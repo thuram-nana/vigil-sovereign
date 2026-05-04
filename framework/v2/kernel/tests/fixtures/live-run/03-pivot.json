@@ -1,0 +1,62 @@
+{
+  "ok": true,
+  "elapsed_s": 69.5,
+  "trace": {
+    "backend": "claude-code",
+    "is_dryrun": false,
+    "cognitive_doc": "framework/cognitive/pivot-protocols.md",
+    "cognitive_sections": [
+      "1-the-two-minute-reset",
+      "2-surface-pivot-same-class-different-surface",
+      "3-class-pivot-same-surface-different-class",
+      "4-adversary-pivot-what-would-x-do-here",
+      "5-layer-pivot-go-up-or-go-down"
+    ],
+    "tokens_in": 51209,
+    "tokens_out": 7281,
+    "latency_ms": 69544.21905799973,
+    "timestamp": "2026-05-04T21:34:44+00:00"
+  },
+  "parsed": {
+    "stuck_thread": "Spent 45 minutes on /admin path bypass with header tricks; every variant returns 401",
+    "last_observation": "X-Original-URL, X-Forwarded-For, X-Real-IP, Host overrides \u2014 all return identical 401",
+    "moves": [
+      {
+        "kind": "surface",
+        "suggestion": "Test /api/admin, /api/v1/admin, /api/v2/admin, /api/mobile/admin, /api/management/admin endpoints with same header tricks",
+        "rationale": "APIs are protected by different auth stacks than web UI. WAF rules built for web paths often exempt /api/* prefixes or enforce different validation. Admin functionality commonly exists in parallel API form with identical or weaker auth. This surface remains untested.",
+        "estimated_effort": "minutes",
+        "confidence": 0.75
+      },
+      {
+        "kind": "source",
+        "suggestion": "Obtain or create a low-privilege authenticated user and test /admin from within that context to distinguish auth-level rejection from privilege-level rejection",
+        "rationale": "Critical missing baseline. Without authenticated comparison, cannot determine if 401 blocks access (auth bypass target) or denies privilege (escalation target). This distinction reshapes the entire attack vector. Also enables privilege escalation testing.",
+        "estimated_effort": "minutes",
+        "confidence": 0.78
+      },
+      {
+        "kind": "class",
+        "suggestion": "Test HTTP method variation: POST /admin, PUT /admin, DELETE /admin, PATCH /admin, OPTIONS /admin with original headers, dropping path-confusion payloads entirely",
+        "rationale": "Auth middleware often binds to GET exclusively. POST/PUT/DELETE frequently bypass authentication checks entirely or hit different code paths with weaker validation. OPTIONS preflight can sometimes skip standard auth. Tests different vulnerability class (method confusion) rather than path tricks.",
+        "estimated_effort": "minutes",
+        "confidence": 0.65
+      },
+      {
+        "kind": "tool",
+        "suggestion": "Run Nuclei with templates: http/cves/*/auth-bypass*, http/misconfiguration/*admin*, and http/default-credentials/* against /admin and adjacent paths",
+        "rationale": "Automation finds edge cases in timing, header ordering, encoding variants, and path normalization that manual testing systematically misses. Nuclei's CVE-backed templates detect known admin-bypass signatures. Validates manual efforts and surfaces blind spots.",
+        "estimated_effort": "minutes",
+        "confidence": 0.62
+      },
+      {
+        "kind": "layer",
+        "suggestion": "Test HTTP interpretation layer: request smuggling (Content-Length/Transfer-Encoding discrepancy), cache poisoning (Pragma/Cache-Control header override), or load-balancer request reinterpretation via path doubling (//admin, /./admin with LB normalization mismatch)",
+        "rationale": "If WAF rejects at application layer, HTTP-layer tricks can reach backend auth handler directly. Cache-layer bypasses serve stale 200s without re-auth. LB/WAF interpretation mismatches can route /admin traffic away from protected handler. Shifts from app auth to infrastructure layer.",
+        "estimated_effort": "hours",
+        "confidence": 0.48
+      }
+    ],
+    "recommended": 0
+  }
+}

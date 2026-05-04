@@ -83,7 +83,7 @@ class LLMBackend(abc.ABC):
 # ---------------------------------------------------------------------------
 
 _ENV_OVERRIDE = "CRUCIBLE_LLM_BACKEND"
-_PREFERENCE_ORDER = ("anthropic", "ollama", "dryrun")
+_PREFERENCE_ORDER = ("anthropic", "claude-code", "ollama", "dryrun")
 _cached_backend: LLMBackend | None = None
 
 
@@ -92,6 +92,9 @@ def _construct(name: str) -> LLMBackend:
     if name == "anthropic":
         from .backends.anthropic import AnthropicBackend
         return AnthropicBackend()
+    if name == "claude-code":
+        from .backends.claude_code import ClaudeCodeBackend
+        return ClaudeCodeBackend()
     if name == "ollama":
         from .backends.ollama import OllamaBackend
         return OllamaBackend()

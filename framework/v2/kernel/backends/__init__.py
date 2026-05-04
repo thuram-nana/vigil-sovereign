@@ -12,7 +12,7 @@ from typing import Iterator
 from ..llm import LLMBackend
 
 
-_BACKEND_NAMES = ("anthropic", "ollama", "dryrun")
+_BACKEND_NAMES = ("anthropic", "claude-code", "ollama", "dryrun")
 
 
 def probe_all() -> Iterator[tuple[str, bool, str]]:
@@ -35,6 +35,9 @@ def _construct(name: str) -> LLMBackend:
     if name == "anthropic":
         from .anthropic import AnthropicBackend
         return AnthropicBackend()
+    if name == "claude-code":
+        from .claude_code import ClaudeCodeBackend
+        return ClaudeCodeBackend()
     if name == "ollama":
         from .ollama import OllamaBackend
         return OllamaBackend()

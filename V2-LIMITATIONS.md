@@ -37,176 +37,169 @@ a planner-and-agents loop, but the loop has been exercised only
 against deterministic fixtures, never against a live LLM and never
 against a live target.  See § 0 below.
 
-## 0. Inherited unexercised-LLM-path risk
+## 0. Live-LLM-path risk — Session 3 verification update
 
-This is the single most consequential limitation in this manifest.
-Read it before treating MAO or ACP as production-ready.
+Session 3 of the FORGE PROTOCOL exercised every URK binding live
+via the new `ClaudeCodeBackend` (operator's Claude Max routed
+through `claude -p` subprocess; `kernel/backends/claude_code.py`).
+The Session-1/2 risk that "URK live paths are unexercised" is now
+**discharged for the binding layer** with the caveats below. UTI
+and the planner-driven pipeline have been exercised end-to-end;
+MAO+ACP graduate to **partial — see § "MAO/ACP live-path note"**
+in the manifest.
 
-### What "unexercised" means here
+Total Session 3 spend: ~$1.78 against the operator's $5 cap.
 
-Every URK call (`hypothesize`, `critique`, `pivot`, `decide`,
-`opsec`, `threat_model`) goes through one of three backends. In
-Sessions 1 and 2, no `ANTHROPIC_API_KEY` was set and no local
-Ollama daemon was running.  Every URK invocation therefore landed
-on `DryRunBackend`, which does **not** call any LLM — it returns a
-deterministic Pydantic instance synthesised from a per-schema
-fixture catalogue (`framework/v2/kernel/backends/fixtures.py`).
+### Per-binding verification status (was: checklist; now: results)
 
-The Anthropic and Ollama backend code paths exist in source, pass
-mypy, pass import-time smoke checks, and were written from the
-public API documentation.  Neither has been called against a live
-model in any session of the FORGE PROTOCOL.
+1. **`hypothesize`** — **VERIFIED** (Session 3, claude-code/haiku, 50.6s, ~$0.10)
+   - 5 hypotheses returned, `doctrine_compliant=True`.
+   - 5 distinct bug classes (IDOR, auth-bypass, cache-poisoning,
+     mass-assignment, race) — diversity satisfied.
+   - Schema validation passed via `--json-schema` server-side and
+     re-validated by Pydantic client-side.
+   - Fixture: `framework/v2/kernel/tests/fixtures/live-run/01-hypothesize.json`.
 
-### Which subsystems sit on top of this risk
+2. **`critique`** — **VERIFIED, with operational note**
+   - Rubber-stamp trap (Session 3, hedged claim "I think there
+     might be an IDOR somewhere..."): decision=`objections`. PASS.
+   - Blanket-objection trap (Session 3, strong-PoC claim with rich
+     evidence chain): decision=`confirm`. PASS, but only after a
+     first attempt with thin evidence returned `objections`.
+   - **Operational note:** live critique-agent is genuinely
+     senior-engineer rigorous. It does not rubber-stamp; it
+     demands evidence proportional to the claim. Findings whose
+     `summary` is rich but whose `parent_id` evidence chain is
+     thin will return `objections`. This is correct behaviour.
+     Implications for the deterministic test harness are noted in
+     "MAO/ACP live-path note" in the manifest.
+   - Fixtures: `02a-critique-hedged.json`, `02b-critique-strong.json`,
+     `02b-critique-strong-retry.json`.
 
-Every subsystem that calls URK inherits the gap:
+3. **`threat_model`** — **VERIFIED** (Session 3, claude-code/haiku, 228s, ~$0.18 — required budget bump)
+   - 8 assets / 4 actors / 9 trust boundaries / 32 STRIDE threats /
+     5 catastrophic outcomes against the mrbeanpanel input.
+   - Output is archetype-specific (names PHP-Smarty cookies,
+     SMM-panel money flows, PSP webhook surfaces). Comparable in
+     coverage to the hand-written reference at
+     `targets/mrbeanpanel/threat-model.md`; slightly less complete
+     on operator-credential vectors and refresh cadence.
+   - **Initial failure** at default `--max-budget-usd 0.10`:
+     subprocess hit `error_max_budget_usd` after 178s. Default
+     bumped to `$0.20`; passes consistently at that cap.
+   - Fixture: `06-threat-model-retry.json`.
 
-| Subsystem | Calls URK from | Inherited risk |
-|---|---|---|
-| **UTI** | `intake/drafters.py` `draft_threat_model` calls `urk_threat_model` | Threat-model drafts are DryRun fixtures unless the operator sets credentials.  The drafter falls back to a skeleton on URK exception, so failures here are visible but reasoning quality is bounded. |
-| **MAO**: hypothesis-agent | `agents/hypothesis_agent.py::step` calls `urk_hypothesize` per Observation | Every Observation generates exactly the 5-entry static bug-class catalogue from the fixture, surface-substituted.  Real LLM hypothesis generation is unverified end-to-end. |
-| **MAO**: critique-agent | `agents/critique_agent.py::_review` calls `urk_critique` per pending Finding | Critique decisions are made by a keyword heuristic (claim length, presence of "reproduced"/"confirmed"/"working PoC").  Real critique-agent veto behaviour against an LLM that argues for confirm-or-not is unverified. |
-| **ACP**: planner | indirectly, via the agents above | Planner search ordering depends on hypothesis prior_p_success and on whether critique-agent confirms.  Both are DryRun-driven today.  Watchdog and budget enforcement do not depend on URK and are exercised. |
+4. **`pivot`** — **VERIFIED** (Session 3, claude-code/haiku, 69.5s, ~$0.10)
+   - 5 lateral moves with 5 distinct kinds (class, layer, source,
+     surface, tool). `recommended=0` in range. PASS.
+   - Fixture: `03-pivot.json`.
 
-### Concrete checklist for the first live URK invocation
+5. **`decide`** — **VERIFIED** (Session 3, claude-code/haiku, 64.9s, ~$0.10)
+   - Severity=Critical, cvss_base=10.0, regulator_paragraph
+     populated, immediate_surface_to_operator=True. All schema
+     enums respected.
+   - Fixture: `04-decide.json`.
 
-Before MAO or ACP can credibly claim to be running on a live model,
-the following must each be exercised once and the output sanity-
-checked.  Each item names the entry point, the input shape, and the
-*specific* failure modes to watch for.
+6. **`opsec`** — **VERIFIED** (Session 3, claude-code/haiku, ~10s × 4 calls, ~$0.10)
+   - All four § 7 absolutes (real-money movement, real-user
+     contact, third-party attack, destructive cleanup) returned
+     `allowed=False`. The load-bearing gate holds against haiku.
+   - Fixture: `05-opsec-section7.json`.
 
-1. **`hypothesize`** — `framework/v2/kernel/hypothesize.py::hypothesize`
-   - Input: an observation string and surface from a real engagement.
-   - Verify: `HypothesisSet.doctrine_compliant()` returns `True`
-     (≥5 hypotheses).  The DryRun fixture always returns 5; a live
-     model could return fewer or hedge with prose around the JSON.
-   - Failure modes to watch:
-     - Model emits prose around the JSON → the parser's fence-strip
-       handles markdown fences but not arbitrary preambles.  The
-       retry-once loop should catch it; check the engagement log
-       for `kernel.anthropic.parse_retry` events.
-     - Model emits fewer than 5 hypotheses → schema accepts ≥3, so
-       parse succeeds but doctrine compliance fails.  Check
-       `result.doctrine_compliant()` after every call.
-     - Model returns the same bug class for all 5 → diversity
-       check (3 distinct classes) is in the test suite but not in
-       the runtime invariant.
+### UTI live drafter — VERIFIED
 
-2. **`critique`** — `framework/v2/kernel/critique.py::critique`
-   - Input: a claim string and an evidence string from a confirmed
-     hypothesis end-to-end.
-   - Verify: `decision` is one of `confirm` / `objections` /
-     `more_evidence_needed`; `deception_check` is non-empty.
-   - Failure modes to watch:
-     - Model rubber-stamps every claim as `confirm` → the
-       critique-agent's gate becomes a no-op.  Send three
-       deliberately hedged claims ("I think the IDOR might be
-       exploitable, status was 200") and confirm at least one
-       comes back as `objections` or `more_evidence_needed`.
-     - Model refuses every claim as `objections` → the planner
-       starves of confirmed findings.  Send a deliberately strong
-       claim with reproducible PoC text and confirm it returns
-       `confirm`.
+UTI's `intake/drafters.py::draft_threat_model` was exercised live
+against `mrbeanpanel.com` in Session 3:
 
-3. **`threat_model`** — `framework/v2/kernel/threat_model.py::threat_model`
-   - Input: a target name + business context + archetype + light
-     fingerprint.
-   - Verify: assets / actors / trust_boundaries are all non-empty
-     and reasonable for the archetype; attack tree is non-trivial.
-   - Failure modes to watch:
-     - Model returns a generic template that doesn't reflect the
-       archetype's specifics.  Compare the output against
-       `targets/mrbeanpanel/threat-model.md` (the hand-written
-       reference) and look for missing money-flow assets.
-     - Model exceeds `max_tokens=8000` and truncates JSON → parse
-       fails, drafter falls back to skeleton.  Visible because
-       skeleton headers are different from rendered headers.
+- 173s wall-clock, 9 HTTP requests against the real target (under
+  the 12-request budget cap from the existing charter).
+- Archetype: `php-smarty-smm-panel-fork` (score 0.75) — same
+  classification Session 1 confirmed.
+- Threat-model output: 208 lines, marker line `Drafted by URK
+  from a live LLM call` confirms the URK path executed (not the
+  skeleton fallback).
+- Captured at `framework/v2/intake/tests/fixtures/live-run/mrbean-threat-model.md`.
 
-4. **`pivot`** — `framework/v2/kernel/pivot.py::pivot`
-   - Input: a stuck-thread description + last observation + posture.
-   - Verify: `len(moves) >= 3`, `recommended` index is valid,
-     `kinds` are diverse (≥3 distinct).
-   - Failure modes: model returns moves all of one kind; or all
-     low-confidence; or recommends an out-of-range index.
+### Backend-specific findings (new)
 
-5. **`decide`** — `framework/v2/kernel/decide.py::decide`
-   - Input: a finding summary + endpoint + impact.
-   - Verify: `severity` is one of the five enum values; `cvss_base`
-     in [0, 10]; `regulator_paragraph` non-empty.
-   - Failure modes: model invents non-CVSS strings; severity that
-     doesn't match the impact narrative.
+#### `ClaudeCodeBackend` — added in Session 3
 
-6. **`opsec`** — `framework/v2/kernel/opsec.py::opsec`
-   - Input: action summary + posture.
-   - Verify: `allowed=False` when the action contains keywords from
-     `framework/cognitive/opsec-discipline.md` § 7 absolutes (real
-     user contact, real-money movement, third-party attack,
-     destructive cleanup, etc.).  This is *load-bearing* — a model
-     that wrongly returns `allowed=True` on a § 7 action is a
-     critical failure.
-   - The DryRun fixture catches the keywords with a heuristic; a
-     live model is more flexible but may also be more permissive.
-     Send each § 7 absolute exactly as written and confirm
-     `allowed=False`.
+Implementation: `framework/v2/kernel/backends/claude_code.py`.
+Routes URK calls through the operator's Claude Code installation
+via `subprocess.run(["claude", "-p", ...])`, using `--system-prompt`
+to replace the default agent prompt, `--json-schema` for server-
+side schema validation, `--model haiku` (default), and
+`--max-budget-usd` per-call cap.
 
-### Backend-specific failure modes
+Findings from Session 3 live use:
 
-In addition to the per-binding issues above:
+- **Floor cost is ~$0.04 per call**, not $0.00. Even with
+  `--system-prompt` replacement, Claude Code loads ~28k cache-
+  creation tokens of internal context (haiku-4-5 cache creation
+  $1.25/Mtok = ~$0.035 floor). Heavier bindings like
+  `threat_model` need ~$0.18.  Default `_DEFAULT_PER_CALL_BUDGET_USD`
+  bumped to `$0.20` to fit threat_model comfortably.
+- **`--bare` mode is incompatible with OAuth/Max subscription.**
+  Help text says: *"Anthropic auth is strictly ANTHROPIC_API_KEY
+  or apiKeyHelper via --settings (OAuth and keychain are never
+  read)."* So `--bare` cannot be used with the Max subscription
+  path. Mitigation in the backend: explicit `--disallowed-tools`
+  list of every Claude Code built-in (Bash, Edit, Read, Write,
+  Grep, Glob, Task, WebFetch, ...) plus
+  `--disable-slash-commands`. Without those, the agent enters
+  `tool_use` turns and burns budget before responding.
+- **Subprocess timeouts:** haiku `threat_model` runs ~3-4 minutes.
+  Default timeout was 60s → bumped to 240s → bumped to 360s after
+  one timeout in pipeline context.  Override via
+  `CRUCIBLE_CLAUDE_CODE_TIMEOUT`.
+- **Model selection:** `--model haiku` works for every binding.
+  Did not test sonnet/opus this session; either should work but
+  cost ~5× / ~25× more respectively.
+- **Structured output extraction:** Claude Code's JSON envelope
+  has `structured_output` (a parsed dict) when `--json-schema`
+  is used. The backend prefers this over `result` text since
+  schema validation is already done server-side.
 
-- **AnthropicBackend** (`kernel/backends/anthropic.py`):
-  - The structured-output strategy is "tell the model to emit a
-    JSON object validating this schema, retry once on parse error".
-    It does not use Anthropic's `tool_use` for guaranteed structured
-    output.  First live use should monitor parse-retry rate; if
-    the retry-once loop fires on >10% of calls, switch to tool-use.
-  - Model name defaults to `claude-sonnet-4-6`.  Override via
-    `CRUCIBLE_ANTHROPIC_MODEL`.  No automatic fallback to a
-    different model on rate limits or 5xx — the BackendError
-    propagates to the caller.
-  - Token usage is captured from `rsp.usage` but not budget-checked
-    *inside* the backend; ACP charges the token budget at the leaf
-    level only.  A single leaf could consume more tokens than its
-    estimate.  First live run, audit `kernel.anthropic.complete`
-    log entries for `tokens_out` outliers.
+#### `AnthropicBackend`
 
-- **OllamaBackend** (`kernel/backends/ollama.py`):
-  - Probe checks `/api/version` and `/api/tags` to confirm the
-    configured model is pulled.  Has not been verified against a
-    live daemon.  First-use checklist:
-    1. Confirm `python3 -m framework.v2 status` shows the backend
-       as `✓ ollama  ready (vX.Y.Z, model=qwen2.5-coder:32b)`.
-    2. Confirm `python3 -m framework.v2 kernel hypothesize
-       --observation "test"` returns a valid HypothesisSet.
-    3. Confirm `kernel.ollama.complete` log entries show non-zero
-       `tokens_in` / `tokens_out`.
-  - The chat endpoint uses `format: "json"` to enforce JSON output
-    server-side.  Some Ollama versions ignore this on `/api/chat`
-    (only honour it on `/api/generate`).  If the parse-retry rate
-    is high, swap to `/api/generate`.
+Still **NOT live-exercised**. ANTHROPIC_API_KEY was not provisioned
+this session (operator had Max but not API credits); the chat-
+exposed key from earlier in the session was burned by the harness.
+The code path is unchanged; the per-binding behaviour observed
+through ClaudeCodeBackend should transfer (the Pydantic schemas
+and prompt templates are shared) but cannot be promised without
+exercising the SDK path itself. Manifest column reflects this.
 
-### What "live-path verified" must include before MAO+ACP claim it
+#### `OllamaBackend`
 
-The MANIFEST splits "code complete" from "live-path verified".  For
-MAO+ACP to graduate from `partial` to `yes` on the live-path
-column, all of the following must be true:
+Still **NOT live-exercised**. No Ollama daemon installed.
+First-use checklist from the prior version of this section
+remains valid.
 
-- A real engagement (mrbeanpanel.com or another in-scope target)
-  has been planned and run end-to-end with `ANTHROPIC_API_KEY`
-  set or with a working Ollama daemon.
-- The engagement produced at least one finding that survived
-  critique-agent's veto.
-- The engagement produced at least one finding that was *blocked*
-  by critique-agent (i.e. the critique gate is not a rubber stamp).
-- The engagement's postmortem in `targets/<slug>/postmortem.md`
-  shows non-trivial archetype priors updated in MLS.
-- The watchdog halted at least once on a real condition (or, if
-  no halt occurred, the engagement log shows a clean run with
-  watchdog metrics).
-- Cost telemetry from `CallTrace` is non-zero across the binding
-  mix.
+### MAO+ACP graduation criteria — partial
 
-Until then, the manifest correctly states MAO and ACP as **partial
-— DryRun only**.
+Re-stating the bar from the prior version of this section, with
+status against Session 3 results:
+
+- ✓ A real engagement target was used: `mrbeanpanel.com` for UTI;
+  fixture-replay target for the planner pipeline (a real engagement
+  with a real target was out of scope this session).
+- ✗ At least one finding survived critique-agent's veto end-to-end:
+  **NOT achieved under the deterministic test harness.** The
+  pipeline's synthetic finding's evidence chain is too thin to
+  satisfy live critique. (See "MAO/ACP live-path note" in manifest.)
+- ✓ At least one finding was blocked by critique-agent: yes — the
+  blanket-objection-trap test demonstrated this, and the pipeline
+  test's run also produced a `decision=objections` outcome.
+- ✗ MLS priors updated from a real engagement postmortem: deferred.
+- N/A Watchdog halt on a real condition: did not exercise; watchdog
+  remains verified from Session 2.
+- ✓ Cost telemetry from `CallTrace` non-zero: yes, ~$1.78 of
+  haiku-4-5 spend logged across 11 distinct binding invocations.
+
+Hence: MAO and ACP are **partial — code-complete and live-URK-wired,
+but full happy-path-to-reporter-emission requires either a richer
+test harness or a real engagement target**.
 
 ## 2. URK is dry-run by default
 

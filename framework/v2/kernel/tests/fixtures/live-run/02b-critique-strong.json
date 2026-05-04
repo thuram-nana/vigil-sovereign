@@ -1,0 +1,61 @@
+{
+  "ok": true,
+  "elapsed_s": 36.2,
+  "trace": {
+    "backend": "claude-code",
+    "is_dryrun": false,
+    "cognitive_doc": "framework/cognitive/self-critique.md",
+    "cognitive_sections": [
+      "1-quick-critique-5-minutes-run-often",
+      "21-coverage-check",
+      "4-final-critique-before-declaring-done",
+      "5-anti-patterns-the-routine-catches"
+    ],
+    "tokens_in": 28759,
+    "tokens_out": 2987,
+    "latency_ms": 36173.17751799783,
+    "timestamp": "2026-05-04T21:33:34+00:00"
+  },
+  "parsed": {
+    "claim": "Reproduced twice end-to-end with a working PoC: GET /api/v2/orders/123 with user A's session (user_id=1) returns user B's order body (user_id=2 confirmed). Confirmed via diff against baseline; evidence at evidence/001-idor-orders/. The endpoint authenticates the session but does not check ownership.",
+    "decision": "objections",
+    "drift_detected": false,
+    "drift_note": null,
+    "coverage_gaps": [
+      "No explicit baseline or audit trail proving order_id=123 belongs to user_id=2; ownership assumption is single-sourced from response body",
+      "Session cookie identity not validated against authenticated endpoints or auth logs",
+      "Only one order ID tested; enumeration scope (all orders vulnerable vs. one order) unconfirmed",
+      "Write methods (PATCH, PUT, DELETE) not tested; read-only vulnerability vs. full IDOR unclear",
+      "Cache freshness and response tampering not ruled out"
+    ],
+    "deception_check": "Operator treats user_id=2 in response as proof of data ownership without explicit evidence that order_id=123 actually belongs to user_id=2 (database record, creation audit, or inventory baseline not shown). The field could be cache-poisoned, echoed without validation, or always present regardless of ownership.",
+    "objections": [
+      {
+        "concern": "Ownership not verified: claim states order belongs to user B but provides no audit trail (database query, order creation log, or baseline inventory) proving order_id=123 is user_id=2's order.",
+        "severity": "major",
+        "evidence_request": "Screenshot or query output showing order_id=123 was created by / is owned by user_id=2 in the system-of-record (database, admin UI, or audit log)."
+      },
+      {
+        "concern": "Session identity unverified: no evidence that sid=A actually belongs to user_id=1 and sid=B to user_id=2. Assumes cookie names/values are trustworthy.",
+        "severity": "major",
+        "evidence_request": "Call /api/v2/me or similar authenticated endpoint with each session cookie and show it returns the claimed user_id; or show session IDs from auth logs."
+      },
+      {
+        "concern": "Scope not isolated: tested 1 order ID (123). Does vulnerability affect all orders or only this one? No evidence of testing order_ids 124, 999, or a non-existent ID.",
+        "severity": "major",
+        "evidence_request": "Repeat test with at least 2 additional order IDs belonging to different users (e.g., 124, 999) to confirm the vulnerability is systematic, not a one-off anomaly."
+      },
+      {
+        "concern": "Authentication boundary not tested: claim says endpoint 'authenticates the session' but no evidence an invalid/expired/missing session was rejected.",
+        "severity": "minor",
+        "evidence_request": "Show that GET /api/v2/orders/123 with no cookie, or an invalid sid value, fails with 401/403, confirming authentication is enforced."
+      },
+      {
+        "concern": "Write-path untested: only GET tested. PATCH/PUT /api/v2/orders/123 may also be vulnerable to modification of cross-user orders.",
+        "severity": "minor",
+        "evidence_request": "Attempt PATCH /api/v2/orders/123 with user A's session to modify a field (e.g., status, address) and confirm whether the change persists."
+      }
+    ],
+    "one_more_thread": "If you had one more hour: (1) Query the database directly or call an admin API to verify order_id=123 ownership and all order attributes, then compare against the exposed response to confirm no fields are redacted/truncated; (2) test a brand-new order created as user C (not in your current test scope) and attempt to access it as user A to rule out per-order vulnerabilities; (3) attempt unauthorized modification via PATCH with both users' sessions to confirm write-access scope; (4) fuzz the order_id parameter with negative IDs, string values, and UUIDs to check for different code paths that might have different authz logic."
+  }
+}

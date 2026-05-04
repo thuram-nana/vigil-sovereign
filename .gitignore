@@ -337,7 +337,9 @@ framework/v2/.memory/
 framework/v2/.dryrun/
 framework/v2/.intake-authorizations.txt
 framework/v2/.crucible-v2.log
-framework/v2/intake/tests/fixtures/
+framework/v2/intake/tests/fixtures/*
+# Session 3 regression fixtures from live URK runs ARE tracked.
+!framework/v2/intake/tests/fixtures/live-run/
 targets/*/.crucible-v2.log
 targets/*/.planner-state.json
 targets/*/recon/fingerprint.json

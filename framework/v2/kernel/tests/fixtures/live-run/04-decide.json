@@ -1,0 +1,34 @@
+{
+  "ok": true,
+  "elapsed_s": 64.9,
+  "trace": {
+    "backend": "claude-code",
+    "is_dryrun": false,
+    "cognitive_doc": "framework/cognitive/decision-frameworks.md",
+    "cognitive_sections": [
+      "1-severity-cvss-plus-contextual-adjustment",
+      "11-when-to-override-cvss-up",
+      "12-when-to-override-cvss-down",
+      "13-severity-ladder-pragmatic-definitions",
+      "5-the-explain-it-to-a-regulator-test",
+      "6-when-to-surface-immediately-vs-hold"
+    ],
+    "tokens_in": 52505,
+    "tokens_out": 7138,
+    "latency_ms": 64877.14668600165,
+    "timestamp": "2026-05-04T21:35:48+00:00"
+  },
+  "parsed": {
+    "finding_summary": "Webhook callback at POST /payment/cryptomus/callback accepts forged deposits without signature verification, crediting balance to any user_id supplied in the request body. Unauthenticated, no rate limit.",
+    "cvss_vector": "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+    "cvss_base": 10.0,
+    "severity": "Critical",
+    "contextual_note": "CVSS base score is 10.0 (Critical), which is appropriate and requires no adjustment. This is an unauthenticated, pre-authentication direct path to financial fraud at arbitrary scale. The attack is network-based with no complexity (HTTP POST with JSON), requires zero privileges and zero user interaction, and has Scope:Changed because the impact directly affects user accounts other than the attacker. Both Integrity and Confidentiality are High: the attacker can directly forge deposits to any account (integrity violation) and gain visibility into account balances and access patterns (confidentiality breach). No downward adjustment applies\u2014there are no realistic preconditions or compensating controls. This finding satisfies all upgrade criteria in \u00a7 1.1: direct money flow, scale without privilege, primary feature, and immediate exploitability. The finding has been tested and verified in production (staging) with proof of concept.",
+    "likelihood": "high",
+    "impact": "high",
+    "worth_reporting": "finding",
+    "immediate_surface_to_operator": true,
+    "chain_candidates": [],
+    "regulator_paragraph": "Without immediate remediation, an attacker can send forged HTTP requests to the payment webhook endpoint to credit arbitrary user accounts with cryptocurrency balances. Each forged request can credit $100 or more with no authentication, rate limiting, or signature verification to prevent repetition. An attacker could systematically execute hundreds of requests daily against any valid user ID in the system, resulting in potential fraud losses of $100,000\u2013$1,000,000+ depending on attacker persistence and account enumeration. Webhook verification failures in payment systems represent a known and actively exploited attack vector documented in public incident reports from major payment processors; similar attacks have resulted in fraud losses in the low-to-mid six-figure range before detection. Such attacks typically remain undetected for 2\u20134 weeks because forged deposits appear legitimate from the system perspective, allowing the attacker to accumulate and withdraw funds unimpeded."
+  }
+}

@@ -1,0 +1,1234 @@
+{
+  "ok": true,
+  "elapsed_s": 228.1,
+  "trace": {
+    "backend": "claude-code",
+    "is_dryrun": false,
+    "cognitive_doc": "framework/cognitive/threat-modeling.md",
+    "cognitive_sections": [
+      "1-what-a-threat-model-contains",
+      "2-assets-whats-worth-attacking",
+      "3-actors-whos-actually-attacking",
+      "4-trust-boundaries-where-you-focus",
+      "5-stride-per-boundary",
+      "6-attack-trees"
+    ],
+    "tokens_in": 85123,
+    "tokens_out": 27425,
+    "latency_ms": 228068.58477199785,
+    "timestamp": "2026-05-04T21:48:01+00:00"
+  },
+  "parsed": {
+    "business_context": "SMM (Social Media Marketing) reseller panel. ~44k users, ~967k orders. Multi-PSP balance top-up (Cryptomus, Coinbase, Payeer, Perfect Money, manual USDT/BTC). Operator reports active account-takeover incidents. Revenue-critical: every lost balance or processor compromise directly damages operator monetization.",
+    "assets": [
+      {
+        "id": "A1",
+        "name": "User Account Balances",
+        "rationale": "Direct theft vector. Attackers monetize by withdrawing user funds. Operator liable for refunds. Drives revenue loss and platform credibility collapse.",
+        "confidentiality": "low",
+        "integrity": "critical",
+        "availability": "low",
+        "priority": "P0"
+      },
+      {
+        "id": "A2",
+        "name": "Payment Processor API Keys (Cryptomus, Coinbase, Payeer, Perfect Money)",
+        "rationale": "Compromised keys grant direct withdrawal access to operator's merchant accounts and customer deposits. Single point of failure for all payment flows. Attacker can drain operator reserves.",
+        "confidentiality": "critical",
+        "integrity": "critical",
+        "availability": "medium",
+        "priority": "P0"
+      },
+      {
+        "id": "A3",
+        "name": "Admin Panel Access",
+        "rationale": "Full site control: user management, payment settings, balance manipulation, log deletion. Enables cover-up of previous breaches and wholesale account takeovers.",
+        "confidentiality": "critical",
+        "integrity": "critical",
+        "availability": "critical",
+        "priority": "P1"
+      },
+      {
+        "id": "A4",
+        "name": "User Credentials (Username + Password Hash)",
+        "rationale": "Enables account takeover when combined with weak hashing or rainbow tables. Attacker can mass-breach accounts and drain balances. Also resale value on dark market.",
+        "confidentiality": "high",
+        "integrity": "high",
+        "availability": "low",
+        "priority": "P1"
+      },
+      {
+        "id": "A5",
+        "name": "Session Tokens / Auth Cookies",
+        "rationale": "Hijacking via XSS or theft grants account access without password. Enables CSRF on balance-changing actions. High velocity attack surface.",
+        "confidentiality": "high",
+        "integrity": "high",
+        "availability": "low",
+        "priority": "P1"
+      },
+      {
+        "id": "A6",
+        "name": "Upstream Service Credentials (SMM API keys, resale APIs)",
+        "rationale": "Compromised keys allow attacker to place fraudulent orders and credit own balance without paying. Enables service abuse and financial loss via refund cycles.",
+        "confidentiality": "high",
+        "integrity": "high",
+        "availability": "medium",
+        "priority": "P2"
+      },
+      {
+        "id": "A7",
+        "name": "Transaction and Audit Logs",
+        "rationale": "Attackers delete/modify logs to cover traces of balance theft or ATO. Loss of audit trail hampers incident investigation and regulatory compliance (GDPR/PCI).",
+        "confidentiality": "high",
+        "integrity": "medium",
+        "availability": "high",
+        "priority": "P2"
+      },
+      {
+        "id": "A8",
+        "name": "User Target / Resale Data (social accounts, service types, volumes)",
+        "rationale": "Competitors and affiliated criminals value customer lists and order patterns. Lower immediate financial impact than balance theft, but enables secondary monetization.",
+        "confidentiality": "high",
+        "integrity": "low",
+        "availability": "low",
+        "priority": "P3"
+      }
+    ],
+    "actors": [
+      {
+        "id": "T1",
+        "name": "Financially-Motivated Criminal (Opportunistic/Volume)",
+        "goal": "Maximize short-term monetary gain: steal balances, resell credentials, abuse refund loops.",
+        "skill": "journeyman",
+        "motivation": "opportunistic",
+        "notes": "Primary realistic threat. Uses public tools (burp, Shodan, public exploits). Targets weak auth, IDOR, unsigned webhooks. Fast and noisy; will abandon if friction rises. Volume-based attacks (credential stuffing, brute force)."
+      },
+      {
+        "id": "T2",
+        "name": "Automated Botnet / Scanner (Script-Driven)",
+        "goal": "Discover and exploit easy wins: default credentials, unpatched vulns, weak endpoints.",
+        "skill": "novice",
+        "motivation": "opportunistic",
+        "notes": "Drives mass ATO via password spraying. No persistence; exploits and moves on. High noise. Triggered by published CVEs affecting PHP/Smarty/Perfect Panel forks."
+      },
+      {
+        "id": "T3",
+        "name": "Competitor (Motivated, Stealthy)",
+        "goal": "Steal customer lists, disrupt service, poach users, damage reputation.",
+        "skill": "journeyman",
+        "motivation": "strategic",
+        "notes": "Targets user data exfiltration and prolonged service unavailability. More patient and stealthy than criminals. Willing to pivot through codebase for advantage. Targets confidentiality over immediate theft."
+      },
+      {
+        "id": "T4",
+        "name": "Malicious Admin / Insider",
+        "goal": "Steal payment keys, exfiltrate user data, sabotage operations.",
+        "skill": "expert",
+        "motivation": "motivated",
+        "notes": "Already has access; can bypass most controls. Can modify logs. Enables cover-up of other breaches. Lower probability but catastrophic impact. Out-of-model for penetration testing (test assumes legitimate admin honesty)."
+      }
+    ],
+    "trust_boundaries": [
+      {
+        "name": "Anonymous User \u2192 Web App Login",
+        "data_crossing": "Username, password, 2FA code (if enabled)",
+        "auth_check": "Credential verification against user table; rate limit on failed attempts",
+        "failure_mode": "No rate limit enables brute force; weak password rules; SQL injection in login query; unsalted password hash"
+      },
+      {
+        "name": "Authenticated User \u2192 Web App (General User Actions)",
+        "data_crossing": "Session token in cookie/header; order requests (amount, service type); balance queries; profile updates",
+        "auth_check": "Session token validation; ownership check on resource IDs (IDOR on orders, balance)",
+        "failure_mode": "Missing IDOR checks; session fixation; CSRF on balance-changing actions; no server-side validation of price/balance fields; race condition on concurrent balance deduction"
+      },
+      {
+        "name": "User-A Data \u2194 User-B Data (Tenant Isolation)",
+        "data_crossing": "User balance, order history, refund status, personal info, targets/leads",
+        "auth_check": "Ownership verification on /api/order/ID, /api/balance, /api/user/ID; authorization query in DB WHERE user_id = current_user_id",
+        "failure_mode": "Sequential/guessable user/order IDs; missing WHERE clause in query; user can modify ID in request to access other users' data; refund endpoint has no authorization check"
+      },
+      {
+        "name": "User / Authenticated Admin \u2192 Admin Panel",
+        "data_crossing": "Admin settings (PSP keys), user ledger, configuration, logs, payment processor webhooks",
+        "auth_check": "Role-based access control (is_admin flag); admin-only middleware on /admin/*; admin user authentication",
+        "failure_mode": "is_admin flag stored client-side (cookie, session, local storage) without server validation; SQL injection on admin login; privilege escalation via parameter tampering (?role=admin); default admin credentials; no MFA"
+      },
+      {
+        "name": "Web App \u2192 Payment Processors (Cryptomus, Coinbase, Payeer, Perfect Money) Webhooks",
+        "data_crossing": "Webhook callback with payment status (success/failure), amount, user ID, transaction hash; balance credit/debit instruction",
+        "auth_check": "HMAC signature verification on webhook payload; IP whitelist of processor servers (if applicable)",
+        "failure_mode": "Unsigned webhooks; weak HMAC algorithm (predictable key, length-extension vulnerable); no state/nonce check; timing attack on signature verification; webhook reflected back without idempotency check (double-credit)"
+      },
+      {
+        "name": "Web App \u2192 Payment Processors (API Requests)",
+        "data_crossing": "API key in Authorization header; balance queries, withdrawal requests, transaction status queries",
+        "auth_check": "Bearer token in header; HTTPS encryption in transit",
+        "failure_mode": "API keys logged in plaintext in error messages; keys stored unencrypted in DB or config; keys exposed in source code; MITM if HTTPS not enforced; no request signing (attacker can replay requests)"
+      },
+      {
+        "name": "Web App \u2192 Database (MySQL/PostgreSQL)",
+        "data_crossing": "User credentials, balances, orders, payment processor settings, logs, admin actions",
+        "auth_check": "Parameterized queries; least-privilege DB user (read/write, no DROP/CREATE); network isolation",
+        "failure_mode": "SQL injection in any query; unsanitized user input in WHERE clauses; string concatenation instead of prepared statements; weak DB password; DB exposed to internet; plaintext password storage (no bcrypt/Argon2)"
+      },
+      {
+        "name": "Browser \u2192 Web App (Client-Side Rendering)",
+        "data_crossing": "Session cookie, DOM with balance/user data, local storage with tokens, form inputs",
+        "auth_check": "CSP (Content Security Policy); SameSite=Strict on cookies; Secure flag on cookies (HTTPS-only); anti-CSRF tokens on state-changing actions",
+        "failure_mode": "Stored/reflected/DOM XSS enables session theft; balance rendered in HTML (attacker modifies DOM); CSRF on refund/order endpoints (no CSRF token); session token in localStorage (XSS steals it); unsanitized user input in Smarty templates"
+      },
+      {
+        "name": "Web App \u2192 File System (Upload / Inclusion)",
+        "data_crossing": "User-uploaded files (avatars, documents); application config files; logs",
+        "auth_check": "File type validation (whitelist, magic bytes); path traversal checks; executable bit not set on uploads",
+        "failure_mode": "Arbitrary file upload (PHP shell); path traversal in upload (/../../config.php); LFI via ?page=../../config.php; backup files readable (.bak, ~, .git); no extension check (upload .php5 as jpg)"
+      }
+    ],
+    "stride_threats": [
+      {
+        "boundary": "Anonymous User \u2192 Web App Login",
+        "stride_class": "S",
+        "threat": "Credential stuffing / brute force on /login endpoint with no rate limit, enabling account takeover of high-value users.",
+        "realistic": true
+      },
+      {
+        "boundary": "Anonymous User \u2192 Web App Login",
+        "stride_class": "T",
+        "threat": "SQL injection in login query (username' OR '1'='1--) bypasses credential check.",
+        "realistic": true
+      },
+      {
+        "boundary": "Anonymous User \u2192 Web App Login",
+        "stride_class": "I",
+        "threat": "User password stored as plaintext or unsalted MD5 hash; rainbow table enables offline cracking if DB breached.",
+        "realistic": true
+      },
+      {
+        "boundary": "Anonymous User \u2192 Web App Login",
+        "stride_class": "D",
+        "threat": "Resource exhaustion on login endpoint (no rate limit); attacker locks out legitimate users via repeated failed attempts.",
+        "realistic": true
+      },
+      {
+        "boundary": "Authenticated User \u2192 Web App (General User Actions)",
+        "stride_class": "S",
+        "threat": "Session hijacking via stored XSS in username or profile field; attacker steals cookie and impersonates user.",
+        "realistic": true
+      },
+      {
+        "boundary": "Authenticated User \u2192 Web App (General User Actions)",
+        "stride_class": "T",
+        "threat": "CSRF on balance-affecting endpoints (place order, refund); attacker tricks user into authorizing unwanted action.",
+        "realistic": true
+      },
+      {
+        "boundary": "Authenticated User \u2192 Web App (General User Actions)",
+        "stride_class": "T",
+        "threat": "Client-trusted price/balance field in order request; attacker modifies amount before submit (e.g., order price = 0).",
+        "realistic": true
+      },
+      {
+        "boundary": "Authenticated User \u2192 Web App (General User Actions)",
+        "stride_class": "T",
+        "threat": "Race condition on balance check and deduction; concurrent requests both pass check and both deduct, allowing overdraft.",
+        "realistic": true
+      },
+      {
+        "boundary": "Authenticated User \u2192 Web App (General User Actions)",
+        "stride_class": "D",
+        "threat": "User creates mass orders to exhaust own balance as griefing; operator absorbs service cost.",
+        "realistic": true
+      },
+      {
+        "boundary": "User-A Data \u2194 User-B Data (Tenant Isolation)",
+        "stride_class": "I",
+        "threat": "IDOR on order endpoint: /api/order/123 returns order details even if user does not own order 123; attacker reads all orders.",
+        "realistic": true
+      },
+      {
+        "boundary": "User-A Data \u2194 User-B Data (Tenant Isolation)",
+        "stride_class": "I",
+        "threat": "IDOR on refund endpoint: /api/refund/ORDER_ID has no authorization check; attacker refunds orders belonging to other users.",
+        "realistic": true
+      },
+      {
+        "boundary": "User-A Data \u2194 User-B Data (Tenant Isolation)",
+        "stride_class": "I",
+        "threat": "IDOR on balance endpoint: /api/balance/USER_ID returns balance for any user ID; attacker enumerates all user balances.",
+        "realistic": true
+      },
+      {
+        "boundary": "User / Authenticated Admin \u2192 Admin Panel",
+        "stride_class": "E",
+        "threat": "Privilege escalation via parameter tampering: POST /api/user-role?role=admin or is_admin=1 in session cookie.",
+        "realistic": true
+      },
+      {
+        "boundary": "User / Authenticated Admin \u2192 Admin Panel",
+        "stride_class": "S",
+        "threat": "Brute force admin password on /admin/login with no rate limit (same vulns as user login, but targets single admin user).",
+        "realistic": true
+      },
+      {
+        "boundary": "User / Authenticated Admin \u2192 Admin Panel",
+        "stride_class": "T",
+        "threat": "SQL injection on admin login bypasses authentication and returns admin user without password check.",
+        "realistic": true
+      },
+      {
+        "boundary": "User / Authenticated Admin \u2192 Admin Panel",
+        "stride_class": "S",
+        "threat": "Default admin credentials not changed (admin/admin, admin/password); attacker logs in directly.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Payment Processors (Cryptomus, Coinbase, Payeer, Perfect Money) Webhooks",
+        "stride_class": "T",
+        "threat": "Unsigned webhook endpoint: attacker forges balance-credit webhook (POST /webhook/balance-top-up with amount=$100000) without HMAC signature.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Payment Processors (Cryptomus, Coinbase, Payeer, Perfect Money) Webhooks",
+        "stride_class": "T",
+        "threat": "Webhook signature uses weak HMAC algorithm (e.g., HMAC-MD5, predictable key); attacker forges valid signature.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Payment Processors (Cryptomus, Coinbase, Payeer, Perfect Money) Webhooks",
+        "stride_class": "T",
+        "threat": "Webhook idempotency not enforced: attacker replays same webhook multiple times; balance credited multiple times for one transaction.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Payment Processors (Cryptomus, Coinbase, Payeer, Perfect Money) Webhooks",
+        "stride_class": "E",
+        "threat": "Webhook processing runs with elevated privilege; attacker credits any user via webhook tampering.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Payment Processors (API Requests)",
+        "stride_class": "S",
+        "threat": "API keys logged in error messages or debug output; attacker reads error page and steals key.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Payment Processors (API Requests)",
+        "stride_class": "T",
+        "threat": "API keys stored plaintext in database or config.php; SQL injection or file read exposes keys.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Database (MySQL/PostgreSQL)",
+        "stride_class": "T",
+        "threat": "SQL injection in user search or filter endpoint; attacker modifies balance directly (UPDATE users SET balance=9999999 WHERE id=123).",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Database (MySQL/PostgreSQL)",
+        "stride_class": "I",
+        "threat": "SQL injection enables data exfiltration: attacker queries user table and dumps all credentials and balances.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 Database (MySQL/PostgreSQL)",
+        "stride_class": "D",
+        "threat": "SQL injection with DROP/DELETE: attacker deletes entire order history or user table.",
+        "realistic": true
+      },
+      {
+        "boundary": "Browser \u2192 Web App (Client-Side Rendering)",
+        "stride_class": "S",
+        "threat": "Stored XSS in support ticket subject line; when admin views ticket, JavaScript steals admin session cookie.",
+        "realistic": true
+      },
+      {
+        "boundary": "Browser \u2192 Web App (Client-Side Rendering)",
+        "stride_class": "S",
+        "threat": "Reflected XSS in order details page (/?order_id=<script>alert(1)</script>); attacker sends link to user, steals session.",
+        "realistic": true
+      },
+      {
+        "boundary": "Browser \u2192 Web App (Client-Side Rendering)",
+        "stride_class": "S",
+        "threat": "DOM-based XSS: client-side JS processes user input unsafely and injects into innerHTML.",
+        "realistic": true
+      },
+      {
+        "boundary": "Browser \u2192 Web App (Client-Side Rendering)",
+        "stride_class": "T",
+        "threat": "CSRF on refund endpoint; attacker embeds <img src=/api/refund/ORDER_ID> on external site and tricks user into visiting.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 File System (Upload / Inclusion)",
+        "stride_class": "T",
+        "threat": "Arbitrary file upload: attacker uploads PHP shell as avatar.jpg.php or avatar.phtml; executes via HTTP request.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 File System (Upload / Inclusion)",
+        "stride_class": "I",
+        "threat": "Path traversal on file read (LFI): /download?file=../../config.php exposes config with payment keys.",
+        "realistic": true
+      },
+      {
+        "boundary": "Web App \u2192 File System (Upload / Inclusion)",
+        "stride_class": "I",
+        "threat": "Backup files readable in web root (.bak, .git, config.php~, .env.bak) contain credentials and API keys.",
+        "realistic": true
+      }
+    ],
+    "attack_tree": {
+      "label": "Compromise mrbeanpanel: Attacker Objectives",
+      "is_leaf": false,
+      "status": "?",
+      "children": [
+        {
+          "label": "1. Steal User Account Balances (Direct Monetization)",
+          "is_leaf": false,
+          "status": "?",
+          "children": [
+            {
+              "label": "1.1. Mass Account Takeover via Credential Brute Force",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.1.1. No rate limit on /login endpoint",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.1.2. Attacker sprays common passwords (password123, 123456) against user list",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.1.3. Weak password policy (no minimum length, no complexity)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "1.2. Session Hijacking via Stored XSS",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.2.1. Stored XSS in username / profile display field",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.2.2. Stored XSS in support ticket subject / message",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.2.3. Attacker crafts payload that steals session cookie on page load",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.2.4. No Content Security Policy (CSP) to block script execution",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "1.3. IDOR on Balance Endpoint",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.3.1. GET /api/balance/USER_ID lacks authorization check (no WHERE user_id = current_user)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.3.2. User IDs are sequential (1, 2, 3, ...) enabling enumeration",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.3.3. Attacker reads all user balances, identifies high-value targets",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "1.4. Refund Without Authorization (IDOR on Refund Endpoint)",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.4.1. POST /api/refund/ORDER_ID has no authorization check",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.4.2. Attacker refunds orders belonging to other users to their own account",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.4.3. No per-user refund limit or refund eligibility window check",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "1.5. Race Condition on Balance Deduction",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.5.1. No atomic transaction on balance check + deduction",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.5.2. Attacker sends concurrent order requests before balance is deducted",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.5.3. Both requests pass balance check, both deduct; user goes negative",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "1.6. Client-Trusted Price/Balance Field",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.6.1. Order request includes price field controlled by client",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.6.2. Attacker sets price=0 to get service for free",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.6.3. No server-side price validation against catalog",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "1.7. Webhook Spoofing: Forge Balance Credit",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.7.1. Webhook endpoint has no HMAC signature verification",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.7.2. Attacker crafts POST /webhook/balance-credit with user_id and amount",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.7.3. Endpoint credits balance without verifying webhook origin",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "1.8. Coupon / Voucher Abuse",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "1.8.1. Coupon code has no per-user limit; can be reused indefinitely",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.8.2. Coupon codes are guessable (WELCOME, NEWYEAR2025, TEST)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.8.3. Stack multiple coupons to 100%+ off via arithmetic overflow",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "1.8.4. No cap on total discount per order",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            }
+          ],
+          "notes": ""
+        },
+        {
+          "label": "2. Compromise Payment Processor API Keys (Operator Fund Drain)",
+          "is_leaf": false,
+          "status": "?",
+          "children": [
+            {
+              "label": "2.1. Exfiltrate Keys from Database",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "2.1.1. Keys stored plaintext in users/settings table",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.1.2. SQL injection on any endpoint; attacker queries payment_settings table",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.1.3. SELECT * FROM payment_settings WHERE processor='Cryptomus'; attacker exfiltrates key",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "2.2. Exfiltrate Keys from File System",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "2.2.1. Keys hardcoded in /app/config.php",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.2.2. LFI via ?page=../../config.php endpoint",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.2.3. Path traversal on file download endpoint",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.2.4. Backup files (.env.bak, config.php~) readable in web root",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "2.3. Keys Exposed in Error Messages / Logs",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "2.3.1. Payment processor API errors logged with full response (includes key)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.3.2. Debug mode enabled in production; /debug or phpinfo() exposes env vars",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.3.3. Error page displays exception stack trace with config include paths",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "2.4. Keys Accessible via Admin Panel (IDOR / Auth Bypass)",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "2.4.1. Admin panel /admin/payment-settings has no authentication",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.4.2. Normal user escalates to admin via is_admin=1 parameter",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.4.3. Attacker accesses /admin/payment-settings and reads all processor keys",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "2.5. Direct Withdrawal from Payment Processor",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "2.5.1. Attacker uses exfiltrated key to make withdrawal request to Cryptomus API",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.5.2. No IP whitelist or rate limit on processor API from application",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "2.5.3. Funds drained to attacker's wallet in minutes",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            }
+          ],
+          "notes": ""
+        },
+        {
+          "label": "3. Full Admin Panel Takeover",
+          "is_leaf": false,
+          "status": "?",
+          "children": [
+            {
+              "label": "3.1. Admin Authentication Bypass",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "3.1.1. Brute force admin password on /admin/login with no rate limit",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.1.2. SQL injection on /admin/login (username' OR '1'='1--)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.1.3. Default admin credentials not changed (admin/admin, admin/password)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.1.4. Session fixation: attacker sets cookie before admin logs in",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "3.2. Privilege Escalation from User to Admin",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "3.2.1. is_admin flag stored in session/cookie without server-side validation",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.2.2. Attacker modifies cookie (is_admin=1) or session variable",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.2.3. POST /api/update-user?role=admin sets admin role without authorization check",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.2.4. No server-side role validation on protected endpoints",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "3.3. IDOR on Admin Endpoints",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "3.3.1. /admin/user-management endpoint has no authentication",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.3.2. /admin/settings/1 returns admin settings even if user is not admin",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.3.3. Attacker iterates through settings IDs and accesses all configuration",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "3.4. Stored XSS Leading to Admin Session Theft",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "3.4.1. Stored XSS in user support ticket subject",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.4.2. Admin views ticket list; XSS payload fires in admin session",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.4.3. JavaScript steals admin session cookie and sends to attacker server",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.4.4. Attacker uses admin cookie to access admin panel",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "3.5. Remote Code Execution via File Upload",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "3.5.1. Admin upload endpoint accepts .php files disguised as images",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.5.2. File type validation only checks extension, not magic bytes",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.5.3. Attacker uploads shell.php as shell.jpg; renames on server",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.5.4. Attacker accesses /uploads/shell.php?cmd=id and executes commands",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "3.6. Admin Actions After Takeover",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "3.6.1. Attacker disables all payment processors to prevent withdrawals",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.6.2. Attacker modifies operator's payout address to attacker wallet",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.6.3. Attacker deletes audit logs to cover tracks",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "3.6.4. Attacker creates backdoor admin account for persistent access",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            }
+          ],
+          "notes": ""
+        },
+        {
+          "label": "4. Compromise User Credentials Database (Mass ATO)",
+          "is_leaf": false,
+          "status": "?",
+          "children": [
+            {
+              "label": "4.1. SQL Injection to Dump User Table",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "4.1.1. SQL injection in any query endpoint (search, filter, login)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "4.1.2. Attacker uses UNION-based injection to query users table",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "4.1.3. SELECT username, email, password FROM users exfiltrated",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "4.2. Weak Password Hashing",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "4.2.1. Passwords hashed with MD5 or unsalted SHA1",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "4.2.2. Attacker uses rainbow table to crack hashes offline",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "4.2.3. Common passwords recovered in minutes (password, 123456, admin)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "4.2.4. Strong passwords would take weeks/months; operator has time to rotate",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "4.3. Credential Stuffing Attack",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "4.3.1. Attacker obtains credentials from other breached sites (LinkedIn, etc.)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "4.3.2. Attacker tests credentials against mrbeanpanel login",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "4.3.3. Overlap in users + weak passwords = high success rate (10-30%)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            }
+          ],
+          "notes": ""
+        },
+        {
+          "label": "5. Service Disruption / Denial of Service",
+          "is_leaf": false,
+          "status": "?",
+          "children": [
+            {
+              "label": "5.1. Disable Payment Processors",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "5.1.1. Attacker gains admin access (see branch 3)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "5.1.2. Attacker disables all payment processors in /admin/payment-settings",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "5.1.3. Users cannot top-up balances; new orders cannot be placed",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "5.2. Mass Delete Orders / Logs",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "5.2.1. SQL injection enables DELETE FROM orders or DROP TABLE orders",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "5.2.2. Attacker deletes transaction history to prevent dispute resolution",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "5.2.3. No backup or recovery; data loss is permanent",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            },
+            {
+              "label": "5.3. Resource Exhaustion / Database Crash",
+              "is_leaf": false,
+              "status": "?",
+              "children": [
+                {
+                  "label": "5.3.1. Attacker crafts expensive SQL query (SELECT * with no WHERE)",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "5.3.2. Query locks database; legitimate queries timeout",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                },
+                {
+                  "label": "5.3.3. Service degradation or outage until operator kills query",
+                  "is_leaf": true,
+                  "status": "?",
+                  "children": [],
+                  "notes": ""
+                }
+              ],
+              "notes": ""
+            }
+          ],
+          "notes": ""
+        }
+      ],
+      "notes": ""
+    },
+    "catastrophic_outcomes": [
+      "Operator loses access to payment processor merchant accounts (keys compromised); attacker withdraws all customer deposits and operator reserves. Financial loss: $50k\u2013$500k+ depending on processor balance.",
+      "Mass account takeover (1000+ users) enabled by weak authentication. Attackers drain all visible balances. Users demand refunds; operator's operational credibility collapses. Chargeback liability and regulatory scrutiny (GDPR, MoneyCorp regulations).",
+      "Admin panel compromised. Attacker disables payment processors, deletes order history, and installs persistent backdoor. Service unavailable for days. Operator loses entire order pipeline revenue during recovery window.",
+      "User credential database (username + password hash) exfiltrated. Weak hashing (MD5, unsalted) enables rapid offline cracking. Credentials sold on dark market. Secondary ATOs occur across multiple platforms using same password.",
+      "Audit logs deleted post-breach. Operator cannot prove to regulators or users what happened, when, or to whom. Refund disputes unresolvable. Regulatory penalties and lawsuits follow."
+    ],
+    "not_in_model": [
+      "Nation-state adversaries. No geopolitical value in compromising SMM panel; out-of-scope for this threat model.",
+      "Physical attacks on infrastructure. Assumes cloud hosting; physical security is cloud provider's responsibility.",
+      "Supply-chain attacks on dependencies (PHP, Smarty, nginx). Covered by standard security patching practices; specific CVE-chaining is out of scope.",
+      "Distributed denial-of-service (DDoS) attacks. Infrastructure resilience (WAF, DDoS mitigation) assumed in place; testing is ISP/CDN responsibility.",
+      "Side-channel attacks (cache timing, speculative execution). Too low-probability for realistic SMM panel attacker.",
+      "Malicious insider intentionally sabotaging (covered under \u00a7 3 T4, but excluded from active penetration testing scope; assumes admin honesty).",
+      "Accidental misconfiguration (e.g., admin left API key in code comment). Deployment/SDLC issue, not architectural threat."
+    ]
+  }
+}
