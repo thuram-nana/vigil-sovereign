@@ -35,7 +35,14 @@ warn_unused_ignores       = false
 exclude                   = ['/tests/']
 
 [tool.pytest.ini_options]
-testpaths        = ["kernel/tests", "memory/tests", "intake/tests"]
+testpaths        = [
+  "common/tests",
+  "kernel/tests",
+  "memory/tests",
+  "intake/tests",
+  "agents/tests",
+  "planner/tests",
+]
 python_files     = ["test_*.py"]
 python_functions = ["test_*"]
 addopts          = "-q -ra"
