@@ -1,0 +1,39 @@
+name: Generic web application
+slug: generic-web
+description: |
+  Fallback archetype when fingerprinting cannot pin the stack. The
+  attack tree is generic OWASP coverage; the playbook order is the
+  v1 default. Treat as a starting baseline — refine the archetype
+  by hand once recon reveals the stack.
+fingerprints_required_any: []
+fingerprints_optional: []
+common_vulnerabilities:
+  - IDOR
+  - SQLi
+  - XSS
+  - CSRF
+  - SSRF
+  - open-redirect
+  - file-upload
+  - auth-bypass
+  - rate-limit-missing
+  - information-disclosure
+playbook_priorities:
+  - 04-web-application
+  - 05-api-security
+  - 06-authentication-identity
+  - 07-authorization
+  - 08-injection
+  - 09-client-side
+  - 10-business-logic
+  - 11-cryptography
+  - 12-network-infrastructure
+attack_tree_seeds:
+  - Take over a user account
+  - Reach data the user should not have access to
+  - Reach RCE on the host
+  - Manipulate state (orders, balances, settings) without authorisation
+notes: |
+  This archetype is a placeholder. Once recon nails the stack,
+  re-run intake or hand-edit the engagement to use a specific
+  archetype.

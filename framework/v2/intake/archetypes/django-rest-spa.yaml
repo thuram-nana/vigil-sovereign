@@ -1,0 +1,40 @@
+name: Django REST + SPA
+slug: django-rest-spa
+description: |
+  Django back-end exposing a REST API (Django REST Framework) to a
+  React / Vue / Svelte SPA. Bug surface: DRF permission classes
+  vs view-level checks, IDOR via PrimaryKeyRelatedField, ORM
+  injection in raw QuerySets, JWT or session auth weaknesses.
+fingerprints_required_any:
+  - framework:django
+fingerprints_optional:
+  - server:gunicorn
+  - server:uvicorn
+  - api:rest
+  - api:openapi
+  - framework:react
+  - framework:vue
+  - framework:svelte
+  - auth:jwt
+common_vulnerabilities:
+  - IDOR
+  - permission-bypass
+  - SQLi-via-raw
+  - SSRF
+  - DRF-throttling-bypass
+  - admin-exposure
+  - debug-mode-disclosure
+playbook_priorities:
+  - 05-api-security
+  - 07-authorization
+  - 06-authentication-identity
+  - 08-injection
+  - 04-web-application
+attack_tree_seeds:
+  - Take over an account or escalate privilege
+  - Bypass DRF permission classes
+  - Exploit SQLi via raw / extra() QuerySets
+  - Reach Django admin from internet
+notes: |
+  Django admin reachable at /admin/ is a common operator mistake.
+  DEBUG = True with internal IPs leaks stack traces with secrets.

@@ -1,0 +1,47 @@
+name: PHP-Smarty SMM-panel fork
+slug: php-smarty-smm-panel-fork
+description: |
+  PHP-based reseller panel for Social Media Marketing services,
+  typically a fork of the Perfect Panel codebase. Heavy on numeric
+  ID-bearing URLs, balance-based payments, and a multi-PSP webhook
+  surface (Cryptomus, Coinbase, Payeer, Perfect Money, manual USDT/BTC).
+  Frequent ATO targets for credential-stuffers and webhook-forgery
+  fraudsters. mrbeanpanel.com is the canonical instance.
+fingerprints_required_any:
+  - cms:perfect-panel
+  - framework:perfect-panel
+fingerprints_optional:
+  - server:nginx
+  - framework:php
+  - framework:smarty
+  - cms:smm-panel
+  - payment:cryptomus
+  - payment:coinbase-commerce
+  - payment:payeer
+  - payment:perfect-money
+  - payment:manual-crypto
+common_vulnerabilities:
+  - webhook-forgery
+  - IDOR
+  - mass-assignment
+  - race
+  - SQLi
+  - vertical-privesc
+  - source-disclosure
+  - reset-token
+playbook_priorities:
+  - 05-api-security
+  - 07-authorization
+  - 06-authentication-identity
+  - 10-business-logic
+  - 11-cryptography
+  - 04-web-application
+  - 12-network-infrastructure
+attack_tree_seeds:
+  - Take over a customer account
+  - Manipulate balance / orders without paying
+  - Take over the platform itself
+notes: |
+  This archetype's worst-case loss is unbounded balance creation via
+  unsigned webhook callbacks. Treat the PSP webhook handlers as the
+  highest-priority surface.

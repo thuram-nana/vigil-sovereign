@@ -1,0 +1,44 @@
+name: Laravel marketplace
+slug: laravel-marketplace
+description: |
+  Laravel application implementing a multi-tenant marketplace or
+  e-commerce platform. Heavy on Eloquent models, REST API endpoints,
+  middleware-driven auth, and Blade templates. Common bugs are
+  mass-assignment via $fillable misuse, IDOR on routes that bind
+  models implicitly, file-upload weaknesses, and SSRF via image /
+  URL-fetch features.
+fingerprints_required_any:
+  - framework:laravel
+fingerprints_optional:
+  - server:nginx
+  - server:apache
+  - framework:php
+  - api:rest
+  - api:openapi
+  - payment:stripe
+  - payment:paypal
+common_vulnerabilities:
+  - IDOR
+  - mass-assignment
+  - SQLi
+  - SSRF
+  - file-upload
+  - SSTI
+  - XSS
+  - vertical-privesc
+playbook_priorities:
+  - 05-api-security
+  - 07-authorization
+  - 04-web-application
+  - 08-injection
+  - 10-business-logic
+  - 06-authentication-identity
+attack_tree_seeds:
+  - Take over a tenant account or escalate to platform admin
+  - Manipulate order, refund, or balance state
+  - Abuse mass-assignment to elevate privilege
+  - Reach RCE via file upload or template injection
+notes: |
+  Implicit route-model binding plus a missing policy check is the
+  classic Laravel IDOR.  Test PUT/PATCH routes for mass-assignment of
+  `role`, `is_admin`, `team_id`, `tenant_id`.

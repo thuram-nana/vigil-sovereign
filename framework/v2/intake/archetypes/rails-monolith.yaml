@@ -1,0 +1,38 @@
+name: Ruby on Rails monolith
+slug: rails-monolith
+description: |
+  Classic Rails application — server-rendered ERB / Hotwire, sometimes
+  with a JSON API for mobile or SPA clients. Bug surface: strong-
+  params bypass, mass-assignment, ActionController open-redirect,
+  YAML.load deserialization, ActiveStorage URL-fetch SSRF.
+fingerprints_required_any:
+  - framework:rails
+  - framework:phusion
+fingerprints_optional:
+  - server:puma
+  - server:unicorn
+  - auth:rails-session
+  - api:rest
+common_vulnerabilities:
+  - IDOR
+  - mass-assignment
+  - SQLi-via-where-string
+  - SSTI-erb
+  - YAML-deserialization
+  - SSRF-activestorage
+  - open-redirect
+  - csrf-token-missing-on-api
+playbook_priorities:
+  - 05-api-security
+  - 07-authorization
+  - 04-web-application
+  - 08-injection
+  - 06-authentication-identity
+attack_tree_seeds:
+  - Take over an account or escalate privilege
+  - Inject SQL via where("...") string interpolation
+  - Reach RCE via YAML deserialization / Marshal
+  - Abuse open-redirect on login / oauth callback
+notes: |
+  Permit a parameter list explicitly per controller — implicit permit
+  is the canonical Rails mass-assignment bug.

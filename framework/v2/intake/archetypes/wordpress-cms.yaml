@@ -1,0 +1,41 @@
+name: WordPress CMS
+slug: wordpress-cms
+description: |
+  Generic WordPress installation. Bug surface dominated by plugins
+  and themes; core itself is reasonably hardened against common
+  classes. Authentication via wp-login; xmlrpc historically a
+  brute-force target. WP REST API at /wp-json/.
+fingerprints_required_any:
+  - cms:wordpress
+  - framework:wordpress
+fingerprints_optional:
+  - server:apache
+  - server:nginx
+  - server:litespeed
+  - cdn_waf:wordfence
+  - cdn_waf:sucuri
+  - cdn_waf:cloudflare
+common_vulnerabilities:
+  - plugin-CVE
+  - reflected-XSS
+  - stored-XSS
+  - SQLi
+  - file-upload
+  - wp-config-disclosure
+  - xmlrpc-bruteforce
+  - rest-api-enum
+playbook_priorities:
+  - 04-web-application
+  - 06-authentication-identity
+  - 08-injection
+  - 09-client-side
+  - 12-network-infrastructure
+  - 15-cicd-supply-chain
+attack_tree_seeds:
+  - Take over an admin account
+  - Compromise a published plugin / theme
+  - Reach RCE via file upload / known plugin CVE
+  - Enumerate users via REST / xmlrpc
+notes: |
+  Always run wpscan with a paid token if available. /wp-json/wp/v2/users
+  often leaks usernames anonymously.
