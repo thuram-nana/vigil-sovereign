@@ -1,0 +1,13 @@
+# Operator attestation ledger for UTI intake.
+#
+# Each line below records that the operator has explicit authority to
+# perform passive fingerprinting against a hostname.  UTI refuses to
+# operate on any hostname not present here.
+#
+# Format:
+#     <ISO-8601 UTC timestamp> | <operator-name> | <hostname>
+#
+# Example:
+#     2026-05-04T12:34:56Z | satoshi | mrbeanpanel.com
+#
+# Edit by hand. UTI never writes to this file.

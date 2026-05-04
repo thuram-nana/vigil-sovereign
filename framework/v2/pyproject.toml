@@ -1,0 +1,38 @@
+[project]
+name = "crucible-v2"
+version = "2.0.0a1"
+description = "CRUCIBLE v2 — autonomous, learning offensive-intelligence platform layered onto v1"
+requires-python = ">=3.11"
+authors = [{name = "OBSIDIAN-FORGE"}]
+license = {text = "Operator-internal — see CLAUDE.md"}
+readme = "README.md"
+
+dependencies = [
+  "pydantic>=2.10,<3",
+  "structlog>=25.0,<26",
+  "httpx>=0.28,<1",
+  "requests>=2.32,<3",
+  "PyYAML>=6,<7",
+  "beautifulsoup4>=4.12,<5",
+  "Jinja2>=3.1,<4",
+]
+
+[project.optional-dependencies]
+anthropic   = ["anthropic>=0.40,<1"]
+embeddings  = ["sentence-transformers>=2,<6"]
+dev         = ["pytest>=8,<11", "mypy>=1.10,<2"]
+
+[tool.mypy]
+python_version       = "3.11"
+strict_optional      = true
+warn_unused_ignores  = true
+warn_return_any      = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths        = ["kernel/tests", "memory/tests", "intake/tests"]
+python_files     = ["test_*.py"]
+python_functions = ["test_*"]
+addopts          = "-q -ra"
