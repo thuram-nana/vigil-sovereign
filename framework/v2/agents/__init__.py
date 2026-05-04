@@ -17,10 +17,36 @@ Public surface:
     from framework.v2.agents.critique_agent import CritiqueAgent
     from framework.v2.agents.reporter_agent import ReporterAgent
     from framework.v2.agents.memory_agent import MemoryAgent
+
+Three executors ship side-by-side:
+
+    DeterministicExecutor — fixture lookup by (bug_class, surface).
+    RealisticExecutor     — substantive synthetic evidence per scenario.
+    HttpExecutor          — bounded live-HTTP with full safety stack.
 """
 
 from __future__ import annotations
 
 from .blackboard import Blackboard, open_blackboard
+from .executor_proto import (
+    DeterministicExecutor,
+    ExecutionOutcome,
+    Executor,
+)
+from .http_executor import HttpExecutor, parse_posture, user_agent_for
+from .realistic_executor import RealisticExecutor
+from .scope_gate import ScopeDecision, validate_action
 
-__all__ = ["Blackboard", "open_blackboard"]
+__all__ = [
+    "Blackboard",
+    "open_blackboard",
+    "Executor",
+    "ExecutionOutcome",
+    "DeterministicExecutor",
+    "RealisticExecutor",
+    "HttpExecutor",
+    "ScopeDecision",
+    "validate_action",
+    "parse_posture",
+    "user_agent_for",
+]

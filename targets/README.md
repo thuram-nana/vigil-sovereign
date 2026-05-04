@@ -9,7 +9,7 @@
 - **Reuse without contamination.** The framework is the playbook; the target directory is the case file. A new engagement starts by copying `_template/` to `targets/<name>/`, not by reaching into the framework.
 - **OPSEC.** Loot, credentials, and PII never leave their target directory. `.gitignore` keeps `loot/` out of any repo by default.
 - **Reporting clarity.** Each target produces its own `reports/` artifacts referencing its own findings. Cross-target generalizations belong in the framework knowledge base, not in any single target.
-- **Multi-target operators.** OBSIDIAN must be able to switch from `targets/mrbeanpanel/` to `targets/clientB/` without state bleed.
+- **Multi-target operators.** OBSIDIAN must be able to switch from `targets/clientA/` to `targets/clientB/` without state bleed.
 
 ---
 
@@ -52,7 +52,7 @@ $EDITOR targets/clientname/attack-tree.md
 
 ## Naming Convention
 
-Use a short, lowercase, hyphen-or-underscore-free slug for the target directory: `mrbeanpanel`, `clientb`, `acme-prod`. Keep it stable across an engagement so paths in reports remain valid.
+Use a short, lowercase, hyphen-or-underscore-free slug for the target directory: `acme-portal`, `clientb`, `acme-prod`. Keep it stable across an engagement so paths in reports remain valid.
 
 If the same client has multiple distinct apps, use multiple target dirs: `clientb-portal`, `clientb-api`, `clientb-mobile`. Cross-link in their charters.
 

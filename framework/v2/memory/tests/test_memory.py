@@ -3,14 +3,14 @@ Tests for MLS — schema, storage, embeddings, recorder, recall, priors.
 
 Acceptance test per FORGE PROTOCOL § 3.2:
 
-    "seed the store with the existing targets/mrbeanpanel/ data ...
+    "seed the store with the built-in sample engagement data ...
      Run UTI on a structurally similar second target.  Confirm the
      planner's first hypotheses are biased — measurably — toward
-     what worked on mrbeanpanel."
+     what worked on the seeded archetype."
 
-UTI and the planner are deferred. The achievable acceptance is that
-recall over the seeded store returns the seeded archetype's priors
-at the top when queried with a similar fingerprint.
+The achievable acceptance is that recall over the seeded store
+returns the seeded archetype's priors at the top when queried with
+a similar fingerprint.
 """
 
 from __future__ import annotations
@@ -34,6 +34,16 @@ def fresh_store(tmp_path: Path) -> Store:
     s = open_store(db)
     yield s
     s.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_target_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The built-in seed module's seed() calls postmortem.run() which
+    writes targets/<slug>/postmortem.md on disk. Without this redirect,
+    every test that calls seed pollutes the real targets/ tree. Reads
+    still degrade gracefully (returning [] when files are absent)."""
+    from framework.v2.common import paths as _paths
+    monkeypatch.setattr(_paths, "target_dir", lambda slug: tmp_path / slug)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +169,7 @@ def test_priors_increment(fresh_store: Store) -> None:
 
 
 # ---------------------------------------------------------------------------
-# seed mrbeanpanel + acceptance
+# built-in sample seed + acceptance
 # ---------------------------------------------------------------------------
 
 
@@ -193,16 +203,16 @@ def test_recall_finds_seeded_target_by_similarity(fresh_store: Store) -> None:
         business_context="completely unrelated CRM app",
     )
 
-    # Query with text resembling the mrbeanpanel fingerprint.
+    # Query with text resembling the seeded fingerprint.
     sims = recall.similar_targets(
         fresh_store,
-        text="PHP Smarty SMM reseller panel Cryptomus webhook",
+        text="PHP Smarty SMM reseller panel payment webhook",
         limit=5,
     )
     assert sims, "expected at least one similar target"
-    # mrbeanpanel must rank above the unrelated rails one.
+    # The seeded engagement must rank above the unrelated rails one.
     top = sims[0]
-    assert top.slug == "mrbeanpanel"
+    assert top.slug == "sample-php-panel"
     assert top.archetype == "PHP-Smarty SMM-panel fork"
     if len(sims) > 1:
         assert sims[0].score > sims[1].score
@@ -248,7 +258,7 @@ def test_postmortem_writes_file(fresh_store: Store, tmp_path: Path,
     monkeypatch.setattr(_paths, "target_dir",
                          lambda slug: tmp_path / slug)
     seed_mrbeanpanel.seed(fresh_store)
-    out = postmortem.run(fresh_store, "mrbeanpanel")
+    out = postmortem.run(fresh_store, "sample-php-panel")
     assert out.is_file()
     text = out.read_text(encoding="utf-8")
     assert "Postmortem" in text
@@ -263,7 +273,7 @@ def test_postmortem_writes_file(fresh_store: Store, tmp_path: Path,
 
 def test_acceptance_measurable_bias_after_seed(fresh_store: Store) -> None:
     """
-    After seeding mrbeanpanel and recording an unrelated engagement,
+    After seeding the built-in sample engagement and recording an unrelated one,
     a query for hypotheses biased toward 'PHP-Smarty SMM-panel fork'
     must rank the seeded confirmed bug-classes ABOVE arbitrary others.
     This is the closest we can get to § 3.2 without UTI/ACP.

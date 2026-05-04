@@ -15,6 +15,7 @@ the conftest leaves it alone and the configured backend is used.
 from __future__ import annotations
 
 import os
+from collections.abc import Generator
 
 import pytest
 
@@ -28,5 +29,20 @@ def pytest_configure(config: pytest.Config) -> None:
     try:
         from framework.v2.kernel.llm import reset_cache
         reset_cache()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _unbind_engagement_after_test() -> Generator[None, None, None]:
+    """`logging.bind_engagement(slug)` sets a module-level slug that
+    routes subsequent log writes to `targets/<slug>/.crucible-v2.log`.
+    Tests that exercise intake/agents/planner pipelines call it, but
+    nothing resets it, so logs from later tests (after monkeypatches
+    revert) leak to the real `targets/`. Reset after every test."""
+    yield
+    try:
+        from framework.v2.common.logging import bind_engagement
+        bind_engagement(None)
     except Exception:
         pass

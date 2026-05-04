@@ -67,7 +67,7 @@ with open_store() as store:
 python3 -m framework.v2 memory status                # row counts
 python3 -m framework.v2 memory similar --text "..."  # similar past targets
 python3 -m framework.v2 memory priors --archetype "..."
-python3 -m framework.v2 memory seed --slug mrbeanpanel  # seed from v1 target
+python3 -m framework.v2 memory seed --slug sample-php-panel  # built-in sample engagement fixture
 ```
 
 ## Provenance

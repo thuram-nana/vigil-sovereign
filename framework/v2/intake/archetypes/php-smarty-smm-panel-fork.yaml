@@ -6,7 +6,7 @@ description: |
   ID-bearing URLs, balance-based payments, and a multi-PSP webhook
   surface (Cryptomus, Coinbase, Payeer, Perfect Money, manual USDT/BTC).
   Frequent ATO targets for credential-stuffers and webhook-forgery
-  fraudsters. mrbeanpanel.com is the canonical instance.
+  fraudsters.
 fingerprints_required_any:
   - cms:perfect-panel
   - framework:perfect-panel

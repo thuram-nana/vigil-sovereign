@@ -218,9 +218,6 @@
       "WebFetch(domain:docs.aws.amazon.com)",
       "WebFetch(domain:cloud.google.com)",
       "WebFetch(domain:kubernetes.io)",
-      "WebFetch(domain:perfectpanel.com)",
-      "WebFetch(domain:mrbeanpanel.com)",
-      "WebFetch(domain:beansms.com)",
       "WebSearch"
     ],
     "ask": [

@@ -130,7 +130,7 @@ crucible/
 └── targets/                        # Per-engagement working directories
     ├── README.md
     ├── _template/                  # Copy this to start a new target
-    └── <your-target-name>/         # e.g. mrbeanpanel, app2, app3, ...
+    └── <your-target-name>/         # e.g. app1, app2, internal-crm, ...
         ├── charter.md
         ├── threat-model.md
         ├── attack-tree.md
@@ -218,31 +218,37 @@ If you are OBSIDIAN booting up:
 
 ---
 
-## CRUCIBLE v2 (foundation pass)
+## CRUCIBLE v2
 
 `framework/v2/` adds an executable layer on top of v1 without
-modifying any v1 file. The foundation pass shipped in this session
-contains three subsystems:
+modifying any v1 file. Five working subsystems ship today:
 
 - **URK** (`framework/v2/kernel/`) — wraps each cognitive doc as a
   typed callable. `hypothesize / critique / pivot / decide / opsec /
-  threat_model` take inputs, prompt an LLM (Anthropic / Ollama / a
-  deterministic DryRun fallback), and return Pydantic-validated
-  results.
+  threat_model` take inputs, prompt an LLM (Anthropic / Claude Code /
+  Ollama / a deterministic DryRun fallback), and return Pydantic-
+  validated results.
 - **MLS** (`framework/v2/memory/`) — persistent SQLite + embeddings
   store of every engagement, finding, hypothesis, payload, and dead
   end. Queryable from the CLI; biases future intakes toward what
   actually paid off.
-- **UTI** (`framework/v2/intake/`) — drop a URL, get a fully
-  scaffolded `targets/<slug>/` directory with charter draft, threat
-  model, attack tree, and structured fingerprint JSON. Honours the
-  ethics gates: no scaffolding without operator-attested
-  authorization; no active testing until the operator signs
-  `charter.md`.
+- **UTI** (`framework/v2/intake/`) — drop *any* operator-authorised
+  URL, get a fully scaffolded `targets/<slug>/` directory with
+  charter draft, threat model, attack tree, and structured
+  fingerprint JSON. Honours the ethics gates: no scaffolding without
+  operator-attested authorization; no active testing until the
+  operator signs `charter.md`.
+- **MAO** (`framework/v2/agents/`) — blackboard + coordinator + 5
+  specialist agents (recon, hypothesis, exploit, critique, reporter)
+  + memory-agent. Append-only event log; critique gate vetoes weak
+  findings before they reach the report.
+- **ACP** (`framework/v2/planner/`) — goal-tree-driven autonomous
+  campaign planner with budget, pruner, watchdog, and resume.
+  Drives MAO end-to-end from URL to report.
 
-Five further subsystems (MAO, ACP, DAA, DEL, SIL) are designed but
-deferred. See `V2-MANIFEST.md` for status and `V2-LIMITATIONS.md`
-for what the foundation pass *cannot* do.
+Three further subsystems (DAA, DEL, SIL) are designed but deferred.
+See `V2-MANIFEST.md` for status and `V2-LIMITATIONS.md` for what v2
+*cannot* do.
 
 ```bash
 # one-time setup
@@ -252,9 +258,11 @@ pip install --break-system-packages -r framework/v2/requirements.txt
 # verify
 python3 -m framework.v2 status
 
-# usage
-python3 -m framework.v2 intake authorize https://example.com --operator yourname
-python3 -m framework.v2 intake https://example.com
-python3 -m framework.v2 memory similar --text "PHP Smarty SMM panel webhook"
+# the universal command — drop any operator-authorised URL
+python3 -m framework.v2 intake authorize https://your-app.example.com --operator yourname
+python3 -m framework.v2 intake https://your-app.example.com
+
+# query the memory substrate
+python3 -m framework.v2 memory similar --text "describe a stack you care about"
 python3 -m framework.v2 kernel critique --claim "..."
 ```

@@ -51,7 +51,7 @@ python3 -m framework.v2 kernel critique --claim "..." --evidence "..."
 python3 -m framework.v2 kernel pivot --thread "..." --posture EMULATE
 python3 -m framework.v2 kernel decide --summary "..."
 python3 -m framework.v2 kernel opsec --action "..." --posture EMULATE
-python3 -m framework.v2 kernel threat-model --target mrbeanpanel --context "..."
+python3 -m framework.v2 kernel threat-model --target your-target --context "..."
 ```
 
 Each prints `{"parsed": ..., "trace": ...}` — the parsed Pydantic

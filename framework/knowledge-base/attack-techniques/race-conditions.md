@@ -131,9 +131,11 @@ Test: two separate users (different sessions) submit checkout simultaneously.
 Pass: one succeeds, one returns "out of stock".
 Fail: both succeed; later refund chaos.
 
-### 4.4 SMM panel — service / order specific
+### 4.4 Reseller panels — service / order specific
 
-(Target-specific to mrbeanpanel.com class apps.)
+(Applies to reseller / SMM panels and similar credit-based order
+flows: signed but unverified webhooks, balance state in the user
+table, ID-bearing order URLs.)
 
 - **Refund races** — `POST /api/v2/refund?order=N` — refunding partially
   completed orders multiple times before status updates.

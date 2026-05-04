@@ -4,7 +4,7 @@ memory.cli — `python3 -m framework.v2 memory <subcommand>`.
 Subcommands:
 
     status                    row counts and DB path
-    seed --slug <name>        seed from a v1 target (mrbeanpanel only for now)
+    seed --slug <name>        seed from a built-in sample engagement fixture (slug: sample-php-panel)
     similar --text "..."      similar past engagements by cosine
     wins --archetype "..."    confirmed hypotheses for an archetype
     payloads --bug-class X    successful-payload priors
@@ -30,9 +30,11 @@ def _status(_args: argparse.Namespace) -> int:
 
 
 def _seed(args: argparse.Namespace) -> int:
-    if args.slug != "mrbeanpanel":
-        print(f"error: only --slug mrbeanpanel is supported in this session "
-              f"(got {args.slug!r})", file=sys.stderr)
+    # The seed_mrbeanpanel fixture is the built-in sample engagement.
+    # Other slugs would require a matching seed_<slug> module.
+    if args.slug != "sample-php-panel":
+        print(f"error: no built-in seed fixture for --slug {args.slug!r} "
+              f"(only 'sample-php-panel' ships with the framework)", file=sys.stderr)
         return 2
     from . import seed_mrbeanpanel
     with open_store() as s:
@@ -133,7 +135,7 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("status", help="row counts and DB path")
     p.set_defaults(fn=_status)
 
-    p = sub.add_parser("seed", help="seed from a v1 target")
+    p = sub.add_parser("seed", help="seed from a built-in sample engagement fixture")
     p.add_argument("--slug", required=True)
     p.set_defaults(fn=_seed)
 

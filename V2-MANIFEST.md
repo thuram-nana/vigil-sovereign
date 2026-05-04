@@ -26,9 +26,9 @@ as legitimate states of the work.
 | # | Subsystem | Path | Code complete | Live-path verified | Notes |
 |---|-----------|------|---------------|---------------------|-------|
 | 1 | URK — Universal Reasoning Kernel | `framework/v2/kernel/` | yes | **yes** | 6 cognitive bindings + 4 backends (Anthropic, ClaudeCode, Ollama, DryRun). All six bindings exercised live in Session 3 against the ClaudeCodeBackend (operator's Claude Max via `claude -p`, model=haiku). All `V2-LIMITATIONS.md` § 0 failure-mode tests pass. Captured fixtures under `framework/v2/kernel/tests/fixtures/live-run/`. |
-| 2 | MLS — Memory & Learning Substrate | `framework/v2/memory/` | yes | yes | SQLite store + lexical embeddings (sentence-transformers optional); recorder / recall / priors / postmortem. mrbeanpanel seed exercised. No LLM dependency. |
-| 3 | UTI — Universal Target Intake | `framework/v2/intake/` | yes | **yes** | 7 detectors, 9 archetypes, confidence-weighted classifier exercised live against `mrbeanpanel.com` (Session 1). The threat-model drafter was exercised live in Session 3 against `mrbeanpanel.com` with live URK: 173s wall, 9 HTTP requests, archetype `php-smarty-smm-panel-fork` (0.75), 208-line URK-driven threat-model captured at `framework/v2/intake/tests/fixtures/live-run/mrbean-threat-model.md`. |
-| 4 | MAO — Multi-Agent Orchestration | `framework/v2/agents/` | yes | **yes** | Blackboard, coordinator, 5 specialist agents, memory-agent, executor protocol exercised live (Session 3: every binding fires live URK; critique-agent rigour verified). Session 4 added `RealisticExecutor` and ran the full pipeline end-to-end under live URK: 30 planner steps → 2 executor successes → 2 critique calls → 1 confirmed finding → reporter emitted `technical.md` → MLS recorded the confirmed finding. The weak-evidence finding was correctly rejected by critique (gate still discriminates). Captured fixture: `framework/v2/agents/tests/fixtures/live-run/realistic-pipeline/`. |
+| 2 | MLS — Memory & Learning Substrate | `framework/v2/memory/` | yes | yes | SQLite store + lexical embeddings (sentence-transformers optional); recorder / recall / priors / postmortem. Built-in sample-engagement seed exercised. No LLM dependency. |
+| 3 | UTI — Universal Target Intake | `framework/v2/intake/` | yes | **yes** | 7 detectors, 9 archetypes, confidence-weighted classifier exercised live in Session 1 against an operator-authorised target. The threat-model drafter was exercised live in Session 3 against the same target with live URK: 173s wall, 9 HTTP requests, archetype `php-smarty-smm-panel-fork` (0.75), 208-line URK-driven threat-model captured under `framework/v2/intake/tests/fixtures/live-run/` (regression captures retained). |
+| 4 | MAO — Multi-Agent Orchestration | `framework/v2/agents/` | yes | **yes** | Blackboard, coordinator, 5 specialist agents, memory-agent, executor protocol exercised live (Session 3: every binding fires live URK; critique-agent rigour verified). Session 4 added `RealisticExecutor` and ran the full pipeline end-to-end under live URK: 30 planner steps → 2 executor successes → 2 critique calls → 1 confirmed finding → reporter emitted `technical.md` → MLS recorded the confirmed finding. Session 6 added `HttpExecutor` — bounded live-HTTP with the six-gate safety stack (charter signature, scope, destructive prompt, request budget, posture-aware rate limit, posture-aware UA). 22 unit tests against `pytest-httpserver` cover every gate. Live exercise opt-in via `CRUCIBLE_LIVE_HTTP=<url>`; deferred to operator's next supervised run if not provided this session. Captured fixture: `framework/v2/agents/tests/fixtures/live-run/realistic-pipeline/`. |
 | 5 | ACP — Autonomous Campaign Planner | `framework/v2/planner/` | yes | **yes** | Planner drove the Session-4 live full-pipeline run end-to-end: leaf dispatch → exploit-agent → critique-agent → reporter emission, all under live URK. 30 steps in 232s, halted on `max_steps` per the test budget, checkpoint persisted, MLS mirrored. Watchdog halt-authority and resume-across-kill remain verified from Session 2. Acceptance test: `framework/v2/planner/tests/test_full_integration.py::test_full_pipeline_url_to_report_live_realistic` (opt-in via `CRUCIBLE_LIVE_FULL_PIPELINE=1`). |
 | 6 | DEL — Defender Emulation Layer | (`framework/v2/defender/` — absent) | no | no | Telemetry model, detection scoring, evasion library, Sigma runner. Deferred to a future session. |
 | 7 | DAA — Deep Analysis Arsenal | (`framework/v2/analysis/` — absent) | no | no | Semgrep / CodeQL / Joern / API fuzzer / differential testing / AST indexer. Largest deferred subsystem. |
@@ -87,10 +87,10 @@ classes have been exercised:
    are in this class.
 
 2. **Live HTTP** (no LLM, real network) — UTI's HTTP fetcher and
-   detector pipeline have been exercised against the operator's own
-   `mrbeanpanel.com` (in scope per the existing charter) under a 12-
-   request budget. Classifier returns `php-smarty-smm-panel-fork`
-   with score 0.745.
+   detector pipeline have been exercised against an operator-
+   authorised target under a 12-request budget. Classifier returned
+   `php-smarty-smm-panel-fork` with score 0.745. The intake test
+   accepts any `CRUCIBLE_LIVE_INTAKE_URL` the operator authorises.
 
 3. **DryRun LLM** (no live model, deterministic fixture) — every
    URK call across every binding goes through DryRun unless an
@@ -121,10 +121,11 @@ All from clean runs at the time this manifest was last revised.
 - **Type check:** `mypy --config-file framework/v2/pyproject.toml`
   — `Success: no issues found in 71 source files`.
 - **Test suite:** `python3 -m pytest framework/v2/`
-  — `159 passed, 1 skipped` (the skip is the opt-in
-  `mrbeanpanel.com` live-intake test).
-- **Live integration:** `CRUCIBLE_LIVE_INTAKE=1 pytest
-  framework/v2/intake/tests/test_intake.py::test_live_intake_against_mrbeanpanel`
+  — `159 passed, 1 skipped` (the skip is the opt-in live-intake
+  test; runs only when the operator sets
+  `CRUCIBLE_LIVE_INTAKE_URL=<https://your-authorised-target>`).
+- **Live integration:** `CRUCIBLE_LIVE_INTAKE_URL=https://your-target
+  pytest framework/v2/intake/tests/test_intake.py::test_live_intake_against_authorised_target`
   — passes; ~13s, 12-request budget.
 - **Cross-references:** every `framework/v2/...` path referenced in
   the v2 docs resolves to a real file (excluding the deferred
@@ -159,7 +160,7 @@ measurable-bias acceptance.
 ### UTI (subsystem 3)
 
 20 modules + tests, ~2700 lines (incl. signatures). 25 tests + 1
-opt-in live integration. mrbeanpanel.com classifies as
+opt-in live integration. The Session-1 live target classified as
 `php-smarty-smm-panel-fork`.
 
 ### MAO (subsystem 4)
@@ -217,9 +218,11 @@ Per FORGE PROTOCOL § 8 every gate is in `framework/v2/common/ethics.py`
 and tested by `framework/v2/common/tests/test_common.py`:
 
 - **Charter requirement:** `require_charter_signed()` raises
-  `CharterNotSigned` on the actual unsigned mrbeanpanel charter.
+  `CharterNotSigned` against an unsigned charter (verified against a
+  synthetic-target fixture in `test_common.py`).
 - **Scope enforcement:** `require_in_scope()` raises `OutOfScope`
-  for `evil.com`; `mrbeanpanel.com` and its subdomains pass.
+  for hosts outside the parsed charter scope (verified with
+  synthetic in-scope and out-of-scope hosts).
 - **Authorization on intake:** `require_authorized_intake()`
   reads the ledger; deny-by-default.
 - **Watchdog scope-drift halt:** the planner's watchdog calls
@@ -252,11 +255,11 @@ python3 -m framework.v2 kernel critique     --claim "..."
 python3 -m framework.v2 kernel pivot        --thread "..."
 python3 -m framework.v2 kernel decide       --summary "..."
 python3 -m framework.v2 kernel opsec        --action "..."
-python3 -m framework.v2 kernel threat-model --target mrbeanpanel
+python3 -m framework.v2 kernel threat-model --target your-target
 
 # MLS
 python3 -m framework.v2 memory status
-python3 -m framework.v2 memory seed --slug mrbeanpanel
+python3 -m framework.v2 memory seed --slug sample-php-panel  # built-in sample
 python3 -m framework.v2 memory similar --text "..."
 python3 -m framework.v2 memory wins    --archetype "..."
 python3 -m framework.v2 memory priors  --archetype "..."

@@ -31,6 +31,10 @@
 # real target. We ignore them by pattern so a freshly-cloned repo gets the
 # template scaffolding but never inherits another engagement's artifacts.
 # -----------------------------------------------------------------------------
+
+# Archived engagements — preserved for reference but never published.
+targets/.archive/
+
 targets/*/loot/**
 targets/*/evidence/**
 targets/*/recon/raw/**

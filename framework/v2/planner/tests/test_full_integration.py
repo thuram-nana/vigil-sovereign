@@ -4,8 +4,8 @@ Full v2 integration test: UTI → ACP → MAO → reports → MLS.
 The closest thing in this session to "drop a URL, run the framework
 end-to-end" without a live target. Replaces the original FORGE
 PROTOCOL § 4.9 (intake against three real public targets) with the
-operator-revised acceptance: fixture-replay + the existing in-scope
-mrbeanpanel.com (skipped here in the offline default).
+operator-revised acceptance: fixture-replay + an optional live test
+against any operator-authorised URL (skipped here in the offline default).
 
 Pipeline exercised:
   1. UTI: authorise + scaffold from a fixture corpus
@@ -415,5 +415,163 @@ def test_full_pipeline_url_to_report_live_realistic(
         },
     }, indent=2, default=str), encoding="utf-8")
 
+    bb.close()
+    mem.close()
+
+
+# ---------------------------------------------------------------------------
+# Live HTTP pipeline test — opt-in only.
+# ---------------------------------------------------------------------------
+#
+# Gated on CRUCIBLE_LIVE_HTTP=<https://your-authorised-target>. Runs the
+# full pipeline (UTI -> planner -> MAO -> reports) with HttpExecutor
+# pointed at the supplied URL. Skipped by default. The operator runs it
+# explicitly when ready.
+#
+# Requirements before invoking this test:
+#   1. Set CRUCIBLE_LIVE_HTTP=<https://your-authorised-target>.
+#   2. Append the target host to framework/v2/.intake-authorizations.txt.
+#   3. Run UTI to scaffold targets/<slug>/, then sign charter.md.
+#   4. Set CRUCIBLE_LLM_BACKEND to a non-dryrun backend (claude-code
+#      or anthropic) — UTI's drafters call URK.
+#
+# Acceptance: pipeline completes, at least one Result event recorded,
+# every action passed through the scope gate, no out-of-scope requests
+# were made, evidence captured under targets/<slug>/evidence/.
+
+
+@pytest.mark.skipif(
+    not os.environ.get("CRUCIBLE_LIVE_HTTP"),
+    reason="set CRUCIBLE_LIVE_HTTP=<https://your-authorised-target> to run the live HTTP pipeline",
+)
+def test_full_pipeline_url_to_report_live_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full pipeline driven by HttpExecutor against an operator-supplied URL.
+
+    This is the first test that puts real HTTP traffic on the wire.
+    Every action passes through scope_gate; out-of-scope traffic is
+    impossible by construction. Destructive prompts default-deny.
+    """
+    from urllib.parse import urlparse
+    from framework.v2.agents.http_executor import HttpExecutor
+    from framework.v2.kernel.llm import get_backend, reset_cache
+
+    reset_cache()
+    backend = get_backend()
+    if backend.is_dryrun:
+        pytest.skip(
+            "live HTTP pipeline test requires a non-dryrun LLM backend; "
+            "set CRUCIBLE_LLM_BACKEND=claude-code (or anthropic)"
+        )
+
+    target_url = os.environ["CRUCIBLE_LIVE_HTTP"]
+    parsed = urlparse(target_url)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        pytest.skip(f"could not parse host from {target_url!r}")
+
+    # The slug is operator-controlled. Default convention: derive from
+    # the host (alpha.example -> alpha-example), but operator can
+    # override via CRUCIBLE_LIVE_HTTP_SLUG.
+    slug = os.environ.get("CRUCIBLE_LIVE_HTTP_SLUG") or host.replace(".", "-")
+
+    # The operator must have prepared the engagement: signed charter,
+    # ledger entry, etc. We do NOT auto-create those — that would
+    # defeat the gates we just built.
+    cp = paths.charter_path(slug)
+    if not cp.is_file():
+        pytest.skip(
+            f"no charter at {cp}; run UTI on {target_url} and sign the "
+            f"charter before exercising HttpExecutor"
+        )
+    signed, sig_reason = ethics.is_charter_signed(slug)
+    if not signed:
+        pytest.skip(
+            f"charter at {cp} is not signed ({sig_reason}); "
+            f"sign before invoking the live HTTP pipeline"
+        )
+    if not ethics.is_authorized_for_intake(target_url):
+        pytest.skip(
+            f"host {host} is not in framework/v2/.intake-authorizations.txt; "
+            f"add an attestation line and rerun"
+        )
+
+    # ---- 1. seed the goal tree from the archetype recorded by UTI ----
+    fp_path = paths.fingerprint_path(slug)
+    if not fp_path.is_file():
+        pytest.skip(
+            f"no fingerprint at {fp_path}; run UTI to scaffold the "
+            f"engagement before exercising HttpExecutor"
+        )
+    fp = json.loads(fp_path.read_text(encoding="utf-8"))
+    archetype_slug = fp.get("classification", {}).get("archetype_slug", "generic-web")
+
+    # The HttpExecutor only ships GET-by-default request derivation.
+    # Pick surfaces the executor can actually exercise without an
+    # operator-supplied request library.
+    surfaces = ["/", "/robots.txt", "/sitemap.xml"]
+
+    with open_store() as store:
+        tree = seed_tree(
+            archetype_slug=archetype_slug, target_url=target_url,
+            surfaces=surfaces, mls_store=store,
+        )
+
+    # ---- 2. wire HttpExecutor and the agent loop ----
+    bb = open_blackboard()
+    bb.engagement_id(slug)
+
+    http_executor = HttpExecutor(
+        engagement_slug=slug,
+        base_url=target_url,
+        request_budget=20,
+        timeout_seconds=15.0,
+        # Default-deny destructive prompts in this opt-in test;
+        # operator can override by re-running with a custom callback.
+        prompt_callback=lambda _q, _t: False,
+    )
+
+    hyp = HypothesisAgent(bb, slug)
+    exp = ExploitAgent(bb, slug, executor=http_executor, max_per_step=1)
+    crit = CritiqueAgent(bb, slug)
+    rpt = ReporterAgent(bb, slug)
+    mem = MemoryAgent(bb, slug, archetype=archetype_slug, target_url=target_url)
+    coord = Coordinator(
+        blackboard=bb, engagement_slug=slug,
+        agents=[hyp, exp, crit, rpt, mem],
+        max_ticks=200, quiet_ticks=3,
+    )
+
+    budget = Budget(
+        request_max=50,
+        token_max=200_000.0,
+        wall_clock_max_seconds=600.0,
+    )
+    pruner = Pruner(max_failures_per_node=2)
+    watchdog = Watchdog(engagement_slug=slug, tree=tree, budget=budget)
+    planner = Planner(
+        blackboard=bb, coordinator=coord, engagement_slug=slug,
+        tree=tree, budget=budget, pruner=pruner, watchdog=watchdog,
+        coordinator_ticks_per_step=4,
+        scope_check=True,  # MUST be True for live HTTP
+        checkpoint_interval_s=5.0,
+    )
+    report = planner.run(max_steps=15)
+
+    # ---- 3. acceptance assertions ----
+    assert report.steps > 0
+    results = bb.read(engagement=slug, kinds=["result"])
+    assert len(results) >= 1, "no Result events posted; pipeline never reached executor"
+
+    stats = http_executor.stats()
+    print(f"http_executor stats: {stats}")
+
+    evidence_root = paths.target_dir(slug) / "evidence"
+    if evidence_root.is_dir():
+        captured = list(evidence_root.iterdir())
+        assert captured, "no evidence dirs written"
+
+    http_executor.close()
     bb.close()
     mem.close()

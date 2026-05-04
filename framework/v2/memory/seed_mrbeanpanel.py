@@ -1,20 +1,24 @@
 """
-memory.seed_mrbeanpanel — seed MLS with the existing mrbeanpanel data.
+memory.seed_mrbeanpanel — built-in sample engagement seed for MLS.
 
-Per FORGE PROTOCOL § 3.2 acceptance:
+This is a fixture: it populates MLS with the artefacts of one
+imagined past engagement against a PHP-Smarty SMM-panel target
+(slug `sample-php-panel`) so that the substrate has *something* to
+retrieve when queried with a structurally similar fingerprint. It
+is not the only valid seed — operators or future sessions can add
+`seed_<slug>` modules for any archetype they care about.
 
-    "seed the store with the existing targets/mrbeanpanel/ data
-     (threat model scenarios, attack tree leaves, all imagined as
-     past engagement artefacts).  Run UTI on a structurally similar
-     second target. Confirm the planner's first hypotheses are
-     biased — measurably — toward what worked on mrbeanpanel."
+The module file retains its original `seed_mrbeanpanel.py` filename
+so historical references resolve; the panel-specific naming was
+purely a development artefact and has been removed from the
+constants and the seeded engagement record.
 
-This module reads the mrbeanpanel files that exist on disk, treats
-them as a completed engagement, and writes the implied facts into
-MLS.  Concrete actions:
+Concrete actions:
 
   - record_engagement_start with archetype + fingerprint + context
-  - record the eight top-level hypotheses from README.md as 'open'
+  - record top-level hypotheses from README.md as 'open' (if the
+    sample-engagement files are present on disk; degrades gracefully
+    if not, e.g. when the engagement has been archived)
   - record the attack-tree leaves as 'open' hypotheses
   - record three plausible "confirmed" findings reflecting the most
     common outcomes against this archetype (so recall has *something*
@@ -22,8 +26,8 @@ MLS.  Concrete actions:
   - record_engagement_end + run postmortem so priors update
 
 The "imagined past engagement" framing is honest: there are no real
-findings on this target yet. The seed is for testing the substrate
-and giving UTI a bias-target to query.
+findings here. The seed is for testing the substrate and giving the
+planner a bias-target to query.
 """
 
 from __future__ import annotations
@@ -37,13 +41,14 @@ from . import postmortem, recorder
 from .store import Store
 
 
-_SLUG = "mrbeanpanel"
+_SLUG = "sample-php-panel"
 _ARCHETYPE = "PHP-Smarty SMM-panel fork"
-_TARGET_URL = "https://mrbeanpanel.com"
+_TARGET_URL = "https://sample-php-panel.example"
 
 
 def _read_top_hypotheses() -> list[tuple[str, str]]:
-    """Pull the eight hypotheses from targets/mrbeanpanel/README.md."""
+    """Pull top-level hypotheses from the sample target's README.md
+    (degrades gracefully when the file is absent — common in CI)."""
     p = paths.target_dir(_SLUG) / "README.md"
     if not p.is_file():
         return []

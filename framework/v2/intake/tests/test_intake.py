@@ -10,12 +10,13 @@ Strategy:
     archetype wins.
   - Drafter / scaffolder tests run against a temp dir.
   - End-to-end intake tests use a Fetcher in fixture-replay mode.
-  - The live integration test against mrbeanpanel.com is opt-in via
-    CRUCIBLE_LIVE_INTAKE=1 and respects the 50-request budget.
+  - The live integration test is opt-in via CRUCIBLE_LIVE_INTAKE_URL
+    pointing at any operator-authorised target, and respects the
+    intake request budget.
 
 Per the operator's directive (replacing FORGE PROTOCOL § 4.9), the
 intake correctness bar is "unit tests against captured fixtures plus
-one optional live test against mrbeanpanel.com".
+one optional live test against any operator-authorised URL".
 """
 
 from __future__ import annotations
@@ -366,15 +367,15 @@ def test_intake_end_to_end_with_fixture_fetcher(
     # Authorize the fake host
     monkeypatch.setattr(ethics, "authorization_ledger", lambda: tmp_path / "auth.txt")
     (tmp_path / "auth.txt").write_text(
-        f"{ethics.now_iso()} | testbot | fake-mrbean.example\n"
+        f"{ethics.now_iso()} | testbot | fake-target.example\n"
     )
 
     # Build a Fetcher pre-filled with synthetic exchanges that look like
     # an SMM panel.
-    fetcher = Fetcher(base_url="https://fake-mrbean.example")
+    fetcher = Fetcher(base_url="https://fake-target.example")
     fetcher._exchanges = [
         HTTPExchange(
-            method="GET", url="https://fake-mrbean.example/",
+            method="GET", url="https://fake-target.example/",
             status=200,
             headers={"Server": "nginx", "X-Powered-By": "PHP/7.4"},
             body_excerpt=(
@@ -385,7 +386,7 @@ def test_intake_end_to_end_with_fixture_fetcher(
             cookies={"PHPSESSID": "a"},
         ),
         HTTPExchange(
-            method="GET", url="https://fake-mrbean.example/login",
+            method="GET", url="https://fake-target.example/login",
             status=200,
             headers={},
             body_excerpt='<form action="/login"><input type="password" name="pw"></form>',
@@ -394,8 +395,8 @@ def test_intake_end_to_end_with_fixture_fetcher(
     fetcher._used = 2
 
     out = intake_mod.run(
-        "https://fake-mrbean.example",
-        slug="fake-mrbean",
+        "https://fake-target.example",
+        slug="fake-target",
         operator_name="testbot",
         business_context="synthetic test target",
         fetcher=fetcher,
@@ -413,7 +414,7 @@ def test_intake_end_to_end_with_fixture_fetcher(
     assert Path(out.attack_tree_path).is_file()
     # Fingerprint JSON parses
     fpj = json.loads(Path(out.fingerprint_json_path).read_text(encoding="utf-8"))
-    assert fpj["fingerprint"]["target_url"] == "https://fake-mrbean.example"
+    assert fpj["fingerprint"]["target_url"] == "https://fake-target.example"
 
 
 # ---------------------------------------------------------------------------
@@ -422,25 +423,28 @@ def test_intake_end_to_end_with_fixture_fetcher(
 
 
 @pytest.mark.skipif(
-    os.environ.get("CRUCIBLE_LIVE_INTAKE") != "1",
-    reason="set CRUCIBLE_LIVE_INTAKE=1 to run the live mrbeanpanel.com intake",
+    not os.environ.get("CRUCIBLE_LIVE_INTAKE_URL"),
+    reason="set CRUCIBLE_LIVE_INTAKE_URL=<https://your-authorised-target> to run the live intake",
 )
-def test_live_intake_against_mrbeanpanel(isolated_targets: Path,
-                                          monkeypatch: pytest.MonkeyPatch) -> None:
-    """Live HTTP fingerprint against mrbeanpanel.com.
+def test_live_intake_against_authorised_target(isolated_targets: Path,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live HTTP fingerprint against any operator-authorised URL.
 
-    Authorized by the existing operator charter (mrbeanpanel.com is in
-    scope per targets/mrbeanpanel/charter.md). Budget capped at 12 to
-    stay polite during tests.
+    The operator must have authorised the target host (set via
+    CRUCIBLE_LIVE_INTAKE_URL). Budget capped at 12 to stay polite.
     """
-    # Use a temp ledger pre-authorising mrbeanpanel.com
+    from urllib.parse import urlparse
+    target_url = os.environ["CRUCIBLE_LIVE_INTAKE_URL"]
+    host = urlparse(target_url).netloc.lower()
+
+    # Use a temp ledger pre-authorising the chosen host.
     ledger = isolated_targets.parent / "intake-auth.txt"
     monkeypatch.setattr(ethics, "authorization_ledger", lambda: ledger)
-    ledger.write_text(f"{ethics.now_iso()} | testbot | mrbeanpanel.com\n")
+    ledger.write_text(f"{ethics.now_iso()} | testbot | {host}\n")
 
     out = intake_mod.run(
-        "https://mrbeanpanel.com",
-        slug="mrbeanpanel-live",
+        target_url,
+        slug="live-intake-target",
         operator_name="testbot",
         business_context="live integration test",
         budget=12,

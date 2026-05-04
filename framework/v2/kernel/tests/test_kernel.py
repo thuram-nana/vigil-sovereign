@@ -214,10 +214,10 @@ def test_opsec_emulate_changes_recommendations() -> None:
 
 def test_threat_model_returns_full_structure() -> None:
     tm, _ = threat_model(
-        target_name="mrbeanpanel",
-        business_context="SMM reseller panel; balance-based; users report ATOs",
-        archetype="PHP-Smarty SMM-panel fork",
-        known_concerns=["users reporting account takeovers"],
+        target_name="example-target",
+        business_context="generic web application with user accounts and balance-based features",
+        archetype="generic web application",
+        known_concerns=["account takeover risk"],
     )
     assert isinstance(tm, ThreatModel)
     assert len(tm.assets) >= 1

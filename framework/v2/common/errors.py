@@ -45,6 +45,17 @@ class AuthorizationMissing(EthicsViolation):
     """UTI was asked to draft against a URL with no operator attestation."""
 
 
+class DestructiveActionRefused(EthicsViolation):
+    """Operator declined a destructive-action prompt, or the prompt
+    timed out and default-deny fired."""
+
+
+class BudgetExhausted(EthicsViolation):
+    """Per-engagement HTTP request budget has been spent. Further
+    requests refused until the operator raises the cap or starts a
+    new engagement."""
+
+
 # ---------------------------------------------------------------------------
 # Subsystem-level errors.  Recoverable in some contexts.
 # ---------------------------------------------------------------------------

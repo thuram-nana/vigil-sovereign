@@ -78,12 +78,12 @@ Total Session 3 spend: ~$1.78 against the operator's $5 cap.
 
 3. **`threat_model`** — **VERIFIED** (Session 3, claude-code/haiku, 228s, ~$0.18 — required budget bump)
    - 8 assets / 4 actors / 9 trust boundaries / 32 STRIDE threats /
-     5 catastrophic outcomes against the mrbeanpanel input.
+     5 catastrophic outcomes against the Session-3 sample input.
    - Output is archetype-specific (names PHP-Smarty cookies,
      SMM-panel money flows, PSP webhook surfaces). Comparable in
-     coverage to the hand-written reference at
-     `targets/mrbeanpanel/threat-model.md`; slightly less complete
-     on operator-credential vectors and refresh cadence.
+     coverage to the hand-written reference threat-model archived
+     under `targets/.archive/`; slightly less complete on operator-
+     credential vectors and refresh cadence.
    - **Initial failure** at default `--max-budget-usd 0.10`:
      subprocess hit `error_max_budget_usd` after 178s. Default
      bumped to `$0.20`; passes consistently at that cap.
@@ -109,16 +109,18 @@ Total Session 3 spend: ~$1.78 against the operator's $5 cap.
 ### UTI live drafter — VERIFIED
 
 UTI's `intake/drafters.py::draft_threat_model` was exercised live
-against `mrbeanpanel.com` in Session 3:
+in Session 3 against an operator-authorised target (now archived
+under `targets/.archive/`):
 
 - 173s wall-clock, 9 HTTP requests against the real target (under
-  the 12-request budget cap from the existing charter).
+  the 12-request budget cap from the engagement charter).
 - Archetype: `php-smarty-smm-panel-fork` (score 0.75) — same
   classification Session 1 confirmed.
 - Threat-model output: 208 lines, marker line `Drafted by URK
   from a live LLM call` confirms the URK path executed (not the
   skeleton fallback).
-- Captured at `framework/v2/intake/tests/fixtures/live-run/mrbean-threat-model.md`.
+- Captured under `framework/v2/intake/tests/fixtures/live-run/`
+  (regression captures retained).
 
 ### Backend-specific findings (new)
 
@@ -186,11 +188,12 @@ opt-in integration test
 
 Status against the original bar, Session-4 results:
 
-- ✓ A real engagement target was used: `mrbeanpanel.com` for UTI
-  (Session 3); the live full-pipeline test uses fixture-replay
-  intake against `https://fix-target.invalid` plus `RealisticExecutor`
-  for the exploit path.  No real attack traffic at the executor
-  layer in the live test; only UTI hits a real host.
+- ✓ A real engagement target was used by UTI in Session 3 (now
+  archived under `targets/.archive/`); the live full-pipeline test
+  uses fixture-replay intake against `https://fix-target.invalid`
+  plus `RealisticExecutor` for the exploit path.  No real attack
+  traffic at the executor layer in the live test; only UTI hits a
+  real host.
 - ✓ At least one finding survived critique-agent's veto end-to-end:
   **achieved.**  The strong-evidence webhook-forgery scenario's
   finding was confirmed by live critique-agent and emitted by the
@@ -213,18 +216,56 @@ Session 4" for the verbose narrative.
 
 What is **still NOT verified live**:
 
-- Real engagement against a real attackable target with a real
-  exploit-running executor (rather than a synthetic harness).
-  `RealisticExecutor` produces multi-step evidence chains that
-  *resemble* real-engagement output, but the underlying actions
-  are pre-baked.  An `HttpExecutor` or richer real-target executor
-  is a future-session work item.
+- ~~Real engagement against a real attackable target with a real
+  exploit-running executor (rather than a synthetic harness).~~
+  **Session 6 closed the executor gap.** `HttpExecutor` ships with
+  the six-gate safety stack (charter signature, scope, destructive
+  prompt, request budget, posture-aware rate limit + UA) and 22
+  unit tests against `pytest-httpserver`. Live HTTP exercise is
+  opt-in via `CRUCIBLE_LIVE_HTTP=<url>`; the operator runs it on
+  their own authorised target after preparing the engagement
+  (signed charter, ledger entry, UTI scaffold). Until that opt-in
+  run is captured, the LIVE end-to-end path with HttpExecutor
+  remains **partial — code shipped, real-network exercise
+  deferred**. See "HttpExecutor live-network gap" below.
 - The `mixed`-evidence scenario (timing-side-channel) was not
   picked up by the planner during the captured run — only the
   strong + weak scenarios fired.  The mixed scenario's behaviour
   under live critique remains tested only at the binding-unit
   level (Session 3's `02b-critique-strong-retry.json` is the
   closest analogue).
+
+### HttpExecutor live-network gap (Session 6)
+
+What ships:
+
+- `framework/v2/agents/http_executor.py` — `HttpExecutor` conforming
+  to the same `Executor` protocol as `DeterministicExecutor` and
+  `RealisticExecutor`. Issues bounded HTTP via `httpx` with full
+  evidence capture (request + response archived, redirect chain,
+  body excerpt, structured event log).
+- `framework/v2/agents/scope_gate.py` — pre-flight validator that
+  wraps `common.ethics` primitives into a typed `ScopeDecision`.
+  Charter signature, scope, destructive classifier all live here.
+- 22 unit tests at `framework/v2/agents/tests/test_http_executor.py`
+  exercising every gate against `pytest-httpserver`.
+- Opt-in integration test `test_full_pipeline_url_to_report_live_http`
+  gated on `CRUCIBLE_LIVE_HTTP=<url>`.
+
+What's not yet exercised:
+
+- An end-to-end run against a real authorised target. Requires
+  the operator to prepare an engagement (UTI scaffold, signed
+  charter, ledger attestation) and set `CRUCIBLE_LIVE_HTTP=<url>`.
+- Request derivation today only covers GET-by-default with a
+  `METHOD /path` prefix in `hypothesis.surface`. Bodies, custom
+  headers, multi-step request chains will need a richer derivation
+  layer (or operator-supplied request templates) before HttpExecutor
+  exercises the full attack surface.
+- Posture detection is a checkbox parser on charter § 7. If the
+  charter's posture section is missing or malformed, HttpExecutor
+  defaults to TEST, which is the safe default but may surprise
+  operators who expected EMULATE behaviour.
 
 ## 2. URK is dry-run by default
 
@@ -327,11 +368,10 @@ breadth. Specifically:
 - The 50-request budget is hard-capped. A site under heavy CDN
   protection may exhaust the budget on `/` retries alone.
 - The classifier is *confidence-weighted*; a high-confidence signal
-  beats several weak ones. We hand-tuned this against the
-  `mrbeanpanel.com` live run, which initially mis-classified as
-  `laravel-marketplace` due to a generic `<meta name="csrf-token">`
-  match before the fix. Other live targets may surface similar
-  edge cases.
+  beats several weak ones. We hand-tuned this against the Session-1
+  live target, which initially mis-classified as `laravel-marketplace`
+  due to a generic `<meta name="csrf-token">` match before the fix.
+  Other live targets may surface similar edge cases.
 
 The drafters then build a charter / threat-model / attack-tree from
 what is likely an incomplete fingerprint. Treat all three as
@@ -350,21 +390,23 @@ threat model" or "skeleton fallback" is small enough that a hurried
 reader might miss it. The header on every drafted threat-model
 states which path produced it.
 
-## 8. The mrbeanpanel seed is a fixture, not a real engagement record
+## 8. The built-in MLS seed is a fixture, not a real engagement record
 
-`memory.seed_mrbeanpanel.seed()` writes the existing target's
-threat-model and attack-tree as if a completed engagement had
+`memory.seed_mrbeanpanel.seed()` is a sample-engagement fixture —
+the only one currently shipped. It writes archetype-typical
+threat-model and attack-tree data as if a completed engagement had
 recorded them, plus three plausible "confirmed" findings (webhook-
 forgery, IDOR on /api/v2/orders/{id}, mass-assignment on
-/api/profile). These three finding fixtures are clearly tagged
-`[seed]` in their summaries — but a casual reader of the `findings`
-table might not notice. They reflect *common patterns for this
-archetype* across the SMM-panel space; they are not claims about
-mrbeanpanel itself.
+/api/profile). All three are clearly tagged `[seed]` in their
+summaries — but a casual reader of the `findings` table might not
+notice. They reflect *common patterns for the PHP-Smarty SMM-panel
+archetype*; they are not claims about any specific target.
 
 The seeded engagement is what bears the bias the § 3.2 acceptance
 test exercises. When real findings replace the seed, drop them by
 deleting the engagement from the store or by replacing the seed.
+Future sessions can add `seed_<slug>` modules for any archetype
+that warrants its own fixture.
 
 ## 9. The 50-request UTI budget can be exhausted by redirects
 
@@ -396,11 +438,12 @@ It's idempotent: running twice on the same host is a no-op. But:
 
 ## 11. Tests use a real network for the live integration
 
-`test_live_intake_against_mrbeanpanel` is opt-in via
-`CRUCIBLE_LIVE_INTAKE=1` and respects a 12-request budget. It hits
-`mrbeanpanel.com` directly. If the site is down, redirects to a
-challenge page, or has changed structure since this session, the
-test may hang up to `8 * 12 = 96s` before failing.
+`test_live_intake_against_authorised_target` is opt-in via
+`CRUCIBLE_LIVE_INTAKE_URL=<https://your-target>` and respects a 12-
+request budget. It hits whatever URL the operator has authorised in
+the env var. If the site is down, redirects to a challenge page, or
+has changed structure, the test may hang up to `8 * 12 = 96s` before
+failing.
 
 The 110 passing tests are deterministic and offline.
 
@@ -462,8 +505,8 @@ attack surface and warrant one before they ship.
 
 ## 16. The verification suite does not include a fuzzer
 
-Pytest exercises the documented public surface plus the live mrbean
-integration. There is no:
+Pytest exercises the documented public surface plus the opt-in
+live-intake integration. There is no:
 
 - Property-based testing (Hypothesis library).
 - Fuzzing of the markdown parser, charter parser, or detector

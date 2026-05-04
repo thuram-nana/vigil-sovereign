@@ -171,9 +171,10 @@ Before you let OBSIDIAN start any engagement:
 
 ## CRUCIBLE v2 quickstart
 
-The v2 layer adds a CLI-driven scaffolder, a queryable memory of
-past engagements, and a typed wrapper around the cognitive docs.
-None of it replaces v1; it sits beside it.
+The v2 layer is universal: drop any operator-authorised URL, and the
+framework scaffolds the engagement, queries past priors, drives the
+multi-agent loop, and emits a technical report. None of it replaces
+v1; it sits beside it.
 
 ```bash
 # one-time setup on a fresh host
@@ -182,11 +183,11 @@ pip install --break-system-packages -r framework/v2/requirements.txt
 python3 -m framework.v2 status     # shows resolved root + active LLM backend
 
 # one-time per target — append authorization to the ledger
-python3 -m framework.v2 intake authorize https://your-target.example \
+python3 -m framework.v2 intake authorize https://your-app.example.com \
     --operator your-name
 
-# scaffold an engagement from a URL
-python3 -m framework.v2 intake https://your-target.example
+# scaffold the engagement from any operator-authorised URL
+python3 -m framework.v2 intake https://your-app.example.com
 # → produces targets/<slug>/charter.draft.md, threat-model.md,
 #   attack-tree.md, recon/fingerprint.json
 # → records the engagement to MLS
@@ -194,8 +195,8 @@ python3 -m framework.v2 intake https://your-target.example
 # (operator) review charter.draft.md, sign it as charter.md.
 # Until charter.md exists with a signed name, v2 refuses active testing.
 
-# query past engagements
-python3 -m framework.v2 memory similar --text "PHP Smarty SMM panel webhook"
+# query past engagements (text + archetype both work)
+python3 -m framework.v2 memory similar --text "describe the stack you care about"
 python3 -m framework.v2 memory wins    --archetype "PHP-Smarty SMM-panel fork"
 python3 -m framework.v2 memory priors  --archetype "PHP-Smarty SMM-panel fork"
 
@@ -209,10 +210,11 @@ python3 -m framework.v2 kernel critique \
 ```
 
 If you have an Anthropic API key, set `ANTHROPIC_API_KEY` and the
-kernel calls will use it. Without a key, URK runs in DryRun mode —
-deterministic stubs, no network. See `V2-LIMITATIONS.md` for what
-DryRun gives up.
+kernel calls will use it. Without a key, URK falls back to the
+ClaudeCodeBackend (subprocess `claude -p`) if available, then to a
+local Ollama daemon, then DryRun. See `V2-LIMITATIONS.md` for what
+each backend gives up.
 
-What v2 does *not* yet do — autonomous engagement loop, multi-agent
-orchestration, deep static analysis, defender emulation,
-self-improvement — is documented in `V2-MANIFEST.md`.
+What v2 does *not* yet do — deep static analysis, defender
+emulation, self-improvement loop — is documented in `V2-MANIFEST.md`
+under the deferred subsystems list.

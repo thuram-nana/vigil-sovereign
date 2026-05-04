@@ -31,8 +31,9 @@ One paragraph, plain language. The first sentence answers:
 
 > *Example: An unauthenticated attacker can credit any user's
 > balance with arbitrary amounts by POSTing forged payment-success
-> webhooks to the public callback URL, because the panel does not
-> verify the signature header on incoming Cryptomus callbacks.*
+> webhooks to the public callback URL, because the application does
+> not verify the signature header on incoming payment-provider
+> callbacks.*
 
 ## Impact
 
@@ -51,8 +52,8 @@ Detectable: no (no current alerts on this endpoint)."
 ## Affected endpoint(s) / surface(s)
 
 ```
-POST /payment/cryptomus/callback
-POST /payment/coinbase/callback
+POST /payment/<provider-a>/callback
+POST /payment/<provider-b>/callback
 ```
 
 ## Reproduction
@@ -65,7 +66,7 @@ environment should reproduce in 5 minutes.
 TARGET_USER_ID="42"
 
 # 2. Forge the webhook
-curl -sk -X POST https://target/payment/cryptomus/callback \
+curl -sk -X POST https://target/payment/<provider>/callback \
   -H "Content-Type: application/json" \
   -d '{
     "order_id": "OBSIDIAN-FORGED-001",
@@ -93,16 +94,16 @@ Raw HTTP exchanges and (redacted) screenshots in
 
 ## Root cause hypothesis (pre-source review)
 
-Likely the controller for `/payment/cryptomus/callback` does not
-verify the signature header (`sign` per Cryptomus docs). After
-source review, verify and update.
+Likely the controller for `/payment/<provider>/callback` does not
+verify the signature header (per the provider's webhook signing
+documentation). After source review, verify and update.
 
 ## Root cause (post-source review)
 
 `<file>:<line range>` — paste offending lines and explain.
 
 ```php
-// app/Controllers/Payment/CryptomusController.php:47-58
+// app/Controllers/Payment/ProviderController.php:47-58
 public function callback(Request $r) {
     $body = json_decode($r->getContent(), true);
     // <-- no signature check anywhere here
@@ -121,9 +122,10 @@ Concrete and minimal.
 
 ```php
 public function callback(Request $r) {
-    $sign = $r->header('sign');
+    $sign = $r->header('X-Signature');
     $body = $r->getContent();
-    $expected = base64_encode(md5($body . config('services.cryptomus.api_key'), true));
+    // Use the scheme the provider documents (HMAC-SHA256, RSA, etc).
+    $expected = hash_hmac('sha256', $body, config('services.provider.webhook_secret'));
     if (!hash_equals($expected, (string) $sign)) {
         return response()->json(['error' => 'invalid signature'], 401);
     }
@@ -134,17 +136,17 @@ public function callback(Request $r) {
 
 Defense-in-depth:
 - Idempotency: `unique(provider, tx_id)` constraint on deposits table.
-- Allowlist Cryptomus webhook source IPs at the WAF / firewall as a
-  second layer.
+- Allowlist the provider's webhook source IPs at the WAF / firewall
+  as a second layer (when the provider publishes them).
 - Log all incoming webhook attempts (signed and unsigned) for audit.
 - Alert on any rejected webhook with a count threshold.
 
 ## References
 
-- Cryptomus webhook signature docs: `<URL>`
+- Payment provider's webhook signature docs: `<URL>`
 - OWASP API Security Top 10 — API8:2023 Security Misconfiguration.
 - CWE-345: Insufficient Verification of Data Authenticity.
-- Past similar incidents in SMM-panel space: `<refs>`.
+- Past similar incidents in the same product space: `<refs>`.
 
 ## Re-test
 

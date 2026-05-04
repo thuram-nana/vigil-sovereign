@@ -36,7 +36,10 @@ log.  This is enforced at the Pydantic and the SQL layers; an
 | `blackboard.py` | `Blackboard` class — the only write surface is `post()` / `supersede()`. |
 | `base.py` | `Agent` ABC: `should_run()` + `step()` + cursor helpers. |
 | `coordinator.py` | Boots agents, schedules ticks, terminates on quiet / wall-clock / external stop. |
-| `executor_proto.py` | `Executor` protocol + `DeterministicExecutor` (tests) + `HttpExecutor` sketch (live). |
+| `executor_proto.py` | `Executor` protocol + `DeterministicExecutor` (fixture lookup, tests). |
+| `realistic_executor.py` | `RealisticExecutor` — substantive synthetic evidence per scenario; satisfies live URK critique. |
+| `http_executor.py` | `HttpExecutor` — bounded live-HTTP with the six-gate safety stack. |
+| `scope_gate.py` | `validate_action()` — charter signature + scope + destructive classifier. |
 | `recon_agent.py` | Probes paths via UTI's Fetcher; posts Observations. |
 | `hypothesis_agent.py` | Reads Observations; calls URK.hypothesize(); posts ≥5 Hypotheses per observation. |
 | `exploit_agent.py` | Claims open Hypotheses; posts Plan/Action/Result/Finding chain; supersedes hypothesis status. |
@@ -55,6 +58,49 @@ log.  This is enforced at the Pydantic and the SQL layers; an
 - SQL triggers `bb_events_no_update` and `bb_events_no_delete`
   refuse direct mutation; the Python API does not expose `update`
   or `delete`.
+
+## The three executors
+
+The exploit-agent does not call tools directly. It accepts an
+`Executor`, defined as a protocol in `executor_proto.py`. Three
+implementations ship side-by-side; pick by what the engagement is:
+
+| Executor | When to use | What it returns |
+|---|---|---|
+| `DeterministicExecutor` | Unit + simulated tests. Maps `(bug_class, surface)` to a fixed `ExecutionOutcome`. | Whatever the test put in the lookup table. |
+| `RealisticExecutor` | Integration tests under live URK. Three pre-baked scenarios (strong / weak / mixed) producing rich evidence chains. | Substantive synthetic outcomes that a senior critique-agent will accept or reject *for the right reason*. |
+| `HttpExecutor` | Real engagements. Issues bounded HTTP/HTTPS through the six-gate safety stack. | Actual HTTP response (status, body excerpt, evidence dir, timing) — never auto-claims `success=True`; the exploit-agent decides. |
+
+### HttpExecutor's six safety gates
+
+Live-HTTP is the first v2 component that can take real action against
+real targets, so the gates here are load-bearing. Each is called per-
+action; none is bypassable without a code change. If any gate
+refuses, the request never goes out and an `ExecutionOutcome` with
+`success=False` and a refusal note is returned for the blackboard.
+
+1. **Charter file present** — `targets/<slug>/charter.md` must exist.
+2. **Charter signature** — the `Signed:` line must contain a non-
+   placeholder operator name. UTI's draft charter is not enough.
+3. **Scope** — the action's host must match the charter's § 2 scope
+   table (literal hosts and `*.suffix` wildcards supported).
+4. **Destructive-action confirmation** — POST/PUT/DELETE/PATCH and
+   any URL containing destructive path tokens (`/admin`, `/delete`,
+   `/upload`, `/payment/`, ...) prompt the operator on stderr with a
+   30-second timeout. Default-deny on no answer or non-TTY stdin.
+5. **Per-engagement request budget** — counted across the executor's
+   lifetime. Default 100; configurable. Exhaustion halts cleanly.
+6. **Posture-aware rate limit + UA** — TEST is aggressive (5 req/s,
+   identifiable UA); AUDIT is moderate (1 req/s, control-test UA);
+   EMULATE is slow + jittered (0.2 req/s + up to 3 s jitter, realistic
+   browser UA). Read from charter § 7 unless overridden.
+
+Plus full evidence capture: every request → `targets/<slug>/evidence/<action_id>/{request,response}.http` and the raw body archived as `response.body`. Every action → a structured event in `targets/<slug>/.crucible-v2.log`.
+
+The unit tests at `tests/test_http_executor.py` exercise each gate
+against a `pytest-httpserver` fixture — never against a real network.
+Live exercise is opt-in via `CRUCIBLE_LIVE_HTTP=<url>`; see
+`framework/v2/planner/tests/test_full_integration.py::test_full_pipeline_url_to_report_live_http`.
 
 ## Critique-agent gate
 

@@ -185,7 +185,7 @@ _LEDGER_HEADER = """\
 #     <ISO-8601 UTC timestamp> | <operator-name> | <hostname>
 #
 # Example:
-#     2026-05-04T12:34:56Z | satoshi | mrbeanpanel.com
+#     2026-05-04T12:34:56Z | satoshi | example-target.example
 #
 # Edit by hand. UTI never writes to this file.
 """

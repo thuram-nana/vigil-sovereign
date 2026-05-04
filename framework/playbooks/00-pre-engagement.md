@@ -31,7 +31,7 @@ cp -r targets/_template targets/<shortname>
 ```
 
 The shortname is lowercase, alphanumeric+hyphen, descriptive but
-brief: `mrbeanpanel`, `internal-crm`, `payments-api`.
+brief: `acme-portal`, `internal-crm`, `payments-api`.
 
 ## 0.3 Walk the charter section by section
 
