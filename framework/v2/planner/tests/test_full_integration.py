@@ -21,6 +21,7 @@ Asserts at every stage that the artefact exists and is well-formed.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -226,6 +227,193 @@ def test_full_pipeline_url_to_report(
     payload = json.loads(ckpt.read_text(encoding="utf-8"))
     assert payload["slug"] == slug
     assert "tree" in payload and "budget" in payload
+
+    bb.close()
+    mem.close()
+
+
+# ===========================================================================
+# Live URK pipeline test  —  closes the Session-3 reporter-emission gap
+# ===========================================================================
+#
+# The test above (DryRun + DeterministicExecutor) verifies the wiring of
+# UTI -> ACP -> MAO -> reports without needing an LLM.  Under live URK,
+# the same wiring did not reach reporter emission in Session 3 because
+# the DeterministicExecutor's Result objects had empty body_excerpt and
+# one-line notes — the live critique-agent walked the parent_id chain,
+# saw thin evidence, and correctly returned `objections`.
+#
+# This live test uses RealisticExecutor (multi-step reproduction in
+# body_excerpt + note, the shape a real engagement records).  Critique
+# under live URK confirms the strong-evidence finding, the reporter
+# emits technical.md, and MLS records the confirmed finding.
+#
+# Opt-in only: set CRUCIBLE_LIVE_FULL_PIPELINE=1.  Skipped by default
+# because each run costs ~$0.50 of subscription quota and ~5 minutes
+# wall-clock.  The skip mark also requires a live LLM backend to be
+# selectable (claude-code or anthropic).
+
+
+@pytest.mark.skipif(
+    os.environ.get("CRUCIBLE_LIVE_FULL_PIPELINE") != "1",
+    reason="set CRUCIBLE_LIVE_FULL_PIPELINE=1 to run the live full-pipeline test",
+)
+def test_full_pipeline_url_to_report_live_realistic(
+    isolated_paths: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same pipeline as `test_full_pipeline_url_to_report` but with:
+
+      - live URK (caller must set CRUCIBLE_LLM_BACKEND=claude-code or
+        leave it unset so anthropic auto-picks; conftest now respects
+        the choice),
+      - RealisticExecutor with the strong-evidence webhook scenario,
+      - budgets sized for live URK latency (~3-min UTI threat-model
+        drafter call + ~50s critique-agent call per finding).
+
+    The test exercises the path Session 3 left at "partial".  It
+    asserts the reporter actually emits technical.md and MLS records
+    a confirmed finding.
+    """
+    from framework.v2.agents.realistic_executor import (
+        BUILT_IN_SCENARIOS, RealisticExecutor,
+    )
+    from framework.v2.kernel.llm import get_backend, reset_cache
+
+    # Honour the operator's backend choice; refuse to run in dryrun.
+    reset_cache()
+    backend = get_backend()
+    if backend.is_dryrun:
+        pytest.skip(
+            "live test requires a non-dryrun backend; "
+            "set CRUCIBLE_LLM_BACKEND=claude-code (or anthropic) and rerun"
+        )
+
+    slug = "live-realistic-pipeline"
+    target_url = "https://fix-target.invalid"
+
+    # ---- 1. authorise + UTI fixture corpus (same as the offline test) ----
+    led = ethics.authorization_ledger()
+    led.parent.mkdir(parents=True, exist_ok=True)
+    led.write_text(
+        f"{ethics.now_iso()} | testbot | fix-target.invalid\n", encoding="utf-8",
+    )
+
+    fixture_dir = isolated_paths / "fixtures"
+    _write_fixture_corpus(fixture_dir)
+    monkeypatch.setenv("CRUCIBLE_INTAKE_FIXTURE_DIR", str(fixture_dir))
+
+    # ---- 2. UTI runs live (fires URK threat_model_drafter) ----
+    out = intake_mod.run(
+        target_url, slug=slug,
+        operator_name="testbot",
+        business_context=(
+            "Synthetic SMM-panel-shaped target for live-URK pipeline "
+            "verification under the realistic-evidence harness."
+        ),
+    )
+    assert Path(out.threat_model_path).is_file()
+    archetype_slug = out.classification.primary.archetype.slug
+
+    # ---- 3. seed the goal tree against surfaces RealisticExecutor knows ----
+    realistic = RealisticExecutor()
+    surfaces = sorted({surface for _, surface in realistic.keys()})
+
+    with open_store() as store:
+        tree = seed_tree(
+            archetype_slug=archetype_slug, target_url=target_url,
+            surfaces=surfaces, mls_store=store,
+        )
+    assert tree.stats()["leaves"] >= len(surfaces)
+
+    # ---- 4. MAO + planner ----
+    bb = open_blackboard(db_path=isolated_paths / "bb.sqlite")
+    bb.engagement_id(slug)
+
+    hyp = HypothesisAgent(bb, slug)
+    exp = ExploitAgent(bb, slug, executor=realistic, max_per_step=2)
+    crit = CritiqueAgent(bb, slug)
+    rpt = ReporterAgent(bb, slug)
+    mem = MemoryAgent(bb, slug, archetype=archetype_slug, target_url=target_url)
+    coord = Coordinator(
+        blackboard=bb, engagement_slug=slug,
+        agents=[hyp, exp, crit, rpt, mem],
+        max_ticks=400, quiet_ticks=3,
+    )
+
+    budget = Budget(
+        request_max=2000,
+        token_max=400_000.0,
+        wall_clock_max_seconds=900.0,
+    )
+    pruner = Pruner(max_failures_per_node=2)
+    watchdog = Watchdog(engagement_slug=slug, tree=tree, budget=budget)
+    planner = Planner(
+        blackboard=bb, coordinator=coord, engagement_slug=slug,
+        tree=tree, budget=budget, pruner=pruner, watchdog=watchdog,
+        coordinator_ticks_per_step=6,
+        scope_check=False,  # synthetic surfaces
+        checkpoint_interval_s=2.0,
+    )
+    report = planner.run(max_steps=30)
+
+    # ---- 5. reporter must emit technical.md ----
+    assert report.steps > 0
+    assert report.dispatched > 0
+    assert report.succeeded >= 1
+
+    tech_path = paths.target_dir(slug) / "reports" / "technical.md"
+    assert tech_path.is_file(), (
+        f"reporter did not emit technical.md after {report.steps} steps "
+        f"({report.succeeded} successes); halt_reason={report.halt_reason!r}; "
+        f"tree_stats={report.final_stats}; "
+        f"this is the Session-3 gap — see V2-LIMITATIONS § 0"
+    )
+    text = tech_path.read_text(encoding="utf-8")
+    # Strong-evidence webhook finding should appear; weak-evidence
+    # robots.txt finding should NOT (gate still discriminates).
+    assert "real-001-webhook-forgery" in text
+    assert "real-002-robots-disclosure" not in text, (
+        "weak-evidence finding reached the report — the critique gate "
+        "is now permissive, which is a regression"
+    )
+
+    # ---- 6. MLS recorded the confirmed finding ----
+    with open_store() as store:
+        rows = store.fetchall(
+            "SELECT severity, bug_class, slug FROM findings "
+            "WHERE engagement_id IN (SELECT id FROM engagements WHERE slug = ?)",
+            (slug,),
+        )
+    assert any(r["bug_class"] == "webhook-forgery" for r in rows)
+
+    # ---- 7. checkpoint ----
+    ckpt = paths.planner_state(slug)
+    assert ckpt.is_file()
+
+    # ---- 8. capture as regression fixture ----
+    fixture_out = (
+        Path("framework/v2/agents/tests/fixtures/live-run/realistic-pipeline")
+    )
+    fixture_out.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copy2(tech_path, fixture_out / "technical.md")
+    shutil.copy2(ckpt, fixture_out / "planner-state.json")
+    if Path(out.threat_model_path).is_file():
+        shutil.copy2(Path(out.threat_model_path), fixture_out / "uti-threat-model.md")
+    (fixture_out / "run-summary.json").write_text(json.dumps({
+        "backend": backend.name,
+        "model": getattr(backend, "model", "?"),
+        "intake_archetype": archetype_slug,
+        "planner_steps": report.steps,
+        "planner_succeeded": report.succeeded,
+        "planner_halt_reason": report.halt_reason,
+        "tree_stats": report.final_stats,
+        "blackboard_event_counts": {
+            k: bb.count(engagement=slug, kind=k)
+            for k in ("observation", "hypothesis", "plan", "action",
+                      "result", "finding", "critique")
+        },
+    }, indent=2, default=str), encoding="utf-8")
 
     bb.close()
     mem.close()

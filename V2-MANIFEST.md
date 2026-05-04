@@ -28,44 +28,47 @@ as legitimate states of the work.
 | 1 | URK — Universal Reasoning Kernel | `framework/v2/kernel/` | yes | **yes** | 6 cognitive bindings + 4 backends (Anthropic, ClaudeCode, Ollama, DryRun). All six bindings exercised live in Session 3 against the ClaudeCodeBackend (operator's Claude Max via `claude -p`, model=haiku). All `V2-LIMITATIONS.md` § 0 failure-mode tests pass. Captured fixtures under `framework/v2/kernel/tests/fixtures/live-run/`. |
 | 2 | MLS — Memory & Learning Substrate | `framework/v2/memory/` | yes | yes | SQLite store + lexical embeddings (sentence-transformers optional); recorder / recall / priors / postmortem. mrbeanpanel seed exercised. No LLM dependency. |
 | 3 | UTI — Universal Target Intake | `framework/v2/intake/` | yes | **yes** | 7 detectors, 9 archetypes, confidence-weighted classifier exercised live against `mrbeanpanel.com` (Session 1). The threat-model drafter was exercised live in Session 3 against `mrbeanpanel.com` with live URK: 173s wall, 9 HTTP requests, archetype `php-smarty-smm-panel-fork` (0.75), 208-line URK-driven threat-model captured at `framework/v2/intake/tests/fixtures/live-run/mrbean-threat-model.md`. |
-| 4 | MAO — Multi-Agent Orchestration | `framework/v2/agents/` | yes | **partial — see § "MAO/ACP live-path note"** | Blackboard, coordinator, 5 specialist agents, memory-agent, executor protocol all exercised live in Session 3. `hypothesis_agent` and `critique_agent` both fire live URK successfully. Critique-agent verified to apply genuine senior-engineer rigor: rejects findings whose **evidence chain** (parent_id walk) is thin even when the **finding summary** is rich. This is correct behavior, but the existing `DeterministicExecutor` test harness produces evidence too thin to satisfy live critique → reporter emission requires either richer harness or a real target. Captured artefacts under `framework/v2/planner/tests/fixtures/live-run/`. |
-| 5 | ACP — Autonomous Campaign Planner | `framework/v2/planner/` | yes | **partial — see § "MAO/ACP live-path note"** | Planner orchestrates live URK calls through the agents. Verified live: leaf dispatch → exploit-agent → finding posted → critique-agent fires URK → finding superseded with critique decision. Watchdog halt-authority and resume-across-kill remain verified from Session 2. Full happy-path (reporter emits technical.md) blocked by the deterministic harness's thin evidence; not an ACP code bug. |
+| 4 | MAO — Multi-Agent Orchestration | `framework/v2/agents/` | yes | **yes** | Blackboard, coordinator, 5 specialist agents, memory-agent, executor protocol exercised live (Session 3: every binding fires live URK; critique-agent rigour verified). Session 4 added `RealisticExecutor` and ran the full pipeline end-to-end under live URK: 30 planner steps → 2 executor successes → 2 critique calls → 1 confirmed finding → reporter emitted `technical.md` → MLS recorded the confirmed finding. The weak-evidence finding was correctly rejected by critique (gate still discriminates). Captured fixture: `framework/v2/agents/tests/fixtures/live-run/realistic-pipeline/`. |
+| 5 | ACP — Autonomous Campaign Planner | `framework/v2/planner/` | yes | **yes** | Planner drove the Session-4 live full-pipeline run end-to-end: leaf dispatch → exploit-agent → critique-agent → reporter emission, all under live URK. 30 steps in 232s, halted on `max_steps` per the test budget, checkpoint persisted, MLS mirrored. Watchdog halt-authority and resume-across-kill remain verified from Session 2. Acceptance test: `framework/v2/planner/tests/test_full_integration.py::test_full_pipeline_url_to_report_live_realistic` (opt-in via `CRUCIBLE_LIVE_FULL_PIPELINE=1`). |
 | 6 | DEL — Defender Emulation Layer | (`framework/v2/defender/` — absent) | no | no | Telemetry model, detection scoring, evasion library, Sigma runner. Deferred to a future session. |
 | 7 | DAA — Deep Analysis Arsenal | (`framework/v2/analysis/` — absent) | no | no | Semgrep / CodeQL / Joern / API fuzzer / differential testing / AST indexer. Largest deferred subsystem. |
 | 8 | SIL — Self-Improvement Loop | (`framework/v2/improve/` — absent) | no | no | Engagement-end reviewer + reviewable patch generator. Runs after everything else. |
 
-## MAO/ACP live-path note
+## MAO/ACP live-path graduation — Session 4
 
-The Session 3 acceptance criterion in V2-LIMITATIONS § 0 read:
+Session 3 closed at "partial" because the `DeterministicExecutor`
+test harness produced thin Result objects (empty `body_excerpt`,
+one-line `note`).  Live critique-agent walked the parent_id chain,
+saw evidence that didn't support the rich Finding summary, and
+correctly returned `objections`.  The gate was right; the harness
+was the limitation.
 
-> "MAO and ACP graduate to `live-path verified: yes` only if the
-> integration test genuinely passes under live URK. If it passes
-> partially, say so explicitly."
+Session 4 closed the gap.  The fix was a new test harness, not a
+gate change:
 
-Honest status: **passes partially.** Specifically:
+- `framework/v2/agents/realistic_executor.py` — Executor returning
+  multi-step reproduction logs in `body_excerpt` + `note` (200+
+  chars, with negative controls and DB attestations).
+- Three pre-baked scenarios: **strong** (webhook-forgery; should
+  confirm), **weak** (robots.txt info-disclosure; should object),
+  **mixed** (timing side-channel; reasoning matters).
 
-- ✓ UTI fires live URK threat-model drafter against `mrbeanpanel.com`
-- ✓ Planner runs and dispatches goal-tree leaves
-- ✓ Exploit-agent claims hypotheses and posts Plan/Action/Result chains
-- ✓ Finding posted with `critique_status='pending'`
-- ✓ Critique-agent fires live URK against the finding
-- ✓ Critique-agent supersedes the finding with its decision
-- ✗ Reporter emits `technical.md` — does not fire because critique-agent
-  decided `objections` (correctly, given the thin evidence chain)
+Live full-pipeline run (`test_full_pipeline_url_to_report_live_realistic`,
+ClaudeCodeBackend / haiku, 232s, ~$0.55):
 
-The critique-agent's decision is **right, not wrong**. The
-`DeterministicExecutor` harness produces a Result with an empty
-`body_excerpt` and a one-line `note`. Walked as a parent chain,
-the evidence is two short JSON payloads. A senior reviewer would
-also say "you've shown one action; you haven't shown reproducibility
-or scope". Live haiku does the same.
+- ✓ UTI fires live URK threat-model drafter (archetype `php-smarty-smm-panel-fork`)
+- ✓ Planner dispatches 30 goal-tree leaves
+- ✓ Exploit-agent claims hypotheses, runs them through `RealisticExecutor`
+- ✓ 2 findings posted (strong + weak both succeed at the executor layer)
+- ✓ Critique-agent fires live URK against each finding
+- ✓ Strong-evidence finding **confirmed** → reporter emits `technical.md`
+- ✓ Weak-evidence finding **objected** → not in the report
+- ✓ MLS records the confirmed finding (`bug_class=webhook-forgery`)
+- ✓ Planner checkpoint persists
 
-To exercise the full happy-path-through-reporter under live URK,
-either a) build a richer test harness that produces multi-step
-evidence chains, or b) run a real engagement against a live target
-(out of session scope). Both are deferred. The pipeline's per-step
-behaviour is verified; what's NOT verified is the full DryRun-style
-happy-path under live URK.
+The critique gate is still rigorous: weak claims still fail.  What
+changed is that strong claims now have evidence-chain support
+proportional to their finding text, and the gate accepts them.
 
 The deferred subsystems (6–8) are absent on disk — not stubbed (per
 FORGE PROTOCOL § 4.1).

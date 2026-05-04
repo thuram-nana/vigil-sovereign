@@ -176,30 +176,55 @@ Still **NOT live-exercised**. No Ollama daemon installed.
 First-use checklist from the prior version of this section
 remains valid.
 
-### MAO+ACP graduation criteria — partial
+### MAO+ACP graduation criteria — UPDATED Session 4
 
-Re-stating the bar from the prior version of this section, with
-status against Session 3 results:
+Session 3 left MAO/ACP at "partial" because the deterministic test
+harness produced thin Result objects.  Session 4 closed this with
+`framework/v2/agents/realistic_executor.py` and a new
+opt-in integration test
+(`test_full_pipeline_url_to_report_live_realistic`).
 
-- ✓ A real engagement target was used: `mrbeanpanel.com` for UTI;
-  fixture-replay target for the planner pipeline (a real engagement
-  with a real target was out of scope this session).
-- ✗ At least one finding survived critique-agent's veto end-to-end:
-  **NOT achieved under the deterministic test harness.** The
-  pipeline's synthetic finding's evidence chain is too thin to
-  satisfy live critique. (See "MAO/ACP live-path note" in manifest.)
-- ✓ At least one finding was blocked by critique-agent: yes — the
-  blanket-objection-trap test demonstrated this, and the pipeline
-  test's run also produced a `decision=objections` outcome.
-- ✗ MLS priors updated from a real engagement postmortem: deferred.
-- N/A Watchdog halt on a real condition: did not exercise; watchdog
+Status against the original bar, Session-4 results:
+
+- ✓ A real engagement target was used: `mrbeanpanel.com` for UTI
+  (Session 3); the live full-pipeline test uses fixture-replay
+  intake against `https://fix-target.invalid` plus `RealisticExecutor`
+  for the exploit path.  No real attack traffic at the executor
+  layer in the live test; only UTI hits a real host.
+- ✓ At least one finding survived critique-agent's veto end-to-end:
+  **achieved.**  The strong-evidence webhook-forgery scenario's
+  finding was confirmed by live critique-agent and emitted by the
+  reporter to `technical.md`.
+- ✓ At least one finding was blocked by critique-agent: the
+  weak-evidence robots.txt scenario's finding was rejected by
+  live critique-agent and is absent from the report.  Gate still
+  discriminates.
+- ✓ MLS recorded the confirmed finding with `bug_class=webhook-forgery`.
+- N/A Watchdog halt on a real condition: did not fire in the run
+  (the planner halted on `max_steps=30` per the test budget);
   remains verified from Session 2.
-- ✓ Cost telemetry from `CallTrace` non-zero: yes, ~$1.78 of
-  haiku-4-5 spend logged across 11 distinct binding invocations.
+- ✓ Cost telemetry from `CallTrace` non-zero: ~$0.55 for this run
+  on top of ~$1.78 from Session 3.  Total live-URK spend across
+  Sessions 3+4 stays under $3.
 
-Hence: MAO and ACP are **partial — code-complete and live-URK-wired,
-but full happy-path-to-reporter-emission requires either a richer
-test harness or a real engagement target**.
+MAO and ACP now graduate to **`live-path verified: yes`** on the
+manifest.  See `V2-MANIFEST.md` "MAO/ACP live-path graduation —
+Session 4" for the verbose narrative.
+
+What is **still NOT verified live**:
+
+- Real engagement against a real attackable target with a real
+  exploit-running executor (rather than a synthetic harness).
+  `RealisticExecutor` produces multi-step evidence chains that
+  *resemble* real-engagement output, but the underlying actions
+  are pre-baked.  An `HttpExecutor` or richer real-target executor
+  is a future-session work item.
+- The `mixed`-evidence scenario (timing-side-channel) was not
+  picked up by the planner during the captured run — only the
+  strong + weak scenarios fired.  The mixed scenario's behaviour
+  under live critique remains tested only at the binding-unit
+  level (Session 3's `02b-critique-strong-retry.json` is the
+  closest analogue).
 
 ## 2. URK is dry-run by default
 
