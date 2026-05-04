@@ -37,11 +37,16 @@ def _engagement_log_path() -> Path:
     return paths.v2_root() / ".crucible-v2.log"
 
 
-def _emit_json(_logger: Any, _name: str, event_dict: dict[str, Any]) -> str:
-    """Final processor: write the event to disk and stop the chain."""
+def _emit_json(_logger: Any, _name: str, event_dict: Any) -> Any:
+    """Final processor: write the event to disk and stop the chain.
+
+    Signature is intentionally `Any` to satisfy structlog's
+    Processor protocol (which uses MutableMapping in typeshed). We
+    raise DropEvent before any return so the type erasure is moot.
+    """
     p = _engagement_log_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(event_dict, default=str, separators=(",", ":"), sort_keys=True)
+    line = json.dumps(dict(event_dict), default=str, separators=(",", ":"), sort_keys=True)
     with p.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
     raise structlog.DropEvent

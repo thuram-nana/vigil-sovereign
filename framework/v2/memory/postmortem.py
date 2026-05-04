@@ -94,9 +94,8 @@ def _update_priors_from_engagement(store: Store, slug: str) -> int:
     Returns the number of priors updated.
     """
     eid = store.engagement_id(slug)
-    archetype = store.fetchone(
-        "SELECT archetype FROM engagements WHERE id=?", (eid,)
-    )["archetype"] or ""
+    row = store.fetchone("SELECT archetype FROM engagements WHERE id=?", (eid,))
+    archetype = (row["archetype"] if row is not None else "") or ""
     if not archetype:
         return 0
 

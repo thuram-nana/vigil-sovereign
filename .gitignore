@@ -328,6 +328,24 @@ temp/
 
 
 # -----------------------------------------------------------------------------
+# CRUCIBLE v2 — sensitive engagement state.
+# Memory store, dryrun prompt captures, planner state, intake fixtures
+# captured from real targets, structured engagement logs, and the
+# operator-attested authorization ledger.  None of this is for the repo.
+# -----------------------------------------------------------------------------
+framework/v2/.memory/
+framework/v2/.dryrun/
+framework/v2/.intake-authorizations.txt
+framework/v2/.crucible-v2.log
+framework/v2/intake/tests/fixtures/
+targets/*/.crucible-v2.log
+targets/*/.planner-state.json
+targets/*/recon/fingerprint.json
+targets/*/charter.draft.md
+targets/*/postmortem.md
+
+
+# -----------------------------------------------------------------------------
 # Final safety net — anything explicitly named "private", "internal",
 # "do-not-commit", or "sensitive" is blocked. If you have to name a file
 # that, you already know it shouldn't be committed.

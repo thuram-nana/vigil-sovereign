@@ -18,7 +18,7 @@ from datetime import date
 from typing import Any
 
 from ..common import logging as v2log
-from ..kernel import threat_model as urk_threat_model
+from ..kernel.threat_model import threat_model as urk_threat_model
 from ..kernel.models import ThreatModel as TMModel
 from .models import Classification, Fingerprint
 
@@ -253,7 +253,7 @@ def draft_threat_model(
     arch = classification.primary.archetype
 
     try:
-        tm, trace = urk_threat_model.threat_model(
+        tm, trace = urk_threat_model(
             target_name=slug,
             business_context=business_context or (
                 f"Target {target_host}; archetype {arch.name}"

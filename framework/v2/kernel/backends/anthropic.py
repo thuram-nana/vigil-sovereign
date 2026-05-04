@@ -52,7 +52,7 @@ class AnthropicBackend(LLMBackend):
             return False, "ANTHROPIC_API_KEY not set"
         return True, f"ready (model={self.model})"
 
-    def _client_obj(self):
+    def _client_obj(self) -> object:
         if self._client is None:
             import anthropic
             self._client = anthropic.Anthropic()

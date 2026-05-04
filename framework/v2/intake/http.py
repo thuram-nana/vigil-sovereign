@@ -169,7 +169,7 @@ class Fetcher:
                 method=method, url=url, status=r.status_code,
                 headers={k: v for k, v in r.headers.items()},
                 body_excerpt=body,
-                cookies={c.name: c.value for c in r.cookies.jar},
+                cookies={c.name: (c.value or "") for c in r.cookies.jar},
                 elapsed_ms=elapsed,
             )
         except httpx.HTTPError as e:

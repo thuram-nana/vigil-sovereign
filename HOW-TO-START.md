@@ -166,3 +166,53 @@ Before you let OBSIDIAN start any engagement:
       own app from your IP. (Most do; a few shared hosts require
       written notice.)
 - [ ] You've decided whether you'll deliver source code, and when.
+
+---
+
+## CRUCIBLE v2 quickstart
+
+The v2 layer adds a CLI-driven scaffolder, a queryable memory of
+past engagements, and a typed wrapper around the cognitive docs.
+None of it replaces v1; it sits beside it.
+
+```bash
+# one-time setup on a fresh host
+bash bin/init.sh
+pip install --break-system-packages -r framework/v2/requirements.txt
+python3 -m framework.v2 status     # shows resolved root + active LLM backend
+
+# one-time per target — append authorization to the ledger
+python3 -m framework.v2 intake authorize https://your-target.example \
+    --operator your-name
+
+# scaffold an engagement from a URL
+python3 -m framework.v2 intake https://your-target.example
+# → produces targets/<slug>/charter.draft.md, threat-model.md,
+#   attack-tree.md, recon/fingerprint.json
+# → records the engagement to MLS
+
+# (operator) review charter.draft.md, sign it as charter.md.
+# Until charter.md exists with a signed name, v2 refuses active testing.
+
+# query past engagements
+python3 -m framework.v2 memory similar --text "PHP Smarty SMM panel webhook"
+python3 -m framework.v2 memory wins    --archetype "PHP-Smarty SMM-panel fork"
+python3 -m framework.v2 memory priors  --archetype "PHP-Smarty SMM-panel fork"
+
+# invoke any cognitive binding from the CLI
+python3 -m framework.v2 kernel hypothesize \
+    --observation "GET /api/orders/{id} returned other user's data" \
+    --surface "/api/orders/{id}"
+
+python3 -m framework.v2 kernel critique \
+    --claim "Reproduced: webhook accepts forged signature, balance credits"
+```
+
+If you have an Anthropic API key, set `ANTHROPIC_API_KEY` and the
+kernel calls will use it. Without a key, URK runs in DryRun mode —
+deterministic stubs, no network. See `V2-LIMITATIONS.md` for what
+DryRun gives up.
+
+What v2 does *not* yet do — autonomous engagement loop, multi-agent
+orchestration, deep static analysis, defender emulation,
+self-improvement — is documented in `V2-MANIFEST.md`.

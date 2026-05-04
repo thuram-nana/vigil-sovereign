@@ -24,10 +24,13 @@ from typing import Any, Callable
 
 from pydantic import BaseModel
 
+from typing import cast
+
 from ..models import (
     Actor,
     Asset,
     AttackTreeNode,
+    CritiqueDecision,
     CritiqueResult,
     HypothesisSet,
     Hypothesis,
@@ -198,6 +201,7 @@ def _critique_fixture(schema: type[BaseModel], inp: dict[str, Any]) -> BaseModel
     claim = inp.get("claim", "")
     cl = claim.lower()
 
+    decision: CritiqueDecision
     if any(k in cl for k in _CONFIRM_KEYWORDS) and len(claim) > 60:
         decision = "confirm"
         objections: list[Objection] = []

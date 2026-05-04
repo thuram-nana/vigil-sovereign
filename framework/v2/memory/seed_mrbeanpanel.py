@@ -132,7 +132,7 @@ _SEED_FINDINGS = [
 ]
 
 
-def seed(store: Store) -> dict[str, int]:
+def seed(store: Store) -> dict[str, int | str]:
     """Idempotent: re-running yields the same row counts.
 
     Returns a stats dict for the CLI to print.
@@ -210,28 +210,42 @@ def seed(store: Store) -> dict[str, int]:
     # Three seeded "confirmed" findings + matching confirmed hypotheses.
     n_findings = 0
     for f in _SEED_FINDINGS:
-        recorder.record_finding(store, _SLUG, **{**f, "discovered_at": started_at})
+        bug_class = str(f["bug_class"])
+        surface = str(f["surface"])
+        recorder.record_finding(
+            store, _SLUG,
+            finding_slug=str(f["finding_slug"]),
+            title=str(f["title"]),
+            severity=str(f["severity"]),
+            cvss_vector=str(f["cvss_vector"]),
+            cvss_base=float(f["cvss_base"]),  # type: ignore[arg-type]
+            bug_class=bug_class,
+            surface=surface,
+            summary=str(f["summary"]),
+            impact=str(f["impact"]),
+            discovered_at=started_at,
+        )
         recorder.record_hypothesis(
             store, _SLUG,
-            handle=f"S-{f['finding_slug'][:4]}",
-            bug_class=f["bug_class"],
-            surface=f["surface"],
+            handle=f"S-{str(f['finding_slug'])[:4]}",
+            bug_class=bug_class,
+            surface=surface,
             given="standard low-priv session",
-            if_text=f["title"],
+            if_text=str(f["title"]),
             then_text="exploit reproduces with a single curl",
-            because=f["summary"],
+            because=str(f["summary"]),
             refute_on="response identical to baseline",
             cheap_test="single curl + diff",
             status="confirmed",
             confidence=0.95,
             created_at=started_at,
         )
-        # And a successful payload + a refuted attempt for prior diversity.
+        # And a successful payload to make prior diversity meaningful.
         recorder.record_payload(
             store, _SLUG,
-            bug_class=f["bug_class"],
-            payload_text=_seed_payload_for(f["bug_class"]),
-            target_surface=f["surface"],
+            bug_class=bug_class,
+            payload_text=_seed_payload_for(bug_class),
+            target_surface=surface,
             archetype=_ARCHETYPE,
             outcome="success",
             notes="seeded — illustrates the high-yield payload for this class",

@@ -215,3 +215,46 @@ If you are OBSIDIAN booting up:
 2. The active target's `charter.md` and `notes/engagement-log.md`.
 3. The relevant cognitive framework file for the current stage.
 4. The relevant playbook for the current domain.
+
+---
+
+## CRUCIBLE v2 (foundation pass)
+
+`framework/v2/` adds an executable layer on top of v1 without
+modifying any v1 file. The foundation pass shipped in this session
+contains three subsystems:
+
+- **URK** (`framework/v2/kernel/`) — wraps each cognitive doc as a
+  typed callable. `hypothesize / critique / pivot / decide / opsec /
+  threat_model` take inputs, prompt an LLM (Anthropic / Ollama / a
+  deterministic DryRun fallback), and return Pydantic-validated
+  results.
+- **MLS** (`framework/v2/memory/`) — persistent SQLite + embeddings
+  store of every engagement, finding, hypothesis, payload, and dead
+  end. Queryable from the CLI; biases future intakes toward what
+  actually paid off.
+- **UTI** (`framework/v2/intake/`) — drop a URL, get a fully
+  scaffolded `targets/<slug>/` directory with charter draft, threat
+  model, attack tree, and structured fingerprint JSON. Honours the
+  ethics gates: no scaffolding without operator-attested
+  authorization; no active testing until the operator signs
+  `charter.md`.
+
+Five further subsystems (MAO, ACP, DAA, DEL, SIL) are designed but
+deferred. See `V2-MANIFEST.md` for status and `V2-LIMITATIONS.md`
+for what the foundation pass *cannot* do.
+
+```bash
+# one-time setup
+bash bin/init.sh
+pip install --break-system-packages -r framework/v2/requirements.txt
+
+# verify
+python3 -m framework.v2 status
+
+# usage
+python3 -m framework.v2 intake authorize https://example.com --operator yourname
+python3 -m framework.v2 intake https://example.com
+python3 -m framework.v2 memory similar --text "PHP Smarty SMM panel webhook"
+python3 -m framework.v2 kernel critique --claim "..."
+```
