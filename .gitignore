@@ -339,16 +339,28 @@ temp/
 # -----------------------------------------------------------------------------
 framework/v2/.memory/
 framework/v2/.dryrun/
+framework/v2/.blackboard/
 framework/v2/.intake-authorizations.txt
 framework/v2/.crucible-v2.log
 framework/v2/intake/tests/fixtures/*
 # Session 3 regression fixtures from live URK runs ARE tracked.
 !framework/v2/intake/tests/fixtures/live-run/
+# Session 8.5 — first real engagement captures (mrbeanpanel) contain
+# real-target HTTP traffic logs. Not for the public repo. Operator
+# can move sanitised fragments to a tracked path later if needed.
+framework/v2/planner/tests/fixtures/live-run/mrbeanpanel-*/
 targets/*/.crucible-v2.log
 targets/*/.planner-state.json
 targets/*/recon/fingerprint.json
 targets/*/charter.draft.md
 targets/*/postmortem.md
+# UTI versioned scaffold outputs (threat-model.md.uti-<date>, attack-tree.md.uti-<date>)
+# — engagement-specific URK drafts; operator decides what to publish.
+targets/*/threat-model.md.uti-*
+targets/*/attack-tree.md.uti-*
+# UTI's host-derived parallel-scaffold folders (e.g. mrbeanpanel-com/) when
+# the operator already has a canonical engagement folder under a different slug.
+targets/mrbeanpanel-com/
 
 
 # -----------------------------------------------------------------------------

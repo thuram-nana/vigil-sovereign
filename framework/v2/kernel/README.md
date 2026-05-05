@@ -27,14 +27,35 @@ for h in result.hypotheses:
 
 ## Backends
 
-| Backend | Activates when | Notes |
-|---|---|---|
-| `AnthropicBackend` | `ANTHROPIC_API_KEY` set + `anthropic` SDK installed | Default model `claude-sonnet-4-6` (override `CRUCIBLE_ANTHROPIC_MODEL`). |
-| `OllamaBackend` | local Ollama daemon answering at `http://localhost:11434` with the configured model pulled | Default model `qwen2.5-coder:32b` (override `CRUCIBLE_OLLAMA_MODEL`). |
-| `DryRunBackend` | always | Writes prompt to `framework/v2/.dryrun/`, returns deterministic per-schema fixture. No network. |
+URK ships eight backend names spanning four sovereignty classes.
 
-Selection order: anthropic → ollama → dryrun. Override with
-`CRUCIBLE_LLM_BACKEND=<name>`.
+| Backend | Class | Activates when | Notes |
+|---|---|---|---|
+| `AnthropicBackend` (`anthropic`) | cloud_only | `ANTHROPIC_API_KEY` set + `anthropic` SDK installed | Default model `claude-sonnet-4-6` (override `CRUCIBLE_ANTHROPIC_MODEL`). |
+| `AnthropicBackend` ZDR (`anthropic-zdr`) | trusted_cloud | + `CRUCIBLE_ANTHROPIC_ZDR=1` | Operator attests the API key is associated with a Zero-Data-Retention contract. |
+| `BedrockBackend` (`bedrock`) | sovereign_cloud | `boto3` installed + AWS creds + `CRUCIBLE_BEDROCK_REGION` in allowlist | Claude on AWS Bedrock with regional restriction. Default region allowlist: us-gov-east-1 / us-gov-west-1 / eu-west-1 / eu-west-3 / eu-central-1 / ap-northeast-1 / us-east-1 / us-west-2. |
+| `VertexBackend` (`vertex`) | sovereign_cloud | `google-auth` installed + `CRUCIBLE_VERTEX_PROJECT` + `CRUCIBLE_VERTEX_REGION` in allowlist | Claude on GCP Vertex AI with regional restriction. Default region allowlist: us-central1 / us-east5 / europe-west4 / europe-west9 / asia-northeast1. |
+| `MistralBackend` (`mistral`) | sovereign_cloud | `MISTRAL_API_KEY` set | Mistral La Plateforme; httpx-direct (no SDK dep). EU-jurisdictional. |
+| `ClaudeCodeBackend` (`claude-code`) | cloud_only | `claude` CLI installed + OAuth credentials (`~/.claude/.credentials.json`) | Routes via `claude -p` subprocess. |
+| `OllamaBackend` (`ollama`) | local | local Ollama daemon answering at `http://localhost:11434` with the configured model pulled | Default `qwen2.5-coder:32b` (override `CRUCIBLE_OLLAMA_MODEL`). |
+| `DryRunBackend` (`dryrun`) | local | always | Writes prompt to `framework/v2/.dryrun/`, returns deterministic per-schema fixture. No network. |
+
+Selection order is *tier-aware*. The active sovereignty tier
+(default PERMISSIVE; set via `CRUCIBLE_SOVEREIGNTY_TIER`) determines
+which backends are reachable:
+
+| Tier | Auto-selection preference |
+|---|---|
+| AIR_GAPPED | ollama → vllm → llama-cpp → tgi → dryrun |
+| SOVEREIGN_CLOUD | bedrock → vertex → mistral → ollama → ... → dryrun |
+| TRUSTED_CLOUD | anthropic-zdr → bedrock → vertex → mistral → ollama → ... → dryrun |
+| PERMISSIVE | anthropic → claude-code → anthropic-zdr → bedrock → ... → dryrun |
+
+Override with `CRUCIBLE_LLM_BACKEND=<name>`. Cloud-class backends
+(`anthropic`, `claude-code`) attempted under sovereign tiers raise
+`SovereigntyViolation` at construction. See
+[`framework/v2/kernel/sovereignty.py`](sovereignty.py) for the policy
+gate.
 
 Inspect at any time:
 

@@ -12,7 +12,11 @@ from typing import Iterator
 from ..llm import LLMBackend
 
 
-_BACKEND_NAMES = ("anthropic", "claude-code", "ollama", "dryrun")
+_BACKEND_NAMES = (
+    "anthropic", "anthropic-zdr",
+    "bedrock", "vertex", "mistral",
+    "claude-code", "ollama", "dryrun",
+)
 
 
 def probe_all() -> Iterator[tuple[str, bool, str]]:
@@ -32,16 +36,7 @@ def probe_all() -> Iterator[tuple[str, bool, str]]:
 
 
 def _construct(name: str) -> LLMBackend:
-    if name == "anthropic":
-        from .anthropic import AnthropicBackend
-        return AnthropicBackend()
-    if name == "claude-code":
-        from .claude_code import ClaudeCodeBackend
-        return ClaudeCodeBackend()
-    if name == "ollama":
-        from .ollama import OllamaBackend
-        return OllamaBackend()
-    if name == "dryrun":
-        from .dryrun import DryRunBackend
-        return DryRunBackend()
-    raise ValueError(f"unknown backend {name!r}")
+    # Defer to kernel.llm._construct so the sovereignty gate runs
+    # before any cloud SDK is imported.
+    from ..llm import _construct as llm_construct
+    return llm_construct(name)

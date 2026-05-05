@@ -29,7 +29,7 @@ I, **`Satoshi`**, attest:
 - I authorize OBSIDIAN to perform the activities described in this
   charter, within the limits stated.
 
-Signed: `<name>`     Date: `__________`
+Signed: `Satoshi`     Date: `2026-05-05`
 
 ---
 
@@ -71,11 +71,11 @@ beyond minimum proof.
 
 - No DoS testing (resource-exhaustion, connection flooding, fork
   bombs).
-- No real-money payment movement beyond `$<X>` total cap.
+- No real-money payment movement beyond `$0` total cap.
 - No real-user contact (no password resets to real customer
   emails, no notifications/SMS to real users).
 - No data exfiltration of real user PII beyond minimum needed to
-  demonstrate impact (max `<N>` records, redacted in evidence).
+  demonstrate impact (max `5` records, redacted in evidence).
 - No persistence on production beyond proof (and removed within
   the same session).
 - No third-party attack.
@@ -122,14 +122,14 @@ any DB column to identify test artifacts.
 
 ## 7. Posture
 
-- [ ] **TEST** (default): identifiable, throttled, tagged. Operator
+- [x] **TEST** (default): identifiable, throttled, tagged. Operator
        expects to correlate scan traffic.
 - [ ] **AUDIT**: compliance-focused, control-mapped, slower.
 - [ ] **EMULATE**: adversary emulation. Requires explicit reason
        and additional limits (still no real harm).
 
-Selected: `<TEST | AUDIT | EMULATE>`.
-Reason for non-default: `<if not TEST>`.
+Selected: `TEST`.
+Reason for non-default: `n/a`.
 
 ## 8. Objectives
 
@@ -231,5 +231,5 @@ The engagement is closed when:
 - Continuous-testing plan agreed (per § 12).
 
 Final sign-off:
-- Operator: `<name>` — date: ____________
-- Tester (OBSIDIAN, on behalf of operator): date: ____________
+- Operator: `Satoshi` — date: ____________ (final, post-engagement)
+- Tester (OBSIDIAN, on behalf of operator): date: ____________ (final, post-engagement)

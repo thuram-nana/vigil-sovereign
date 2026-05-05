@@ -33,6 +33,8 @@ as legitimate states of the work.
 | 6 | DEL — Defender Emulation Layer | (`framework/v2/defender/` — absent) | no | no | Telemetry model, detection scoring, evasion library, Sigma runner. Deferred to a future session. |
 | 7 | DAA — Deep Analysis Arsenal | (`framework/v2/analysis/` — absent) | no | no | Semgrep / CodeQL / Joern / API fuzzer / differential testing / AST indexer. Largest deferred subsystem. |
 | 8 | SIL — Self-Improvement Loop | (`framework/v2/improve/` — absent) | no | no | Engagement-end reviewer + reviewable patch generator. Runs after everything else. |
+| 9 | Sovereignty Substrate (Session 7) | `framework/v2/kernel/sovereignty.py`, `framework/v2/agents/egress_guard.py` + project-root docs | yes | partial | Session 7. `SovereigntyPolicy` refuses cloud backends at construction under `CRUCIBLE_SOVEREIGN_MODE=1`; auto-selection reverses to local-first. `SovereignHttpxTransport` enforces an egress allowlist at runtime. Source-level egress audit confirms zero "anything else" paths. STRIDE self-threat-model + supply-chain attestation workflow + SECURITY.md shipped. **Local-LLM quality verification deferred** — Ollama not present on Session 7's development host; comparison harness ships with `<DEFERRED>` placeholders. 42 tests pass. |
+| 10 | Substrate Pluralism (Session 8) | `framework/v2/kernel/sovereignty.py` (tiered), `framework/v2/kernel/backends/{bedrock,vertex,mistral,anthropic}.py` | yes | partial | Session 8. `SovereigntyPolicy` evolved from binary strict/permissive to four tiers: AIR_GAPPED, SOVEREIGN_CLOUD, TRUSTED_CLOUD, PERMISSIVE. `CRUCIBLE_SOVEREIGN_MODE=1` aliases to AIR_GAPPED for back-compat. Four new backends: `BedrockBackend` (Claude on AWS Bedrock with regional allowlist), `VertexBackend` (Claude on GCP Vertex with regional allowlist), `MistralBackend` (Mistral La Plateforme via httpx-direct, no SDK), `AnthropicBackend` ZDR variant (`anthropic-zdr` registers as `trusted_cloud`). 42 new tests (19 tier + 23 substrate-backend mocks) pass. **Live verification of all four new backends DEFERRED** — operator credentials not present in Session 8 environment. |
 
 ## MAO/ACP live-path graduation — Session 4
 
@@ -104,6 +106,19 @@ been called against a live endpoint in any session. See
 `V2-LIMITATIONS.md` § "Inherited unexercised-LLM-path risk" for the
 explicit verification checklist that needs to run the first time
 URK is invoked live.
+
+---
+
+## Live engagement verification
+
+| Date | Target | Substrate | Tier | Outcome | Notes |
+|---|---|---|---|---|---|
+| 2026-05-05 | `mrbeanpanel.com` (operator's production SMM panel) | `claude-code` (Claude Max OAuth, model=haiku) | `PERMISSIVE` | **Completed clean** on `max_steps=15` | First real engagement. Reduced run shape (50 / $2 / 1800 s, GET-only via destructive-deny). 15 GET requests, 0 scope violations, 0 destructive refusals, 0 findings emitted. Validated framework plumbing end-to-end; finding-discovery deferred to a richer second-engagement run. Post-engagement summary at [`targets/mrbeanpanel/POST-ENGAGEMENT.md`](targets/mrbeanpanel/POST-ENGAGEMENT.md). |
+
+This converts the framework's status from "verified at integration test"
+(Sessions 3 / 4 against synthetic harnesses) to "verified in real
+engagement against an operator's production target." The most important
+graduation since Session 3.
 
 ---
 

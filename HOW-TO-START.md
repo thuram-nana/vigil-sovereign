@@ -176,6 +176,24 @@ framework scaffolds the engagement, queries past priors, drives the
 multi-agent loop, and emits a technical report. None of it replaces
 v1; it sits beside it.
 
+### Step 0 — choose your sovereignty tier *before* first run
+
+CRUCIBLE's reasoning kernel routes through an LLM. **Pick the tier
+that matches your trust posture before configuring anything else.**
+The tier is enforced at backend construction; a misconfigured
+deployment fails closed at startup.
+
+| Tier | Backends | Use case |
+|---|---|---|
+| `AIR_GAPPED` | Ollama / vLLM / llama-cpp / TGI / DryRun | Highest sensitivity; pure local; lower reasoning quality |
+| `SOVEREIGN_CLOUD` | + AWS Bedrock (regional) / GCP Vertex (regional) / Mistral La Plateforme | Most government workloads; jurisdictional sovereignty; frontier reasoning quality |
+| `TRUSTED_CLOUD` | + Anthropic Zero-Data-Retention | Trusted-vendor org use; contractual data-handling |
+| `PERMISSIVE` (default) | + plain consumer Anthropic / Claude Code | Development and personal use only |
+
+Set the tier via `CRUCIBLE_SOVEREIGNTY_TIER=<name>` in your shell rc
+or systemd unit. See [`SECURITY.md`](SECURITY.md) § 3.5 for per-tier
+configuration (regions, credentials, attestations).
+
 ```bash
 # one-time setup on a fresh host
 bash bin/init.sh

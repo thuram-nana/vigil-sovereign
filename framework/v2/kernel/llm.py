@@ -32,7 +32,8 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..common import logging as v2log
-from ..common.errors import BackendError, BackendUnavailable
+from ..common.errors import BackendError, BackendUnavailable, SovereigntyViolation
+from . import sovereignty
 from .models import CallTrace
 
 
@@ -83,15 +84,32 @@ class LLMBackend(abc.ABC):
 # ---------------------------------------------------------------------------
 
 _ENV_OVERRIDE = "CRUCIBLE_LLM_BACKEND"
-_PREFERENCE_ORDER = ("anthropic", "claude-code", "ollama", "dryrun")
 _cached_backend: LLMBackend | None = None
 
 
 def _construct(name: str) -> LLMBackend:
-    """Import backends lazily so the module loads without optional deps."""
+    """Import backends lazily so the module loads without optional deps.
+
+    The sovereignty policy is checked *before* any import of a cloud
+    backend's SDK — strict tiers never import `anthropic`, `boto3`,
+    or `google-auth` even to probe availability.
+    """
+    sovereignty.current().assert_permitted(name)
     if name == "anthropic":
         from .backends.anthropic import AnthropicBackend
-        return AnthropicBackend()
+        return AnthropicBackend(zdr=False)
+    if name == "anthropic-zdr":
+        from .backends.anthropic import AnthropicBackend
+        return AnthropicBackend(zdr=True)
+    if name == "bedrock":
+        from .backends.bedrock import BedrockBackend
+        return BedrockBackend()
+    if name == "vertex":
+        from .backends.vertex import VertexBackend
+        return VertexBackend()
+    if name == "mistral":
+        from .backends.mistral import MistralBackend
+        return MistralBackend()
     if name == "claude-code":
         from .backends.claude_code import ClaudeCodeBackend
         return ClaudeCodeBackend()
@@ -118,17 +136,29 @@ def get_backend(force: str | None = None, refresh: bool = False) -> LLMBackend:
     if _cached_backend is not None and not refresh:
         return _cached_backend
 
+    policy = sovereignty.current()
+
     override = os.environ.get(_ENV_OVERRIDE, "").strip().lower()
     if override:
+        # `_construct` re-asserts the policy; an attempt to override
+        # to a cloud backend in sovereign mode raises here, fail-closed.
         b = _construct(override)
         _cached_backend = b
-        _log.info("kernel.backend.selected", backend=b.name, reason="env-override")
+        _log.info(
+            "kernel.backend.selected",
+            backend=b.name, reason="env-override",
+            sovereign=policy.strict,
+        )
         return b
 
-    for name in _PREFERENCE_ORDER:
+    for name in policy.permitted_preference():
         try:
             cand = _construct(name)
-        except BackendUnavailable:
+        except (BackendUnavailable, SovereigntyViolation):
+            # SovereigntyViolation should never appear here because
+            # `permitted_preference()` already filters; catching it
+            # is defence-in-depth in case a future policy variant
+            # offers cloud names but rejects on construction.
             continue
         ok, note = cand.is_available()
         if ok:
@@ -136,6 +166,7 @@ def get_backend(force: str | None = None, refresh: bool = False) -> LLMBackend:
             _log.info(
                 "kernel.backend.selected",
                 backend=cand.name, reason="auto", note=note,
+                sovereign=policy.strict,
             )
             return cand
 

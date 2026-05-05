@@ -8,6 +8,21 @@ Activates when:
 Default model: claude-sonnet-4-6 (override via CRUCIBLE_ANTHROPIC_MODEL).
 Default max_tokens: 4096 (override on the Prompt).
 
+ZDR variant (Session 8):
+  Anthropic offers Enterprise / zero-data-retention contracts where
+  prompts and completions are not retained beyond the request.
+  Setting `CRUCIBLE_ANTHROPIC_ZDR=1` produces an `AnthropicBackend`
+  whose `name` is `anthropic-zdr`, which the sovereignty policy
+  classifies as `trusted_cloud` (permitted under TIER_TRUSTED_CLOUD)
+  rather than `cloud_only` (permitted only under TIER_PERMISSIVE).
+
+  ZDR enrolment is an organisational contract with Anthropic, not a
+  per-request flag. CRUCIBLE has no programmatic way to verify that
+  the configured API key belongs to a ZDR-enabled org. Setting
+  `CRUCIBLE_ANTHROPIC_ZDR=1` is therefore an *operator attestation*
+  that the org is ZDR-enrolled. Misuse is the operator's
+  responsibility — see SECURITY.md § 'Operator attestations'.
+
 The structured-output strategy is the simplest one that works
 robustly across schemas: instruct the model to emit a single JSON
 object validating the schema, peel any markdown fence, validate via
@@ -30,9 +45,13 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
 class AnthropicBackend(LLMBackend):
+    """Live Anthropic backend. The ZDR variant differs only in `name`
+    (which the sovereignty policy uses for tier classification) and
+    in a structured-log marker; the API call shape is identical."""
+
     name = "anthropic"
 
-    def __init__(self) -> None:
+    def __init__(self, *, zdr: bool | None = None) -> None:
         try:
             import anthropic  # noqa: F401
         except ImportError as e:
@@ -42,6 +61,15 @@ class AnthropicBackend(LLMBackend):
         # construct lazily on first use to avoid network on import
         self._client: object | None = None
         self.model = os.environ.get("CRUCIBLE_ANTHROPIC_MODEL", _DEFAULT_MODEL)
+        # ZDR flag: explicit constructor arg wins; otherwise read env.
+        env_zdr = os.environ.get("CRUCIBLE_ANTHROPIC_ZDR", "").strip() in (
+            "1", "true", "yes", "on",
+        )
+        self.zdr = bool(zdr) if zdr is not None else env_zdr
+        if self.zdr:
+            # The sovereignty policy classifies by name; rebrand this
+            # instance so the policy gate places it under trusted_cloud.
+            self.name = "anthropic-zdr"
 
     def is_available(self) -> tuple[bool, str]:
         try:
@@ -50,7 +78,8 @@ class AnthropicBackend(LLMBackend):
             return False, "anthropic SDK not installed"
         if not os.environ.get("ANTHROPIC_API_KEY"):
             return False, "ANTHROPIC_API_KEY not set"
-        return True, f"ready (model={self.model})"
+        zdr_marker = " [ZDR]" if self.zdr else ""
+        return True, f"ready (model={self.model}){zdr_marker}"
 
     def _client_obj(self) -> object:
         if self._client is None:

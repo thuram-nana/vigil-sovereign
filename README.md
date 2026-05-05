@@ -255,6 +255,12 @@ See `V2-MANIFEST.md` for status and `V2-LIMITATIONS.md` for what v2
 bash bin/init.sh
 pip install --break-system-packages -r framework/v2/requirements.txt
 
+# 0. choose your sovereignty tier before first run.
+#    See HOW-TO-START.md and SECURITY.md § 3.5 for the matrix.
+#    Default is PERMISSIVE (development); sovereign deployments pick
+#    AIR_GAPPED, SOVEREIGN_CLOUD, or TRUSTED_CLOUD.
+export CRUCIBLE_SOVEREIGNTY_TIER=PERMISSIVE   # or AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD
+
 # verify
 python3 -m framework.v2 status
 

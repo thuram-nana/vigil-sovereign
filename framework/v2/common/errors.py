@@ -56,6 +56,17 @@ class BudgetExhausted(EthicsViolation):
     new engagement."""
 
 
+class SovereigntyViolation(EthicsViolation):
+    """An action would route data or trust through non-sovereign
+    infrastructure (cloud LLM, third-party telemetry endpoint, etc.)
+    while the framework is running in sovereign mode
+    (CRUCIBLE_SOVEREIGN_MODE=1).
+
+    Raised at backend instantiation and at runtime egress-guard hooks
+    so a misconfigured deployment fails closed at startup, not after
+    the first prompt has already left the host."""
+
+
 # ---------------------------------------------------------------------------
 # Subsystem-level errors.  Recoverable in some contexts.
 # ---------------------------------------------------------------------------

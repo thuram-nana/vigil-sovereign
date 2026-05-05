@@ -218,16 +218,15 @@ What is **still NOT verified live**:
 
 - ~~Real engagement against a real attackable target with a real
   exploit-running executor (rather than a synthetic harness).~~
-  **Session 6 closed the executor gap.** `HttpExecutor` ships with
-  the six-gate safety stack (charter signature, scope, destructive
-  prompt, request budget, posture-aware rate limit + UA) and 22
-  unit tests against `pytest-httpserver`. Live HTTP exercise is
-  opt-in via `CRUCIBLE_LIVE_HTTP=<url>`; the operator runs it on
-  their own authorised target after preparing the engagement
-  (signed charter, ledger entry, UTI scaffold). Until that opt-in
-  run is captured, the LIVE end-to-end path with HttpExecutor
-  remains **partial — code shipped, real-network exercise
-  deferred**. See "HttpExecutor live-network gap" below.
+  **Session 8.5 closed this — first real engagement against
+  `mrbeanpanel.com` (operator's production SMM panel) ran end-to-end
+  on 2026-05-05.** 15 GET requests, 0 scope violations, 0 destructive
+  refusals, 0 findings emitted. Halted cleanly on `max_steps=15`.
+  Run shape was deliberately conservative (50 / $2 / 1800 s budget,
+  GET-only via destructive-deny). The framework's PLUMBING is now
+  verified against a real target; FINDING-DISCOVERY at scale awaits
+  a second engagement that approves destructive-action probes on
+  the test accounts. See [`targets/mrbeanpanel/POST-ENGAGEMENT.md`](targets/mrbeanpanel/POST-ENGAGEMENT.md).
 - The `mixed`-evidence scenario (timing-side-channel) was not
   picked up by the planner during the captured run — only the
   strong + weak scenarios fired.  The mixed scenario's behaviour
@@ -235,7 +234,17 @@ What is **still NOT verified live**:
   level (Session 3's `02b-critique-strong-retry.json` is the
   closest analogue).
 
-### HttpExecutor live-network gap (Session 6)
+### HttpExecutor live-network gap (Session 6 — partially closed by Session 8.5 run)
+
+**Update 2026-05-05:** the first real engagement against `mrbeanpanel.com`
+ran cleanly under the reduced shape (GET-only, 15 requests, 0
+violations). The plumbing-level gap is closed; the
+finding-discovery-at-scale gap remains — see
+[`targets/mrbeanpanel/POST-ENGAGEMENT.md`](targets/mrbeanpanel/POST-ENGAGEMENT.md)
+§ 5 for issues surfaced during the run (UTI slug-collision with the
+operator's pre-existing engagement folder, planner Cartesian-product
+seeding, recon-agent not wired into the live pipeline). These become
+the next FORGE session's priority list.
 
 What ships:
 
@@ -266,6 +275,124 @@ What's not yet exercised:
   charter's posture section is missing or malformed, HttpExecutor
   defaults to TEST, which is the safe default but may surprise
   operators who expected EMULATE behaviour.
+
+### Substrate pluralism (Session 8)
+
+**Tiered sovereignty model.** Session 7's binary strict/permissive
+evolved into a four-tier ladder so most government deployments can
+choose *jurisdictional* sovereignty (data residency, regional infra)
+rather than pure-local — without giving up frontier reasoning quality.
+
+| Tier | Backends permitted | Quality |
+|---|---|---|
+| `AIR_GAPPED` | Ollama / vLLM / llama-cpp / TGI / DryRun | Lower (local) |
+| `SOVEREIGN_CLOUD` | + Bedrock / Vertex / Mistral | Frontier (Claude) or High (Mistral) |
+| `TRUSTED_CLOUD` | + Anthropic-ZDR | Frontier |
+| `PERMISSIVE` | + plain Anthropic / Claude Code | Frontier |
+
+Tier set via `CRUCIBLE_SOVEREIGNTY_TIER=<name>`; legacy
+`CRUCIBLE_SOVEREIGN_MODE=1` still maps to `AIR_GAPPED`. All Session
+7 tests pass unchanged.
+
+**Backends shipped — all four deferred-live this session:**
+
+| Backend | Built against | Live-verified Session 8? | Verification cost |
+|---|---|---|---|
+| `BedrockBackend` | `anthropic.AnthropicBedrock` (no new deps; needs `boto3` for live) | **No** — AWS creds absent | $0 (mock) |
+| `VertexBackend` | `anthropic.AnthropicVertex` (needs `google-auth` for live) | **No** — GCP creds absent | $0 (mock) |
+| `MistralBackend` | httpx-direct against `api.mistral.ai/v1/chat/completions` | **No** — `MISTRAL_API_KEY` absent | $0 (mock) |
+| `AnthropicBackend` ZDR variant | `CRUCIBLE_ANTHROPIC_ZDR=1` → registers as `anthropic-zdr` (trusted_cloud) | **No** — `ANTHROPIC_API_KEY` absent in this session | $0 (mock) |
+
+**Honest framing for sovereign reviewers:**
+
+- All four backends are code-complete and type-clean. Construction
+  paths, region-allowlist enforcement, credential-resolution
+  failure modes, and tier integration are exercised by 23 mock
+  tests against fake SDK modules.
+- The actual `complete()` round-trip against a real cloud endpoint
+  has NOT been run from CRUCIBLE in Session 8. The Bedrock/Vertex
+  paths use Anthropic's first-party SDK clients (`AnthropicBedrock`
+  / `AnthropicVertex`) which Anthropic maintains — the failure
+  modes most likely to surface are credential / quota / regional-
+  availability errors, not API-shape errors. The Mistral path uses
+  the documented chat-completions REST shape stable as of late
+  2025; if Mistral's `response_format: {type: json_object}` field
+  has changed, the parse will fail at first call.
+- The operator runs the live verification on a host with the
+  required credentials. The mock-test suite confirms: when those
+  creds aren't present, the backend fails with a clear
+  `BackendUnavailable` rather than crashing later.
+
+**Open work (operator-roadmap):**
+
+- Live verification of each backend on credentials-equipped CI.
+- Verify Vertex region/model id format against Anthropic's current
+  Vertex documentation — Vertex's prefix conventions for Claude
+  model IDs evolve.
+- Mistral `response_format` field stability check against the
+  La Plateforme API reference.
+- Update `framework/v2/kernel/tests/fixtures/sovereignty-comparison.md`
+  with empirical numbers across all four substrates plus Ollama once
+  credentials and a local Ollama deployment are available.
+
+---
+
+### Sovereignty substrate gap (Session 7)
+
+**What ships:**
+
+- `framework/v2/kernel/sovereignty.py` — `SovereigntyPolicy` refuses
+  cloud backends at construction under `CRUCIBLE_SOVEREIGN_MODE=1`,
+  reverses auto-selection to local-first
+  (`ollama > vllm > llama-cpp > tgi > dryrun`).
+- `framework/v2/agents/egress_guard.py` — `SovereignHttpxTransport`
+  enforces an `EgressAllowlist` at runtime; off-allowlist hosts
+  raise `SovereigntyViolation` before bytes leave the host.
+- Source-level egress audit confirms zero "anything else" call
+  sites in v2 production code; documented at
+  [`framework/v2/SOVEREIGNTY-EGRESS-AUDIT.md`](framework/v2/SOVEREIGNTY-EGRESS-AUDIT.md).
+- STRIDE-style self-threat-model at
+  [`SOVEREIGNTY-THREAT-MODEL.md`](SOVEREIGNTY-THREAT-MODEL.md)
+  covering prompt injection, MLS poisoning, planner-checkpoint
+  tampering, supply-chain compromise, LLM-substrate compromise,
+  and operator-credential leakage.
+- Supply-chain attestation workflow:
+  `framework/v2/requirements.in` (source spec),
+  `framework/v2/requirements.lock.txt` (operator-regenerated),
+  `framework/v2/sbom.json` (operator-regenerated CycloneDX 1.5),
+  `bin/verify-supply-chain.sh` (CI verification, fail-closed).
+- [`SECURITY.md`](SECURITY.md) at project root documents the trust
+  delegation model, vulnerability reporting process, and a
+  sovereign-deployment hardening checklist.
+- 42 new tests pass (29 sovereignty policy + 13 egress guard).
+
+**What's not yet done — operator-roadmap:**
+
+- **Local-LLM quality verification.** Ollama not present on the
+  Session 7 development host. The comparison harness at
+  [`framework/v2/kernel/tests/fixtures/sovereignty-comparison.md`](framework/v2/kernel/tests/fixtures/sovereignty-comparison.md)
+  ships with `<DEFERRED>` placeholders; the operator (or any
+  sovereign-deployment evaluator) fills them by running the URK
+  binding-verification suite against `qwen2.5-coder:32b` on an
+  Ollama-equipped host. **No fake quality numbers shipped.**
+- **Hash-pinned `requirements.lock.txt` and `sbom.json`.**
+  Generation requires `pip-compile` and `cyclonedx-bom`, which
+  this session's sandbox refused to install (correctly — it
+  doesn't recognise them as in-manifest deps). Both files ship
+  as structurally-correct *skeletons* with explicit
+  `OPERATOR REGENERATES` markers. Sovereign deployments run
+  `bin/verify-supply-chain.sh` (which installs the build-time
+  tools and produces real artefacts) on their CI host.
+- **Third-party security audit.** Not engineering work — operator
+  roadmap.
+- **Reproducible-build attestation.** Operator roadmap.
+- **Institutional home.** Operator roadmap.
+
+The framework is now a **credible candidate for sovereign use.** It
+is not yet **ready for sovereign donation.** The remaining bars are
+honest external-validation work, not code work.
+
+---
 
 ## 2. URK is dry-run by default
 
