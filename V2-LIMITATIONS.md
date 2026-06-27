@@ -714,15 +714,14 @@ What is NOT yet done — operator roadmap:
   (1) `builtin_corpus()` — 3 synthetic archetype targets (metadata only).
   (2) `corpus/vulnpy/` — 8 real vulnerable Python files across 8 CWE
   classes, used to measure DAA's *actual* dataflow detection via
-  `DaaCorpusProducer` + the eval harness. Measured result is honest by
-  construction: **6/8 detected, precision 1.0** — the 6 taint-class vulns
-  (SQLi, command injection, SSRF, path traversal, SSTI, code injection)
-  are found; insecure deserialization (CWE-502) and XXE (CWE-611) are
-  MISSED because the taint ruleset has no pickle/XXE sink. The missed
-  classes are asserted in the test so the gap stays visible. This is a
-  curated benchmark (like OWASP Benchmark / Juliet), NOT scraped real
-  apps; a flagship still needs a large authorised real-target corpus —
-  and the two known gaps are a concrete ruleset-extension backlog.
+  `DaaCorpusProducer` + the eval harness. It was built at **6/8** (the
+  taint ruleset lacked pickle/XXE sinks); taint rules for those two
+  classes (daa-py-insecure-deserialization, daa-py-xxe) were then added,
+  taking it to **8/8 detected, precision 1.0** — a hand-run of exactly
+  what the SIL loop automates (named gap → rule → remeasure). This is
+  still a small curated benchmark (like OWASP Benchmark / Juliet), NOT
+  scraped real apps; a flagship needs a large authorised real-target
+  corpus, and 8/8 on 8 files is a sanity check, not a capability claim.
 - **False-positive counts require complete ground truth.** A produced
   finding with no ground-truth counterpart is scored as a false
   positive. On a target whose ground truth is incomplete, real

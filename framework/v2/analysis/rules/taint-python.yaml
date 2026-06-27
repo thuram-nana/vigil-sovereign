@@ -157,3 +157,56 @@ rules:
               - pattern: render_template_string(...)
               - pattern: flask.render_template_string(...)
               - pattern: Template(...).render(...)
+
+  - id: daa-py-insecure-deserialization
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into an unsafe deserializer — RCE (CWE-502).
+    metadata: {cwe: "CWE-502", bug_class: "Insecure Deserialization"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+              - pattern: request.data
+              - pattern: request.get_data(...)
+              - pattern: request.get_json(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: pickle.loads(...)
+              - pattern: pickle.load(...)
+              - pattern: cPickle.loads(...)
+              - pattern: yaml.load(...)
+              - pattern: yaml.unsafe_load(...)
+    pattern-sanitizers:
+      - pattern: yaml.safe_load(...)
+
+  - id: daa-py-xxe
+    mode: taint
+    severity: ERROR
+    message: Untrusted XML is parsed by an entity-resolving parser (XXE, CWE-611).
+    metadata: {cwe: "CWE-611", bug_class: "XXE"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: request.data
+              - pattern: request.get_data(...)
+              - pattern: flask.request.data
+              - pattern: request.body
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: lxml.etree.fromstring(...)
+              - pattern: lxml.etree.parse(...)
+              - pattern: lxml.etree.XML(...)
+              - pattern: etree.fromstring(...)
+              - pattern: etree.parse(...)
+              - pattern: xml.etree.ElementTree.fromstring(...)
+              - pattern: xml.sax.parse(...)
