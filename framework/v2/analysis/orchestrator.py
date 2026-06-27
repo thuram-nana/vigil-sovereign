@@ -20,6 +20,7 @@ from ..common.errors import CrucibleError
 from ..entitlement import Capability, require_capability
 from .analyzers.builtin import PatternAnalyzer
 from .analyzers.external import SemgrepAnalyzer
+from .analyzers.joern import JoernAnalyzer
 from .models import (
     AnalysisFinding,
     AnalysisReport,
@@ -36,9 +37,11 @@ _SEVERITY_RANK: dict[str, int] = {
 
 
 def default_analyzers() -> list[Analyzer]:
-    """Built-in pattern analyzer (always available) plus the Semgrep
-    adapter (available iff semgrep is installed)."""
-    return [PatternAnalyzer(), SemgrepAnalyzer()]
+    """Built-in pattern analyzer (always available), the Semgrep taint
+    adapter (available iff semgrep is installed), and the Joern CPG
+    adapter (available iff joern is provisioned). Unavailable analyzers
+    are recorded as skipped, never fatal."""
+    return [PatternAnalyzer(), SemgrepAnalyzer(), JoernAnalyzer()]
 
 
 def _dedup(findings: list[AnalysisFinding]) -> list[AnalysisFinding]:

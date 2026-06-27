@@ -843,11 +843,20 @@ What is NOT yet done — operator roadmap:
   remains as an always-available lexical fallback (leads, not verdicts).
 - **Taint ruleset is Python-only and curated, not exhaustive.** It covers
   the major injection/SSRF/traversal classes for Flask/Django/generic
-  request sources; other languages and frameworks need their own rules
-  (or `config="auto"` against the semgrep.dev registry, which needs
-  network). CodeQL and Joern adapters (true CPG inter-procedural
-  dataflow) follow the same probe→run→normalize contract but are not yet
-  implemented; Java 21 is present so Joern is feasible next.
+  request sources; other languages need their own rules (or
+  `config="auto"` against the semgrep.dev registry, which needs network).
+- **Joern CPG adapter ships (optional) — verified.** `JoernAnalyzer` runs
+  Joern's inter-procedural `reachableByFlows` via a shipped CPGQL script
+  and normalizes results; verified resolving a cross-function flow
+  (request → `_passthrough` → `os.system`, `analysis/benchmark/python/
+  interprocedural.py`). Honest finding: for typical Python *web* source,
+  semgrep's taint is already competitive (it caught the same simple
+  inter-procedural case), so Joern's real edge is harder targets — native
+  C/C++ and binaries via its frontends, very large cross-file flows,
+  custom graph queries — not a strict win on every codebase. Joern is
+  ~2 GB + JVM, not pip-installable; the framework does not install it
+  (provision via `CRUCIBLE_JOERN_HOME` or PATH). Tests skip when absent.
+  CodeQL (a third CPG engine) is still not adapted.
 - **Symbol index is Python-only.** The `Symbol` shape is
   language-agnostic, but only the `ast`-based Python indexer exists.
   Other languages need their own parser behind the same index.

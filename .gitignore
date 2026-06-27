@@ -389,3 +389,7 @@ targets/mrbeanpanel-com/
 *CONFIDENTIAL*
 internal-only/
 internal_only/
+# Joern CPG workspace output (created by importCode). Never committed.
+workspace/
+framework/v2/workspace/
+**/workspace/

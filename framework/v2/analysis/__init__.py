@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from .analyzers.builtin import PatternAnalyzer
 from .analyzers.external import SemgrepAnalyzer
+from .analyzers.joern import JoernAnalyzer
 from .index import SymbolIndex, build_symbol_index
 from .models import (
     AnalysisFinding,
@@ -54,6 +55,7 @@ __all__ = [
     "SkippedAnalyzer",
     "PatternAnalyzer",
     "SemgrepAnalyzer",
+    "JoernAnalyzer",
     "run_analysis",
     "SymbolIndex",
     "build_symbol_index",
