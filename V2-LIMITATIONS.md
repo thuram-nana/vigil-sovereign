@@ -651,6 +651,53 @@ creates `framework/v2/.memory/store.sqlite`. There is no script to
 clean these up. They are gitignored, so a fresh clone is clean —
 but a long-lived working copy will accumulate state.
 
+## 18. Entitlement layer (Pillar 2) — controlled distribution
+
+`framework/v2/entitlement/` ships the capability-gating spine described
+in `ROADMAP-FLAGSHIP.md` § 3 (Pillar 2): m-of-n Ed25519 threshold
+verification over a domain-separated canonical form, a capability ladder
+(`registry.py`), host/workload binding, signed revocation, and a
+fail-closed `require_capability` gate that emits an audit decision on
+every call. 38 offline tests pass; the package is `mypy --strict` clean.
+The `ExploitAgent` is wired to require `EXPLOIT_EXECUTION`.
+
+What is real and verified:
+
+- Threshold crypto is genuine and end-to-end tested: keys are generated,
+  documents signed, and the gate verified against tampering, wrong keys,
+  forged signatures, duplicate signers, below-threshold signing, expiry,
+  not-yet-valid windows, binding mismatch, and revocation (including a
+  fail-closed path for an invalidly-signed revocation list).
+
+What is NOT yet done — operator roadmap:
+
+- **Activation default is permissive.** With no trust root provisioned
+  and `CRUCIBLE_ENTITLEMENT_ENFORCED` unset, enforcement is INACTIVE:
+  gated capabilities are permitted with a logged WARNING. This mirrors
+  the sovereignty layer's PERMISSIVE default and keeps dev/test
+  checkouts (and the existing test suite) working. A production
+  deployment MUST provision a trust root (enforcement then activates
+  automatically) or set the env var. An un-provisioned deployment is
+  not access-controlled.
+- **FROST aggregation is forward-compatible but unexercised.** The
+  verifier treats a single aggregated FROST-Ed25519 group signature as
+  a 1-of-1 trust root, but no FROST signer has been run against it. Only
+  the plain m-of-n multisig path is tested.
+- **Attestation is consumed, not performed.** Host binding trusts
+  `CRUCIBLE_ATTESTED_IDENTITY` (plus machine-id / hostname). The
+  framework does not itself perform TPM/SPIRE/instance-identity
+  attestation — a deployment's attestation sidecar must set that env var
+  from a verified source. If nothing sets it, only machine-id and
+  hostname back the binding, which are weak against a local attacker.
+- **No issuance ceremony tooling beyond `provision.py`.** Minting trust
+  roots and signing entitlements is a library API; there is no hardened,
+  HSM-integrated, multi-party issuance ceremony CLI yet. Private-key
+  custody is entirely the operator's responsibility.
+- **Gate coverage is one call-site.** Only `ExploitAgent` is wired.
+  `AUTONOMOUS_PLANNING`, `DEEP_STATIC_ANALYSIS` (DAA),
+  `DEFENDER_TELEMETRY`/`DEFENDER_EVASION` (DEL), and
+  `SELF_IMPROVEMENT_MERGE` (SIL) gates attach as those subsystems land.
+
 ---
 
 ## What the operator should do next

@@ -33,6 +33,11 @@ def _kernel(argv: list[str]) -> int:
     return kernel_cli.main(argv)
 
 
+def _entitlement(argv: list[str]) -> int:
+    from .entitlement import cli as entitlement_cli
+    return entitlement_cli.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -64,6 +69,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "intake": _intake,
     "memory": _memory,
     "kernel": _kernel,
+    "entitlement": _entitlement,
     "status": _status,
 }
 

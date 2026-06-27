@@ -68,6 +68,61 @@ class SovereigntyViolation(EthicsViolation):
 
 
 # ---------------------------------------------------------------------------
+# Entitlement layer (Pillar 2 — controlled distribution).
+#
+# These gate dangerous capabilities behind a threshold-signed, host-bound
+# entitlement. EntitlementViolation subclasses are EthicsViolations: a
+# denied capability is an authorization-boundary crossing and must never
+# be silently caught. See ROADMAP-FLAGSHIP.md § 3 (Pillar 2) and
+# framework/v2/entitlement/.
+# ---------------------------------------------------------------------------
+
+
+class EntitlementViolation(EthicsViolation):
+    """A gated capability was requested but the entitlement does not
+    authorize it. Base class — callers catch the specific subclass."""
+
+
+class EntitlementMissing(EntitlementViolation):
+    """A gated capability was requested while enforcement is active but
+    no entitlement document is provisioned. Fail closed: only baseline
+    capabilities run without an entitlement."""
+
+
+class EntitlementInvalid(EntitlementViolation):
+    """An entitlement document is present but failed verification —
+    bad/insufficient threshold signatures, canonical-form mismatch, or
+    a malformed trust root. Treated as hostile: gated capabilities are
+    denied with the failure reason."""
+
+
+class EntitlementExpired(EntitlementViolation):
+    """The entitlement is outside its not_before..not_after window."""
+
+
+class EntitlementRevoked(EntitlementViolation):
+    """The entitlement id appears on a validly-signed revocation list."""
+
+
+class EntitlementBindingMismatch(EntitlementViolation):
+    """The entitlement is bound to host/workload identifiers that do not
+    match the machine the framework is running on. Possession of the
+    entitlement on an un-attested host grants nothing."""
+
+
+class CapabilityNotGranted(EntitlementViolation):
+    """The entitlement is valid, current, and host-bound, but its
+    capability tier does not include the requested capability."""
+
+
+class EntitlementError(CrucibleError):
+    """Recoverable entitlement-layer error (file parse, store I/O) that
+    is NOT itself an authorization decision. Distinct from
+    EntitlementViolation so loaders can surface a clear cause without
+    implying a capability was denied."""
+
+
+# ---------------------------------------------------------------------------
 # Subsystem-level errors.  Recoverable in some contexts.
 # ---------------------------------------------------------------------------
 

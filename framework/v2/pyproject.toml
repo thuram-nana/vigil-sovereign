@@ -42,6 +42,7 @@ testpaths        = [
   "intake/tests",
   "agents/tests",
   "planner/tests",
+  "entitlement/tests",
 ]
 python_files     = ["test_*.py"]
 python_functions = ["test_*"]

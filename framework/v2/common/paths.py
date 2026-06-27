@@ -141,6 +141,36 @@ def authorization_ledger() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Entitlement layer (Pillar 2). Operator-provisioned, gitignored. The
+# directory holds the trust root (authoriser public keys + threshold),
+# the threshold-signed entitlement, and the signed revocation list.
+#
+# Override the directory with CRUCIBLE_ENTITLEMENT_DIR so a deployment
+# can keep entitlement material on a read-only mount or HSM-fronted
+# path separate from the code tree.
+# ---------------------------------------------------------------------------
+
+
+def entitlement_dir() -> Path:
+    override = os.environ.get("CRUCIBLE_ENTITLEMENT_DIR")
+    if override:
+        return Path(override).expanduser()
+    return v2_root() / ".entitlement"
+
+
+def trust_root_path() -> Path:
+    return entitlement_dir() / "trust-root.json"
+
+
+def entitlement_path() -> Path:
+    return entitlement_dir() / "entitlement.json"
+
+
+def revocation_path() -> Path:
+    return entitlement_dir() / "revocation.json"
+
+
+# ---------------------------------------------------------------------------
 # Per-target paths
 # ---------------------------------------------------------------------------
 
