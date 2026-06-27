@@ -349,6 +349,9 @@ framework/v2/.entitlement/
 # SIL (Pillar 3) working area: mined gaps and drafted proposals. Review
 # artifacts, not canon — regenerated per engagement.
 framework/v2/.improve/
+# Engagement authority + kill-switch state. Operator/runtime state, never
+# committed. The .halt file is the persistent hard stop.
+framework/v2/.authority/
 framework/v2/intake/tests/fixtures/*
 # Session 3 regression fixtures from live URK runs ARE tracked.
 !framework/v2/intake/tests/fixtures/live-run/

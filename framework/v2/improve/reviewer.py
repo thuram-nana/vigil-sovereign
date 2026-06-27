@@ -46,13 +46,39 @@ def _gap_id(kind: GapKind, slug: str, key: str) -> str:
     return f"gap-{kind.value}-{digest}"
 
 
+def _path_segments(surface: str) -> tuple[str, ...]:
+    """Significant path segments of a surface, robust to method prefixes,
+    path-param placeholders, and trailing notes. '/api/orders/{id}' and
+    'GET /api/orders/{id} (BOLA)' both reduce to ('api', 'orders')."""
+    s = surface.strip().lower()
+    if " " in s:
+        # Prefer a path-looking token (e.g. drop a 'GET ' method prefix).
+        parts = s.split()
+        s = next((p for p in parts if p.startswith("/")), parts[-1] if parts else s)
+    segs: list[str] = []
+    for raw in s.split("/"):
+        raw = raw.strip()
+        if not raw or raw[0] in "{:*":  # placeholder / wildcard segment
+            continue
+        tok = "".join(ch for ch in raw if ch.isalnum())
+        if tok:
+            segs.append(tok)
+    return tuple(segs)
+
+
 def _surface_covered(surface: str, hypothesis_surfaces: list[str]) -> bool:
-    ns = _norm(surface)
-    if not ns:
-        return True  # an empty surface is not a coverage signal
-    for hs in hypothesis_surfaces:
-        nh = _norm(hs)
-        if nh and (nh == ns or nh in ns or ns in nh):
+    """True if some hypothesis touched this surface. Matches on whole path
+    segments — equal, or one path nested under the other — never on an
+    incidental substring (so a hypothesis on '/a' does not 'cover'
+    '/admin')."""
+    es = _path_segments(surface)
+    if not es:
+        return True  # an empty/opaque surface is not a coverage signal
+    for hs_raw in hypothesis_surfaces:
+        hs = _path_segments(hs_raw)
+        if not hs:
+            continue
+        if es == hs or es[: len(hs)] == hs or hs[: len(es)] == es:
             return True
     return False
 

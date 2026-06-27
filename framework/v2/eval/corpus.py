@@ -92,3 +92,12 @@ def load_corpus(path: str | Path) -> BenchmarkCorpus:
     if p.is_file():
         return _corpus_from_file(p)
     raise EvalError(f"corpus path does not exist: {p}")
+
+
+def builtin_corpus() -> BenchmarkCorpus:
+    """The shipped starter corpus: a few SYNTHETIC archetype targets with
+    illustrative ground truth, so the eval/SIL loop is runnable out of the
+    box. The ground truth is metadata describing typical bug classes per
+    archetype — not a claim about any real system, and not exploit code.
+    Operators replace it with authorised target replicas."""
+    return _corpus_from_file(Path(__file__).parent / "corpus" / "starter.json")

@@ -48,6 +48,26 @@ def _improve(argv: list[str]) -> int:
     return improve_cli.main(argv)
 
 
+def _defender(argv: list[str]) -> int:
+    from .defender import cli as defender_cli
+    return defender_cli.main(argv)
+
+
+def _analysis(argv: list[str]) -> int:
+    from .analysis import cli as analysis_cli
+    return analysis_cli.main(argv)
+
+
+def _authority(argv: list[str]) -> int:
+    from .authority import cli as authority_cli
+    return authority_cli.main(argv)
+
+
+def _socialdefense(argv: list[str]) -> int:
+    from .socialdefense import cli as socialdefense_cli
+    return socialdefense_cli.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -82,6 +102,10 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "entitlement": _entitlement,
     "eval": _eval,
     "improve": _improve,
+    "defender": _defender,
+    "analysis": _analysis,
+    "authority": _authority,
+    "socialdefense": _socialdefense,
     "status": _status,
 }
 

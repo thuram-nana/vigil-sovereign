@@ -29,7 +29,7 @@ its output; it does not act on its own.
 
 from __future__ import annotations
 
-from .corpus import load_corpus
+from .corpus import builtin_corpus, load_corpus
 from .harness import FindingProducer, run_harness
 from .models import (
     AggregateScore,
@@ -57,6 +57,7 @@ __all__ = [
     "score_run",
     "compare_runs",
     "load_corpus",
+    "builtin_corpus",
     "run_harness",
     "FindingProducer",
 ]

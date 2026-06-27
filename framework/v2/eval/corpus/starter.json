@@ -1,0 +1,39 @@
+{
+  "name": "crucible-starter",
+  "version": "1",
+  "targets": [
+    {
+      "slug": "synthetic-php-smm-panel",
+      "name": "Synthetic PHP/Smarty SMM panel",
+      "archetype": "php-smarty-smm-panel",
+      "description": "SYNTHETIC benchmark target. Ground truth describes the bug classes typical of this archetype; it is illustrative metadata, not a claim about any real system. Replace with an authorised replica before drawing conclusions.",
+      "ground_truth": [
+        {"id": "idor-orders", "bug_class": "IDOR", "surface": "/api/v2/orders/{id}", "severity": "high", "description": "Order objects readable across users by id.", "detection_keys": ["order_id"]},
+        {"id": "massassign-profile", "bug_class": "Mass Assignment", "surface": "/api/profile", "severity": "high", "description": "Privilege fields settable via profile update.", "detection_keys": ["is_admin", "balance"]},
+        {"id": "webhook-forgery", "bug_class": "Webhook Forgery", "surface": "/webhook/payment", "severity": "critical", "description": "Payment webhook accepts unsigned callbacks.", "detection_keys": ["signature"]}
+      ]
+    },
+    {
+      "slug": "synthetic-rails-marketplace",
+      "name": "Synthetic Rails marketplace",
+      "archetype": "rails-marketplace",
+      "description": "SYNTHETIC benchmark target. Illustrative ground truth for a Rails marketplace archetype.",
+      "ground_truth": [
+        {"id": "sqli-search", "bug_class": "SQLi", "surface": "/search", "severity": "critical", "description": "Search parameter concatenated into SQL.", "detection_keys": ["q"]},
+        {"id": "bola-listings", "bug_class": "BOLA", "surface": "/api/listings/{id}", "severity": "high", "description": "Listing mutation authorised by id alone.", "detection_keys": ["listing_id"]},
+        {"id": "csrf-email", "bug_class": "CSRF", "surface": "/account/email", "severity": "medium", "description": "Email change lacks anti-CSRF token."}
+      ]
+    },
+    {
+      "slug": "synthetic-spring-api",
+      "name": "Synthetic Spring API",
+      "archetype": "spring-api",
+      "description": "SYNTHETIC benchmark target. Illustrative ground truth for a Spring REST API archetype.",
+      "ground_truth": [
+        {"id": "ssrf-fetch", "bug_class": "SSRF", "surface": "/fetch", "severity": "high", "description": "Server fetches an attacker-supplied URL.", "detection_keys": ["url"]},
+        {"id": "jwt-none", "bug_class": "JWT Algorithm Confusion", "surface": "/api/token", "severity": "critical", "description": "Accepts alg=none / HS256-with-public-key tokens.", "detection_keys": ["alg"]},
+        {"id": "bfla-admin", "bug_class": "BFLA", "surface": "/admin/users", "severity": "high", "description": "Admin function callable by non-admin role.", "detection_keys": ["role"]}
+      ]
+    }
+  ]
+}

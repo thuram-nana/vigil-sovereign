@@ -710,22 +710,28 @@ drop, or specifically-newly-missed finding. 24 offline tests pass;
 
 What is NOT yet done — operator roadmap:
 
-- **No benchmark corpus ships.** The harness scores against a corpus;
-  none is included. A real flagship needs a curated corpus of
-  authorised, known-vulnerable target replicas with complete ground
-  truth. Building/curating it is engagement + content work, not code.
+- **Starter corpus ships; production corpus is operator content.** A
+  `builtin_corpus()` (3 SYNTHETIC archetype targets, 9 ground-truth
+  findings) ships so the eval/SIL loop is runnable out of the box, and a
+  test drives the full harness + regression gate against it. But the
+  ground truth is illustrative metadata, NOT authorised real-target
+  replicas — a real flagship needs a curated corpus of authorised,
+  known-vulnerable replicas with verified complete ground truth. Building
+  that is engagement + content work.
 - **False-positive counts require complete ground truth.** A produced
   finding with no ground-truth counterpart is scored as a false
   positive. On a target whose ground truth is incomplete, real
   discoveries are mis-scored as FPs. The corpus must document
   completeness per target; until it does, treat precision as a lower
   bound.
-- **No live producer adapter yet.** `run_harness` takes a
-  `FindingProducer`; the production adapter that runs the planner
-  against a target replica and maps blackboard findings to
-  `ProducedFinding` is not written. Offline tests use deterministic
-  producers. Wiring the live adapter is the bridge from "harness works"
-  to "harness measures the real framework."
+- **Live producer adapter: blackboard half done; planner half pending.**
+  `eval/produce.py` ships `BlackboardFindingProducer`, which reads an
+  engagement's critique-confirmed findings off a live Blackboard and maps
+  them to `ProducedFinding` — verified end-to-end driving `run_harness`.
+  What remains is the step that *populates* the blackboard: running the
+  planner against a target replica per benchmark target (needs a target
+  corpus and an LLM backend). The mapping and harness wiring are real;
+  the autonomous "run the engagement" front-end is the open piece.
 - **Matching is lexical.** Bug-class normalisation removes formatting
   but does not unify synonyms (`SQLi` vs `SQL Injection`); surface
   matching is substring/containment, not semantic. A corpus should use
@@ -760,10 +766,12 @@ What is NOT yet done — operator roadmap:
   empty by default. Turning a proposal into an actual diff is a human
   or future-LLM step; SIL never self-writes code. This is deliberate,
   but it means a proposal is not yet a merge-ready patch.
-- **No live blackboard adapter.** `review_snapshot` works on an
-  `EngagementSnapshot`; the thin adapter that assembles one from a live
-  Blackboard + MLS recall is not wired (mirrors the eval harness's
-  pending live producer). Tests use constructed snapshots.
+- **Live blackboard adapter: done.** `improve/ingest_live.py` assembles
+  an `EngagementSnapshot` from a live Blackboard (hypothesis states,
+  observed surfaces) and MLS (archetype's known bug classes), verified
+  driving the reviewer end-to-end. (Integration testing also surfaced and
+  fixed a reviewer surface-matching bug — coverage now matches whole path
+  segments, not incidental substrings.)
 - **Horizon intake is file-fed.** No network fetcher — a live feed
   puller must pass the sovereignty egress guard and is deferred.
 - **The merge gate authorises; nothing applies.** By design there is no
@@ -771,6 +779,148 @@ What is NOT yet done — operator roadmap:
   the decision) performs the actual merge. Do not add an auto-apply
   without re-deriving the threat model: an unattended self-applying
   offensive tool is the failure mode the whole gate prevents.
+
+## 21. DEL — defender emulation layer, defensive subset (M4)
+
+`framework/v2/defender/` ships the *defensive* half of DEL: a telemetry
+model (what signals an action emits across access-log / WAF / auth-log /
+netflow channels), a Sigma-style detection ruleset + matching engine,
+self-detection scoring (noisy-OR detectability), and posture annotation
+(TEST emphasises correlatability; EMULATE reports honest detectability).
+Scoring is gated on Capability.DEFENDER_TELEMETRY. 17 offline tests
+pass; `mypy --strict` clean; CLI at `python3 -m framework.v2 defender`.
+
+The policy line is enforced in code and in tests: EMULATE guidance is
+self-assessment ("you would be detected by rule X") and a test asserts
+no evasion vocabulary (bypass/evade/obfuscate) appears in it.
+
+What is NOT here, by deliberate policy (not an oversight):
+
+- **No evasion library.** Turnkey defeat of a named production defender
+  is Capability.DEFENDER_EVASION (M6) — an entitlement-locked,
+  human-authored interface, not generated capability. DEL tells you how
+  loud you are; it does not make you quiet by defeating detections.
+
+What is NOT yet done — operator roadmap:
+
+- **The telemetry model is legible, not a SIEM fidelity simulation.** It
+  encodes common, well-understood signals; it does not model a specific
+  product's parsing, enrichment, or correlation. Operators supply their
+  own ruleset (`--ruleset`) to reflect their real environment. A low
+  modelled score is a lower bound on footprint, never proof of stealth —
+  the EMULATE guidance says so explicitly.
+- **Not wired into the planner.** Scoring/annotation is a library + CLI;
+  it is not yet called inline as the planner schedules actions (which
+  would let the operator see footprint per step). Wiring is
+  straightforward once an action→ActionDescriptor mapping is agreed.
+- **No detection-feed import.** Rulesets are hand-authored JSON; there is
+  no Sigma-repo importer yet.
+
+## 22. DAA — deep analysis arsenal (M5)
+
+`framework/v2/analysis/` ships the deep-sensing layer: an offline,
+always-available pattern analyzer (curated dangerous-pattern ruleset), an
+external-tool adapter contract (Semgrep reference impl that degrades
+gracefully when the binary is absent), a Python AST symbol index
+(functions/classes/imports/call-sites, queryable), and an orchestrator
+that merges + de-dupes findings and records what was skipped and why.
+Whole-tree analysis is gated on Capability.DEEP_STATIC_ANALYSIS. 15
+offline tests pass; `mypy --strict` clean; CLI at
+`python3 -m framework.v2 analysis`. Demonstrated DAA-turned-inward: it
+self-scans the framework's own subsystems.
+
+What is NOT yet done — operator roadmap:
+
+- **Pattern analyzer is lexical, not dataflow.** It matches lines; it
+  cannot prove a sink is reachable from a source. Findings are leads for
+  the kernel to confirm, not verdicts — false positives are expected.
+  Real dataflow/taint comes from the external tools.
+- **Only the Semgrep adapter is written.** CodeQL and Joern follow the
+  same probe→run→normalize contract but are not implemented. None of the
+  external tools is installed by the framework; a deployment provisions
+  them on the analysis host.
+- **Symbol index is Python-only.** The `Symbol` shape is
+  language-agnostic, but only the `ast`-based Python indexer exists.
+  Other languages need their own parser behind the same index.
+- **No fuzzing / differential-testing harness yet.** The roadmap's
+  coverage-guided fuzzing and differential testing (DAA's dynamic half)
+  are not built; this milestone delivered the static half + indexing.
+- **Wired into hypothesis generation via the blackboard.**
+  `analysis/seed.py` maps DAA findings to blackboard `HypothesisPayload`s
+  (bug class per rule/CWE, confidence per severity) and posts them as open
+  hypotheses the exploit agent picks up — verified end-to-end. What
+  remains is the *deeper* integration: feeding the symbol index and
+  findings into the kernel's `hypothesize` prompt as priors (so the model
+  reasons over them), rather than seeding only at the blackboard level.
+
+## 23. Engagement authority + kill-switch (digital-twin discipline)
+
+`framework/v2/authority/` ships the scoped, time-boxed, environment-aware
+authorization object and the persistent kill-switch. The gate checks, in
+order: kill-switch -> validity window -> scope -> destructive permission
+-> live-destructive double-acknowledgement -> action budget. The
+kill-switch is a file on disk, so a tripped engagement stays halted
+across a process restart, and the hard stop is checked before every other
+condition. Live-destructive actions require two explicit flags
+(allow_destructive AND live_destructive_acknowledged); the intended
+workflow is to run high-risk work against a TWIN environment first. 18
+offline tests pass; mypy --strict clean; CLI at
+`python3 -m framework.v2 authority`.
+
+What is NOT here — honest scope:
+
+- **No replica/twin *constructor*.** This enforces twin-FIRST discipline
+  (an authority is tagged TWIN/STAGING/LIVE and live destruction is
+  double-gated), but it does not build a cloud replica of a target.
+  Standing up a faithful digital twin is operator infrastructure
+  (IaC/snapshots); the framework enforces the discipline, it does not
+  provision the environment.
+- **Rollback is the halt, not state restoration.** The kill-switch stops
+  further action instantly and persistently; it does not undo changes
+  already made on the target. True rollback is target-specific and out of
+  scope (and impossible to guarantee in general).
+- **Wired into the executor.** `HttpExecutor` now takes optional
+  `authority` and `killswitch` and checks them first in `execute()` —
+  before the scope gate and any network I/O — so a kill-switch tripped
+  from anywhere (CLI, another process) halts the engagement at its very
+  next action. Backward compatible (both default None). Verified by tests
+  that a tripped switch refuses the next action with status 0. What
+  remains is having the planner/coordinator construct the executor with a
+  per-engagement authority by default, rather than the operator wiring it
+  explicitly.
+- **Authority is unsigned.** Unlike the entitlement layer, the authority
+  document is plain JSON, not threshold-signed. For high-assurance
+  deployments it should carry the same Ed25519 signing as entitlements so
+  a tampered scope is detected.
+
+## 24. Social-engineering defence (socialdefense)
+
+`framework/v2/socialdefense/` is the *defensive* answer to the Bucket-C
+social-engineering capabilities the framework refuses to build: instead
+of generating phishing/impersonation, it scores *inbound* messages for
+attack indicators (urgency, credential harvesting, authority
+impersonation, lookalike/punycode domains, reply-to and display-name
+mismatch, financial-action and secrecy requests, dangerous attachments)
+and recommends action. Deterministic, offline, pure defence — it reads a
+message you received and reports risk; it sends nothing and generates no
+content. 8 offline tests pass; mypy --strict clean; CLI at
+`python3 -m framework.v2 socialdefense`.
+
+What is NOT here — honest scope:
+
+- **Heuristic, not ML/LLM.** It is a high-signal first filter, not a
+  trained classifier. It will miss novel phrasing and can false-positive
+  on legitimately urgent mail. A production deployment augments it with
+  an ML/LLM model; the recommendation states it is a heuristic, not proof.
+- **Text/email only.** Deepfake *audio/video* detection needs
+  media-forensic models and is out of scope. This covers written social
+  engineering (email/chat).
+- **Naive eTLD handling.** `_registrable` takes the last two labels, so
+  multi-label TLDs (`co.uk`) are approximated. Good enough for the
+  lookalike heuristic; a production build uses the public suffix list.
+- **No live mail integration.** It assesses a supplied `MessageArtifact`;
+  wiring it to a mail pipeline (IMAP/Graph/Gmail API) is operator
+  integration.
 
 ---
 

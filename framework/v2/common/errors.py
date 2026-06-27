@@ -56,6 +56,17 @@ class BudgetExhausted(EthicsViolation):
     new engagement."""
 
 
+class EngagementHalted(EthicsViolation):
+    """The engagement's kill-switch is tripped. Every action is refused,
+    fail-closed and persistently, until a new authority is issued. This
+    is the hard stop — it survives process restart."""
+
+
+class AuthorityExpired(EthicsViolation):
+    """The engagement authority is outside its not_before..not_after
+    window. Time-boxed authority has lapsed; re-authorise to continue."""
+
+
 class SovereigntyViolation(EthicsViolation):
     """An action would route data or trust through non-sovereign
     infrastructure (cloud LLM, third-party telemetry endpoint, etc.)

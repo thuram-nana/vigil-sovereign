@@ -189,6 +189,25 @@ def gaps_dir() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Engagement authority + kill-switch. Writable, gitignored. The kill-switch
+# file is the persistent fail-closed hard stop: if it exists, the
+# engagement is halted regardless of process state.
+# ---------------------------------------------------------------------------
+
+
+def authority_dir() -> Path:
+    return v2_root() / ".authority"
+
+
+def authority_path(slug: str) -> Path:
+    return authority_dir() / f"{slug}.authority.json"
+
+
+def killswitch_path(slug: str) -> Path:
+    return authority_dir() / f"{slug}.halt"
+
+
+# ---------------------------------------------------------------------------
 # Per-target paths
 # ---------------------------------------------------------------------------
 

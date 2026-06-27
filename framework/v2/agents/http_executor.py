@@ -49,9 +49,15 @@ import httpx
 
 from ..common import logging as v2log
 from ..common import paths
+from ..authority import (
+    ActionRequest,
+    EngagementAuthority,
+    KillSwitch,
+    authorize_action,
+)
 from .executor_proto import ExecutionOutcome, Executor
 from .models import HypothesisPayload, PlanPayload
-from .scope_gate import ScopeDecision, Posture, validate_action
+from .scope_gate import ScopeDecision, Posture, is_destructive, validate_action
 
 _log = v2log.get_logger(__name__)
 
@@ -203,6 +209,15 @@ class HttpExecutor:
     operator_identifier: str | None = None
     dry_run: bool = False
 
+    # Optional engagement authority + kill-switch (Pillar: trustworthy
+    # autonomy). When set, every action is gated through them BEFORE the
+    # scope gate and before any network I/O — so a kill-switch tripped
+    # from anywhere (even another process / the CLI) halts the engagement
+    # at its very next action. Backward compatible: both default None, in
+    # which case the executor behaves exactly as before.
+    authority: EngagementAuthority | None = None
+    killswitch: KillSwitch | None = None
+
     # Internal mutable state.
     _requests_made: int = 0
     _last_request_at: float = 0.0
@@ -218,6 +233,14 @@ class HttpExecutor:
             self.posture if self.posture is not None
             else parse_posture(self.engagement_slug)
         )
+        # The off-switch is always present: auto-wire a kill-switch bound
+        # to this engagement when the caller did not supply one. This is
+        # backward compatible — an absent `.halt` file means not tripped,
+        # so behaviour is unchanged until an operator trips it (via the
+        # `authority halt` CLI or any process). It guarantees the operator
+        # can always halt a running engagement, opt-in or not.
+        if self.killswitch is None:
+            self.killswitch = KillSwitch(self.engagement_slug)
         # bind_engagement() is a global mutator. Skip the import-time
         # protocol-assertion path (sentinel slug) but bind for real
         # engagements so structured logs route to the engagement file.
@@ -226,6 +249,46 @@ class HttpExecutor:
 
     # ---------------- public protocol ----------------
 
+    def _authority_gate(
+        self, method: str, url: str, action_id: str,
+    ) -> ExecutionOutcome | None:
+        """Check the kill-switch and engagement authority. Returns a
+        refusal ExecutionOutcome if the action is denied, or None if it
+        may proceed. The kill-switch is checked first and works even
+        without a full authority object."""
+        # Kill-switch: the absolute stop. Re-read from disk every action,
+        # so a trip from any source halts the next action immediately.
+        if self.killswitch is not None and self.killswitch.is_tripped():
+            self._log_event(
+                "authority.halted", action_id=action_id,
+                reason=self.killswitch.reason(),
+            )
+            return self._refused(
+                f"engagement halted by kill-switch: {self.killswitch.reason()}",
+                status_code=0,
+            )
+
+        if self.authority is not None:
+            destructive = is_destructive(method, url)
+            decision = authorize_action(
+                self.authority,
+                ActionRequest(
+                    target=url, action_kind="exploit", destructive=destructive,
+                ),
+                killswitch=self.killswitch,
+                actions_taken=self._requests_made,
+            )
+            self._log_event(
+                "authority.decision", action_id=action_id,
+                decision=decision.model_dump(mode="json"),
+            )
+            if not decision.allowed:
+                return self._refused(
+                    f"authority refused ({decision.denial_code}): {decision.reason}",
+                    status_code=0,
+                )
+        return None
+
     def execute(
         self,
         hypothesis: HypothesisPayload,
@@ -233,6 +296,13 @@ class HttpExecutor:
     ) -> ExecutionOutcome:
         method, url = self._derive_request(hypothesis, plan)
         action_id = self._next_action_id()
+
+        # Engagement-authority + kill-switch gate. Checked first, before
+        # the scope gate and before any I/O, so a tripped kill-switch
+        # halts the engagement at the very next action.
+        halt = self._authority_gate(method, url, action_id)
+        if halt is not None:
+            return halt
 
         decision = validate_action(
             slug=self.engagement_slug,
