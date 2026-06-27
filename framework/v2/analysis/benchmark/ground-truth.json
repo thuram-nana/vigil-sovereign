@@ -1,0 +1,14 @@
+{
+  "name": "daa-taint-benchmark",
+  "description": "Vulnerable/sanitized pairs proving DAA does dataflow taint analysis, not regex. The vulnerable file has 6 real source->sink flows; the sanitized file performs the same operations with the dataflow broken (parameterised / sanitised / constant) and must yield zero taint findings.",
+  "vulnerable_file": "python/vulnerable.py",
+  "sanitized_file": "python/sanitized.py",
+  "expected_taint_findings": [
+    {"function": "cmd_injection", "bug_class": "OS Command Injection", "cwe": "CWE-78"},
+    {"function": "sql_injection", "bug_class": "SQL Injection", "cwe": "CWE-89"},
+    {"function": "ssrf", "bug_class": "SSRF", "cwe": "CWE-918"},
+    {"function": "code_injection", "bug_class": "Code Injection", "cwe": "CWE-95"},
+    {"function": "path_traversal", "bug_class": "Path Traversal", "cwe": "CWE-22"},
+    {"function": "ssti", "bug_class": "Server-Side Template Injection", "cwe": "CWE-1336"}
+  ]
+}

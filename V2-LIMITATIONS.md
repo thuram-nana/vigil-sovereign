@@ -831,14 +831,23 @@ self-scans the framework's own subsystems.
 
 What is NOT yet done — operator roadmap:
 
-- **Pattern analyzer is lexical, not dataflow.** It matches lines; it
-  cannot prove a sink is reachable from a source. Findings are leads for
-  the kernel to confirm, not verdicts — false positives are expected.
-  Real dataflow/taint comes from the external tools.
-- **Only the Semgrep adapter is written.** CodeQL and Joern follow the
-  same probe→run→normalize contract but are not implemented. None of the
-  external tools is installed by the framework; a deployment provisions
-  them on the analysis host.
+- **Real dataflow/taint now ships via Semgrep — verified.** The
+  `SemgrepAnalyzer` runs in TAINT mode against a curated offline ruleset
+  (`analysis/rules/taint-python.yaml`: command injection, SQLi, SSRF,
+  code injection, path traversal, SSTI). Each finding means untrusted
+  input provably reaches a sink. Proven by a benchmark
+  (`analysis/benchmark/`): the vulnerable file yields all 6 source→sink
+  flows; the *sanitized* file — same sinks, dataflow broken — yields
+  ZERO, where the regex pattern analyzer false-positives. Tests skip when
+  semgrep is absent (`pip install semgrep`). The builtin pattern analyzer
+  remains as an always-available lexical fallback (leads, not verdicts).
+- **Taint ruleset is Python-only and curated, not exhaustive.** It covers
+  the major injection/SSRF/traversal classes for Flask/Django/generic
+  request sources; other languages and frameworks need their own rules
+  (or `config="auto"` against the semgrep.dev registry, which needs
+  network). CodeQL and Joern adapters (true CPG inter-procedural
+  dataflow) follow the same probe→run→normalize contract but are not yet
+  implemented; Java 21 is present so Joern is feasible next.
 - **Symbol index is Python-only.** The `Symbol` shape is
   language-agnostic, but only the `ast`-based Python indexer exists.
   Other languages need their own parser behind the same index.

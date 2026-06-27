@@ -31,13 +31,25 @@ _SEMGREP_SEVERITY: dict[str, str] = {
 }
 
 
+def shipped_rules_dir() -> Path:
+    """The framework's curated taint ruleset, so semgrep does real
+    dataflow analysis offline without the semgrep.dev registry."""
+    return Path(__file__).resolve().parent.parent / "rules"
+
+
 class SemgrepAnalyzer:
-    """Adapter over the `semgrep` CLI. Skipped gracefully when absent."""
+    """Adapter over the `semgrep` CLI, run in TAINT mode against the
+    framework's shipped dataflow ruleset by default. Each finding means
+    untrusted input provably reaches a sink — not a regex match. Skipped
+    gracefully when the binary is absent.
+
+    Pass `config="auto"` for the semgrep.dev registry (needs network) or a
+    path to a custom ruleset."""
 
     name = "semgrep"
 
-    def __init__(self, config: str = "auto", timeout_s: int = 300) -> None:
-        self._config = config
+    def __init__(self, config: str | None = None, timeout_s: int = 300) -> None:
+        self._config = config if config is not None else str(shipped_rules_dir())
         self._timeout_s = timeout_s
 
     def is_available(self) -> tuple[bool, str]:
