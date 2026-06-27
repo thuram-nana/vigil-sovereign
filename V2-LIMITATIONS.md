@@ -651,6 +651,127 @@ creates `framework/v2/.memory/store.sqlite`. There is no script to
 clean these up. They are gitignored, so a fresh clone is clean —
 but a long-lived working copy will accumulate state.
 
+## 18. Entitlement layer (Pillar 2) — controlled distribution
+
+`framework/v2/entitlement/` ships the capability-gating spine described
+in `ROADMAP-FLAGSHIP.md` § 3 (Pillar 2): m-of-n Ed25519 threshold
+verification over a domain-separated canonical form, a capability ladder
+(`registry.py`), host/workload binding, signed revocation, and a
+fail-closed `require_capability` gate that emits an audit decision on
+every call. 38 offline tests pass; the package is `mypy --strict` clean.
+The `ExploitAgent` is wired to require `EXPLOIT_EXECUTION`.
+
+What is real and verified:
+
+- Threshold crypto is genuine and end-to-end tested: keys are generated,
+  documents signed, and the gate verified against tampering, wrong keys,
+  forged signatures, duplicate signers, below-threshold signing, expiry,
+  not-yet-valid windows, binding mismatch, and revocation (including a
+  fail-closed path for an invalidly-signed revocation list).
+
+What is NOT yet done — operator roadmap:
+
+- **Activation default is permissive.** With no trust root provisioned
+  and `CRUCIBLE_ENTITLEMENT_ENFORCED` unset, enforcement is INACTIVE:
+  gated capabilities are permitted with a logged WARNING. This mirrors
+  the sovereignty layer's PERMISSIVE default and keeps dev/test
+  checkouts (and the existing test suite) working. A production
+  deployment MUST provision a trust root (enforcement then activates
+  automatically) or set the env var. An un-provisioned deployment is
+  not access-controlled.
+- **FROST aggregation is forward-compatible but unexercised.** The
+  verifier treats a single aggregated FROST-Ed25519 group signature as
+  a 1-of-1 trust root, but no FROST signer has been run against it. Only
+  the plain m-of-n multisig path is tested.
+- **Attestation is consumed, not performed.** Host binding trusts
+  `CRUCIBLE_ATTESTED_IDENTITY` (plus machine-id / hostname). The
+  framework does not itself perform TPM/SPIRE/instance-identity
+  attestation — a deployment's attestation sidecar must set that env var
+  from a verified source. If nothing sets it, only machine-id and
+  hostname back the binding, which are weak against a local attacker.
+- **No issuance ceremony tooling beyond `provision.py`.** Minting trust
+  roots and signing entitlements is a library API; there is no hardened,
+  HSM-integrated, multi-party issuance ceremony CLI yet. Private-key
+  custody is entirely the operator's responsibility.
+- **Gate coverage is one call-site.** Only `ExploitAgent` is wired.
+  `AUTONOMOUS_PLANNING`, `DEEP_STATIC_ANALYSIS` (DAA),
+  `DEFENDER_TELEMETRY`/`DEFENDER_EVASION` (DEL), and
+  `SELF_IMPROVEMENT_MERGE` (SIL) gates attach as those subsystems land.
+
+## 19. Evaluation harness (M2) — measurement substrate
+
+`framework/v2/eval/` ships the measurement layer SIL gates on: a
+benchmark-corpus contract, ground-truth/produced finding models,
+greedy one-to-one matching, per-target + micro-averaged scoring
+(detection/precision/recall/F1), run persistence, and a regression
+verdict (`compare_runs`) that fails on any detection drop, precision
+drop, or specifically-newly-missed finding. 24 offline tests pass;
+`mypy --strict` clean; CLI at `python3 -m framework.v2 eval`.
+
+What is NOT yet done — operator roadmap:
+
+- **No benchmark corpus ships.** The harness scores against a corpus;
+  none is included. A real flagship needs a curated corpus of
+  authorised, known-vulnerable target replicas with complete ground
+  truth. Building/curating it is engagement + content work, not code.
+- **False-positive counts require complete ground truth.** A produced
+  finding with no ground-truth counterpart is scored as a false
+  positive. On a target whose ground truth is incomplete, real
+  discoveries are mis-scored as FPs. The corpus must document
+  completeness per target; until it does, treat precision as a lower
+  bound.
+- **No live producer adapter yet.** `run_harness` takes a
+  `FindingProducer`; the production adapter that runs the planner
+  against a target replica and maps blackboard findings to
+  `ProducedFinding` is not written. Offline tests use deterministic
+  producers. Wiring the live adapter is the bridge from "harness works"
+  to "harness measures the real framework."
+- **Matching is lexical.** Bug-class normalisation removes formatting
+  but does not unify synonyms (`SQLi` vs `SQL Injection`); surface
+  matching is substring/containment, not semantic. A corpus should use
+  canonical bug-class labels and stable surface strings, or supply
+  `detection_keys`, to avoid false misses.
+
+## 20. SIL — self-improvement loop (M3)
+
+`framework/v2/improve/` ships the never-stop engine as
+continuous-discovery / gated-deployment: a deterministic reviewer that
+mines an engagement for capability gaps, a horizon scanner that folds
+CVEs/techniques into gaps, a patcher that drafts reviewable proposals
+(records + markdown), and a merge gate that *authorises* (never applies)
+a merge only when eval-green (M2) AND a threshold of governance
+approvals over the proposal content (Pillar-2 crypto) AND the
+SELF_IMPROVEMENT_MERGE capability all hold. 22 offline tests pass;
+`mypy --strict` clean; CLI at `python3 -m framework.v2 improve`.
+
+The load-bearing safety property is verified: the gate makes no change
+to the working tree, and an approval signed over one proposal does not
+authorise another.
+
+What is NOT yet done — operator roadmap:
+
+- **Reviewer is deterministic, not yet LLM-augmented.** It mines gaps
+  the blackboard and MLS priors already imply (untested known classes,
+  unreached surfaces/hypotheses, refuted threads). It does not yet
+  propose *novel* gaps a model might see (a class MLS doesn't know for
+  the archetype). An LLM binding would add gaps, never remove these.
+- **Patcher emits described-only proposals.** It states precisely what
+  to change and where, but authors no code diff — `change.patch` is
+  empty by default. Turning a proposal into an actual diff is a human
+  or future-LLM step; SIL never self-writes code. This is deliberate,
+  but it means a proposal is not yet a merge-ready patch.
+- **No live blackboard adapter.** `review_snapshot` works on an
+  `EngagementSnapshot`; the thin adapter that assembles one from a live
+  Blackboard + MLS recall is not wired (mirrors the eval harness's
+  pending live producer). Tests use constructed snapshots.
+- **Horizon intake is file-fed.** No network fetcher — a live feed
+  puller must pass the sovereignty egress guard and is deferred.
+- **The merge gate authorises; nothing applies.** By design there is no
+  auto-apply path. A human (or a future gated deploy step that re-checks
+  the decision) performs the actual merge. Do not add an auto-apply
+  without re-deriving the threat model: an unattended self-applying
+  offensive tool is the failure mode the whole gate prevents.
+
 ---
 
 ## What the operator should do next
