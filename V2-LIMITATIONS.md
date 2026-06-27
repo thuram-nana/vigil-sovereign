@@ -940,6 +940,40 @@ What is NOT here — honest scope:
   wiring it to a mail pipeline (IMAP/Graph/Gmail API) is operator
   integration.
 
+## 25. Live reasoning loop — verified over Claude Code (no API key)
+
+The long-standing "URK is DryRun by default / no live frontier model
+verified" caveat is **discharged for this environment**. With
+`CRUCIBLE_LLM_BACKEND=claude-code`, URK routes reasoning through the
+operator's Claude Code CLI (`claude -p`) — a Max subscription, no
+ANTHROPIC_API_KEY. Verified live on 2026-06-27:
+
+- `hypothesize` against a `/fetch?url=` observation → 5 real, falsifiable
+  hypotheses (SSRF, `file://` LFI, open redirect, cache poisoning), each
+  with a cheap test and refute condition; `is_dryrun=false`, ~58s.
+- `critique` of a real DAA taint finding (SSRF source→sink) →
+  `decision=confirm` with a rigorous coverage-gap list and a deception
+  check; `is_dryrun=false`, ~36s.
+
+This is the "reasoning over deep analysis" loop running for real: a DAA
+taint finding (provable dataflow) becomes a claim that live URK confirms
+or refutes. Regression-covered by the opt-in
+`kernel/tests/test_live_claude_code.py` (gated on `CRUCIBLE_LIVE_LLM=1`
+plus the `claude` CLI; skipped in CI).
+
+Honest bounds:
+
+- **Per-call cost and latency are real** — ~30–60s and subscription
+  tokens per binding. This is fine for source review / targeted
+  verification, not for thousands of cheap cycles without a budget.
+- **Not yet an autonomous at-scale loop.** The pieces (DAA → seed →
+  hypothesize → critique) are verified individually live; running them as
+  a continuous, budgeted, self-driving source-review campaign is the next
+  build, not done.
+- **Quality is the model's**, and a confirmed critique is still "worth a
+  PoC," not a proven bug — exactly as the framework's own discipline
+  requires.
+
 ---
 
 ## What the operator should do next
