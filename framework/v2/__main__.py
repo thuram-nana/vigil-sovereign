@@ -43,6 +43,11 @@ def _eval(argv: list[str]) -> int:
     return eval_cli.main(argv)
 
 
+def _improve(argv: list[str]) -> int:
+    from .improve import cli as improve_cli
+    return improve_cli.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -76,6 +81,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "kernel": _kernel,
     "entitlement": _entitlement,
     "eval": _eval,
+    "improve": _improve,
     "status": _status,
 }
 

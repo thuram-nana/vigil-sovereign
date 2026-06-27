@@ -171,6 +171,24 @@ def revocation_path() -> Path:
 
 
 # ---------------------------------------------------------------------------
+# SIL — self-improvement loop artifacts (Pillar 3). Writable, gitignored.
+# Gaps and reviewable proposals; never the framework's own canon.
+# ---------------------------------------------------------------------------
+
+
+def improve_dir() -> Path:
+    return v2_root() / ".improve"
+
+
+def proposals_dir() -> Path:
+    return improve_dir() / "proposals"
+
+
+def gaps_dir() -> Path:
+    return improve_dir() / "gaps"
+
+
+# ---------------------------------------------------------------------------
 # Per-target paths
 # ---------------------------------------------------------------------------
 

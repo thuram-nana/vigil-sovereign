@@ -346,6 +346,9 @@ framework/v2/.crucible-v2.log
 # list. Operator-provisioned, never committed. Authoriser PRIVATE keys
 # must never touch a runtime host or the repo at all.
 framework/v2/.entitlement/
+# SIL (Pillar 3) working area: mined gaps and drafted proposals. Review
+# artifacts, not canon — regenerated per engagement.
+framework/v2/.improve/
 framework/v2/intake/tests/fixtures/*
 # Session 3 regression fixtures from live URK runs ARE tracked.
 !framework/v2/intake/tests/fixtures/live-run/

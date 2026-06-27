@@ -732,6 +732,46 @@ What is NOT yet done — operator roadmap:
   canonical bug-class labels and stable surface strings, or supply
   `detection_keys`, to avoid false misses.
 
+## 20. SIL — self-improvement loop (M3)
+
+`framework/v2/improve/` ships the never-stop engine as
+continuous-discovery / gated-deployment: a deterministic reviewer that
+mines an engagement for capability gaps, a horizon scanner that folds
+CVEs/techniques into gaps, a patcher that drafts reviewable proposals
+(records + markdown), and a merge gate that *authorises* (never applies)
+a merge only when eval-green (M2) AND a threshold of governance
+approvals over the proposal content (Pillar-2 crypto) AND the
+SELF_IMPROVEMENT_MERGE capability all hold. 22 offline tests pass;
+`mypy --strict` clean; CLI at `python3 -m framework.v2 improve`.
+
+The load-bearing safety property is verified: the gate makes no change
+to the working tree, and an approval signed over one proposal does not
+authorise another.
+
+What is NOT yet done — operator roadmap:
+
+- **Reviewer is deterministic, not yet LLM-augmented.** It mines gaps
+  the blackboard and MLS priors already imply (untested known classes,
+  unreached surfaces/hypotheses, refuted threads). It does not yet
+  propose *novel* gaps a model might see (a class MLS doesn't know for
+  the archetype). An LLM binding would add gaps, never remove these.
+- **Patcher emits described-only proposals.** It states precisely what
+  to change and where, but authors no code diff — `change.patch` is
+  empty by default. Turning a proposal into an actual diff is a human
+  or future-LLM step; SIL never self-writes code. This is deliberate,
+  but it means a proposal is not yet a merge-ready patch.
+- **No live blackboard adapter.** `review_snapshot` works on an
+  `EngagementSnapshot`; the thin adapter that assembles one from a live
+  Blackboard + MLS recall is not wired (mirrors the eval harness's
+  pending live producer). Tests use constructed snapshots.
+- **Horizon intake is file-fed.** No network fetcher — a live feed
+  puller must pass the sovereignty egress guard and is deferred.
+- **The merge gate authorises; nothing applies.** By design there is no
+  auto-apply path. A human (or a future gated deploy step that re-checks
+  the decision) performs the actual merge. Do not add an auto-apply
+  without re-deriving the threat model: an unattended self-applying
+  offensive tool is the failure mode the whole gate prevents.
+
 ---
 
 ## What the operator should do next
