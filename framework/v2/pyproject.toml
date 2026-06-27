@@ -33,7 +33,7 @@ ignore_missing_imports    = true
 # cross-platform conditional imports leave the occasional dead # type: ignore.
 warn_return_any           = false
 warn_unused_ignores       = false
-exclude                   = ['/tests/']
+exclude                   = ['/tests/', '/benchmark/', '/corpus/']
 
 [tool.pytest.ini_options]
 testpaths        = [

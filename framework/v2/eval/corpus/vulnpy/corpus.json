@@ -1,0 +1,22 @@
+{
+  "name": "vulnpy",
+  "version": "1",
+  "targets": [
+    {"slug": "sqli.py", "name": "SQL injection", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "SQL Injection", "surface": "sqli.py", "cwe": "CWE-89", "severity": "critical"}]},
+    {"slug": "cmdi.py", "name": "Command injection", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "OS Command Injection", "surface": "cmdi.py", "cwe": "CWE-78", "severity": "critical"}]},
+    {"slug": "ssrf.py", "name": "SSRF", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "SSRF", "surface": "ssrf.py", "cwe": "CWE-918", "severity": "high"}]},
+    {"slug": "pathtrav.py", "name": "Path traversal", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "Path Traversal", "surface": "pathtrav.py", "cwe": "CWE-22", "severity": "high"}]},
+    {"slug": "ssti.py", "name": "SSTI", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "Server-Side Template Injection", "surface": "ssti.py", "cwe": "CWE-1336", "severity": "critical"}]},
+    {"slug": "codeinj.py", "name": "Code injection", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "Code Injection", "surface": "codeinj.py", "cwe": "CWE-95", "severity": "critical"}]},
+    {"slug": "deserialize.py", "name": "Insecure deserialization", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "Insecure Deserialization", "surface": "deserialize.py", "cwe": "CWE-502", "severity": "critical"}]},
+    {"slug": "xxe.py", "name": "XML external entity", "archetype": "flask",
+     "ground_truth": [{"id": "v", "bug_class": "XXE", "surface": "xxe.py", "cwe": "CWE-611", "severity": "high"}]}
+  ]
+}

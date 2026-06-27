@@ -33,6 +33,7 @@ class GroundTruthFinding(BaseModel):
     bug_class: str = Field(min_length=1, description="Canonical class: IDOR, SQLi, SSRF, ...")
     surface: str = Field(min_length=1, description="Endpoint / feature / flow it lives on.")
     severity: str = Field(default="medium", pattern=r"^(info|low|medium|high|critical)$")
+    cwe: str = Field(default="", description="Optional CWE id, e.g. CWE-89.")
     description: str = Field(default="")
     detection_keys: list[str] = Field(
         default_factory=list,

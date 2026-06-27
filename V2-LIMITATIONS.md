@@ -710,14 +710,19 @@ drop, or specifically-newly-missed finding. 24 offline tests pass;
 
 What is NOT yet done — operator roadmap:
 
-- **Starter corpus ships; production corpus is operator content.** A
-  `builtin_corpus()` (3 SYNTHETIC archetype targets, 9 ground-truth
-  findings) ships so the eval/SIL loop is runnable out of the box, and a
-  test drives the full harness + regression gate against it. But the
-  ground truth is illustrative metadata, NOT authorised real-target
-  replicas — a real flagship needs a curated corpus of authorised,
-  known-vulnerable replicas with verified complete ground truth. Building
-  that is engagement + content work.
+- **Two corpora ship; production corpus is still operator content.**
+  (1) `builtin_corpus()` — 3 synthetic archetype targets (metadata only).
+  (2) `corpus/vulnpy/` — 8 real vulnerable Python files across 8 CWE
+  classes, used to measure DAA's *actual* dataflow detection via
+  `DaaCorpusProducer` + the eval harness. Measured result is honest by
+  construction: **6/8 detected, precision 1.0** — the 6 taint-class vulns
+  (SQLi, command injection, SSRF, path traversal, SSTI, code injection)
+  are found; insecure deserialization (CWE-502) and XXE (CWE-611) are
+  MISSED because the taint ruleset has no pickle/XXE sink. The missed
+  classes are asserted in the test so the gap stays visible. This is a
+  curated benchmark (like OWASP Benchmark / Juliet), NOT scraped real
+  apps; a flagship still needs a large authorised real-target corpus —
+  and the two known gaps are a concrete ruleset-extension backlog.
 - **False-positive counts require complete ground truth.** A produced
   finding with no ground-truth counterpart is scored as a false
   positive. On a target whose ground truth is incomplete, real
