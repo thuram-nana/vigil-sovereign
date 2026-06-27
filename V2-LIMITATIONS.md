@@ -974,6 +974,43 @@ Honest bounds:
   PoC," not a proven bug — exactly as the framework's own discipline
   requires.
 
+## 26. Autonomous source-review loop (DAA → live URK)
+
+`analysis/review_loop.py` ties the verified pieces into an autonomous
+white-box review: DAA dataflow findings → live URK critique
+(confirm/refute), budgeted, with the engagement kill-switch checked
+before every model call. `python3 -m framework.v2 analysis review
+--root <path> --max-reviews N`. 5 offline tests (fake reviewer: budget
+cap, kill-switch halt, selective confirm); mypy clean.
+
+Verified live on the benchmark (Claude Code backend, no API key):
+
+- First run fed only a finding summary → 0/2 confirmed; the critique
+  flagged the exact gap: *"actual vulnerable code not examined", "PoC not
+  attempted"*.
+- Acting on that feedback, the loop now includes the real source window
+  around each finding in the evidence → re-run confirmed **1/2** (SQLi
+  CWE-89 `confirm`; the command-injection drew `objections` — the
+  critique staying rigorous, not rubber-stamping).
+
+That round-trip — the loop's own output critiqued, the critique's gap
+fixed, the result improved — is the self-improvement discipline working
+on the framework itself.
+
+Honest bounds:
+
+- **Confirm ≠ proven.** A `confirm` here means the model, given dataflow
+  evidence + source, judges the flaw real and worth a PoC. It is not a
+  PoC. Turning confirmed findings into reproduced exploits (the executor
+  path, against an authorised running target) remains separate and ROE-
+  gated.
+- **Cost-bounded, not at-scale-autonomous.** ~30–60s + subscription
+  tokens per review; the budget caps calls. A continuous, large-corpus,
+  loop-until-dry campaign with token accounting is the next step.
+- **Triages dataflow findings first.** Lexical pattern findings are
+  reviewed only when no dataflow findings exist; review quality tracks
+  DAA's finding quality.
+
 ---
 
 ## What the operator should do next

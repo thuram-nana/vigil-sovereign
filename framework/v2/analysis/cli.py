@@ -71,6 +71,38 @@ def _analyzers(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _review(args: argparse.Namespace) -> int:
+    # Autonomous source review: DAA dataflow -> URK confirm/refute, budgeted,
+    # kill-switch armed. Live when CRUCIBLE_LLM_BACKEND=claude-code.
+    from .review_loop import run_source_review
+
+    report = run_source_review(
+        _target(args), engagement_slug=args.slug, max_reviews=args.max_reviews,
+    )
+    print(json.dumps(
+        {
+            "target": report.target_root,
+            "total_findings": report.total_findings,
+            "reviews_run": report.reviews_run,
+            "confirmed": report.confirmed_count,
+            "halted": report.halted,
+            "halt_reason": report.halt_reason,
+            "live_reasoning": report.used_live_reasoning,
+            # Every triaged finding with its verdict — a non-confirm decision
+            # (e.g. more_evidence_needed) is the rigorous critique refusing to
+            # call a static finding proven without a PoC. That is correct.
+            "reviews": [
+                {"path": r.finding.path, "line": r.finding.line, "cwe": r.finding.cwe,
+                 "decision": r.decision, "confirmed": r.confirmed,
+                 "claim": r.claim, "coverage_gaps": r.coverage_gaps}
+                for r in report.reviewed
+            ],
+        },
+        indent=2,
+    ))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 analysis",
@@ -96,6 +128,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ext", action="append", default=[])
     p.add_argument("--max-files", type=int, default=5000)
     p.set_defaults(fn=_analyzers)
+
+    p = sub.add_parser("review", help="autonomous source review (DAA -> URK confirm/refute)")
+    p.add_argument("--root", required=True)
+    p.add_argument("--ext", action="append", default=[])
+    p.add_argument("--max-files", type=int, default=5000)
+    p.add_argument("--max-reviews", type=int, default=5, help="model-call budget")
+    p.add_argument("--slug", default="source-review", help="engagement slug (kill-switch key)")
+    p.set_defaults(fn=_review)
 
     return parser
 
