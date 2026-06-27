@@ -698,6 +698,40 @@ What is NOT yet done — operator roadmap:
   `DEFENDER_TELEMETRY`/`DEFENDER_EVASION` (DEL), and
   `SELF_IMPROVEMENT_MERGE` (SIL) gates attach as those subsystems land.
 
+## 19. Evaluation harness (M2) — measurement substrate
+
+`framework/v2/eval/` ships the measurement layer SIL gates on: a
+benchmark-corpus contract, ground-truth/produced finding models,
+greedy one-to-one matching, per-target + micro-averaged scoring
+(detection/precision/recall/F1), run persistence, and a regression
+verdict (`compare_runs`) that fails on any detection drop, precision
+drop, or specifically-newly-missed finding. 24 offline tests pass;
+`mypy --strict` clean; CLI at `python3 -m framework.v2 eval`.
+
+What is NOT yet done — operator roadmap:
+
+- **No benchmark corpus ships.** The harness scores against a corpus;
+  none is included. A real flagship needs a curated corpus of
+  authorised, known-vulnerable target replicas with complete ground
+  truth. Building/curating it is engagement + content work, not code.
+- **False-positive counts require complete ground truth.** A produced
+  finding with no ground-truth counterpart is scored as a false
+  positive. On a target whose ground truth is incomplete, real
+  discoveries are mis-scored as FPs. The corpus must document
+  completeness per target; until it does, treat precision as a lower
+  bound.
+- **No live producer adapter yet.** `run_harness` takes a
+  `FindingProducer`; the production adapter that runs the planner
+  against a target replica and maps blackboard findings to
+  `ProducedFinding` is not written. Offline tests use deterministic
+  producers. Wiring the live adapter is the bridge from "harness works"
+  to "harness measures the real framework."
+- **Matching is lexical.** Bug-class normalisation removes formatting
+  but does not unify synonyms (`SQLi` vs `SQL Injection`); surface
+  matching is substring/containment, not semantic. A corpus should use
+  canonical bug-class labels and stable surface strings, or supply
+  `detection_keys`, to avoid false misses.
+
 ---
 
 ## What the operator should do next

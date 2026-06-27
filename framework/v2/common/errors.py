@@ -147,5 +147,12 @@ class MemoryStoreError(CrucibleError):
     """MLS-layer error (storage, embedding, recall)."""
 
 
+class EvalError(CrucibleError):
+    """Evaluation-harness error — corpus load/parse, malformed ground
+    truth, or a run record that fails schema validation. The eval layer
+    measures capability; it makes no trust decision, so this is a plain
+    recoverable CrucibleError, never an EthicsViolation."""
+
+
 class SchemaMismatch(MemoryStoreError):
     """SQLite schema is older than expected; run migrate."""
