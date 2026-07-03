@@ -141,7 +141,14 @@ run. This wave is the highest-EV work on the board.
 
 ### WAVE 5 — The three ontologies (the custom knowledge substrate)
 
-- [ ] **(A) Target World-Model / Attack Graph — persistence + attacker state.**
+- [x] **(A) Target World-Model / Attack Graph — persistence + attacker state.**
+  `[ONTOLOGY][DEFENSIVE]` **L** — ✅ **SHIPPED 2026-07-03.** Added `EdgeKind`
+  OWNS/HOLDS/REACHED + `worldmodel/attacker.py::AttackerState` recording confirmed-
+  primitive postconditions (own/hold/reach) as typed edges from a canonical
+  attacker principal, plus `ATTACKER_RULES` (own-via-held-credential,
+  reach-via-owned-host). State is graph-native → round-trips through `store` and
+  chains via `derivation`. Proof: `worldmodel/tests/test_attacker_state.py` (record
+  cred-held → reload → derive attacker OWNS target). Original plan text:
   `[ONTOLOGY][DEFENSIVE]` **L** — extend `worldmodel/` so a graph persists across
   runs of an engagement and holds *attacker state* (owned nodes, held creds/tokens,
   reachable services) as typed facts. *Why #1:* without persistent state the
@@ -357,3 +364,11 @@ Format per entry:
   lone-oracle-no-dissent, unconfirmed-empty-dissent). NEXT: Wave 5 (the three
   ontologies) — (A) world-model persistence + attacker state is the top item.
   TESTS: green — 0 failures, 13 skipped.
+- 2026-07-03 · auto/worldmodel-attacker-state (local build) · COMPLETED: Wave 5
+  item A "World-Model persistence + attacker state". EdgeKind OWNS/HOLDS/REACHED +
+  `worldmodel/attacker.py` (AttackerState records own/hold/reach postconditions as
+  edges from a canonical attacker principal; ATTACKER_RULES chain them). Graph-
+  native → persists via store, chains via derivation. Acceptance:
+  `test_attacker_state.py` (3 tests: persist+followon, reach-via-owned-host,
+  no-postcondition-no-ownership). NEXT: Wave 5 (B) technique operators with typed
+  pre/post-conditions. TESTS: green — 0 failures, 13 skipped.

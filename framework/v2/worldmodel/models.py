@@ -72,6 +72,12 @@ class EdgeKind(str, enum.Enum):
     SESSION_ON      src (session) is established on dst (host/webapp).
     CONTROL_PROTECTS src (control) protects dst (any node).
     EVIDENCES       src (finding) evidences a fact about dst.
+
+    Attacker-state edges (an achieved postcondition of a confirmed primitive,
+    src is the attacker principal — see worldmodel.attacker):
+    OWNS            src (attacker) controls dst (host/service/resource/principal).
+    HOLDS           src (attacker) holds dst (credential/session/token).
+    REACHED         src (attacker) has reached dst (service/endpoint/segment).
     """
 
     REACHABLE_FROM = "reachable_from"
@@ -84,6 +90,9 @@ class EdgeKind(str, enum.Enum):
     SESSION_ON = "session_on"
     CONTROL_PROTECTS = "control_protects"
     EVIDENCES = "evidences"
+    OWNS = "owns"
+    HOLDS = "holds"
+    REACHED = "reached"
 
 
 # ---------------------------------------------------------------------------
