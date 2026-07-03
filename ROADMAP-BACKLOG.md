@@ -89,7 +89,13 @@ run. This wave is the highest-EV work on the board.
   `produce → critique` against a localhost test target where the finding is
   confirmed **only** because an oracle signal fired (assert: with the signal
   suppressed the same finding is NOT confirmed).
-- [ ] **Reporter surfaces oracle provenance.** `[DEFENSIVE]` **S** —
+- [x] **Reporter surfaces oracle provenance.** `[DEFENSIVE]` **S** — ✅ **SHIPPED
+  2026-07-03.** `FindingPayload` gained `oracle_kind` + `oracle_rationale`; the
+  critique-agent captures them from the fired `ConfirmedFinding`; `reporter_agent`
+  renders a "Verification (deterministic oracle)" block per confirmed finding
+  (which oracle fired, calibrated non-1.0 confidence, rationale), and marks
+  LLM-advisory confirmations plainly. Proof:
+  `agents/tests/test_reporter_oracle_provenance.py`. Original plan text:
   `reporter_agent` renders, per confirmed finding, *which oracle kind fired*, the
   signal evidence, and the calibrated confidence (not 1.0). *Why #1:* prove-don't-
   guess is only credible if the report shows the proof. *Done =* a green test
@@ -326,4 +332,13 @@ Format per entry:
   `calibration.fit(ledger.pairs())` (identity under sparse data, isotonic once
   ≥8 labels), clamped <1.0 — the last hardcoded 1.0 at the confirmation site is
   gone. Acceptance: `test_critique_calibrated_confidence.py` (2 tests). TESTS:
+  green — 0 failures, 13 skipped.
+- 2026-07-03 · auto/reporter-oracle-provenance (local build) · COMPLETED: Wave 4
+  item 2 "Reporter surfaces oracle provenance". `FindingPayload` gained
+  `oracle_kind` + `oracle_rationale`; critique-agent captures them from the fired
+  ConfirmedFinding; reporter renders a per-finding "Verification (deterministic
+  oracle)" block (oracle kind, calibrated non-1.0 confidence, rationale) and marks
+  LLM-advisory confirmations plainly. Acceptance:
+  `test_reporter_oracle_provenance.py` (2 tests). Wave 4 oracle-loop core (items
+  1–4) COMPLETE; only item 5 (multi-oracle disagreement policy) remains. TESTS:
   green — 0 failures, 13 skipped.

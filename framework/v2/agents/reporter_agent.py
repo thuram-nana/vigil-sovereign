@@ -113,6 +113,28 @@ class ReporterAgent(Agent):
                 f.impact or "_(unspecified)_",
                 "",
             ]
+            # Prove-don't-guess: surface HOW the finding was confirmed. An
+            # oracle-verified finding shows which oracle fired, the calibrated
+            # (never-1.0) confidence, and the oracle's rationale, so the report
+            # carries the proof rather than merely asserting it.
+            if f.verified_by_oracle:
+                conf = f"{f.confidence:.3f}" if f.confidence is not None else "n/a"
+                lines += [
+                    "### Verification (deterministic oracle)",
+                    "",
+                    f"**Confirmed by oracle:** `{f.oracle_kind or 'unknown'}`  ",
+                    f"**Calibrated confidence:** {conf}  ",
+                    "",
+                    f.oracle_rationale or "_(no rationale recorded)_",
+                    "",
+                ]
+            else:
+                lines += [
+                    "### Verification",
+                    "",
+                    "_LLM-advisory confirmation — no deterministic oracle signal._",
+                    "",
+                ]
             if f.cvss_vector:
                 lines += [f"**CVSS 3.1 vector:** `{f.cvss_vector}`  ", ""]
             if f.cvss_base is not None:

@@ -159,6 +159,22 @@ class FindingPayload(BaseModel):
             "unconfirmed findings and for the LLM-advisory path."
         ),
     )
+    oracle_kind: str | None = Field(
+        default=None,
+        description=(
+            "Which deterministic oracle fired to confirm this finding (e.g. "
+            "'differential_response', 'oob_callback', 'sanitizer_signal'). None "
+            "for LLM-advisory confirmations. Surfaced in the report so the proof "
+            "is visible, not just asserted."
+        ),
+    )
+    oracle_rationale: str = Field(
+        default="",
+        description=(
+            "Plain-language rationale from the oracle layer (which signal fired "
+            "and on what evidence). Empty for the LLM-advisory path."
+        ),
+    )
 
 
 class CritiquePayload(BaseModel):

@@ -192,6 +192,14 @@ class CritiqueAgent(Agent):
             update["confidence"] = self._calibrated_confidence(
                 float(getattr(oracle_confirmed, "confidence", 0.0))
             )
+            # Provenance for the report: which oracle fired + why (item 4.2).
+            kind = getattr(oracle_confirmed, "confirmed_by", None)
+            update["oracle_kind"] = getattr(kind, "value", None) or (
+                str(kind) if kind is not None else None
+            )
+            update["oracle_rationale"] = str(
+                getattr(oracle_confirmed, "rationale", "") or ""
+            )
         new_finding = finding.model_copy(update=update)
         self.bb.supersede(
             old_id=f_event.id, agent_name=self.name,
