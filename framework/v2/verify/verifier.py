@@ -138,11 +138,25 @@ class OracleVerifier:
         confirming = [s for s in signals if s.fired and s.confidence >= self.high_confidence]
         confirmed = len(confirming) > 0
 
+        # Multi-oracle combine policy: any-high-confidence-fired (safety-monotone).
+        # A non-firing oracle cannot veto a fired one, so when the finding is
+        # confirmed we RECORD the oracles that ran but did not confirm as dissent
+        # rather than treating them as a refutation. Dissent is only meaningful
+        # once something confirmed (otherwise "not confirmed" already says it).
+        confirming_kinds = {s.kind for s in confirming}
+        dissent = (
+            [s.kind.value for s in signals if s.kind not in confirming_kinds]
+            if confirmed
+            else []
+        )
+
         return VerificationResult(
             confirmed=confirmed,
             bug_class=bug_class,
             signals=signals,
-            rationale=self._rationale(bug_class, kinds, signals, confirming, skipped),
+            combine_policy="any_high_confidence_fired",
+            dissent=dissent,
+            rationale=self._rationale(bug_class, kinds, signals, confirming, skipped, dissent),
         )
 
     # -- dispatch ----------------------------------------------------------
@@ -184,15 +198,22 @@ class OracleVerifier:
         signals: list[OracleSignal],
         confirming: list[OracleSignal],
         skipped: list[str],
+        dissent: list[str] | None = None,
     ) -> str:
         if confirming:
             parts = "; ".join(
                 f"{s.kind.value}@{s.confidence:.2f}: {s.evidence}" for s in confirming
             )
-            return (
+            msg = (
                 f"CONFIRMED {bug_class or 'finding'} — "
                 f"{len(confirming)} oracle(s) fired at high confidence: {parts}"
             )
+            if dissent:
+                # Record the disagreement without letting it veto (safety-monotone).
+                msg += (
+                    f". Dissent (ran, did not confirm, cannot veto): {dissent}"
+                )
+            return msg
         fired_low = [s for s in signals if s.fired]
         if fired_low:
             parts = "; ".join(

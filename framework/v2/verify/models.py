@@ -109,6 +109,26 @@ class VerificationResult(BaseModel):
     confirmed: bool
     bug_class: str = Field(default="", description="The class the finding claimed.")
     signals: list[OracleSignal] = Field(default_factory=list)
+    combine_policy: str = Field(
+        default="any_high_confidence_fired",
+        description=(
+            "How multiple applicable oracles were combined into `confirmed`. "
+            "'any_high_confidence_fired' is safety-monotone: one deterministic "
+            "oracle firing at/above the threshold is sufficient proof, and a "
+            "non-firing oracle CANNOT veto a fired one (absence of a signal is "
+            "not evidence of absence). A disagreeing oracle is recorded as "
+            "dissent, never treated as a refutation."
+        ),
+    )
+    dissent: list[str] = Field(
+        default_factory=list,
+        description=(
+            "When the finding was confirmed, the applicable oracle kinds that "
+            "RAN over observed data but did not confirm (did not fire, or fired "
+            "below the threshold) — the recorded disagreement among oracles. "
+            "Empty when a lone oracle confirmed or when nothing confirmed."
+        ),
+    )
     rationale: str = Field(
         default="",
         description="Plain-language account of why the finding was or was not confirmed.",

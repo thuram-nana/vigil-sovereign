@@ -126,7 +126,13 @@ run. This wave is the highest-EV work on the board.
   *Why #1:* directly kills the audit's "confirmed carried a hardcoded 1.0" defect.
   *Done =* a green test shows two confirmed findings of differing evidence strength
   receive *different* calibrated scores, both ≠ 1.0.
-- [ ] **Multi-oracle disagreement policy.** `[DEFENSIVE]` **M** — when >1 oracle
+- [x] **Multi-oracle disagreement policy.** `[DEFENSIVE]` **M** — ✅ **SHIPPED
+  2026-07-03.** `VerificationResult` gained `combine_policy`
+  (`any_high_confidence_fired`, safety-monotone) + `dissent` (applicable oracles
+  that ran but did not confirm). A non-firing oracle cannot veto a fired one; the
+  disagreement is recorded, not treated as refutation, and surfaced in the
+  rationale. Proof: `verify/tests/test_multi_oracle_policy.py` (4 tests). **Wave 4
+  COMPLETE (5/5).** Original plan text:
   applies to a finding, define and test the combine rule (e.g. any-fired-confirms
   for safety-monotone oracles; record dissent). *Why #1:* multi-oracle is the bar;
   a stated, tested policy prevents silent single-point trust. *Done =* a green test
@@ -342,3 +348,12 @@ Format per entry:
   `test_reporter_oracle_provenance.py` (2 tests). Wave 4 oracle-loop core (items
   1–4) COMPLETE; only item 5 (multi-oracle disagreement policy) remains. TESTS:
   green — 0 failures, 13 skipped.
+- 2026-07-03 · auto/multi-oracle-policy (local build) · COMPLETED: Wave 4 item 5
+  "Multi-oracle disagreement policy" — **WAVE 4 COMPLETE (5/5).** `VerificationResult`
+  gained `combine_policy=any_high_confidence_fired` (safety-monotone) + `dissent`
+  (oracles that ran but did not confirm); a non-firing oracle cannot veto a fired
+  one, and the disagreement is recorded in provenance + rationale. Acceptance:
+  `verify/tests/test_multi_oracle_policy.py` (4 tests: confirm+dissent, no-veto,
+  lone-oracle-no-dissent, unconfirmed-empty-dissent). NEXT: Wave 5 (the three
+  ontologies) — (A) world-model persistence + attacker state is the top item.
+  TESTS: green — 0 failures, 13 skipped.
