@@ -38,8 +38,10 @@ attacks on live/third-party targets.
 
 - **Tests green before commit.** 0 failures. An item is not "done" until its
   acceptance test passes *and* the full suite stays green.
-- **Never merge to main.** The agent opens a PR from its working branch; a human
-  reviews and merges. Never force-push, never rewrite history.
+- **Merge to main only via a PR that auto-merges on green.** Each increment goes
+  on a fresh branch off main; its PR auto-merges the instant the full suite is
+  green (0 failures) and any CI checks pass — never before. Never push main
+  directly, never force-push, never rewrite history.
 - **No fixture-theatre.** Acceptance tests must exercise real code paths and real
   fired signals — never assert on hand-baked fixtures shaped to pass. If a test
   can pass without the capability existing, it is invalid.
@@ -69,7 +71,16 @@ closed, the headline win ("a real target drove a real confirmed finding") is
 true only in the confirmation unit tests, not on a full produce→critique→report
 run. This wave is the highest-EV work on the board.
 
-- [ ] **Producer → `oracle_context` wire-in.** `[DEFENSIVE]` **M** —
+- [x] **Producer → `oracle_context` wire-in.** `[DEFENSIVE]` **M** — ✅ **SHIPPED
+  2026-07-03.** Real wire point (the `eval/produce.py` guess below was superseded —
+  `produce.py` runs *after* critique, so it cannot feed it): `ExecutionOutcome`
+  gained `oracle_context`; `exploit_agent` propagates it onto the posted
+  `FindingPayload.oracle_context`; the new `OracleProbeExecutor` differential-probes
+  a loopback target and builds the `FindingContext` from the two real responses.
+  Proof: `agents/tests/test_producer_oracle_e2e.py` — a real localhost target is
+  confirmed **only** because the oracle fired (LLM stubbed to object), and a safe
+  target is **not** confirmed despite a confirming LLM. Original plan text kept for
+  provenance:
   `eval/produce.py` builds a `verify.adapter.FindingContext` for each candidate
   finding it emits (target handle, primitive, observable channel, OOB token where
   applicable) and attaches it as `finding.oracle_context`. *Why #1:* this is the
@@ -276,3 +287,15 @@ Format per entry:
   0 references (producer→oracle wire-in confirmed as the genuine Wave 4 first item)
   and the reporter does not yet surface oracle provenance. REPLENISHED: ~30 items
   across Wave 4 / 5 / 6+ / Horizon. TESTS: not run this session (authoring only).
+- 2026-07-03 · auto/producer-oracle-wirein (local build) · COMPLETED: Wave 4 item 1
+  "Producer → oracle_context wire-in". `ExecutionOutcome.oracle_context` added;
+  `exploit_agent` propagates it to `FindingPayload.oracle_context`; new
+  `agents/oracle_probe_executor.py::OracleProbeExecutor` differential-probes a
+  loopback target (fail-closed on non-loopback) and attaches the two real
+  responses as a `FindingContext`. Acceptance: `test_producer_oracle_e2e.py`
+  (2 tests) — vulnerable localhost target → oracle-confirmed with LLM stubbed to
+  OBJECT; safe target → NOT confirmed with LLM stubbed to CONFIRM (oracle vetoes).
+  The prove-don't-guess loop now closes on a real produce→critique run, not only
+  in the confirmation unit. REPLENISHED: none this run (Wave 4 still has ≥3 items).
+  TESTS: green — 0 failures, 13 skipped (all external-dep/opt-in; +2 vs prior are
+  #11's semgrep-gated vulnjs corpus, not from this change).

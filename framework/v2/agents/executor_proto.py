@@ -39,6 +39,13 @@ class ExecutionOutcome:
     # If the outcome is a confirmed bug, the finding payload to post.
     # The exploit-agent will mark it critique_status='pending' regardless.
     finding: FindingPayload | None = None
+    # Oracle-observable evidence backing the finding: a serialized
+    # verify.adapter.FindingContext (baseline/mutated responses, OOB hits,
+    # achieved-state pair, ...) collected while running the plan. When present,
+    # the exploit-agent propagates it onto the posted Finding as
+    # `oracle_context`, so the deterministic oracle — not the LLM critique —
+    # becomes the confirmation authority for that finding.
+    oracle_context: dict | None = None
 
 
 @runtime_checkable
