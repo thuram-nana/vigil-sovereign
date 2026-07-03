@@ -36,20 +36,46 @@ When `oracle_context` is None the legacy LLM-only path is unchanged and
 
 from __future__ import annotations
 
-from typing import Any, Iterator
+import hashlib
+from typing import TYPE_CHECKING, Any, Iterator
 
 from ..kernel.critique import critique as urk_critique
 from .base import Agent
 from .blackboard import Blackboard, BlackboardEventRow
 from .models import CritiquePayload, FindingPayload
 
+if TYPE_CHECKING:
+    from ..calibration import OutcomeLedger
+
+# Version tag stamped on every ledger Prediction this agent writes, so a
+# calibrator can segment by the scoring model that produced the record.
+_MODEL_VERSION = "oracle-critique-v1"
+
+
+def _feature_hash(finding: FindingPayload) -> str:
+    """A stable, wallclock-free feature key for a finding's calibration record
+    (bug class + surface). Deterministic so the ledger serialises byte-stably."""
+    raw = f"{finding.bug_class}|{finding.surface}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
 
 class CritiqueAgent(Agent):
     name = "critique"
 
-    def __init__(self, bb: Blackboard, engagement_slug: str) -> None:
+    def __init__(
+        self,
+        bb: Blackboard,
+        engagement_slug: str,
+        *,
+        ledger: "OutcomeLedger | None" = None,
+    ) -> None:
         super().__init__(bb, engagement_slug)
         self._reviewed_finding_ids: set[int] = set()
+        # Optional calibration outcome ledger. When present, every
+        # oracle-adjudicated finding appends a deterministic (prediction,
+        # outcome) pair — the training signal for calibrated scoring and the
+        # audit trail. Absent it, critique behaviour is unchanged.
+        self._ledger = ledger
 
     def should_run(self) -> bool:
         # Any pending finding we haven't reviewed yet?
@@ -164,7 +190,62 @@ class CritiqueAgent(Agent):
             new_payload=new_finding.model_dump(),
         )
         posted += 1
+
+        # 3. record the deterministic outcome for calibration + audit — oracle
+        # path only (a fired/silent oracle is the ground truth; the LLM-advisory
+        # path has no deterministic label worth recording).
+        if oracle_present and self._ledger is not None:
+            self._record_outcome(finding, f_event.id, oracle_fired, oracle_confirmed)
+
         return posted
+
+    def _record_outcome(
+        self,
+        finding: FindingPayload,
+        finding_event_id: int,
+        oracle_fired: bool,
+        oracle_result: Any,
+    ) -> None:
+        """Append the finding's (prediction, outcome) pair to the ledger.
+
+        The prediction's raw_score is the fired oracle's confidence (0.0 when no
+        oracle fired); the outcome is EXPLOITABLE when a signal fired, else
+        FALSE_POSITIVE. `seq` is derived from the finding's blackboard event id
+        (monotonic, wallclock-free): 2*id for the prediction, 2*id+1 for the
+        outcome. Append-only violations (a re-reviewed id) are logged, not
+        raised — the ledger never rewrites history."""
+        try:
+            from ..calibration.ledger import LedgerError
+            from ..calibration.models import Outcome, OutcomeLabel, Prediction
+        except Exception as e:  # pragma: no cover - defensive import guard
+            self._log.warning(
+                "agent.critique.calibration_import_failed",
+                id=finding_event_id, error=str(e),
+            )
+            return
+
+        fid = f"{finding.finding_slug}#{finding_event_id}"
+        raw = float(getattr(oracle_result, "confidence", 0.0)) if oracle_fired else 0.0
+        label = OutcomeLabel.EXPLOITABLE if oracle_fired else OutcomeLabel.FALSE_POSITIVE
+        pred_seq = 2 * finding_event_id
+        try:
+            self._ledger.add_prediction(
+                Prediction(
+                    finding_id=fid,
+                    raw_score=raw,
+                    feature_hash=_feature_hash(finding),
+                    model_version=_MODEL_VERSION,
+                    oracle_confirmed=oracle_fired,
+                ),
+                seq=pred_seq,
+            )
+            self._ledger.record_outcome(
+                Outcome(finding_id=fid, label=label), seq=pred_seq + 1,
+            )
+        except LedgerError as e:
+            self._log.warning(
+                "agent.critique.ledger_skip", id=finding_event_id, error=str(e),
+            )
 
     def _oracle_confirm(self, finding: FindingPayload, finding_id: int) -> Any:
         """Run the deterministic oracle layer over `finding.oracle_context`.

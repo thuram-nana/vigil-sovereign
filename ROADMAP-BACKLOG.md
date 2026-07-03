@@ -95,7 +95,12 @@ run. This wave is the highest-EV work on the board.
   guess is only credible if the report shows the proof. *Done =* a green test
   asserts a reported finding contains the firing oracle id + evidence + a
   calibrated (non-1.0) score.
-- [ ] **OutcomeLedger wire-in on every confirm/refute.** `[DEFENSIVE]` **M** —
+- [x] **OutcomeLedger wire-in on every confirm/refute.** `[DEFENSIVE]` **M** — ✅
+  **SHIPPED 2026-07-03.** `CritiqueAgent(ledger=...)` appends a deterministic
+  (Prediction, Outcome) pair for every oracle-adjudicated finding (fired →
+  EXPLOITABLE, silent → FALSE_POSITIVE; seq = 2·event_id / +1). Legacy LLM-only
+  findings are not recorded (no deterministic ground truth). Proof:
+  `agents/tests/test_critique_ledger.py`. Original plan text:
   each oracle decision (confirmed / refuted / inconclusive) appends an outcome to
   `calibration.OutcomeLedger`, keyed to the finding's provenance. *Why #1:* the
   ledger is the training signal for calibrated scoring and the audit trail that
@@ -299,3 +304,12 @@ Format per entry:
   in the confirmation unit. REPLENISHED: none this run (Wave 4 still has ≥3 items).
   TESTS: green — 0 failures, 13 skipped (all external-dep/opt-in; +2 vs prior are
   #11's semgrep-gated vulnjs corpus, not from this change).
+- 2026-07-03 · auto/critique-outcome-ledger (local build) · COMPLETED: Wave 4 item 3
+  "OutcomeLedger wire-in". `CritiqueAgent` gained an optional `ledger` param;
+  every oracle-adjudicated finding appends a deterministic (Prediction, Outcome)
+  pair (fired→EXPLOITABLE raw=oracle-confidence, silent→FALSE_POSITIVE raw=0.0),
+  wallclock-free seq from the finding event id, append-only violations logged not
+  raised. Legacy (no oracle_context) findings are not recorded. Acceptance:
+  `test_critique_ledger.py` (3 tests: confirmed+refuted labels, legacy-not-recorded,
+  no-ledger backward-compatible). REPLENISHED: none. TESTS: green — 0 failures,
+  13 skipped.
