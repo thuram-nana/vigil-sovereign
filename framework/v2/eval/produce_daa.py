@@ -33,11 +33,16 @@ _CWE_CLASS: dict[str, str] = {
     "CWE-95": "Code Injection",
     "CWE-502": "Insecure Deserialization",
     "CWE-611": "XXE",
+    "CWE-943": "NoSQL Injection",
 }
 
 
 def builtin_vulnpy_code_dir() -> Path:
     return Path(__file__).resolve().parent / "corpus" / "vulnpy" / "code"
+
+
+def builtin_vulnjs_code_dir() -> Path:
+    return Path(__file__).resolve().parent / "corpus" / "vulnjs" / "code"
 
 
 class DaaCorpusProducer:

@@ -1,0 +1,18 @@
+{
+  "name": "vulnjs",
+  "version": "1",
+  "targets": [
+    {"slug": "cmdi.js", "name": "Command injection", "archetype": "express",
+     "ground_truth": [{"id": "v", "bug_class": "OS Command Injection", "surface": "cmdi.js", "cwe": "CWE-78", "severity": "critical"}]},
+    {"slug": "codeinj.js", "name": "Code injection", "archetype": "express",
+     "ground_truth": [{"id": "v", "bug_class": "Code Injection", "surface": "codeinj.js", "cwe": "CWE-95", "severity": "critical"}]},
+    {"slug": "ssrf.js", "name": "SSRF", "archetype": "express",
+     "ground_truth": [{"id": "v", "bug_class": "SSRF", "surface": "ssrf.js", "cwe": "CWE-918", "severity": "high"}]},
+    {"slug": "sqli.js", "name": "SQL injection", "archetype": "express",
+     "ground_truth": [{"id": "v", "bug_class": "SQL Injection", "surface": "sqli.js", "cwe": "CWE-89", "severity": "critical"}]},
+    {"slug": "pathtrav.js", "name": "Path traversal", "archetype": "express",
+     "ground_truth": [{"id": "v", "bug_class": "Path Traversal", "surface": "pathtrav.js", "cwe": "CWE-22", "severity": "high"}]},
+    {"slug": "nosqli.js", "name": "NoSQL injection", "archetype": "express",
+     "ground_truth": [{"id": "v", "bug_class": "NoSQL Injection", "surface": "nosqli.js", "cwe": "CWE-943", "severity": "high"}]}
+  ]
+}

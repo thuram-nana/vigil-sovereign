@@ -1,0 +1,124 @@
+# DAA taint ruleset — JavaScript / TypeScript (semgrep taint mode).
+#
+# Dataflow rules: each finding means request-controlled input provably
+# reaches a dangerous sink. Sources are common Express request entry
+# points (req.query / req.params / req.body / req.headers / req.cookies).
+# Extend per framework (Koa ctx.*, Fastify, Next.js handlers).
+
+rules:
+  - id: daa-js-command-injection
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into a child_process command (CWE-78).
+    metadata: {cwe: "CWE-78", bug_class: "OS Command Injection"}
+    languages: [javascript, typescript]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query
+          - pattern: $REQ.query.$P
+          - pattern: $REQ.params.$P
+          - pattern: $REQ.body
+          - pattern: $REQ.body.$P
+          - pattern: $REQ.headers.$P
+          - pattern: $REQ.cookies.$P
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $CP.exec(...)
+          - pattern: $CP.execSync(...)
+          - pattern: $CP.spawn(...)
+          - pattern: $CP.spawnSync(...)
+
+  - id: daa-js-code-injection
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into a code-evaluation sink (CWE-95).
+    metadata: {cwe: "CWE-95", bug_class: "Code Injection"}
+    languages: [javascript, typescript]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query.$P
+          - pattern: $REQ.params.$P
+          - pattern: $REQ.body.$P
+          - pattern: $REQ.query
+          - pattern: $REQ.body
+    pattern-sinks:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: Function(...)
+          - pattern: new Function(...)
+
+  - id: daa-js-ssrf
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into an outbound HTTP fetch (SSRF, CWE-918).
+    metadata: {cwe: "CWE-918", bug_class: "SSRF"}
+    languages: [javascript, typescript]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query.$P
+          - pattern: $REQ.params.$P
+          - pattern: $REQ.body.$P
+          - pattern: $REQ.query
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $H.get(...)
+          - pattern: $H.request(...)
+          - pattern: axios.get(...)
+          - pattern: axios(...)
+          - pattern: fetch(...)
+          - pattern: request(...)
+
+  - id: daa-js-sql-injection
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into a SQL query string (CWE-89).
+    metadata: {cwe: "CWE-89", bug_class: "SQL Injection"}
+    languages: [javascript, typescript]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query.$P
+          - pattern: $REQ.params.$P
+          - pattern: $REQ.body.$P
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.query($A + $B, ...)
+              - pattern: $DB.query(`...`, ...)
+              - pattern: $DB.execute($A + $B, ...)
+              - pattern: $DB.execute(`...`, ...)
+
+  - id: daa-js-path-traversal
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into a filesystem read (path traversal, CWE-22).
+    metadata: {cwe: "CWE-22", bug_class: "Path Traversal"}
+    languages: [javascript, typescript]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.query.$P
+          - pattern: $REQ.params.$P
+          - pattern: $REQ.body.$P
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $FS.readFile(...)
+          - pattern: $FS.readFileSync(...)
+          - pattern: $FS.createReadStream(...)
+          - pattern: $FS.sendFile(...)
+
+  - id: daa-js-nosql-injection
+    mode: taint
+    severity: ERROR
+    message: Untrusted request object flows into a NoSQL query (CWE-943).
+    metadata: {cwe: "CWE-943", bug_class: "NoSQL Injection"}
+    languages: [javascript, typescript]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ.body
+          - pattern: $REQ.body.$P
+          - pattern: $REQ.query
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $COL.find(...)
+          - pattern: $COL.findOne(...)
+          - pattern: $COL.deleteMany(...)
+          - pattern: $COL.updateMany(...)
