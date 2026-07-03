@@ -181,10 +181,18 @@ class CritiqueAgent(Agent):
             new_status = "confirmed" if cr.decision == "confirm" else "objections"
             verified = False
 
-        new_finding = finding.model_copy(update={
+        update: dict[str, Any] = {
             "critique_status": new_status,
             "verified_by_oracle": verified,
-        })
+        }
+        # Calibrated exploitability score at the confirmation site — the fired
+        # oracle's signal confidence mapped through calibration (identity under
+        # sparse data). This replaces the audit's hardcoded 1.0; it is never 1.0.
+        if oracle_fired:
+            update["confidence"] = self._calibrated_confidence(
+                float(getattr(oracle_confirmed, "confidence", 0.0))
+            )
+        new_finding = finding.model_copy(update=update)
         self.bb.supersede(
             old_id=f_event.id, agent_name=self.name,
             new_payload=new_finding.model_dump(),
@@ -246,6 +254,23 @@ class CritiqueAgent(Agent):
             self._log.warning(
                 "agent.critique.ledger_skip", id=finding_event_id, error=str(e),
             )
+
+    def _calibrated_confidence(self, raw: float) -> float:
+        """Map a fired oracle's raw signal confidence to a calibrated
+        exploitability probability. Fits a PAV/isotonic calibrator over the
+        ledger's resolved pairs when a ledger is present; falls back to identity
+        (the raw score passed through) with no ledger or too few labels. Either
+        way it is a real number in [0, 1) — never the old hardcoded 1.0."""
+        raw = max(0.0, min(1.0, raw))
+        if self._ledger is None:
+            return raw
+        try:
+            from ..calibration.calibrate import fit
+            calibrator = fit(self._ledger.pairs())
+            return float(calibrator.calibrate(raw, oracle_confirmed=True))
+        except Exception as e:  # pragma: no cover - defensive
+            self._log.warning("agent.critique.calibrate_failed", error=str(e))
+            return raw
 
     def _oracle_confirm(self, finding: FindingPayload, finding_id: int) -> Any:
         """Run the deterministic oracle layer over `finding.oracle_context`.

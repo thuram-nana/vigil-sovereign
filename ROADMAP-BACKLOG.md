@@ -107,7 +107,14 @@ run. This wave is the highest-EV work on the board.
   ends the self-contradicting honesty ledger. *Done =* a green test runs N
   produce→critique cycles and asserts the ledger contains N outcomes with correct
   confirmed/refuted labels.
-- [ ] **Calibrated score replaces the hardcoded 1.0 at the confirmation site.**
+- [x] **Calibrated score replaces the hardcoded 1.0 at the confirmation site.**
+  `[DEFENSIVE]` **S** — ✅ **SHIPPED 2026-07-03.** `FindingPayload.confidence`
+  added; the critique-agent sets it from the fired oracle's signal confidence via
+  `calibration.calibrate.fit(ledger.pairs())` (identity passthrough under sparse
+  data, PAV isotonic once ≥8 labels) — clamped `<1.0`, never a constant. Proof:
+  `agents/tests/test_critique_calibrated_confidence.py` (3-row differential →
+  ~0.97, 1-row → ~0.83, distinct & both ≠1.0; legacy path → confidence None).
+  Original plan text:
   `[DEFENSIVE]` **S** — the confidence attached to a confirmed finding is drawn
   from `calibration.calibrate` (PAV isotonic over the ledger), not a constant.
   *Why #1:* directly kills the audit's "confirmed carried a hardcoded 1.0" defect.
@@ -313,3 +320,10 @@ Format per entry:
   `test_critique_ledger.py` (3 tests: confirmed+refuted labels, legacy-not-recorded,
   no-ledger backward-compatible). REPLENISHED: none. TESTS: green — 0 failures,
   13 skipped.
+- 2026-07-03 · auto/critique-calibrated-confidence (local build) · COMPLETED: Wave 4
+  item 4 "Calibrated score at the confirmation site". `FindingPayload.confidence`
+  added; critique-agent sets it to the fired oracle's confidence mapped through
+  `calibration.fit(ledger.pairs())` (identity under sparse data, isotonic once
+  ≥8 labels), clamped <1.0 — the last hardcoded 1.0 at the confirmation site is
+  gone. Acceptance: `test_critique_calibrated_confidence.py` (2 tests). TESTS:
+  green — 0 failures, 13 skipped.

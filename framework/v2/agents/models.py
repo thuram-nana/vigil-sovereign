@@ -147,6 +147,18 @@ class FindingPayload(BaseModel):
             "confirmations and for every finding without oracle evidence."
         ),
     )
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Calibrated exploitability probability set at the confirmation site "
+            "when a deterministic oracle fired: the oracle's signal confidence "
+            "mapped through calibration (PAV isotonic over the OutcomeLedger, or "
+            "identity when data is sparse). NEVER the old hardcoded 1.0. None for "
+            "unconfirmed findings and for the LLM-advisory path."
+        ),
+    )
 
 
 class CritiquePayload(BaseModel):
