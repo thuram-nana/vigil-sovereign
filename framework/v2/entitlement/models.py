@@ -161,6 +161,17 @@ class EntitlementDocument(BaseModel):
         "Empty means 'all capabilities the tier permits'.",
     )
     binding: HardwareBinding = Field(default_factory=HardwareBinding)
+    revocation_required: bool = Field(
+        default=False,
+        description="When true, a validly-signed revocation list MUST be present "
+        "and readable at evaluation time; an absent or unreadable list fails "
+        "CLOSED (deny). This closes the 'rm revocation.json' bypass for grants "
+        "that expect a revocation source. Default false preserves legacy "
+        "behaviour — an entitlement that never expected a revocation list is "
+        "not denied merely because none is present. This field is inside the "
+        "signed core, so it cannot be flipped off without invalidating the "
+        "signature.",
+    )
     issued_at: datetime
     not_before: datetime
     not_after: datetime

@@ -1,0 +1,271 @@
+"""
+verify.adapter — translate already-collected observations into oracle inputs.
+
+`OracleVerifier.confirm` consumes a plain `finding_context` mapping (see
+verifier.confirm's docstring). Producing that mapping by hand at every call
+site is error-prone and couples the caller to the exact key names. This module
+is the single, typed translation layer between *observations a probe already
+collected* and *the context the oracle layer judges*.
+
+Hard boundary — this is a TRANSLATOR, not a generator:
+
+  * It never sends traffic, mints payloads, or contacts a target.
+  * It takes data the caller already has (two HTTP responses, a list of OOB
+    hits, an expected/observed state pair, captured process output, a sink)
+    and reshapes it into the keys `confirm` recognises.
+  * Everything it emits is JSON-serialisable, so a `FindingContext` can be
+    stored alongside the finding it confirms and replayed deterministically.
+
+`FindingContext.to_verifier_context()` yields exactly the dict `confirm`
+reads — and only the keys whose inputs are actually present, so an oracle
+with no observed data is *skipped*, never fed empty values it might
+misjudge.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ---------------------------------------------------------------------------
+# Coercion helpers — kept local so the adapter depends on nothing but stdlib
+# ---------------------------------------------------------------------------
+
+
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _response_to_dict(value: Any, latency_ms: float | None = None) -> dict[str, Any]:
+    """Normalise one observed HTTP response into `{status?, body, latency_ms?}`.
+
+    Accepts (all already-collected, nothing is fetched here):
+      * a mapping with any of {status|status_code, body|text|content,
+        latency_ms|elapsed_ms};
+      * a response-like object exposing `.status_code`/`.status` and
+        `.text`/`.content` (httpx.Response, urllib's http.client response, …);
+      * a raw `str`/`bytes` body.
+    """
+    if value is None:
+        raise ValueError("response is None; nothing to translate")
+
+    if isinstance(value, Mapping):
+        status = value.get("status", value.get("status_code"))
+        body = value.get("body", value.get("text", value.get("content")))
+        lat = value.get("latency_ms", value.get("elapsed_ms", latency_ms))
+        out: dict[str, Any] = {"body": _coerce_text(body if body is not None else "")}
+        if status is not None:
+            out["status"] = int(status)
+        if lat is not None:
+            out["latency_ms"] = float(lat)
+        return out
+
+    # Duck-typed response object (avoid importing httpx just to isinstance it).
+    if hasattr(value, "status_code") or hasattr(value, "status"):
+        status = getattr(value, "status_code", None)
+        if status is None:
+            status = getattr(value, "status", None)
+        body = getattr(value, "text", None)
+        if body is None:
+            body = getattr(value, "content", None)
+        out = {"body": _coerce_text(body if body is not None else "")}
+        if status is not None:
+            out["status"] = int(status)
+        if latency_ms is not None:
+            out["latency_ms"] = float(latency_ms)
+        return out
+
+    # Raw body.
+    out = {"body": _coerce_text(value)}
+    if latency_ms is not None:
+        out["latency_ms"] = float(latency_ms)
+    return out
+
+
+def _hit_to_dict(hit: Any) -> dict[str, Any]:
+    """Reduce one OOB interaction (OOBHit model, mapping, or duck-typed object)
+    to a JSON-safe dict the oob oracle can read."""
+    if hasattr(hit, "model_dump"):
+        return dict(hit.model_dump())
+    if isinstance(hit, Mapping):
+        return dict(hit)
+    return {
+        "method": getattr(hit, "method", "?"),
+        "path": getattr(hit, "path", "?"),
+        "client_ip": getattr(hit, "client_ip", "?"),
+    }
+
+
+def _sink_to_serialisable(sink: Any) -> Any:
+    """Keep mappings/lists as-is (JSON-safe, and the side-effect oracle searches
+    them structurally); coerce anything else to text."""
+    if isinstance(sink, Mapping):
+        return {str(k): _coerce_text(v) for k, v in sink.items()}
+    if isinstance(sink, (list, tuple)):
+        return [_coerce_text(x) for x in sink]
+    return _coerce_text(sink)
+
+
+# ---------------------------------------------------------------------------
+# FindingContext — the typed carrier of oracle inputs
+# ---------------------------------------------------------------------------
+
+
+class FindingContext(BaseModel):
+    """Typed, replayable bundle of the observations one finding is judged on.
+
+    A field left `None` means "this oracle has no observed data" — its key is
+    omitted from `to_verifier_context()` and the oracle is skipped. Build one
+    with the classmethod that matches the signal you collected; combine several
+    by passing more than one builder's output through `merge` if a finding is
+    corroborated by multiple oracles."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bug_class: str = Field(
+        default="",
+        description="Canonical or aliased bug class; selects the oracle set.",
+    )
+
+    # differential_response_oracle
+    baseline: dict[str, Any] | None = None
+    mutated: dict[str, Any] | None = None
+    discriminator: dict[str, Any] | None = None
+
+    # achieved_state_oracle
+    expected_state: dict[str, Any] | None = None
+    observed_state: dict[str, Any] | None = None
+
+    # side_effect_oracle
+    marker: str | None = None
+    observed_sink: Any | None = None
+
+    # sanitizer_signal_oracle
+    process_output: str | None = None
+
+    # oob_callback_oracle
+    oob_hits: list[Any] | None = None
+
+    # -- builders ----------------------------------------------------------
+
+    @classmethod
+    def from_http_responses(
+        cls,
+        baseline: Any,
+        mutated: Any,
+        *,
+        bug_class: str = "boolean_sqli",
+        discriminator: Mapping[str, Any] | None = None,
+        baseline_latency_ms: float | None = None,
+        mutated_latency_ms: float | None = None,
+    ) -> "FindingContext":
+        """A baseline vs. mutated response pair, for the differential oracle
+        (boolean- and time-based blind signals). Latencies are optional and
+        only needed for a time-based comparison; omit them for a purely
+        boolean (status/length/lexical) differential to stay deterministic."""
+        return cls(
+            bug_class=bug_class,
+            baseline=_response_to_dict(baseline, baseline_latency_ms),
+            mutated=_response_to_dict(mutated, mutated_latency_ms),
+            discriminator=dict(discriminator) if discriminator is not None else None,
+        )
+
+    @classmethod
+    def from_oob(
+        cls, hits: Any, *, bug_class: str = "ssrf"
+    ) -> "FindingContext":
+        """A list of out-of-band interactions (whatever `OOBReceiver.poll`
+        returned) for the oob-callback oracle. An empty list is a valid,
+        non-firing negative control."""
+        return cls(
+            bug_class=bug_class,
+            oob_hits=[_hit_to_dict(h) for h in (hits or [])],
+        )
+
+    @classmethod
+    def from_state(
+        cls,
+        expected: Mapping[str, Any],
+        observed: Mapping[str, Any],
+        *,
+        bug_class: str = "idor",
+    ) -> "FindingContext":
+        """An expected (attacker-predicted) vs. observed state pair for the
+        achieved-state oracle (IDOR/BOLA/mass-assignment/privesc)."""
+        return cls(
+            bug_class=bug_class,
+            expected_state=dict(expected or {}),
+            observed_state=dict(observed or {}),
+        )
+
+    @classmethod
+    def from_process_output(
+        cls, captured: Any, *, bug_class: str = "crash"
+    ) -> "FindingContext":
+        """Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/
+        abort/traceback markers)."""
+        return cls(bug_class=bug_class, process_output=_coerce_text(captured))
+
+    @classmethod
+    def from_side_effect(
+        cls,
+        marker: str,
+        observed_sink: Any,
+        *,
+        bug_class: str = "xss",
+    ) -> "FindingContext":
+        """A unique canary marker plus the sink it was observed in, for the
+        side-effect oracle (XSS/SSTI/path-traversal/error-based)."""
+        return cls(
+            bug_class=bug_class,
+            marker=_coerce_text(marker),
+            observed_sink=_sink_to_serialisable(observed_sink),
+        )
+
+    # -- combination -------------------------------------------------------
+
+    def merge(self, other: "FindingContext") -> "FindingContext":
+        """Fold another context's populated inputs into this one, so a single
+        finding can be judged by multiple oracles. `self` wins on conflicts;
+        `other.bug_class` is only adopted when `self` has none."""
+        data = self.model_dump()
+        for key, value in other.model_dump().items():
+            if key == "bug_class":
+                if not data.get("bug_class"):
+                    data["bug_class"] = value
+                continue
+            if data.get(key) is None and value is not None:
+                data[key] = value
+        return FindingContext(**data)
+
+    # -- emit --------------------------------------------------------------
+
+    def to_verifier_context(self) -> dict[str, Any]:
+        """The exact mapping `OracleVerifier.confirm` consumes. Only keys whose
+        inputs are present are emitted; a paired oracle (differential,
+        achieved-state, side-effect) is only wired when *both* halves exist."""
+        ctx: dict[str, Any] = {"bug_class": self.bug_class}
+        if self.baseline is not None and self.mutated is not None:
+            ctx["baseline"] = self.baseline
+            ctx["mutated"] = self.mutated
+            if self.discriminator is not None:
+                ctx["discriminator"] = self.discriminator
+        if self.expected_state is not None and self.observed_state is not None:
+            ctx["expected_state"] = self.expected_state
+            ctx["observed_state"] = self.observed_state
+        if self.marker is not None and self.observed_sink is not None:
+            ctx["marker"] = self.marker
+            ctx["observed_sink"] = self.observed_sink
+        if self.process_output is not None:
+            ctx["process_output"] = self.process_output
+        if self.oob_hits is not None:
+            ctx["oob_hits"] = self.oob_hits
+        return ctx

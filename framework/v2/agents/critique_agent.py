@@ -15,11 +15,28 @@ For each Finding with `critique_status='pending'`:
      'confirmed' or 'objections'.
 
 The reporter watches for findings with critique_status='confirmed'.
+
+Oracle authority (CRUCIBLE Wave 3)
+----------------------------------
+When a Finding carries `oracle_context` (a serialized
+`verify.adapter.FindingContext`), the deterministic oracle layer is the
+AUTHORITY and the LLM critique is demoted to ADVISORY:
+
+  * If an oracle FIRES over the observed data, the finding is stamped
+    `confirmed` and `verified_by_oracle=True`. The URK critique is STILL
+    run and its verdict STILL recorded as a Critique event — but that
+    verdict does not override the fired signal.
+  * If no oracle fires, the finding is NOT confirmed regardless of what
+    the LLM says — a fired signal is required. The LLM cannot rubber-
+    stamp a finding the oracle refused.
+
+When `oracle_context` is None the legacy LLM-only path is unchanged and
+`verified_by_oracle` stays False (advisory confirmation, as before).
 """
 
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Any, Iterator
 
 from ..kernel.critique import critique as urk_critique
 from .base import Agent
@@ -80,6 +97,17 @@ class CritiqueAgent(Agent):
             depth += 1
         evidence = "\n\n".join(evidence_parts) or "(no provenance chain)"
 
+        # If the finding carries oracle evidence, the deterministic oracle is
+        # the AUTHORITY: run it first and let its verdict decide promotion. The
+        # URK critique below becomes advisory (still recorded, never overriding).
+        oracle_confirmed = (
+            self._oracle_confirm(finding, f_event.id)
+            if finding.oracle_context is not None
+            else None
+        )
+        oracle_present = finding.oracle_context is not None
+        oracle_fired = oracle_confirmed is not None
+
         try:
             cr, _trace = urk_critique(
                 claim=f"{finding.title}: {finding.summary}",
@@ -90,26 +118,83 @@ class CritiqueAgent(Agent):
             self._log.warning(
                 "agent.critique.urk_error", id=f_event.id, error=str(e),
             )
-            return 0
+            if not oracle_present:
+                # Legacy LLM-only path: no critique means no decision. Leave the
+                # finding pending exactly as before (unchanged behaviour).
+                return 0
+            # Oracle-authoritative path: the oracle already holds the verdict,
+            # so a failed advisory critique does not block promotion. Proceed
+            # without an advisory Critique event.
+            cr = None
 
-        # 1. post the critique event
-        crit_payload = CritiquePayload(
-            target_event_id=f_event.id,
-            decision=cr.decision,
-            objections=[o.concern for o in cr.objections],
-            deception_check=cr.deception_check,
-        )
-        self.bb.post(
-            engagement=self.engagement_id, kind="critique",
-            agent_name=self.name, parent_id=f_event.id,
-            payload=crit_payload.model_dump(),
-        )
+        posted = 0
 
-        # 2. supersede the finding with the new critique_status
-        new_status = "confirmed" if cr.decision == "confirm" else "objections"
-        new_finding = finding.model_copy(update={"critique_status": new_status})
+        # 1. post the critique event (advisory when an oracle is the authority)
+        if cr is not None:
+            crit_payload = CritiquePayload(
+                target_event_id=f_event.id,
+                decision=cr.decision,
+                objections=[o.concern for o in cr.objections],
+                deception_check=cr.deception_check,
+            )
+            self.bb.post(
+                engagement=self.engagement_id, kind="critique",
+                agent_name=self.name, parent_id=f_event.id,
+                payload=crit_payload.model_dump(),
+            )
+            posted += 1
+
+        # 2. supersede the finding with the new critique_status.
+        if oracle_present:
+            # The oracle is authoritative: a fired signal is required, and the
+            # LLM's advisory verdict cannot override it in either direction.
+            new_status = "confirmed" if oracle_fired else "objections"
+            verified = oracle_fired
+        else:
+            # Legacy LLM-advisory path — unchanged.
+            new_status = "confirmed" if cr.decision == "confirm" else "objections"
+            verified = False
+
+        new_finding = finding.model_copy(update={
+            "critique_status": new_status,
+            "verified_by_oracle": verified,
+        })
         self.bb.supersede(
             old_id=f_event.id, agent_name=self.name,
             new_payload=new_finding.model_dump(),
         )
-        return 2
+        posted += 1
+        return posted
+
+    def _oracle_confirm(self, finding: FindingPayload, finding_id: int) -> Any:
+        """Run the deterministic oracle layer over `finding.oracle_context`.
+
+        Returns the `ConfirmedFinding` when an oracle fired at/above the
+        verifier threshold, else None. `verify` is imported lazily to avoid an
+        import cycle (verify → agents.models via _finding_to_dict duck typing).
+        Any failure to build the context or run the oracle is treated as
+        "did not fire" — the authority never promotes on an error."""
+        try:
+            from ..verify.adapter import FindingContext
+            from ..verify.confirmation import confirm_finding
+        except Exception as e:  # pragma: no cover - defensive import guard
+            self._log.warning(
+                "agent.critique.verify_import_failed", id=finding_id, error=str(e),
+            )
+            return None
+
+        try:
+            context = FindingContext.model_validate(finding.oracle_context)
+        except Exception as e:
+            self._log.warning(
+                "agent.critique.oracle_context_invalid", id=finding_id, error=str(e),
+            )
+            return None
+
+        try:
+            return confirm_finding(finding, context)
+        except Exception as e:  # pragma: no cover - defensive
+            self._log.warning(
+                "agent.critique.oracle_error", id=finding_id, error=str(e),
+            )
+            return None

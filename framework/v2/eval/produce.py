@@ -25,39 +25,128 @@ Mapping decisions:
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Union
 
 from ..agents.blackboard import Blackboard, BlackboardError
 from ..agents.models import FindingPayload
 from .models import BenchmarkTarget, ProducedFinding
 
-# critique_status -> confidence the produced finding carries.
+if TYPE_CHECKING:  # avoid importing the calibration layer at module import time.
+    from ..calibration import Calibrator, OutcomeLedger
+
+# A fitted mapping (Calibrator), the ledger to fit one from (OutcomeLedger), or
+# nothing. Kept as a public alias so callers can annotate the optional arg.
+CalibratorLike = Union["Calibrator", "OutcomeLedger"]
+
+# critique_status -> confidence the produced finding carries when NO calibrator
+# is supplied. This is the honest, uncalibrated prior. "confirmed" is 0.9, NOT
+# 1.0: critique- or oracle-confirmation is strong evidence, not certainty, and
+# this module never emits a hardcoded 1.0 on any path (that false certainty was
+# AUDIT finding #8 / DAA-adjacent). Whenever a calibrator IS supplied, the
+# confirmed confidence is instead a probability *learned from recorded outcomes*
+# (see `_HONEST_PRIOR` and framework.v2.calibration), clamped below 1.0.
 _CONFIDENCE: dict[str, float] = {
-    "confirmed": 1.0,
+    "confirmed": 0.9,
+    "pending": 0.6,
+    "objections": 0.2,
+}
+
+# critique_status -> honest, uncalibrated prior fed to a calibrator as the raw
+# score. "confirmed" is 0.9, not 1.0: critique-confirmation is strong evidence,
+# not certainty. Under an *identity* (data-sparse) calibrator these pass through
+# unchanged, so even an unfitted calibrator never re-emits a false 1.0; under a
+# *fitted* calibrator they are replaced by the isotonically-learned probability.
+_HONEST_PRIOR: dict[str, float] = {
+    "confirmed": 0.9,
     "pending": 0.6,
     "objections": 0.2,
 }
 
 
-def map_finding(payload: FindingPayload) -> ProducedFinding:
-    """Map one blackboard finding to a ProducedFinding."""
+def _resolve_calibrator(calibrator: CalibratorLike) -> "Calibrator":
+    """Coerce a supplied calibrator-or-ledger into a fitted `Calibrator`.
+
+    Imported lazily so `eval.produce` stays importable without the calibration
+    layer when no calibrator is used. An `OutcomeLedger` is fit on the spot
+    (deterministic: `fit` is a pure function of the ledger's resolved pairs);
+    a `Calibrator` is used as-is."""
+    from ..calibration import Calibrator, OutcomeLedger, fit
+
+    if isinstance(calibrator, Calibrator):
+        return calibrator
+    if isinstance(calibrator, OutcomeLedger):
+        return fit(calibrator.pairs())
+    raise TypeError(
+        "calibrator must be a calibration.Calibrator or calibration.OutcomeLedger, "
+        f"got {type(calibrator).__name__}"
+    )
+
+
+def _confidence(payload: FindingPayload, calibrator: "Calibrator | None") -> float:
+    """The confidence a produced finding carries.
+
+    No calibrator -> the honest uncalibrated table ("confirmed" is 0.9, never a
+    false 1.0). With a calibrator -> the honest prior for
+    the finding's status is fed through the calibrator, so "confirmed" becomes
+    a probability *learned from outcomes* rather than a hardcoded 1.0. A
+    finding whose confirmation was carried by a deterministic oracle
+    (`verified_by_oracle`) contributes a strong learned prior via the
+    calibrator's noisy-OR, raising — never pinning — the number."""
+    status = payload.critique_status
+    if calibrator is None:
+        return _CONFIDENCE.get(status, 0.5)
+    raw = _HONEST_PRIOR.get(status, 0.5)
+    return calibrator.calibrate(raw, oracle_confirmed=payload.verified_by_oracle)
+
+
+def map_finding(
+    payload: FindingPayload, *, calibrator: CalibratorLike | None = None
+) -> ProducedFinding:
+    """Map one blackboard finding to a ProducedFinding.
+
+    `calibrator` is optional and additive: when omitted, confidence comes from
+    the legacy status table (backward compatible). When supplied (a fitted
+    `Calibrator` or an `OutcomeLedger` to fit one from), the confidence is the
+    calibrated exploitability probability learned from recorded outcomes."""
     keys = [payload.derived_from_hypothesis] if payload.derived_from_hypothesis else []
+    cal = _resolve_calibrator(calibrator) if calibrator is not None else None
     return ProducedFinding(
         bug_class=payload.bug_class,
         surface=payload.surface,
         summary=payload.title or payload.summary,
-        confidence=_CONFIDENCE.get(payload.critique_status, 0.5),
+        confidence=_confidence(payload, cal),
         detection_keys=keys,
     )
 
 
 def map_findings(
-    findings: list[FindingPayload], *, confirmed_only: bool = True
+    findings: list[FindingPayload],
+    *,
+    confirmed_only: bool = True,
+    calibrator: CalibratorLike | None = None,
 ) -> list[ProducedFinding]:
-    """Map blackboard findings, optionally restricting to critique-confirmed."""
+    """Map blackboard findings, optionally restricting to critique-confirmed.
+
+    An optional `calibrator` (a fitted `Calibrator` or an `OutcomeLedger`) is
+    resolved once and applied to every mapped finding, so a confirmed
+    finding's confidence reflects learned outcomes rather than a hardcoded
+    1.0. Omitting it preserves the legacy behavior exactly."""
     selected = [
         f for f in findings if (not confirmed_only or f.critique_status == "confirmed")
     ]
-    return [map_finding(f) for f in selected]
+    cal = _resolve_calibrator(calibrator) if calibrator is not None else None
+    return [
+        ProducedFinding(
+            bug_class=f.bug_class,
+            surface=f.surface,
+            summary=f.title or f.summary,
+            confidence=_confidence(f, cal),
+            detection_keys=(
+                [f.derived_from_hypothesis] if f.derived_from_hypothesis else []
+            ),
+        )
+        for f in selected
+    ]
 
 
 def read_blackboard_findings(bb: Blackboard, engagement_slug: str) -> list[FindingPayload]:
@@ -94,12 +183,19 @@ class BlackboardFindingProducer:
         *,
         slug_resolver: Callable[[BenchmarkTarget], str] | None = None,
         confirmed_only: bool = True,
+        calibrator: CalibratorLike | None = None,
     ) -> None:
         self._bb = bb
         self._resolver = slug_resolver or (lambda t: t.slug)
         self._confirmed_only = confirmed_only
+        # Optional and additive: None preserves the legacy naive confidences.
+        self._calibrator = calibrator
 
     def __call__(self, target: BenchmarkTarget) -> list[ProducedFinding]:
         slug = self._resolver(target)
         findings = read_blackboard_findings(self._bb, slug)
-        return map_findings(findings, confirmed_only=self._confirmed_only)
+        return map_findings(
+            findings,
+            confirmed_only=self._confirmed_only,
+            calibrator=self._calibrator,
+        )

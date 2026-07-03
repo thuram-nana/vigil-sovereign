@@ -30,7 +30,7 @@ from ..memory import recorder
 from ..memory.store import open_store
 from . import fingerprint as fp_pkg
 from . import scaffolder, stack_classifier
-from .http import DEFAULT_BUDGET, Fetcher, make_fetcher
+from .http import DEFAULT_BUDGET, Fetcher, assert_public_target, make_fetcher
 from .models import Fingerprint, IntakeOutcome
 
 
@@ -75,6 +75,13 @@ def run(
 
     # 1. ethics gate
     ethics.require_authorized_intake(full_url)
+
+    # 1b. SSRF entry-point guard (defence-in-depth). Reject a non-http(s)
+    # scheme or a literal private / loopback / link-local / metadata IP at
+    # the front door. DNS resolution is deferred to the fetcher's per-
+    # request guard (resolve=False here) so a merely-unresolvable hostname
+    # does not fail intake before scaffolding.
+    assert_public_target(full_url, resolve=False)
 
     # 2. determine slug
     if slug is None:

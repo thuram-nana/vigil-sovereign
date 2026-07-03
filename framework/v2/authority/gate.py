@@ -20,6 +20,7 @@ tripped engagement cannot take any action by any path.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 from ..common.errors import (
@@ -31,6 +32,7 @@ from ..common.errors import (
     OutOfScope,
 )
 from ..common.ethics import host_matches_scope
+from ..entitlement.models import TrustRoot
 from .killswitch import KillSwitch
 from .models import (
     ActionRequest,
@@ -39,6 +41,7 @@ from .models import (
     EngagementAuthority,
     TargetEnvironment,
 )
+from .store import load_authority, load_verified_authority
 
 
 def _host_of(target: str) -> str:
@@ -151,3 +154,32 @@ def require_authorization(
         err = _DENIAL_ERRORS.get(decision.denial_code, EthicsViolation)
         raise err(decision.reason)
     return decision
+
+
+def load_authority_for_gate(
+    slug: str,
+    *,
+    trust_root: TrustRoot | None = None,
+    path: Path | None = None,
+) -> EngagementAuthority:
+    """Load the authority the gate should enforce, choosing the load path.
+
+    This is the single, first-class entry point a caller uses to obtain an
+    authority before feeding it to :func:`authorize_action` /
+    :func:`require_authorization`.
+
+    - If ``trust_root`` is supplied, the *verified* (threshold-signed) load
+      path is used: the on-disk document must carry at least the trust
+      root's threshold of valid governance signatures or the load fails
+      closed (raises ``AuthorityUnsigned``). This is the recommended,
+      high-assurance path — pass a trust root and unsigned/tampered
+      documents cannot arm an engagement.
+    - If ``trust_root`` is ``None``, the legacy unsigned load path is used
+      (compat for deployments not yet running signed authorities).
+
+    Selecting the verified path is therefore as simple as passing a trust
+    root; nothing else about the call changes.
+    """
+    if trust_root is not None:
+        return load_verified_authority(slug, trust_root, path)
+    return load_authority(slug, path)

@@ -12,30 +12,29 @@ add it here.
 
 ---
 
-## 1. Three subsystems are missing entirely
+## 1. Subsystem inventory — DAA/DEL/SIL now ship (this section was stale)
 
-After Sessions 1 and 2, five subsystems ship: URK, MLS, UTI, MAO,
-ACP. The remaining three — DAA, DEL, SIL — are not stubbed and not
-partially implemented. They do not exist on disk.
+**Corrected Wave 1 (2026-07-02).** This section previously stated that
+DAA, DEL, and SIL "do not exist on disk." That is no longer true — all
+three shipped in later sessions and are code-complete + module-tested
+(offline). See the manifest table (rows 6/7/8) and §§ 20–22 below:
 
-What this means in practice:
+- **DEL** — `framework/v2/defender/` ships the defensive telemetry /
+  self-detection subset (§ 21). No evasion generation, by policy.
+- **DAA** — `framework/v2/analysis/` ships the offline pattern analyzer
+  plus Semgrep taint and optional Joern CPG adapters (§ 22).
+- **SIL** — `framework/v2/improve/` ships the reviewer / horizon /
+  patcher / gated-merge loop (§ 20).
 
-- **No defender awareness.** Without DEL, the framework has no
-  model of what telemetry its own actions would trip. EMULATE
-  posture is named in URK's OpsecGuidance but no DEL substrate
-  backs it.
-- **No deep static analysis.** Without DAA, semgrep / CodeQL /
-  Joern / API fuzzing / differential testing are absent. v1 has
-  source-code-review playbook prose; v2 does not yet automate it.
-- **No self-improvement.** Without SIL, the framework does not
-  propose its own patches. Cross-engagement learnings stay in the
-  MLS priors but no reviewer-loop emits patches for human merge.
+What remains honest to say about the whole loop:
 
-Headlining the framework as XBOW-or-Big-Sleep-class is incorrect
-even with MAO + ACP shipped: those two subsystems give the framework
-a planner-and-agents loop, but the loop has been exercised only
-against deterministic fixtures, never against a live LLM and never
-against a live target.  See § 0 below.
+Headlining the framework as XBOW-or-Big-Sleep-class is still incorrect.
+The planner-and-agents loop has been exercised end-to-end under a live
+LLM only against **fabricated executor evidence** (`RealisticExecutor`
+fixtures — see § "MAO+ACP graduation" below), and the one real-target
+run (mrbeanpanel, 2026-05-05) emitted **0 findings**. The subsystems
+exist; the at-scale, real-target, finding-discovering autonomous loop
+does not yet.  See § 0 below.
 
 ## 0. Live-LLM-path risk — Session 3 verification update
 
@@ -195,9 +194,11 @@ Status against the original bar, Session-4 results:
   traffic at the executor layer in the live test; only UTI hits a
   real host.
 - ✓ At least one finding survived critique-agent's veto end-to-end:
-  **achieved.**  The strong-evidence webhook-forgery scenario's
-  finding was confirmed by live critique-agent and emitted by the
-  reporter to `technical.md`.
+  **achieved — but on synthetic evidence.**  The strong-evidence
+  webhook-forgery scenario's finding was confirmed by live
+  critique-agent and emitted by the reporter to `technical.md`. The
+  evidence critiqued was `RealisticExecutor` **fabricated fixture
+  data**, not a real request against a real target.
 - ✓ At least one finding was blocked by critique-agent: the
   weak-evidence robots.txt scenario's finding was rejected by
   live critique-agent and is absent from the report.  Gate still
@@ -210,9 +211,13 @@ Status against the original bar, Session-4 results:
   on top of ~$1.78 from Session 3.  Total live-URK spend across
   Sessions 3+4 stays under $3.
 
-MAO and ACP now graduate to **`live-path verified: yes`** on the
-manifest.  See `V2-MANIFEST.md` "MAO/ACP live-path graduation —
-Session 4" for the verbose narrative.
+MAO and ACP graduate to **`partial (live URK, synthetic executor
+evidence)`** on the manifest — NOT an unqualified `yes`. The live-URK
+critique loop is verified end-to-end and discriminates strong from
+weak claims; what is NOT verified is confirmation of a finding backed
+by real target evidence. See `V2-MANIFEST.md` "MAO/ACP live-path
+graduation — Session 4" for the verbose narrative and its honest
+qualifier.
 
 What is **still NOT verified live**:
 
@@ -572,7 +577,19 @@ the env var. If the site is down, redirects to a challenge page, or
 has changed structure, the test may hang up to `8 * 12 = 96s` before
 failing.
 
-The 110 passing tests are deterministic and offline.
+The deterministic offline tests are the bulk of the suite (only the
+opt-in live-intake and live-LLM tests touch a network or a model).
+
+> **Note on counts (Wave 1).** Test and source-file counts quoted
+> throughout these two documents (e.g. "110 passing", "159 passed",
+> "71 source files", "50 source files") were written at different
+> sessions and have drifted apart — they now contradict each other and
+> should be treated as historical, not current. Read the live numbers
+> from the suite instead:
+> `python3 -m pytest framework/v2/ -q -p no:cacheprovider` for the test
+> count, and `find framework/v2 -name '*.py' -not -path '*/tests/*' |
+> wc -l` for the source-file count. Do not trust any hardcoded figure
+> in these docs as authoritative.
 
 ## 12. Type-checking is selective
 
@@ -1016,6 +1033,28 @@ Honest bounds:
   DAA's finding quality.
 
 ---
+
+## 27. Wave 1 (2026-07-02) hardening — new modules, honest status
+
+A hardening wave landed `framework/v2/verify/` (verification oracles
+that confirm a finding by exercising it and observing behaviour — NOT
+exploit generators) and `framework/v2/worldmodel/` (an explicit target
+world-model the planner can reason over), plus targeted security fixes
+across the touched modules.
+
+Honest status: **code-complete + module-tested (offline). Full
+integration into the live pipeline is a follow-up.** Specifically:
+
+- `verify/` module tests pass, but the oracles are not yet wired into
+  the autonomous critique/finding loop.
+- `worldmodel/` module tests pass, but the planner does not yet consume
+  the world-model by default.
+- The security fixes each ship with a focused test for the safe path;
+  no global default was broadly flipped (per the wave's own rule).
+
+Do not read this as a live-path claim. None of the Wave 1 work has
+been exercised in a live end-to-end engagement. See the module READMEs
+and `V2-MANIFEST.md` § "Wave 1 (2026-07-02) hardening".
 
 ## What the operator should do next
 

@@ -21,6 +21,30 @@ as legitimate states of the work.
 
 ---
 
+## Wave 1 (2026-07-02) hardening
+
+A hardening wave landed two new modules plus targeted security fixes.
+Honest status: **code-complete + module-tested (offline); full
+integration into the live pipeline is a follow-up.**
+
+- **`framework/v2/verify/`** — verification oracles that confirm a
+  finding's stated impact by exercising it and observing behaviour.
+  These are confirmation oracles, not exploit generators. Module tests
+  pass; wiring into the autonomous critique loop is follow-up work.
+- **`framework/v2/worldmodel/`** — an explicit target world-model the
+  planner can reason over. Module tests pass; the planner does not yet
+  consume it by default.
+- **Security fixes** — hardening across the touched modules (input
+  handling, gate ordering, fail-closed defaults). Each fix ships with
+  focused tests for the safe path; no existing behaviour was broadly
+  flipped.
+
+These are marked code-complete + module-tested only. They have NOT
+been exercised in a live end-to-end engagement; do not read this note
+as a live-path claim. Individual module READMEs carry the specifics.
+
+---
+
 ## Subsystem status
 
 | # | Subsystem | Path | Code complete | Live-path verified | Notes |
@@ -28,8 +52,8 @@ as legitimate states of the work.
 | 1 | URK — Universal Reasoning Kernel | `framework/v2/kernel/` | yes | **yes** | 6 cognitive bindings + 4 backends (Anthropic, ClaudeCode, Ollama, DryRun). All six bindings exercised live in Session 3 against the ClaudeCodeBackend (operator's Claude Max via `claude -p`, model=haiku). All `V2-LIMITATIONS.md` § 0 failure-mode tests pass. Captured fixtures under `framework/v2/kernel/tests/fixtures/live-run/`. |
 | 2 | MLS — Memory & Learning Substrate | `framework/v2/memory/` | yes | yes | SQLite store + lexical embeddings (sentence-transformers optional); recorder / recall / priors / postmortem. Built-in sample-engagement seed exercised. No LLM dependency. |
 | 3 | UTI — Universal Target Intake | `framework/v2/intake/` | yes | **yes** | 7 detectors, 9 archetypes, confidence-weighted classifier exercised live in Session 1 against an operator-authorised target. The threat-model drafter was exercised live in Session 3 against the same target with live URK: 173s wall, 9 HTTP requests, archetype `php-smarty-smm-panel-fork` (0.75), 208-line URK-driven threat-model captured under `framework/v2/intake/tests/fixtures/live-run/` (regression captures retained). |
-| 4 | MAO — Multi-Agent Orchestration | `framework/v2/agents/` | yes | **yes** | Blackboard, coordinator, 5 specialist agents, memory-agent, executor protocol exercised live (Session 3: every binding fires live URK; critique-agent rigour verified). Session 4 added `RealisticExecutor` and ran the full pipeline end-to-end under live URK: 30 planner steps → 2 executor successes → 2 critique calls → 1 confirmed finding → reporter emitted `technical.md` → MLS recorded the confirmed finding. Session 6 added `HttpExecutor` — bounded live-HTTP with the six-gate safety stack (charter signature, scope, destructive prompt, request budget, posture-aware rate limit, posture-aware UA). 22 unit tests against `pytest-httpserver` cover every gate. Live exercise opt-in via `CRUCIBLE_LIVE_HTTP=<url>`; deferred to operator's next supervised run if not provided this session. Captured fixture: `framework/v2/agents/tests/fixtures/live-run/realistic-pipeline/`. |
-| 5 | ACP — Autonomous Campaign Planner | `framework/v2/planner/` | yes | **yes** | Planner drove the Session-4 live full-pipeline run end-to-end: leaf dispatch → exploit-agent → critique-agent → reporter emission, all under live URK. 30 steps in 232s, halted on `max_steps` per the test budget, checkpoint persisted, MLS mirrored. Watchdog halt-authority and resume-across-kill remain verified from Session 2. Acceptance test: `framework/v2/planner/tests/test_full_integration.py::test_full_pipeline_url_to_report_live_realistic` (opt-in via `CRUCIBLE_LIVE_FULL_PIPELINE=1`). |
+| 4 | MAO — Multi-Agent Orchestration | `framework/v2/agents/` | yes | **partial (live URK, synthetic executor evidence)** | Blackboard, coordinator, 5 specialist agents, memory-agent, executor protocol exercised live (Session 3: every binding fires live URK; critique-agent rigour verified). Session 4 added `RealisticExecutor` and ran the full pipeline end-to-end under live URK: 30 planner steps → 2 executor successes → 2 critique calls → 1 confirmed finding → reporter emitted `technical.md` → MLS recorded the confirmed finding. **The executor's evidence was fabricated fixture data, not real target traffic** — live URK critiqued synthetic evidence. The one real-target run (mrbeanpanel, 2026-05-05) emitted 0 findings. Session 6 added `HttpExecutor` — bounded live-HTTP with the six-gate safety stack (charter signature, scope, destructive prompt, request budget, posture-aware rate limit, posture-aware UA). 22 unit tests against `pytest-httpserver` cover every gate. Live exercise opt-in via `CRUCIBLE_LIVE_HTTP=<url>`; deferred to operator's next supervised run if not provided this session. Captured fixture: `framework/v2/agents/tests/fixtures/live-run/realistic-pipeline/`. |
+| 5 | ACP — Autonomous Campaign Planner | `framework/v2/planner/` | yes | **partial (live URK, synthetic executor evidence)** | Planner drove the Session-4 live full-pipeline run end-to-end: leaf dispatch → exploit-agent → critique-agent → reporter emission, all under live URK. Same caveat as MAO: the executor evidence in that run was fabricated fixture data via `RealisticExecutor`, not real target traffic; the only real-target run emitted 0 findings. 30 steps in 232s, halted on `max_steps` per the test budget, checkpoint persisted, MLS mirrored. Watchdog halt-authority and resume-across-kill remain verified from Session 2. Acceptance test: `framework/v2/planner/tests/test_full_integration.py::test_full_pipeline_url_to_report_live_realistic` (opt-in via `CRUCIBLE_LIVE_FULL_PIPELINE=1`). |
 | 6 | DEL — Defender Emulation Layer (defensive subset) | `framework/v2/defender/` | yes | offline | Telemetry model + Sigma-style detection ruleset + self-detection scoring + posture annotation. **Defensive only by policy**: knows what telemetry an action trips; does NOT generate evasion (that stays `Capability.DEFENDER_EVASION`, entitlement-locked + human-authored). Gated on `DEFENDER_TELEMETRY`. 17 tests. `V2-LIMITATIONS.md` § 21. |
 | 7 | DAA — Deep Analysis Arsenal | `framework/v2/analysis/` | yes | offline | Offline pattern analyzer (curated dangerous-pattern ruleset, always available) + Semgrep adapter (graceful-degrade when absent) + Python AST symbol index + orchestrator (merge/dedup/skip-record). `analysis/seed.py` maps findings → blackboard hypotheses the exploit agent picks up. Gated on `DEEP_STATIC_ANALYSIS`. 21 tests. § 22. |
 | 8 | SIL — Self-Improvement Loop | `framework/v2/improve/` | yes | offline | Continuous-discovery / gated-deployment: reviewer mines capability gaps, horizon scanner folds CVEs, patcher drafts reviewable proposals (never self-applied), merge gate authorises only on eval-green + threshold governance approvals + `SELF_IMPROVEMENT_MERGE`. `ingest_live.py` assembles snapshots from live Blackboard+MLS. 26 tests. § 20. |
@@ -76,6 +100,15 @@ The critique gate is still rigorous: weak claims still fail.  What
 changed is that strong claims now have evidence-chain support
 proportional to their finding text, and the gate accepts them.
 
+**Honest qualifier (added Wave 1).** "Graduation" here means the
+live-URK critique loop was exercised end-to-end and discriminates
+strong from weak — not that MAO/ACP confirmed a real vulnerability.
+`RealisticExecutor`'s evidence is fabricated fixture data; no real
+request was issued at the executor layer in this run. The manifest
+status for subsystems 4 and 5 is therefore **partial**, not `yes`.
+The only real-target engagement (mrbeanpanel, 2026-05-05) emitted
+0 findings.
+
 The deferred subsystems (6–8) are absent on disk — not stubbed (per
 FORGE PROTOCOL § 4.1).
 
@@ -98,18 +131,38 @@ classes have been exercised:
    `php-smarty-smm-panel-fork` with score 0.745. The intake test
    accepts any `CRUCIBLE_LIVE_INTAKE_URL` the operator authorises.
 
-3. **DryRun LLM** (no live model, deterministic fixture) — every
-   URK call across every binding goes through DryRun unless an
-   `ANTHROPIC_API_KEY` is set or a local Ollama daemon answers.
-   Sessions 1 and 2 ran with neither; the live LLM path is **never
-   exercised** in this manifest's history.
+3. **Live LLM via Claude Code** (real frontier model, no API key) —
+   from Session 3 onward URK routes through `ClaudeCodeBackend`
+   (`claude -p` subprocess against the operator's Claude Max, model
+   `haiku`). All six cognitive bindings were exercised live this way,
+   with the responses captured as regression fixtures under
+   `framework/v2/kernel/tests/fixtures/live-run/` and
+   `kernel/tests/test_live_claude_code.py` (opt-in). This is the ONLY
+   live-LLM path ever exercised.
 
-The Anthropic and Ollama backend code paths are written from public
-documentation and pass mypy + import-time smoke tests but have not
-been called against a live endpoint in any session. See
-`V2-LIMITATIONS.md` § "Inherited unexercised-LLM-path risk" for the
-explicit verification checklist that needs to run the first time
-URK is invoked live.
+4. **DryRun LLM** (no live model, deterministic fixture) — every URK
+   call falls back to DryRun when no backend is selected. Sessions 1
+   and 2 ran entirely in DryRun.
+
+**Honest scope of the live-LLM claim.** Only the `claude-code`/haiku
+binding was ever called live. The `Anthropic`, `Ollama`, `Bedrock`,
+`Vertex`, and `Mistral` backend code paths are written from public
+documentation and pass mypy + import-time smoke tests but have
+**never been called against a live endpoint in any session** — see
+`V2-LIMITATIONS.md` §§ 3, 4, "Substrate pluralism (Session 8)" for
+the per-backend status and the first-use checklist.
+
+**A load-bearing caveat on the "confirmed finding" e2e run.** The
+Session-4 full-pipeline run that ends in "1 confirmed finding →
+reporter emits technical.md" used `RealisticExecutor`, whose evidence
+(reproduction logs, DB attestations, negative controls) is
+**fabricated fixture data**, not the result of any real request
+against any real target. Live URK genuinely critiqued that evidence
+and confirmed it — but the evidence itself was synthetic. The only
+run that touched a real target end-to-end was the 2026-05-05
+`mrbeanpanel.com` engagement, which emitted **0 findings** (see the
+Live engagement verification table below). No live LLM run has ever
+confirmed a finding backed by real target evidence.
 
 ---
 
@@ -129,6 +182,13 @@ graduation since Session 3.
 ## Verification results
 
 All from clean runs at the time this manifest was last revised.
+
+> **Note on counts (Wave 1).** The test and source-file counts below
+> (and elsewhere in this file — "159 passed", "71 source files", the
+> per-subsystem test tallies) are historical and have drifted across
+> sessions; several no longer agree with `V2-LIMITATIONS.md`. Treat
+> them as illustrative, not current. Read live counts from the suite:
+> `python3 -m pytest framework/v2/ -q -p no:cacheprovider`.
 
 - **v1 canon unchanged:** `git diff 28659ec HEAD --
   framework/{cognitive,playbooks,checklists,knowledge-base,templates}`

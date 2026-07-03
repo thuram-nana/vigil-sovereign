@@ -14,7 +14,9 @@ something the framework does on its own), and it is logged.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,8 +37,38 @@ class KillSwitch:
     def path(self) -> Path:
         return self._path
 
+    # errno values that positively prove the switch file is absent. Any
+    # other stat error is ambiguous and must fail closed (TRIPPED).
+    _ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG})
+
     def is_tripped(self) -> bool:
-        return self._path.is_file()
+        """Return True (HALTED) unless the switch file can be positively
+        determined to be absent.
+
+        ``Path.is_file()`` swallows every ``OSError`` and reports ``False``,
+        so an unreadable parent directory or a broken symlink would read as
+        CLEAR — the opposite of what a fail-closed hard stop must do. Here,
+        only an errno that proves the file is genuinely absent (ENOENT and
+        friends) is treated as CLEAR; any other error (permission denied,
+        symlink loop, I/O error) is treated as TRIPPED."""
+        try:
+            os.stat(self._path)
+        except OSError as e:
+            if e.errno in self._ABSENT_ERRNOS:
+                # The switch file is genuinely absent -> CLEAR.
+                return False
+            # Ambiguous (permission denied, symlink loop, I/O error, ...):
+            # cannot prove absence, so fail closed -> TRIPPED.
+            _log.warning(
+                "authority.killswitch.stat_ambiguous",
+                slug=self._slug,
+                errno=e.errno,
+                error=str(e),
+            )
+            return True
+        # The path exists (regular file = normal tripped state, or any
+        # other node) -> TRIPPED.
+        return True
 
     def trip(self, reason: str) -> None:
         """Halt the engagement. Idempotent: the first reason is preserved

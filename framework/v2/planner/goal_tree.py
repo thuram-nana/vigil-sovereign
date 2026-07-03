@@ -22,9 +22,124 @@ import itertools
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import TYPE_CHECKING, Iterable, Iterator, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:  # avoid a hard import-time dependency on the world-model.
+    from collections.abc import Callable
+
+    from ..worldmodel.graph import WorldModel
+    from ..worldmodel.models import Edge, NodeKind
+
+
+# ---------------------------------------------------------------------------
+# World-model-aware leaf scoring (optional, additive)
+# ---------------------------------------------------------------------------
+
+
+def surface_to_node_id(world: "WorldModel", surface: str) -> str | None:
+    """Best-effort map a leaf's ``surface`` string onto a world-model node id.
+
+    A leaf's surface is free text (a full URL like ``https://h/api/x``, a path
+    like ``/api/x``, or a bare node id). The world-model keys nodes by id and
+    records URLs/hosts/paths in each node's ``attrs`` bag. This helper resolves
+    a surface to a node id deterministically (nodes are scanned in id-sorted
+    order, first match wins) using, in priority order:
+
+      1. a direct node-id match (``surface`` *is* a node id);
+      2. an exact ``attrs['url'] == surface`` match;
+      3. a host+path match against ``attrs['url']`` (or path-only when the
+         surface carries no host), or ``attrs['path'] == path``;
+      4. a host match against ``attrs['host']`` or the node id.
+
+    Returns ``None`` when nothing plausibly matches — the caller then treats
+    the leaf as off-path (no boost). Pure and read-only on ``world``."""
+    if not surface:
+        return None
+    if world.has_node(surface):
+        return surface
+
+    if "://" in surface:
+        parsed = urlparse(surface)
+        host = parsed.hostname
+        path = parsed.path or None
+    elif surface.startswith("/"):
+        host, path = None, surface
+    else:
+        host, path = surface, None
+
+    # Pass 2: exact url match.
+    for node in world.all_nodes():
+        if node.attrs.get("url") == surface:
+            return node.id
+
+    # Pass 3/4: host+path / path-only / host-only best-effort matches.
+    for node in world.all_nodes():
+        attrs = node.attrs
+        url = attrs.get("url")
+        if isinstance(url, str):
+            u = urlparse(url)
+            if host is not None and u.hostname == host and (
+                path is None or u.path == path
+            ):
+                return node.id
+            if host is None and path is not None and u.path == path:
+                return node.id
+        if isinstance(attrs.get("path"), str) and path is not None and attrs["path"] == path:
+            return node.id
+        if host is not None and (attrs.get("host") == host or node.id == host):
+            return node.id
+    return None
+
+
+def _path_node_boosts(
+    world: "WorldModel",
+    *,
+    source: str,
+    objective_kinds: "Iterable[NodeKind]",
+    boost: float,
+    k: int,
+    weight_fn: "Callable[[Edge], float] | None",
+    edge_kinds: "Iterable | None",
+) -> dict[str, float]:
+    """Map each world-model node that lies on one of the ``k`` best routes
+    from ``source`` to a crown-jewel (a node whose kind is in
+    ``objective_kinds``) to a score **multiplier** ``>= 1.0``.
+
+    The multiplier rewards two things: *proximity* (nodes nearer the objective
+    matter more — you are one hop from the prize) and *path quality* (a route
+    on a higher-ranked, higher-confidence best-path matters more than a
+    marginal one). Concretely, for a node at position ``pos`` (0 = source) on
+    the rank-``r`` best path of ``n`` nodes with weakest-link confidence
+    ``c``::
+
+        multiplier = 1 + boost * ((pos + 1) / n) * (c / (r + 1))
+
+    A node on several paths keeps its strongest (max) multiplier. Returns an
+    empty dict when the source is absent or no crown-jewel is reachable — the
+    caller then falls back to the plain greedy score. Deterministic and
+    read-only on ``world``."""
+    from ..worldmodel import pathsearch
+
+    if not world.has_node(source):
+        return {}
+    paths = pathsearch.best_paths(
+        world, source, objective_kinds, weight_fn, k=k, edge_kinds=edge_kinds,
+    )
+    boosts: dict[str, float] = {}
+    for rank, path in enumerate(paths):
+        node_ids = path.nodes
+        n = len(node_ids)
+        conf = path.min_confidence
+        for pos, nid in enumerate(node_ids):
+            proximity = (pos + 1) / n
+            quality = conf / (rank + 1)
+            val = 1.0 + boost * proximity * quality
+            if val > boosts.get(nid, 1.0):
+                boosts[nid] = val
+    return boosts
 
 
 GoalStatus = Literal[
@@ -132,6 +247,61 @@ class GoalTree:
             return None
         scored.sort(key=lambda t: t[0], reverse=True)
         return scored[0][1]
+
+    def best_open_leaf_pathaware(
+        self,
+        *,
+        world: "WorldModel | None" = None,
+        objective_kinds: "Iterable[NodeKind] | None" = None,
+        source: str | None = None,
+        boost: float = 2.0,
+        k: int = 3,
+        weight_fn: "Callable[[Edge], float] | None" = None,
+        edge_kinds: "Iterable | None" = None,
+    ) -> GoalNode | None:
+        """World-model-aware leaf selection.
+
+        Identical to :meth:`best_open_leaf` (myopic greedy on
+        ``prior * value / cost``) **unless** a ``world`` + ``objective_kinds``
+        + ``source`` are supplied. When they are, each open leaf whose
+        ``surface`` maps (via :func:`surface_to_node_id`) onto a node lying on
+        a high-value :func:`worldmodel.pathsearch.best_paths` route from
+        ``source`` to a crown-jewel gets its greedy score multiplied by a
+        path-membership/proximity factor (see :func:`_path_node_boosts`).
+        Leaves off every path — and every leaf when the source can't reach a
+        crown-jewel — keep their plain greedy score, so this degrades exactly
+        to :meth:`best_open_leaf`.
+
+        Falls back to :meth:`best_open_leaf` verbatim when the world model is
+        not supplied, so the default (world=None) path is byte-for-byte the
+        legacy behaviour. Deterministic: ties break on ascending leaf id."""
+        if world is None or not objective_kinds or source is None:
+            return self.best_open_leaf()
+
+        boosts = _path_node_boosts(
+            world,
+            source=source,
+            objective_kinds=objective_kinds,
+            boost=boost,
+            k=k,
+            weight_fn=weight_fn,
+            edge_kinds=edge_kinds,
+        )
+        if not boosts:
+            # No crown-jewel reachable: nothing to bias toward — behave greedily.
+            return self.best_open_leaf()
+
+        # (-effective_score, leaf_id) sorts to max score, then lowest id.
+        scored: list[tuple[float, int, GoalNode]] = []
+        for leaf in self.open_leaves():
+            base = leaf.score()
+            nid = surface_to_node_id(world, leaf.surface)
+            mult = boosts.get(nid, 1.0) if nid is not None else 1.0
+            scored.append((-(base * mult), leaf.id, leaf))
+        if not scored:
+            return None
+        scored.sort(key=lambda t: (t[0], t[1]))
+        return scored[0][2]
 
     def mark_status(
         self, node_id: int, status: GoalStatus, *, reason: str = "",

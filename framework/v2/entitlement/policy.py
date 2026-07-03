@@ -52,14 +52,41 @@ from .models import (
     CapabilityTier,
     EntitlementDecision,
     SignedEntitlement,
-    SignedRevocation,
     TrustRoot,
 )
 
 _log = clog.get_logger("entitlement")
 
 _ENFORCE_ENV = "CRUCIBLE_ENTITLEMENT_ENFORCED"
+_OPERATOR_ENV = "CRUCIBLE_OPERATOR_IDENTITY"
 _TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _operator_identities() -> list[str]:
+    """Operator identities the running process presents, from
+    CRUCIBLE_OPERATOR_IDENTITY (comma-separated). Injected by the
+    deployment (e.g. a SPIFFE SVID for the operator/workload). Distinct
+    from the host attestation identity used for hardware binding."""
+    raw = os.environ.get(_OPERATOR_ENV, "")
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _operator_constraint_satisfied(constraint: str) -> tuple[bool, str]:
+    """Return (ok, reason). A subject.operator_constraint binds the grant
+    to a specific operator identity (or identity prefix, per the model
+    docstring — SPIFFE ids are hierarchical). Satisfied iff a presented
+    operator identity equals the constraint or begins with it. No
+    presented identity at all fails CLOSED."""
+    ids = _operator_identities()
+    if not ids:
+        return False, (
+            f"entitlement binds an operator_constraint but no operator identity "
+            f"is present (set {_OPERATOR_ENV} on the attested host)"
+        )
+    for ident in ids:
+        if ident == constraint or ident.startswith(constraint):
+            return True, "operator constraint satisfied"
+    return False, "presented operator identity does not satisfy operator_constraint"
 
 
 def _utcnow() -> datetime:
@@ -245,22 +272,77 @@ def _denied_state(
     )
 
 
-def _revocation_blocks(
-    revocation: SignedRevocation,
+@dataclass(frozen=True)
+class _RevocationOutcome:
+    """The result of evaluating the revocation list against one
+    entitlement. `error` is None when the entitlement survives; otherwise
+    it is the typed violation and `reason` explains it."""
+
+    error: type[EntitlementViolation] | None
+    reason: str
+
+
+def _evaluate_revocation(
     trust_root: TrustRoot,
     entitlement_id: str,
-) -> tuple[bool, str]:
-    """Return (blocked, reason). A revocation list must itself be
-    validly threshold-signed to be trusted. An invalidly-signed list is
-    a tamper signal -> block (fail closed)."""
+    revocation_required: bool,
+) -> _RevocationOutcome:
+    """Post-issuance kill-switch evaluation. Order:
+
+      1. Load the list. Unreadable -> fail closed (tamper).
+      2. Absent list: deny iff the entitlement declared it expects one
+         (revocation_required); otherwise pass. This closes the
+         'rm revocation.json' fail-open bypass.
+      3. Present list: must be validly threshold-signed (else tamper).
+      4. Anti-rollback: a serial below the persisted high-water mark is a
+         replayed stale list -> deny. Accepted serials advance the mark.
+      5. Revoked-id membership -> deny.
+    """
+    try:
+        revocation = store.load_revocation()
+    except EntitlementError as e:
+        return _RevocationOutcome(EntitlementInvalid, f"revocation list unreadable: {e}")
+
+    if revocation is None:
+        if revocation_required:
+            return _RevocationOutcome(
+                EntitlementRevoked,
+                "entitlement requires a revocation source but no revocation list "
+                "is present (fail closed — a deleted revocation list must not "
+                "silently un-gate a revocable entitlement)",
+            )
+        return _RevocationOutcome(None, "no revocation list present (none required)")
+
     msg = revocation_signing_bytes(revocation.document)
     thr = verify_threshold(msg, revocation.signatures, trust_root)
     if not thr.satisfied:
-        return True, f"revocation list present but not validly signed ({thr.reason})"
+        return _RevocationOutcome(
+            EntitlementInvalid,
+            f"revocation list present but not validly signed ({thr.reason})",
+        )
+
+    serial = revocation.document.serial
+    try:
+        highwater = store.load_revocation_highwater()
+    except EntitlementError as e:
+        return _RevocationOutcome(
+            EntitlementInvalid, f"revocation high-water mark unreadable: {e}"
+        )
+    if highwater is not None and serial < highwater:
+        return _RevocationOutcome(
+            EntitlementInvalid,
+            f"revocation rollback refused: list serial {serial} is below the "
+            f"last accepted serial {highwater} (stale list replay)",
+        )
+    if highwater is None or serial > highwater:
+        store.store_revocation_highwater(serial)
+
     if entitlement_id in revocation.document.revoked_entitlement_ids:
-        return True, f"entitlement {entitlement_id!r} is on revocation serial " \
-            f"{revocation.document.serial}"
-    return False, "not revoked"
+        return _RevocationOutcome(
+            EntitlementRevoked,
+            f"entitlement {entitlement_id!r} is on revocation serial {serial}",
+        )
+    return _RevocationOutcome(None, "not revoked")
 
 
 def _build_state() -> _State:
@@ -337,27 +419,23 @@ def _verify_entitlement(signed: SignedEntitlement, trust_root: TrustRoot) -> _St
             institution=inst,
         )
 
-    # 4. revocation
-    try:
-        revocation = store.load_revocation()
-    except EntitlementError as e:
-        return _denied_state(
-            EntitlementInvalid,
-            f"revocation list unreadable: {e}",
-            entitlement_id=eid,
-            institution=inst,
-        )
-    if revocation is not None:
-        blocked, reason = _revocation_blocks(revocation, trust_root, eid)
-        if blocked:
-            err = (
-                EntitlementInvalid
-                if reason.startswith("revocation list present but not")
-                else EntitlementRevoked
+    # 4. operator constraint — bind the grant to a specific operator identity
+    if doc.subject.operator_constraint is not None:
+        op_ok, op_why = _operator_constraint_satisfied(doc.subject.operator_constraint)
+        if not op_ok:
+            return _denied_state(
+                EntitlementBindingMismatch,
+                op_why,
+                entitlement_id=eid,
+                institution=inst,
             )
-            return _denied_state(err, reason, entitlement_id=eid, institution=inst)
 
-    # 5. valid — compute effective capabilities
+    # 5. revocation (fail-closed on missing-when-required; anti-rollback)
+    rev = _evaluate_revocation(trust_root, eid, doc.revocation_required)
+    if rev.error is not None:
+        return _denied_state(rev.error, rev.reason, entitlement_id=eid, institution=inst)
+
+    # 6. valid — compute effective capabilities
     caps = registry.effective_capabilities(doc.capability_tier, doc.granted_capabilities)
     return _State(
         enforced=True,

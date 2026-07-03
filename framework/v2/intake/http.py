@@ -23,21 +23,123 @@ can replay.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
+import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 import httpx
 
 from ..common import logging as v2log
-from ..common.errors import IntakeBudgetExceeded
+from ..common.errors import EthicsViolation, IntakeBudgetExceeded
 from .models import HTTPExchange
 
 
 _log = v2log.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SSRF defence-in-depth
+# ---------------------------------------------------------------------------
+
+_ALLOWED_SCHEMES = ("http", "https")
+
+
+class SSRFRefused(EthicsViolation):
+    """A fetch target was refused by the SSRF guard: either a non-http(s)
+    scheme, or a host that resolves to a non-public (private / loopback /
+    link-local / reserved) address — including the 169.254.169.254 cloud
+    metadata endpoint."""
+
+
+def _is_forbidden_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for any address the fetcher must never reach: RFC1918 private,
+    loopback, link-local (169.254.0.0/16 — cloud metadata lives here),
+    reserved, multicast, and unspecified ranges. IPv4-mapped IPv6
+    addresses are unwrapped and re-checked so `::ffff:127.0.0.1` cannot
+    slip through."""
+    if ip.version == 6:
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if mapped is not None:
+            return _is_forbidden_ip(mapped)
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def assert_public_target(url: str, *, resolve: bool = True) -> None:
+    """SSRF guard, applied BEFORE a request leaves the fetcher.
+
+    Two checks:
+      1. Scheme must be http or https — reject `file:`, `gopher:`,
+         `ftp:`, etc.
+      2. The target host must not be (or resolve to) a private /
+         loopback / link-local / reserved address. Resolving here — at
+         request time, immediately before the socket is opened — is what
+         defeats DNS-rebinding of an otherwise authorised hostname: an
+         attacker who flips a hostname's A-record to 169.254.169.254 (or
+         127.0.0.1, or an internal 10.x host) between authorisation and
+         fetch is caught.
+
+    Literal-IP hosts are checked directly (no DNS). For hostnames,
+    `getaddrinfo` is consulted when `resolve=True`; if the name does not
+    resolve the guard is silent (the request will fail on its own — a
+    NXDOMAIN is not an SSRF). Raises `SSRFRefused` on a forbidden target.
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        raise SSRFRefused(f"refusing non-http(s) scheme {scheme!r} in {url!r}")
+    host = parsed.hostname
+    if not host:
+        raise SSRFRefused(f"no host to fetch in {url!r}")
+
+    # Literal IP host — check directly, no DNS.
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _is_forbidden_ip(literal):
+            raise SSRFRefused(
+                f"refusing fetch of non-public address {host!r} in {url!r}"
+            )
+        return
+
+    if not resolve:
+        return
+
+    port = parsed.port or (443 if scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(
+            host, port, proto=socket.IPPROTO_TCP,
+        )
+    except socket.gaierror:
+        # Unresolvable name: not our call to block — the request itself
+        # will fail. (A rebinding attack needs the name to resolve.)
+        return
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if _is_forbidden_ip(ip):
+            raise SSRFRefused(
+                f"host {host!r} resolves to non-public address {ip} — "
+                f"refusing fetch of {url!r} (possible DNS-rebinding / "
+                f"SSRF to internal or cloud-metadata service)"
+            )
 
 DEFAULT_BUDGET = 50
 DEFAULT_TIMEOUT = 8.0
@@ -152,6 +254,13 @@ class Fetcher:
                 self._used += 1
                 self._exchanges.append(ex)
                 return ex
+
+        # SSRF defence-in-depth: reject non-http(s) schemes and any host
+        # that resolves to a private / loopback / link-local / reserved
+        # address BEFORE opening the socket. Resolving here (not at
+        # authorisation time) is what catches DNS-rebinding of an
+        # authorised hostname to 169.254.169.254 / 127.0.0.1 / 10.x etc.
+        assert_public_target(url)
 
         headers = {"User-Agent": self.user_agent, **self.extra_headers}
 

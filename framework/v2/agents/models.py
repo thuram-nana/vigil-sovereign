@@ -130,6 +130,23 @@ class FindingPayload(BaseModel):
         default=None, description="Hypothesis handle this finding confirms.",
     )
     critique_status: Literal["pending", "confirmed", "objections"] = "pending"
+    oracle_context: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "A serialized verify.adapter.FindingContext (its model_dump), or "
+            "None. When present, the deterministic oracle layer — not the LLM "
+            "critique — is the authority for promotion to 'confirmed'. When "
+            "None, the finding takes the legacy LLM-advisory confirmation path."
+        ),
+    )
+    verified_by_oracle: bool = Field(
+        default=False,
+        description=(
+            "Provenance: True only when a deterministic oracle fired and "
+            "carried this finding's confirmation. False for LLM-advisory "
+            "confirmations and for every finding without oracle evidence."
+        ),
+    )
 
 
 class CritiquePayload(BaseModel):

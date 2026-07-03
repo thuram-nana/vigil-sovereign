@@ -29,7 +29,9 @@ def _finding(status: str, **kw: object) -> FindingPayload:
 
 
 def test_map_finding_confidence_by_status() -> None:
-    assert map_finding(_finding("confirmed")).confidence == 1.0
+    # "confirmed" is the honest prior 0.9, never a false certainty of 1.0
+    # (no map_finding path emits 1.0); a calibrator learns the real number.
+    assert map_finding(_finding("confirmed")).confidence == 0.9
     assert map_finding(_finding("pending")).confidence == 0.6
     assert map_finding(_finding("objections")).confidence == 0.2
 

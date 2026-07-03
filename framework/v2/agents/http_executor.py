@@ -49,11 +49,18 @@ import httpx
 
 from ..common import logging as v2log
 from ..common import paths
+from ..common.errors import SovereigntyViolation
 from ..authority import (
     ActionRequest,
     EngagementAuthority,
     KillSwitch,
     authorize_action,
+)
+from ..authority.store import AuthorityError, load_authority, load_verified_authority
+from .egress_guard import (
+    EgressAllowlist,
+    SovereignHttpxTransport,
+    build_engagement_allowlist,
 )
 from .executor_proto import ExecutionOutcome, Executor
 from .models import HypothesisPayload, PlanPayload
@@ -218,6 +225,26 @@ class HttpExecutor:
     authority: EngagementAuthority | None = None
     killswitch: KillSwitch | None = None
 
+    # When True and no `authority` was supplied, load the engagement's
+    # persisted authority document from disk at construction (via
+    # `load_authority`). Backward compatible: defaults False, so
+    # callers that never provisioned an authority are unaffected. When
+    # a `trust_root` is also given, the *signed* authority is required
+    # and verified (`load_verified_authority`) — fail-closed: a missing
+    # or badly-signed document leaves `authority` None rather than
+    # silently trusting an unverified one.
+    auto_load_authority: bool = False
+    trust_root: object | None = None
+
+    # Optional runtime egress allowlist (Pillar: sovereignty /
+    # defence-in-depth). When set, the httpx client is built on a
+    # `SovereignHttpxTransport` so any request to a host outside the
+    # allowlist raises `SovereigntyViolation` before bytes leave the
+    # host — a belt-and-braces backstop behind the scope gate. When
+    # None (the default) the client is built exactly as before, so
+    # existing callers/tests are unaffected.
+    egress_allowlist: EgressAllowlist | None = None
+
     # Internal mutable state.
     _requests_made: int = 0
     _last_request_at: float = 0.0
@@ -241,6 +268,23 @@ class HttpExecutor:
         # can always halt a running engagement, opt-in or not.
         if self.killswitch is None:
             self.killswitch = KillSwitch(self.engagement_slug)
+        # Optionally hydrate the engagement authority from disk so the
+        # time-box / scope / environment checks in `_authority_gate`
+        # apply. Fail-closed and quiet: any load/verify error leaves the
+        # authority unset (behaviour identical to not provisioning one).
+        if self.authority is None and self.auto_load_authority \
+                and not self.engagement_slug.startswith("<"):
+            try:
+                if self.trust_root is not None:
+                    self.authority = load_verified_authority(
+                        self.engagement_slug, self.trust_root,  # type: ignore[arg-type]
+                    )
+                else:
+                    self.authority = load_authority(self.engagement_slug)
+            except AuthorityError as exc:
+                self._log_event(
+                    "authority.load_skipped", reason=f"{type(exc).__name__}: {exc}",
+                )
         # bind_engagement() is a global mutator. Skip the import-time
         # protocol-assertion path (sentinel slug) but bind for real
         # engagements so structured logs route to the engagement file.
@@ -287,6 +331,39 @@ class HttpExecutor:
                     f"authority refused ({decision.denial_code}): {decision.reason}",
                     status_code=0,
                 )
+        return None
+
+    def _gate_redirect(
+        self, method: str, url: str, action_id: str,
+    ) -> str | None:
+        """Re-run the kill-switch + engagement-authority + scope gate for
+        a redirect *target* before it is issued. Returns a human-readable
+        refusal reason if the redirect must not be followed, or None if it
+        is safe to proceed.
+
+        This closes the redirect TOCTOU/SSRF: the initial URL is gated in
+        `execute()`, but a 30x Location can point anywhere. Without this
+        re-gate an in-scope URL could bounce the executor to an
+        out-of-scope host (cloud metadata, an internal service, a third
+        party) with no further check. Every hop is now gated exactly like
+        the first request.
+        """
+        halt = self._authority_gate(method, url, action_id)
+        if halt is not None:
+            return halt.note
+        decision = validate_action(
+            slug=self.engagement_slug,
+            method=method,
+            target_url=url,
+            posture=self._resolved_posture,
+        )
+        self._log_event(
+            "redirect.scope_decision", action_id=action_id,
+            decision=decision.__dict__,
+        )
+        if not decision.allowed:
+            self._scope_violations += 1
+            return f"scope_gate refused ({decision.refusal_kind}): {decision.reason}"
         return None
 
     def execute(
@@ -424,10 +501,17 @@ class HttpExecutor:
 
     def _client(self) -> httpx.Client:
         if self._http_client is None:
-            self._http_client = httpx.Client(
+            kwargs: dict[str, object] = dict(
                 timeout=self.timeout_seconds,
                 follow_redirects=False,  # capture redirect chain manually
             )
+            if self.egress_allowlist is not None:
+                # Route every request through the sovereign egress guard.
+                # In non-strict sovereign mode the transport passes
+                # through; in strict mode it refuses non-allowlisted
+                # hosts before any bytes leave the host.
+                kwargs["transport"] = SovereignHttpxTransport(self.egress_allowlist)
+            self._http_client = httpx.Client(**kwargs)  # type: ignore[arg-type]
         return self._http_client
 
     def _issue(
@@ -440,12 +524,28 @@ class HttpExecutor:
         evidence_dir.mkdir(parents=True, exist_ok=True)
 
         redirect_chain: list[tuple[int, str]] = []
+        redirect_refused: str | None = None
         try:
             t0 = time.perf_counter()
             client = self._client()
             current_method, current_url = method, url
             response = None
-            for _hop in range(5):  # max 5 redirects
+            for hop in range(5):  # initial request + up to 4 redirects
+                if hop > 0:
+                    # Re-gate the redirect target BEFORE issuing it. A
+                    # refusal here means the redirect points out of scope
+                    # (or the kill-switch/authority now denies) — we stop
+                    # the chain and never contact the redirect host.
+                    redirect_refused = self._gate_redirect(
+                        current_method, current_url, action_id,
+                    )
+                    if redirect_refused is not None:
+                        self._log_event(
+                            "redirect.refused", action_id=action_id,
+                            refused_url=current_url, reason=redirect_refused,
+                            redirect_chain=redirect_chain,
+                        )
+                        break
                 response = client.request(
                     current_method, current_url, headers=headers,
                 )
@@ -457,6 +557,16 @@ class HttpExecutor:
                     continue
                 break
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        except SovereigntyViolation as exc:
+            # The egress guard refused the host (belt-and-braces behind
+            # the scope gate). Treat it like any other gate refusal:
+            # a success=False refusal outcome, not a crash.
+            self._scope_violations += 1
+            self._log_event(
+                "egress.refused", action_id=action_id, method=method, url=url,
+                error=str(exc), redirect_chain=redirect_chain,
+            )
+            return self._refused(f"egress guard: {exc}", status_code=0)
         except httpx.HTTPError as exc:
             self._requests_made += 1
             self._last_request_at = time.time()
@@ -502,6 +612,22 @@ class HttpExecutor:
             redirect_chain=redirect_chain,
             evidence_dir=str(evidence_dir),
         )
+
+        # A redirect target was refused by the re-gate: the chain was
+        # truncated and the out-of-scope host was never contacted. Report
+        # it as a refusal (with the evidence captured up to that point).
+        if redirect_refused is not None:
+            return ExecutionOutcome(
+                success=False,
+                status_code=response.status_code,
+                elapsed_ms=elapsed_ms,
+                body_excerpt=body_excerpt,
+                note=(
+                    f"http_executor: REFUSED redirect ({redirect_refused}); "
+                    f"chain not followed past scope; evidence at {evidence_dir}; "
+                    f"redirect_chain={redirect_chain}"
+                ),
+            )
 
         # HttpExecutor never claims `success=True` autonomously — that's
         # the exploit-agent's call once it sees the body. Status reach-

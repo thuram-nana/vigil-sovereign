@@ -24,7 +24,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from ..worldmodel.graph import WorldModel
+    from ..worldmodel.models import NodeKind
 
 from ..agents.blackboard import Blackboard
 from ..agents.coordinator import Coordinator
@@ -87,6 +91,9 @@ class Planner:
         coordinator_ticks_per_step: int = 8,
         scope_check: bool = True,
         checkpoint_interval_s: float = resume.CHECKPOINT_INTERVAL_S,
+        world: "WorldModel | None" = None,
+        objectives: "Iterable[NodeKind] | None" = None,
+        world_source: str | None = None,
     ) -> None:
         self.bb = blackboard
         self.coord = coordinator
@@ -100,6 +107,12 @@ class Planner:
         )
         self.ticks_per_step = coordinator_ticks_per_step
         self.scope_check = scope_check
+        # Optional world-model-aware planning. When all three are supplied the
+        # planner biases leaf selection toward leaves on high-value attack
+        # paths to a crown-jewel; otherwise it stays myopic-greedy (unchanged).
+        self.world = world
+        self.objectives = list(objectives) if objectives is not None else None
+        self.world_source = world_source
         self._cursor = 0  # blackboard cursor
         self._last_checkpoint_at = 0.0
         self.checkpoint_interval_s = checkpoint_interval_s
@@ -130,7 +143,20 @@ class Planner:
 
         pruned = self.pruner.prune(self.tree)
 
-        leaf = self.tree.best_open_leaf()
+        # World-model-aware selection when a world + objectives + foothold are
+        # wired in; otherwise byte-for-byte the legacy greedy selection.
+        if (
+            self.world is not None
+            and self.objectives
+            and self.world_source is not None
+        ):
+            leaf = self.tree.best_open_leaf_pathaware(
+                world=self.world,
+                objective_kinds=self.objectives,
+                source=self.world_source,
+            )
+        else:
+            leaf = self.tree.best_open_leaf()
         if leaf is None:
             return StepResult(no_more_leaves=True, pruned_this_step=pruned)
 

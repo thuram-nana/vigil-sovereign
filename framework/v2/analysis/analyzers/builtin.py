@@ -63,6 +63,18 @@ _RULES: tuple[_Rule, ...] = (
     _r("DAA-PICKLE", "medium", r"\bpickle\.loads?\s*\(",
        "Deserializing with pickle — arbitrary code execution on untrusted data", "CWE-502",
        (".py",)),
+    # Dataflow-ish: a DB cursor .execute()/.executemany() whose argument is
+    # built by string concatenation or an f-string is the classic SQLi taint
+    # shape a constant query never has. High-signal, still a lead not a proof.
+    _r("DAA-SQL-CONCAT", "high",
+       r"\.execute(?:many)?\s*\(\s*(?:f['\"]|['\"].*['\"]\s*[%+]|['\"].*\{)",
+       "SQL query built by string concatenation/format into execute() — SQL injection risk",
+       "CWE-89", (".py",)),
+    # Flask's render_template_string renders its argument as a Jinja template;
+    # passing anything but a constant is server-side template injection.
+    _r("DAA-SSTI", "high", r"\brender_template_string\s*\(",
+       "render_template_string() on non-constant input — server-side template injection",
+       "CWE-1336", (".py",)),
     _r("DAA-YAML-LOAD", "medium", r"yaml\.load\s*\((?![^)]*Loader)",
        "yaml.load without a safe Loader — arbitrary object construction", "CWE-502", (".py",)),
     _r("DAA-WEAK-HASH", "low", r"\b(?:hashlib\.)?(?:md5|sha1)\s*\(",
