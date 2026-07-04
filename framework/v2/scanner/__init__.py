@@ -28,6 +28,9 @@ so scope and authorization stay enforced.
 
 from __future__ import annotations
 
+from .checks import DEFAULT_CHECKS, Check, DifferentialCheck, MarkerReflectionCheck
+from .crawler import CrawlResult, Crawler, Page, Scope
+from .engine import AuditEngine, AuditFinding
 from .insertion import (
     HttpRequest,
     InsertionKind,
@@ -36,8 +39,22 @@ from .insertion import (
 )
 
 __all__ = [
+    # insertion
     "HttpRequest",
     "InsertionKind",
     "InsertionPoint",
     "RequestTemplate",
+    # checks
+    "Check",
+    "DifferentialCheck",
+    "MarkerReflectionCheck",
+    "DEFAULT_CHECKS",
+    # engine
+    "AuditEngine",
+    "AuditFinding",
+    # crawler
+    "Crawler",
+    "Scope",
+    "CrawlResult",
+    "Page",
 ]
