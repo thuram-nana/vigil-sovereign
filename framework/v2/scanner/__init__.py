@@ -1,0 +1,43 @@
+"""
+scanner — CRUCIBLE's autonomous web-audit engine (Burp-parity track).
+
+Burp Suite is an *engine plus a human operator*. CRUCIBLE already has the
+confirmation brain (``verify`` oracles, ``worldmodel``, ``planner``,
+``calibration``); this package builds the missing *hands* — the crawl →
+insertion-point → check → confirm pipeline — and drives it with the planner
+instead of a human, so it runs zero-manual.
+
+Foundational layer first: the **insertion-point engine**. Every active check
+Burp runs is an (insertion-point × payload × response-analyzer) triple; without
+a way to mark an arbitrary position in a request and render a payload into it,
+there is no scanner and no Intruder. ``RequestTemplate`` provides exactly that,
+as pure, deterministic parsing/rendering (no network, no clock) — the substrate
+the check library and the fuzzing engine ride on.
+
+Public surface:
+
+    from framework.v2.scanner import (
+        HttpRequest, InsertionKind, InsertionPoint, RequestTemplate,
+    )
+
+Boundary: this module only *shapes* requests. It sends nothing itself — the
+audit engine (a later increment) issues rendered requests through the existing
+``agents.http_executor`` safety stack (charter/scope/kill-switch/egress/rate),
+so scope and authorization stay enforced.
+"""
+
+from __future__ import annotations
+
+from .insertion import (
+    HttpRequest,
+    InsertionKind,
+    InsertionPoint,
+    RequestTemplate,
+)
+
+__all__ = [
+    "HttpRequest",
+    "InsertionKind",
+    "InsertionPoint",
+    "RequestTemplate",
+]
