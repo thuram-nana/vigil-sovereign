@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .checks import Send
 from .insertion import HttpRequest, _encode_pairs
+from .passive import PassiveFinding, Response, scan_passive
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,7 @@ class CrawlResult(BaseModel):
 
     requests: list[HttpRequest] = Field(default_factory=list)
     pages: list[Page] = Field(default_factory=list)
+    passive_findings: list[PassiveFinding] = Field(default_factory=list)
     locations: int = 0
 
 
@@ -177,6 +179,7 @@ class Crawler:
         visited: set[str] = set()
         pages: list[Page] = []
         requests: list[HttpRequest] = []
+        passive: list[PassiveFinding] = []
         req_keys: set[str] = set()
 
         while frontier and len(pages) < self.max_pages:
@@ -189,13 +192,20 @@ class Crawler:
             req = HttpRequest(method="GET", url=url)
             resp = self._send(req)
             status = int(resp.get("status", 0)) if isinstance(resp, dict) else 0
+            body = resp.get("body", "") if isinstance(resp, dict) else ""
+            raw_headers = resp.get("headers", []) if isinstance(resp, dict) else []
             pages.append(Page(url=url, status=status))
             _add_request(requests, req_keys, req)
+
+            # Passive analysis of every response — no extra request, high precision.
+            passive.extend(scan_passive(Response(
+                url=url, status=status,
+                headers=[(str(k), str(v)) for k, v in raw_headers], body=body,
+            )))
 
             if depth >= self.max_depth:
                 continue
 
-            body = resp.get("body", "") if isinstance(resp, dict) else ""
             ex = _Extractor()
             try:
                 ex.feed(body)
@@ -217,7 +227,9 @@ class Crawler:
                 if freq.method == "GET" and _location("GET", freq.url) not in visited:
                     frontier.append((freq.url, depth + 1))
 
-        return CrawlResult(requests=requests, pages=pages, locations=len(visited))
+        return CrawlResult(
+            requests=requests, pages=pages, passive_findings=passive, locations=len(visited),
+        )
 
 
 # ---------------------------------------------------------------------------

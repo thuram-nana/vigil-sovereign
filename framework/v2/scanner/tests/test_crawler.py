@@ -79,7 +79,11 @@ def _send(req: HttpRequest) -> dict:
     if req.body is not None:
         r.data = req.body.encode("utf-8")
     with urllib.request.urlopen(r, timeout=5) as resp:  # noqa: S310 (loopback only)
-        return {"status": resp.status, "body": resp.read().decode("utf-8", "replace")}
+        return {
+            "status": resp.status,
+            "headers": list(resp.headers.items()),
+            "body": resp.read().decode("utf-8", "replace"),
+        }
 
 
 def _paths(reqs) -> set[str]:
@@ -112,6 +116,16 @@ def test_crawl_is_bounded() -> None:
     with _site() as base:
         result = Crawler(_send, max_pages=2).crawl(base + "/")
         assert len(result.pages) <= 2, "max_pages budget not enforced"
+
+
+def test_crawl_runs_passive_checks_per_response() -> None:
+    # every crawled response is passively analyzed at zero extra request cost;
+    # the site serves HTML with no CSP/X-Frame-Options, so those surface.
+    with _site() as base:
+        result = Crawler(_send).crawl(base + "/")
+        ids = {f.check_id for f in result.passive_findings}
+        assert "missing-content-security-policy" in ids
+        assert "missing-x-frame-options" in ids
 
 
 def test_full_loop_crawl_then_scan_then_confirm() -> None:

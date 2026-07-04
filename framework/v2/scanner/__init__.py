@@ -31,6 +31,7 @@ from __future__ import annotations
 from .checks import DEFAULT_CHECKS, Check, DifferentialCheck, MarkerReflectionCheck
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
+from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .insertion import (
     HttpRequest,
     InsertionKind,
@@ -57,4 +58,9 @@ __all__ = [
     "Scope",
     "CrawlResult",
     "Page",
+    # passive
+    "Response",
+    "PassiveFinding",
+    "scan_passive",
+    "PASSIVE_CHECKS",
 ]
