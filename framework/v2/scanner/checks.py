@@ -136,6 +136,51 @@ class OOBCheck:
         return FindingContext.from_oob(hits, bug_class=self.bug_class)
 
 
+@dataclass(frozen=True)
+class IdorCheck:
+    """Broken-object-level authorization (IDOR / BOLA) via a two-identity read.
+
+    Confirmation is achieved-state, not reflection: acting as the attacker, it
+    requests an object owned by a DIFFERENT identity (``victim_ref``) and checks
+    whether the response actually reveals that identity's object content — the
+    ground truth being what the victim's own session (``victim_send``) sees for
+    the same reference. Cross-tenant read (attacker got 200 AND the victim's
+    distinctive content appears in the attacker's response) fires the
+    achieved-state oracle; a 403/empty/different response does not. This is the
+    honest BOLA test: an oracle-confirmed unauthorized read, never a guess from
+    a numeric parameter's mere presence.
+
+    Runs only on the object-reference point (``ref_param``); other points return
+    None. ``victim_send`` is a send authenticated as the victim — supply it from
+    the session layer (a second AuthSession)."""
+
+    id: str
+    ref_param: str
+    victim_ref: str
+    victim_send: Send
+    bug_class: str = "idor"
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        if point.name != self.ref_param:
+            return None
+        victim = self.victim_send(template.render(point, self.victim_ref))
+        attacker = send(template.render(point, self.victim_ref))
+        victim_body = (str(victim.get("body", "")) if isinstance(victim, dict) else str(victim)).strip()
+        attacker_body = str(attacker.get("body", "")) if isinstance(attacker, dict) else str(attacker)
+        attacker_status = int(attacker.get("status", 0)) if isinstance(attacker, dict) else 0
+
+        cross_tenant_read = (
+            attacker_status == 200
+            and len(victim_body) >= 8            # the victim actually has object content
+            and victim_body in attacker_body     # and the attacker is seeing exactly it
+        )
+        return FindingContext.from_state(
+            {"cross_tenant_read": True},
+            {"cross_tenant_read": cross_tenant_read},
+            bug_class=self.bug_class,
+        )
+
+
 def _slugify(s: str) -> str:
     return "".join(c for c in s if c.isalnum())
 

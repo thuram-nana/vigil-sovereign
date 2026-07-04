@@ -29,7 +29,14 @@ so scope and authorization stay enforced.
 from __future__ import annotations
 
 from .campaign import ScanReport, WebScanCampaign, populate_worldmodel
-from .checks import DEFAULT_CHECKS, Check, DifferentialCheck, MarkerReflectionCheck
+from .checks import (
+    DEFAULT_CHECKS,
+    Check,
+    DifferentialCheck,
+    IdorCheck,
+    MarkerReflectionCheck,
+    OOBCheck,
+)
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
@@ -50,6 +57,8 @@ __all__ = [
     "Check",
     "DifferentialCheck",
     "MarkerReflectionCheck",
+    "OOBCheck",
+    "IdorCheck",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",
