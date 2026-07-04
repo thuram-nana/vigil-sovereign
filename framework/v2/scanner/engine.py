@@ -19,6 +19,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..verify.confirmation import confirm_finding
+from ..verify.oob import OOBReceiver
 from ..verify.verifier import OracleVerifier
 from .checks import DEFAULT_CHECKS, Check, Send
 from .insertion import HttpRequest, InsertionKind, RequestTemplate
@@ -58,10 +59,14 @@ class AuditEngine:
         *,
         verifier: OracleVerifier | None = None,
         max_requests: int = 0,
+        oob: OOBReceiver | None = None,
     ) -> None:
         self._send = send
         self.verifier = verifier or OracleVerifier()
         self.max_requests = max_requests
+        # A started OOBReceiver enables the blind (OOB) checks; without one they
+        # are skipped — a blind class is never guessed, only callback-confirmed.
+        self.oob = oob
         self.requests_sent = 0
 
     def _counted_send(self, request: HttpRequest) -> dict:
@@ -93,7 +98,12 @@ class AuditEngine:
                     key = (check.bug_class, point.id)
                     if key in seen:
                         continue
-                    ctx = check.probe(template, point, self._counted_send)
+                    if getattr(check, "wants_oob", False):
+                        if self.oob is None:
+                            continue  # no receiver -> blind check is skipped, not guessed
+                        ctx = check.probe(template, point, self._counted_send, self.oob)
+                    else:
+                        ctx = check.probe(template, point, self._counted_send)
                     if ctx is None:
                         continue
                     confirmed = confirm_finding(

@@ -21,8 +21,11 @@ executor in production), so an autonomous run is both bounded and authorized.
 
 from __future__ import annotations
 
+import contextlib
+
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..verify.oob import OOBReceiver
 from ..worldmodel.graph import WorldModel
 from ..worldmodel.models import Edge, EdgeKind, Node, NodeKind
 from .checks import DEFAULT_CHECKS, Check, Send
@@ -77,6 +80,7 @@ class WebScanCampaign:
         max_pages: int = 100,
         max_depth: int = 6,
         max_audit_requests: int = 0,
+        enable_oob: bool = True,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -85,6 +89,10 @@ class WebScanCampaign:
         self.max_pages = max_pages
         self.max_depth = max_depth
         self.max_audit_requests = max_audit_requests
+        # A per-scan out-of-band receiver so the blind checks (SSRF/XXE/RCE/
+        # deserialization) can confirm callbacks; loopback-only, torn down with
+        # the scan. Off => those checks are skipped, never guessed.
+        self.enable_oob = enable_oob
 
     def run(self, seed_url: str) -> ScanReport:
         crawl = Crawler(
@@ -92,23 +100,26 @@ class WebScanCampaign:
             max_pages=self.max_pages, max_depth=self.max_depth,
         ).crawl(seed_url)
 
-        # One engine across the whole campaign, so its request counter enforces a
-        # single shared active-traffic budget rather than a per-request one.
-        engine = AuditEngine(self._send, max_requests=self.max_audit_requests)
         active: list[AuditFinding] = []
         audited = 0
-        for req in crawl.requests:
-            active.extend(engine.audit(req, insertion_kinds=self.insertion_kinds))
-            audited += 1
-            if self.max_audit_requests and engine.requests_sent >= self.max_audit_requests:
-                break  # budget spent; stop auditing further endpoints
+        oob_cm = OOBReceiver() if self.enable_oob else contextlib.nullcontext(None)
+        with oob_cm as oob:
+            # One engine across the whole campaign, so its request counter enforces
+            # a single shared active-traffic budget rather than a per-request one.
+            engine = AuditEngine(self._send, max_requests=self.max_audit_requests, oob=oob)
+            for req in crawl.requests:
+                active.extend(engine.audit(req, checks=self.checks, insertion_kinds=self.insertion_kinds))
+                audited += 1
+                if self.max_audit_requests and engine.requests_sent >= self.max_audit_requests:
+                    break  # budget spent; stop auditing further endpoints
+            requests_sent = engine.requests_sent
 
         return ScanReport(
             target=seed_url,
             pages_crawled=len(crawl.pages),
             requests_discovered=len(crawl.requests),
             requests_audited=audited,
-            audit_requests_sent=engine.requests_sent,
+            audit_requests_sent=requests_sent,
             active_findings=active,
             passive_findings=crawl.passive_findings,
         )
