@@ -45,7 +45,8 @@ from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
-from . import domxss, graphql, jwt, smuggling
+from . import browser, domxss, graphql, jwt, smuggling
+from .browser import find_browser, render_dom, scan_dom_xss
 from .domxss import DomXssCandidate, analyze_html, analyze_js
 from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import (
@@ -82,6 +83,10 @@ __all__ = [
     "DomXssCandidate",
     "analyze_html",
     "analyze_js",
+    "browser",
+    "find_browser",
+    "render_dom",
+    "scan_dom_xss",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",
