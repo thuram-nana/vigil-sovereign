@@ -1,15 +1,17 @@
 """
 OutcomeLedger wire-in (Wave 4, item 3).
 
-Every oracle-adjudicated finding must append a deterministic (prediction,
-outcome) pair to a `calibration.OutcomeLedger`: the training signal for
-calibrated scoring (item 4) and the audit trail that ends the self-
-contradicting honesty ledger. A fired oracle -> EXPLOITABLE; a silent oracle
--> FALSE_POSITIVE. Findings with no oracle evidence (the legacy LLM-advisory
-path) have no deterministic ground truth and are NOT recorded.
+Every oracle-adjudicated finding appends a deterministic prediction to a
+`calibration.OutcomeLedger`. The OUTCOME label, however, is resolved WITHOUT
+circularity (Wave 3): the old code labelled EXPLOITABLE iff the oracle fired and
+fed that same oracle's confidence in as the prediction, so the calibrator learned
+P(exploitable|oracle)~=1.0 by construction — certifying the oracle against itself.
+Now a single confirming oracle resolves to DISPUTED (honest abstention, excluded
+from every fit); only genuine cross-oracle corroboration resolves EXPLOITABLE
+autonomously, and real labels otherwise come from an independent adjudicator.
 
 The critique-agent is unchanged when no ledger is supplied (backward-compatible);
-these tests pass one in and assert the recorded outcomes.
+these tests pass one in and assert the recorded predictions + abstained outcomes.
 """
 
 from __future__ import annotations
@@ -86,11 +88,11 @@ def _post(bb: Blackboard, payload: FindingPayload) -> None:
             payload=payload.model_dump())
 
 
-def test_ledger_records_confirmed_and_refuted_outcomes(
+def test_ledger_records_predictions_and_abstains_on_single_oracle(
     bb: Blackboard, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # LLM stubbed to OBJECT throughout, to prove the ledger labels track the
-    # ORACLE verdict, not the LLM.
+    # LLM stubbed to OBJECT throughout, to prove the ledger tracks the ORACLE
+    # path, not the LLM.
     monkeypatch.setattr(critique_mod, "urk_critique", _stub_urk("objections"))
 
     _post(bb, _finding("001-fires", _firing_context()))
@@ -102,17 +104,19 @@ def test_ledger_records_confirmed_and_refuted_outcomes(
     while agent.should_run():
         agent.step()
 
-    # Three oracle-adjudicated findings -> three fully-resolved ledger entries.
+    # Three findings -> three predictions recorded.
     assert len(ledger) == 3
-    assert ledger.resolved_count == 3
-    assert len(ledger.pairs()) == 3
 
-    labels = [e.outcome.label for e in ledger.entries()]
-    assert labels.count(OutcomeLabel.EXPLOITABLE) == 2, "both fired oracles -> EXPLOITABLE"
-    assert labels.count(OutcomeLabel.FALSE_POSITIVE) == 1, "silent oracle -> FALSE_POSITIVE"
+    # Each fires exactly ONE oracle kind (the differential), which is NOT
+    # independent enough to auto-confirm — so every outcome is DISPUTED (honest
+    # abstention), and none contributes a target to a fit.
+    from framework.v2.calibration.models import label_to_target
+    labels = [e.outcome.label for e in ledger.entries() if e.outcome is not None]
+    assert labels and all(l == OutcomeLabel.DISPUTED for l in labels)
+    assert all(label_to_target(l) is None for l in labels), "DISPUTED must be excluded from fits"
 
-    # The fired predictions carry a real (non-zero) oracle confidence and the
-    # oracle_confirmed flag; the silent one is 0.0 / False.
+    # Predictions still carry the honest raw oracle confidence + the
+    # oracle_confirmed flag: fired -> >0/True, silent -> 0.0/False.
     by_conf = {e.prediction.oracle_confirmed: e.prediction.raw_score for e in ledger.entries()}
     assert by_conf[True] > 0.0
     assert by_conf[False] == 0.0

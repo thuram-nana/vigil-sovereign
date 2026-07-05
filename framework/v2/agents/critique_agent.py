@@ -59,6 +59,26 @@ def _feature_hash(finding: FindingPayload) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
+# The confidence at/above which a signal is treated as a confirming one — mirrors
+# verify.verifier.OracleVerifier.high_confidence (0.7). Kept local so this module
+# does not import the verifier just to count corroborating kinds.
+_CORROBORATION_THRESHOLD = 0.7
+
+
+def _distinct_confirming_kinds(oracle_result: Any) -> int:
+    """How many DISTINCT oracle kinds fired at/above the confirming threshold for
+    one finding. Two or more is genuine cross-oracle corroboration — evidence
+    independent enough of any single oracle to resolve an autonomous EXPLOITABLE
+    label without the ledger certifying an oracle against itself."""
+    signals = getattr(oracle_result, "signals", None) or []
+    kinds: set[str] = set()
+    for s in signals:
+        if getattr(s, "fired", False) and float(getattr(s, "confidence", 0.0)) >= _CORROBORATION_THRESHOLD:
+            k = getattr(s, "kind", None)
+            kinds.add(getattr(k, "value", None) or str(k))
+    return len(kinds)
+
+
 class CritiqueAgent(Agent):
     name = "critique"
 
@@ -242,7 +262,22 @@ class CritiqueAgent(Agent):
 
         fid = f"{finding.finding_slug}#{finding_event_id}"
         raw = float(getattr(oracle_result, "confidence", 0.0)) if oracle_fired else 0.0
-        label = OutcomeLabel.EXPLOITABLE if oracle_fired else OutcomeLabel.FALSE_POSITIVE
+        # Non-circular ground truth. The old code labelled EXPLOITABLE iff the
+        # oracle fired and used that same oracle's confidence as the prediction —
+        # so the calibrator learned P(exploitable | oracle) ~= 1.0 by construction,
+        # certifying the oracle against itself. Here the label is resolved ONLY
+        # from a signal independent of the confirming oracle: genuine cross-oracle
+        # corroboration (>=2 distinct kinds firing on the same evidence) resolves
+        # EXPLOITABLE; everything else is DISPUTED (target None -> excluded from
+        # every fit). A silent oracle is NOT auto-labelled FALSE_POSITIVE — that
+        # too would be the oracle judging itself. Real EXPLOITABLE/FALSE_POSITIVE
+        # labels come from an INDEPENDENT adjudicator (the eval harness scoring
+        # against a known corpus, or the operator) via record_outcome; until then
+        # the calibrator honestly falls back to identity.
+        if oracle_fired and _distinct_confirming_kinds(oracle_result) >= 2:
+            label = OutcomeLabel.EXPLOITABLE
+        else:
+            label = OutcomeLabel.DISPUTED
         pred_seq = 2 * finding_event_id
         try:
             self._ledger.add_prediction(

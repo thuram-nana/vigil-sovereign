@@ -78,6 +78,11 @@ def _engage(argv: list[str]) -> int:
     return engage_mod.main(argv)
 
 
+def _verify(argv: list[str]) -> int:
+    from .verify import reverify
+    return reverify.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -118,6 +123,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "socialdefense": _socialdefense,
     "scan": _scan,
     "engage": _engage,
+    "verify": _verify,
     "status": _status,
 }
 
