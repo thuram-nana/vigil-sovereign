@@ -43,6 +43,7 @@ from .checks import (
 )
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
+from .orchestrator import AutonomousCampaign, AutonomousResult, ChainedConclusion
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
 from . import browser, browser_crawler, domxss, graphql, jwt, sequencer, smuggling, websocket
@@ -118,6 +119,10 @@ __all__ = [
     "WebScanCampaign",
     "ScanReport",
     "populate_worldmodel",
+    # autonomous orchestration (scanner -> world-model -> knowledge chaining)
+    "AutonomousCampaign",
+    "AutonomousResult",
+    "ChainedConclusion",
     # targeting
     "select_checks",
     "likely_classes",
