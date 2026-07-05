@@ -137,6 +137,71 @@ class OOBCheck:
         return FindingContext.from_oob(hits, bug_class=self.bug_class)
 
 
+@runtime_checkable
+class RequestCheck(Protocol):
+    """A check that operates on the WHOLE request/response — adding a header,
+    reading a response header — rather than fuzzing one insertion point. The
+    engine runs it once per request. Returns oracle-ready evidence, or None."""
+
+    id: str
+    bug_class: str
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None: ...
+
+
+@dataclass(frozen=True)
+class CorsActiveCheck:
+    """Active CORS misconfiguration: send a hostile ``Origin`` and check whether
+    the server reflects it (or wildcards) with credentials — the combination that
+    lets an attacker page read authenticated responses. Confirmed via
+    achieved-state only on the dangerous reflection, so a properly-scoped CORS
+    policy does not fire."""
+
+    id: str = "cors-active"
+    bug_class: str = "cors"
+    evil_origin: str = "https://crucible-evil-origin.test"
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        req = template.request
+        headers = [(k, v) for k, v in req.headers if k.lower() != "origin"]
+        headers.append(("Origin", self.evil_origin))
+        resp = send(req.model_copy(update={"headers": headers}))
+        if not isinstance(resp, dict):
+            return None
+        rh = resp.get("headers", []) or []
+        acao = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-origin"), "")
+        acac = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-credentials"), "").lower() == "true"
+        vulnerable = (acao == self.evil_origin and acac) or (acao == "*" and acac)
+        return FindingContext.from_state(
+            {"cors_bypass": True}, {"cors_bypass": vulnerable}, bug_class=self.bug_class)
+
+
+@dataclass(frozen=True)
+class HostHeaderCheck:
+    """Host-header injection: send a hostile ``Host`` and check whether the app
+    reflects it into an absolute URL — a redirect ``Location`` or an absolute link
+    in the body — which is what poisons password-reset links and web-cache. A
+    plain-text echo of the host does not fire; only its use as a URL authority."""
+
+    id: str = "host-header"
+    bug_class: str = "host_header_injection"
+    evil_host: str = "crucible-evil-host.test"
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        req = template.request
+        headers = [(k, v) for k, v in req.headers if k.lower() != "host"]
+        headers.append(("Host", self.evil_host))
+        resp = send(req.model_copy(update={"headers": headers}))
+        if not isinstance(resp, dict):
+            return None
+        body = str(resp.get("body", ""))
+        rh = resp.get("headers", []) or []
+        location = next((str(v) for k, v in rh if str(k).lower() == "location"), "")
+        reflected = _host(location) == self.evil_host or f"//{self.evil_host}" in body
+        return FindingContext.from_state(
+            {"host_reflected_in_url": True}, {"host_reflected_in_url": reflected}, bug_class=self.bug_class)
+
+
 @dataclass(frozen=True)
 class OpenRedirectCheck:
     """Open redirection: inject a canary absolute URL into a redirect parameter

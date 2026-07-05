@@ -32,11 +32,14 @@ from .campaign import ScanReport, WebScanCampaign, populate_worldmodel
 from .checks import (
     DEFAULT_CHECKS,
     Check,
+    CorsActiveCheck,
     DifferentialCheck,
+    HostHeaderCheck,
     IdorCheck,
     MarkerReflectionCheck,
     OOBCheck,
     OpenRedirectCheck,
+    RequestCheck,
 )
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
@@ -62,6 +65,9 @@ __all__ = [
     "OOBCheck",
     "IdorCheck",
     "OpenRedirectCheck",
+    "RequestCheck",
+    "CorsActiveCheck",
+    "HostHeaderCheck",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",

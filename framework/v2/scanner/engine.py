@@ -88,6 +88,7 @@ class AuditEngine:
         *,
         insertion_kinds: tuple[InsertionKind, ...] | None = None,
         selector: CheckSelector | None = None,
+        request_checks: tuple = (),
     ) -> list[AuditFinding]:
         """Sweep ``checks`` across ``request``'s insertion points and return the
         oracle-confirmed findings, de-duplicated per (bug_class, insertion point).
@@ -100,6 +101,30 @@ class AuditEngine:
         seen: set[tuple[str, str]] = set()
         findings: list[AuditFinding] = []
         try:
+            # Request-level checks (CORS, host-header, …): run once on the whole
+            # request, not per insertion point.
+            for rcheck in request_checks:
+                ctx = rcheck.probe(template, self._counted_send)
+                if ctx is None:
+                    continue
+                confirmed = confirm_finding(
+                    finding={
+                        "bug_class": rcheck.bug_class,
+                        "title": f"{rcheck.bug_class} on the request",
+                        "severity": "High", "surface": f"request:{rcheck.id}",
+                        "summary": f"{rcheck.id} request-level probe fired an oracle",
+                    },
+                    context=ctx, verifier=self.verifier,
+                )
+                if confirmed is not None:
+                    kind = confirmed.confirmed_by
+                    findings.append(AuditFinding(
+                        check_id=rcheck.id, bug_class=rcheck.bug_class,
+                        insertion_point=f"request:{rcheck.id}", param="(request)",
+                        confidence=confirmed.confidence,
+                        confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
+                        rationale=confirmed.rationale,
+                    ))
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
                 for check in point_checks:

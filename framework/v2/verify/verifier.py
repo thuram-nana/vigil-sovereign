@@ -43,6 +43,8 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "mass_assignment": (OracleKind.ACHIEVED_STATE,),
     "privilege_escalation": (OracleKind.ACHIEVED_STATE,),
     "open_redirect": (OracleKind.ACHIEVED_STATE,),
+    "cors": (OracleKind.ACHIEVED_STATE,),
+    "host_header_injection": (OracleKind.ACHIEVED_STATE,),
     "ssrf": (OracleKind.OOB_CALLBACK,),
     "xxe": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "blind_xxe": (OracleKind.OOB_CALLBACK,),
