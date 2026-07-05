@@ -41,6 +41,7 @@ class OracleKind(str, enum.Enum):
     OOB_CALLBACK = "oob_callback"                     # blind out-of-band interaction
     SANITIZER_SIGNAL = "sanitizer_signal"             # ASAN/UBSAN/panic/traceback
     TIMING = "timing"                                 # statistical time-based blind
+    BOOLEAN_INFERENCE = "boolean_inference"           # SPRT over repeated true/false probes
 
 
 class OracleProbe(BaseModel):

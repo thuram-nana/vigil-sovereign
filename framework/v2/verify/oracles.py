@@ -348,6 +348,83 @@ def timing_oracle(
     )
 
 
+def boolean_inference_oracle(
+    probe_rounds: Any,
+    *,
+    alpha: float = 0.05,
+    beta: float = 0.05,
+    p1: float = 0.9,
+    p0: float = 0.1,
+    discriminator: Mapping[str, Any] | str | None = None,
+) -> OracleSignal:
+    """Confirm a boolean-blind vulnerability by a Wald SEQUENTIAL PROBABILITY
+    RATIO TEST over repeated probes — robust to the nondeterministic backends
+    (caching, load-dependent bodies, per-request tokens) that make a single
+    true/false comparison produce Burp-style "Tentative" false positives.
+
+    Each round carries three observed responses: a TRUE-clause response, and two
+    FALSE-clause responses. The per-round Bernoulli signal is
+
+        (TRUE differs from FALSE)  AND  (the two FALSE responses agree)
+
+    — the first half is the boolean signal; the second is a *dynamic-page
+    control* that a naive repeated-differential lacks. A real injection makes the
+    true clause change the response while the false clause stays stable (signal
+    1); a page that simply changes every request trips the control (signal 0), so
+    it cannot masquerade as a bug.
+
+    SPRT accumulates the log-likelihood ratio that the signal rate is ``p1``
+    (vulnerable) vs ``p0`` (noise) and stops at the first boundary: LLR >=
+    log((1-beta)/alpha) confirms; LLR <= log(beta/(1-alpha)) refutes; neither by
+    the last round is inconclusive (a non-fire — never a guess). ``probe_rounds``
+    is ``[{"true": resp, "false_a": resp, "false_b": resp}, ...]``.
+    """
+    rounds = list(probe_rounds or [])
+    upper = math.log((1.0 - beta) / alpha)
+    lower = math.log(beta / (1.0 - alpha))
+    llr = 0.0
+    signals = 0
+    decided: str | None = None
+    n_used = 0
+    for r in rounds:
+        if not isinstance(r, Mapping) or "true" not in r or "false_a" not in r or "false_b" not in r:
+            continue
+        n_used += 1
+        across = differential_response_oracle(r["false_a"], r["true"], discriminator).fired
+        within_same = not differential_response_oracle(r["false_a"], r["false_b"], discriminator).fired
+        signal = bool(across and within_same)
+        signals += 1 if signal else 0
+        llr += math.log(p1 / p0) if signal else math.log((1.0 - p1) / (1.0 - p0))
+        if llr >= upper:
+            decided = "confirm"
+            break
+        if llr <= lower:
+            decided = "refute"
+            break
+
+    observed = {
+        "rounds_used": n_used, "signal_rounds": signals, "llr": llr,
+        "upper": upper, "lower": lower, "decision": decided or "inconclusive",
+    }
+    if decided == "confirm":
+        # confidence reflects the controlled type-I error rate of the test
+        confidence = min(0.99, 1.0 - alpha)
+        return OracleSignal(
+            kind=OracleKind.BOOLEAN_INFERENCE, fired=True, confidence=confidence,
+            evidence=(
+                f"SPRT confirmed boolean inference in {n_used} round(s): "
+                f"{signals} separable (true!=false, false stable), LLR={llr:.2f} >= {upper:.2f}"
+            ),
+            observed=observed,
+        )
+    reason = "refuted (indistinguishable)" if decided == "refute" else "inconclusive (no boundary reached)"
+    return OracleSignal(
+        kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0,
+        evidence=f"SPRT {reason} after {n_used} round(s): LLR={llr:.2f} in ({lower:.2f}, {upper:.2f})",
+        observed=observed,
+    )
+
+
 def holm_correction(p_values: Sequence[float], alpha: float = 0.01) -> list[bool]:
     """Holm-Bonferroni step-down over ``m`` simultaneous timing tests (one per
     candidate parameter). Returns, per input p-value, whether it rejects at

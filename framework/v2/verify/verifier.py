@@ -29,13 +29,13 @@ HIGH_CONFIDENCE = 0.7
 
 # Canonical bug classes to the ordered oracle kinds that can confirm them.
 BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
-    "boolean_sqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
+    "boolean_sqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
     "time_based_sqli": (OracleKind.TIMING, OracleKind.DIFFERENTIAL_RESPONSE),
     "time_based_command_injection": (OracleKind.TIMING, OracleKind.OOB_CALLBACK),
     "time_based": (OracleKind.TIMING,),
     "error_based_sqli": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
-    "sqli": (OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
-    "nosqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
+    "sqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
+    "nosqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
     "idor": (OracleKind.ACHIEVED_STATE,),
     "bola": (OracleKind.ACHIEVED_STATE,),
     "bfla": (OracleKind.ACHIEVED_STATE,),
@@ -193,6 +193,14 @@ class OracleVerifier:
                     injected_ms=ctx.get("timing_injected_ms"),
                     alpha=float(ctx.get("timing_alpha", 0.01)),
                     dose=ctx.get("timing_dose"),
+                )
+            return None
+        if kind is OracleKind.BOOLEAN_INFERENCE:
+            if "probe_rounds" in ctx:
+                return oracles.boolean_inference_oracle(
+                    ctx["probe_rounds"],
+                    discriminator=ctx.get("discriminator"),
+                    **{k: ctx[f"sprt_{k}"] for k in ("alpha", "beta", "p1", "p0") if f"sprt_{k}" in ctx},
                 )
             return None
         if kind is OracleKind.ACHIEVED_STATE:

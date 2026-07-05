@@ -140,6 +140,9 @@ class FindingContext(BaseModel):
     mutated: dict[str, Any] | None = None
     discriminator: dict[str, Any] | None = None
 
+    # boolean_inference_oracle (SPRT over repeated true/false probes)
+    probe_rounds: list[dict[str, Any]] | None = None
+
     # timing_oracle (statistical time-based blind)
     baseline_latencies: list[float] | None = None
     treatment_latencies: list[float] | None = None
@@ -182,6 +185,30 @@ class FindingContext(BaseModel):
             bug_class=bug_class,
             baseline=_response_to_dict(baseline, baseline_latency_ms),
             mutated=_response_to_dict(mutated, mutated_latency_ms),
+            discriminator=dict(discriminator) if discriminator is not None else None,
+        )
+
+    @classmethod
+    def from_boolean_probes(
+        cls,
+        true_responses: Sequence[Any],
+        false_a_responses: Sequence[Any],
+        false_b_responses: Sequence[Any],
+        *,
+        bug_class: str = "boolean_sqli",
+        discriminator: Mapping[str, Any] | None = None,
+    ) -> "FindingContext":
+        """Aligned per-round responses for the SPRT boolean-inference oracle:
+        for each round, the TRUE-clause response and two FALSE-clause responses
+        (the second is the dynamic-page control). Rounds are zipped to the
+        shortest of the three lists; nothing is fetched here."""
+        rounds = [
+            {"true": _response_to_dict(t), "false_a": _response_to_dict(a), "false_b": _response_to_dict(b)}
+            for t, a, b in zip(true_responses, false_a_responses, false_b_responses)
+        ]
+        return cls(
+            bug_class=bug_class,
+            probe_rounds=rounds,
             discriminator=dict(discriminator) if discriminator is not None else None,
         )
 
@@ -289,6 +316,10 @@ class FindingContext(BaseModel):
             ctx["baseline"] = self.baseline
             ctx["mutated"] = self.mutated
             if self.discriminator is not None:
+                ctx["discriminator"] = self.discriminator
+        if self.probe_rounds is not None:
+            ctx["probe_rounds"] = self.probe_rounds
+            if self.discriminator is not None and "discriminator" not in ctx:
                 ctx["discriminator"] = self.discriminator
         if self.baseline_latencies is not None and self.treatment_latencies is not None:
             ctx["baseline_latencies"] = self.baseline_latencies

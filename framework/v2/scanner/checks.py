@@ -23,6 +23,7 @@ tokens), not weaponized exploits.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
@@ -72,6 +73,62 @@ class DifferentialCheck:
             baseline, mutated, bug_class=self.bug_class,
             discriminator={"dimensions": ["status", "length", "lexical"]},
         )
+
+
+@dataclass(frozen=True)
+class BooleanInferenceCheck:
+    """Boolean-blind via a sequential probability ratio test (SPRT).
+
+    Each round sends a TRUE-condition clause and the FALSE-condition clause
+    twice (the second FALSE is a dynamic-page control). It runs the SPRT online
+    to stop as soon as the evidence is decisive — few rounds for a clear signal,
+    a bounded ``n_max`` otherwise — then hands every collected round to the
+    boolean-inference oracle, which recomputes the same decision deterministically.
+    Robust to flaky/dynamic backends that make a single true/false comparison
+    false-positive."""
+
+    id: str
+    bug_class: str
+    true_clause: str
+    false_clause: str
+    n_max: int = 24
+    alpha: float = 0.05
+    beta: float = 0.05
+    p1: float = 0.9
+    p0: float = 0.1
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        from ..verify.oracles import differential_response_oracle  # local: avoid import cycle at module load
+
+        upper = math.log((1.0 - self.beta) / self.alpha)
+        lower = math.log(self.beta / (1.0 - self.alpha))
+        llr = 0.0
+        trues: list[dict] = []
+        false_as: list[dict] = []
+        false_bs: list[dict] = []
+        for _ in range(self.n_max):
+            t = _as_dict(send(template.render(point, self.true_clause)))
+            a = _as_dict(send(template.render(point, self.false_clause)))
+            b = _as_dict(send(template.render(point, self.false_clause)))
+            trues.append(t)
+            false_as.append(a)
+            false_bs.append(b)
+            across = differential_response_oracle(a, t).fired
+            within_same = not differential_response_oracle(a, b).fired
+            signal = across and within_same
+            llr += math.log(self.p1 / self.p0) if signal else math.log((1.0 - self.p1) / (1.0 - self.p0))
+            if llr >= upper or llr <= lower:
+                break  # SPRT reached a decision — stop early
+
+        return FindingContext.from_boolean_probes(
+            trues, false_as, false_bs, bug_class=self.bug_class,
+        )
+
+
+def _as_dict(resp: object) -> dict:
+    if isinstance(resp, dict):
+        return resp
+    return {"body": str(resp)}
 
 
 @dataclass(frozen=True)
