@@ -26,17 +26,21 @@ Public surface:
 
 from __future__ import annotations
 
-from . import generators
+from . import generators, processing
 from .analysis import detect_outliers
 from .attack import AttackType, render_attack
 from .engine import AttackResult, AttackResultRow, IntruderEngine
+from .processing import PayloadProcessor, processed
 
 __all__ = [
     "generators",
+    "processing",
     "AttackType",
     "render_attack",
     "IntruderEngine",
     "AttackResult",
     "AttackResultRow",
     "detect_outliers",
+    "PayloadProcessor",
+    "processed",
 ]
