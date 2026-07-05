@@ -69,6 +69,24 @@ def unit_weight(edge: Edge) -> float:
     return 1.0
 
 
+def lcb_weight(z: float = 1.0) -> WeightFn:
+    """A risk-averse weight: ``-log(belief lower-credible-bound)``. Where
+    ``default_weight`` ranks by the confidence point estimate, this ranks by the
+    *evidence-discounted* belief, so a high-mean but thinly-evidenced (high-
+    variance) edge costs MORE than a slightly-lower-mean but proven one — the
+    planner prefers routes it has actually corroborated. Non-negative (the LCB is
+    in [0, 1]); a zero-LCB edge costs ``inf`` (unusable until it earns evidence).
+
+    Returns a ``WeightFn`` to hand to :func:`best_paths` / :func:`shortest_paths`;
+    ``z`` sets how conservative the bound is (1.0 ~= a one-sigma lower bound)."""
+    def _weight(edge: Edge) -> float:
+        lcb = edge.belief_lcb(z)
+        if lcb <= 0.0:
+            return math.inf
+        return -math.log(lcb)
+    return _weight
+
+
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------

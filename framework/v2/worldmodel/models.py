@@ -29,8 +29,15 @@ query.py, persistence in store.py.
 from __future__ import annotations
 
 import enum
+import math
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def _belief_sd(alpha: float, beta: float) -> float:
+    """Standard deviation of a Beta(alpha, beta) belief."""
+    s = alpha + beta
+    return math.sqrt((alpha * beta) / (s * s * (s + 1.0)))
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +127,13 @@ class Node(BaseModel):
         description="Id of the event/observation that asserted this node.",
     )
     confidence: float = Field(ge=0.0, le=1.0, default=1.0)
+    # Beta(alpha, beta) belief accumulated from re-observations: alpha = 1 +
+    # corroboration weight, beta = 1 + refutation weight. `confidence` stays the
+    # asserted point estimate (reconciled by max); this is the richer signal that
+    # DROPS when a fact is re-observed and fails (max never can). Default Beta(1,1)
+    # is the uniform prior. Maintained by worldmodel.graph on upsert.
+    alpha: float = Field(default=1.0, gt=0.0, description="Beta belief: 1 + corroboration weight.")
+    beta: float = Field(default=1.0, gt=0.0, description="Beta belief: 1 + refutation weight.")
     first_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
     last_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
 
@@ -128,6 +142,20 @@ class Node(BaseModel):
         if self.last_seen < self.first_seen:
             raise ValueError("last_seen must be >= first_seen")
         return self
+
+    @property
+    def belief_mean(self) -> float:
+        """Posterior mean of the Beta belief, alpha / (alpha + beta)."""
+        return self.alpha / (self.alpha + self.beta)
+
+    @property
+    def belief_sd(self) -> float:
+        return _belief_sd(self.alpha, self.beta)
+
+    def belief_lcb(self, z: float = 1.0) -> float:
+        """Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean
+        but high-variance (thinly-evidenced) belief scores below a proven one."""
+        return max(0.0, self.belief_mean - z * self.belief_sd)
 
 
 class Edge(BaseModel):
@@ -149,6 +177,10 @@ class Edge(BaseModel):
         description="Id of the event/observation that asserted this edge.",
     )
     confidence: float = Field(ge=0.0, le=1.0, default=1.0)
+    # Beta belief (see Node.alpha/beta) — the uncertainty-aware companion to the
+    # scalar confidence, maintained by worldmodel.graph on upsert.
+    alpha: float = Field(default=1.0, gt=0.0, description="Beta belief: 1 + corroboration weight.")
+    beta: float = Field(default=1.0, gt=0.0, description="Beta belief: 1 + refutation weight.")
     first_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
     last_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
 
@@ -157,6 +189,19 @@ class Edge(BaseModel):
         if self.last_seen < self.first_seen:
             raise ValueError("last_seen must be >= first_seen")
         return self
+
+    @property
+    def belief_mean(self) -> float:
+        """Posterior mean of the Beta belief, alpha / (alpha + beta)."""
+        return self.alpha / (self.alpha + self.beta)
+
+    @property
+    def belief_sd(self) -> float:
+        return _belief_sd(self.alpha, self.beta)
+
+    def belief_lcb(self, z: float = 1.0) -> float:
+        """Lower credible bound: belief_mean - z * sd, floored at 0."""
+        return max(0.0, self.belief_mean - z * self.belief_sd)
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -197,3 +242,22 @@ class Path(BaseModel):
     @property
     def hops(self) -> int:
         return len(self.edges)
+
+    @property
+    def belief_mean(self) -> float:
+        """The path's success belief: the product of its edges' belief means
+        (independent-hop assumption). The uncertainty-aware analogue of
+        min_confidence."""
+        p = 1.0
+        for e in self.edges:
+            p *= e.belief_mean
+        return p
+
+    def belief_lcb(self, z: float = 1.0) -> float:
+        """A conservative lower credible bound on the path's success belief — the
+        product of the edges' lower bounds. A path of thinly-evidenced hops scores
+        below one of equally-mean but proven hops."""
+        p = 1.0
+        for e in self.edges:
+            p *= e.belief_lcb(z)
+        return p
