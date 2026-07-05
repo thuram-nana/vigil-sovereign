@@ -36,6 +36,7 @@ Design notes:
 from __future__ import annotations
 
 from .catalog import CATALOG, by_id, by_technique
+from .catalog_ext import EXTENDED_CATALOG, FINDING_PRECONDITIONS, by_id_ext
 from .models import (
     AttrOp,
     Direction,
@@ -78,6 +79,9 @@ __all__ = [
     "OperatorError",
     # catalog
     "CATALOG",
+    "EXTENDED_CATALOG",
+    "FINDING_PRECONDITIONS",
+    "by_id_ext",
     "by_id",
     "by_technique",
 ]

@@ -104,6 +104,29 @@ def _send(req: HttpRequest) -> dict:
                 "body": resp.read().decode("utf-8", "replace")}
 
 
+def test_leaked_credential_chains_via_extended_operators_to_a_grant() -> None:
+    # A passive private-key disclosure feeds the extended catalog: the leaked
+    # credential is captured and, via role-assumption, grants over a crown jewel.
+    from framework.v2.scanner.passive import PassiveFinding
+    report = ScanReport(target="http://t/", passive_findings=[
+        PassiveFinding(check_id="info-private-key", title="Private key disclosed",
+                       severity="High", confidence="Certain", url="http://t/backup.pem",
+                       evidence="-----BEGIN RSA PRIVATE KEY-----"),
+    ])
+    result = AutonomousCampaign(lambda req: {"status": 200, "body": ""}).chain_findings(report)
+
+    techniques = {c.technique for c in result.chained_conclusions}
+    assert "credential-leak-capture" in techniques, techniques
+    assert "role-assumption" in techniques, techniques
+
+    grant_paths = [p for p in result.attack_paths if p.destination.startswith("internal:")]
+    assert grant_paths, [p.describe() for p in result.attack_paths]
+
+    # detection cost is populated and paths are sorted stealthiest-first
+    costs = [p.detection_cost for p in result.attack_paths]
+    assert costs == sorted(costs) and all(0.0 <= c <= 1.0 for c in costs)
+
+
 def test_autonomous_campaign_confirms_ssrf_and_chains_to_internal_reach() -> None:
     with _server() as base:
         result = AutonomousCampaign(

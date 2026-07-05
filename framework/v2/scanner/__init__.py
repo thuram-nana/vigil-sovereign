@@ -46,7 +46,22 @@ from .engine import AuditEngine, AuditFinding
 from .orchestrator import AttackPath, AutonomousCampaign, AutonomousResult, ChainedConclusion
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
-from . import browser, browser_crawler, domxss, graphql, jwt, sequencer, smuggling, websocket
+from . import (
+    benchmark,
+    browser,
+    browser_crawler,
+    detection_cost,
+    domxss,
+    graphql,
+    jwt,
+    race,
+    sequencer,
+    smuggling,
+    websocket,
+)
+from .benchmark import BenchmarkReport, run_benchmark
+from .detection_cost import detection_cost_of_technique, path_detection_cost, rank_paths
+from .race import RaceResult, race_burst, race_check, raw_race
 from .sequencer import SequencerResult, analyze as analyze_tokens, collect_tokens
 from .websocket import CswshCheck, WsMessageInjectionCheck
 from .browser import find_browser, render_dom, scan_dom_xss
@@ -124,6 +139,21 @@ __all__ = [
     "AutonomousResult",
     "ChainedConclusion",
     "AttackPath",
+    # single-packet race
+    "race",
+    "raw_race",
+    "race_burst",
+    "race_check",
+    "RaceResult",
+    # detection-cost / stealth ranking
+    "detection_cost",
+    "detection_cost_of_technique",
+    "path_detection_cost",
+    "rank_paths",
+    # benchmark harness
+    "benchmark",
+    "run_benchmark",
+    "BenchmarkReport",
     # targeting
     "select_checks",
     "likely_classes",

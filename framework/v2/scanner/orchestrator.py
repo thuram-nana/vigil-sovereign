@@ -28,13 +28,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..knowledge import CATALOG, saturate
+from ..knowledge import CATALOG, EXTENDED_CATALOG, saturate
 from ..worldmodel.attacker import ATTACKER_ID, AttackerState
 from ..worldmodel.graph import WorldModel
 from ..worldmodel.models import Edge, EdgeKind, Node, NodeKind
 from ..worldmodel.pathsearch import best_paths
 from .campaign import ScanReport, WebScanCampaign, populate_worldmodel
 from .checks import DEFAULT_CHECKS, Check, Send
+from .detection_cost import path_detection_cost
 from .insertion import InsertionKind
 
 DEFAULT_INTERNAL_RESOURCES: tuple[tuple[str, dict[str, object]], ...] = (
@@ -52,8 +53,14 @@ _TRAVERSABLE = (
     EdgeKind.VALID_ON,
 )
 
-# operator ids that must be seeded with the attacker as their acting principal.
-_ACTOR_SEEDED = ("credential-reuse", "token-replay", "deserialization-to-code-exec")
+# operator ids that must be seeded with the attacker as their acting principal
+# (base catalog + the extended catalog's attacker-acting operators). saturate
+# RAISES if a seed-requiring operator matches without its seed, so every such
+# operator whose preconditions the graph can satisfy must be listed.
+_ACTOR_SEEDED = (
+    "credential-reuse", "token-replay", "deserialization-to-code-exec",
+    "credential-leak-capture", "datastore-secret-extraction", "token-leak-capture",
+)
 
 
 @dataclass
@@ -74,6 +81,7 @@ class AttackPath:
     hops."""
 
     steps: list[ChainedConclusion]
+    detection_cost: float = 0.0  # 0 = stealthy, 1 = loud (DEL telemetry accounting)
 
     @property
     def destination(self) -> str:
@@ -155,9 +163,20 @@ class AutonomousCampaign:
             attacker.reach(ep_id, seq=seq.next(), provenance=f"finding:{f.bug_class}", confidence=f.confidence)
             self._establish_topology(world, ep_id, f.bug_class, f.confidence, seq)
 
-        # chain: run the technique operators over the confirmed facts to a fixpoint
-        seeds = {op_id: {"actor": ATTACKER_ID} for op_id in _ACTOR_SEEDED}
-        saturate(CATALOG, world, seq_start=seq.next(), seeds=seeds)
+        # passive findings feed chains too: a disclosed private key IS a credential
+        # the attacker can capture, which the extended operators turn into account
+        # takeover / a grant over a crown jewel.
+        for pf in report.passive_findings:
+            if pf.check_id == "info-private-key":
+                self._establish_credential_exposure(world, pf.url, seq)
+
+        # chain: run the base + extended technique operators over the confirmed
+        # facts to a fixpoint. role-assumption grants over a caller-supplied crown
+        # jewel; seed it with an internal resource so it can fire without raising.
+        seeds: dict[str, dict[str, str]] = {op_id: {"actor": ATTACKER_ID} for op_id in _ACTOR_SEEDED}
+        if self.internal_resources:
+            seeds["role-assumption"] = {"resource": self.internal_resources[0][0]}
+        saturate([*CATALOG, *EXTENDED_CATALOG], world, seq_start=seq.next(), seeds=seeds)
 
         conclusions = [
             ChainedConclusion(src=e.src, edge=e.kind.value, dst=e.dst,
@@ -189,6 +208,18 @@ class AutonomousCampaign:
             # the operator wants an incoming REACHABLE_FROM(host -> endpoint)
             _edge(world, host, ep_id, EdgeKind.REACHABLE_FROM, prov, conf, seq)
 
+    def _establish_credential_exposure(self, world: WorldModel, url: str, seq: "_Seq") -> None:
+        """A disclosed credential valid on a principal — the topology the
+        credential-leak-capture → role-assumption chain consumes."""
+        slug = ("".join(c for c in url if c.isalnum())[-16:]) or "x"
+        cred, principal = f"credential:leaked:{slug}", f"principal:leaked:{slug}"
+        prov = "finding:info-private-key"
+        world.add_node(Node(id=cred, kind=NodeKind.CREDENTIAL, attrs={"exposed": True},
+                            provenance=prov, confidence=0.9, first_seen=seq.peek(), last_seen=seq.next()))
+        world.add_node(Node(id=principal, kind=NodeKind.PRINCIPAL, attrs={},
+                            provenance=prov, confidence=0.9, first_seen=seq.peek(), last_seen=seq.next()))
+        _edge(world, cred, principal, EdgeKind.VALID_ON, prov, 0.9, seq)
+
     def _extract_paths(self, world: WorldModel) -> list[AttackPath]:
         if world.get_node(ATTACKER_ID) is None:
             return []
@@ -202,7 +233,11 @@ class AutonomousCampaign:
                 for e in p.edges
             ]
             if steps:
-                paths.append(AttackPath(steps=steps))
+                cost = path_detection_cost([s.technique for s in steps])
+                paths.append(AttackPath(steps=steps, detection_cost=round(cost, 3)))
+        # stealthiest first — the DEL telemetry accounting lets the operator (or a
+        # planner) prefer the least-detectable route to the same crown jewel.
+        paths.sort(key=lambda ap: ap.detection_cost)
         return paths
 
 
