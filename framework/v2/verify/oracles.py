@@ -568,6 +568,86 @@ def holm_correction(p_values: Sequence[float], alpha: float = 0.01) -> list[bool
 # ---------------------------------------------------------------------------
 
 
+def _resolve_operand(operand: Any, observed: Mapping[str, Any]) -> Any:
+    """A predicate operand is either a variable reference ``{"var": "name"}``
+    (looked up in the observed evidence) or a literal (str/int/list/...)."""
+    if isinstance(operand, Mapping) and set(operand.keys()) == {"var"}:
+        return observed.get(operand["var"])
+    return operand
+
+
+def _eval_predicate(pred: Any, observed: Mapping[str, Any]) -> tuple[bool, str]:
+    """Evaluate one declarative predicate node over the observed evidence and
+    return (holds, human-readable evidence). The predicate is a tiny, pure,
+    JSON-serialisable AST — no code, so a certificate stays re-verifiable. Ops:
+    all/any/not, eq/ieq, contains/icontains, in, min_len, gt/ge."""
+    if not isinstance(pred, Mapping) or len(pred) != 1:
+        raise ValueError(f"predicate node must be a single-op mapping, got {pred!r}")
+    op, args = next(iter(pred.items()))
+
+    if op == "all":
+        results = [_eval_predicate(p, observed) for p in args]
+        return all(r[0] for r in results), " AND ".join(f"({r[1]})" for r in results)
+    if op == "any":
+        results = [_eval_predicate(p, observed) for p in args]
+        return any(r[0] for r in results), " OR ".join(f"({r[1]})" for r in results)
+    if op == "not":
+        r = _eval_predicate(args, observed)
+        return (not r[0]), f"NOT({r[1]})"
+
+    a = _resolve_operand(args[0], observed)
+    if op in ("eq", "ieq", "contains", "icontains", "in", "min_len", "gt", "ge"):
+        b = _resolve_operand(args[1], observed) if len(args) > 1 else None
+    if op == "eq":
+        return a == b, f"{a!r} == {b!r}"
+    if op == "ieq":
+        return str(a).lower() == str(b).lower(), f"{a!r} =(ci) {b!r}"
+    if op == "contains":
+        ok = bool(a) and bool(b) and str(b) in str(a)
+        return ok, f"{b!r} in <{len(str(a))}b body>"
+    if op == "icontains":
+        ok = bool(a) and bool(b) and str(b).lower() in str(a).lower()
+        return ok, f"{b!r} in(ci) <{len(str(a))}b body>"
+    if op == "in":
+        return a in (b or []), f"{a!r} in {b!r}"
+    if op == "min_len":
+        return len(str(a or "")) >= int(b), f"len({a!r})>={b}"
+    if op == "gt":
+        return (a is not None and b is not None and a > b), f"{a!r} > {b!r}"
+    if op == "ge":
+        return (a is not None and b is not None and a >= b), f"{a!r} >= {b!r}"
+    raise ValueError(f"unknown predicate op {op!r}")
+
+
+def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> OracleSignal:
+    """Evaluate a dangerous CONDITION over RAW observed values — the fix for the
+    achieved-state rubber-stamp.
+
+    The old pattern had each state check (CORS/host-header/redirect/JWT/IDOR/race)
+    compute a boolean in Python and pass ``{"k": True}`` vs ``{"k": that_boolean}``
+    to ``achieved_state_oracle``, which merely re-asserted the check's own verdict.
+    Here the check hands over the ACTUAL observed values (header values, both
+    identities' bodies, the accepted/rejected statuses, the concurrent successes)
+    plus a declarative predicate, and THIS oracle decides — emitting evidence that
+    cites the values it judged. The predicate is a pure JSON AST, so the finding's
+    certificate re-verifies offline exactly like every other oracle."""
+    observed = dict(observed_evidence or {})
+    try:
+        fired, evidence = _eval_predicate(predicate, observed)
+    except (ValueError, TypeError) as e:
+        return OracleSignal(
+            kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0,
+            evidence=f"malformed predicate: {e}", observed={"predicate": predicate})
+    return OracleSignal(
+        kind=OracleKind.ACHIEVED_STATE,
+        fired=fired,
+        confidence=0.9 if fired else 0.0,
+        evidence=(f"dangerous condition holds over observed values: {evidence}"
+                  if fired else f"condition not met: {evidence}"),
+        observed={"predicate_eval": evidence, "values": observed},
+    )
+
+
 def achieved_state_oracle(
     expected_state: Mapping[str, Any],
     observed_state: Mapping[str, Any],

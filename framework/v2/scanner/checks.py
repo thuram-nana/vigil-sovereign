@@ -282,10 +282,18 @@ class CorsActiveCheck:
             return None
         rh = resp.get("headers", []) or []
         acao = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-origin"), "")
-        acac = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-credentials"), "").lower() == "true"
-        vulnerable = (acao == self.evil_origin and acac) or (acao == "*" and acac)
-        return FindingContext.from_state(
-            {"cors_bypass": True}, {"cors_bypass": vulnerable}, bug_class=self.bug_class)
+        acac = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-credentials"), "")
+        # The ORACLE decides the dangerous condition over the raw header values:
+        # (ACAO reflects the hostile origin OR is a wildcard) AND credentials are
+        # allowed. A properly-scoped policy fails the predicate and does not fire.
+        return FindingContext.from_predicate(
+            {"acao": acao, "acac": acac, "evil_origin": self.evil_origin},
+            {"all": [
+                {"any": [{"eq": [{"var": "acao"}, {"var": "evil_origin"}]},
+                         {"eq": [{"var": "acao"}, "*"]}]},
+                {"ieq": [{"var": "acac"}, "true"]},
+            ]},
+            bug_class=self.bug_class)
 
 
 @dataclass(frozen=True)
@@ -309,9 +317,17 @@ class HostHeaderCheck:
         body = str(resp.get("body", ""))
         rh = resp.get("headers", []) or []
         location = next((str(v) for k, v in rh if str(k).lower() == "location"), "")
-        reflected = _host(location) == self.evil_host or f"//{self.evil_host}" in body
-        return FindingContext.from_state(
-            {"host_reflected_in_url": True}, {"host_reflected_in_url": reflected}, bug_class=self.bug_class)
+        # The oracle checks whether the hostile Host became a URL authority: a
+        # redirect Location to it, or an absolute //evil-host URL in the body. A
+        # plain-text echo of the host does NOT satisfy the predicate.
+        return FindingContext.from_predicate(
+            {"location_host": _host(location), "evil_host": self.evil_host,
+             "body": body, "evil_url": f"//{self.evil_host}"},
+            {"any": [
+                {"eq": [{"var": "location_host"}, {"var": "evil_host"}]},
+                {"contains": [{"var": "body"}, {"var": "evil_url"}]},
+            ]},
+            bug_class=self.bug_class)
 
 
 @dataclass(frozen=True)
@@ -340,15 +356,29 @@ class OpenRedirectCheck:
         location = next((str(v) for k, v in headers if str(k).lower() == "location"), "")
         body = str(resp.get("body", ""))
 
-        canary_host = _host(self.canary)
-        via_header = status in (301, 302, 303, 307, 308) and _host(location) == canary_host
-        via_body = canary_host and canary_host in body and (
-            "http-equiv" in body.lower() or "location.href" in body.lower() or "location.replace" in body.lower()
-        )
-        redirected = bool(via_header or via_body)
-        return FindingContext.from_state(
-            {"open_redirect": True}, {"open_redirect": redirected}, bug_class=self.bug_class,
-        )
+        # The oracle decides redirection to the canary host over the raw status,
+        # Location, and body: a 30x Location to the canary host, OR a meta/JS
+        # redirect in the body that resolves to it. Reflection on the app's own
+        # host fails the predicate (no false positive on echoed-but-safe params).
+        return FindingContext.from_predicate(
+            {"status": status, "location_host": _host(location),
+             "canary_host": _host(self.canary), "body": body},
+            {"any": [
+                {"all": [
+                    {"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
+                    {"eq": [{"var": "location_host"}, {"var": "canary_host"}]},
+                ]},
+                {"all": [
+                    {"min_len": [{"var": "canary_host"}, 1]},
+                    {"contains": [{"var": "body"}, {"var": "canary_host"}]},
+                    {"any": [
+                        {"icontains": [{"var": "body"}, "http-equiv"]},
+                        {"icontains": [{"var": "body"}, "location.href"]},
+                        {"icontains": [{"var": "body"}, "location.replace"]},
+                    ]},
+                ]},
+            ]},
+            bug_class=self.bug_class)
 
 
 @dataclass(frozen=True)
@@ -384,14 +414,17 @@ class IdorCheck:
         attacker_body = str(attacker.get("body", "")) if isinstance(attacker, dict) else str(attacker)
         attacker_status = int(attacker.get("status", 0)) if isinstance(attacker, dict) else 0
 
-        cross_tenant_read = (
-            attacker_status == 200
-            and len(victim_body) >= 8            # the victim actually has object content
-            and victim_body in attacker_body     # and the attacker is seeing exactly it
-        )
-        return FindingContext.from_state(
-            {"cross_tenant_read": True},
-            {"cross_tenant_read": cross_tenant_read},
+        # The oracle decides the cross-tenant read over the raw bodies/status:
+        # the attacker got 200, the victim actually has object content, and that
+        # exact content appears in the attacker's response.
+        return FindingContext.from_predicate(
+            {"attacker_status": attacker_status, "victim_body": victim_body,
+             "attacker_body": attacker_body},
+            {"all": [
+                {"eq": [{"var": "attacker_status"}, 200]},
+                {"min_len": [{"var": "victim_body"}, 8]},
+                {"contains": [{"var": "attacker_body"}, {"var": "victim_body"}]},
+            ]},
             bug_class=self.bug_class,
         )
 

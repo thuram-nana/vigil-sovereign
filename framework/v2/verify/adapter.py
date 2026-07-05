@@ -154,6 +154,10 @@ class FindingContext(BaseModel):
     expected_state: dict[str, Any] | None = None
     observed_state: dict[str, Any] | None = None
 
+    # predicate_oracle (evidence-carrying achieved-state; Wave 7)
+    observed_evidence: dict[str, Any] | None = None
+    predicate: dict[str, Any] | None = None
+
     # side_effect_oracle
     marker: str | None = None
     observed_sink: Any | None = None
@@ -266,6 +270,24 @@ class FindingContext(BaseModel):
         )
 
     @classmethod
+    def from_predicate(
+        cls,
+        observed_evidence: Mapping[str, Any],
+        predicate: Mapping[str, Any],
+        *,
+        bug_class: str = "cors",
+    ) -> "FindingContext":
+        """Raw observed values plus a declarative dangerous-condition predicate
+        for the predicate oracle (CORS/host-header/redirect/JWT/IDOR/race). The
+        oracle — not the check — evaluates the condition, so the verdict is no
+        longer a rubber-stamp. Both are JSON so the certificate re-verifies."""
+        return cls(
+            bug_class=bug_class,
+            observed_evidence={str(k): v for k, v in dict(observed_evidence or {}).items()},
+            predicate=dict(predicate),
+        )
+
+    @classmethod
     def from_process_output(
         cls, captured: Any, *, bug_class: str = "crash"
     ) -> "FindingContext":
@@ -333,6 +355,9 @@ class FindingContext(BaseModel):
         if self.expected_state is not None and self.observed_state is not None:
             ctx["expected_state"] = self.expected_state
             ctx["observed_state"] = self.observed_state
+        if self.observed_evidence is not None and self.predicate is not None:
+            ctx["observed_evidence"] = self.observed_evidence
+            ctx["predicate"] = self.predicate
         if self.marker is not None and self.observed_sink is not None:
             ctx["marker"] = self.marker
             ctx["observed_sink"] = self.observed_sink
