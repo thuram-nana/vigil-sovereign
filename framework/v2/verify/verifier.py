@@ -42,6 +42,7 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "auth_bypass": (OracleKind.ACHIEVED_STATE, OracleKind.DIFFERENTIAL_RESPONSE),
     "mass_assignment": (OracleKind.ACHIEVED_STATE,),
     "privilege_escalation": (OracleKind.ACHIEVED_STATE,),
+    "open_redirect": (OracleKind.ACHIEVED_STATE,),
     "ssrf": (OracleKind.OOB_CALLBACK,),
     "xxe": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "blind_xxe": (OracleKind.OOB_CALLBACK,),

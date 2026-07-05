@@ -36,6 +36,7 @@ from .checks import (
     IdorCheck,
     MarkerReflectionCheck,
     OOBCheck,
+    OpenRedirectCheck,
 )
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
@@ -60,6 +61,7 @@ __all__ = [
     "MarkerReflectionCheck",
     "OOBCheck",
     "IdorCheck",
+    "OpenRedirectCheck",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",

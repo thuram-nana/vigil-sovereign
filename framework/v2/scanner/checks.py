@@ -26,6 +26,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 from ..verify.adapter import FindingContext
 from ..verify.oob import OOBReceiver
@@ -137,6 +138,43 @@ class OOBCheck:
 
 
 @dataclass(frozen=True)
+class OpenRedirectCheck:
+    """Open redirection: inject a canary absolute URL into a redirect parameter
+    and confirm via achieved-state ONLY when the response actually redirects to
+    the canary's host — a 30x Location to the canary host, or a meta-refresh /
+    JS-location redirect that resolves to it. A redirect that stays on the app's
+    own host (the app merely echoing the param inside its own URL) does NOT fire,
+    so this does not false-positive on reflected-but-safe redirect params.
+
+    Runs on any point (the caller scopes it via targeting to redirect-ish params).
+    Needs response headers from ``send``; a follow-redirects=False client (the
+    production executor) exposes the Location header."""
+
+    id: str = "open-redirect"
+    bug_class: str = "open_redirect"
+    canary: str = "https://crucible-redirect-canary.test/pwned"
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        resp = send(template.render(point, self.canary))
+        if not isinstance(resp, dict):
+            return None
+        status = int(resp.get("status", 0))
+        headers = resp.get("headers", []) or []
+        location = next((str(v) for k, v in headers if str(k).lower() == "location"), "")
+        body = str(resp.get("body", ""))
+
+        canary_host = _host(self.canary)
+        via_header = status in (301, 302, 303, 307, 308) and _host(location) == canary_host
+        via_body = canary_host and canary_host in body and (
+            "http-equiv" in body.lower() or "location.href" in body.lower() or "location.replace" in body.lower()
+        )
+        redirected = bool(via_header or via_body)
+        return FindingContext.from_state(
+            {"open_redirect": True}, {"open_redirect": redirected}, bug_class=self.bug_class,
+        )
+
+
+@dataclass(frozen=True)
 class IdorCheck:
     """Broken-object-level authorization (IDOR / BOLA) via a two-identity read.
 
@@ -183,6 +221,11 @@ class IdorCheck:
 
 def _slugify(s: str) -> str:
     return "".join(c for c in s if c.isalnum())
+
+
+def _host(url: str) -> str:
+    """The netloc of a URL, lowercased, or '' if it has none (relative URL)."""
+    return urlsplit(url).netloc.lower()
 
 
 # ---------------------------------------------------------------------------
