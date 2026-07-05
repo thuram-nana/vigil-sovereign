@@ -43,13 +43,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 
 from ..common import logging as v2log
 from ..common import paths
 from ..common.errors import SovereigntyViolation
+from ..verify.adapter import FindingContext
 from ..authority import (
     ActionRequest,
     EngagementAuthority,
@@ -63,7 +64,7 @@ from .egress_guard import (
     build_engagement_allowlist,
 )
 from .executor_proto import ExecutionOutcome, Executor
-from .models import HypothesisPayload, PlanPayload
+from .models import FindingPayload, HypothesisPayload, PlanPayload
 from .scope_gate import ScopeDecision, Posture, is_destructive, validate_action
 
 _log = v2log.get_logger(__name__)
@@ -89,6 +90,16 @@ _UA_REALISTIC = (
 
 def _today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _set_query_param(url: str, param: str, value: str) -> str:
+    """Return ``url`` with ``param`` set to ``value`` in its query string
+    (replacing any existing occurrence). Used to render the baseline and probe
+    URLs for a differential without disturbing the rest of the request."""
+    parts = urlsplit(url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != param]
+    kept.append((param, value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
 
 
 def user_agent_for(
@@ -366,17 +377,18 @@ class HttpExecutor:
             return f"scope_gate refused ({decision.refusal_kind}): {decision.reason}"
         return None
 
-    def execute(
-        self,
-        hypothesis: HypothesisPayload,
-        plan: PlanPayload,
-    ) -> ExecutionOutcome:
-        method, url = self._derive_request(hypothesis, plan)
-        action_id = self._next_action_id()
+    def _run_gates(
+        self, method: str, url: str, action_id: str,
+    ) -> ExecutionOutcome | None:
+        """Run the full per-action safety chain and return a refusal outcome if
+        any gate denies, else None (the action may proceed to I/O).
 
-        # Engagement-authority + kill-switch gate. Checked first, before
-        # the scope gate and before any I/O, so a tripped kill-switch
-        # halts the engagement at the very next action.
+        Order is load-bearing: authority/kill-switch (before any I/O, so a trip
+        halts at the very next action) -> scope -> destructive-confirm (default-
+        deny) -> per-engagement budget -> posture rate-limit. Shared by
+        ``execute`` and ``execute_differential`` so NO action path can skip a
+        gate — a new confirmation mode cannot become a hole in the safety stack.
+        """
         halt = self._authority_gate(method, url, action_id)
         if halt is not None:
             return halt
@@ -426,6 +438,19 @@ class HttpExecutor:
 
         # Rate limit (posture-aware).
         self._sleep_for_rate_limit()
+        return None
+
+    def execute(
+        self,
+        hypothesis: HypothesisPayload,
+        plan: PlanPayload,
+    ) -> ExecutionOutcome:
+        method, url = self._derive_request(hypothesis, plan)
+        action_id = self._next_action_id()
+
+        refusal = self._run_gates(method, url, action_id)
+        if refusal is not None:
+            return refusal
 
         if self.dry_run:
             self._requests_made += 1
@@ -440,6 +465,116 @@ class HttpExecutor:
 
         return self._issue(action_id=action_id, method=method, url=url,
                            hypothesis=hypothesis)
+
+    def execute_differential(
+        self,
+        hypothesis: HypothesisPayload,
+        plan: PlanPayload,
+        *,
+        param: str,
+        baseline_value: str,
+        probe_value: str,
+        bug_class: str = "boolean_sqli",
+        discriminator: dict | None = None,
+    ) -> ExecutionOutcome:
+        """Issue a benign BASELINE and a boolean PROBE for ``param`` — both
+        through the full ``_run_gates`` chain — and attach the two observed
+        responses as ``oracle_context`` so the deterministic differential oracle,
+        not the LLM critique, adjudicates.
+
+        This is the live-path counterpart to ``OracleProbeExecutor`` (which only
+        probes loopback): every request here still passes authority/scope/
+        destructive/budget/rate-limit/egress, so a *live* finding now carries the
+        same machine-checkable, independently re-verifiable evidence a loopback
+        finding does. Returns ``success=True`` when a candidate worth adjudicating
+        was produced — never a confirmation; the oracle remains the gate.
+        """
+        method, base = self._derive_request(hypothesis, plan)
+        baseline_url = _set_query_param(base, param, baseline_value)
+        probe_url = _set_query_param(base, param, probe_value)
+
+        captured: dict[str, dict] = {}
+        for label, url in (("baseline", baseline_url), ("probe", probe_url)):
+            action_id = self._next_action_id()
+            refusal = self._run_gates(method, url, action_id)
+            if refusal is not None:
+                return refusal  # a gate denied one probe -> the whole finding is refused
+            if self.dry_run:
+                self._requests_made += 1
+                self._log_event("dry_run.skipped", action_id=action_id, method=method, url=url)
+                return ExecutionOutcome(
+                    success=False,
+                    note=f"http_executor: dry_run=True; would have issued {method} {url}",
+                )
+            ua = user_agent_for(self._resolved_posture, self.operator_identifier)
+            headers = {"User-Agent": ua, "Accept": "*/*"}
+            resp, refusal = self._capture(method, url, action_id, headers)
+            if refusal is not None:
+                return refusal
+            captured[label] = resp  # type: ignore[assignment]
+
+        baseline, mutated = captured["baseline"], captured["probe"]
+        context = FindingContext.from_http_responses(
+            baseline, mutated, bug_class=bug_class,
+            discriminator=discriminator or {"dimensions": ["status", "length", "lexical"]},
+        )
+        finding = FindingPayload(
+            finding_slug=f"{(hypothesis.handle or 'H').strip().lower().replace(' ', '-')}-differential",
+            title=f"{bug_class} candidate on {base}",
+            severity="High",
+            bug_class=bug_class,
+            surface=f"{method} {base} [{param}]",
+            summary=(
+                "A benign baseline and a boolean probe were captured live through "
+                "the gated executor; the differential oracle adjudicates whether "
+                "the responses diverge enough to confirm."
+            ),
+        )
+        return ExecutionOutcome(
+            success=True,
+            status_code=int(mutated.get("status", 0)),
+            body_excerpt=str(mutated.get("body", ""))[:300],
+            note=(
+                "http_executor: baseline vs probe captured through the gated stack; "
+                "oracle_context attached for deterministic adjudication"
+            ),
+            finding=finding,
+            oracle_context=context.model_dump(),
+        )
+
+    def gated_fetch(self, request: object) -> dict:
+        """Run one scanner ``HttpRequest`` (``.method``/``.url``/``.headers``/
+        ``.body``) through the full gate chain and return
+        ``{status, body, headers, latency_ms}`` — a refusal yields status 0 and a
+        ``refused`` note.
+
+        This is the adapter that makes the scanner's injected ``send`` *be* the
+        gated executor in production: the whole Wave-1 arsenal (crawl + point
+        checks + request-level checks) runs against an authorized target with
+        every request passing authority/kill-switch/scope/budget/rate-limit/
+        egress. It is the ``engage`` runner's bridge between the scanner's
+        ``send(HttpRequest)->dict`` contract and the safety stack."""
+        method = getattr(request, "method", "GET")
+        url = getattr(request, "url", "")
+        body = getattr(request, "body", None) or None
+        raw_headers = list(getattr(request, "headers", []) or [])
+        action_id = self._next_action_id()
+
+        refusal = self._run_gates(method, url, action_id)
+        if refusal is not None:
+            return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0, "refused": refusal.note}
+        if self.dry_run:
+            self._requests_made += 1
+            self._log_event("dry_run.skipped", action_id=action_id, method=method, url=url)
+            return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
+
+        headers = {str(k): str(v) for k, v in raw_headers}
+        headers.setdefault("User-Agent", user_agent_for(self._resolved_posture, self.operator_identifier))
+        headers.setdefault("Accept", "*/*")
+        resp, refusal = self._capture(method, url, action_id, headers, body)
+        if refusal is not None:
+            return {"status": 0, "body": "", "headers": [], "latency_ms": 0.0, "refused": refusal.note}
+        return resp  # type: ignore[return-value]
 
     def stats(self) -> dict[str, int]:
         return {
@@ -644,6 +779,101 @@ class HttpExecutor:
                 f"redirect_chain={redirect_chain}"
             ),
         )
+
+    def _capture(
+        self, method: str, url: str, action_id: str, headers: dict[str, str],
+        body: str | bytes | None = None,
+    ) -> tuple[dict | None, ExecutionOutcome | None]:
+        """Issue one ALREADY-GATED request (following + re-gating redirects) and
+        return its response as an oracle-ready dict
+        ``{status, body, headers, latency_ms}``, or ``(None, refusal)``.
+
+        Mirrors ``_issue``'s I/O (redirect re-gate, evidence archive, budget
+        increment, egress/http-error handling) but yields structured response
+        data for the oracle layer instead of a human-readable outcome. The
+        gating itself is NOT duplicated — the caller runs ``_run_gates`` first
+        and redirects re-enter ``_gate_redirect`` here. ``body`` is sent on the
+        initial hop and dropped on any redirect (which becomes a GET)."""
+        evidence_dir = self._evidence_dir(action_id)
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        redirect_chain: list[tuple[int, str]] = []
+        redirect_refused: str | None = None
+        try:
+            t0 = time.perf_counter()
+            client = self._client()
+            current_method, current_url = method, url
+            current_body = body
+            response = None
+            for hop in range(5):
+                if hop > 0:
+                    redirect_refused = self._gate_redirect(current_method, current_url, action_id)
+                    if redirect_refused is not None:
+                        self._log_event(
+                            "redirect.refused", action_id=action_id,
+                            refused_url=current_url, reason=redirect_refused,
+                            redirect_chain=redirect_chain,
+                        )
+                        break
+                content = None
+                if current_body is not None:
+                    content = current_body.encode("utf-8") if isinstance(current_body, str) else current_body
+                response = client.request(current_method, current_url, headers=headers, content=content)
+                redirect_chain.append((response.status_code, current_url))
+                if response.is_redirect and response.headers.get("location"):
+                    current_url = urljoin(current_url, response.headers["location"])
+                    current_method = "GET"
+                    current_body = None  # a redirected request carries no body
+                    continue
+                break
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        except SovereigntyViolation as exc:
+            self._scope_violations += 1
+            self._log_event("egress.refused", action_id=action_id, method=method, url=url,
+                            error=str(exc), redirect_chain=redirect_chain)
+            return None, self._refused(f"egress guard: {exc}", status_code=0)
+        except httpx.HTTPError as exc:
+            self._requests_made += 1
+            self._last_request_at = time.time()
+            self._log_event("http.error", action_id=action_id, method=method, url=url,
+                            error=f"{type(exc).__name__}: {exc}")
+            return None, ExecutionOutcome(
+                success=False, status_code=0,
+                note=f"http_executor: {type(exc).__name__}: {exc}")
+
+        assert response is not None
+        self._requests_made += 1
+        self._last_request_at = time.time()
+
+        body_bytes = response.content
+        body_excerpt = body_bytes[:_BODY_EXCERPT_BYTES].decode("utf-8", errors="replace")
+        try:
+            (evidence_dir / "request.http").write_text(
+                self._format_request(method, url, headers), encoding="utf-8")
+            (evidence_dir / "response.http").write_text(
+                self._format_response(response, redirect_chain), encoding="utf-8")
+            (evidence_dir / "response.body").write_bytes(body_bytes)
+        except OSError as e:
+            self._log_event("evidence.write_failed", action_id=action_id, error=str(e))
+
+        self._log_event(
+            "http.request", action_id=action_id, method=method, url=url,
+            status=response.status_code, elapsed_ms=elapsed_ms,
+            posture=self._resolved_posture, body_bytes=len(body_bytes),
+            redirect_chain=redirect_chain, evidence_dir=str(evidence_dir),
+        )
+
+        if redirect_refused is not None:
+            return None, ExecutionOutcome(
+                success=False, status_code=response.status_code, elapsed_ms=elapsed_ms,
+                body_excerpt=body_excerpt,
+                note=f"http_executor: REFUSED redirect ({redirect_refused})")
+
+        return {
+            "status": response.status_code,
+            "body": body_excerpt,
+            "headers": [(k, v) for k, v in response.headers.items()],
+            "latency_ms": elapsed_ms,
+        }, None
 
     # ---------------- helpers ----------------
 

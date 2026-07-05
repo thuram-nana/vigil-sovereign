@@ -32,6 +32,19 @@ from .learning import ContextualBandit
 CheckSelector = Callable[[InsertionPoint, "tuple[Check, ...]"], "list[Check]"]
 
 
+def _context_dump(ctx: object) -> dict | None:
+    """Serialise a verify.FindingContext to a JSON-safe dict for retention (the
+    re-verifiable certificate). Never fatal: an unserialisable context just
+    yields None, and the confirmed finding still stands on its own confidence."""
+    try:
+        dump = getattr(ctx, "model_dump", None)
+        if callable(dump):
+            return dump(mode="json")
+    except Exception:
+        pass
+    return None
+
+
 class AuditFinding(BaseModel):
     """One oracle-confirmed finding: the check that produced it, the exact
     insertion point, and the deterministic proof (which oracle fired, its
@@ -46,6 +59,10 @@ class AuditFinding(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     confirmed_by: str = Field(description="The oracle kind that fired.")
     rationale: str = ""
+    # The serialized verify.FindingContext the oracle adjudicated — the retained
+    # evidence that lets this finding be re-verified offline (the certificate the
+    # Wave-3 re-verifier re-runs the pure oracle over). None only for legacy paths.
+    oracle_context: dict | None = None
 
 
 class BudgetExceeded(RuntimeError):
@@ -140,6 +157,7 @@ class AuditEngine:
                         confidence=confirmed.confidence,
                         confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
                         rationale=confirmed.rationale,
+                        oracle_context=_context_dump(ctx),
                     ))
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
@@ -195,6 +213,7 @@ class AuditEngine:
                         confidence=confirmed.confidence,
                         confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
                         rationale=confirmed.rationale,
+                        oracle_context=_context_dump(ctx),
                     ))
         except BudgetExceeded:
             pass

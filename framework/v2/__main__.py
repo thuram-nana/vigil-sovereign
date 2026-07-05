@@ -73,6 +73,11 @@ def _scan(argv: list[str]) -> int:
     return scanner_cli.main(argv)
 
 
+def _engage(argv: list[str]) -> int:
+    from . import engage as engage_mod
+    return engage_mod.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -112,6 +117,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "authority": _authority,
     "socialdefense": _socialdefense,
     "scan": _scan,
+    "engage": _engage,
     "status": _status,
 }
 

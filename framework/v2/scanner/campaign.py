@@ -112,6 +112,7 @@ class WebScanCampaign:
         bandit_context: str = "default",
         bandit_path: Path | str | None = None,
         enable_domxss: bool = False,
+        oob_advertise_base_url: str | None = None,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -139,6 +140,11 @@ class WebScanCampaign:
         # Opt-in static DOM-XSS source->sink analysis over crawled page bodies
         # (no extra traffic). Produces leads, not confirmed findings.
         self.enable_domxss = enable_domxss
+        # Opt-in operator-hosted OOB relay: the callback base blind checks embed.
+        # None => loopback-only (blind classes confirm only for co-resident
+        # targets). The engage runner sets this only after checking the relay
+        # host is on the charter allowlist.
+        self.oob_advertise_base_url = oob_advertise_base_url
 
     def _resolve_bandit(self) -> ContextualBandit:
         """The explicit bandit, else a warm-start from the persisted file if one
@@ -161,7 +167,10 @@ class WebScanCampaign:
         active: list[AuditFinding] = []
         audited = 0
         seen_hosts: set[str] = set()
-        oob_cm = OOBReceiver() if self.enable_oob else contextlib.nullcontext(None)
+        oob_cm = (
+            OOBReceiver(advertise_base_url=self.oob_advertise_base_url)
+            if self.enable_oob else contextlib.nullcontext(None)
+        )
         with oob_cm as oob:
             # One engine across the whole campaign, so its request counter enforces
             # a single shared active-traffic budget rather than a per-request one.
