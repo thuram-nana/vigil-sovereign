@@ -47,6 +47,7 @@ from .orchestrator import AttackPath, AutonomousCampaign, AutonomousResult, Chai
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
 from . import (
+    adaptive,
     benchmark,
     browser,
     browser_crawler,
@@ -54,14 +55,21 @@ from . import (
     domxss,
     graphql,
     jwt,
+    learning,
+    quantum_era,
     race,
+    self_improve,
     sequencer,
     smuggling,
     websocket,
 )
+from .adaptive import AdaptResult, EvolveResult, evolve, waf_adapt
 from .benchmark import BenchmarkReport, run_benchmark
 from .detection_cost import detection_cost_of_technique, path_detection_cost, rank_paths
+from .learning import ContextualBandit, arm_key, context_key
+from .quantum_era import PqcReport, anneal_path_portfolio, classify_kex, classify_signature, pqc_scan
 from .race import RaceResult, race_burst, race_check, raw_race
+from .self_improve import CapabilityGap, CapabilityProposal, MergeGate, analyze_gaps, draft_proposals
 from .sequencer import SequencerResult, analyze as analyze_tokens, collect_tokens
 from .websocket import CswshCheck, WsMessageInjectionCheck
 from .browser import find_browser, render_dom, scan_dom_xss
@@ -154,6 +162,31 @@ __all__ = [
     "benchmark",
     "run_benchmark",
     "BenchmarkReport",
+    # self-learning bandit
+    "learning",
+    "ContextualBandit",
+    "arm_key",
+    "context_key",
+    # evolving payloads + WAF-adaptive bypass
+    "adaptive",
+    "evolve",
+    "waf_adapt",
+    "EvolveResult",
+    "AdaptResult",
+    # quantum-era: PQC exposure + quantum-inspired optimizer
+    "quantum_era",
+    "classify_kex",
+    "classify_signature",
+    "pqc_scan",
+    "PqcReport",
+    "anneal_path_portfolio",
+    # self-improvement (proposes, never self-applies)
+    "self_improve",
+    "analyze_gaps",
+    "draft_proposals",
+    "MergeGate",
+    "CapabilityGap",
+    "CapabilityProposal",
     # targeting
     "select_checks",
     "likely_classes",

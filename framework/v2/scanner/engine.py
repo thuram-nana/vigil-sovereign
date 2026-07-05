@@ -25,6 +25,7 @@ from ..verify.oob import OOBReceiver
 from ..verify.verifier import OracleVerifier
 from .checks import DEFAULT_CHECKS, Check, Send
 from .insertion import HttpRequest, InsertionKind, InsertionPoint, RequestTemplate
+from .learning import ContextualBandit
 
 # A selector prioritises which checks to run at one insertion point (see
 # scanner.targeting). It returns a subset (or reorder) of the given checks.
@@ -66,6 +67,8 @@ class AuditEngine:
         verifier: OracleVerifier | None = None,
         max_requests: int = 0,
         oob: OOBReceiver | None = None,
+        bandit: ContextualBandit | None = None,
+        bandit_context: str = "default",
     ) -> None:
         self._send = send
         self.verifier = verifier or OracleVerifier()
@@ -73,6 +76,12 @@ class AuditEngine:
         # A started OOBReceiver enables the blind (OOB) checks; without one they
         # are skipped — a blind class is never guessed, only callback-confirmed.
         self.oob = oob
+        # Optional self-learning: a ContextualBandit reorders checks by learned
+        # per-target value and is rewarded on each probe's outcome. It only ORDERS
+        # effort (never drops a check), so coverage is unchanged; without it the
+        # engine behaves exactly as before.
+        self.bandit = bandit
+        self.bandit_context = bandit_context
         self.requests_sent = 0
 
     def _counted_send(self, request: HttpRequest) -> dict:
@@ -127,6 +136,12 @@ class AuditEngine:
                     ))
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
+                if self.bandit is not None:
+                    # order effort by learned value (posterior mean); ties keep
+                    # the original order. Never drops a check — coverage intact.
+                    order = {bc: i for i, bc in enumerate(
+                        self.bandit.rank(self.bandit_context, [c.bug_class for c in point_checks]))}
+                    point_checks = sorted(point_checks, key=lambda c: order.get(c.bug_class, len(order)))
                 for check in point_checks:
                     key = (check.bug_class, point.id)
                     if key in seen:
@@ -150,6 +165,10 @@ class AuditEngine:
                         context=ctx,
                         verifier=self.verifier,
                     )
+                    # reward the bandit on every probe that actually ran: a fired
+                    # oracle is a hit, an exhausted probe is a miss.
+                    if self.bandit is not None:
+                        self.bandit.update(self.bandit_context, check.bug_class, reward=confirmed is not None)
                     if confirmed is None:
                         continue
                     seen.add(key)

@@ -26,6 +26,7 @@ those confirmed facts, each hop carrying the technique that produced it.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
 from ..knowledge import CATALOG, EXTENDED_CATALOG, saturate
@@ -37,6 +38,7 @@ from .campaign import ScanReport, WebScanCampaign, populate_worldmodel
 from .checks import DEFAULT_CHECKS, Check, Send
 from .detection_cost import path_detection_cost
 from .insertion import InsertionKind
+from .quantum_era import anneal_path_portfolio
 
 DEFAULT_INTERNAL_RESOURCES: tuple[tuple[str, dict[str, object]], ...] = (
     ("internal:cloud-metadata", {"internal": True, "detail": "169.254.169.254 instance metadata"}),
@@ -82,6 +84,7 @@ class AttackPath:
 
     steps: list[ChainedConclusion]
     detection_cost: float = 0.0  # 0 = stealthy, 1 = loud (DEL telemetry accounting)
+    value: float = 1.0           # reaching one crown jewel = 1 unit (portfolio value)
 
     @property
     def destination(self) -> str:
@@ -102,6 +105,9 @@ class AutonomousResult:
     scan_report: ScanReport
     chained_conclusions: list[ChainedConclusion] = field(default_factory=list)
     attack_paths: list[AttackPath] = field(default_factory=list)
+    # the quantum-inspired optimizer's pick: the most valuable set of paths whose
+    # total detection cost fits the budget — the stealthiest way to the crown jewels.
+    path_portfolio: list[AttackPath] = field(default_factory=list)
     world: WorldModel | None = None
 
     @property
@@ -122,8 +128,10 @@ class AutonomousCampaign:
         max_pages: int = 100,
         max_depth: int = 6,
         max_audit_requests: int = 0,
+        detection_budget: float = 2.0,
     ) -> None:
         self._send = send
+        self.detection_budget = detection_budget
         self.checks = checks
         self.insertion_kinds = insertion_kinds
         self.internal_resources = internal_resources
@@ -185,8 +193,14 @@ class AutonomousCampaign:
         ]
 
         paths = self._extract_paths(world)
+        # quantum-inspired: pick the most valuable path set within the detection
+        # budget (simulated annealing over the 0/1 path-portfolio knapsack).
+        portfolio: list[AttackPath] = []
+        if paths:
+            sel = anneal_path_portfolio(paths, budget=self.detection_budget, rng=random.Random(0))
+            portfolio = list(sel.chosen)
         return AutonomousResult(scan_report=report, chained_conclusions=conclusions,
-                                attack_paths=paths, world=world)
+                                attack_paths=paths, path_portfolio=portfolio, world=world)
 
     # -- topology per finding class ---------------------------------------
 
