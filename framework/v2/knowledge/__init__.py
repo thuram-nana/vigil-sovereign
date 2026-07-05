@@ -50,6 +50,7 @@ from .operators import (
     Binding,
     OperatorError,
     applicable,
+    applicable_operators,
     apply,
     derive,
     match,
@@ -67,6 +68,7 @@ __all__ = [
     "Direction",
     # evaluation / assertion
     "applicable",
+    "applicable_operators",
     "match",
     "apply",
     "derive",

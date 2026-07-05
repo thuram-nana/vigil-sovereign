@@ -155,8 +155,14 @@ run. This wave is the highest-EV work on the board.
   platform cannot chain or resume. *Done =* a green test builds a graph, records a
   primitive's postcondition (e.g. cred obtained), reloads from `store`, and shows
   the state survived and enables a follow-on edge.
-- [ ] **(B) Technique Knowledge Graph — operators with typed pre/post-conditions.**
-  `[ONTOLOGY][DEFENSIVE]` **L** — grow `knowledge/` so each technique is a planning
+- [x] **(B) Technique Knowledge Graph — operators with typed pre/post-conditions.**
+  `[ONTOLOGY][DEFENSIVE]` **L** — ✅ **SHIPPED 2026-07-03.** `knowledge/` already
+  reified 6 techniques as operators w/ typed pre/post-conditions + ATT&CK/CWE/CAPEC
+  refs; added the read-only catalog query `applicable_operators(world, ...)` that
+  returns the operators whose preconditions a world state S satisfies (the "what
+  can I do from here?" query the planner asks). Proof:
+  `knowledge/tests/test_applicable_operators.py` (5 tests: exact applicable set,
+  read-only, empty world, focus-kind scoping, cross-ref resolution). Original:
   operator with typed preconditions and postconditions, cross-referenced to
   CWE/CAPEC/ATT&CK/D3FEND and (where present) CVE/EPSS. *Why #1:* operators with
   typed conditions are what make attack-path planning *sound* rather than heuristic.

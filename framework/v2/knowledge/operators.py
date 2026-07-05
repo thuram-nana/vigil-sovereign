@@ -28,7 +28,7 @@ from collections.abc import Iterable, Mapping
 
 from ..common.errors import CrucibleError
 from ..worldmodel.graph import WorldModel
-from ..worldmodel.models import Edge, Node
+from ..worldmodel.models import Edge, Node, NodeKind
 from .models import (
     AttrOp,
     Direction,
@@ -379,3 +379,39 @@ def _signature(applied: Applied) -> tuple[str, ...]:
     assert applied.node is not None
     n = applied.node
     return ("N", n.id, ",".join(sorted(n.attrs)))
+
+
+def applicable_operators(
+    world: WorldModel,
+    operators: Iterable[Operator],
+    *,
+    seeds: Mapping[str, Mapping[str, str]] | None = None,
+    focus_kinds: Iterable[NodeKind] | None = None,
+) -> list[Operator]:
+    """The operators whose preconditions are satisfied by the current world
+    state — the "what can I do from here?" query the planner asks before it
+    commits to a move.
+
+    This is READ-ONLY: it evaluates preconditions and asserts nothing, so the
+    world is unchanged (unlike ``derive`` / ``saturate``). An operator is
+    included iff it :func:`match`es over at least one focus node — optionally
+    restricted to ``focus_kinds`` to scope the scan (e.g. only ENDPOINTs).
+    ``seeds`` is forwarded to ``match`` for operators whose preconditions
+    reference a caller-supplied role.
+
+    Deterministic: operators are returned in the given order, each tested
+    against the graph's sorted node order, so the same world always yields the
+    same applicable set — which is what makes a plan reproducible."""
+    seeds = seeds or {}
+    focus_set = set(focus_kinds) if focus_kinds is not None else None
+    result: list[Operator] = []
+    nodes = world.all_nodes()  # sorted -> deterministic
+    for op in operators:
+        seed = seeds.get(op.id)
+        for node in nodes:
+            if focus_set is not None and node.kind not in focus_set:
+                continue
+            if match(op, world, node, seed) is not None:
+                result.append(op)
+                break
+    return result
