@@ -45,12 +45,14 @@ from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
+from . import jwt
 from .insertion import (
     HttpRequest,
     InsertionKind,
     InsertionPoint,
     RequestTemplate,
 )
+from .jwt import JwtNoneCheck
 
 __all__ = [
     # insertion
@@ -68,6 +70,8 @@ __all__ = [
     "RequestCheck",
     "CorsActiveCheck",
     "HostHeaderCheck",
+    "JwtNoneCheck",
+    "jwt",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",
