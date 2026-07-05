@@ -113,7 +113,14 @@ class AuditEngine:
             # Request-level checks (CORS, host-header, …): run once on the whole
             # request, not per insertion point.
             for rcheck in request_checks:
-                ctx = rcheck.probe(template, self._counted_send)
+                try:
+                    ctx = rcheck.probe(template, self._counted_send)
+                except BudgetExceeded:
+                    raise  # budget is a hard stop for the whole audit
+                except Exception:
+                    # A single check erroring on an odd response (a 501 to its
+                    # POST, a malformed body) must never kill the whole scan.
+                    continue
                 if ctx is None:
                     continue
                 confirmed = confirm_finding(
@@ -146,12 +153,19 @@ class AuditEngine:
                     key = (check.bug_class, point.id)
                     if key in seen:
                         continue
-                    if getattr(check, "wants_oob", False):
-                        if self.oob is None:
-                            continue  # no receiver -> blind check is skipped, not guessed
-                        ctx = check.probe(template, point, self._counted_send, self.oob)
-                    else:
-                        ctx = check.probe(template, point, self._counted_send)
+                    try:
+                        if getattr(check, "wants_oob", False):
+                            if self.oob is None:
+                                continue  # no receiver -> blind check is skipped, not guessed
+                            ctx = check.probe(template, point, self._counted_send, self.oob)
+                        else:
+                            ctx = check.probe(template, point, self._counted_send)
+                    except BudgetExceeded:
+                        raise  # budget is a hard stop for the whole audit
+                    except Exception:
+                        # Isolate a check failure to that check — a scan must be
+                        # robust to one probe erroring on a hostile response.
+                        continue
                     if ctx is None:
                         continue
                     confirmed = confirm_finding(
