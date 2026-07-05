@@ -14,9 +14,45 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Iterator
 
+from framework.v2.scanner.campaign import ScanReport
+from framework.v2.scanner.engine import AuditFinding
 from framework.v2.scanner.insertion import HttpRequest, InsertionKind
 from framework.v2.scanner.orchestrator import AutonomousCampaign
 from framework.v2.worldmodel.models import EdgeKind
+
+
+def _finding(bug_class: str, param: str, confirmed_by: str) -> AuditFinding:
+    return AuditFinding(check_id=bug_class, bug_class=bug_class, insertion_point=f"query_value:{param}",
+                        param=param, confidence=0.9, confirmed_by=confirmed_by)
+
+
+def test_chain_findings_builds_multihop_attack_paths() -> None:
+    # Fast, deterministic: feed confirmed findings straight to the reasoning stage.
+    report = ScanReport(target="http://t/", active_findings=[
+        _finding("ssrf", "url", "oob_callback"),
+        _finding("idor", "id", "achieved_state"),
+    ])
+    result = AutonomousCampaign(lambda req: {"status": 200, "body": ""}).chain_findings(report)
+
+    all_paths = [p.describe() for p in result.attack_paths]
+
+    # SSRF chained: attacker -> endpoint:url -> an internal resource (2 hops), via the operator
+    ssrf_paths = [p for p in result.attack_paths
+                  if p.destination.startswith("internal:")
+                  and any(s.technique == "ssrf-internal-reach" for s in p.steps)]
+    assert ssrf_paths and ssrf_paths[0].hops >= 2, all_paths
+    assert ssrf_paths[0].steps[0].src == "attacker:self"
+    assert "endpoint:url" in {s.src for s in ssrf_paths[0].steps} | {s.dst for s in ssrf_paths[0].steps}
+
+    # IDOR chained: attacker -> endpoint:id -> a backing datastore (2 hops), via the operator
+    idor_paths = [p for p in result.attack_paths
+                  if p.destination.startswith("datastore:")
+                  and any(s.technique == "unauth-endpoint-read" for s in p.steps)]
+    assert idor_paths and idor_paths[0].hops >= 2, all_paths
+
+    # both crown-jewel classes were reached from the same run
+    dests = {p.destination for p in result.attack_paths}
+    assert any(d.startswith("internal:") for d in dests) and any(d.startswith("datastore:") for d in dests)
 
 
 class _SsrfApp(BaseHTTPRequestHandler):

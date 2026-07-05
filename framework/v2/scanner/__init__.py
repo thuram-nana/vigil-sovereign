@@ -43,7 +43,7 @@ from .checks import (
 )
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
-from .orchestrator import AutonomousCampaign, AutonomousResult, ChainedConclusion
+from .orchestrator import AttackPath, AutonomousCampaign, AutonomousResult, ChainedConclusion
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
 from . import browser, browser_crawler, domxss, graphql, jwt, sequencer, smuggling, websocket
@@ -123,6 +123,7 @@ __all__ = [
     "AutonomousCampaign",
     "AutonomousResult",
     "ChainedConclusion",
+    "AttackPath",
     # targeting
     "select_checks",
     "likely_classes",
