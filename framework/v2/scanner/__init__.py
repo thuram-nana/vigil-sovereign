@@ -45,7 +45,8 @@ from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
-from . import jwt
+from . import graphql, jwt
+from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import (
     HttpRequest,
     InsertionKind,
@@ -72,6 +73,9 @@ __all__ = [
     "HostHeaderCheck",
     "JwtNoneCheck",
     "jwt",
+    "GraphQLIntrospectionCheck",
+    "GraphQLSuggestionsCheck",
+    "graphql",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",
