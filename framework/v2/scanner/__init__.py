@@ -45,7 +45,8 @@ from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
-from . import browser, browser_crawler, domxss, graphql, jwt, smuggling, websocket
+from . import browser, browser_crawler, domxss, graphql, jwt, sequencer, smuggling, websocket
+from .sequencer import SequencerResult, analyze as analyze_tokens, collect_tokens
 from .websocket import CswshCheck, WsMessageInjectionCheck
 from .browser import find_browser, render_dom, scan_dom_xss
 from .browser_crawler import BrowserCrawler, browser_send
@@ -95,6 +96,10 @@ __all__ = [
     "websocket",
     "CswshCheck",
     "WsMessageInjectionCheck",
+    "sequencer",
+    "SequencerResult",
+    "analyze_tokens",
+    "collect_tokens",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",
