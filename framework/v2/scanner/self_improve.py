@@ -497,6 +497,7 @@ def _skeleton_for(bug_class: str, oracle_kind: OracleKind) -> tuple[str, str]:
         OracleKind.SANITIZER_SIGNAL: ("crash-inducing input", "malformed input; scan process output"),
         OracleKind.TIMING: ("statistical time-blind", "benign vs delay-injecting payload; k paired latency samples -> timing oracle"),
         OracleKind.BOOLEAN_INFERENCE: ("SPRT true/false differential", "repeat true vs false clause + a false control; SPRT to a bounded-error decision"),
+        OracleKind.REFLECTION_CONTEXT: ("context-aware markup canary", "\"'><x{marker}>; confirm the marker reaches an EXECUTABLE (tag/script/handler) context"),
     }
     return generic[oracle_kind]
 

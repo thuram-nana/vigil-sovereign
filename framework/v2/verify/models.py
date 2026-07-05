@@ -42,6 +42,7 @@ class OracleKind(str, enum.Enum):
     SANITIZER_SIGNAL = "sanitizer_signal"             # ASAN/UBSAN/panic/traceback
     TIMING = "timing"                                 # statistical time-based blind
     BOOLEAN_INFERENCE = "boolean_inference"           # SPRT over repeated true/false probes
+    REFLECTION_CONTEXT = "reflection_context"         # marker reached an executable HTML/JS context
 
 
 class OracleProbe(BaseModel):

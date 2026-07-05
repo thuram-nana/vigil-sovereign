@@ -62,7 +62,7 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "rce": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT, OracleKind.SANITIZER_SIGNAL),
     "command_injection": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "ssti": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
-    "xss": (OracleKind.SIDE_EFFECT,),
+    "xss": (OracleKind.REFLECTION_CONTEXT,),
     "path_traversal": (OracleKind.SIDE_EFFECT,),
     "lfi": (OracleKind.SIDE_EFFECT,),
     "memory_corruption": (OracleKind.SANITIZER_SIGNAL,),
@@ -212,6 +212,10 @@ class OracleVerifier:
         if kind is OracleKind.SIDE_EFFECT:
             if "marker" in ctx and "observed_sink" in ctx:
                 return oracles.side_effect_oracle(ctx["marker"], ctx["observed_sink"])
+            return None
+        if kind is OracleKind.REFLECTION_CONTEXT:
+            if "marker" in ctx and "observed_sink" in ctx:
+                return oracles.reflection_context_oracle(ctx["marker"], ctx["observed_sink"])
             return None
         if kind is OracleKind.SANITIZER_SIGNAL:
             if "process_output" in ctx:

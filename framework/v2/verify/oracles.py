@@ -18,11 +18,19 @@ from __future__ import annotations
 import difflib
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from statistics import median
 from typing import Any, Mapping, Sequence
 
 from .models import OracleKind, OracleSignal
+
+# HTML void elements never get an end tag — popped from the path stack on start.
+_VOID_ELEMENTS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +68,107 @@ def _normalize_response(value: Any) -> _Response:
             latency_ms=float(latency) if latency is not None else None,
         )
     return _Response(status=None, body=_coerce_text(value), latency_ms=None)
+
+
+# ---------------------------------------------------------------------------
+# Structural (AST) response signatures — invariant to token noise
+# ---------------------------------------------------------------------------
+
+
+def _json_signature(obj: Any, prefix: str = "") -> set[tuple[str, str]]:
+    """The set of (json-pointer path, value-TYPE) pairs in a JSON document.
+    Records structure, not values — so a changed timestamp/nonce (same path,
+    same type) is invisible, but a new/removed record (a new path) shows."""
+    out: set[tuple[str, str]] = set()
+    if isinstance(obj, dict):
+        out.add((prefix or "/", "object"))
+        for k in obj:
+            out |= _json_signature(obj[k], f"{prefix}/{k}")
+    elif isinstance(obj, list):
+        out.add((prefix or "/", "array"))
+        for i, v in enumerate(obj):
+            out |= _json_signature(v, f"{prefix}/{i}")
+    else:
+        out.add((prefix or "/", type(obj).__name__))
+    return out
+
+
+class _TagPathCounter(HTMLParser):
+    """Builds a multiset of ancestor-tag-paths (e.g. ``html>body>table>tr``) over
+    a document, using stdlib parsing only. The multiset is invariant to text/
+    attribute values, so token noise does not move it, but an added element does."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._stack: list[str] = []
+        self.counter: Counter[str] = Counter()
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        self._stack.append(tag)
+        self.counter[">".join(self._stack)] += 1
+        if tag in _VOID_ELEMENTS:
+            self._stack.pop()
+
+    def handle_startendtag(self, tag: str, attrs: object) -> None:
+        self._stack.append(tag)
+        self.counter[">".join(self._stack)] += 1
+        self._stack.pop()
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._stack:
+            while self._stack and self._stack[-1] != tag:
+                self._stack.pop()
+            if self._stack:
+                self._stack.pop()
+
+
+def _parse_structure(body: str) -> tuple[str, Any]:
+    """Return ('json', path-type set) or ('html', tag-path multiset). JSON is
+    tried first; anything else is parsed as HTML with the stdlib parser (no
+    third-party dependency). A parse failure degrades to ('text', None) so the
+    caller can skip cleanly."""
+    import json as _json
+
+    text = body if isinstance(body, str) else _coerce_text(body)
+    stripped = text.lstrip()
+    if stripped[:1] in "{[":
+        try:
+            return "json", _json_signature(_json.loads(text))
+        except (ValueError, TypeError):
+            pass
+    parser = _TagPathCounter()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:
+        return "text", None
+    if not parser.counter:
+        return "text", None
+    return "html", parser.counter
+
+
+def structural_diff(baseline_body: Any, mutated_body: Any) -> float:
+    """A structure-aware divergence score in [0, 1], invariant to token noise
+    (CSRF tokens, nonces, timestamps) and sensitive to real change (an added
+    record, an extra ``<tr>``, a new form). 0 = structurally identical.
+
+    JSON: symmetric difference of (path, type) sets over their union. HTML:
+    multiset difference of tag-paths over the total. Different document kinds
+    (JSON vs HTML) score 1.0. Unparseable bodies score 0.0 (no structural
+    claim — the lexical dimension still applies)."""
+    kind_b, sig_b = _parse_structure(baseline_body)
+    kind_m, sig_m = _parse_structure(mutated_body)
+    if kind_b == "text" or kind_m == "text":
+        return 0.0
+    if kind_b != kind_m:
+        return 1.0
+    if kind_b == "json":
+        union = sig_b | sig_m
+        return (len(sig_b ^ sig_m) / len(union)) if union else 0.0
+    # html multisets
+    diff = sum((sig_b - sig_m).values()) + sum((sig_m - sig_b).values())
+    total = sum(sig_b.values()) + sum(sig_m.values())
+    return (diff / total) if total else 0.0
 
 
 def _noisy_or(weights: list[float]) -> float:
@@ -108,6 +217,7 @@ def differential_response_oracle(
     length_thr = float(disc.get("length_threshold", 0.05))
     lexical_thr = float(disc.get("lexical_threshold", 0.10))
     latency_thr = float(disc.get("latency_threshold_ms", 1000.0))
+    structural_thr = float(disc.get("structural_threshold", 0.02))
     true_marker = disc.get("true_marker")
 
     dims: list[dict[str, Any]] = []
@@ -132,6 +242,16 @@ def differential_response_oracle(
         dims.append({"dim": "lexical", "differs": differs,
                      "weight": diff if differs else 0.0,
                      "detail": f"similarity {sim:.2%}"})
+
+    if "structural" in wanted:
+        # AST-level divergence: invariant to nonce/CSRF/timestamp noise, so a
+        # page that merely reflects a per-request token does NOT read as a diff,
+        # while an added record / DOM node does. Higher precision than lexical.
+        score = structural_diff(b.body, m.body)
+        differs = score > structural_thr
+        dims.append({"dim": "structural", "differs": differs,
+                     "weight": min(1.0, score) if differs else 0.0,
+                     "detail": f"structural delta {score:.2%}"})
 
     if "latency" in wanted and b.latency_ms is not None and m.latency_ms is not None:
         delta = m.latency_ms - b.latency_ms
@@ -527,6 +647,109 @@ def side_effect_oracle(marker: str, observed_sink: Any) -> OracleSignal:
         evidence=f"marker {marker!r} reached sink: ...{snippet}...",
         observed={"marker": marker, "offset": idx, "snippet": snippet},
     )
+
+
+# ---------------------------------------------------------------------------
+# 3b. Reflection context — a marker reached an EXECUTABLE HTML/JS position
+# ---------------------------------------------------------------------------
+
+
+class _ReflectionScanner(HTMLParser):
+    """Locate a marker's parse context with stdlib HTML parsing. Fires internal
+    state when the marker became (part of) a tag name, landed inside a
+    ``<script>``, or sits in an event-handler / ``javascript:`` attribute value.
+    ``convert_charrefs=True`` means an HTML-encoded payload arrives as inert TEXT
+    (not a tag), so it is correctly judged non-executable."""
+
+    def __init__(self, marker_lower: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self._ml = marker_lower
+        self._in_script = False
+        self.context: str | None = None
+        self.detail: str = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.context is not None:
+            return
+        if self._ml in tag.lower():
+            self.context, self.detail = "html_tag", tag
+            return
+        if tag.lower() == "script":
+            self._in_script = True
+        for name, val in attrs:
+            v = (val or "").lower()
+            if self._ml not in v:
+                continue
+            a = name.lower()
+            if a.startswith("on") or (a in ("href", "src", "action", "formaction")
+                                      and v.lstrip().startswith("javascript:")):
+                self.context, self.detail = f"js_attribute:{name}", name
+                return
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "script":
+            self._in_script = False
+
+    def handle_data(self, data: str) -> None:
+        if self.context is None and self._in_script and self._ml in data.lower():
+            self.context = "script"
+
+
+def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
+    """Fire only when a reflected marker lands in an EXECUTABLE position — the
+    payload broke out of its context into live markup or script — not merely when
+    the marker substring is present.
+
+    Substring-presence (what ``side_effect_oracle`` and most DAST use for XSS)
+    over-reports: a marker reflected inside an HTML-encoded attribute, a comment,
+    or plain text is inert. Here the response is PARSED (stdlib, no third-party
+    dependency), and a signal fires only if the marker became (part of) a tag
+    name (the payload created an element), landed inside a ``<script>``, or sits
+    in an event-handler / ``javascript:`` attribute. An encoded or text-only
+    reflection does not fire — materially fewer false positives than substring
+    XSS detection."""
+    marker = (marker or "").strip()
+    body = observed_sink if isinstance(observed_sink, str) else _searchable(observed_sink)
+    if len(marker) < 4:
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+            evidence="marker too short to be a reliable canary", observed={"marker": marker})
+    ml = marker.lower()
+    if ml not in body.lower():
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+            evidence=f"marker {marker!r} not reflected", observed={"marker": marker})
+
+    scanner = _ReflectionScanner(ml)
+    try:
+        scanner.feed(body)
+        scanner.close()
+    except Exception:
+        scanner.context = None
+
+    if scanner.context == "html_tag":
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.95,
+            evidence=f"marker created a live element <{scanner.detail}> — executable HTML injection",
+            observed={"marker": marker, "context": "html_tag", "tag": scanner.detail})
+    if scanner.context == "script":
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
+            evidence="marker reflected inside a <script> block — executable JS context",
+            observed={"marker": marker, "context": "script"})
+    if scanner.context and scanner.context.startswith("js_attribute"):
+        return OracleSignal(
+            kind=OracleKind.REFLECTION_CONTEXT, fired=True, confidence=0.9,
+            evidence=f"marker in executable attribute {scanner.detail!r} — event/JS URL context",
+            observed={"marker": marker, "context": scanner.context})
+
+    return OracleSignal(
+        kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+        evidence="marker reflected but NOT in an executable context (encoded/inert)",
+        observed={"marker": marker, "context": "inert"})
 
 
 # ---------------------------------------------------------------------------
