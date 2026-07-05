@@ -16,13 +16,19 @@ request budget bounds the sweep so an autonomous run cannot blow up.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..verify.confirmation import confirm_finding
 from ..verify.oob import OOBReceiver
 from ..verify.verifier import OracleVerifier
 from .checks import DEFAULT_CHECKS, Check, Send
-from .insertion import HttpRequest, InsertionKind, RequestTemplate
+from .insertion import HttpRequest, InsertionKind, InsertionPoint, RequestTemplate
+
+# A selector prioritises which checks to run at one insertion point (see
+# scanner.targeting). It returns a subset (or reorder) of the given checks.
+CheckSelector = Callable[[InsertionPoint, "tuple[Check, ...]"], "list[Check]"]
 
 
 class AuditFinding(BaseModel):
@@ -81,6 +87,7 @@ class AuditEngine:
         checks: tuple[Check, ...] = DEFAULT_CHECKS,
         *,
         insertion_kinds: tuple[InsertionKind, ...] | None = None,
+        selector: CheckSelector | None = None,
     ) -> list[AuditFinding]:
         """Sweep ``checks`` across ``request``'s insertion points and return the
         oracle-confirmed findings, de-duplicated per (bug_class, insertion point).
@@ -94,7 +101,8 @@ class AuditEngine:
         findings: list[AuditFinding] = []
         try:
             for point in points:
-                for check in checks:
+                point_checks = selector(point, checks) if selector is not None else checks
+                for check in point_checks:
                     key = (check.bug_class, point.id)
                     if key in seen:
                         continue

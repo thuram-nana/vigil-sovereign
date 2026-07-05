@@ -33,6 +33,7 @@ from .crawler import Crawler, Scope
 from .engine import AuditEngine, AuditFinding
 from .insertion import InsertionKind
 from .passive import PassiveFinding
+from .targeting import select_checks
 
 
 class ScanReport(BaseModel):
@@ -81,6 +82,7 @@ class WebScanCampaign:
         max_depth: int = 6,
         max_audit_requests: int = 0,
         enable_oob: bool = True,
+        targeted: bool = False,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -93,6 +95,9 @@ class WebScanCampaign:
         # deserialization) can confirm callbacks; loopback-only, torn down with
         # the scan. Off => those checks are skipped, never guessed.
         self.enable_oob = enable_oob
+        # Prioritise checks per insertion point by parameter fingerprint, so the
+        # budget is spent where a bug is plausible (scanner.targeting).
+        self.targeted = targeted
 
     def run(self, seed_url: str) -> ScanReport:
         crawl = Crawler(
@@ -107,8 +112,10 @@ class WebScanCampaign:
             # One engine across the whole campaign, so its request counter enforces
             # a single shared active-traffic budget rather than a per-request one.
             engine = AuditEngine(self._send, max_requests=self.max_audit_requests, oob=oob)
+            selector = select_checks if self.targeted else None
             for req in crawl.requests:
-                active.extend(engine.audit(req, checks=self.checks, insertion_kinds=self.insertion_kinds))
+                active.extend(engine.audit(
+                    req, checks=self.checks, insertion_kinds=self.insertion_kinds, selector=selector))
                 audited += 1
                 if self.max_audit_requests and engine.requests_sent >= self.max_audit_requests:
                     break  # budget spent; stop auditing further endpoints

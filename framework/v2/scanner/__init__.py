@@ -40,6 +40,7 @@ from .checks import (
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
+from .targeting import likely_classes, select_checks
 from .insertion import (
     HttpRequest,
     InsertionKind,
@@ -77,4 +78,7 @@ __all__ = [
     "WebScanCampaign",
     "ScanReport",
     "populate_worldmodel",
+    # targeting
+    "select_checks",
+    "likely_classes",
 ]
