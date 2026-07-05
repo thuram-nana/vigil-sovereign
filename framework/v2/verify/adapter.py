@@ -24,7 +24,7 @@ misjudge.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -140,6 +140,13 @@ class FindingContext(BaseModel):
     mutated: dict[str, Any] | None = None
     discriminator: dict[str, Any] | None = None
 
+    # timing_oracle (statistical time-based blind)
+    baseline_latencies: list[float] | None = None
+    treatment_latencies: list[float] | None = None
+    timing_injected_ms: float | None = None
+    timing_alpha: float | None = None
+    timing_dose: dict[str, Any] | None = None
+
     # achieved_state_oracle
     expected_state: dict[str, Any] | None = None
     observed_state: dict[str, Any] | None = None
@@ -176,6 +183,31 @@ class FindingContext(BaseModel):
             baseline=_response_to_dict(baseline, baseline_latency_ms),
             mutated=_response_to_dict(mutated, mutated_latency_ms),
             discriminator=dict(discriminator) if discriminator is not None else None,
+        )
+
+    @classmethod
+    def from_timing_samples(
+        cls,
+        baseline_latencies: Sequence[float],
+        treatment_latencies: Sequence[float],
+        *,
+        bug_class: str = "time_based_sqli",
+        injected_ms: float | None = None,
+        alpha: float | None = None,
+        dose: Mapping[str, Any] | None = None,
+    ) -> "FindingContext":
+        """Paired latency samples (a benign baseline vs a delay-injected probe)
+        for the statistical timing oracle. ``injected_ms`` is the delay the
+        probe tried to induce (enables the effect-size floor); ``dose`` optionally
+        carries a second delay's samples for a dose-response check. Samples are
+        already-measured milliseconds — nothing is fetched here."""
+        return cls(
+            bug_class=bug_class,
+            baseline_latencies=[float(x) for x in baseline_latencies],
+            treatment_latencies=[float(x) for x in treatment_latencies],
+            timing_injected_ms=float(injected_ms) if injected_ms is not None else None,
+            timing_alpha=float(alpha) if alpha is not None else None,
+            timing_dose=dict(dose) if dose is not None else None,
         )
 
     @classmethod
@@ -258,6 +290,15 @@ class FindingContext(BaseModel):
             ctx["mutated"] = self.mutated
             if self.discriminator is not None:
                 ctx["discriminator"] = self.discriminator
+        if self.baseline_latencies is not None and self.treatment_latencies is not None:
+            ctx["baseline_latencies"] = self.baseline_latencies
+            ctx["treatment_latencies"] = self.treatment_latencies
+            if self.timing_injected_ms is not None:
+                ctx["timing_injected_ms"] = self.timing_injected_ms
+            if self.timing_alpha is not None:
+                ctx["timing_alpha"] = self.timing_alpha
+            if self.timing_dose is not None:
+                ctx["timing_dose"] = self.timing_dose
         if self.expected_state is not None and self.observed_state is not None:
             ctx["expected_state"] = self.expected_state
             ctx["observed_state"] = self.observed_state

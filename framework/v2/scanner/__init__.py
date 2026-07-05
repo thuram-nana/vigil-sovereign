@@ -40,6 +40,7 @@ from .checks import (
     OOBCheck,
     OpenRedirectCheck,
     RequestCheck,
+    TimingCheck,
 )
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
@@ -100,6 +101,7 @@ __all__ = [
     "RequestCheck",
     "CorsActiveCheck",
     "HostHeaderCheck",
+    "TimingCheck",
     "JwtNoneCheck",
     "jwt",
     "GraphQLIntrospectionCheck",

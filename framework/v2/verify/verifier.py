@@ -30,7 +30,9 @@ HIGH_CONFIDENCE = 0.7
 # Canonical bug classes to the ordered oracle kinds that can confirm them.
 BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "boolean_sqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
-    "time_based_sqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
+    "time_based_sqli": (OracleKind.TIMING, OracleKind.DIFFERENTIAL_RESPONSE),
+    "time_based_command_injection": (OracleKind.TIMING, OracleKind.OOB_CALLBACK),
+    "time_based": (OracleKind.TIMING,),
     "error_based_sqli": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "sqli": (OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "nosqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
@@ -75,6 +77,10 @@ _ALIASES: dict[str, str] = {
     "blind_sqli": "boolean_sqli",
     "boolean_based_sqli": "boolean_sqli",
     "time_sqli": "time_based_sqli",
+    "time_based_blind_sqli": "time_based_sqli",
+    "blind_time_sqli": "time_based_sqli",
+    "time_based_rce": "time_based_command_injection",
+    "time_based_cmdi": "time_based_command_injection",
     "no_sqli": "nosqli",
     "nosql_injection": "nosqli",
     "insecure_direct_object_reference": "idor",
@@ -178,6 +184,15 @@ class OracleVerifier:
             if "baseline" in ctx and "mutated" in ctx:
                 return oracles.differential_response_oracle(
                     ctx["baseline"], ctx["mutated"], ctx.get("discriminator")
+                )
+            return None
+        if kind is OracleKind.TIMING:
+            if "baseline_latencies" in ctx and "treatment_latencies" in ctx:
+                return oracles.timing_oracle(
+                    ctx["baseline_latencies"], ctx["treatment_latencies"],
+                    injected_ms=ctx.get("timing_injected_ms"),
+                    alpha=float(ctx.get("timing_alpha", 0.01)),
+                    dose=ctx.get("timing_dose"),
                 )
             return None
         if kind is OracleKind.ACHIEVED_STATE:

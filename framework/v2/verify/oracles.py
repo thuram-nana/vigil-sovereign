@@ -16,9 +16,11 @@ dimensions push confidence up, but no single weak dimension can dominate.
 from __future__ import annotations
 
 import difflib
+import math
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping
+from statistics import median
+from typing import Any, Mapping, Sequence
 
 from .models import OracleKind, OracleSignal
 
@@ -168,6 +170,200 @@ def differential_response_oracle(
         evidence=evidence,
         observed={"dimensions": dims, "expect": expect},
     )
+
+
+# ---------------------------------------------------------------------------
+# 1b. Timing — statistical time-based blind (a real hypothesis test)
+# ---------------------------------------------------------------------------
+
+
+def _normal_cdf(z: float) -> float:
+    """Standard-normal CDF via erf (pure stdlib)."""
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _rank_average(values: Sequence[float]) -> tuple[list[float], list[int]]:
+    """Average (fractional) ranks of ``values`` and the sizes of each tie group.
+
+    Ties share the mean of the ranks they would occupy — the standard
+    correction, so the Mann-Whitney statistic is exact under ties."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    tie_sizes: list[int] = []
+    i = 0
+    n = len(values)
+    while i < n:
+        j = i
+        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0  # ranks are 1-based
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        if j > i:
+            tie_sizes.append(j - i + 1)
+        i = j + 1
+    return ranks, tie_sizes
+
+
+def _mann_whitney(baseline: Sequence[float], treatment: Sequence[float]) -> tuple[float, float]:
+    """One-sided Mann-Whitney U for H1: treatment stochastically GREATER than
+    baseline. Returns (z, p_value) using the normal approximation with tie and
+    continuity correction. p is the probability of a U this extreme under H0
+    (no location shift). Small samples still get an honest — if conservative —
+    normal-approximation p; there is no exact-distribution table here."""
+    n1, n2 = len(baseline), len(treatment)
+    if n1 == 0 or n2 == 0:
+        return 0.0, 1.0
+    ranks, tie_sizes = _rank_average(list(baseline) + list(treatment))
+    r_treat = sum(ranks[n1:])
+    u_treat = r_treat - n2 * (n2 + 1) / 2.0
+    mu = n1 * n2 / 2.0
+    n = n1 + n2
+    tie_term = sum(t ** 3 - t for t in tie_sizes)
+    var = (n1 * n2 / 12.0) * ((n + 1) - tie_term / (n * (n - 1))) if n > 1 else 0.0
+    if var <= 0.0:
+        # Zero variance: either everything tied (no signal) or perfectly
+        # separated with n too small — treat as no usable statistic.
+        return 0.0, 1.0
+    sigma = math.sqrt(var)
+    # continuity correction toward the null
+    z = (u_treat - mu - 0.5) / sigma
+    p = 1.0 - _normal_cdf(z)
+    return z, p
+
+
+def _hodges_lehmann(baseline: Sequence[float], treatment: Sequence[float]) -> float:
+    """The Hodges-Lehmann estimator of the median shift (treatment - baseline):
+    the median of all pairwise differences. A robust effect-size measure that
+    resists outliers (one slow request cannot manufacture a shift)."""
+    diffs = [t - b for t in treatment for b in baseline]
+    return median(diffs) if diffs else 0.0
+
+
+def timing_oracle(
+    baseline_samples: Any,
+    treatment_samples: Any,
+    *,
+    injected_ms: float | None = None,
+    alpha: float = 0.01,
+    effect_floor_fraction: float = 0.5,
+    absolute_floor_ms: float = 250.0,
+    min_samples: int = 5,
+    dose: Mapping[str, Any] | None = None,
+) -> OracleSignal:
+    """Confirm a time-based blind vulnerability with a real hypothesis test.
+
+    A single averaged comparison or a fixed latency threshold (what sqlmap/Burp
+    largely do) false-positives under jitter and false-negatives under load.
+    This fires only when ALL of the following hold, which together are robust to
+    both:
+
+      1. **Rank-sum test.** A one-sided Mann-Whitney U rejects H0 (no shift) at
+         ``alpha`` — the delay-injected requests are stochastically slower, by a
+         distribution-free test that does not assume Gaussian latencies.
+      2. **Effect-size floor.** The Hodges-Lehmann median shift is at least
+         ``effect_floor_fraction`` of the injected delay (or ``absolute_floor_ms``
+         when the delay is unknown) — a statistically-significant-but-tiny shift
+         (network drift) is refused.
+      3. **Dose-response (optional).** When ``dose`` supplies a second treatment
+         at a different delay, the observed shift must scale with the injected
+         delay (e.g. SLEEP(2) ~= 2x SLEEP(1)) — a constant offset cannot fake
+         this. ``dose = {"low_ms": .., "low_samples": [..], "high_ms": .., "high_samples": [..]}``.
+
+    Deterministic and pure: given the same samples it returns the same signal.
+    """
+    base = [float(x) for x in (baseline_samples or [])]
+    treat = [float(x) for x in (treatment_samples or [])]
+    if len(base) < min_samples or len(treat) < min_samples:
+        return OracleSignal(
+            kind=OracleKind.TIMING, fired=False, confidence=0.0,
+            evidence=f"insufficient samples ({len(base)}/{len(treat)}, need >= {min_samples} each)",
+            observed={"n_baseline": len(base), "n_treatment": len(treat)},
+        )
+
+    z, p = _mann_whitney(base, treat)
+    shift = _hodges_lehmann(base, treat)
+    floor = (effect_floor_fraction * injected_ms) if injected_ms else absolute_floor_ms
+
+    reject = p < alpha
+    effect_ok = shift >= floor
+
+    dose_ok = True
+    dose_detail = ""
+    dose_conf = 0.0
+    if dose is not None:
+        low = [float(x) for x in (dose.get("low_samples") or [])]
+        high = [float(x) for x in (dose.get("high_samples") or [])]
+        low_ms = float(dose.get("low_ms", 0.0) or 0.0)
+        high_ms = float(dose.get("high_ms", 0.0) or 0.0)
+        if len(low) >= min_samples and len(high) >= min_samples and low_ms > 0 and high_ms > low_ms:
+            low_shift = _hodges_lehmann(base, low)
+            high_shift = _hodges_lehmann(base, high)
+            expected_ratio = high_ms / low_ms
+            observed_ratio = (high_shift / low_shift) if low_shift > 0 else 0.0
+            # The observed shift must actually SCALE with the injected delay. A
+            # constant offset (a slow proxy) gives ratio ~1.0 regardless; a real
+            # dose gives ~expected_ratio. Require the ratio to sit above the
+            # halfway point between "no scaling" (1) and full scaling, and not
+            # wildly overshoot — so ratio 1.0 is refused, ratio ~expected passes.
+            lower = 1.0 + 0.5 * (expected_ratio - 1.0)
+            upper = 1.5 * expected_ratio
+            dose_ok = lower <= observed_ratio <= upper
+            dose_conf = 0.9 if dose_ok else 0.0
+            dose_detail = f"; dose ratio {observed_ratio:.2f} vs expected {expected_ratio:.2f}"
+        else:
+            dose_ok = True  # malformed dose spec: do not penalise, just don't corroborate
+
+    fired = reject and effect_ok and dose_ok
+
+    if not fired:
+        why = []
+        if not reject:
+            why.append(f"rank-sum p={p:.4g} >= alpha={alpha}")
+        if not effect_ok:
+            why.append(f"median shift {shift:.0f}ms < floor {floor:.0f}ms")
+        if not dose_ok:
+            why.append("dose-response failed")
+        return OracleSignal(
+            kind=OracleKind.TIMING, fired=False, confidence=0.0,
+            evidence="no timing signal: " + "; ".join(why),
+            observed={"z": z, "p_value": p, "median_shift_ms": shift, "floor_ms": floor},
+        )
+
+    p_conf = min(0.9, 1.0 - p)
+    eff_conf = min(0.85, shift / injected_ms) if injected_ms else min(0.85, shift / (floor * 2))
+    confidence = _noisy_or([p_conf, eff_conf, dose_conf])
+    return OracleSignal(
+        kind=OracleKind.TIMING,
+        fired=True,
+        confidence=confidence,
+        evidence=(
+            f"delay-injected requests are slower (Mann-Whitney z={z:.2f}, p={p:.3g}); "
+            f"median shift {shift:.0f}ms >= floor {floor:.0f}ms{dose_detail}"
+        ),
+        observed={
+            "z": z, "p_value": p, "median_shift_ms": shift, "floor_ms": floor,
+            "n_baseline": len(base), "n_treatment": len(treat), "dose_ok": dose_ok,
+        },
+    )
+
+
+def holm_correction(p_values: Sequence[float], alpha: float = 0.01) -> list[bool]:
+    """Holm-Bonferroni step-down over ``m`` simultaneous timing tests (one per
+    candidate parameter). Returns, per input p-value, whether it rejects at
+    family-wise error rate ``alpha``. Probing many params at once inflates false
+    positives; Holm controls that without the raw Bonferroni's loss of power."""
+    m = len(p_values)
+    if m == 0:
+        return []
+    order = sorted(range(m), key=lambda i: p_values[i])
+    reject = [False] * m
+    for rank, idx in enumerate(order):
+        if p_values[idx] <= alpha / (m - rank):
+            reject[idx] = True
+        else:
+            break  # step-down: once one fails to reject, all larger p-values do too
+    return reject
 
 
 # ---------------------------------------------------------------------------

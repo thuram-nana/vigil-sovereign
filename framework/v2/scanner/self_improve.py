@@ -441,7 +441,9 @@ _STRATEGY_BY_ORACLE: dict[OracleKind, str] = {
 # who implements the check, deliberately not a live weaponised payload.
 _SKELETON_BY_CLASS: dict[str, tuple[str, str]] = {
     "boolean_sqli": ("boolean-blind tautology differential", "benign vs \"x' OR '1'='1\""),
-    "time_based_sqli": ("time-blind delay differential", "\"'; WAITFOR DELAY '0:0:{n}'--\" vs benign; latency_threshold_ms"),
+    "time_based_sqli": ("time-blind delay differential", "\"'; WAITFOR DELAY '0:0:{n}'--\" vs benign; paired latency samples -> timing oracle"),
+    "time_based": ("statistical time-blind", "benign vs delay-injecting payload; k paired latency samples -> Mann-Whitney timing oracle"),
+    "time_based_command_injection": ("time-blind OS command", ";sleep {n}; vs benign; paired latency samples -> timing oracle (+ OOB)"),
     "error_based_sqli": ("syntax-breaking error probe", "{marker}'\\\"\\\\ (look for the marker/DB error in the sink)"),
     "sqli": ("generic SQLi (differential + OOB)", "benign vs \"x' OR '1'='1\"; OOB variant \"';SELECT ...{callback}...\""),
     "nosqli": ("operator-injection differential", "benign vs {\"$ne\": null} / \"[$gt]=\" style operator payload"),
@@ -493,6 +495,7 @@ def _skeleton_for(bug_class: str, oracle_kind: OracleKind) -> tuple[str, str]:
         OracleKind.SIDE_EFFECT: ("unique canary marker", "{marker}; confirm it reaches the sink"),
         OracleKind.OOB_CALLBACK: ("out-of-band callback", "{callback}; confirm on inbound interaction"),
         OracleKind.SANITIZER_SIGNAL: ("crash-inducing input", "malformed input; scan process output"),
+        OracleKind.TIMING: ("statistical time-blind", "benign vs delay-injecting payload; k paired latency samples -> timing oracle"),
     }
     return generic[oracle_kind]
 

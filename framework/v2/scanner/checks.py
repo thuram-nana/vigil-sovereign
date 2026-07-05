@@ -75,6 +75,61 @@ class DifferentialCheck:
 
 
 @dataclass(frozen=True)
+class TimingCheck:
+    """Statistical time-based blind (SQLi / command injection).
+
+    Measures ``samples`` paired latencies — a benign value vs a delay-injecting
+    payload — and hands them to the timing oracle, which decides via a rank-sum
+    test + effect-size floor + optional dose-response (never a fixed threshold).
+    Benign and probe requests are interleaved so latency drift biases both
+    equally. Expensive (``2*samples`` requests per point), so it is opt-in and
+    best spent on bandit-prioritised candidates."""
+
+    id: str
+    bug_class: str
+    benign: str
+    sleep_payload: str
+    injected_ms: float
+    samples: int = 15
+    # optional second, larger delay for a dose-response corroboration
+    dose_payload: str | None = None
+    dose_ms: float | None = None
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        base: list[float] = []
+        treat: list[float] = []
+        dose_samples: list[float] = []
+        for _ in range(self.samples):
+            base.append(self._time(send, template, point, self.benign))
+            treat.append(self._time(send, template, point, self.sleep_payload))
+            if self.dose_payload is not None:
+                dose_samples.append(self._time(send, template, point, self.dose_payload))
+
+        dose = None
+        if self.dose_payload is not None and self.dose_ms:
+            dose = {
+                "low_ms": self.injected_ms, "low_samples": treat,
+                "high_ms": self.dose_ms, "high_samples": dose_samples,
+            }
+        return FindingContext.from_timing_samples(
+            base, treat, bug_class=self.bug_class,
+            injected_ms=self.injected_ms, dose=dose,
+        )
+
+    @staticmethod
+    def _time(send: Send, template: RequestTemplate, point: InsertionPoint, value: str) -> float:
+        """Wall-time one request in milliseconds. Times the ``send`` itself (the
+        I/O), so it works whether or not the send reports its own latency; a
+        blind payload that makes the target error is still timed."""
+        t0 = time.monotonic()
+        try:
+            send(template.render(point, value))
+        except Exception:
+            pass
+        return (time.monotonic() - t0) * 1000.0
+
+
+@dataclass(frozen=True)
 class MarkerReflectionCheck:
     """Side-effect reflection: place a unique canary (wrapped by `payload_template`)
     and confirm via the side-effect oracle iff the *raw* canary reaches the
