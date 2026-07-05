@@ -45,7 +45,7 @@ from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
 from .passive import PASSIVE_CHECKS, PassiveFinding, Response, scan_passive
 from .targeting import likely_classes, select_checks
-from . import graphql, jwt
+from . import graphql, jwt, smuggling
 from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import (
     HttpRequest,
@@ -76,6 +76,7 @@ __all__ = [
     "GraphQLIntrospectionCheck",
     "GraphQLSuggestionsCheck",
     "graphql",
+    "smuggling",
     "DEFAULT_CHECKS",
     # engine
     "AuditEngine",
