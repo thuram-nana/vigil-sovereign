@@ -50,6 +50,8 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "graphql_suggestions": (OracleKind.ACHIEVED_STATE,),
     "request_smuggling": (OracleKind.DIFFERENTIAL_RESPONSE,),
     "dom_xss": (OracleKind.SIDE_EFFECT,),
+    "cross_site_websocket_hijacking": (OracleKind.ACHIEVED_STATE,),
+    "websocket_injection": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "ssrf": (OracleKind.OOB_CALLBACK,),
     "xxe": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "blind_xxe": (OracleKind.OOB_CALLBACK,),
