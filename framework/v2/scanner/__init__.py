@@ -58,6 +58,7 @@ from . import (
     domxss,
     fitness,
     graphql,
+    grammar,
     jwt,
     learning,
     quantum_era,
@@ -69,6 +70,7 @@ from . import (
 )
 from .constraints import InferenceResult, InferredConstraint, infer_predicate
 from .fitness import differential_proximity, reflection_proximity, unblocked_gate
+from .grammar import RequestGrammar, infer_grammar
 from .adaptive import AdaptResult, EvolveResult, evolve, waf_adapt
 from .benchmark import BenchmarkReport, run_benchmark
 from .detection_cost import detection_cost_of_technique, path_detection_cost, rank_paths
@@ -190,6 +192,9 @@ __all__ = [
     "reflection_proximity",
     "differential_proximity",
     "unblocked_gate",
+    "grammar",
+    "infer_grammar",
+    "RequestGrammar",
     # quantum-era: PQC exposure + quantum-inspired optimizer
     "quantum_era",
     "classify_kex",
