@@ -1,0 +1,32 @@
+{
+  "name": "drupal",
+  "role": "real-enterprise",
+  "image": "drupal:latest",
+  "container_port": 80,
+  "host_port": 8083,
+  "health_path": "/",
+  "health_statuses": [
+    200,
+    301,
+    302
+  ],
+  "health_timeout_s": 120,
+  "seed_path": "",
+  "ground_truth": {
+    "kind": "none"
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "BODY_FORM_VALUE"
+    ],
+    "drop_timing": true,
+    "enable_oob": false,
+    "max_pages": 50,
+    "max_depth": 3,
+    "max_audit_requests": 1500,
+    "use_library": true
+  },
+  "heavy": false,
+  "notes": "UNVERIFIED in this build environment: no network is available to pull the image or stand the app up, so port/health/behavior below are from documentation and prior knowledge, not confirmed here. Operator should verify before relying on it.\n\nCanonical image: `drupal` is a Docker Official Image on Docker Hub (docker.io/library/drupal, tag latest). It ships PHP + Apache + Drupal core ONLY \u2014 it does NOT include a database. Drupal requires an external DB (MariaDB/MySQL or PostgreSQL) AND a one-time install step before the site is functional. Unlike the wordpress image, the drupal image does NOT auto-configure the DB from env vars; you must complete the web installer at /core/install.php (or provision via drush). Operator must wire this up: e.g. `docker run --network X -e ... drupal:latest` alongside a `mariadb` companion, then walk the install wizard (choose profile, point at the DB, set admin creds). Health check `/` returns 302 -> /core/install.php on a FRESH (uninstalled) container, and 200 once installed; both 3xx and 2xx are accepted as healthy so the container is considered up even pre-install, but the scanner will only see a real site (routing/forms/CMS surface) AFTER install is completed. For meaningful coverage the operator must finish the install and, ideally, add a few nodes/pages.\n\nground_truth.kind = none: this is real production CMS software with no planted/known-stable bugs. We are measuring false-positive count, crawl/discovery quality, and performance against a hardened real-world app \u2014 NOT recall. No curated bug locations are asserted (authoring guesses against a patched Drupal core would be dishonest). If the operator deliberately deploys a known-vulnerable Drupal version (e.g. a Drupalgeddon-era build) they should switch this to a curated manifest with verified locations.\n\nScan tuning rationale: CMS with server-rendered pages, clean-URL routing, and HTML forms (login, search, contact, comment). QUERY_VALUE + BODY_FORM_VALUE cover legacy `?q=`/query params and form posts; timing dropped (kind none, timing not essential); OOB off; use_library=true to lean on fingerprint scoping for a known CMS; modest page/depth/request budget since a default Drupal site is small (padding just inflates FP surface and runtime).\n\nREVIEW (honesty/plausibility): PASS, no corrections. (1) Image is the real canonical Docker Official Image. (2) container_port 80 + health_path `/` + accepted 200/301/302 statuses correctly model both fresh (302->/core/install.php) and installed (200) states. (3) kind=none, so no curated locations/bug_class labels to validate \u2014 correctly avoids fabricating them. (4) Notes honestly disclose unverified-in-build-env, the DB + manual-install dependency (incl. the WordPress-vs-Drupal env-var distinction), the post-install-only scan surface, and the curation caveat. (5) heavy=false is correct (Drupal is not owasp-benchmark/gitlab-ce/mattermost). Descriptor kept intact."
+}

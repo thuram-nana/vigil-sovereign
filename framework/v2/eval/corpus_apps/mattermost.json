@@ -1,0 +1,30 @@
+{
+  "name": "mattermost",
+  "role": "real-enterprise",
+  "image": "mattermost/mattermost-preview",
+  "container_port": 8065,
+  "host_port": 8065,
+  "health_path": "/api/v4/system/ping",
+  "health_statuses": [
+    200
+  ],
+  "health_timeout_s": 300,
+  "seed_path": "",
+  "ground_truth": {
+    "kind": "none"
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "JSON_VALUE"
+    ],
+    "drop_timing": true,
+    "enable_oob": false,
+    "use_library": true,
+    "max_pages": 120,
+    "max_depth": 6,
+    "max_audit_requests": 2000
+  },
+  "heavy": true,
+  "notes": "UNVERIFIED in this build environment: there is no network here to pull the image or boot the container, so the port, health path, and boot behavior below are taken from Mattermost's documented behavior, not observed. Canonical image: Docker Hub `mattermost/mattermost-preview` (the official Mattermost preview/demo image). This preview image is self-contained: it bundles PostgreSQL plus the Mattermost server in a single container, so no companion service is required, but it is RAM-heavy (~1-2 GB) and slow to boot (DB init + schema migrations) \u2014 hence heavy=true and operator-run (must NOT be auto-launched). AUTH/SETUP requirement: on first run the operator must complete interactive setup via the web UI at http://localhost:8065 to create the initial system-admin account and a team; most REST endpoints (`/api/v4/*`) and the WebSocket API require an authenticated session token, so any meaningful audit depends on the operator seeding an account and supplying a session/credentials (no seed script ships with this descriptor). SPA requirement: the front end is a large React single-page app, so route/API discovery needs the browser-execution crawler rather than a static HTML crawl. Health: `/api/v4/system/ping` is the documented unauthenticated liveness endpoint and returns 200 `{\"status\":\"OK\"}` once the server is up; the long health_timeout_s accounts for DB bootstrap. ground_truth.kind=none because this is real production software with no planted bugs \u2014 the point of including it is to exercise the SPA crawler / browser execution / API discovery and to measure false-positive count, discovery, and performance against a heavy realistic target, NOT recall. All config values here should be verified on first real boot. REVIEW (honesty/plausibility pass, verified against framework/v2/eval/corpus_run.py schema): all five checks pass, no corrections needed. (1) Image is the real canonical preview image. (2) container_port 8065 and health_path /api/v4/system/ping with health_statuses [200] match Mattermost's documented pre-auth liveness endpoint. (3) N/A \u2014 kind=none, so resolve_ground_truth returns [] (no curated locations/bug_class labels to check). (4) Notes honestly disclose unverified-in-build-env, auth/DB/SPA needs, and the kind=none rationale (measures FP/discovery/perf, not recall). (5) heavy=true is correct \u2014 Mattermost is in the sanctioned heavy set (owasp-benchmark/gitlab-ce/mattermost). All fields validate against the extra=forbid CorpusApp/ScanTuning models."
+}

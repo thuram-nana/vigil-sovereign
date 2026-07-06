@@ -1,0 +1,49 @@
+{
+  "name": "juice-shop",
+  "role": "vulnerable",
+  "image": "bkimminich/juice-shop",
+  "container_port": 3000,
+  "host_port": 0,
+  "health_path": "/",
+  "health_statuses": [
+    200
+  ],
+  "health_timeout_s": 120,
+  "seed_path": "/rest/products/search?q=apple",
+  "ground_truth": {
+    "kind": "curated",
+    "expected": [
+      {
+        "bug_class": "sqli",
+        "location": "/rest/products/search?q"
+      },
+      {
+        "bug_class": "sqli",
+        "location": "/rest/user/login"
+      },
+      {
+        "bug_class": "nosqli",
+        "location": "/rest/track-order/:id"
+      },
+      {
+        "bug_class": "open_redirect",
+        "location": "/redirect?to"
+      }
+    ]
+  },
+  "scan": {
+    "max_pages": 40,
+    "max_depth": 4,
+    "use_library": true,
+    "enable_oob": false,
+    "max_audit_requests": 1500,
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "JSON_VALUE",
+      "URL_PATH_SEG"
+    ],
+    "drop_timing": true
+  },
+  "heavy": false,
+  "notes": "UNVERIFIED in this build environment: there is no network here to pull bkimminich/juice-shop, so the image tag, port, health path, and the exact bug locations were authored from OWASP Juice Shop documentation and prior experience, NOT confirmed against a running container. Canonical image: Docker Hub `bkimminich/juice-shop` (the OWASP flagship deliberately-vulnerable app); `:latest` tracks the current release \u2014 pin a specific tag (e.g. a v17.x) for reproducible scoring. Listens on container port 3000; GET / returns 200 (Angular index) once the Node server finishes seeding its in-memory SQLite DB \u2014 allow ~30-60s cold start (health_timeout_s set to 120 for margin). Not heavy: a normal Node container (a few hundred MB), safe to auto-launch. No auth is required to reach any of the ground-truth endpoints (the login SQLi is itself the auth bypass).\\n\\nSPA CAVEAT: the front end is an Angular single-page app, so a static (non-browser) crawl from / discovers almost no links and sees essentially no attack surface. seed_path therefore points the scanner straight at the REST search endpoint (/rest/products/search?q=apple), which carries a mutable query param. The other three ground-truth endpoints are NOT reachable by static crawl from that seed and must be seeded/driven directly (or via a headless-browser pass) to get full recall.\\n\\nGROUND TRUTH is OUR curation (co-design caveat) \u2014 these four are canonical, long-documented, stable Juice Shop vulnerabilities, but the locations/labels should still be verified against the pinned image version before scoring: (1) /rest/products/search?q \u2014 error/UNION SQLi, the q term is concatenated into the SQL query; a lone single quote returns a SQLite error in the JSON body (highest-confidence, QUERY_VALUE-detectable). (2) /rest/user/login \u2014 SQLi in the `email` field of the JSON body giving admin auth bypass (' OR 1=1--), needs JSON_VALUE insertion. (3) /rest/track-order/:id \u2014 NoSQL (MarsDB) injection via the id path segment, needs URL_PATH_SEG insertion. (4) /redirect?to \u2014 open redirect; NOTE it is allowlist-gated (a bare foreign URL returns 406), so triggering it requires a payload containing an allowlisted substring \u2014 a plain open-redirect probe will likely miss it, and it is listed here as a real bug-location for recall accounting rather than an easy detection. Client-side/DOM bugs (e.g. the DOM XSS in the search bar) require a rendering-browser pass and are deliberately omitted from this manifest to avoid overclaiming for a non-browser DAST."
+}

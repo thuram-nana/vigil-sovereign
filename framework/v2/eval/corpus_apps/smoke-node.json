@@ -1,0 +1,23 @@
+{
+  "name": "smoke-node",
+  "role": "vulnerable",
+  "image": "crucible-corpus-smoke:latest",
+  "container_port": 8080,
+  "health_path": "/health",
+  "health_statuses": [200],
+  "health_timeout_s": 60,
+  "seed_path": "/",
+  "ground_truth": {
+    "kind": "curated",
+    "expected": [
+      { "bug_class": "xss", "location": "/search?q" }
+    ]
+  },
+  "scan": {
+    "max_pages": 10,
+    "max_depth": 3,
+    "use_library": true,
+    "insertion_kinds": ["QUERY_VALUE"]
+  },
+  "notes": "Local docker smoke target built from a cached node base (no registry pull). Proves the real DockerLauncher lifecycle. One planted reflected XSS at /search?q; /safe escapes and must not be flagged."
+}

@@ -1,0 +1,71 @@
+{
+  "tool": "CRUCIBLE",
+  "corpus": "in-process benchmark app (9 planted bugs, 3 safe controls)",
+  "matcher": "(normalized bug_class family, path+parameter); greedy 1-1; off-manifest detections are false positives by construction",
+  "incumbent_versions": {
+    "sqlmap": "1.10.2#stable",
+    "wapiti": "3.2.10",
+    "nikto": "Nikto 2.6.0 (LW 2.5)",
+    "nuclei": "absent"
+  },
+  "incumbent_invocations": {
+    "sqlmap": "sqlmap -u <url> --batch",
+    "wapiti": "wapiti -u <url> -f json -o <file>",
+    "nikto": "nikto -h <url> -Format json -output <file>",
+    "nuclei": "nuclei -u <url> -jsonl -silent"
+  },
+  "results": [
+    {
+      "tool": "crucible",
+      "tp": 9,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "elapsed_s": 9.894,
+      "requests_sent": 796,
+      "peak_rss_mb": 51.6,
+      "findings_reported": 9
+    },
+    {
+      "tool": "sqlmap",
+      "tp": 0,
+      "fp": 0,
+      "fn": 9,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "elapsed_s": 1.165,
+      "requests_sent": null,
+      "peak_rss_mb": 103.5,
+      "findings_reported": 0
+    },
+    {
+      "tool": "wapiti",
+      "tp": 2,
+      "fp": 7,
+      "fn": 7,
+      "precision": 0.222222,
+      "recall": 0.222222,
+      "f1": 0.222222,
+      "elapsed_s": 9.416,
+      "requests_sent": null,
+      "peak_rss_mb": 40.4,
+      "findings_reported": 10
+    },
+    {
+      "tool": "nikto",
+      "tp": 0,
+      "fp": 7,
+      "fn": 9,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "elapsed_s": 9.027,
+      "requests_sent": null,
+      "peak_rss_mb": null,
+      "findings_reported": 13
+    }
+  ]
+}

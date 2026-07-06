@@ -207,6 +207,37 @@ class MarkerReflectionCheck:
         body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
         return FindingContext.from_side_effect(marker, body, bug_class=self.bug_class)
 
+    def adapt(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        """WAF-adaptive fallback (opt-in, engine-driven): when the canonical payload
+        is filtered/blocked, synthesize a form that both gets past the filter AND
+        reflects the canary into an EXECUTABLE context, then hand that response to the
+        same side-effect oracle. The sink proxy is the executable-reflection oracle
+        itself, so a bypass that only reflects inertly is not treated as success — the
+        precision anchor is unchanged."""
+        from .fitness import reflection_proximity
+        from .waf_evasion import adaptive_bypass
+        from ..verify.oracles import reflection_context_oracle
+
+        marker = f"crucible{_slugify(point.id)}mark"
+        payload = self.payload_template.format(marker=marker)
+
+        def send_form(form: str) -> dict:
+            return send(template.render(point, form))
+
+        def sink_present(resp: dict) -> bool:
+            body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
+            return reflection_context_oracle(marker, body).fired
+
+        def proximity(resp: dict) -> float:
+            body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
+            return reflection_proximity(marker, body)
+
+        res = adaptive_bypass(payload, send_form, sink_present, proximity=proximity)
+        if res is None:
+            return None
+        body = res.response.get("body", "") if isinstance(res.response, dict) else str(res.response)
+        return FindingContext.from_side_effect(marker, body, bug_class=self.bug_class)
+
 
 @dataclass(frozen=True)
 class OOBCheck:
@@ -505,6 +536,27 @@ class ContentSignatureCheck:
         body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
         return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
 
+    def adapt(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        """WAF-adaptive fallback (opt-in): when a traversal payload is filtered,
+        synthesize a form that gets past the filter AND still returns the target
+        file's content signature. The sink proxy is the signature's presence — proof
+        the file was read, not merely that the path reflected — so the confirmation
+        bar is identical to the normal path."""
+        from .waf_evasion import adaptive_bypass
+
+        def send_form(form: str) -> dict:
+            return send(template.render(point, form))
+
+        def sink_present(resp: dict) -> bool:
+            body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
+            return self.signature in body
+
+        res = adaptive_bypass(self.payload, send_form, sink_present)
+        if res is None:
+            return None
+        body = res.response.get("body", "") if isinstance(res.response, dict) else str(res.response)
+        return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+
 
 @dataclass(frozen=True)
 class PathProbeCheck:
@@ -568,21 +620,34 @@ REFLECTED_XSS = MarkerReflectionCheck(
     payload_template="\"'><x{marker}>",
 )
 
-SSTI_REFLECTION = MarkerReflectionCheck(
-    id="ssti-reflection", bug_class="ssti",
-    # a canary the engine looks for reflected verbatim; the SSTI arithmetic
-    # variant is added by the engine's context step, this is the reflection gate.
-    payload_template="{marker}",
+# SSTI / path-traversal / error-based used to be MarkerReflectionCheck probes that
+# confirmed on bare canary REFLECTION — but reflecting a canary only proves input
+# is echoed (an XSS signal, already covered by REFLECTED_XSS), NOT that a template
+# was evaluated, a file was read, or a datastore errored. On any endpoint that
+# reflects input verbatim (a search box, an echo, an error page) all three fired as
+# FALSE POSITIVES — the benchmark app only dodged this by reflecting solely
+# markup-shaped input. These now use the evidence-carrying oracles: SSTI confirms
+# only when the server COMPUTED the arithmetic (result present, raw absent),
+# path-traversal only when the target file's CONTENT appears, error-based only when
+# a datastore error appears in the probe but not the benign control. Prove, don't
+# guess — a reflecting endpoint no longer trips any of the three.
+SSTI_EVAL_BRACES = EvaluationCheck(
+    id="ssti-eval-braces", bug_class="ssti",
+    probe_expr="{{7331*7331}}", expected_result="53743561",
 )
 
-PATH_TRAVERSAL = MarkerReflectionCheck(
+SSTI_EVAL_DOLLAR = EvaluationCheck(
+    id="ssti-eval-dollar", bug_class="ssti",
+    probe_expr="${7331*7331}", expected_result="53743561",
+)
+
+PATH_TRAVERSAL = ContentSignatureCheck(
     id="path-traversal", bug_class="path_traversal",
-    payload_template="../../{marker}",
+    payload="../../../../etc/passwd", signature="root:x:0:0:",
 )
 
-ERROR_BASED = MarkerReflectionCheck(
+ERROR_BASED = ErrorSignatureCheck(
     id="error-based-injection", bug_class="error_based_sqli",
-    payload_template="{marker}'\"\\",
 )
 
 
@@ -624,7 +689,8 @@ OPEN_REDIRECT = OpenRedirectCheck()
 DEFAULT_CHECKS: tuple[Check, ...] = (
     BOOLEAN_SQLI,
     REFLECTED_XSS,
-    SSTI_REFLECTION,
+    SSTI_EVAL_BRACES,
+    SSTI_EVAL_DOLLAR,
     PATH_TRAVERSAL,
     ERROR_BASED,
     OPEN_REDIRECT,

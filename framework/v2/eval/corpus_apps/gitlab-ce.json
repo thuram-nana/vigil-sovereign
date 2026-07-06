@@ -1,0 +1,34 @@
+{
+  "name": "gitlab-ce",
+  "role": "real-enterprise",
+  "image": "gitlab/gitlab-ce:latest",
+  "container_port": 80,
+  "host_port": 8929,
+  "health_path": "/users/sign_in",
+  "health_statuses": [
+    200,
+    302
+  ],
+  "health_timeout_s": 600,
+  "seed_path": "/",
+  "env": {
+    "GITLAB_ROOT_PASSWORD": "OBSIDIAN-Test-Root-Pw-2026"
+  },
+  "ground_truth": {
+    "kind": "none"
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "JSON_VALUE"
+    ],
+    "max_pages": 120,
+    "max_depth": 4,
+    "drop_timing": true,
+    "enable_oob": false,
+    "use_library": true,
+    "max_audit_requests": 2000
+  },
+  "heavy": true,
+  "notes": "UNVERIFIED in this build environment: there is no network here to pull the image or boot the app, so the port, health path, and env behavior below are from the canonical GitLab Omnibus image documentation and MUST be verified by the operator on first run. Canonical image source: official GitLab Community Edition Omnibus image on Docker Hub (gitlab/gitlab-ce, maintained by GitLab Inc.), which bundles nginx, Puma, Sidekiq, PostgreSQL, Redis, Gitaly, and Workhorse in a single container \u2014 no separate DB/companion needed, but it is a full multi-process stack. VERY RAM-heavy (allow >=4 GB, 6-8 GB recommended) and slow to boot: reconfigure + service startup routinely takes 3-8 minutes on first launch, hence health_timeout_s=600 and heavy=true. Operator-run ONLY; do NOT auto-launch. Health: GET /users/sign_in returns 200 (or 302 to itself) once Workhorse/Puma are ready; before that expect 502 from nginx while GitLab reconfigures. AUTH REQUIRED: nearly all surface (repos, GraphQL at /api/graphql, REST at /api/v4, admin, project/issue/CI UI) is behind login. Root login is 'root'; the GITLAB_ROOT_PASSWORD env here sets the initial password on first boot (recent images; otherwise a random one is written to /etc/gitlab/initial_root_password inside the container). Deep coverage (SPA crawl, GraphQL/REST API discovery, CI/registry endpoints) needs an authenticated session or a personal access token supplied to the scanner. ground_truth.kind=none: this is real production software with NO planted bugs \u2014 we are measuring false-positive count, crawl/API discovery quality, and performance/throughput against a large modern app, NOT recall; any scanner \"finding\" here should be triaged as a candidate FP unless independently confirmed. drop_timing is true because timing-based inference is noisy against this heavy async stack. Recommend running off-peak with modest concurrency to avoid Sidekiq/Puma saturation. NOTE: the default external_url is http://gitlab.example.com, so some absolute redirects/asset URLs GitLab emits point off-host and the same-origin crawler will not follow them; if the crawl looks truncated, set GITLAB_OMNIBUS_CONFIG external_url to http://127.0.0.1:8929 to match the published host_port. (Reviewer notes: image, container_port=80, health_path=/users/sign_in, ground_truth.kind=none, and heavy=true are all correct/honest; seed_path normalized from \"\" to \"/\" \u2014 functionally identical since the harness seeds base_url + \"/\" + seed_path.lstrip(\"/\").)"
+}

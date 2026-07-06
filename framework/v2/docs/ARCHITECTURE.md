@@ -258,12 +258,19 @@ Coverage is designed to scale to thousands of checks without diluting precision:
   token set; predicates gate entries against it (`{"tech": ...}`, `{"category":
   ...}`, `any`/`all`/`not`). Framework/CMS detections imply their runtime language
   so gating works even when no banner leaked.
-- **The benchmark spine.** `scanner/benchmark.py` is a local WAVSEP-style harness:
-  a deliberately-vulnerable loopback app plus a ground-truth manifest, scored for
-  true/false positives, false negatives, precision, recall and F1 — **including
-  safe controls a precise scanner must leave alone**. It is the honest "is it any
-  good" number, and the regression gate that a new library entry adds recall
-  without costing precision. `verify/confirmation.py` carries the same discipline
+- **The benchmark spine.** The comparative harness (`eval/validation.py`) is the
+  scoring core: one normalized finding shape every tool speaks, a precision/recall
+  `Scoreboard` paired with a `RunMetrics` cost record, and a greedy
+  `(bug_class family, path+param)` matcher — **including safe controls a precise
+  scanner must leave alone**, so off-manifest detections are false positives by
+  construction. It runs CRUCIBLE against the labelled in-process app
+  (`eval/benchmark_run.py`) and against the dockerized multi-app corpus
+  (`eval/corpus_run.py`, neutral OWASP-Benchmark truth via `eval/owasp_benchmark.py`),
+  and `eval/gate.py` turns a committed baseline into a zero-tolerance regression gate
+  (`make gate`) — a new library entry must add recall without costing precision. The
+  full methodology is `docs/BENCHMARK.md`. (`scanner/benchmark.py` is an older
+  WAVSEP-style single-app harness kept for its local checks; new work targets the
+  `eval/` spine.) `verify/confirmation.py` carries the same discipline
   at the unit level: a `DifferentialDemoHandler` that must confirm and a
   `SafeDemoHandler` twin that must return `None` — the negative control proving the
   authority does not rubber-stamp.
