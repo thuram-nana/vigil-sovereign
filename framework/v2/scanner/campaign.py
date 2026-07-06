@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..verify.collaborator import RelayClient
 from ..verify.oob import OOBReceiver
 from ..worldmodel.graph import WorldModel
 from ..worldmodel.models import Edge, EdgeKind, Node, NodeKind
@@ -121,6 +122,8 @@ class WebScanCampaign:
         oob_advertise_base_url: str | None = None,
         use_library: bool = False,
         library_entries: list[LibraryEntry] | None = None,
+        oob_relay_url: str | None = None,
+        oob_relay_secret: str | None = None,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -153,6 +156,12 @@ class WebScanCampaign:
         # targets). The engage runner sets this only after checking the relay
         # host is on the charter allowlist.
         self.oob_advertise_base_url = oob_advertise_base_url
+        # Opt-in remote OOB collaborator (verify.collaborator): when a relay URL is
+        # given, blind checks confirm on REMOTE targets by polling the operator-
+        # hosted relay instead of the loopback receiver. The engage runner sets
+        # this only after checking the relay host is on the charter allowlist.
+        self.oob_relay_url = oob_relay_url
+        self.oob_relay_secret = oob_relay_secret
         # Data-driven coverage: fingerprint the target from the crawl and run the
         # declarative-library checks whose applicability predicate matches the
         # detected stack (scanner.library + scanner.fingerprint). Off by default
@@ -198,10 +207,13 @@ class WebScanCampaign:
         active: list[AuditFinding] = []
         audited = 0
         seen_hosts: set[str] = set()
-        oob_cm = (
-            OOBReceiver(advertise_base_url=self.oob_advertise_base_url)
-            if self.enable_oob else contextlib.nullcontext(None)
-        )
+        if self.enable_oob and self.oob_relay_url:
+            # Remote collaborator: poll the operator-hosted relay for interactions.
+            oob_cm: object = RelayClient(self.oob_relay_url, self.oob_relay_secret or "")
+        elif self.enable_oob:
+            oob_cm = OOBReceiver(advertise_base_url=self.oob_advertise_base_url)
+        else:
+            oob_cm = contextlib.nullcontext(None)
         with oob_cm as oob:
             # One engine across the whole campaign, so its request counter enforces
             # a single shared active-traffic budget rather than a per-request one.

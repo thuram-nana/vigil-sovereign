@@ -1,0 +1,22 @@
+{
+  "id": "m3-blind-ssrf-svg-image-href",
+  "bug_class": "ssrf",
+  "title": "Blind SSRF (SVG <image> xlink:href fetch)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "body_whole"
+  ],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><image xlink:href=\"http://{callback}\" height=\"10\" width=\"10\"/></svg>"
+  },
+  "references": [
+    "CWE-918",
+    "CAPEC-664"
+  ],
+  "remediation": "Do not let user input drive server-side fetches. Enforce an allowlist of permitted hosts and schemes, block internal/link-local ranges and the cloud metadata endpoint, disable unneeded URL schemes (gopher/dict/ftp/file), resolve-then-pin the destination to defeat DNS rebinding, and never follow redirects into internal space. The inbound callback proves a server-side fetch fired.",
+  "payload_family": "callback-svg"
+}

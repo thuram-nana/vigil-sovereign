@@ -141,7 +141,7 @@ def test_engage_refuses_relay_host_not_in_scope(isolated_engagement, httpserver:
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")
     httpserver.expect_request("/").respond_with_handler(_root)
-    with pytest.raises(EngagementRefused, match="relay host"):
+    with pytest.raises(EngagementRefused, match="not on charter allowlist"):
         run_engagement(
             "alpha", f"http://127.0.0.1:{port}/",
             enable_oob=False, prompt_callback=_deny,

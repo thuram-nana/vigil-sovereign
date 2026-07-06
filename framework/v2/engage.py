@@ -70,6 +70,8 @@ def run_engagement(
     enable_domxss: bool = False,
     enable_oob: bool = True,
     oob_advertise_base_url: str | None = None,
+    oob_relay_url: str | None = None,
+    oob_relay_secret: str | None = None,
     prompt_callback: PromptCallback | None = None,
 ) -> ScanReport:
     """Run one authorized engagement end to end and return the ScanReport. Every
@@ -77,14 +79,16 @@ def run_engagement(
     may not start."""
     preflight(slug, seed_url)
 
-    if oob_advertise_base_url is not None:
-        # The relay URL is embedded in blind-check payloads and thus contacted by
-        # the target — it must itself be in charter scope.
+    # Any OOB callback base the target will contact — the advertise host or the
+    # collaborator relay — must itself be on the charter allowlist.
+    for label, relay in (("advertise", oob_advertise_base_url), ("relay", oob_relay_url)):
+        if relay is None:
+            continue
         posture = parse_posture(slug)
-        d = validate_action(slug=slug, method="GET", target_url=oob_advertise_base_url, posture=posture)
+        d = validate_action(slug=slug, method="GET", target_url=relay, posture=posture)
         if not d.allowed:
             raise EngagementRefused(
-                f"OOB relay host not on charter allowlist ({d.refusal_kind}): {d.reason}")
+                f"OOB {label} host not on charter allowlist ({d.refusal_kind}): {d.reason}")
 
     ex = HttpExecutor(
         engagement_slug=slug,
@@ -103,6 +107,8 @@ def run_engagement(
             bandit_path=bandit_path,
             bandit_context=slug,
             oob_advertise_base_url=oob_advertise_base_url,
+            oob_relay_url=oob_relay_url,
+            oob_relay_secret=oob_relay_secret,
         ).run(seed_url)
     finally:
         ex.close()
@@ -123,8 +129,13 @@ def main(argv: list[str]) -> int:
                         help="Persist/warm-start the self-learning check-ordering bandit.")
     parser.add_argument("--domxss", action="store_true", help="Also emit static DOM-XSS leads.")
     parser.add_argument("--oob-relay", default=None,
-                        help="Operator-hosted, charter-allowlisted OOB callback base URL "
-                             "(unlocks blind-class confirmation on remote targets).")
+                        help="Operator-hosted, charter-allowlisted OOB callback base URL to ADVERTISE "
+                             "(tunnel model; hits delivered to a loopback receiver).")
+    parser.add_argument("--oob-relay-url", default=None,
+                        help="Operator-hosted OOB COLLABORATOR relay base URL to poll "
+                             "(run `collaborator serve`; unlocks blind confirmation on remote targets).")
+    parser.add_argument("--oob-relay-secret", default=None,
+                        help="Shared secret for the collaborator relay's poll endpoint.")
     args = parser.parse_args(argv)
 
     try:
@@ -136,6 +147,8 @@ def main(argv: list[str]) -> int:
             bandit_path=args.bandit_file,
             enable_domxss=args.domxss,
             oob_advertise_base_url=args.oob_relay,
+            oob_relay_url=args.oob_relay_url,
+            oob_relay_secret=args.oob_relay_secret,
         )
     except EngagementRefused as e:
         print(f"engagement refused: {e}")
