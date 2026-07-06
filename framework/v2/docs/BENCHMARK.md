@@ -43,8 +43,32 @@ each answering a different question a professional actually asks:
 
 Each app is one JSON descriptor under `eval/corpus_apps/` — how to stand it up in
 Docker, when it is healthy, where to scan, and what its ground truth is. The
-descriptors are honest about being **unverified in the build environment** (there is
-no network here to pull images); the operator runs them.
+descriptors for prebuilt public images are honest about being **unverified in the
+build environment** (this sandbox cannot pull from Docker Hub); the operator runs them.
+
+### Real historical CVEs (runs even without registry access)
+
+The most persuasive rebuttal to "you designed the benchmark yourself" is a **known
+historical vulnerability in a real, widely-used package** — and this tier runs here
+despite the registry block. Each app under `eval/corpus_apps/_cve/` pins a real npm
+package at a version with a **published CVE** and exposes that package's documented
+flaw. The vulnerable dependency comes from the npm registry (reachable where Docker
+Hub is not), so `_cve/build.sh` builds the app on the host and copies it into the
+cached `node` base — no prebuilt-image pull. The vulnerability is in the *package*, not
+in harness code.
+
+| app | package | CVE | class | verified result |
+|-----|---------|-----|-------|-----------------|
+| `cve-st-2014-3744` | `st@0.2.4` | CVE-2014-3744 | path traversal | **tp=1, fp=0, precision 1.000** — CRUCIBLE injects an encoded `../` into a path segment, `st` serves `/etc/passwd`, and the finding is confirmed on the `root:x:0:0:` file-content signature (a real file read, not a reflected path) |
+
+```bash
+bash framework/v2/eval/corpus_apps/_cve/build.sh
+python3 -m framework.v2 benchmark --corpus --apps cve-st-2014-3744 --no-incumbents
+```
+
+This is the same crawl → check → oracle → scoreboard pipeline as the in-process app,
+now confirming a **real, cited npm CVE** end-to-end with zero false positives. The
+tier is extensible — drop another pinned-CVE app under `_cve/` and add its descriptor.
 
 ### Four measured dimensions
 

@@ -1,0 +1,7 @@
+{
+  "name": "cve-st-2014-3744",
+  "version": "1.0.0",
+  "description": "Minimal harness exposing CVE-2014-3744 (encoded path traversal) in the real st@0.2.4 npm package.",
+  "private": true,
+  "dependencies": { "st": "0.2.4" }
+}

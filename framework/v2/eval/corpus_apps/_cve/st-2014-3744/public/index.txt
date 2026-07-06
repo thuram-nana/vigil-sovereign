@@ -1,0 +1,1 @@
+public homepage file (a legitimate served file)
