@@ -28,15 +28,15 @@ const Console = (() => {
     { id: 'live',       label: 'Live Run',      group: 'OPERATIONS',  glyph: '⏵', render: renderLive },
     { id: 'engagements',label: 'Engagements',   group: 'OPERATIONS',  glyph: '▤', render: renderEngagements },
     { id: 'findings',   label: 'Findings',      group: 'OPERATIONS',  glyph: '◈', render: renderFindings },
-    { id: 'graph',      label: 'Attack Graph',  group: 'OPERATIONS',  glyph: '⧉', render: (m) => stub(m, 'Attack Graph', 'The world-model: typed nodes, belief-weighted edges, attacker→crown-jewel paths, choke-points. (Phase 2)') },
-    { id: 'coverage',   label: 'Coverage',      group: 'OPERATIONS',  glyph: '▦', render: (m) => stub(m, 'Coverage', 'Fingerprint, library checks, discovered endpoints, passive hygiene, DOM-XSS leads. (Phase 2)') },
+    { id: 'graph',      label: 'Attack Graph',  group: 'OPERATIONS',  glyph: '⧉', render: renderGraph },
+    { id: 'coverage',   label: 'Coverage',      group: 'OPERATIONS',  glyph: '▦', render: renderCoverage },
 
     { id: 'reasoning',  label: 'Reasoning Brain', group: 'INTELLIGENCE', glyph: '❋', render: (m) => stub(m, 'Reasoning Brain', 'Bandit rankings, WAF-evasion attempts, grammar-fuzz coverage, inferred filter predicates. (Phase 3)') },
     { id: 'planner',    label: 'Planner',       group: 'INTELLIGENCE', glyph: '⌘', render: (m) => stub(m, 'Planner', 'The goal tree: status/score/cost, the claimed leaf, VOI/EIG, halt reasons. (Phase 3)') },
     { id: 'memory',     label: 'Memory',        group: 'INTELLIGENCE', glyph: '❒', render: (m) => stub(m, 'Memory', 'Priors, winning hypotheses, best payloads, dead-ends, postmortems — with provenance. (Phase 3)') },
     { id: 'kernel',     label: 'Kernel',        group: 'INTELLIGENCE', glyph: '◆', render: (m) => stub(m, 'Kernel (Cognition)', 'LLM backends + CallTrace, hypotheses, self-critique, CVSS decisions, threat-model tree. (Phase 3)') },
 
-    { id: 'benchmark',  label: 'Benchmark',     group: 'ASSURANCE',   glyph: '▲', render: (m) => stub(m, 'Benchmark', 'CRUCIBLE vs incumbents, precision/recall/FP, performance, the regression gate, calibration. (Phase 2)') },
+    { id: 'benchmark',  label: 'Benchmark',     group: 'ASSURANCE',   glyph: '▲', render: renderBenchmark },
     { id: 'analysis',   label: 'Analysis',      group: 'ASSURANCE',   glyph: '⊟', render: (m) => stub(m, 'Analysis (SAST)', 'Analyzers run/skipped, findings by path/rule/CWE, severity histogram. (Phase 4)') },
     { id: 'improve',    label: 'Improve',       group: 'ASSURANCE',   glyph: '↗', render: (m) => stub(m, 'Improve (SIL)', 'Capability-gap backlog, proposals + diffs, the merge gate, horizon items. (Phase 4)') },
 
@@ -415,6 +415,113 @@ const Console = (() => {
       msg.innerHTML = d.error ? `<span class="badge danger">${esc(d.error)}</span>`
         : `<span class="badge ${d.reproduced === d.total ? 'ok' : 'warn'}">${d.reproduced}/${d.total} certificates reproduced</span>`;
     } catch (e) { msg.innerHTML = `<span class="badge danger">${esc(e.message)}</span>`; }
+  }
+
+  // ---- shared run picker (Graph / Coverage reuse Findings' run selection) --
+  function withRun(main, title, sub, cb) {
+    main.innerHTML = `<div class="screen-head"><h1>${esc(title)}</h1><span class="sub">${esc(sub)}</span>
+      <div class="actions"><select class="eng-select" id="runSelect2"></select></div></div>
+      <div id="runBody"><div class="muted">loading runs…</div></div>`;
+    getJSON('/api/runs').then((d) => {
+      const runs = (d.runs || []).filter((r) => r.has_report);
+      const sel = document.getElementById('runSelect2');
+      sel.innerHTML = runs.length ? runs.map((r) => `<option value="${esc(r.run_id)}">${esc(r.run_id)} · ${esc(r.target || '')}</option>`).join('')
+        : '<option value="">no completed runs</option>';
+      sel.onchange = () => { currentRun = sel.value; cb(sel.value); };
+      const pick = (currentRun && runs.some((r) => r.run_id === currentRun)) ? currentRun : (runs[0] && runs[0].run_id);
+      if (pick) { sel.value = pick; currentRun = pick; cb(pick); }
+      else document.getElementById('runBody').innerHTML = '<div class="empty">no completed runs — launch a scan from <a href="#live">Live Run</a></div>';
+    }).catch((e) => { document.getElementById('runBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+  }
+
+  // ---- screens: Attack Graph --------------------------------------------
+  function renderGraph(main) {
+    withRun(main, 'Attack Graph', 'the world-model — belief-weighted, attacker→crown-jewel paths, choke-points', (run) => {
+      const body = document.getElementById('runBody'); body.innerHTML = '<div class="muted">reconstructing world-model…</div>';
+      getJSON('/api/worldmodel/' + encodeURIComponent(run)).then((d) => {
+        if (d.pending) { body.innerHTML = '<div class="stub">run still in progress</div>'; return; }
+        body.innerHTML = `
+          <div class="grid cols-4" style="margin-bottom:var(--sp-4)">
+            <div class="tile"><div class="k">Nodes</div><div class="v">${num(d.node_count)}</div></div>
+            <div class="tile"><div class="k">Edges</div><div class="v">${num(d.edge_count)}</div></div>
+            <div class="tile"><div class="k">Attack paths</div><div class="v">${num((d.paths||[]).length)}</div><div class="foot">attacker→crown jewel</div></div>
+            <div class="tile"><div class="k">Choke-points</div><div class="v">${num((d.chokes||[]).length)}</div><div class="foot">remediation levers</div></div>
+          </div>
+          <div class="card" style="margin-bottom:var(--sp-4)"><h3>World-model</h3><div id="graphCanvas"></div></div>
+          <div class="grid cols-2">
+            <div class="card"><h3>Attack paths</h3>${(d.paths||[]).length ? d.paths.map((p) =>
+              `<div style="padding:6px 0;border-bottom:1px solid var(--border)"><span class="badge ${p.detection_cost<.5?'ok':p.detection_cost<.8?'warn':'danger'}">${Number(p.detection_cost).toFixed(2)} detect</span>
+                <span class="mono" style="margin-left:8px;font-size:var(--fs-xs)">${esc(p.description)}</span></div>`).join('') : '<div class="muted">no attacker→crown-jewel path (findings not chainable to a crown jewel)</div>'}</div>
+            <div class="card"><h3>Choke-points <span class="muted" style="font-weight:400">(cut these to disconnect)</span></h3>
+              ${(d.chokes||[]).length ? `<table class="tbl"><thead><tr><th>edge</th><th>betw.</th><th>bridge</th><th>disconnects</th></tr></thead><tbody>
+                ${d.chokes.map((c) => `<tr><td class="mono" style="font-size:var(--fs-xs)">${esc(c.src)} →<br>${esc(c.dst)}</td>
+                  <td>${c.betweenness}</td><td>${c.is_bridge?'<span class="badge danger">yes</span>':dash()}</td>
+                  <td>${num((c.disconnects||[]).length)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">none computed</div>'}</div>
+          </div>`;
+        Graph.render(document.getElementById('graphCanvas'), d, (n) => drawer(n.id, `<div class="kv">
+          <div class="k">kind</div><div class="v"><span class="badge" style="color:${Graph.color(n.kind)}">${esc(n.kind)}</span></div>
+          <div class="k">belief (mean)</div><div class="v">${esc(n.belief)}</div>
+          <div class="k">confidence</div><div class="v">${esc(n.confidence)}</div>
+          <div class="k">provenance</div><div class="v mono">${esc(n.provenance)}</div>
+          <div class="k">detail</div><div class="v">${dash(n.detail)}</div></div>`));
+      }).catch((e) => { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+    });
+  }
+
+  // ---- screens: Coverage -------------------------------------------------
+  function renderCoverage(main) {
+    withRun(main, 'Coverage', 'surface coverage — stack, discovered endpoints, passive hygiene, DOM-XSS leads', (run) => {
+      const body = document.getElementById('runBody');
+      getJSON('/api/coverage/' + encodeURIComponent(run)).then((d) => {
+        if (d.pending) { body.innerHTML = '<div class="stub">run still in progress</div>'; return; }
+        const s = d.summary || {};
+        body.innerHTML = `
+          <div class="grid cols-4" style="margin-bottom:var(--sp-4)">
+            <div class="tile"><div class="k">Pages crawled</div><div class="v">${num(s.pages_crawled)}</div></div>
+            <div class="tile"><div class="k">Endpoints found</div><div class="v">${num((d.discovered_endpoints||[]).length + (s.discovered_endpoints||0))}</div></div>
+            <div class="tile"><div class="k">Passive</div><div class="v">${num((d.passive||[]).length)}</div><div class="foot">hygiene</div></div>
+            <div class="tile"><div class="k">DOM-XSS leads</div><div class="v">${num((d.dom_xss||[]).length)}</div><div class="foot">candidates</div></div>
+          </div>
+          <div class="card" style="margin-bottom:var(--sp-4)"><h3>Detected stack (fingerprint)</h3>
+            <div class="row-flex" style="flex-wrap:wrap">${(d.fingerprint||[]).length ? d.fingerprint.map((t) => `<span class="badge">${esc(t)}</span>`).join(' ') : '<span class="muted">no stack tokens</span>'}</div></div>
+          <div class="grid cols-2">
+            <div class="card"><h3>Passive findings</h3>${(d.passive||[]).length ? `<table class="tbl"><tbody>
+              ${d.passive.map((f) => `<tr><td><span class="badge sev-${esc(f.severity)}">${esc(f.severity)}</span></td><td class="mono">${esc(f.bug_class)}</td><td class="muted">${esc(f.title)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">none</div>'}</div>
+            <div class="card"><h3>Discovered endpoints</h3><div class="feed" style="max-height:300px">${(d.discovered_endpoints||[]).length ? d.discovered_endpoints.map((e) => `<div class="row"><span class="msg mono">${esc(e)}</span></div>`).join('') : '<div class="muted" style="padding:var(--sp-3)">none (SPA crawl off / static target)</div>'}</div></div>
+          </div>`;
+      }).catch((e) => { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+    });
+  }
+
+  // ---- screens: Benchmark ------------------------------------------------
+  function renderBenchmark(main) {
+    main.innerHTML = `<div class="screen-head"><h1>Benchmark</h1><span class="sub">CRUCIBLE vs incumbents + the regression gate</span></div>
+      <div id="benchBody"><div class="muted">loading…</div></div>`;
+    getJSON('/api/benchmark').then((d) => {
+      const body = document.getElementById('benchBody');
+      const res = d.results; if (!res) { body.innerHTML = '<div class="empty">no committed benchmark-results.json — run <code>make bench</code></div>'; return; }
+      const rows = res.results || [];
+      const crucible = rows.find((r) => r.tool === 'crucible') || {};
+      const base = (d.baseline && d.baseline.scores && d.baseline.scores['benchmark-app'] && d.baseline.scores['benchmark-app'].crucible) || null;
+      let gate = 'no baseline';
+      if (base) { const reg = (crucible.fp > base.fp) || (crucible.tp < base.tp); gate = reg ? 'REGRESSION' : 'PASS'; }
+      body.innerHTML = `
+        <div class="grid cols-4" style="margin-bottom:var(--sp-4)">
+          <div class="tile"><div class="k">CRUCIBLE precision</div><div class="v">${crucible.precision!=null?Number(crucible.precision).toFixed(3):dash()}</div><div class="foot">${num(crucible.tp)} tp · ${num(crucible.fp)} fp</div></div>
+          <div class="tile"><div class="k">Recall</div><div class="v">${crucible.recall!=null?Number(crucible.recall).toFixed(3):dash()}</div></div>
+          <div class="tile"><div class="k">Gate</div><div class="v sm"><span class="badge ${gate==='PASS'?'ok':gate==='REGRESSION'?'danger':'warn'}">${esc(gate)}</span></div><div class="foot">vs committed baseline</div></div>
+          <div class="tile"><div class="k">Requests</div><div class="v">${num(crucible.requests_sent)}</div><div class="foot">${crucible.elapsed_s!=null?crucible.elapsed_s+'s':''}</div></div>
+        </div>
+        <div class="card" style="margin-bottom:var(--sp-4)"><h3>Scoreboard <span class="muted" style="font-weight:400">— ${esc(res.corpus||'')}</span></h3>
+          <div class="scroll-x"><table class="tbl"><thead><tr><th>tool</th><th>tp</th><th>fp</th><th>fn</th><th>precision</th><th>recall</th><th>f1</th><th>time_s</th><th>reqs</th><th>rss_mb</th></tr></thead><tbody>
+          ${rows.map((r) => `<tr><td class="mono ${r.tool==='crucible'?'':''}">${esc(r.tool)}</td>
+            <td>${num(r.tp)}</td><td>${r.fp>0?`<span class="badge danger">${r.fp}</span>`:num(r.fp)}</td><td>${num(r.fn)}</td>
+            <td>${Number(r.precision).toFixed(3)}</td><td>${Number(r.recall).toFixed(3)}</td><td>${Number(r.f1).toFixed(3)}</td>
+            <td>${r.elapsed_s!=null?Number(r.elapsed_s).toFixed(1):dash()}</td><td>${r.requests_sent==null?dash():num(r.requests_sent)}</td><td>${r.peak_rss_mb==null?dash():r.peak_rss_mb}</td></tr>`).join('')}</tbody></table></div>
+          <div class="muted" style="font-size:var(--fs-xs);margin-top:8px">The <b>fp</b> column is the differentiator — CRUCIBLE reports only oracle-confirmed findings. <code>-</code> = the tool does not report that number.</div></div>
+        <div class="card"><h3>Incumbent versions + invocations</h3><div class="kv">
+          ${Object.entries(res.incumbent_versions||{}).map(([k,v]) => `<div class="k">${esc(k)}</div><div class="v mono">${esc(v)} — <span class="muted">${esc((res.incumbent_invocations||{})[k]||'')}</span></div>`).join('')}</div></div>`;
+    }).catch((e) => { document.getElementById('benchBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
   }
 
   // ---- stub + drawer -----------------------------------------------------

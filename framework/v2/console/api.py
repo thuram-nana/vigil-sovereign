@@ -189,3 +189,88 @@ def run_report(run_id: str) -> dict[str, Any]:
         return {"run_id": run_id, "pending": True, "status": meta.get("status", "unknown")}
     doc["run_id"] = run_id
     return doc
+
+
+def _no_send(_request):  # pragma: no cover - chaining is pure reasoning, never sends
+    raise RuntimeError("world-model reconstruction must not issue traffic")
+
+
+def worldmodel(run_id: str) -> dict[str, Any]:
+    """Reconstruct the world-model attack graph for a saved run — a PURE re-run of
+    the chaining over the retained ScanReport (no traffic). Returns typed nodes,
+    belief-weighted edges, attacker→crown-jewel paths, and choke-points."""
+    from . import actions
+
+    rj = actions.run_dir(run_id) / "reverifiable.json"
+    doc = _safe(lambda: json.loads(rj.read_text(encoding="utf-8")), default=None)
+    if doc is None:
+        return {"run_id": run_id, "pending": True, "nodes": [], "edges": [], "paths": [], "chokes": []}
+
+    def _build() -> dict[str, Any]:
+        from ..scanner.campaign import ScanReport
+        from ..scanner.orchestrator import _CROWN_KINDS, _TRAVERSABLE, AutonomousCampaign
+        from ..worldmodel.attacker import ATTACKER_ID
+        from ..worldmodel.pathsearch import choke_points
+
+        report = ScanReport.model_validate(doc)
+        auto = AutonomousCampaign(_no_send).chain_findings(report)
+        world = auto.world
+        nodes = [{
+            "id": n.id, "kind": getattr(n.kind, "value", str(n.kind)),
+            "belief": round(n.belief_mean, 3), "confidence": round(n.confidence, 3),
+            "provenance": n.provenance, "detail": n.attrs.get("detail") or n.attrs.get("bug_class") or "",
+        } for n in world.all_nodes()]
+        edges = [{
+            "src": e.src, "dst": e.dst, "kind": getattr(e.kind, "value", str(e.kind)),
+            "technique": str(e.attrs.get("technique", e.provenance.split(":", 1)[-1])),
+            "belief": round(e.belief_mean, 3), "provenance": e.provenance,
+        } for e in world.all_edges()]
+        paths = [{
+            "description": p.describe(), "detection_cost": p.detection_cost, "hops": p.hops,
+            "destination": p.destination,
+            "steps": [{"src": s.src, "edge": s.edge, "dst": s.dst, "technique": s.technique} for s in p.steps],
+        } for p in auto.attack_paths]
+        chokes: list[dict[str, Any]] = []
+        if world.get_node(ATTACKER_ID) is not None:
+            for c in _safe(lambda: choke_points(world, ATTACKER_ID, _CROWN_KINDS, edge_kinds=_TRAVERSABLE), default=[]) or []:
+                chokes.append({"src": c.edge.src, "dst": c.edge.dst,
+                               "kind": getattr(c.edge.kind, "value", str(c.edge.kind)),
+                               "betweenness": c.betweenness, "disconnects": c.disconnects, "is_bridge": c.is_bridge})
+        return {"run_id": run_id, "nodes": nodes, "edges": edges, "paths": paths, "chokes": chokes,
+                "node_count": world.node_count, "edge_count": world.edge_count}
+
+    return _safe(_build, default={"run_id": run_id, "error": "could not reconstruct world-model",
+                                  "nodes": [], "edges": [], "paths": [], "chokes": []})
+
+
+# ---------------------------------------------------------------------------
+# benchmark + coverage
+# ---------------------------------------------------------------------------
+
+
+def benchmark_data() -> dict[str, Any]:
+    """The committed benchmark scoreboard + the regression baseline — reused as-is
+    (no run needed). These are committed PACKAGE data, so read them relative to this
+    file (the installed framework), not the runtime CRUCIBLE_ROOT."""
+    v2 = Path(__file__).resolve().parents[1]  # .../framework/v2
+    results = _safe(lambda: json.loads((v2 / "docs" / "benchmark-results.json").read_text(encoding="utf-8")), default=None)
+    baseline = _safe(lambda: json.loads((v2 / "eval" / "baselines" / "benchmark-app.json").read_text(encoding="utf-8")), default=None)
+    return {"results": results, "baseline": baseline}
+
+
+def coverage_data(run_id: str) -> dict[str, Any]:
+    """Surface-coverage view of a saved run: detected stack, discovered endpoints,
+    passive hygiene, DOM-XSS leads (all from the build_report document)."""
+    doc = run_report(run_id)
+    if doc.get("pending"):
+        return {"run_id": run_id, "pending": True}
+    findings = doc.get("findings", [])
+    return {
+        "run_id": run_id,
+        "target": doc.get("target"),
+        "fingerprint": doc.get("fingerprint", []),
+        "discovered_endpoints": doc.get("discovered_endpoints", []),
+        "summary": doc.get("summary", {}),
+        "passive": [f for f in findings if f.get("kind") == "passive"],
+        "dom_xss": [f for f in findings if f.get("kind") == "dom_xss_candidate"],
+    }

@@ -37,6 +37,15 @@ _EXACT_ROUTES = {
     "/api/status": api.status_data,
     "/api/engagements": api.list_engagements,
     "/api/runs": api.list_runs,
+    "/api/benchmark": api.benchmark_data,
+}
+
+# Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
+_PREFIX_ROUTES = {
+    "/api/engagement/": api.engagement_detail,
+    "/api/report/": api.run_report,
+    "/api/worldmodel/": api.worldmodel,
+    "/api/coverage/": api.coverage_data,
 }
 
 
@@ -119,12 +128,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path in _EXACT_ROUTES:
                 self._json(_EXACT_ROUTES[path]())
                 return
-            if path.startswith("/api/engagement/"):
-                self._json(api.engagement_detail(path[len("/api/engagement/"):].strip("/")))
-                return
-            if path.startswith("/api/report/"):
-                self._json(api.run_report(path[len("/api/report/"):].strip("/")))
-                return
+            for prefix, fn in _PREFIX_ROUTES.items():
+                if path.startswith(prefix):
+                    self._json(fn(path[len(prefix):].strip("/")))
+                    return
             if path.startswith("/api/"):
                 self._json({"error": "unknown endpoint"}, status=404)
                 return

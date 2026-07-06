@@ -180,3 +180,45 @@ def test_runs_report_and_reverify_read_saved_run(tmp_path, monkeypatch) -> None:
     assert doc["run_id"] == "r1" and doc["summary"]["confirmed"] == 1
     rv = actions.reverify_run("r1")
     assert rv["total"] == 1  # the one finding was examined (cert-less here -> not reproduced)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — benchmark + world-model reconstruction + coverage
+# ---------------------------------------------------------------------------
+
+
+def test_benchmark_data_reads_committed_results() -> None:
+    d = api.benchmark_data()
+    assert d["results"] is not None, "committed docs/benchmark-results.json should load"
+    tools = [r["tool"] for r in d["results"]["results"]]
+    assert "crucible" in tools
+    assert d["baseline"] is not None  # eval/baselines/benchmark-app.json
+
+
+def test_worldmodel_reconstructs_attack_paths(tmp_path, monkeypatch) -> None:
+    from framework.v2.console import actions
+
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
+    rd = tmp_path / "runs" / "r1"
+    rd.mkdir(parents=True)
+    # a ScanReport with chainable findings (IDOR fronts a datastore, deser on a host)
+    report = {
+        "target": "http://t/",
+        "active_findings": [
+            {"check_id": "idor", "bug_class": "idor", "insertion_point": "query:id", "param": "id",
+             "endpoint": "http://t/account?id=1", "confidence": 0.9, "confirmed_by": "achieved_state",
+             "rationale": "swap", "oracle_context": None},
+            {"check_id": "deser", "bug_class": "deserialization", "insertion_point": "body:data", "param": "data",
+             "endpoint": "http://t/import", "confidence": 0.9, "confirmed_by": "oob_callback",
+             "rationale": "gadget", "oracle_context": None},
+        ],
+    }
+    (rd / "reverifiable.json").write_text(json.dumps(report), encoding="utf-8")
+
+    wm = api.worldmodel("r1")
+    assert wm["node_count"] > 0 and wm["edge_count"] > 0
+    assert len(wm["paths"]) >= 1  # attacker -> crown jewel chain
+    kinds = {n["kind"] for n in wm["nodes"]}
+    assert kinds & {"datastore", "host", "cloud_resource"}  # a crown-jewel node exists
+    # every path step is technique-annotated (the reasoning, surfaced)
+    assert all(s["technique"] for p in wm["paths"] for s in p["steps"])
