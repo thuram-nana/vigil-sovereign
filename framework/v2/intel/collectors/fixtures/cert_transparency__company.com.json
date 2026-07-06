@@ -1,0 +1,4 @@
+[
+  {"fingerprint": "xyz", "names": ["api.company.com", "backend.company.com"], "not_after": "2026-06-01"},
+  {"fingerprint": "abc", "names": ["www.company.com"], "not_after": "2026-05-01"}
+]

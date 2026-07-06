@@ -9,9 +9,10 @@ provenance for free. On top of that substrate sit entity resolution (many refs �
 asset), evidence fusion, and — in the `confidence` sibling package — the Scientific
 Confidence Engine.
 
-Phase A (this package's first slice): refs + Observation model + fusion + the
-projection keystone + entity resolution. Collectors, the adaptive recon planner,
-temporal intelligence, and prediction compose on this spine.
+Phase A (the reasoning core): refs + Observation model + fusion + the projection
+keystone + entity resolution. Phase B (the collection spine) composes on it:
+transport-injected offline-first collectors, the IntelIngest single writer, and
+the VOI-driven ReconPlanner.
 """
 
 from .refs import ArtifactTier, EntityRef, canonicalize
@@ -23,9 +24,25 @@ from .models import (
     Reliability,
     SourceReliability,
 )
+from .transport import (
+    DisabledTransport,
+    FixtureTransport,
+    GuardedHttpTransport,
+    MappingTransport,
+    RawRecord,
+    Transport,
+)
+from .ingest import IngestResult, IntelIngest
+from .planner import ReconPlan, ReconPlanner, ReconTask
+from .store import IntelStore
 
 __all__ = [
     "ArtifactTier", "EntityRef", "canonicalize",
     "Credibility", "IntelSourceKind", "Observation", "Polarity", "Reliability",
     "SourceReliability",
+    # Phase B — collection spine
+    "Transport", "RawRecord", "DisabledTransport", "FixtureTransport",
+    "MappingTransport", "GuardedHttpTransport",
+    "IntelIngest", "IngestResult", "IntelStore",
+    "ReconPlanner", "ReconPlan", "ReconTask",
 ]

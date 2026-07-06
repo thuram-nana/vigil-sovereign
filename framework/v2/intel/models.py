@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 import math
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -87,7 +88,7 @@ class Observation(BaseModel):
     subject: EntityRef
     relation: EdgeKind | None = None            # None → a node claim; set → an edge claim
     object: EntityRef | None = None
-    attrs: dict[str, object] = Field(default_factory=dict)
+    attrs: dict[str, Any] = Field(default_factory=dict)
     source_reliability: SourceReliability = Field(default_factory=SourceReliability)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     polarity: Polarity = Polarity.AFFIRMS
