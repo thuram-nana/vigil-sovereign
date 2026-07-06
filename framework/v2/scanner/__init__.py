@@ -53,8 +53,10 @@ from . import (
     benchmark,
     browser,
     browser_crawler,
+    constraints,
     detection_cost,
     domxss,
+    fitness,
     graphql,
     jwt,
     learning,
@@ -65,6 +67,8 @@ from . import (
     smuggling,
     websocket,
 )
+from .constraints import InferenceResult, InferredConstraint, infer_predicate
+from .fitness import differential_proximity, reflection_proximity, unblocked_gate
 from .adaptive import AdaptResult, EvolveResult, evolve, waf_adapt
 from .benchmark import BenchmarkReport, run_benchmark
 from .detection_cost import detection_cost_of_technique, path_detection_cost, rank_paths
@@ -177,6 +181,15 @@ __all__ = [
     "waf_adapt",
     "EvolveResult",
     "AdaptResult",
+    # membership-query constraint inference + oracle-proximity fitness
+    "constraints",
+    "infer_predicate",
+    "InferenceResult",
+    "InferredConstraint",
+    "fitness",
+    "reflection_proximity",
+    "differential_proximity",
+    "unblocked_gate",
     # quantum-era: PQC exposure + quantum-inspired optimizer
     "quantum_era",
     "classify_kex",
