@@ -78,6 +78,11 @@ def _engage(argv: list[str]) -> int:
     return engage_mod.main(argv)
 
 
+def _collaborator(argv: list[str]) -> int:
+    from .verify import collaborator_cli
+    return collaborator_cli.main(argv)
+
+
 def _verify(argv: list[str]) -> int:
     from .verify import reverify
     return reverify.main(argv)
@@ -124,6 +129,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "scan": _scan,
     "engage": _engage,
     "verify": _verify,
+    "collaborator": _collaborator,
     "status": _status,
 }
 

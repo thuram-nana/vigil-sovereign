@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-deser-php-phar-wrapper",
+  "bug_class": "deserialization",
+  "title": "PHP phar:// stream-wrapper deserialization trigger",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "php"
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "phar://{callback}/gadget.phar/x"
+  },
+  "references": [
+    "CWE-502",
+    "CAPEC-586"
+  ],
+  "remediation": "Never deserialize untrusted data into arbitrary types. Use allowlist-based deserialization or a data-only format (JSON with a fixed schema), disable polymorphic type handling, and remove/patch the gadget libraries on the classpath. The inbound callback proves the gadget chain executed.",
+  "payload_family": "php-phar"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "m3-blind-ssrf-header-forwarded",
+  "bug_class": "ssrf",
+  "title": "Blind SSRF (header-driven fetch, e.g. X-Forwarded-Host / Forwarded)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "header_value"
+  ],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "http://{callback}"
+  },
+  "references": [
+    "CWE-918",
+    "CAPEC-664"
+  ],
+  "remediation": "Do not let user input drive server-side fetches. Enforce an allowlist of permitted hosts and schemes, block internal/link-local ranges and the cloud metadata endpoint, disable unneeded URL schemes (gopher/dict/ftp/file), resolve-then-pin the destination to defeat DNS rebinding, and never follow redirects into internal space. The inbound callback proves a server-side fetch fired.",
+  "payload_family": "ssrf-header"
+}
