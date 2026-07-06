@@ -80,6 +80,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--no-oob", action="store_true", help="Disable the loopback OOB receiver.")
     parser.add_argument("--domxss", action="store_true",
                         help="Also emit static DOM-XSS source->sink leads (candidates, not confirmed).")
+    parser.add_argument("--browser-xss", action="store_true",
+                        help="Confirm DOM-XSS by real execution in a headless browser (needs Chromium).")
+    parser.add_argument("--spa", action="store_true",
+                        help="Run the SPA crawler to capture fetch/XHR endpoints (needs Chromium).")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
@@ -101,6 +105,8 @@ def main(argv: list[str]) -> int:
         targeted=args.targeted,
         enable_oob=not args.no_oob,
         enable_domxss=args.domxss,
+        enable_browser_xss=args.browser_xss,
+        enable_spa_crawl=args.spa,
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
     ).run(args.target)
@@ -115,4 +121,8 @@ def main(argv: list[str]) -> int:
         print(f"  passive findings  : {len(report.passive_findings)}")
     if report.dom_xss_candidates:
         print(f"  dom-xss leads     : {len(report.dom_xss_candidates)} (candidates, not confirmed)")
+    if report.discovered_endpoints:
+        print(f"  spa endpoints     : {len(report.discovered_endpoints)} discovered")
+        for ep in report.discovered_endpoints[:20]:
+            print(f"    {ep}")
     return 0
