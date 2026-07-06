@@ -34,10 +34,12 @@ from .checks import CorsActiveCheck, DEFAULT_CHECKS, Check, HostHeaderCheck, Req
 from .crawler import Crawler, Scope
 from .domxss import DomXssCandidate, analyze_html
 from .engine import AuditEngine, AuditFinding
+from .fingerprint import Fingerprint, fingerprint
 from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import InsertionKind
 from .jwt import JwtNoneCheck
 from .learning import ContextualBandit
+from .library import LibraryEntry, compile_library, load_library, select_entries
 from .passive import PassiveFinding
 from .targeting import select_checks
 
@@ -67,6 +69,10 @@ class ScanReport(BaseModel):
     audit_requests_sent: int = 0
     active_findings: list[AuditFinding] = Field(default_factory=list)
     passive_findings: list[PassiveFinding] = Field(default_factory=list)
+    # The target's detected technology stack (when library-driven scanning ran).
+    # Drives which fingerprint-gated checks were selected.
+    fingerprint: Fingerprint | None = None
+    library_checks_run: int = 0
     # Static DOM-XSS source->sink flows over the crawled page corpus. These are
     # CANDIDATES (leads), never oracle-confirmed — kept strictly separate from
     # active_findings so the prove-don't-guess property is not diluted. Dynamic
@@ -113,6 +119,8 @@ class WebScanCampaign:
         bandit_path: Path | str | None = None,
         enable_domxss: bool = False,
         oob_advertise_base_url: str | None = None,
+        use_library: bool = False,
+        library_entries: list[LibraryEntry] | None = None,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -145,6 +153,13 @@ class WebScanCampaign:
         # targets). The engage runner sets this only after checking the relay
         # host is on the charter allowlist.
         self.oob_advertise_base_url = oob_advertise_base_url
+        # Data-driven coverage: fingerprint the target from the crawl and run the
+        # declarative-library checks whose applicability predicate matches the
+        # detected stack (scanner.library + scanner.fingerprint). Off by default
+        # so the fixed DEFAULT_CHECKS path is unchanged. `library_entries` lets a
+        # caller inject a check set; None loads the shipped library from disk.
+        self.use_library = use_library
+        self._library_entries = library_entries
 
     def _resolve_bandit(self) -> ContextualBandit:
         """The explicit bandit, else a warm-start from the persisted file if one
@@ -164,6 +179,22 @@ class WebScanCampaign:
         ).crawl(seed_url)
 
         bandit = self._resolve_bandit()
+
+        # Data-driven coverage: fingerprint the target and add the library checks
+        # whose applicability predicate matches the detected stack. The checks are
+        # oracle-anchored exactly like the built-ins, so precision is unaffected;
+        # coverage is scoped so a WordPress payload never fires at a Spring app.
+        fp: Fingerprint | None = None
+        active_checks = self.checks
+        library_checks_run = 0
+        if self.use_library:
+            fp = fingerprint(crawl.pages)
+            entries = self._library_entries if self._library_entries is not None else load_library()
+            selected = select_entries(entries, fp.tokens)
+            lib_checks = tuple(compile_library(selected))
+            library_checks_run = len(lib_checks)
+            active_checks = tuple(self.checks) + lib_checks
+
         active: list[AuditFinding] = []
         audited = 0
         seen_hosts: set[str] = set()
@@ -186,7 +217,7 @@ class WebScanCampaign:
                 point_request_checks = self.request_checks if host not in seen_hosts else ()
                 seen_hosts.add(host)
                 active.extend(engine.audit(
-                    req, checks=self.checks, insertion_kinds=self.insertion_kinds,
+                    req, checks=active_checks, insertion_kinds=self.insertion_kinds,
                     selector=selector, request_checks=point_request_checks))
                 audited += 1
                 if self.max_audit_requests and engine.requests_sent >= self.max_audit_requests:
@@ -213,6 +244,8 @@ class WebScanCampaign:
             active_findings=active,
             passive_findings=crawl.passive_findings,
             dom_xss_candidates=candidates,
+            fingerprint=fp,
+            library_checks_run=library_checks_run,
         )
 
 

@@ -1,0 +1,21 @@
+{
+  "id": "m2-ssti-twig",
+  "bug_class": "ssti",
+  "title": "Server-side template injection \u2014 Twig (evaluated 31337*31337)",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "php"
+  },
+  "oracle": {
+    "kind": "evaluation",
+    "probe_expr": "{{31337*31337}}",
+    "expected_result": "982007569"
+  },
+  "references": [
+    "CWE-1336",
+    "CWE-94",
+    "CAPEC-242"
+  ],
+  "remediation": "Do not pass user input into a template as template source. Use the engine's sandboxed/auto-escaping context and pass user data ONLY as rendered variables, never concatenated into the template string.",
+  "payload_family": "ssti-twig"
+}

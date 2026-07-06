@@ -1,0 +1,20 @@
+{
+  "id": "m2-errsqli-backtick",
+  "bug_class": "error_based_sqli",
+  "title": "Error-based SQL injection \u2014 a backtick identifier breaker",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "error_signature",
+    "error_probe": "`",
+    "benign": "crucible-benign-term"
+  },
+  "references": [
+    "CWE-89",
+    "CAPEC-7"
+  ],
+  "remediation": "Use parameterised queries / prepared statements so input cannot alter query syntax; disable verbose database errors in production (they leak schema and confirm injectability).",
+  "payload_family": "error-based-backtick"
+}

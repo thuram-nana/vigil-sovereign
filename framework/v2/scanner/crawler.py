@@ -131,6 +131,9 @@ class Page(BaseModel):
     # The response body, retained so client-side analysers (static DOM-XSS
     # source->sink) can run over the crawled corpus without re-fetching.
     body: str = ""
+    # Response headers, retained so the technology fingerprinter (scanner.
+    # fingerprint) can identify the stack and scope which library checks run.
+    headers: list[tuple[str, str]] = Field(default_factory=list)
 
 
 class CrawlResult(BaseModel):
@@ -197,7 +200,11 @@ class Crawler:
             status = int(resp.get("status", 0)) if isinstance(resp, dict) else 0
             body = resp.get("body", "") if isinstance(resp, dict) else ""
             raw_headers = resp.get("headers", []) if isinstance(resp, dict) else []
-            pages.append(Page(url=url, status=status, body=body if isinstance(body, str) else ""))
+            pages.append(Page(
+                url=url, status=status,
+                body=body if isinstance(body, str) else "",
+                headers=[(str(k), str(v)) for k, v in raw_headers],
+            ))
             _add_request(requests, req_keys, req)
 
             # Passive analysis of every response — no extra request, high precision.

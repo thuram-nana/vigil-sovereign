@@ -833,6 +833,77 @@ def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 3c. Evaluation — the server EVALUATED an injected expression (SSTI / EL)
+# ---------------------------------------------------------------------------
+
+
+def evaluation_oracle(
+    raw_expr: str,
+    expected_result: str,
+    observed_body: Any,
+    control_body: Any = None,
+) -> OracleSignal:
+    """Fire when an injected expression was **evaluated** by the server, not
+    merely reflected — the signature of server-side template / expression-language
+    injection (Jinja2/Twig/Freemarker/Velocity/ERB/Smarty/Mako/Thymeleaf, EL).
+
+    The proof is deliberately strict, because "reflected" and "evaluated" look
+    identical unless you separate them:
+
+      1. the ``expected_result`` (what ``raw_expr`` computes to, e.g. ``31337*31337
+         -> 981538969``) appears in the response, AND
+      2. the ``raw_expr`` itself (``{{31337*31337}}``) does NOT appear — if the
+         raw template text survives, the input was reflected verbatim, not
+         evaluated, so this is NOT SSTI, AND
+      3. when a benign ``control_body`` is supplied, the ``expected_result`` does
+         NOT occur in it — so a value that merely happens to be on the page can
+         never be mistaken for an evaluation.
+
+    Use a distinctive arithmetic result (a large product, not ``7*7=49``) so the
+    expected value cannot coincidentally appear. A reflected-but-unevaluated
+    payload, an encoded payload, or a benign page all correctly do NOT fire."""
+    raw = (raw_expr or "").strip()
+    expected = (expected_result or "").strip()
+    body = _coerce_text(observed_body)
+
+    if len(expected) < 2:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence="expected evaluation result too short to be a reliable marker",
+            observed={"expected": expected})
+
+    if expected not in body:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"evaluated result {expected!r} not present; expression was not evaluated",
+            observed={"expected": expected, "raw_present": raw in body})
+
+    if raw and raw in body:
+        # The literal template text survived — reflection, not evaluation.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"raw expression {raw!r} reflected verbatim — reflected, not evaluated",
+            observed={"expected": expected, "raw_present": True})
+
+    if control_body is not None and expected in _coerce_text(control_body):
+        # The "result" is just part of the page regardless of the payload.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"result {expected!r} also present in the benign control — not attributable to evaluation",
+            observed={"expected": expected})
+
+    idx = body.find(expected)
+    snippet = body[max(0, idx - 24): idx + len(expected) + 24]
+    return OracleSignal(
+        kind=OracleKind.EVALUATION,
+        fired=True,
+        confidence=0.95,
+        evidence=f"expression {raw!r} evaluated to {expected!r} server-side: ...{snippet}...",
+        observed={"expected": expected, "raw": raw, "snippet": snippet},
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4. Sanitizer signal — crash/UB oracles in captured process output
 # ---------------------------------------------------------------------------
 
@@ -889,6 +960,81 @@ def _line_of(text: str, offset: int) -> str:
     start = text.rfind("\n", 0, offset) + 1
     end = text.find("\n", offset)
     return text[start: end if end >= 0 else len(text)]
+
+
+# ---------------------------------------------------------------------------
+# 4b. Error signature — a datastore/parser error a payload provoked (error-based)
+# ---------------------------------------------------------------------------
+
+
+# (regex, engine, confidence). Distinctive server-side error strings that only a
+# malformed query/expression provokes — the signature of error-based injection.
+# Ordered strongest-first; the strongest match wins.
+_ERROR_SIGNATURES: list[tuple[re.Pattern[str], str, float]] = [
+    # --- SQL: MySQL / MariaDB ---
+    (re.compile(r"You have an error in your SQL syntax", re.I), "mysql", 0.95),
+    (re.compile(r"check the manual that corresponds to your (MySQL|MariaDB) server version", re.I), "mysql", 0.95),
+    (re.compile(r"\bwarning:\s*mysqli?_", re.I), "mysql", 0.85),
+    (re.compile(r"MySQLSyntaxErrorException|com\.mysql\.jdbc", re.I), "mysql", 0.9),
+    (re.compile(r"valid MySQL result|Unknown column '[^']+' in 'field list'", re.I), "mysql", 0.85),
+    # --- SQL: PostgreSQL ---
+    (re.compile(r"PostgreSQL.*ERROR|PG::(Syntax|Undefined)|pg_query\(\)|org\.postgresql", re.I), "postgresql", 0.95),
+    (re.compile(r"unterminated quoted string at or near|syntax error at or near", re.I), "postgresql", 0.9),
+    # --- SQL: MSSQL ---
+    (re.compile(r"Unclosed quotation mark after the character string", re.I), "mssql", 0.95),
+    (re.compile(r"Microsoft SQL (Server|Native Client)|System\.Data\.SqlClient\.SqlException", re.I), "mssql", 0.92),
+    (re.compile(r"Incorrect syntax near|\[SQL Server\]", re.I), "mssql", 0.9),
+    # --- SQL: Oracle ---
+    (re.compile(r"\bORA-\d{5}\b", re.I), "oracle", 0.95),
+    (re.compile(r"Oracle.*(Driver|Database)|quoted string not properly terminated", re.I), "oracle", 0.9),
+    # --- SQL: SQLite ---
+    (re.compile(r"SQLite/JDBCDriver|SQLite\.Exception|System\.Data\.SQLite|sqlite3\.OperationalError", re.I), "sqlite", 0.92),
+    (re.compile(r"unrecognized token:|SQL logic error|near \"[^\"]*\": syntax error", re.I), "sqlite", 0.88),
+    # --- SQL: generic JDBC/ODBC ---
+    (re.compile(r"java\.sql\.SQLException|SQLSTATE\[|ODBC.*Driver.*error", re.I), "sql-generic", 0.8),
+    # --- NoSQL ---
+    (re.compile(r"MongoError|E11000 duplicate key|BSONError|com\.mongodb", re.I), "mongodb", 0.85),
+    # --- LDAP ---
+    (re.compile(r"javax\.naming\.directory|LDAPException|Invalid DN syntax|com\.sun\.jndi\.ldap", re.I), "ldap", 0.82),
+    # --- XPath ---
+    (re.compile(r"XPathException|MS\.Internal\.Xml|Expression must evaluate to a node-set|xmlXPathEval", re.I), "xpath", 0.82),
+]
+
+
+def error_signature_oracle(observed_body: Any, control_body: Any = None) -> OracleSignal:
+    """Fire when a response contains a distinctive **datastore/parser error** that
+    a malformed injection payload provoked — the signature of error-based injection
+    (SQL/NoSQL/LDAP/XPath).
+
+    Two guards keep it precise: the error string must be a known, engine-specific
+    signature (not a generic "error" word), AND — when a benign ``control_body`` is
+    supplied — the SAME signature must be ABSENT from the control, so a page that
+    always shows a stack trace cannot be mistaken for an injection. This is the
+    error-based analogue of the sanitizer oracle: a real backend error is strong,
+    attributable evidence the input reached and broke the query parser."""
+    body = _coerce_text(observed_body)
+    control = _coerce_text(control_body) if control_body is not None else ""
+
+    for pattern, engine, conf in _ERROR_SIGNATURES:
+        m = pattern.search(body)
+        if not m:
+            continue
+        if control and pattern.search(control):
+            # the same error is present without the payload -> not attributable
+            continue
+        line = _line_of(body, m.start())
+        return OracleSignal(
+            kind=OracleKind.ERROR_SIGNATURE,
+            fired=True,
+            confidence=conf,
+            evidence=f"{engine} error provoked by the payload: {line.strip()[:200]}",
+            observed={"engine": engine, "match": m.group(0)[:200]},
+        )
+
+    return OracleSignal(
+        kind=OracleKind.ERROR_SIGNATURE, fired=False, confidence=0.0,
+        evidence="no datastore/parser error signature in the response",
+        observed={})
 
 
 # ---------------------------------------------------------------------------

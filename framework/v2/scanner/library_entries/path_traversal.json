@@ -1,0 +1,15 @@
+{
+  "id": "path-traversal",
+  "bug_class": "path_traversal",
+  "title": "Path traversal / directory traversal",
+  "severity": "High",
+  "applies_when": {"always": true},
+  "insertion_kinds": ["query_value", "body_form_value", "url_path_seg"],
+  "oracle": {
+    "kind": "reflection",
+    "payload_template": "../../{marker}"
+  },
+  "references": ["CWE-22", "CAPEC-126"],
+  "remediation": "Resolve user-supplied paths against a fixed base directory and reject any result that escapes it (canonicalise, then verify the prefix). Prefer opaque identifiers mapped server-side to real paths rather than accepting filenames.",
+  "payload_family": "dot-dot-slash"
+}

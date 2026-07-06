@@ -1,0 +1,15 @@
+{
+  "id": "command-injection-oob",
+  "bug_class": "command_injection",
+  "title": "OS command injection (out-of-band)",
+  "severity": "Critical",
+  "applies_when": {"always": true},
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": ";curl {callback};"
+  },
+  "references": ["CWE-78", "CAPEC-248"],
+  "remediation": "Never pass user input to a shell. Invoke programs with an argument vector (no shell interpolation), validate against a strict allowlist, and drop shell metacharacters. A blind OS command that fetches the callback proves shell execution.",
+  "payload_family": "shell-breakout"
+}

@@ -162,6 +162,16 @@ class FindingContext(BaseModel):
     marker: str | None = None
     observed_sink: Any | None = None
 
+    # evaluation_oracle (SSTI/EL — the server evaluated an injected expression)
+    eval_raw: str | None = None
+    eval_expected: str | None = None
+    eval_observed: str | None = None
+    eval_control: str | None = None
+
+    # error_signature_oracle (error-based injection — a datastore/parser error)
+    error_observed: str | None = None
+    error_control: str | None = None
+
     # sanitizer_signal_oracle
     process_output: str | None = None
 
@@ -311,6 +321,45 @@ class FindingContext(BaseModel):
             observed_sink=_sink_to_serialisable(observed_sink),
         )
 
+    @classmethod
+    def from_evaluation(
+        cls,
+        raw_expr: str,
+        expected_result: str,
+        observed_body: Any,
+        *,
+        control_body: Any = None,
+        bug_class: str = "ssti",
+    ) -> "FindingContext":
+        """An injected expression, the value it computes to, and the response it
+        was observed in (plus an optional benign control), for the evaluation
+        oracle. Confirms SSTI/EL only when the server EVALUATED the expression —
+        the result present, the raw template text absent."""
+        return cls(
+            bug_class=bug_class,
+            eval_raw=_coerce_text(raw_expr),
+            eval_expected=_coerce_text(expected_result),
+            eval_observed=_coerce_text(observed_body),
+            eval_control=_coerce_text(control_body) if control_body is not None else None,
+        )
+
+    @classmethod
+    def from_error_signature(
+        cls,
+        observed_body: Any,
+        *,
+        control_body: Any = None,
+        bug_class: str = "error_based_sqli",
+    ) -> "FindingContext":
+        """A response (and an optional benign control) for the error-signature
+        oracle. Confirms error-based injection when a distinctive datastore/parser
+        error the payload provoked is present in the response but not the control."""
+        return cls(
+            bug_class=bug_class,
+            error_observed=_coerce_text(observed_body),
+            error_control=_coerce_text(control_body) if control_body is not None else None,
+        )
+
     # -- combination -------------------------------------------------------
 
     def merge(self, other: "FindingContext") -> "FindingContext":
@@ -361,6 +410,16 @@ class FindingContext(BaseModel):
         if self.marker is not None and self.observed_sink is not None:
             ctx["marker"] = self.marker
             ctx["observed_sink"] = self.observed_sink
+        if self.eval_expected is not None and self.eval_observed is not None:
+            ctx["eval_raw"] = self.eval_raw or ""
+            ctx["eval_expected"] = self.eval_expected
+            ctx["eval_observed"] = self.eval_observed
+            if self.eval_control is not None:
+                ctx["eval_control"] = self.eval_control
+        if self.error_observed is not None:
+            ctx["error_observed"] = self.error_observed
+            if self.error_control is not None:
+                ctx["error_control"] = self.error_control
         if self.process_output is not None:
             ctx["process_output"] = self.process_output
         if self.oob_hits is not None:
