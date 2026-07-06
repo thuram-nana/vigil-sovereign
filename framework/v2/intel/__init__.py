@@ -35,6 +35,13 @@ from .transport import (
 from .ingest import IngestResult, IntelIngest
 from .planner import ReconPlan, ReconPlanner, ReconTask
 from .store import IntelStore
+from .temporal import (
+    ENUMERATIVE_SOURCE_KINDS,
+    SurfaceDelta,
+    TemporalIndex,
+    TimelineEvent,
+)
+from .predict import AssetHypothesis, AssetPredictor
 
 __all__ = [
     "ArtifactTier", "EntityRef", "canonicalize",
@@ -45,4 +52,7 @@ __all__ = [
     "MappingTransport", "GuardedHttpTransport",
     "IntelIngest", "IngestResult", "IntelStore",
     "ReconPlanner", "ReconPlan", "ReconTask",
+    # Phase C — temporal + prediction
+    "TemporalIndex", "SurfaceDelta", "TimelineEvent", "ENUMERATIVE_SOURCE_KINDS",
+    "AssetPredictor", "AssetHypothesis",
 ]
