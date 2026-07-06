@@ -56,6 +56,12 @@ class AuditFinding(BaseModel):
     bug_class: str
     insertion_point: str = Field(description="The point id (kind:locator) the payload hit.")
     param: str = Field(description="Human name of the point (param/header/cookie/pointer).")
+    endpoint: str = Field(
+        default="",
+        description="The request URL the finding sits on — what makes it locatable "
+        "on a multi-endpoint app (and gives the report/SARIF a real location). "
+        "Empty only on legacy/hand-built findings.",
+    )
     confidence: float = Field(ge=0.0, le=1.0)
     confirmed_by: str = Field(description="The oracle kind that fired.")
     rationale: str = ""
@@ -86,10 +92,18 @@ class AuditEngine:
         oob: OOBReceiver | None = None,
         bandit: ContextualBandit | None = None,
         bandit_context: str = "default",
+        waf_adaptive: bool = False,
     ) -> None:
         self._send = send
         self.verifier = verifier or OracleVerifier()
         self.max_requests = max_requests
+        # Opt-in adaptive WAF-bypass: when a check's canonical payload is filtered
+        # but the sink is plausibly reachable, checks that implement `adapt` get a
+        # second chance to SYNTHESIZE a bypassing form (evasion ladder, then a small
+        # GA over encodings) that still fires the oracle. Off by default — it spends
+        # extra requests — and confirmation stays with the same oracle, so a bypass
+        # that does not fire the oracle is never a finding.
+        self.waf_adaptive = waf_adaptive
         # A started OOBReceiver enables the blind (OOB) checks; without one they
         # are skipped — a blind class is never guessed, only callback-confirmed.
         self.oob = oob
@@ -154,6 +168,10 @@ class AuditEngine:
                     findings.append(AuditFinding(
                         check_id=rcheck.id, bug_class=rcheck.bug_class,
                         insertion_point=f"request:{rcheck.id}", param="(request)",
+                        # No endpoint: a request-level check probes its own path (e.g.
+                        # /.git/config), not this host-anchor request's URL, so the
+                        # insertion_point token stays the location — matching the
+                        # exposure ground truth as before.
                         confidence=confirmed.confidence,
                         confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
                         rationale=confirmed.rationale,
@@ -184,19 +202,39 @@ class AuditEngine:
                         # Isolate a check failure to that check — a scan must be
                         # robust to one probe erroring on a hostile response.
                         continue
-                    if ctx is None:
+                    adaptive = self.waf_adaptive and hasattr(check, "adapt")
+                    if ctx is None and not adaptive:
                         continue
-                    confirmed = confirm_finding(
-                        finding={
-                            "bug_class": check.bug_class,
-                            "title": f"{check.bug_class} via {point.name}",
-                            "severity": "High",
-                            "surface": point.id,
-                            "summary": f"{check.id} probe fired an oracle at {point.name}",
-                        },
-                        context=ctx,
-                        verifier=self.verifier,
-                    )
+
+                    def _confirm(c: FindingContext) -> object:
+                        return confirm_finding(
+                            finding={
+                                "bug_class": check.bug_class,
+                                "title": f"{check.bug_class} via {point.name}",
+                                "severity": "High",
+                                "surface": point.id,
+                                "summary": f"{check.id} probe fired an oracle at {point.name}",
+                            },
+                            context=c,
+                            verifier=self.verifier,
+                        )
+
+                    confirmed = _confirm(ctx) if ctx is not None else None
+                    # WAF-adaptive fallback: the canonical payload did not fire (blocked
+                    # or filtered). Synthesize a form that slips past AND fires the SAME
+                    # oracle, then confirm that — precision is unchanged (a bypass that
+                    # does not fire the oracle is never a finding).
+                    if confirmed is None and adaptive:
+                        try:
+                            actx = check.adapt(template, point, self._counted_send)
+                        except BudgetExceeded:
+                            raise
+                        except Exception:
+                            actx = None
+                        if actx is not None:
+                            ac = _confirm(actx)
+                            if ac is not None:
+                                confirmed, ctx = ac, actx
                     # reward the bandit on every probe that actually ran: a fired
                     # oracle is a hit, an exhausted probe is a miss.
                     if self.bandit is not None:
@@ -210,6 +248,7 @@ class AuditEngine:
                         bug_class=check.bug_class,
                         insertion_point=point.id,
                         param=point.name,
+                        endpoint=request.url,
                         confidence=confirmed.confidence,
                         confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
                         rationale=confirmed.rationale,

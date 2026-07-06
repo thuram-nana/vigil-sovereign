@@ -1,0 +1,38 @@
+{
+  "name": "webwolf",
+  "role": "vulnerable",
+  "image": "webgoat/goatandwolf:v8.2.2",
+  "container_port": 9090,
+  "host_port": 0,
+  "env": {
+    "WEBWOLF_HOST": "0.0.0.0",
+    "WEBGOAT_HOST": "0.0.0.0"
+  },
+  "health_path": "/WebWolf/login",
+  "health_statuses": [
+    200,
+    302,
+    401
+  ],
+  "health_timeout_s": 180,
+  "seed_path": "/WebWolf/login",
+  "ground_truth": {
+    "kind": "none",
+    "expected": [],
+    "owasp_csv": null,
+    "owasp_dast_only": false
+  },
+  "scan": {
+    "max_pages": 30,
+    "max_depth": 3,
+    "use_library": true,
+    "enable_oob": false,
+    "max_audit_requests": 0,
+    "insertion_kinds": [
+      "QUERY_VALUE"
+    ],
+    "drop_timing": true
+  },
+  "heavy": false,
+  "notes": "UNVERIFIED in this build environment: no network here to pull the image or confirm the port/health path at runtime \u2014 the operator must verify on first launch. Canonical image source: OWASP WebGoat project on Docker Hub (webgoat/goatandwolf), the combined container that bundles WebGoat (HTTP 8080) and WebWolf (HTTP 9090, context path /WebWolf) in one JVM. This descriptor points the scanner at WebWolf only (container port 9090); the same container also exposes WebGoat on 8080 \u2014 pair with the separate 'webgoat' descriptor for the actual lab surface. WebWolf is the out-of-band collaborator/companion (catches mail, incoming HTTP requests, and hosts attacker files) used by WebGoat's SSRF/XXE/blind-callback labs \u2014 it is intentionally an OOB helper, NOT a planted-bug corpus, so ground_truth.kind is 'none': the meaningful metric here is false-positive count + crawl/discovery + performance, and every confirmed finding must be scrutinised as a candidate false positive, not scored for recall. Auth/reachability caveats: (1) WebWolf uses Spring Security form login at /WebWolf/login and most functionality (mailbox, incoming-requests log, file hosting) sits behind registration/login, so an unauthenticated crawl is deliberately shallow \u2014 /WebWolf/login returns 200 while /WebWolf/home 302-redirects to login. (2) Some goatandwolf images bind the servers to 127.0.0.1 inside the container by default, which makes the mapped port unreachable from the host; the env WEBWOLF_HOST=0.0.0.0 (and WEBGOAT_HOST=0.0.0.0) are set to force 0.0.0.0 binding (Spring relaxed-binding of webwolf.host/webgoat.host). This is a harmless belt-and-suspenders default \u2014 v8.2.2 predates the 127.0.0.1-default change on newer tags, so verify against the exact tag; the variable names have also shifted across releases. No external DB is required (WebGoat/WebWolf use an embedded store). JVM cold start can take 30-90s, hence the 180s health timeout. enable_oob is false because WebWolf is itself the collaborator, not a target that needs an external OOB endpoint. max_audit_requests=0 means unbounded audit traffic (bounded only by max_pages/max_depth), which is intended so FP behaviour is actually exercised."
+}

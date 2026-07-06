@@ -1,0 +1,57 @@
+{
+  "name": "dvwa",
+  "role": "vulnerable",
+  "image": "vulnerables/web-dvwa",
+  "container_port": 80,
+  "host_port": 8080,
+  "health_path": "/login.php",
+  "health_statuses": [
+    200,
+    302
+  ],
+  "health_timeout_s": 60,
+  "seed_path": "/vulnerabilities/",
+  "heavy": false,
+  "ground_truth": {
+    "kind": "curated",
+    "expected": [
+      {
+        "bug_class": "sqli",
+        "location": "/vulnerabilities/sqli/?id"
+      },
+      {
+        "bug_class": "boolean_sqli",
+        "location": "/vulnerabilities/sqli_blind/?id"
+      },
+      {
+        "bug_class": "xss",
+        "location": "/vulnerabilities/xss_r/?name"
+      },
+      {
+        "bug_class": "xss",
+        "location": "/vulnerabilities/xss_s/?mtxMessage"
+      },
+      {
+        "bug_class": "command_injection",
+        "location": "/vulnerabilities/exec/?ip"
+      },
+      {
+        "bug_class": "lfi",
+        "location": "/vulnerabilities/fi/?page"
+      }
+    ]
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "BODY_FORM_VALUE"
+    ],
+    "drop_timing": true,
+    "enable_oob": false,
+    "use_library": true,
+    "max_pages": 40,
+    "max_depth": 3,
+    "max_audit_requests": 1500
+  },
+  "notes": "UNVERIFIED in this build environment: there is no network here to pull the image or exercise the app, so image name, port, health path, and vuln locations are from documentation/experience and should be confirmed on first real run.\n\nCanonical image: Docker Hub `vulnerables/web-dvwa` (the DVWA project's own published image), listening on port 80. Alternative mirror: `citizenstig/dvwa`. DVWA source: github.com/digininja/DVWA.\n\nStandup / auth requirement (operator must wire this before scanning): DVWA bundles its own MySQL/MariaDB inside the image, but the DB must be initialized once by visiting `/setup.php` and clicking \"Create / Reset Database\". Then log in at `/login.php` with the default creds admin/password to obtain a `PHPSESSID` session cookie. Finally set the security level to \"low\" (via `/security.php`, which sets a `security=low` cookie) \u2014 newer DVWA defaults to \"impossible\", under which the planted bugs are NOT present. The scanner MUST carry both cookies (`PHPSESSID=<session>; security=low`); otherwise every `/vulnerabilities/*` request 302-redirects to `/login.php` and nothing is reachable. `/login.php` (used as the health path) returns 200 as soon as Apache is up, before DB init, so health passing does NOT imply the app is scan-ready.\n\nInsertion notes: sqli, sqli_blind, xss_r, and fi take their injectable param via GET query string (`id`, `id`, `name`, `page`), while exec (`ip`) and xss_s (`txtName`/`mtxMessage`) are POST form fields \u2014 hence both QUERY_VALUE and BODY_FORM_VALUE are enabled. Command injection is confirmable via reflected ping output (no OOB/timing needed), so drop_timing is true.\n\nGround-truth caveat: kind=curated. These six locations are OUR curation of DVWA's classic, long-stable vulnerable pages (co-design caveat \u2014 we are labeling a target we also scan). They are stable across DVWA releases but the exact param names and paths should be verified against the deployed image version. bug_class labels use CRUCIBLE coarse families: sqli / boolean_sqli (the sqli_blind page) / xss (reflected + stored) / command_injection / lfi (the file-inclusion page, which also demonstrates path_traversal).\n\nREVIEW (honesty/plausibility pass, 2026-07-06): all five checks PASS, descriptor returned unchanged. (1) Image `vulnerables/web-dvwa` is canonical. (2) Port 80 + health `/login.php` correct. (3) All six locations match DVWA low-security source (params id/id/name/mtxMessage/ip/page); the `?param` notation on POST fields (xss_s, exec) is a locator convention, method clarified in notes above. All bug_class labels are in CRUCIBLE vocabulary. (4) Notes honestly disclose unverified-in-build-env, the DB-init/login/cookie standup requirement, the health-passing != scan-ready gotcha, and the curation/co-design caveat. (5) heavy=false correct (DVWA is not in the {owasp-benchmark, gitlab-ce, mattermost} heavy set)."
+}

@@ -24,7 +24,8 @@ from werkzeug.wrappers import Response
 
 from framework.v2.authority.killswitch import KillSwitch
 from framework.v2.common import paths as _paths
-from framework.v2.engage import EngagementRefused, run_engagement
+from framework.v2 import engage as engage_mod
+from framework.v2.engage import EngagementRefused, EngagementResult, run_engagement
 from framework.v2.verify.adapter import FindingContext
 from framework.v2.verify.confirmation import confirm_finding
 from framework.v2.verify.oob import OOBReceiver
@@ -113,7 +114,7 @@ def test_engage_confirms_findings_with_reverifiable_certificates(
     report = run_engagement(
         "alpha", f"http://127.0.0.1:{port}/",
         max_pages=5, enable_oob=False, prompt_callback=_deny,
-    )
+    ).report
 
     assert report.active_findings, "engage confirmed nothing against a vulnerable target"
     # every confirmed finding carries a certificate that independently re-verifies
@@ -194,7 +195,86 @@ def test_engage_browser_xss_confirms_by_execution_confined_to_scope(
     report = run_engagement(
         "alpha", f"http://127.0.0.1:{port}/",
         max_pages=3, enable_oob=False, enable_browser_xss=True, prompt_callback=_deny,
-    )
+    ).report
     dom = [f for f in report.active_findings if f.confirmed_by == "dom_execution"]
     assert dom, "engage browser pass did not confirm the DOM-XSS by execution"
     assert dom[0].oracle_context is not None  # re-verifiable certificate
+
+
+# ---------------------------------------------------------------------------
+# B1 — the reasoning brain is wired into the live loop: engage returns not just a
+# scan report but the forward reasoning (attack paths) over the confirmed facts.
+# ---------------------------------------------------------------------------
+
+
+def test_engage_returns_engagement_result_with_chaining_wired(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny,
+    )
+    # the new contract: an EngagementResult carrying the report AND the reasoning
+    assert isinstance(result, EngagementResult)
+    assert result.report.active_findings, "engage confirmed nothing against a vulnerable target"
+    # chaining ran without error; its outputs are lists (possibly empty — these
+    # findings are not crown-jewel-chainable, and that is honest, not a failure)
+    assert isinstance(result.attack_paths, list)
+    assert isinstance(result.chained_conclusions, list)
+
+
+def test_engage_chaining_produces_attack_paths_from_chainable_findings():
+    # The keystone, exercised directly through engage's own chaining code path
+    # (AutonomousCampaign over a report, no traffic): a confirmed IDOR fronting a
+    # datastore and a deserialization on a host yield attacker->crown-jewel paths.
+    from framework.v2.scanner.campaign import ScanReport
+    from framework.v2.scanner.engine import AuditFinding
+    from framework.v2.scanner.orchestrator import AutonomousCampaign
+
+    report = ScanReport(
+        target="http://t/", pages_crawled=1,
+        active_findings=[
+            AuditFinding(check_id="idor", bug_class="idor", insertion_point="query:id",
+                         param="id", endpoint="http://t/account?id=1", confidence=0.9,
+                         confirmed_by="achieved_state", rationale="object swap"),
+            AuditFinding(check_id="deser", bug_class="deserialization", insertion_point="body:data",
+                         param="data", endpoint="http://t/import", confidence=0.9,
+                         confirmed_by="oob_callback", rationale="gadget"),
+        ],
+    )
+    auto = AutonomousCampaign(engage_mod._no_send).chain_findings(report)
+    assert auto.attack_paths, "chainable findings produced no attack path"
+    # every hop is technique-annotated (the reasoning, not a guess)
+    assert all(step.technique for ap in auto.attack_paths for step in ap.steps)
+
+
+def test_engage_chaining_is_best_effort(
+    isolated_engagement, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch,
+):
+    # A chaining failure must NEVER sink the engagement: the oracle-confirmed report
+    # is authoritative and is returned with empty paths rather than raising.
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        def chain_findings(self, report):
+            raise RuntimeError("reasoning exploded")
+
+    monkeypatch.setattr(engage_mod, "AutonomousCampaign", _Boom)
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny,
+    )
+    assert result.report.active_findings, "report must survive a chaining failure"
+    assert result.attack_paths == []
+    assert result.chained_conclusions == []

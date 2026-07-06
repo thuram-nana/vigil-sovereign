@@ -1,0 +1,36 @@
+{
+  "name": "keycloak",
+  "role": "real-enterprise",
+  "image": "quay.io/keycloak/keycloak:25.0",
+  "container_port": 8080,
+  "host_port": 8080,
+  "command": [
+    "start-dev"
+  ],
+  "env": {
+    "KEYCLOAK_ADMIN": "admin",
+    "KEYCLOAK_ADMIN_PASSWORD": "admin"
+  },
+  "health_path": "/realms/master",
+  "health_statuses": [
+    200
+  ],
+  "health_timeout_s": 120,
+  "seed_path": "",
+  "ground_truth": {
+    "kind": "none"
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE"
+    ],
+    "drop_timing": true,
+    "max_pages": 40,
+    "max_depth": 4,
+    "enable_oob": false,
+    "use_library": true,
+    "max_audit_requests": 1500
+  },
+  "heavy": false,
+  "notes": "VERIFIED against Quay during review: the `25.0` tag exists on quay.io/keycloak/keycloak (manifest digest sha256:82c5b7a1..., identical to the 25.0.6 patch \u2014 the last release of the 25.0.x line), so the image and pin are real and canonical. Original build-env caveat retained below since it describes where the descriptor was authored. Canonical image source: the official Keycloak image quay.io/keycloak/keycloak on Quay.io, maintained by the Keycloak / Red Hat team (tag pinned to 25.0; the hint's 'recent' allows bumping). Runs self-contained via `start-dev`, which uses an embedded H2 dev database, so NO external DB or companion is required (H2 dev mode is not for production). AUTH/SETUP: the admin console at /admin and the admin REST API require login (KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD) and the console is a React SPA, so that surface is auth-gated and largely invisible to an unauthenticated crawl; the exercised surface is the unauthenticated OIDC/OAuth realm endpoints \u2014 /realms/master, /realms/master/.well-known/openid-configuration, and /realms/master/protocol/openid-connect/auth (redirect_uri, client_id, response_type, state params) \u2014 plus session and redirect handling. ENV-VAR CAVEAT: KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD are correct for the pinned 25.0 image (valid for Keycloak <= 25.x); in Keycloak 26+ the bootstrap admin variables were renamed to KC_BOOTSTRAP_ADMIN_USERNAME / KC_BOOTSTRAP_ADMIN_PASSWORD \u2014 adjust env if the tag is bumped past 25.x. Boot is slow (JVM); allow ~60-120s before healthy (health_path /realms/master returns HTTP 200 JSON with the realm's public OIDC info once up; Quarkus distribution serves HTTP on 8080 with no /auth base path). This is real, well-maintained IAM software with NO planted bugs \u2014 ground_truth.kind is 'none'; the goal is to measure false-positive count, crawl/discovery behavior, and performance against OAuth/OIDC/JWT/redirect/session handling, where a good scanner should report at or near zero findings. This is an auth server, not a planted-bug corpus. heavy=false, but note it is a JVM process \u2014 give it adequate RAM (~512MB-1GB)."
+}

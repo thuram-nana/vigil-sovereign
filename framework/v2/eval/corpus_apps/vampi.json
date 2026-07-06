@@ -1,0 +1,44 @@
+{
+  "name": "vampi",
+  "role": "vulnerable",
+  "image": "erev0s/vampi:latest",
+  "container_port": 5000,
+  "host_port": 5000,
+  "health_path": "/",
+  "health_statuses": [
+    200
+  ],
+  "health_timeout_s": 40,
+  "seed_path": "/createdb",
+  "env": {
+    "vulnerable": "1",
+    "tokentimetolive": "60"
+  },
+  "ground_truth": {
+    "kind": "curated",
+    "expected": [
+      {
+        "bug_class": "sqli",
+        "location": "/users/v1/{username}"
+      },
+      {
+        "bug_class": "exposure",
+        "location": "/users/v1/_debug"
+      }
+    ]
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "JSON_VALUE",
+      "URL_PATH_SEG"
+    ],
+    "max_pages": 40,
+    "max_depth": 4,
+    "drop_timing": true,
+    "enable_oob": false,
+    "max_audit_requests": 2500
+  },
+  "heavy": false,
+  "notes": "UNVERIFIED in this build environment \u2014 no network to pull/run the image here; all values (port 5000, health path '/', /createdb seed, env toggles) come from VAmPI's public docs and must be verified on first launch. Canonical image: Docker Hub `erev0s/vampi` (source: github.com/erev0s/VAmPI), a small Flask REST API returning JSON. DB SETUP: the SQLite DB is empty on boot \u2014 the harness must GET /createdb (seed_path) to populate users/books before auditing, or endpoints return empty/errors. VULN TOGGLE: env `vulnerable=1` enables the intentionally vulnerable code paths (notably the raw string-concatenated username lookup); `tokentimetolive` sets JWT TTL. AUTH: POST /users/v1/register and /users/v1/login (JSON bodies) mint a JWT, and most write endpoints require the Authorization token \u2014 so an unauthenticated scan only covers the unauth surface; both curated findings below are reachable unauthenticated. INSERTION: the SQLi lives in a URL path segment (the <username>), so URL_PATH_SEG is required to hit it; JSON_VALUE covers the register/login bodies; timing is not essential (the SQLi is error/response-based), so drop_timing is on. CURATED LABELS ARE OUR CURATION (co-design caveat): a deliberately minimal, DAST-detectable subset of VAmPI's documented issues \u2014 (1) SQLi at GET /users/v1/{username} (unsanitized string-concatenated SQL when vulnerable=1; verified in models/user_model.py get_user) and (2) excessive-data-exposure at GET /users/v1/_debug (dumps every user including plaintext passwords; verified in get_all_users_debug). Both endpoints are unauthenticated (verified in api_views/users.py \u2014 no token check). Both are stable and well-documented but should be re-verified against the running build. Other documented VAmPI issues (BOLA on /books/v1/{title}, mass assignment / admin escalation on register, unauthorized password change on /users/v1/{username}/password, weak-JWT broken auth) are intentionally omitted because they are stateful/logic bugs not reliably discoverable by an injection/crawl DAST and would distort recall scoring. REVIEW VERDICT: image canonical, port/health-path correct, curated locations verified against source and reachable unauthenticated, bug_class labels ('sqli','exposure') are valid CRUCIBLE vocabulary, heavy=false correct (not owasp-benchmark/gitlab-ce/mattermost). No corrections needed."
+}

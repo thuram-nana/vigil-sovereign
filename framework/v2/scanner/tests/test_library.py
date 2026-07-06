@@ -98,16 +98,21 @@ def test_seed_has_the_named_minimum_entries() -> None:
     # the required coverage across oracle kinds
     assert by_id["boolean-sqli"].oracle.kind == "differential"
     assert by_id["reflected-xss"].oracle.kind == "reflection"
-    assert by_id["ssti-reflection"].oracle.kind == "reflection"
-    assert by_id["path-traversal"].oracle.kind == "reflection"
-    assert by_id["error-based-sqli"].oracle.kind == "reflection"
+    # SSTI / path-traversal / error-based are confirmed by EVIDENCE, not reflection.
+    # The former reflection-gated entries (ssti-reflection / path-traversal /
+    # error-based-sqli) were false-positive generators — a reflected canary proves
+    # only that input is echoed, never that a template evaluated, a file was read,
+    # or a datastore errored — and were removed in favour of these evidence oracles.
+    assert by_id["m2-ssti-jinja2"].oracle.kind == "evaluation"
+    assert by_id["h1-lfi-etc-passwd"].oracle.kind == "content"
+    assert by_id["m2-errsqli-single-quote"].oracle.kind == "error_signature"
     assert by_id["ssrf-oob"].oracle.kind == "oob"
     assert by_id["blind-xxe-oob"].oracle.kind == "oob"
     assert by_id["command-injection-oob"].oracle.kind == "oob"
     assert by_id["time-based-sqli"].oracle.kind == "timing"
     # the two fingerprint-gated exemplars
     assert by_id["wp-author-sqli"].applies_when == {"tech": "wordpress"}
-    assert by_id["php-lfi"].applies_when == {"category": "php"}
+    assert by_id["m2-ssti-smarty"].applies_when == {"category": "php"}
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +218,7 @@ def test_select_entries_nginx_excludes_both_gated() -> None:
 
 def test_select_entries_php_includes_php_excludes_wp() -> None:
     selected = _ids(select_entries(_seed(), {"php", "apache"}))
-    assert "php-lfi" in selected
+    assert "m2-ssti-smarty" in selected  # php-category-gated (Smarty is a PHP engine)
     assert "wp-author-sqli" not in selected
 
 
@@ -393,13 +398,32 @@ def test_compiled_differential_confirms_on_vuln_and_not_on_safe() -> None:
         assert _confirm(check, tpl, point) is None
 
 
-def test_compiled_reflection_confirms_on_echo_and_not_on_strip() -> None:
-    check = compile_entry(_entry("path-traversal"))
+def test_no_reflection_oracle_for_injection_classes() -> None:
+    # Regression guard for the false-positive fix. A reflected canary proves only
+    # that input is echoed — an XSS signal, and ONLY an XSS signal. It never proves
+    # SSTI (needs evaluation), path-traversal/LFI (needs file content), or
+    # error-based SQLi (needs a datastore error). Shipping a reflection-oracle entry
+    # for any of those classes makes every reflecting endpoint (a search box, an
+    # echo, an error page) a false positive — which is exactly what we removed. No
+    # shipped entry may reintroduce it.
+    offenders = [
+        (e.id, e.bug_class)
+        for e in _seed()
+        if e.oracle.kind == "reflection" and e.bug_class != "xss"
+    ]
+    assert offenders == [], f"reflection oracle used for non-XSS classes: {offenders}"
+
+
+def test_reflection_oracle_still_confirms_xss_on_executable_echo() -> None:
+    # The reflection oracle remains valid for its ONE legitimate class: reflected
+    # XSS still confirms when the canary reaches an executable context, and not when
+    # the input is stripped. (The compiled check is a MarkerReflectionCheck; XSS
+    # routes to the executable-context reflection oracle, not bare side-effect.)
+    check = compile_entry(_entry("reflected-xss"))
     with _server(_EchoApp) as base:
         tpl, point = _q_point(base)
         confirmed = _confirm(check, tpl, point)
     assert confirmed is not None
-    assert confirmed.confirmed_by.value == "side_effect"
 
     with _server(_StripApp) as base:
         tpl, point = _q_point(base)

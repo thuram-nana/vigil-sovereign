@@ -25,17 +25,42 @@ Fail-closed by construction:
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from .agents.http_executor import HttpExecutor, PromptCallback, parse_posture, stdin_prompt_with_timeout
 from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
 from .scanner.campaign import ScanReport, WebScanCampaign
+from .scanner.orchestrator import AttackPath, AutonomousCampaign, ChainedConclusion
 
 
 class EngagementRefused(RuntimeError):
     """The engagement could not start: kill-switch tripped, seed out of scope, or
     a relay host not on the charter allowlist."""
+
+
+@dataclass
+class EngagementResult:
+    """The full outcome of an engagement: the oracle-confirmed scan report AND the
+    forward reasoning over it. The scan is the hands; ``attack_paths`` are what the
+    confirmed facts unlock — the multi-hop routes from the attacker to a crown-jewel
+    node, each hop tagged with the technique that established it. Chaining is pure
+    reasoning over the report (it sends no traffic), and is best-effort: a chaining
+    failure never sinks the engagement, so ``attack_paths`` may be empty while the
+    report still stands."""
+
+    report: ScanReport
+    attack_paths: list[AttackPath] = field(default_factory=list)
+    path_portfolio: list[AttackPath] = field(default_factory=list)
+    chained_conclusions: list[ChainedConclusion] = field(default_factory=list)
+
+
+def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
+    """A send that must never be called: chaining is pure reasoning over an already
+    -collected report. If the reasoning ever tries to issue traffic, fail loudly
+    rather than silently sending ungated requests."""
+    raise RuntimeError("chaining must not issue traffic")
 
 
 def _origin(url: str) -> str:
@@ -74,11 +99,23 @@ def run_engagement(
     oob_advertise_base_url: str | None = None,
     oob_relay_url: str | None = None,
     oob_relay_secret: str | None = None,
+    enable_chaining: bool = True,
+    detection_budget: float = 2.0,
+    waf_adaptive: bool = False,
+    grammar_fuzz: int = 0,
+    priors: object = None,
     prompt_callback: PromptCallback | None = None,
-) -> ScanReport:
-    """Run one authorized engagement end to end and return the ScanReport. Every
+) -> EngagementResult:
+    """Run one authorized engagement end to end and return an
+    :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
+    forward reasoning over it (the attack paths the confirmed facts unlock). Every
     request passes the full gate chain; raises EngagementRefused if the engagement
-    may not start."""
+    may not start.
+
+    With ``enable_chaining`` (default) the confirmed findings are written into a
+    world-model and the technique operators are run to a fixpoint to extract
+    attacker→crown-jewel attack paths. Chaining sends NO traffic and is best-effort:
+    if it fails, the engagement still returns its report with empty paths."""
     preflight(slug, seed_url)
 
     # Any OOB callback base the target will contact — the advertise host or the
@@ -106,7 +143,7 @@ def run_engagement(
         prompt_callback=prompt_callback or stdin_prompt_with_timeout,
     )
     try:
-        return WebScanCampaign(
+        report = WebScanCampaign(
             ex.gated_fetch,
             max_pages=max_pages,
             max_audit_requests=max_audit_requests,
@@ -120,9 +157,28 @@ def run_engagement(
             oob_advertise_base_url=oob_advertise_base_url,
             oob_relay_url=oob_relay_url,
             oob_relay_secret=oob_relay_secret,
+            waf_adaptive=waf_adaptive,
+            grammar_fuzz=grammar_fuzz,
+            priors=priors,
         ).run(seed_url)
     finally:
         ex.close()
+
+    # Forward reasoning over the confirmed facts (no traffic). Best-effort: the
+    # scan result is authoritative and must survive any chaining error.
+    result = EngagementResult(report=report)
+    if enable_chaining:
+        try:
+            auto = AutonomousCampaign(
+                _no_send, detection_budget=detection_budget,
+            ).chain_findings(report)
+            result.attack_paths = auto.attack_paths
+            result.path_portfolio = auto.path_portfolio
+            result.chained_conclusions = auto.chained_conclusions
+        except Exception:
+            # chaining is value-add; a reasoning failure never sinks the engagement
+            pass
+    return result
 
 
 def main(argv: list[str]) -> int:
@@ -152,10 +208,20 @@ def main(argv: list[str]) -> int:
                              "(run `collaborator serve`; unlocks blind confirmation on remote targets).")
     parser.add_argument("--oob-relay-secret", default=None,
                         help="Shared secret for the collaborator relay's poll endpoint.")
+    parser.add_argument("--no-chaining", action="store_true",
+                        help="Skip the forward reasoning pass (do not derive attack paths "
+                             "from the confirmed findings). Chaining sends no traffic.")
+    parser.add_argument("--waf-adaptive", action="store_true",
+                        help="On a filtered/blocked probe, synthesize a bypassing form "
+                             "(evasion ladder, then a small GA) that still fires the oracle. "
+                             "Spends extra requests; confirmation stays oracle-gated.")
+    parser.add_argument("--grammar-fuzz", type=int, default=0, metavar="N",
+                        help="Induce a request grammar from the crawl and audit N extra "
+                             "structurally-valid synthesized requests (in-scope, deduped).")
     args = parser.parse_args(argv)
 
     try:
-        report = run_engagement(
+        result = run_engagement(
             args.slug, args.seed_url,
             request_budget=args.request_budget,
             max_pages=args.max_pages,
@@ -167,11 +233,15 @@ def main(argv: list[str]) -> int:
             oob_advertise_base_url=args.oob_relay,
             oob_relay_url=args.oob_relay_url,
             oob_relay_secret=args.oob_relay_secret,
+            enable_chaining=not args.no_chaining,
+            waf_adaptive=args.waf_adaptive,
+            grammar_fuzz=args.grammar_fuzz,
         )
     except EngagementRefused as e:
         print(f"engagement refused: {e}")
         return 2
 
+    report = result.report
     print(f"engage {args.slug}  {report.target}")
     print(f"  pages crawled     : {report.pages_crawled}")
     print(f"  requests audited  : {report.requests_audited} ({report.audit_requests_sent} sent)")
@@ -183,4 +253,11 @@ def main(argv: list[str]) -> int:
         print(f"  passive findings  : {len(report.passive_findings)}")
     if report.dom_xss_candidates:
         print(f"  dom-xss leads     : {len(report.dom_xss_candidates)} (candidates)")
+    # Forward reasoning: the multi-hop attack paths the confirmed facts unlock.
+    if result.attack_paths:
+        print(f"  attack paths      : {len(result.attack_paths)} (attacker -> crown jewel)")
+        for ap in result.attack_paths[:5]:
+            print(f"    [{ap.detection_cost:.2f} detect] {ap.describe()}")
+    elif result.chained_conclusions:
+        print(f"  chained facts     : {len(result.chained_conclusions)} derived (no full path to a crown jewel)")
     return 0

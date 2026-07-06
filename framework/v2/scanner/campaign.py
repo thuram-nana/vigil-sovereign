@@ -22,7 +22,10 @@ executor in production), so an autonomous run is both bounded and authorized.
 from __future__ import annotations
 
 import contextlib
+import random
+import time
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,6 +39,7 @@ from .crawler import Crawler, Scope
 from .domxss import DomXssCandidate, analyze_html
 from .engine import AuditEngine, AuditFinding
 from .fingerprint import Fingerprint, fingerprint
+from .grammar import generate as grammar_generate, infer_grammar
 from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import HttpRequest, InsertionKind
 from .jwt import JwtNoneCheck
@@ -68,6 +72,9 @@ class ScanReport(BaseModel):
     requests_discovered: int = 0
     requests_audited: int = 0
     audit_requests_sent: int = 0
+    # Wall-clock seconds the whole scan took (crawl + audit + any browser passes).
+    # A performance datum for the comparative benchmark, not a scoring input.
+    elapsed_s: float = 0.0
     active_findings: list[AuditFinding] = Field(default_factory=list)
     passive_findings: list[PassiveFinding] = Field(default_factory=list)
     # The target's detected technology stack (when library-driven scanning ran).
@@ -132,10 +139,28 @@ class WebScanCampaign:
         enable_spa_crawl: bool = False,
         max_browser_targets: int = 15,
         browser_allowed_hosts: set[str] | None = None,
+        waf_adaptive: bool = False,
+        grammar_fuzz: int = 0,
+        grammar_fuzz_seed: int = 0,
+        priors: "Iterable[object] | None" = None,
     ) -> None:
         self._send = send
         self.scope = scope
         self.checks = checks
+        # Opt-in adaptive WAF-bypass: filtered-but-plausible probes get a synthesized
+        # bypassing form (see AuditEngine.waf_adaptive). Off by default (extra traffic).
+        self.waf_adaptive = waf_adaptive
+        # Opt-in grammar-aware fuzzing: induce a request grammar from the crawl and
+        # synthesize this many structurally-valid NEW requests into the audit surface
+        # — endpoints/params the static crawl never linked to. 0 = off. Deterministic
+        # given grammar_fuzz_seed.
+        self.grammar_fuzz = grammar_fuzz
+        self.grammar_fuzz_seed = grammar_fuzz_seed
+        # Opt-in cross-engagement TRANSFER: Beta priors (memory.priors.Prior-shaped:
+        # bug_class/successes/attempts) from PAST engagements, folded into this run's
+        # check-ordering bandit so it warm-starts biased toward what paid off before.
+        # It only ORDERS effort (never drops a check), so coverage is unchanged.
+        self._priors = priors
         # Request-level checks run once per host (CORS/host-header/JWT/GraphQL).
         self.request_checks = request_checks
         self.insertion_kinds = insertion_kinds
@@ -193,14 +218,61 @@ class WebScanCampaign:
 
     def _resolve_bandit(self) -> ContextualBandit:
         """The explicit bandit, else a warm-start from the persisted file if one
-        exists, else a fresh uniform-prior bandit."""
+        exists, else a fresh uniform-prior bandit — then folded with any
+        cross-engagement transfer priors."""
         if self._explicit_bandit is not None:
-            return self._explicit_bandit
-        if self.bandit_path is not None:
-            p = Path(self.bandit_path)
-            if p.is_file():
-                return ContextualBandit.load(p)
-        return ContextualBandit()
+            bandit = self._explicit_bandit
+        elif self.bandit_path is not None and Path(self.bandit_path).is_file():
+            bandit = ContextualBandit.load(Path(self.bandit_path))
+        else:
+            bandit = ContextualBandit()
+        self._seed_transfer(bandit)
+        return bandit
+
+    def _seed_transfer(self, bandit: ContextualBandit) -> None:
+        """Fold cross-engagement priors into this run's bandit: each prior's
+        successes/attempts become Beta evidence on ``(this context, its bug_class)``,
+        so a bug class that paid off in past engagements starts ranked higher. A
+        prior without a ``bug_class`` is skipped — this never invents an arm."""
+        if not self._priors:
+            return
+
+        def _key(prior: object) -> tuple[str, str] | None:
+            bug_class = getattr(prior, "bug_class", None)
+            return (self.bandit_context, str(bug_class)) if bug_class else None
+
+        bandit.seed_from_priors(self._priors, _key)
+
+    def _grammar_requests(self, observed: list[HttpRequest]) -> list[HttpRequest]:
+        """Synthesize up to ``grammar_fuzz`` structurally-valid, in-scope requests
+        from a grammar induced over the crawled corpus. Deterministic (seeded rng);
+        de-duplicated against the observed URLs and each other; scope-filtered so a
+        synthesized request can never leave the authorized surface. Robust: an empty
+        or ungeneralizable corpus simply yields nothing."""
+        try:
+            grammar = infer_grammar(observed)
+        except Exception:
+            return []
+        if not grammar.templates:
+            return []
+        rng = random.Random(self.grammar_fuzz_seed)
+        seen = {r.url for r in observed}
+        out: list[HttpRequest] = []
+        # bounded attempts so a low-entropy grammar cannot loop forever chasing new URLs
+        for _ in range(self.grammar_fuzz * 8):
+            if len(out) >= self.grammar_fuzz:
+                break
+            try:
+                req = grammar_generate(grammar, rng)
+            except Exception:
+                break
+            if req.url in seen:
+                continue
+            if self.scope is not None and not self.scope.in_scope(req.url):
+                continue
+            seen.add(req.url)
+            out.append(req)
+        return out
 
     def _maybe_start_browser(self):
         """A started CdpBrowser when a dynamic pass is enabled and a browser
@@ -287,6 +359,7 @@ class WebScanCampaign:
         return findings
 
     def run(self, seed_url: str) -> ScanReport:
+        started = time.monotonic()
         crawl = Crawler(
             self._send, scope=self.scope,
             max_pages=self.max_pages, max_depth=self.max_depth,
@@ -324,6 +397,14 @@ class WebScanCampaign:
             # SPA-discovered in-scope GET endpoints join the audit surface.
             all_requests = list(crawl.requests) + extra_requests
 
+            # Grammar-aware fuzzing: induce a request grammar from what the crawl
+            # observed and synthesize structurally-valid NEW requests (typed path
+            # placeholders + observed params with type-appropriate values). These
+            # reach endpoint/param shapes the static crawl never linked to, while
+            # staying well-formed enough to exercise real handlers.
+            if self.grammar_fuzz > 0:
+                all_requests += self._grammar_requests(crawl.requests)
+
             active: list[AuditFinding] = []
             audited = 0
             seen_hosts: set[str] = set()
@@ -339,7 +420,8 @@ class WebScanCampaign:
                 # enforces a single shared active-traffic budget.
                 engine = AuditEngine(
                     self._send, max_requests=self.max_audit_requests, oob=oob,
-                    bandit=bandit, bandit_context=self.bandit_context)
+                    bandit=bandit, bandit_context=self.bandit_context,
+                    waf_adaptive=self.waf_adaptive)
                 selector = select_checks if self.targeted else None
                 for req in all_requests:
                     # Request-level checks are host/endpoint-level, so run them once
@@ -383,6 +465,7 @@ class WebScanCampaign:
             requests_discovered=len(crawl.requests),
             requests_audited=audited,
             audit_requests_sent=requests_sent,
+            elapsed_s=round(time.monotonic() - started, 3),
             active_findings=active,
             passive_findings=crawl.passive_findings,
             dom_xss_candidates=candidates,

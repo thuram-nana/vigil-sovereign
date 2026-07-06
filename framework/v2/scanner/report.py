@@ -99,8 +99,34 @@ def _meta_for(check_id: str, bug_class: str, lib: dict[str, Any]) -> tuple[str, 
     return "High", "", []
 
 
-def build_report(report: ScanReport) -> dict:
-    """Normalise a ScanReport into a stable, enriched report document."""
+def _serialize_attack_paths(attack_paths: list | None) -> list[dict]:
+    """Serialize forward-reasoning attack paths (duck-typed AttackPath objects from
+    scanner.orchestrator) into stable dicts — no import, so report.py stays
+    decoupled from the reasoning layer. Each path is the attacker->crown-jewel route
+    the confirmed facts unlock, every hop tagged with the technique that made it."""
+    out: list[dict] = []
+    for ap in attack_paths or []:
+        out.append({
+            "destination": ap.destination,
+            "hops": ap.hops,
+            "detection_cost": ap.detection_cost,
+            "description": ap.describe(),
+            "steps": [
+                {"src": s.src, "edge": s.edge, "dst": s.dst, "technique": s.technique}
+                for s in ap.steps
+            ],
+        })
+    return out
+
+
+def build_report(report: ScanReport, *, attack_paths: list | None = None) -> dict:
+    """Normalise a ScanReport into a stable, enriched report document.
+
+    ``attack_paths`` (the forward reasoning from :func:`engage.run_engagement` /
+    :class:`scanner.orchestrator.AutonomousCampaign`) is optional: when present, the
+    document gains an ``attack_paths`` array — the multi-hop routes the confirmed
+    findings unlock — so a machine consumer (CI, a dashboard) sees not just isolated
+    findings but the chains they compose into."""
     lib = _library_index()
     findings: list[ReportFinding] = []
 
@@ -152,11 +178,15 @@ def build_report(report: ScanReport) -> dict:
         "fingerprint": sorted(report.fingerprint.tokens) if report.fingerprint else [],
         "discovered_endpoints": list(report.discovered_endpoints),
         "findings": [f.__dict__ for f in findings],
+        "attack_paths": _serialize_attack_paths(attack_paths),
     }
 
 
-def to_json(report: ScanReport, *, indent: int | None = 2) -> str:
-    return json.dumps(build_report(report), indent=indent, sort_keys=False, ensure_ascii=False)
+def to_json(report: ScanReport, *, attack_paths: list | None = None, indent: int | None = 2) -> str:
+    return json.dumps(
+        build_report(report, attack_paths=attack_paths),
+        indent=indent, sort_keys=False, ensure_ascii=False,
+    )
 
 
 def to_sarif(report: ScanReport) -> str:
