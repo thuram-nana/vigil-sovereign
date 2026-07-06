@@ -38,6 +38,8 @@ _EXACT_ROUTES = {
     "/api/engagements": api.list_engagements,
     "/api/runs": api.list_runs,
     "/api/benchmark": api.benchmark_data,
+    "/api/memory": api.memory_data,
+    "/api/kernel": api.kernel_data,
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -46,6 +48,9 @@ _PREFIX_ROUTES = {
     "/api/report/": api.run_report,
     "/api/worldmodel/": api.worldmodel,
     "/api/coverage/": api.coverage_data,
+    "/api/authority/": api.authority_full,
+    "/api/planner/": api.planner_data,
+    "/api/reports/": api.reports_data,
 }
 
 

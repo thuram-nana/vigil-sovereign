@@ -274,3 +274,79 @@ def coverage_data(run_id: str) -> dict[str, Any]:
         "passive": [f for f in findings if f.get("kind") == "passive"],
         "dom_xss": [f for f in findings if f.get("kind") == "dom_xss_candidate"],
     }
+
+
+# ---------------------------------------------------------------------------
+# memory / kernel / authority / planner / reports (Phase 3-4)
+# ---------------------------------------------------------------------------
+
+
+def memory_data() -> dict[str, Any]:
+    """The learning store: engagement roll-up + per-archetype Beta priors."""
+    def _read() -> dict[str, Any]:
+        from ..memory.priors import all_priors
+        from ..memory.store import Store
+
+        st = Store()
+        summary = _safe(st.engagement_summary, default={})
+        priors = _safe(lambda: [{
+            "archetype": p.archetype, "bug_class": p.bug_class, "surface": p.surface_pattern,
+            "successes": p.successes, "attempts": p.attempts,
+            "mean": round(p.mean, 3), "lower_bound": round(p.lower_bound, 3),
+        } for p in all_priors(st)], default=[])
+        return {"summary": summary, "priors": sorted(priors, key=lambda x: -x["mean"])}
+
+    return _safe(_read, default={"summary": {}, "priors": [], "note": "no memory store yet"})
+
+
+def kernel_data() -> dict[str, Any]:
+    """The URK cognitive layer: LLM backends (live/dryrun) + the cognitive docs the
+    kernel produces structured outputs for."""
+    from ..kernel import backends as backends_pkg
+
+    backends = _safe(lambda: [
+        {"name": n, "available": bool(a), "note": note} for n, a, note in backends_pkg.probe_all()
+    ], default=[])
+    docs = ["hypothesize", "critique", "pivot", "decide (CVSS severity)", "opsec", "threat-model"]
+    return {"backends": backends, "cognitive_docs": docs,
+            "dryrun_default": True,
+            "note": "Kernel outputs are produced on demand via `kernel <verb>`; every call "
+                    "returns a CallTrace (backend, dryrun, tokens, latency)."}
+
+
+def authority_full(slug: str) -> dict[str, Any]:
+    """The governance state for an engagement: kill-switch, authority window/scope,
+    charter presence — the fail-closed safety picture."""
+    if not slug:
+        return {"slug": None, "note": "select an engagement"}
+    return {
+        "slug": slug,
+        "killswitch": _killswitch_state(slug),
+        "authority": _authority_state(slug),
+        "charter_present": _safe(lambda: __import__("pathlib").Path(paths.charter_path(slug)).is_file(), default=False),
+        "gates": ["authority/kill-switch", "scope", "destructive-confirm", "budget", "rate-limit", "egress"],
+    }
+
+
+def planner_data(slug: str) -> dict[str, Any]:
+    """The goal-tree/plan state for an engagement, if a planner ran (planner-state.json)."""
+    def _read() -> dict[str, Any]:
+        p = Path(paths.planner_state(slug))
+        if not p.is_file():
+            return {"slug": slug, "present": False}
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        return {"slug": slug, "present": True, "state": doc}
+
+    return _safe(_read, default={"slug": slug, "present": False})
+
+
+def reports_data(slug: str) -> dict[str, Any]:
+    """Generated reports on disk for an engagement (targets/<slug>/reports/)."""
+    def _read() -> dict[str, Any]:
+        rd = Path(paths.target_dir(slug)) / "reports"
+        if not rd.is_dir():
+            return {"slug": slug, "reports": []}
+        files = [{"name": f.name, "size": f.stat().st_size} for f in rd.iterdir() if f.is_file()]
+        return {"slug": slug, "reports": sorted(files, key=lambda x: x["name"])}
+
+    return _safe(_read, default={"slug": slug, "reports": []})

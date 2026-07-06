@@ -222,3 +222,20 @@ def test_worldmodel_reconstructs_attack_paths(tmp_path, monkeypatch) -> None:
     assert kinds & {"datastore", "host", "cloud_resource"}  # a crown-jewel node exists
     # every path step is technique-annotated (the reasoning, surfaced)
     assert all(s["technique"] for p in wm["paths"] for s in p["steps"])
+
+
+# ---------------------------------------------------------------------------
+# Phase 3-4 — the intelligence/governance readers are resilient
+# ---------------------------------------------------------------------------
+
+
+def test_phase34_readers_resilient() -> None:
+    m = api.memory_data()
+    assert "summary" in m and isinstance(m["priors"], list)
+    k = api.kernel_data()
+    assert isinstance(k["backends"], list) and k["cognitive_docs"]
+    assert "note" in api.authority_full("")  # no slug -> guidance, never a crash
+    a = api.authority_full("no-such-slug")
+    assert a["killswitch"]["tripped"] in (True, False) and "gates" in a
+    assert api.planner_data("no-such-slug")["present"] is False
+    assert api.reports_data("no-such-slug")["reports"] == []

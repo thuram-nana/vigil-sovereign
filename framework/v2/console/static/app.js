@@ -31,19 +31,20 @@ const Console = (() => {
     { id: 'graph',      label: 'Attack Graph',  group: 'OPERATIONS',  glyph: '⧉', render: renderGraph },
     { id: 'coverage',   label: 'Coverage',      group: 'OPERATIONS',  glyph: '▦', render: renderCoverage },
 
-    { id: 'reasoning',  label: 'Reasoning Brain', group: 'INTELLIGENCE', glyph: '❋', render: (m) => stub(m, 'Reasoning Brain', 'Bandit rankings, WAF-evasion attempts, grammar-fuzz coverage, inferred filter predicates. (Phase 3)') },
-    { id: 'planner',    label: 'Planner',       group: 'INTELLIGENCE', glyph: '⌘', render: (m) => stub(m, 'Planner', 'The goal tree: status/score/cost, the claimed leaf, VOI/EIG, halt reasons. (Phase 3)') },
-    { id: 'memory',     label: 'Memory',        group: 'INTELLIGENCE', glyph: '❒', render: (m) => stub(m, 'Memory', 'Priors, winning hypotheses, best payloads, dead-ends, postmortems — with provenance. (Phase 3)') },
-    { id: 'kernel',     label: 'Kernel',        group: 'INTELLIGENCE', glyph: '◆', render: (m) => stub(m, 'Kernel (Cognition)', 'LLM backends + CallTrace, hypotheses, self-critique, CVSS decisions, threat-model tree. (Phase 3)') },
+    { id: 'reasoning',  label: 'Reasoning Brain', group: 'INTELLIGENCE', glyph: '❋', render: renderReasoning },
+    { id: 'planner',    label: 'Planner',       group: 'INTELLIGENCE', glyph: '⌘', render: renderPlanner },
+    { id: 'memory',     label: 'Memory',        group: 'INTELLIGENCE', glyph: '❒', render: renderMemory },
+    { id: 'kernel',     label: 'Kernel',        group: 'INTELLIGENCE', glyph: '◆', render: renderKernel },
 
     { id: 'benchmark',  label: 'Benchmark',     group: 'ASSURANCE',   glyph: '▲', render: renderBenchmark },
-    { id: 'analysis',   label: 'Analysis',      group: 'ASSURANCE',   glyph: '⊟', render: (m) => stub(m, 'Analysis (SAST)', 'Analyzers run/skipped, findings by path/rule/CWE, severity histogram. (Phase 4)') },
-    { id: 'improve',    label: 'Improve',       group: 'ASSURANCE',   glyph: '↗', render: (m) => stub(m, 'Improve (SIL)', 'Capability-gap backlog, proposals + diffs, the merge gate, horizon items. (Phase 4)') },
+    { id: 'analysis',   label: 'Analysis',      group: 'ASSURANCE',   glyph: '⊟', render: (m) => subsystem(m, 'analysis') },
+    { id: 'improve',    label: 'Improve',       group: 'ASSURANCE',   glyph: '↗', render: (m) => subsystem(m, 'improve') },
+    { id: 'intake',     label: 'Intake',        group: 'ASSURANCE',   glyph: '⊕', render: (m) => subsystem(m, 'intake') },
 
-    { id: 'authority',  label: 'Authority & Safety', group: 'GOVERNANCE', glyph: '⛨', render: (m) => stub(m, 'Authority & Safety', 'Kill-switch, authority window, budget/gate counters, posture, entitlement tier. (Phase 4)') },
-    { id: 'defender',   label: 'Defender',      group: 'GOVERNANCE',  glyph: '◇', render: (m) => stub(m, 'Defender (DEL)', 'Detectability self-assessment: which rules fire on which channel, loudest channel. (Phase 4)') },
-    { id: 'socialdef',  label: 'Social Defense',group: 'GOVERNANCE',  glyph: '✉', render: (m) => stub(m, 'Social Defense', 'Inbound-message phishing risk: band, score, indicators, recommendation. (Phase 4)') },
-    { id: 'reports',    label: 'Reports',       group: 'GOVERNANCE',  glyph: '▣', render: (m) => stub(m, 'Reports', 'Browse/export executive/technical/remediation, SARIF, HTML. (Phase 4)') },
+    { id: 'authority',  label: 'Authority & Safety', group: 'GOVERNANCE', glyph: '⛨', render: renderAuthority },
+    { id: 'defender',   label: 'Defender',      group: 'GOVERNANCE',  glyph: '◇', render: (m) => subsystem(m, 'defender') },
+    { id: 'socialdef',  label: 'Social Defense',group: 'GOVERNANCE',  glyph: '✉', render: (m) => subsystem(m, 'socialdefense') },
+    { id: 'reports',    label: 'Reports',       group: 'GOVERNANCE',  glyph: '▣', render: renderReports },
     { id: 'status',     label: 'System Status', group: 'GOVERNANCE',  glyph: '●', render: renderStatus },
   ];
 
@@ -524,6 +525,145 @@ const Console = (() => {
     }).catch((e) => { document.getElementById('benchBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
   }
 
+  // ---- screens: Memory ---------------------------------------------------
+  function renderMemory(main) {
+    main.innerHTML = `<div class="screen-head"><h1>Memory</h1><span class="sub">cross-engagement learning — Beta priors with provenance</span></div><div id="memBody"><div class="muted">loading…</div></div>`;
+    getJSON('/api/memory').then((d) => {
+      const s = d.summary || {}; const pr = d.priors || [];
+      document.getElementById('memBody').innerHTML = `
+        <div class="grid cols-4" style="margin-bottom:var(--sp-4)">
+          ${['engagements','findings','hypotheses','payloads','dead_ends','priors'].filter((k)=>k in s).slice(0,4).map((k)=>`<div class="tile"><div class="k">${esc(k.replace('_',' '))}</div><div class="v">${num(s[k])}</div></div>`).join('')}
+        </div>
+        <div class="card"><h3>Archetype priors <span class="muted" style="font-weight:400">— what paid off, by bug class</span></h3>
+        ${pr.length ? `<div class="scroll-x"><table class="tbl"><thead><tr><th>archetype</th><th>bug class</th><th>surface</th><th>successes</th><th>attempts</th><th>mean</th><th>Wilson LB</th></tr></thead><tbody>
+          ${pr.map((p)=>`<tr><td class="mono">${esc(p.archetype)}</td><td class="mono">${esc(p.bug_class)}</td><td class="muted">${dash(p.surface)}</td>
+            <td>${num(p.successes)}</td><td>${num(p.attempts)}</td>
+            <td><span class="badge ${p.mean>=.6?'ok':p.mean>=.3?'warn':''}">${p.mean}</span></td><td>${p.lower_bound}</td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="muted">no priors yet — they accumulate as engagements complete (mean = Laplace, LB = Wilson 95%)</div>'}</div>`;
+    }).catch((e)=>{ document.getElementById('memBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+  }
+
+  // ---- screens: Kernel ---------------------------------------------------
+  function renderKernel(main) {
+    main.innerHTML = `<div class="screen-head"><h1>Kernel (Cognition)</h1><span class="sub">the URK layer — structured LLM outputs, type-checked</span></div><div id="kBody"><div class="muted">loading…</div></div>`;
+    getJSON('/api/kernel').then((d)=>{
+      document.getElementById('kBody').innerHTML = `
+        <div class="grid cols-2">
+          <div class="card"><h3>LLM backends</h3><table class="tbl"><tbody>
+            ${(d.backends||[]).map((b)=>`<tr><td>${b.available?'<span class="badge ok">up</span>':'<span class="badge">·</span>'}</td><td class="mono">${esc(b.name)}</td><td class="muted">${esc(b.note)}</td></tr>`).join('')}</tbody></table>
+            <div class="muted" style="font-size:var(--fs-xs);margin-top:8px">${esc(d.note||'')}</div></div>
+          <div class="card"><h3>Cognitive outputs</h3><div class="row-flex" style="flex-wrap:wrap">
+            ${(d.cognitive_docs||[]).map((c)=>`<span class="badge oracle">${esc(c)}</span>`).join(' ')}</div>
+            <div class="muted" style="font-size:var(--fs-xs);margin-top:10px">Each returns a typed result + a CallTrace (backend, dryrun, tokens_in/out, latency_ms). DryRun by default (no network/GPU).</div></div>
+        </div>`;
+    }).catch((e)=>{ document.getElementById('kBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+  }
+
+  // ---- screens: Authority & Safety --------------------------------------
+  function renderAuthority(main) {
+    const slug = state.activeSlug;
+    main.innerHTML = `<div class="screen-head"><h1>Authority &amp; Safety</h1><span class="sub">fail-closed governance for <code class="mono">${esc(slug||'—')}</code></span></div><div id="auBody"></div>`;
+    if (!slug) { document.getElementById('auBody').innerHTML = '<div class="empty">select an engagement</div>'; return; }
+    getJSON('/api/authority/'+encodeURIComponent(slug)).then((d)=>{
+      const ks=d.killswitch||{}; const au=d.authority||{};
+      document.getElementById('auBody').innerHTML = `
+        <div class="grid cols-3" style="margin-bottom:var(--sp-4)">
+          <div class="tile"><div class="k">Kill-switch</div><div class="v sm">${ks.tripped?'<span class="badge danger">TRIPPED</span>':'<span class="badge ok">armed</span>'}</div><div class="foot">${esc(ks.reason||'')}</div></div>
+          <div class="tile"><div class="k">Environment</div><div class="v sm">${au.environment?`<span class="badge">${esc(au.environment)}</span>`:dash()}</div></div>
+          <div class="tile"><div class="k">Charter</div><div class="v sm">${d.charter_present?'<span class="badge ok">signed</span>':'<span class="badge warn">missing</span>'}</div></div>
+        </div>
+        <div class="grid cols-2">
+          <div class="card"><h3>Authority window</h3><div class="kv">
+            <div class="k">scope</div><div class="v mono">${au.scope&&au.scope.length?au.scope.map(esc).join('<br>'):dash()}</div>
+            <div class="k">valid</div><div class="v mono">${dash(au.not_before)} → ${dash(au.not_after)}</div>
+            <div class="k">destructive</div><div class="v">${au.allow_destructive==null?dash():(au.allow_destructive?'allowed':'denied')}</div>
+            <div class="k">max actions</div><div class="v">${num(au.max_actions)}</div>
+            <div class="k">issued by</div><div class="v mono">${dash(au.issued_by)}</div></div></div>
+          <div class="card"><h3>The six-gate stack <span class="muted" style="font-weight:400">(every request)</span></h3>
+            <div style="display:flex;flex-direction:column;gap:6px">
+            ${(d.gates||[]).map((g,i)=>`<div class="row-flex"><span class="badge">${i+1}</span><span class="mono">${esc(g)}</span></div>`).join('')}</div>
+            <div style="margin-top:var(--sp-4)"><button class="btn danger" onclick="Console.tripKill('${esc(slug)}')">⛔ Trip kill-switch (emergency stop)</button>
+              <span id="tripMsg" style="margin-left:10px"></span></div></div>
+        </div>`;
+    }).catch((e)=>{ document.getElementById('auBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+  }
+  async function tripKill(slug) {
+    if (!confirm(`Trip the kill-switch for "${slug}"? This is an emergency hard stop.`)) return;
+    const msg=document.getElementById('tripMsg'); msg.innerHTML='<span class="muted">tripping…</span>';
+    try { const r=await fetch('/api/killswitch/'+encodeURIComponent(slug)+'/trip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'tripped from Ops Console'})});
+      const d=await r.json(); msg.innerHTML = d.error?`<span class="badge danger">${esc(d.error)}</span>`:'<span class="badge danger">tripped</span>';
+      refreshSafety(); setTimeout(()=>route(),400);
+    } catch(e){ msg.innerHTML=`<span class="badge danger">${esc(e.message)}</span>`; }
+  }
+
+  // ---- screens: Planner --------------------------------------------------
+  function renderPlanner(main) {
+    const slug = state.activeSlug;
+    main.innerHTML = `<div class="screen-head"><h1>Planner</h1><span class="sub">goal tree + best-first / VOI search for <code>${esc(slug||'—')}</code></span></div><div id="plBody"></div>`;
+    if (!slug) { document.getElementById('plBody').innerHTML='<div class="empty">select an engagement</div>'; return; }
+    getJSON('/api/planner/'+encodeURIComponent(slug)).then((d)=>{
+      if (!d.present) { document.getElementById('plBody').innerHTML = `<div class="stub"><b>No planner state</b> for this engagement. The planner drives best-first / value-of-information search over a mutable goal tree; run it via <code>python3 -m framework.v2</code> to populate <code>.planner-state.json</code>.</div>`; return; }
+      document.getElementById('plBody').innerHTML = `<div class="card"><h3>Planner state</h3><pre class="cert">${esc(JSON.stringify(d.state, null, 2))}</pre></div>`;
+    }).catch((e)=>{ document.getElementById('plBody').innerHTML=`<div class="empty">${esc(e.message)}</div>`; });
+  }
+
+  // ---- screens: Reasoning Brain -----------------------------------------
+  function renderReasoning(main) {
+    withRun(main, 'Reasoning Brain', 'the adaptive scan intelligence — bandit ordering, WAF-evasion, grammar fuzzing', (run) => {
+      const body=document.getElementById('runBody');
+      getJSON('/api/coverage/'+encodeURIComponent(run)).then((d)=>{
+        body.innerHTML = `<div class="grid cols-2">
+          <div class="card"><h3>Detected stack (drives gated checks)</h3><div class="row-flex" style="flex-wrap:wrap">${(d.fingerprint||[]).length?d.fingerprint.map((t)=>`<span class="badge">${esc(t)}</span>`).join(' '):'<span class="muted">no fingerprint (library off for this run)</span>'}</div></div>
+          <div class="card"><h3>Adaptive modules</h3><div style="display:flex;flex-direction:column;gap:8px">
+            <div><span class="badge oracle">contextual bandit</span> <span class="muted">Thompson sampling orders checks per (context, bug_class); persisted with <code>--bandit-file</code>, transferable across engagements.</span></div>
+            <div><span class="badge oracle">WAF-evasion</span> <span class="muted">on a filtered probe, synthesize a bypass (evasion ladder → GA) that still fires the oracle (<code>--waf-adaptive</code>).</span></div>
+            <div><span class="badge oracle">grammar-fuzz</span> <span class="muted">induce a request grammar from the crawl, synthesize structurally-valid new requests (<code>--grammar-fuzz N</code>).</span></div>
+            <div><span class="badge oracle">constraint inference</span> <span class="muted">learn a filter's predicate from black-box membership queries.</span></div>
+          </div></div></div>
+          <div class="muted" style="font-size:var(--fs-xs);margin-top:var(--sp-3)">Bandit posteriors surface here once a run persists a <code>--bandit-file</code>.</div>`;
+      }).catch((e)=>{ body.innerHTML=`<div class="empty">${esc(e.message)}</div>`; });
+    });
+  }
+
+  // ---- screens: Reports --------------------------------------------------
+  function renderReports(main) {
+    const slug = state.activeSlug;
+    main.innerHTML = `<div class="screen-head"><h1>Reports</h1><span class="sub">generated deliverables for <code>${esc(slug||'—')}</code></span></div><div id="rpBody"></div>`;
+    if (!slug) { document.getElementById('rpBody').innerHTML='<div class="empty">select an engagement</div>'; return; }
+    getJSON('/api/reports/'+encodeURIComponent(slug)).then((d)=>{
+      const rs=d.reports||[];
+      document.getElementById('rpBody').innerHTML = `<div class="card"><h3>Report files</h3>
+        ${rs.length?`<table class="tbl"><thead><tr><th>file</th><th>size</th></tr></thead><tbody>
+          ${rs.map((f)=>`<tr><td class="mono">${esc(f.name)}</td><td>${num(f.size)} b</td></tr>`).join('')}</tbody></table>`
+          :`<div class="stub">No report files under <code>targets/${esc(slug)}/reports/</code> yet. CRUCIBLE emits executive / technical / remediation (markdown), and <code>scan --format sarif|html</code> produces SARIF/HTML.</div>`}</div>`;
+    }).catch((e)=>{ document.getElementById('rpBody').innerHTML=`<div class="empty">${esc(e.message)}</div>`; });
+  }
+
+  // ---- on-demand subsystem info panels (defender/social/analysis/improve/intake) ----
+  const SUBSYS = {
+    defender: { title: 'Defender (DEL)', role: 'Self-assesses the DETECTABILITY of the framework\'s own actions against Sigma-style rules — it measures footprint, it never generates evasion.',
+      produces: ['DetectionScore (detectability, loudest channel/severity)', 'per-rule hits by channel (access-log / waf / auth / netflow / edr / dns)', 'posture annotation + guidance'], cli: 'defender score|annotate|rules' },
+    socialdefense: { title: 'Social Defense', role: 'Scores inbound messages for phishing / social-engineering risk (defensive).',
+      produces: ['PhishingAssessment (noisy-OR score + risk band)', 'triggered indicators with weights + evidence', 'a recommendation'], cli: 'socialdefense assess' },
+    analysis: { title: 'Analysis (SAST)', role: 'Runs built-in + external static analyzers (semgrep / joern-style dataflow, CPG) over a source tree, normalized to one finding shape.',
+      produces: ['AnalysisReport (files scanned, analyzers run/skipped + reasons)', 'findings by path:line / rule / CWE / severity + snippet', 'severity histogram'], cli: 'analysis scan|index|analyzers|review' },
+    improve: { title: 'Improve (SIL)', role: 'Mines engagements for capability gaps and drafts reviewable improvement proposals — it never self-applies; a merge gate governs.',
+      produces: ['CapabilityGap backlog by priority', 'ProposedChange (diff + status draft→eval→approved→merged)', 'MergeDecision (approvals, eval pass, threshold)'], cli: 'improve review|horizon|show' },
+    intake: { title: 'Intake', role: 'Passively fingerprints a target from captured HTTP, classifies it to an archetype, and scaffolds the engagement (charter / threat-model / attack-tree drafts).',
+      produces: ['Fingerprint (detectors by category + confidence + evidence)', 'Classification (primary archetype + runners-up)', 'scaffold paths'], cli: 'intake run|authorize|fingerprint' },
+  };
+  function subsystem(main, key) {
+    const s = SUBSYS[key];
+    main.innerHTML = `<div class="screen-head"><h1>${esc(s.title)}</h1><span class="sub">on-demand subsystem</span></div>
+      <div class="grid cols-2">
+        <div class="card"><h3>What it does</h3><p style="margin:0;color:var(--text-1)">${esc(s.role)}</p>
+          <h3 style="margin-top:var(--sp-4)">Invoke</h3><pre class="cert">python3 -m framework.v2 ${esc(s.cli)}</pre></div>
+        <div class="card"><h3>Produces</h3><ul style="margin:0;padding-left:18px;color:var(--text-1)">
+          ${s.produces.map((p)=>`<li style="margin-bottom:6px">${esc(p)}</li>`).join('')}</ul></div>
+      </div>
+      <div class="muted" style="font-size:var(--fs-xs);margin-top:var(--sp-4)">This subsystem produces output on demand (no standing artifact to tail); its results render here once a run persists them. The console reflects the system — it never drives it.</div>`;
+  }
+
   // ---- stub + drawer -----------------------------------------------------
   function stub(main, title, desc) {
     main.innerHTML = `<div class="screen-head"><h1>${esc(title)}</h1></div>
@@ -536,7 +676,7 @@ const Console = (() => {
   }
   function closeDrawer() { $('#drawer').classList.remove('open'); }
 
-  return { init, openEngagement, closeDrawer, launchScan, selectRun, openFinding, reverify };
+  return { init, openEngagement, closeDrawer, launchScan, selectRun, openFinding, reverify, tripKill };
 })();
 
 document.addEventListener('DOMContentLoaded', Console.init);
