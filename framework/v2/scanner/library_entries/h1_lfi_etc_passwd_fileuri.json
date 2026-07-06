@@ -1,0 +1,20 @@
+{
+  "id": "h1-lfi-etc-passwd-fileuri",
+  "bug_class": "lfi",
+  "title": "Local file read via file:// (/etc/passwd)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "content",
+    "content_payload": "file:///etc/passwd",
+    "content_signature": "root:x:0:0:"
+  },
+  "references": [
+    "CWE-98",
+    "CAPEC-126"
+  ],
+  "remediation": "Canonicalise the resolved path and confine it to an allow-listed base directory; reject '..'/absolute paths; never build a filesystem path from input.",
+  "payload_family": "lfi-etc-passwd-fileuri"
+}

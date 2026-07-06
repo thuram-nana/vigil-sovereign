@@ -1,0 +1,20 @@
+{
+  "id": "h1-lfi-etc-passwd-urlenc",
+  "bug_class": "path_traversal",
+  "title": "Path traversal via URL-encoded separators (/etc/passwd)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "content",
+    "content_payload": "..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd",
+    "content_signature": "root:x:0:0:"
+  },
+  "references": [
+    "CWE-22",
+    "CAPEC-126"
+  ],
+  "remediation": "Canonicalise the resolved path and confine it to an allow-listed base directory; reject '..'/absolute paths; never build a filesystem path from input.",
+  "payload_family": "lfi-etc-passwd-urlenc"
+}

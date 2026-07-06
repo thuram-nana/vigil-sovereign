@@ -131,6 +131,7 @@ class WebScanCampaign:
         enable_browser_xss: bool = False,
         enable_spa_crawl: bool = False,
         max_browser_targets: int = 15,
+        browser_allowed_hosts: set[str] | None = None,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -177,6 +178,11 @@ class WebScanCampaign:
         self.enable_browser_xss = enable_browser_xss
         self.enable_spa_crawl = enable_spa_crawl
         self.max_browser_targets = max_browser_targets
+        # When set, the headless browser is launched with resolver-level egress
+        # control: it can only reach these hosts (+ loopback). The engage runner
+        # sets this to the charter's in-scope hosts so the remote browser path
+        # cannot pull the browser off-scope. None => unrestricted (loopback scan).
+        self._browser_allowed_hosts = browser_allowed_hosts
         # Data-driven coverage: fingerprint the target from the crawl and run the
         # declarative-library checks whose applicability predicate matches the
         # detected stack (scanner.library + scanner.fingerprint). Off by default
@@ -205,7 +211,7 @@ class WebScanCampaign:
         if not cdp_available():
             return None
         try:
-            return CdpBrowser().start()
+            return CdpBrowser(allowed_hosts=self._browser_allowed_hosts).start()
         except Exception:
             return None
 

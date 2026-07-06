@@ -49,7 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from ..common.errors import CrucibleError
 from .checks import (
-    Check, DifferentialCheck, ErrorSignatureCheck, EvaluationCheck,
+    Check, ContentSignatureCheck, DifferentialCheck, ErrorSignatureCheck, EvaluationCheck,
     MarkerReflectionCheck, OOBCheck, PathProbeCheck, TimingCheck,
 )
 from .insertion import InsertionKind
@@ -59,7 +59,8 @@ LIBRARY_DIR: Path = Path(__file__).resolve().parent / "library_entries"
 
 # The concrete check shapes an entry's oracle can name.
 ORACLE_KINDS: frozenset[str] = frozenset(
-    {"differential", "reflection", "oob", "timing", "evaluation", "error_signature", "signature"}
+    {"differential", "reflection", "oob", "timing", "evaluation",
+     "error_signature", "signature", "content"}
 )
 
 # Kinds that compile to a REQUEST-level check (probe the whole request/host once)
@@ -233,6 +234,10 @@ class OracleSpec(BaseModel):
     probe_path: str | None = Field(default=None, description="Path to fetch, e.g. /actuator/env (signature).")
     signature: str | None = Field(default=None, description="Distinctive string that confirms exposure (signature).")
     http_method: str = Field(default="GET", description="Method for the path probe (signature).")
+    # content (file read / LFI) — inject a payload into the point, confirm known file content
+    content_payload: str | None = Field(default=None, description="Traversal/LFI payload (content).")
+    content_signature: str | None = Field(
+        default=None, description="Distinctive signature of the target file's content (content).")
 
     @model_validator(mode="after")
     def _check_shape(self) -> "OracleSpec":
@@ -267,6 +272,9 @@ class OracleSpec(BaseModel):
         elif k == "signature":
             _require(self, "probe_path")
             _require(self, "signature")
+        elif k == "content":
+            _require(self, "content_payload")
+            _require(self, "content_signature")
         return self
 
 
@@ -396,6 +404,11 @@ def compile_entry(entry: LibraryEntry) -> Check:
             id=entry.id, bug_class=entry.bug_class,
             probe_path=spec.probe_path, signature=spec.signature,  # type: ignore[arg-type]
             http_method=spec.http_method,
+        )
+    if kind == "content":
+        return ContentSignatureCheck(
+            id=entry.id, bug_class=entry.bug_class,
+            payload=spec.content_payload, signature=spec.content_signature,  # type: ignore[arg-type]
         )
     # OracleSpec validation makes this unreachable; kept as a defensive guard.
     raise LibraryError(f"unknown oracle kind {kind!r} in entry {entry.id!r}")

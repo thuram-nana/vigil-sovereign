@@ -198,6 +198,7 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 ("/users?name=guest", "User lookup"),
                 ("/product?id=1", "Product"),
                 ("/redirect?url=/", "Continue"),
+                ("/file?name=manual.txt", "Docs"),
                 ("/profile?name=guest", "Profile (safe)"),
                 ("/api/health?check=all", "Health (safe)"),
                 ("/download?file=manual.pdf", "Download (safe)"),
@@ -282,6 +283,27 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         else:
             self._respond(404, _page("Download", "<h2>Download</h2><p>File not found.</p>"))
 
+    def _file(self) -> None:
+        # PLANTED BUG (path traversal): a traversal escapes the document directory
+        # and reads an arbitrary file. It returns the FILE CONTENT and never
+        # reflects the raw path, so ONLY a real file-content signature
+        # (``root:x:0:0:``) confirms it — a marker-reflection probe learns nothing
+        # here (which is why the content-signature check is the one that catches
+        # it). A benign name yields an ordinary document with no reflection.
+        name = self._query("name")
+        # A pure path-traversal sink joins the name onto a base dir and opens it, so
+        # a filesystem traversal reads the file but a scheme wrapper (file://, php://)
+        # does NOT — the benchmark plants exactly one traversal bug, not a scheme LFI.
+        if "://" not in name and ("etc/passwd" in name or name.rstrip("/").endswith("passwd")):
+            body = (
+                b"root:x:0:0:root:/root:/bin/bash\n"
+                b"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+                b"www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n"
+            )
+            self._respond(200, body, ctype="text/plain; charset=utf-8")
+        else:
+            self._respond(200, _page("Document", "<h2>Document</h2><p>The requested manual page.</p>"))
+
     # -- exposure routes (leak their signature) ----------------------------
 
     def _git_config(self) -> None:
@@ -338,6 +360,7 @@ _ROUTES = {
     "/profile": BenchmarkHandler._profile,
     "/api/health": BenchmarkHandler._health,
     "/download": BenchmarkHandler._download,
+    "/file": BenchmarkHandler._file,
     "/.git/config": BenchmarkHandler._git_config,
     "/.env": BenchmarkHandler._env,
     "/actuator/env": BenchmarkHandler._actuator_env,
@@ -366,6 +389,7 @@ def benchmark_corpus(base_url: str) -> CorpusTarget:
         ExpectedFinding(bug_class="boolean_sqli", location="/users?name"),
         ExpectedFinding(bug_class="error_based_sqli", location="/product?id"),
         ExpectedFinding(bug_class="open_redirect", location="/redirect?url"),
+        ExpectedFinding(bug_class="path_traversal", location="/file?name"),
         ExpectedFinding(bug_class="cors", location="request:cors-active"),
         ExpectedFinding(bug_class="exposure", location="request:m5-fw-git-config"),
         ExpectedFinding(bug_class="exposure", location="request:m5-fw-env-dbpass"),
