@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CRUCIBLE Ops Console</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='4' fill='%23f5a623'/></svg>" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="brand">
+      <span class="logo"></span>
+      <span class="name">CRUCIBLE <b>Ops</b></span>
+    </div>
+    <header id="topbar">
+      <select class="eng-select" id="engSelect" title="Active engagement"></select>
+      <div class="spacer"></div>
+      <div class="safety" id="safety"></div>
+      <button class="icon-btn" id="themeToggle" title="Toggle theme">◐</button>
+    </header>
+    <nav id="nav"></nav>
+    <main id="main"></main>
+  </div>
+  <aside id="drawer">
+    <div class="dhead">
+      <h2 id="drawerTitle">Detail</h2>
+      <div class="spacer" style="flex:1"></div>
+      <button class="icon-btn" onclick="Console.closeDrawer()">✕</button>
+    </div>
+    <div class="dbody" id="drawerBody"></div>
+  </aside>
+  <script src="/static/graph.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

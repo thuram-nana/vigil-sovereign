@@ -90,6 +90,12 @@ def main(argv: list[str]) -> int:
                         help="Archetype key the bandit keys its posteriors on.")
     parser.add_argument("--format", choices=("text", "json", "sarif", "html"), default="text",
                         help="Report format (json/sarif/html emit a machine/CI/human report to stdout).")
+    parser.add_argument("--progress-log", default=None,
+                        help="Append live phase/finding events as JSONL here (for the Ops Console "
+                             "live view). Off by default; adds no cost when unset.")
+    parser.add_argument("--reverifiable-out", default=None,
+                        help="Also write the raw ScanReport JSON (findings WITH oracle_context "
+                             "certificates) here — the artifact `verify` re-runs.")
     args = parser.parse_args(argv)
 
     if not _is_loopback(args.target):
@@ -98,6 +104,11 @@ def main(argv: list[str]) -> int:
             "authorized remote target goes through the gated executor — use `engage`.",
         )
         return 2
+
+    progress = None
+    if args.progress_log:
+        from .progress import JsonlSink
+        progress = JsonlSink(args.progress_log)
 
     report = WebScanCampaign(
         loopback_send,
@@ -111,7 +122,16 @@ def main(argv: list[str]) -> int:
         enable_spa_crawl=args.spa,
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
+        progress=progress,
     ).run(args.target)
+
+    if args.reverifiable_out:
+        # The raw ScanReport (findings WITH their oracle_context certificates) — the
+        # document `python3 -m framework.v2 verify` re-runs. The rendered report
+        # formats intentionally omit the certificate, so this is the re-verifiable
+        # artifact a CI/console re-check consumes.
+        from pathlib import Path as _P
+        _P(args.reverifiable_out).write_text(report.model_dump_json(indent=2), encoding="utf-8")
 
     if args.format != "text":
         from .report import render
