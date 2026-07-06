@@ -36,6 +36,8 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "error_based_sqli": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "sqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "nosqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
+    "ldap_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
+    "xpath_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
     "idor": (OracleKind.ACHIEVED_STATE,),
     "bola": (OracleKind.ACHIEVED_STATE,),
     "bfla": (OracleKind.ACHIEVED_STATE,),
@@ -61,7 +63,8 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "deserialization": (OracleKind.OOB_CALLBACK, OracleKind.SANITIZER_SIGNAL),
     "rce": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT, OracleKind.SANITIZER_SIGNAL),
     "command_injection": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
-    "ssti": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
+    "ssti": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
+    "el_injection": (OracleKind.EVALUATION, OracleKind.SIDE_EFFECT),
     "xss": (OracleKind.REFLECTION_CONTEXT,),
     "path_traversal": (OracleKind.SIDE_EFFECT,),
     "lfi": (OracleKind.SIDE_EFFECT,),
@@ -83,6 +86,11 @@ _ALIASES: dict[str, str] = {
     "time_based_cmdi": "time_based_command_injection",
     "no_sqli": "nosqli",
     "nosql_injection": "nosqli",
+    "ldap": "ldap_injection",
+    "ldapi": "ldap_injection",
+    "xpath": "xpath_injection",
+    "xpathi": "xpath_injection",
+    "xpath_injection_blind": "xpath_injection",
     "insecure_direct_object_reference": "idor",
     "broken_object_level_authorization": "bola",
     "broken_function_level_authorization": "bfla",
@@ -220,6 +228,13 @@ class OracleVerifier:
         if kind is OracleKind.REFLECTION_CONTEXT:
             if "marker" in ctx and "observed_sink" in ctx:
                 return oracles.reflection_context_oracle(ctx["marker"], ctx["observed_sink"])
+            return None
+        if kind is OracleKind.EVALUATION:
+            if "eval_expected" in ctx and "eval_observed" in ctx:
+                return oracles.evaluation_oracle(
+                    ctx.get("eval_raw", ""), ctx["eval_expected"],
+                    ctx["eval_observed"], ctx.get("eval_control"),
+                )
             return None
         if kind is OracleKind.SANITIZER_SIGNAL:
             if "process_output" in ctx:

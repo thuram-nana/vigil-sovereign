@@ -1,0 +1,26 @@
+{
+  "id": "m2-sqli-oracle-time-dbms-lock-sleep",
+  "bug_class": "time_based_sqli",
+  "title": "Oracle time-based blind SQLi (DBMS_LOCK.SLEEP)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "query_value",
+    "body_form_value"
+  ],
+  "oracle": {
+    "kind": "timing",
+    "benign": "1",
+    "sleep_payload": "' AND DBMS_LOCK.SLEEP(3)=0--",
+    "injected_ms": 3000
+  },
+  "references": [
+    "CWE-89",
+    "CAPEC-66",
+    "note: Oracle DBMS_LOCK.SLEEP(3) delay (requires EXECUTE on DBMS_LOCK)"
+  ],
+  "remediation": "Use parameterised queries / prepared statements so request data is bound as a value and can never alter query structure. Never build SQL by string concatenation; apply least-privilege DB accounts and disable stacked queries as defence in depth.",
+  "payload_family": "oracle-time"
+}

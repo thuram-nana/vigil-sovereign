@@ -43,6 +43,7 @@ class OracleKind(str, enum.Enum):
     TIMING = "timing"                                 # statistical time-based blind
     BOOLEAN_INFERENCE = "boolean_inference"           # SPRT over repeated true/false probes
     REFLECTION_CONTEXT = "reflection_context"         # marker reached an executable HTML/JS context
+    EVALUATION = "evaluation"                         # server evaluated an injected expression (SSTI/EL)
 
 
 class OracleProbe(BaseModel):

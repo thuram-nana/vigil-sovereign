@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from framework.v2.scanner.campaign import WebScanCampaign
 from framework.v2.scanner.cli import loopback_send
+from framework.v2.scanner.library import load_library, select_entries
 
 
 class _WpApp(BaseHTTPRequestHandler):
@@ -94,8 +95,13 @@ def test_wordpress_target_fingerprints_and_runs_gated_library_checks() -> None:
         assert report.fingerprint is not None
         toks = report.fingerprint.tokens
         assert "wordpress" in toks and "php" in toks
-        # ...and the WP-gated + PHP-gated library checks were selected and run
-        assert report.library_checks_run >= 11  # all seed entries (incl. WP/PHP-gated)
+        # ...and exactly the library entries applicable to this stack were run
+        expected = len(select_entries(load_library(), toks))
+        assert report.library_checks_run == expected
+        # the WP/PHP-gated entries are included for this target
+        wp_gated = {e.id for e in load_library() if e.applies({"wordpress", "php", "cms"})} \
+            - {e.id for e in load_library() if e.applies(set())}
+        assert wp_gated, "fixture must exercise at least one framework-gated entry"
         # coverage produced confirmed findings, precision intact (oracle-anchored)
         assert report.active_findings
 
@@ -107,9 +113,12 @@ def test_plain_target_does_not_run_framework_gated_checks() -> None:
         ).run(base + "/")
         assert report.fingerprint is not None
         toks = report.fingerprint.tokens
-        assert "wordpress" not in toks
-        # the WP-gated + PHP-gated checks are excluded -> fewer library checks run
-        assert report.library_checks_run < 11
+        assert "wordpress" not in toks and "php" not in toks
+        # only the entries applicable to this (non-WP/PHP) stack ran...
+        entries = load_library()
+        assert report.library_checks_run == len(select_entries(entries, toks))
+        # ...and strictly fewer than for a WordPress+PHP stack (the gated ones excluded)
+        assert report.library_checks_run < len(select_entries(entries, {"wordpress", "php", "cms", "nginx", "server"}))
 
 
 def test_library_off_by_default_leaves_the_report_fingerprint_free() -> None:

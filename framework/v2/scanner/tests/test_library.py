@@ -86,8 +86,11 @@ def test_seed_entries_are_rich() -> None:
 
 
 def test_seed_covers_all_four_oracle_kinds() -> None:
+    # the library covers at least the four foundational check shapes; later
+    # milestones add more kinds (e.g. "evaluation" for SSTI), so this is a
+    # subset check, not an exact-set one.
     kinds = {e.oracle.kind for e in _seed()}
-    assert kinds == {"differential", "reflection", "oob", "timing"}
+    assert {"differential", "reflection", "oob", "timing"} <= kinds
 
 
 def test_seed_has_the_named_minimum_entries() -> None:

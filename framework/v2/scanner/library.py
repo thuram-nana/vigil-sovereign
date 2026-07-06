@@ -48,14 +48,16 @@ from typing import Any, Iterable, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ..common.errors import CrucibleError
-from .checks import Check, DifferentialCheck, MarkerReflectionCheck, OOBCheck, TimingCheck
+from .checks import Check, DifferentialCheck, EvaluationCheck, MarkerReflectionCheck, OOBCheck, TimingCheck
 from .insertion import InsertionKind
 
 # The seed entries ship next to this module so a default load needs no config.
 LIBRARY_DIR: Path = Path(__file__).resolve().parent / "library_entries"
 
-# The four concrete check shapes an entry's oracle can name.
-ORACLE_KINDS: frozenset[str] = frozenset({"differential", "reflection", "oob", "timing"})
+# The concrete check shapes an entry's oracle can name.
+ORACLE_KINDS: frozenset[str] = frozenset(
+    {"differential", "reflection", "oob", "timing", "evaluation"}
+)
 
 # Severities an entry may claim (aligns with the framework's finding template).
 SEVERITIES: frozenset[str] = frozenset({"Critical", "High", "Medium", "Low", "Info"})
@@ -213,6 +215,10 @@ class OracleSpec(BaseModel):
     # timing
     sleep_payload: str | None = Field(default=None, description="Delay-injecting payload (timing).")
     injected_ms: float | None = Field(default=None, description="Delay the timing payload induces, ms.")
+    # evaluation (SSTI/EL)
+    probe_expr: str | None = Field(default=None, description="Template/EL expression to inject (evaluation).")
+    expected_result: str | None = Field(
+        default=None, description="The distinctive value the expression computes to (evaluation).")
 
     @model_validator(mode="after")
     def _check_shape(self) -> "OracleSpec":
@@ -239,6 +245,9 @@ class OracleSpec(BaseModel):
                 raise ValueError("timing oracle requires 'injected_ms'")
             if self.injected_ms <= 0:
                 raise ValueError("timing 'injected_ms' must be > 0")
+        elif k == "evaluation":
+            _require(self, "probe_expr")
+            _require(self, "expected_result")
         return self
 
 
@@ -351,6 +360,11 @@ def compile_entry(entry: LibraryEntry) -> Check:
             id=entry.id, bug_class=entry.bug_class,
             benign=spec.benign, sleep_payload=spec.sleep_payload,  # type: ignore[arg-type]
             injected_ms=spec.injected_ms,  # type: ignore[arg-type]
+        )
+    if kind == "evaluation":
+        return EvaluationCheck(
+            id=entry.id, bug_class=entry.bug_class,
+            probe_expr=spec.probe_expr, expected_result=spec.expected_result,  # type: ignore[arg-type]
         )
     # OracleSpec validation makes this unreachable; kept as a defensive guard.
     raise LibraryError(f"unknown oracle kind {kind!r} in entry {entry.id!r}")

@@ -833,6 +833,77 @@ def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# 3c. Evaluation — the server EVALUATED an injected expression (SSTI / EL)
+# ---------------------------------------------------------------------------
+
+
+def evaluation_oracle(
+    raw_expr: str,
+    expected_result: str,
+    observed_body: Any,
+    control_body: Any = None,
+) -> OracleSignal:
+    """Fire when an injected expression was **evaluated** by the server, not
+    merely reflected — the signature of server-side template / expression-language
+    injection (Jinja2/Twig/Freemarker/Velocity/ERB/Smarty/Mako/Thymeleaf, EL).
+
+    The proof is deliberately strict, because "reflected" and "evaluated" look
+    identical unless you separate them:
+
+      1. the ``expected_result`` (what ``raw_expr`` computes to, e.g. ``31337*31337
+         -> 981538969``) appears in the response, AND
+      2. the ``raw_expr`` itself (``{{31337*31337}}``) does NOT appear — if the
+         raw template text survives, the input was reflected verbatim, not
+         evaluated, so this is NOT SSTI, AND
+      3. when a benign ``control_body`` is supplied, the ``expected_result`` does
+         NOT occur in it — so a value that merely happens to be on the page can
+         never be mistaken for an evaluation.
+
+    Use a distinctive arithmetic result (a large product, not ``7*7=49``) so the
+    expected value cannot coincidentally appear. A reflected-but-unevaluated
+    payload, an encoded payload, or a benign page all correctly do NOT fire."""
+    raw = (raw_expr or "").strip()
+    expected = (expected_result or "").strip()
+    body = _coerce_text(observed_body)
+
+    if len(expected) < 2:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence="expected evaluation result too short to be a reliable marker",
+            observed={"expected": expected})
+
+    if expected not in body:
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"evaluated result {expected!r} not present; expression was not evaluated",
+            observed={"expected": expected, "raw_present": raw in body})
+
+    if raw and raw in body:
+        # The literal template text survived — reflection, not evaluation.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"raw expression {raw!r} reflected verbatim — reflected, not evaluated",
+            observed={"expected": expected, "raw_present": True})
+
+    if control_body is not None and expected in _coerce_text(control_body):
+        # The "result" is just part of the page regardless of the payload.
+        return OracleSignal(
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            evidence=f"result {expected!r} also present in the benign control — not attributable to evaluation",
+            observed={"expected": expected})
+
+    idx = body.find(expected)
+    snippet = body[max(0, idx - 24): idx + len(expected) + 24]
+    return OracleSignal(
+        kind=OracleKind.EVALUATION,
+        fired=True,
+        confidence=0.95,
+        evidence=f"expression {raw!r} evaluated to {expected!r} server-side: ...{snippet}...",
+        observed={"expected": expected, "raw": raw, "snippet": snippet},
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4. Sanitizer signal — crash/UB oracles in captured process output
 # ---------------------------------------------------------------------------
 

@@ -1,0 +1,20 @@
+{
+  "id": "m2-inj-ssrf-gopher-scheme",
+  "bug_class": "ssrf",
+  "title": "Blind SSRF (gopher scheme to callback)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "gopher://{callback}/_"
+  },
+  "references": [
+    "CWE-918",
+    "CAPEC-664"
+  ],
+  "remediation": "Do not let user input drive server-side fetches. Enforce an allowlist of permitted hosts and schemes, block internal/link-local ranges and the cloud metadata endpoint, disable unneeded URL schemes (gopher/dict/file), and resolve-then-pin the destination to defeat DNS rebinding.",
+  "payload_family": "callback-scheme"
+}
