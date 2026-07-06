@@ -88,6 +88,11 @@ def _benchmark(argv: list[str]) -> int:
     return benchmark_run.main(argv)
 
 
+def _console(argv: list[str]) -> int:
+    from .console import cli as console_cli
+    return console_cli.main(argv)
+
+
 def _verify(argv: list[str]) -> int:
     from .verify import reverify
     return reverify.main(argv)
@@ -136,6 +141,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "verify": _verify,
     "collaborator": _collaborator,
     "benchmark": _benchmark,
+    "console": _console,
     "status": _status,
 }
 
