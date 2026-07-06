@@ -48,7 +48,10 @@ from typing import Any, Iterable, Mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ..common.errors import CrucibleError
-from .checks import Check, DifferentialCheck, EvaluationCheck, MarkerReflectionCheck, OOBCheck, TimingCheck
+from .checks import (
+    Check, DifferentialCheck, ErrorSignatureCheck, EvaluationCheck,
+    MarkerReflectionCheck, OOBCheck, TimingCheck,
+)
 from .insertion import InsertionKind
 
 # The seed entries ship next to this module so a default load needs no config.
@@ -56,7 +59,7 @@ LIBRARY_DIR: Path = Path(__file__).resolve().parent / "library_entries"
 
 # The concrete check shapes an entry's oracle can name.
 ORACLE_KINDS: frozenset[str] = frozenset(
-    {"differential", "reflection", "oob", "timing", "evaluation"}
+    {"differential", "reflection", "oob", "timing", "evaluation", "error_signature"}
 )
 
 # Severities an entry may claim (aligns with the framework's finding template).
@@ -219,6 +222,8 @@ class OracleSpec(BaseModel):
     probe_expr: str | None = Field(default=None, description="Template/EL expression to inject (evaluation).")
     expected_result: str | None = Field(
         default=None, description="The distinctive value the expression computes to (evaluation).")
+    # error_signature (error-based injection) — reuses `benign`; a syntax-breaking probe
+    error_probe: str | None = Field(default=None, description="Syntax-breaking payload (error_signature).")
 
     @model_validator(mode="after")
     def _check_shape(self) -> "OracleSpec":
@@ -248,6 +253,8 @@ class OracleSpec(BaseModel):
         elif k == "evaluation":
             _require(self, "probe_expr")
             _require(self, "expected_result")
+        elif k == "error_signature":
+            _require(self, "error_probe")
         return self
 
 
@@ -365,6 +372,12 @@ def compile_entry(entry: LibraryEntry) -> Check:
         return EvaluationCheck(
             id=entry.id, bug_class=entry.bug_class,
             probe_expr=spec.probe_expr, expected_result=spec.expected_result,  # type: ignore[arg-type]
+        )
+    if kind == "error_signature":
+        benign = spec.benign or "crucible-benign-term"
+        return ErrorSignatureCheck(
+            id=entry.id, bug_class=entry.bug_class,
+            probe_payload=spec.error_probe, benign=benign,  # type: ignore[arg-type]
         )
     # OracleSpec validation makes this unreachable; kept as a defensive guard.
     raise LibraryError(f"unknown oracle kind {kind!r} in entry {entry.id!r}")

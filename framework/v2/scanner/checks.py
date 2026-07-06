@@ -457,6 +457,31 @@ class EvaluationCheck:
         )
 
 
+@dataclass(frozen=True)
+class ErrorSignatureCheck:
+    """Error-based injection (SQL/NoSQL/LDAP/XPath) via a provoked backend error.
+
+    Sends a benign control and a syntax-breaking payload (e.g. a lone quote), and
+    hands both responses to the error-signature oracle — which confirms only when
+    a distinctive datastore/parser error appears in the probe response but NOT in
+    the benign control, so a page that always shows a stack trace cannot be
+    mistaken for injection."""
+
+    id: str
+    bug_class: str
+    probe_payload: str = "'\"`)"
+    benign: str = "crucible-benign-term"
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        control = send(template.render(point, self.benign))
+        probe = send(template.render(point, self.probe_payload))
+        control_body = control.get("body", "") if isinstance(control, dict) else str(control)
+        probe_body = probe.get("body", "") if isinstance(probe, dict) else str(probe)
+        return FindingContext.from_error_signature(
+            probe_body, control_body=control_body, bug_class=self.bug_class,
+        )
+
+
 def _slugify(s: str) -> str:
     return "".join(c for c in s if c.isalnum())
 

@@ -963,6 +963,81 @@ def _line_of(text: str, offset: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 4b. Error signature — a datastore/parser error a payload provoked (error-based)
+# ---------------------------------------------------------------------------
+
+
+# (regex, engine, confidence). Distinctive server-side error strings that only a
+# malformed query/expression provokes — the signature of error-based injection.
+# Ordered strongest-first; the strongest match wins.
+_ERROR_SIGNATURES: list[tuple[re.Pattern[str], str, float]] = [
+    # --- SQL: MySQL / MariaDB ---
+    (re.compile(r"You have an error in your SQL syntax", re.I), "mysql", 0.95),
+    (re.compile(r"check the manual that corresponds to your (MySQL|MariaDB) server version", re.I), "mysql", 0.95),
+    (re.compile(r"\bwarning:\s*mysqli?_", re.I), "mysql", 0.85),
+    (re.compile(r"MySQLSyntaxErrorException|com\.mysql\.jdbc", re.I), "mysql", 0.9),
+    (re.compile(r"valid MySQL result|Unknown column '[^']+' in 'field list'", re.I), "mysql", 0.85),
+    # --- SQL: PostgreSQL ---
+    (re.compile(r"PostgreSQL.*ERROR|PG::(Syntax|Undefined)|pg_query\(\)|org\.postgresql", re.I), "postgresql", 0.95),
+    (re.compile(r"unterminated quoted string at or near|syntax error at or near", re.I), "postgresql", 0.9),
+    # --- SQL: MSSQL ---
+    (re.compile(r"Unclosed quotation mark after the character string", re.I), "mssql", 0.95),
+    (re.compile(r"Microsoft SQL (Server|Native Client)|System\.Data\.SqlClient\.SqlException", re.I), "mssql", 0.92),
+    (re.compile(r"Incorrect syntax near|\[SQL Server\]", re.I), "mssql", 0.9),
+    # --- SQL: Oracle ---
+    (re.compile(r"\bORA-\d{5}\b", re.I), "oracle", 0.95),
+    (re.compile(r"Oracle.*(Driver|Database)|quoted string not properly terminated", re.I), "oracle", 0.9),
+    # --- SQL: SQLite ---
+    (re.compile(r"SQLite/JDBCDriver|SQLite\.Exception|System\.Data\.SQLite|sqlite3\.OperationalError", re.I), "sqlite", 0.92),
+    (re.compile(r"unrecognized token:|SQL logic error|near \"[^\"]*\": syntax error", re.I), "sqlite", 0.88),
+    # --- SQL: generic JDBC/ODBC ---
+    (re.compile(r"java\.sql\.SQLException|SQLSTATE\[|ODBC.*Driver.*error", re.I), "sql-generic", 0.8),
+    # --- NoSQL ---
+    (re.compile(r"MongoError|E11000 duplicate key|BSONError|com\.mongodb", re.I), "mongodb", 0.85),
+    # --- LDAP ---
+    (re.compile(r"javax\.naming\.directory|LDAPException|Invalid DN syntax|com\.sun\.jndi\.ldap", re.I), "ldap", 0.82),
+    # --- XPath ---
+    (re.compile(r"XPathException|MS\.Internal\.Xml|Expression must evaluate to a node-set|xmlXPathEval", re.I), "xpath", 0.82),
+]
+
+
+def error_signature_oracle(observed_body: Any, control_body: Any = None) -> OracleSignal:
+    """Fire when a response contains a distinctive **datastore/parser error** that
+    a malformed injection payload provoked — the signature of error-based injection
+    (SQL/NoSQL/LDAP/XPath).
+
+    Two guards keep it precise: the error string must be a known, engine-specific
+    signature (not a generic "error" word), AND — when a benign ``control_body`` is
+    supplied — the SAME signature must be ABSENT from the control, so a page that
+    always shows a stack trace cannot be mistaken for an injection. This is the
+    error-based analogue of the sanitizer oracle: a real backend error is strong,
+    attributable evidence the input reached and broke the query parser."""
+    body = _coerce_text(observed_body)
+    control = _coerce_text(control_body) if control_body is not None else ""
+
+    for pattern, engine, conf in _ERROR_SIGNATURES:
+        m = pattern.search(body)
+        if not m:
+            continue
+        if control and pattern.search(control):
+            # the same error is present without the payload -> not attributable
+            continue
+        line = _line_of(body, m.start())
+        return OracleSignal(
+            kind=OracleKind.ERROR_SIGNATURE,
+            fired=True,
+            confidence=conf,
+            evidence=f"{engine} error provoked by the payload: {line.strip()[:200]}",
+            observed={"engine": engine, "match": m.group(0)[:200]},
+        )
+
+    return OracleSignal(
+        kind=OracleKind.ERROR_SIGNATURE, fired=False, confidence=0.0,
+        evidence="no datastore/parser error signature in the response",
+        observed={})
+
+
+# ---------------------------------------------------------------------------
 # 5. Out-of-band callback — inbound interaction against a unique token
 # ---------------------------------------------------------------------------
 

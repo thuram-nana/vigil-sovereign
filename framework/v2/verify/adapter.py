@@ -168,6 +168,10 @@ class FindingContext(BaseModel):
     eval_observed: str | None = None
     eval_control: str | None = None
 
+    # error_signature_oracle (error-based injection — a datastore/parser error)
+    error_observed: str | None = None
+    error_control: str | None = None
+
     # sanitizer_signal_oracle
     process_output: str | None = None
 
@@ -339,6 +343,23 @@ class FindingContext(BaseModel):
             eval_control=_coerce_text(control_body) if control_body is not None else None,
         )
 
+    @classmethod
+    def from_error_signature(
+        cls,
+        observed_body: Any,
+        *,
+        control_body: Any = None,
+        bug_class: str = "error_based_sqli",
+    ) -> "FindingContext":
+        """A response (and an optional benign control) for the error-signature
+        oracle. Confirms error-based injection when a distinctive datastore/parser
+        error the payload provoked is present in the response but not the control."""
+        return cls(
+            bug_class=bug_class,
+            error_observed=_coerce_text(observed_body),
+            error_control=_coerce_text(control_body) if control_body is not None else None,
+        )
+
     # -- combination -------------------------------------------------------
 
     def merge(self, other: "FindingContext") -> "FindingContext":
@@ -395,6 +416,10 @@ class FindingContext(BaseModel):
             ctx["eval_observed"] = self.eval_observed
             if self.eval_control is not None:
                 ctx["eval_control"] = self.eval_control
+        if self.error_observed is not None:
+            ctx["error_observed"] = self.error_observed
+            if self.error_control is not None:
+                ctx["error_control"] = self.error_control
         if self.process_output is not None:
             ctx["process_output"] = self.process_output
         if self.oob_hits is not None:

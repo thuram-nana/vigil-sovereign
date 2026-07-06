@@ -44,6 +44,7 @@ class OracleKind(str, enum.Enum):
     BOOLEAN_INFERENCE = "boolean_inference"           # SPRT over repeated true/false probes
     REFLECTION_CONTEXT = "reflection_context"         # marker reached an executable HTML/JS context
     EVALUATION = "evaluation"                         # server evaluated an injected expression (SSTI/EL)
+    ERROR_SIGNATURE = "error_signature"               # a datastore/parser error a payload provoked (error-based)
 
 
 class OracleProbe(BaseModel):

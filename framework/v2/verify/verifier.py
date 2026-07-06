@@ -33,11 +33,11 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "time_based_sqli": (OracleKind.TIMING, OracleKind.DIFFERENTIAL_RESPONSE),
     "time_based_command_injection": (OracleKind.TIMING, OracleKind.OOB_CALLBACK),
     "time_based": (OracleKind.TIMING,),
-    "error_based_sqli": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
-    "sqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
-    "nosqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
-    "ldap_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
-    "xpath_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
+    "error_based_sqli": (OracleKind.ERROR_SIGNATURE, OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
+    "sqli": (OracleKind.ERROR_SIGNATURE, OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
+    "nosqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.ERROR_SIGNATURE),
+    "ldap_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.ERROR_SIGNATURE),
+    "xpath_injection": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.ERROR_SIGNATURE),
     "idor": (OracleKind.ACHIEVED_STATE,),
     "bola": (OracleKind.ACHIEVED_STATE,),
     "bfla": (OracleKind.ACHIEVED_STATE,),
@@ -235,6 +235,10 @@ class OracleVerifier:
                     ctx.get("eval_raw", ""), ctx["eval_expected"],
                     ctx["eval_observed"], ctx.get("eval_control"),
                 )
+            return None
+        if kind is OracleKind.ERROR_SIGNATURE:
+            if "error_observed" in ctx:
+                return oracles.error_signature_oracle(ctx["error_observed"], ctx.get("error_control"))
             return None
         if kind is OracleKind.SANITIZER_SIGNAL:
             if "process_output" in ctx:
