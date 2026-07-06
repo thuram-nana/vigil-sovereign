@@ -94,6 +94,7 @@ class Planner:
         world: "WorldModel | None" = None,
         objectives: "Iterable[NodeKind] | None" = None,
         world_source: str | None = None,
+        use_voi: bool = False,
     ) -> None:
         self.bb = blackboard
         self.coord = coordinator
@@ -113,6 +114,10 @@ class Planner:
         self.world = world
         self.objectives = list(objectives) if objectives is not None else None
         self.world_source = world_source
+        # Opt-in value-of-information leaf selection (expected information gain per
+        # unit cost) instead of greedy prior*value/cost. Off by default so the
+        # legacy selection path is unchanged.
+        self.use_voi = bool(use_voi)
         self._cursor = 0  # blackboard cursor
         self._last_checkpoint_at = 0.0
         self.checkpoint_interval_s = checkpoint_interval_s
@@ -145,11 +150,21 @@ class Planner:
 
         # World-model-aware selection when a world + objectives + foothold are
         # wired in; otherwise byte-for-byte the legacy greedy selection.
-        if (
+        world_aware = (
             self.world is not None
             and self.objectives
             and self.world_source is not None
-        ):
+        )
+        if self.use_voi:
+            # Value-of-information selection (expected information gain per cost),
+            # with the world-model path boost when a world+objectives+foothold
+            # are wired in.
+            leaf = self.tree.best_open_leaf_voi(
+                world=self.world if world_aware else None,
+                objective_kinds=self.objectives if world_aware else None,
+                source=self.world_source if world_aware else None,
+            )
+        elif world_aware:
             leaf = self.tree.best_open_leaf_pathaware(
                 world=self.world,
                 objective_kinds=self.objectives,

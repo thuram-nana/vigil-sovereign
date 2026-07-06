@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Iterator, Literal
@@ -142,6 +143,39 @@ def _path_node_boosts(
     return boosts
 
 
+# ---------------------------------------------------------------------------
+# Expected-information-gain (value-of-information) leaf scoring
+# ---------------------------------------------------------------------------
+
+
+def _bernoulli_entropy(p: float) -> float:
+    """Binary Shannon entropy H(p) in bits. 0 at p in {0, 1}, max 1 at p=0.5."""
+    if p <= 0.0 or p >= 1.0:
+        return 0.0
+    return -(p * math.log2(p) + (1.0 - p) * math.log2(1.0 - p))
+
+
+def expected_information_gain(prior: float, *, tpr: float = 0.9, fpr: float = 0.02) -> float:
+    """Expected information gain (bits) of running a probe against a Bernoulli
+    belief ``prior`` that a bug is present.
+
+    The probe fires with true-positive rate ``tpr`` and false-positive rate
+    ``fpr``; its binary outcome (fire / no-fire) is observed, and
+    ``EIG = H(prior) - E_outcome[H(posterior)]``. This is genuinely NOT the
+    greedy ``prior``: a near-certain belief (prior ~0.99) has little to learn
+    (low EIG) while a coin-flip belief (prior ~0.5) has the most (high EIG). So a
+    planner maximising EIG probes to REDUCE UNCERTAINTY, not to chase high priors."""
+    p = min(max(prior, 0.0), 1.0)
+    h_prior = _bernoulli_entropy(p)
+    p_fire = p * tpr + (1.0 - p) * fpr
+    if p_fire <= 0.0 or p_fire >= 1.0:
+        return 0.0  # the probe outcome is a foregone conclusion -> no information
+    post_fire = (p * tpr) / p_fire
+    post_nofire = (p * (1.0 - tpr)) / (1.0 - p_fire)
+    e_post = p_fire * _bernoulli_entropy(post_fire) + (1.0 - p_fire) * _bernoulli_entropy(post_nofire)
+    return max(0.0, h_prior - e_post)
+
+
 GoalStatus = Literal[
     "open",         # not yet attempted
     "claimed",      # planner picked this as the next branch
@@ -192,6 +226,17 @@ class GoalNode(BaseModel):
             return 0.0
         cost = max(1, self.estimate.requests)
         return (self.prior_p_success * self.value) / cost
+
+    def eig_score(self, *, tpr: float = 0.9, fpr: float = 0.02) -> float:
+        """Value-of-information score: expected information gain (about whether
+        this leaf's bug is present) times the leaf's value, per unit cost. Unlike
+        :meth:`score` (greedy on prior), this rewards resolving UNCERTAIN,
+        consequential leaves — probing where a confirmation is most informative."""
+        if self.status not in ("open", "claimed"):
+            return 0.0
+        cost = max(1, self.estimate.requests)
+        eig = expected_information_gain(self.prior_p_success, tpr=tpr, fpr=fpr)
+        return (eig * self.value) / cost
 
 
 @dataclass
@@ -296,6 +341,45 @@ class GoalTree:
         for leaf in self.open_leaves():
             base = leaf.score()
             nid = surface_to_node_id(world, leaf.surface)
+            mult = boosts.get(nid, 1.0) if nid is not None else 1.0
+            scored.append((-(base * mult), leaf.id, leaf))
+        if not scored:
+            return None
+        scored.sort(key=lambda t: (t[0], t[1]))
+        return scored[0][2]
+
+    def best_open_leaf_voi(
+        self,
+        *,
+        world: "WorldModel | None" = None,
+        objective_kinds: "Iterable[NodeKind] | None" = None,
+        source: str | None = None,
+        boost: float = 2.0,
+        k: int = 3,
+        weight_fn: "Callable[[Edge], float] | None" = None,
+        edge_kinds: "Iterable | None" = None,
+        tpr: float = 0.9,
+        fpr: float = 0.02,
+    ) -> GoalNode | None:
+        """Select the open leaf with the highest EXPECTED-INFORMATION-GAIN per
+        unit cost (optionally weighted by a world-model path boost, exactly as in
+        :meth:`best_open_leaf_pathaware`).
+
+        This is a genuinely different objective from the greedy
+        ``prior * value / cost``: it runs the probe that most reduces uncertainty
+        about a consequential fact, so an uncertain (near-0.5-prior) high-value
+        leaf can outrank a near-certain one greedy would pick first. Deterministic:
+        ties break on ascending leaf id."""
+        boosts: dict[str, float] = {}
+        if world is not None and objective_kinds and source is not None:
+            boosts = _path_node_boosts(
+                world, source=source, objective_kinds=objective_kinds,
+                boost=boost, k=k, weight_fn=weight_fn, edge_kinds=edge_kinds,
+            )
+        scored: list[tuple[float, int, GoalNode]] = []
+        for leaf in self.open_leaves():
+            base = leaf.eig_score(tpr=tpr, fpr=fpr)
+            nid = surface_to_node_id(world, leaf.surface) if (world is not None and boosts) else None
             mult = boosts.get(nid, 1.0) if nid is not None else 1.0
             scored.append((-(base * mult), leaf.id, leaf))
         if not scored:
