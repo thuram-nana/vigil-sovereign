@@ -500,6 +500,7 @@ def _skeleton_for(bug_class: str, oracle_kind: OracleKind) -> tuple[str, str]:
         OracleKind.REFLECTION_CONTEXT: ("context-aware markup canary", "\"'><x{marker}>; confirm the marker reaches an EXECUTABLE (tag/script/handler) context"),
         OracleKind.EVALUATION: ("template-arithmetic probe", "inject {{31337*31337}}; confirm the server EVALUATED it (result present, raw template text absent)"),
         OracleKind.ERROR_SIGNATURE: ("syntax-breaking probe", "inject a lone quote/paren vs a benign control; confirm a datastore/parser error appears in the probe but not the control"),
+        OracleKind.DOM_EXECUTION: ("execution-callback payload", "inject a payload that calls a unique binding on execution; confirm the binding fired in a real DOM (headless browser)"),
     }
     return generic.get(oracle_kind, ("payload probe", "inject a class-appropriate payload; confirm via the routed oracle"))
 

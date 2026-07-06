@@ -172,6 +172,10 @@ class FindingContext(BaseModel):
     error_observed: str | None = None
     error_control: str | None = None
 
+    # dom_execution_oracle (DOM-XSS — injected JS executed in a real DOM)
+    dom_binding_calls: list[str] | None = None
+    dom_canary: str | None = None
+
     # sanitizer_signal_oracle
     process_output: str | None = None
 
@@ -360,6 +364,23 @@ class FindingContext(BaseModel):
             error_control=_coerce_text(control_body) if control_body is not None else None,
         )
 
+    @classmethod
+    def from_dom_execution(
+        cls,
+        binding_calls: Sequence[Any],
+        canary: str,
+        *,
+        bug_class: str = "dom_xss",
+    ) -> "FindingContext":
+        """The arguments a page passed to the CDP execution binding, plus the
+        unique canary, for the DOM-execution oracle. Confirms DOM-XSS only when
+        the injected script actually ran and called back with the canary."""
+        return cls(
+            bug_class=bug_class,
+            dom_binding_calls=[_coerce_text(c) for c in (binding_calls or [])],
+            dom_canary=_coerce_text(canary),
+        )
+
     # -- combination -------------------------------------------------------
 
     def merge(self, other: "FindingContext") -> "FindingContext":
@@ -420,6 +441,9 @@ class FindingContext(BaseModel):
             ctx["error_observed"] = self.error_observed
             if self.error_control is not None:
                 ctx["error_control"] = self.error_control
+        if self.dom_binding_calls is not None and self.dom_canary is not None:
+            ctx["dom_binding_calls"] = self.dom_binding_calls
+            ctx["dom_canary"] = self.dom_canary
         if self.process_output is not None:
             ctx["process_output"] = self.process_output
         if self.oob_hits is not None:

@@ -963,6 +963,47 @@ def _line_of(text: str, offset: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 3d. DOM execution — injected JS actually ran in a real DOM (DOM-XSS)
+# ---------------------------------------------------------------------------
+
+
+def dom_execution_oracle(binding_calls: Any, canary: str) -> OracleSignal:
+    """Fire when a unique canary appears among the arguments the page passed to a
+    CDP binding — proof that injected JavaScript **executed** in a real browser
+    DOM, not merely that a marker was reflected.
+
+    This is the strongest possible XSS evidence and is near-unforgeable: the
+    binding is a function only the driver registered (Runtime.addBinding), and the
+    only way its call carrying the canary appears is if the injected script ran and
+    invoked it. A reflected-but-inert payload, an encoded payload, or a page that
+    never executes the sink all produce no binding call and correctly do not fire.
+    The canary must be non-trivial so an incidental value cannot masquerade as one."""
+    canary = (canary or "").strip()
+    calls = [_coerce_text(c) for c in (binding_calls or [])]
+
+    if len(canary) < 6:
+        return OracleSignal(
+            kind=OracleKind.DOM_EXECUTION, fired=False, confidence=0.0,
+            evidence="execution canary too short to be a reliable, unforgeable marker",
+            observed={"canary": canary})
+
+    hit = next((c for c in calls if canary in c), None)
+    if hit is None:
+        return OracleSignal(
+            kind=OracleKind.DOM_EXECUTION, fired=False, confidence=0.0,
+            evidence="no binding call carried the execution canary; injected script did not run",
+            observed={"canary": canary, "call_count": len(calls)})
+
+    return OracleSignal(
+        kind=OracleKind.DOM_EXECUTION,
+        fired=True,
+        confidence=0.97,
+        evidence=f"injected script executed in the DOM and invoked the callback with {canary!r}",
+        observed={"canary": canary, "call": hit[:200]},
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4b. Error signature — a datastore/parser error a payload provoked (error-based)
 # ---------------------------------------------------------------------------
 

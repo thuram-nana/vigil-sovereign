@@ -45,6 +45,7 @@ class OracleKind(str, enum.Enum):
     REFLECTION_CONTEXT = "reflection_context"         # marker reached an executable HTML/JS context
     EVALUATION = "evaluation"                         # server evaluated an injected expression (SSTI/EL)
     ERROR_SIGNATURE = "error_signature"               # a datastore/parser error a payload provoked (error-based)
+    DOM_EXECUTION = "dom_execution"                   # injected JS actually executed in a real DOM (DOM-XSS)
 
 
 class OracleProbe(BaseModel):
