@@ -35,12 +35,18 @@ def main(argv: list[str]) -> int:
         return 2
 
     url = f"http://{args.host}:{args.port}/"
-    print(f"CRUCIBLE Ops Console — {url}")
-    print("  read-only · loopback-only · Ctrl-C to stop")
+    # flush so the URL is visible immediately even under nohup / a pipe (not a tty)
+    print("\n  ┌─────────────────────────────────────────────────────────┐", flush=True)
+    print("  │  CRUCIBLE Ops Console is running — open in a browser:    │", flush=True)
+    print(f"  │      {url:<50s} │", flush=True)
+    print("  │  (loopback-only: open it ON THIS MACHINE. Ctrl-C stops.)│", flush=True)
+    print("  └─────────────────────────────────────────────────────────┘\n", flush=True)
     if args.open:
-        import webbrowser
-
-        webbrowser.open(url)
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass  # a missing/failed browser must never stop the server from serving
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
