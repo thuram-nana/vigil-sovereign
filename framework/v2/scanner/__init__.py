@@ -53,6 +53,7 @@ from . import (
     benchmark,
     browser,
     browser_crawler,
+    check_synthesis,
     constraints,
     detection_cost,
     domxss,
@@ -68,6 +69,7 @@ from . import (
     smuggling,
     websocket,
 )
+from .check_synthesis import CheckEval, evaluate_check, synthesize_check
 from .constraints import InferenceResult, InferredConstraint, infer_predicate
 from .fitness import differential_proximity, reflection_proximity, unblocked_gate
 from .grammar import RequestGrammar, infer_grammar
@@ -209,6 +211,11 @@ __all__ = [
     "MergeGate",
     "CapabilityGap",
     "CapabilityProposal",
+    # guarded, eval-gated declarative check synthesis
+    "check_synthesis",
+    "synthesize_check",
+    "evaluate_check",
+    "CheckEval",
     # targeting
     "select_checks",
     "likely_classes",
