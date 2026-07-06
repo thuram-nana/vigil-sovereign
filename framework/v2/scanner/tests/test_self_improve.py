@@ -128,7 +128,10 @@ def test_zero_recall_produced_class_yields_low_recall_gap():
     assert gap.oracle_kinds == list(BUG_CLASS_ORACLES["boolean_sqli"])
 
     prop = next(p for p in si.draft_proposals(gaps) if p.gap_id == gap.id)
-    assert prop.oracle_kind is OracleKind.DIFFERENTIAL_RESPONSE
+    # the proposal targets the class's PRIMARY oracle, which for boolean_sqli is
+    # now the SPRT boolean-inference oracle (Wave 5), with the 2-probe
+    # differential as the fallback.
+    assert prop.oracle_kind is OracleKind.BOOLEAN_INFERENCE
 
 
 def test_full_recall_class_yields_no_low_recall_gap():

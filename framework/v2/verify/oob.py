@@ -135,14 +135,34 @@ class OOBReceiver:
     poll for hits. All state is in-process; nothing is persisted and nothing
     leaves the machine."""
 
-    def __init__(self, host: str = "127.0.0.1") -> None:
+    def __init__(self, host: str = "127.0.0.1", *, advertise_base_url: str | None = None) -> None:
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError(
                 f"OOBReceiver refuses to bind to {host!r}; loopback only."
             )
         self._host = "127.0.0.1" if host == "localhost" else host
+        # Opt-in operator-hosted relay (default off). The receiver STILL binds
+        # loopback only — this URL is merely what probes embed as the callback.
+        # The operator runs an allowlisted tunnel from that host back to this
+        # loopback receiver (e.g. an SSH reverse forward), so a remote target's
+        # blind fetch reaches loopback and is recorded here, WITHOUT the receiver
+        # ever binding a public interface. The caller MUST verify the advertise
+        # host is on the engagement's charter allowlist before enabling it — this
+        # class validates the URL shape, not the authorization.
+        self._advertise = self._validate_advertise(advertise_base_url)
         self._server: _OOBHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _validate_advertise(url: str | None) -> str | None:
+        if url is None:
+            return None
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError(
+                f"advertise_base_url must be an absolute http(s) URL, got {url!r}"
+            )
+        return url.rstrip("/")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -186,6 +206,14 @@ class OOBReceiver:
 
     @property
     def base_url(self) -> str:
+        """The callback base a probe embeds. The operator-hosted relay URL when
+        one was configured (blind classes then confirm on remote targets), else
+        the loopback receiver's own URL."""
+        if self._advertise is not None:
+            # Touch .port so an unstarted receiver still raises consistently.
+            if self._server is None:
+                raise RuntimeError("OOBReceiver is not started")
+            return self._advertise
         return f"http://{self._host}:{self.port}"
 
     # -- client-less API ---------------------------------------------------

@@ -273,19 +273,15 @@ def race_check(
     if not result.over_run:
         return None
 
-    # The attacker predicted the action would commit more than its limit; the
-    # burst observed exactly that. A full match fires the achieved-state oracle.
-    # bug_class 'request_race' is unknown to the verifier's routing table, so it
-    # falls back to all oracles and the from_state context confirms via
-    # achieved_state.
-    over_state = {
-        "action": action_path,
-        "max_allowed": max_allowed,
-        "successes": result.successes,
-        "atomicity_violated": True,
-    }
-    context = FindingContext.from_state(
-        over_state, over_state, bug_class="request_race"
+    # The oracle decides the invariant break over the RAW counts: the number of
+    # successes actually exceeded the permitted maximum. (The old code passed the
+    # same dict as both expected and observed, so the achieved-state oracle could
+    # never NOT fire — a pure rubber-stamp. The predicate oracle evaluates the
+    # real condition, successes > max_allowed, and cites the counts as evidence.)
+    context = FindingContext.from_predicate(
+        {"action": action_path, "successes": result.successes, "max_allowed": max_allowed},
+        {"gt": [{"var": "successes"}, {"var": "max_allowed"}]},
+        bug_class="request_race",
     )
     finding = {
         "title": f"Limit-overrun race on {action_path}",

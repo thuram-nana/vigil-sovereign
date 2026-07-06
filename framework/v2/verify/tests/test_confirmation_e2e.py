@@ -124,16 +124,19 @@ def test_confirm_finding_fills_bug_class_from_finding() -> None:
 
 
 def test_confirm_finding_accepts_raw_context_mapping() -> None:
+    # a genuine reflected XSS: the canary broke out into a live element (not inert
+    # text), so the context-aware oracle confirms it from a raw context mapping.
+    marker = "OBSIDIANXSScanary7f3a"
     confirmed = confirm_finding(
         {"bug_class": "xss", "title": "reflected xss"},
         {
             "bug_class": "xss",
-            "marker": "OBSIDIAN-XSS-canary-7f3a",
-            "observed_sink": "<div>OBSIDIAN-XSS-canary-7f3a</div>",
+            "marker": marker,
+            "observed_sink": f"<div>results</div>\"'><x{marker}>",
         },
     )
     assert confirmed is not None
-    assert confirmed.confirmed_by is OracleKind.SIDE_EFFECT
+    assert confirmed.confirmed_by is OracleKind.REFLECTION_CONTEXT
 
 
 def test_custom_verifier_threshold_is_honoured() -> None:

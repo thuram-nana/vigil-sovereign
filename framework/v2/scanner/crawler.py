@@ -128,6 +128,9 @@ class Page(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str
     status: int = 0
+    # The response body, retained so client-side analysers (static DOM-XSS
+    # source->sink) can run over the crawled corpus without re-fetching.
+    body: str = ""
 
 
 class CrawlResult(BaseModel):
@@ -194,7 +197,7 @@ class Crawler:
             status = int(resp.get("status", 0)) if isinstance(resp, dict) else 0
             body = resp.get("body", "") if isinstance(resp, dict) else ""
             raw_headers = resp.get("headers", []) if isinstance(resp, dict) else []
-            pages.append(Page(url=url, status=status))
+            pages.append(Page(url=url, status=status, body=body if isinstance(body, str) else ""))
             _add_request(requests, req_keys, req)
 
             # Passive analysis of every response — no extra request, high precision.

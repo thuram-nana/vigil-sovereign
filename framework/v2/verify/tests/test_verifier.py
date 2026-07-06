@@ -72,14 +72,29 @@ def test_confirm_boolean_sqli_via_differential() -> None:
     assert result.confirmed
 
 
-def test_confirm_xss_via_side_effect() -> None:
-    marker = "OBSIDIAN-XSS-a1b2c3"
+def test_confirm_xss_via_reflection_context() -> None:
+    # xss now confirms via the context-aware oracle: the marker must reach an
+    # EXECUTABLE position (here the payload broke out into a live tag), not merely
+    # be reflected as inert text — so this is a real XSS, not a substring match.
+    marker = "OBSIDIANXSSa1b2c3"
+    result = OracleVerifier().confirm({
+        "bug_class": "xss",
+        "marker": marker,
+        "observed_sink": f"<p>results</p>\"'><x{marker}>",
+    })
+    assert result.confirmed
+    assert result.confirming_signals[0].kind is OracleKind.REFLECTION_CONTEXT
+
+
+def test_inert_text_reflection_does_not_confirm_xss() -> None:
+    # the precision win: a marker reflected only as inert HTML text is NOT XSS
+    marker = "OBSIDIANXSSa1b2c3"
     result = OracleVerifier().confirm({
         "bug_class": "xss",
         "marker": marker,
         "observed_sink": f"<p>{marker}</p>",
     })
-    assert result.confirmed
+    assert not result.confirmed
 
 
 def test_confirm_memory_corruption_via_sanitizer() -> None:
@@ -141,10 +156,14 @@ def test_unknown_bug_class_runs_only_available_inputs() -> None:
         "marker": marker,
         "observed_sink": f"leaked {marker} here",
     })
-    # Falls back to all oracles, but only side_effect had inputs -> it fired.
+    # Falls back to all oracles; both marker-based oracles (side_effect and the
+    # context-aware reflection oracle) have inputs and run. side_effect fires on
+    # the substring; reflection_context correctly does NOT (inert text). The
+    # finding still confirms via side_effect.
     assert result.confirmed
     kinds = {s.kind for s in result.signals}
-    assert kinds == {OracleKind.SIDE_EFFECT}
+    assert kinds == {OracleKind.SIDE_EFFECT, OracleKind.REFLECTION_CONTEXT}
+    assert {s.kind for s in result.confirming_signals} == {OracleKind.SIDE_EFFECT}
 
 
 def test_custom_threshold_is_respected() -> None:

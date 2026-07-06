@@ -22,18 +22,37 @@ executor in production), so an autonomous run is both bounded and authorized.
 from __future__ import annotations
 
 import contextlib
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..verify.oob import OOBReceiver
 from ..worldmodel.graph import WorldModel
 from ..worldmodel.models import Edge, EdgeKind, Node, NodeKind
-from .checks import DEFAULT_CHECKS, Check, Send
+from .checks import CorsActiveCheck, DEFAULT_CHECKS, Check, HostHeaderCheck, RequestCheck, Send
 from .crawler import Crawler, Scope
+from .domxss import DomXssCandidate, analyze_html
 from .engine import AuditEngine, AuditFinding
+from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import InsertionKind
+from .jwt import JwtNoneCheck
+from .learning import ContextualBandit
 from .passive import PassiveFinding
 from .targeting import select_checks
+
+# The request-level arsenal: checks that operate on the WHOLE request/response
+# (adding a hostile header, POSTing a probe query) rather than fuzzing one
+# insertion point. Each confirms via its oracle on the real dangerous evidence,
+# so a properly-configured server does not fire. Run once per host by the
+# campaign (these are host/endpoint-level, not per-parameter).
+DEFAULT_REQUEST_CHECKS: tuple[RequestCheck, ...] = (
+    CorsActiveCheck(),
+    HostHeaderCheck(),
+    JwtNoneCheck(),
+    GraphQLIntrospectionCheck(),
+    GraphQLSuggestionsCheck(),
+)
 
 
 class ScanReport(BaseModel):
@@ -48,6 +67,11 @@ class ScanReport(BaseModel):
     audit_requests_sent: int = 0
     active_findings: list[AuditFinding] = Field(default_factory=list)
     passive_findings: list[PassiveFinding] = Field(default_factory=list)
+    # Static DOM-XSS source->sink flows over the crawled page corpus. These are
+    # CANDIDATES (leads), never oracle-confirmed — kept strictly separate from
+    # active_findings so the prove-don't-guess property is not diluted. Dynamic
+    # confirmation needs a headless browser (the engage runner / Wave 6 path).
+    dom_xss_candidates: list[DomXssCandidate] = Field(default_factory=list)
 
     @property
     def total_findings(self) -> int:
@@ -77,16 +101,24 @@ class WebScanCampaign:
         *,
         scope: Scope | None = None,
         checks: tuple[Check, ...] = DEFAULT_CHECKS,
+        request_checks: tuple[RequestCheck, ...] = DEFAULT_REQUEST_CHECKS,
         insertion_kinds: tuple[InsertionKind, ...] | None = None,
         max_pages: int = 100,
         max_depth: int = 6,
         max_audit_requests: int = 0,
         enable_oob: bool = True,
         targeted: bool = False,
+        bandit: ContextualBandit | None = None,
+        bandit_context: str = "default",
+        bandit_path: Path | str | None = None,
+        enable_domxss: bool = False,
+        oob_advertise_base_url: str | None = None,
     ) -> None:
         self._send = send
         self.scope = scope
         self.checks = checks
+        # Request-level checks run once per host (CORS/host-header/JWT/GraphQL).
+        self.request_checks = request_checks
         self.insertion_kinds = insertion_kinds
         self.max_pages = max_pages
         self.max_depth = max_depth
@@ -98,6 +130,32 @@ class WebScanCampaign:
         # Prioritise checks per insertion point by parameter fingerprint, so the
         # budget is spent where a bug is plausible (scanner.targeting).
         self.targeted = targeted
+        # Self-learning check ordering (scanner.learning). Explicit bandit wins;
+        # else a persisted file is warm-started if present; else a fresh uniform
+        # prior. The bandit only ORDERS effort (never drops a check), so coverage
+        # is identical with or without it. Persisted at run end if a path is set.
+        self._explicit_bandit = bandit
+        self.bandit_context = bandit_context
+        self.bandit_path = bandit_path
+        # Opt-in static DOM-XSS source->sink analysis over crawled page bodies
+        # (no extra traffic). Produces leads, not confirmed findings.
+        self.enable_domxss = enable_domxss
+        # Opt-in operator-hosted OOB relay: the callback base blind checks embed.
+        # None => loopback-only (blind classes confirm only for co-resident
+        # targets). The engage runner sets this only after checking the relay
+        # host is on the charter allowlist.
+        self.oob_advertise_base_url = oob_advertise_base_url
+
+    def _resolve_bandit(self) -> ContextualBandit:
+        """The explicit bandit, else a warm-start from the persisted file if one
+        exists, else a fresh uniform-prior bandit."""
+        if self._explicit_bandit is not None:
+            return self._explicit_bandit
+        if self.bandit_path is not None:
+            p = Path(self.bandit_path)
+            if p.is_file():
+                return ContextualBandit.load(p)
+        return ContextualBandit()
 
     def run(self, seed_url: str) -> ScanReport:
         crawl = Crawler(
@@ -105,21 +163,46 @@ class WebScanCampaign:
             max_pages=self.max_pages, max_depth=self.max_depth,
         ).crawl(seed_url)
 
+        bandit = self._resolve_bandit()
         active: list[AuditFinding] = []
         audited = 0
-        oob_cm = OOBReceiver() if self.enable_oob else contextlib.nullcontext(None)
+        seen_hosts: set[str] = set()
+        oob_cm = (
+            OOBReceiver(advertise_base_url=self.oob_advertise_base_url)
+            if self.enable_oob else contextlib.nullcontext(None)
+        )
         with oob_cm as oob:
             # One engine across the whole campaign, so its request counter enforces
             # a single shared active-traffic budget rather than a per-request one.
-            engine = AuditEngine(self._send, max_requests=self.max_audit_requests, oob=oob)
+            engine = AuditEngine(
+                self._send, max_requests=self.max_audit_requests, oob=oob,
+                bandit=bandit, bandit_context=self.bandit_context)
             selector = select_checks if self.targeted else None
             for req in crawl.requests:
+                # Request-level checks are host/endpoint-level, so run them once
+                # per host (on the first request seen for that host) — not per
+                # parameter, which would re-confirm the same host CORS/JWT N times.
+                host = urlsplit(req.url).netloc
+                point_request_checks = self.request_checks if host not in seen_hosts else ()
+                seen_hosts.add(host)
                 active.extend(engine.audit(
-                    req, checks=self.checks, insertion_kinds=self.insertion_kinds, selector=selector))
+                    req, checks=self.checks, insertion_kinds=self.insertion_kinds,
+                    selector=selector, request_checks=point_request_checks))
                 audited += 1
                 if self.max_audit_requests and engine.requests_sent >= self.max_audit_requests:
                     break  # budget spent; stop auditing further endpoints
             requests_sent = engine.requests_sent
+
+        # Persist the learned posteriors so the next engagement warm-starts.
+        if self.bandit_path is not None:
+            bandit.save(self.bandit_path)
+
+        # Opt-in static DOM-XSS leads over the crawled corpus (no extra traffic).
+        candidates: list[DomXssCandidate] = []
+        if self.enable_domxss:
+            for page in crawl.pages:
+                if page.body:
+                    candidates.extend(analyze_html(page.body))
 
         return ScanReport(
             target=seed_url,
@@ -129,6 +212,7 @@ class WebScanCampaign:
             audit_requests_sent=requests_sent,
             active_findings=active,
             passive_findings=crawl.passive_findings,
+            dom_xss_candidates=candidates,
         )
 
 

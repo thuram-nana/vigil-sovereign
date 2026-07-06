@@ -29,11 +29,13 @@ HIGH_CONFIDENCE = 0.7
 
 # Canonical bug classes to the ordered oracle kinds that can confirm them.
 BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
-    "boolean_sqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
-    "time_based_sqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
+    "boolean_sqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
+    "time_based_sqli": (OracleKind.TIMING, OracleKind.DIFFERENTIAL_RESPONSE),
+    "time_based_command_injection": (OracleKind.TIMING, OracleKind.OOB_CALLBACK),
+    "time_based": (OracleKind.TIMING,),
     "error_based_sqli": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
-    "sqli": (OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
-    "nosqli": (OracleKind.DIFFERENTIAL_RESPONSE,),
+    "sqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE, OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
+    "nosqli": (OracleKind.BOOLEAN_INFERENCE, OracleKind.DIFFERENTIAL_RESPONSE),
     "idor": (OracleKind.ACHIEVED_STATE,),
     "bola": (OracleKind.ACHIEVED_STATE,),
     "bfla": (OracleKind.ACHIEVED_STATE,),
@@ -60,7 +62,7 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "rce": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT, OracleKind.SANITIZER_SIGNAL),
     "command_injection": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "ssti": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
-    "xss": (OracleKind.SIDE_EFFECT,),
+    "xss": (OracleKind.REFLECTION_CONTEXT,),
     "path_traversal": (OracleKind.SIDE_EFFECT,),
     "lfi": (OracleKind.SIDE_EFFECT,),
     "memory_corruption": (OracleKind.SANITIZER_SIGNAL,),
@@ -75,6 +77,10 @@ _ALIASES: dict[str, str] = {
     "blind_sqli": "boolean_sqli",
     "boolean_based_sqli": "boolean_sqli",
     "time_sqli": "time_based_sqli",
+    "time_based_blind_sqli": "time_based_sqli",
+    "blind_time_sqli": "time_based_sqli",
+    "time_based_rce": "time_based_command_injection",
+    "time_based_cmdi": "time_based_command_injection",
     "no_sqli": "nosqli",
     "nosql_injection": "nosqli",
     "insecure_direct_object_reference": "idor",
@@ -180,7 +186,28 @@ class OracleVerifier:
                     ctx["baseline"], ctx["mutated"], ctx.get("discriminator")
                 )
             return None
+        if kind is OracleKind.TIMING:
+            if "baseline_latencies" in ctx and "treatment_latencies" in ctx:
+                return oracles.timing_oracle(
+                    ctx["baseline_latencies"], ctx["treatment_latencies"],
+                    injected_ms=ctx.get("timing_injected_ms"),
+                    alpha=float(ctx.get("timing_alpha", 0.01)),
+                    dose=ctx.get("timing_dose"),
+                )
+            return None
+        if kind is OracleKind.BOOLEAN_INFERENCE:
+            if "probe_rounds" in ctx:
+                return oracles.boolean_inference_oracle(
+                    ctx["probe_rounds"],
+                    discriminator=ctx.get("discriminator"),
+                    **{k: ctx[f"sprt_{k}"] for k in ("alpha", "beta", "p1", "p0") if f"sprt_{k}" in ctx},
+                )
+            return None
         if kind is OracleKind.ACHIEVED_STATE:
+            # Predicate mode (Wave 7): the oracle evaluates the dangerous
+            # condition over raw observed values — no rubber-stamp.
+            if "predicate" in ctx and "observed_evidence" in ctx:
+                return oracles.predicate_oracle(ctx["observed_evidence"], ctx["predicate"])
             if "expected_state" in ctx and "observed_state" in ctx:
                 return oracles.achieved_state_oracle(
                     ctx["expected_state"], ctx["observed_state"]
@@ -189,6 +216,10 @@ class OracleVerifier:
         if kind is OracleKind.SIDE_EFFECT:
             if "marker" in ctx and "observed_sink" in ctx:
                 return oracles.side_effect_oracle(ctx["marker"], ctx["observed_sink"])
+            return None
+        if kind is OracleKind.REFLECTION_CONTEXT:
+            if "marker" in ctx and "observed_sink" in ctx:
+                return oracles.reflection_context_oracle(ctx["marker"], ctx["observed_sink"])
             return None
         if kind is OracleKind.SANITIZER_SIGNAL:
             if "process_output" in ctx:

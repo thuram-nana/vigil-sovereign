@@ -43,6 +43,28 @@ class WorldModelError(CrucibleError):
     EthicsViolation."""
 
 
+# Pseudo-count added to the Beta belief per observation. One observation of
+# confidence c contributes _BELIEF_WEIGHT*c corroboration and *(1-c) refutation.
+_BELIEF_WEIGHT = 1.0
+
+
+def _seed_belief(confidence: float, alpha: float, beta: float) -> tuple[float, float]:
+    """Belief for a first-seen fact. If alpha/beta are still the Beta(1,1) prior
+    (not carried in from a reload), seed them from the asserted confidence; else
+    keep the supplied belief so a persisted belief survives round-tripping."""
+    if alpha == 1.0 and beta == 1.0:
+        return (1.0 + _BELIEF_WEIGHT * confidence, 1.0 + _BELIEF_WEIGHT * (1.0 - confidence))
+    return alpha, beta
+
+
+def _update_belief(alpha: float, beta: float, confidence: float) -> tuple[float, float]:
+    """Conjugate update on re-observation: a high-confidence re-observation adds
+    mostly to alpha (corroboration), a low-confidence one mostly to beta
+    (refutation) — so belief_mean rises on agreement and FALLS on a failed
+    re-check (which max-confidence can never express)."""
+    return (alpha + _BELIEF_WEIGHT * confidence, beta + _BELIEF_WEIGHT * (1.0 - confidence))
+
+
 class WorldModel:
     """A typed attack-graph. Construct empty, then accrete facts."""
 
@@ -58,13 +80,21 @@ class WorldModel:
         """Idempotent upsert. If a node with this id exists, merge attrs,
         reconcile confidence to the max, widen the seen-window, and adopt
         the higher-confidence assertion's provenance. Returns the stored
-        node (the merged one on upsert). Kind may not change once set."""
+        node (the merged one on upsert). Kind may not change once set.
+
+        Alongside the scalar confidence, a Beta(alpha, beta) belief accumulates:
+        the first assertion seeds it from the confidence; each re-observation is
+        a conjugate update (a high-confidence re-observation corroborates ->
+        alpha; a low-confidence one refutes -> beta), so belief_mean DROPS on a
+        failed re-observation even though max-confidence cannot."""
         existing = self._nodes.get(node.id)
         if existing is None:
-            self._nodes[node.id] = node
+            a, b = _seed_belief(node.confidence, node.alpha, node.beta)
+            stored = node.model_copy(update={"alpha": a, "beta": b})
+            self._nodes[node.id] = stored
             self._out.setdefault(node.id, {})
             self._in.setdefault(node.id, {})
-            return node
+            return stored
         if existing.kind != node.kind:
             raise WorldModelError(
                 f"node {node.id!r} kind conflict: "
@@ -78,10 +108,13 @@ class WorldModel:
             provenance, confidence = node.provenance, node.confidence
         else:
             provenance, confidence = existing.provenance, existing.confidence
+        alpha, beta = _update_belief(existing.alpha, existing.beta, node.confidence)
         merged = existing.model_copy(
             update={
                 "attrs": merged_attrs,
                 "confidence": confidence,
+                "alpha": alpha,
+                "beta": beta,
                 "provenance": provenance,
                 "first_seen": min(existing.first_seen, node.first_seen),
                 "last_seen": max(existing.last_seen, node.last_seen),
@@ -122,17 +155,21 @@ class WorldModel:
                 provenance, confidence = edge.provenance, edge.confidence
             else:
                 provenance, confidence = existing.provenance, existing.confidence
+            alpha, beta = _update_belief(existing.alpha, existing.beta, edge.confidence)
             stored = existing.model_copy(
                 update={
                     "attrs": merged_attrs,
                     "confidence": confidence,
+                    "alpha": alpha,
+                    "beta": beta,
                     "provenance": provenance,
                     "first_seen": min(existing.first_seen, edge.first_seen),
                     "last_seen": max(existing.last_seen, edge.last_seen),
                 }
             )
         else:
-            stored = edge
+            a, b = _seed_belief(edge.confidence, edge.alpha, edge.beta)
+            stored = edge.model_copy(update={"alpha": a, "beta": b})
         self._out.setdefault(edge.src, {}).setdefault(edge.dst, {})[kv] = stored
         self._in.setdefault(edge.dst, {}).setdefault(edge.src, {})[kv] = stored
         return stored

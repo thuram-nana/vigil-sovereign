@@ -171,13 +171,16 @@ class JwtNoneCheck:
 
         none_resp = send(with_token(req, self.location, encode_none(header, payload)))
         garbage_resp = send(with_token(req, self.location, "aaa.bbb.ccc"))
-        vulnerable = _authorized(none_resp) and not _authorized(garbage_resp)
-        return FindingContext.from_state(
-            {"alg_none_accepted": True}, {"alg_none_accepted": vulnerable}, bug_class=self.bug_class)
-
-
-def _authorized(resp: object) -> bool:
-    if not isinstance(resp, dict):
-        return False
-    status = int(resp.get("status", 0))
-    return status not in (0, 401, 403)
+        none_status = int(none_resp.get("status", 0)) if isinstance(none_resp, dict) else 0
+        garbage_status = int(garbage_resp.get("status", 0)) if isinstance(garbage_resp, dict) else 0
+        # The oracle decides "unsigned token accepted AND garbage rejected" over
+        # the raw statuses — the server specifically trusts unsigned JWTs, not
+        # that it ignores auth entirely.
+        return FindingContext.from_predicate(
+            {"none_status": none_status, "garbage_status": garbage_status,
+             "unauthorized": [0, 401, 403]},
+            {"all": [
+                {"not": {"in": [{"var": "none_status"}, {"var": "unauthorized"}]}},
+                {"in": [{"var": "garbage_status"}, {"var": "unauthorized"}]},
+            ]},
+            bug_class=self.bug_class)

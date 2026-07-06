@@ -32,6 +32,19 @@ from .learning import ContextualBandit
 CheckSelector = Callable[[InsertionPoint, "tuple[Check, ...]"], "list[Check]"]
 
 
+def _context_dump(ctx: object) -> dict | None:
+    """Serialise a verify.FindingContext to a JSON-safe dict for retention (the
+    re-verifiable certificate). Never fatal: an unserialisable context just
+    yields None, and the confirmed finding still stands on its own confidence."""
+    try:
+        dump = getattr(ctx, "model_dump", None)
+        if callable(dump):
+            return dump(mode="json")
+    except Exception:
+        pass
+    return None
+
+
 class AuditFinding(BaseModel):
     """One oracle-confirmed finding: the check that produced it, the exact
     insertion point, and the deterministic proof (which oracle fired, its
@@ -46,6 +59,10 @@ class AuditFinding(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     confirmed_by: str = Field(description="The oracle kind that fired.")
     rationale: str = ""
+    # The serialized verify.FindingContext the oracle adjudicated — the retained
+    # evidence that lets this finding be re-verified offline (the certificate the
+    # Wave-3 re-verifier re-runs the pure oracle over). None only for legacy paths.
+    oracle_context: dict | None = None
 
 
 class BudgetExceeded(RuntimeError):
@@ -113,7 +130,14 @@ class AuditEngine:
             # Request-level checks (CORS, host-header, …): run once on the whole
             # request, not per insertion point.
             for rcheck in request_checks:
-                ctx = rcheck.probe(template, self._counted_send)
+                try:
+                    ctx = rcheck.probe(template, self._counted_send)
+                except BudgetExceeded:
+                    raise  # budget is a hard stop for the whole audit
+                except Exception:
+                    # A single check erroring on an odd response (a 501 to its
+                    # POST, a malformed body) must never kill the whole scan.
+                    continue
                 if ctx is None:
                     continue
                 confirmed = confirm_finding(
@@ -133,6 +157,7 @@ class AuditEngine:
                         confidence=confirmed.confidence,
                         confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
                         rationale=confirmed.rationale,
+                        oracle_context=_context_dump(ctx),
                     ))
             for point in points:
                 point_checks = selector(point, checks) if selector is not None else checks
@@ -146,12 +171,19 @@ class AuditEngine:
                     key = (check.bug_class, point.id)
                     if key in seen:
                         continue
-                    if getattr(check, "wants_oob", False):
-                        if self.oob is None:
-                            continue  # no receiver -> blind check is skipped, not guessed
-                        ctx = check.probe(template, point, self._counted_send, self.oob)
-                    else:
-                        ctx = check.probe(template, point, self._counted_send)
+                    try:
+                        if getattr(check, "wants_oob", False):
+                            if self.oob is None:
+                                continue  # no receiver -> blind check is skipped, not guessed
+                            ctx = check.probe(template, point, self._counted_send, self.oob)
+                        else:
+                            ctx = check.probe(template, point, self._counted_send)
+                    except BudgetExceeded:
+                        raise  # budget is a hard stop for the whole audit
+                    except Exception:
+                        # Isolate a check failure to that check — a scan must be
+                        # robust to one probe erroring on a hostile response.
+                        continue
                     if ctx is None:
                         continue
                     confirmed = confirm_finding(
@@ -181,6 +213,7 @@ class AuditEngine:
                         confidence=confirmed.confidence,
                         confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
                         rationale=confirmed.rationale,
+                        oracle_context=_context_dump(ctx),
                     ))
         except BudgetExceeded:
             pass

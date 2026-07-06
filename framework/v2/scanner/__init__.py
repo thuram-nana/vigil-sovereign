@@ -36,10 +36,12 @@ from .checks import (
     DifferentialCheck,
     HostHeaderCheck,
     IdorCheck,
+    BooleanInferenceCheck,
     MarkerReflectionCheck,
     OOBCheck,
     OpenRedirectCheck,
     RequestCheck,
+    TimingCheck,
 )
 from .crawler import CrawlResult, Crawler, Page, Scope
 from .engine import AuditEngine, AuditFinding
@@ -51,9 +53,13 @@ from . import (
     benchmark,
     browser,
     browser_crawler,
+    check_synthesis,
+    constraints,
     detection_cost,
     domxss,
+    fitness,
     graphql,
+    grammar,
     jwt,
     learning,
     quantum_era,
@@ -63,6 +69,10 @@ from . import (
     smuggling,
     websocket,
 )
+from .check_synthesis import CheckEval, evaluate_check, synthesize_check
+from .constraints import InferenceResult, InferredConstraint, infer_predicate
+from .fitness import differential_proximity, reflection_proximity, unblocked_gate
+from .grammar import RequestGrammar, infer_grammar
 from .adaptive import AdaptResult, EvolveResult, evolve, waf_adapt
 from .benchmark import BenchmarkReport, run_benchmark
 from .detection_cost import detection_cost_of_technique, path_detection_cost, rank_paths
@@ -100,6 +110,8 @@ __all__ = [
     "RequestCheck",
     "CorsActiveCheck",
     "HostHeaderCheck",
+    "TimingCheck",
+    "BooleanInferenceCheck",
     "JwtNoneCheck",
     "jwt",
     "GraphQLIntrospectionCheck",
@@ -173,6 +185,18 @@ __all__ = [
     "waf_adapt",
     "EvolveResult",
     "AdaptResult",
+    # membership-query constraint inference + oracle-proximity fitness
+    "constraints",
+    "infer_predicate",
+    "InferenceResult",
+    "InferredConstraint",
+    "fitness",
+    "reflection_proximity",
+    "differential_proximity",
+    "unblocked_gate",
+    "grammar",
+    "infer_grammar",
+    "RequestGrammar",
     # quantum-era: PQC exposure + quantum-inspired optimizer
     "quantum_era",
     "classify_kex",
@@ -187,6 +211,11 @@ __all__ = [
     "MergeGate",
     "CapabilityGap",
     "CapabilityProposal",
+    # guarded, eval-gated declarative check synthesis
+    "check_synthesis",
+    "synthesize_check",
+    "evaluate_check",
+    "CheckEval",
     # targeting
     "select_checks",
     "likely_classes",
