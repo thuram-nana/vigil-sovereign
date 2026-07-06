@@ -1,0 +1,16 @@
+{
+  "id": "wp-author-sqli",
+  "bug_class": "boolean_sqli",
+  "title": "WordPress plugin boolean SQL injection (framework-gated)",
+  "severity": "High",
+  "applies_when": {"tech": "wordpress"},
+  "insertion_kinds": ["query_value", "body_form_value"],
+  "oracle": {
+    "kind": "differential",
+    "benign": "crucible-benign-term",
+    "probe": "x' OR '1'='1"
+  },
+  "references": ["CWE-89", "CAPEC-7"],
+  "remediation": "In WordPress code, use $wpdb->prepare() for every query with dynamic input; never interpolate request data into a query string. Keep plugins updated, since plugin SQLi is the dominant WordPress injection vector.",
+  "payload_family": "sql-tautology"
+}
