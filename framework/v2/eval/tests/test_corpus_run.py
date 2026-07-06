@@ -189,6 +189,46 @@ def test_run_corpus_skips_heavy_without_launcher_or_docker(tmp_path, monkeypatch
     assert not out.results
 
 
+def _image_present(tag: str) -> bool:
+    import subprocess
+
+    try:
+        return subprocess.run(["docker", "image", "inspect", tag],
+                              capture_output=True, timeout=20).returncode == 0
+    except Exception:
+        return False
+
+
+def test_real_cve_st_is_detected_when_built() -> None:
+    # A REAL, documented npm CVE end-to-end: st@0.2.4 path traversal (CVE-2014-3744).
+    # Skips unless the operator has built the image (eval/corpus_apps/_cve/build.sh) —
+    # so CI without Docker/npm/network is unaffected, but where it IS built this proves
+    # CRUCIBLE confirms a real historical vulnerability with zero false positives.
+    from pathlib import Path
+
+    from framework.v2.eval.corpus_run import (
+        CorpusApp,
+        DockerLauncher,
+        docker_available,
+        run_corpus_app,
+    )
+
+    tag = "crucible-cve-st-2014-3744:local"
+    if not docker_available():
+        pytest.skip("docker not available")
+    if not _image_present(tag):
+        pytest.skip(f"{tag} not built (run eval/corpus_apps/_cve/build.sh)")
+
+    desc = Path(__file__).resolve().parents[1] / "corpus_apps" / "cve-st-2014-3744.json"
+    boards = run_corpus_app(CorpusApp.from_json(desc), launcher=DockerLauncher())
+    assert len(boards) == 1
+    board = boards[0].scoreboard
+    assert board.tool == "crucible"
+    assert board.true_positives == 1  # the real CVE traversal
+    assert board.false_positives == 0  # zero-FP on a real package
+    assert board.precision == 1.0
+
+
 def test_load_corpus_apps_reads_shipped_descriptors() -> None:
     # the shipped descriptor directory must load and validate as CorpusApps.
     from pathlib import Path
