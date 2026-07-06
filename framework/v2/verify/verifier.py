@@ -53,7 +53,7 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "graphql_introspection": (OracleKind.ACHIEVED_STATE,),
     "graphql_suggestions": (OracleKind.ACHIEVED_STATE,),
     "request_smuggling": (OracleKind.DIFFERENTIAL_RESPONSE,),
-    "dom_xss": (OracleKind.SIDE_EFFECT,),
+    "dom_xss": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
     "cross_site_websocket_hijacking": (OracleKind.ACHIEVED_STATE,),
     "websocket_injection": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "request_race": (OracleKind.ACHIEVED_STATE,),
@@ -239,6 +239,10 @@ class OracleVerifier:
         if kind is OracleKind.ERROR_SIGNATURE:
             if "error_observed" in ctx:
                 return oracles.error_signature_oracle(ctx["error_observed"], ctx.get("error_control"))
+            return None
+        if kind is OracleKind.DOM_EXECUTION:
+            if "dom_binding_calls" in ctx and "dom_canary" in ctx:
+                return oracles.dom_execution_oracle(ctx["dom_binding_calls"], ctx["dom_canary"])
             return None
         if kind is OracleKind.SANITIZER_SIGNAL:
             if "process_output" in ctx:
