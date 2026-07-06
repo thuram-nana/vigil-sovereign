@@ -88,6 +88,8 @@ def main(argv: list[str]) -> int:
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
                         help="Archetype key the bandit keys its posteriors on.")
+    parser.add_argument("--format", choices=("text", "json", "sarif", "html"), default="text",
+                        help="Report format (json/sarif/html emit a machine/CI/human report to stdout).")
     args = parser.parse_args(argv)
 
     if not _is_loopback(args.target):
@@ -110,6 +112,11 @@ def main(argv: list[str]) -> int:
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
     ).run(args.target)
+
+    if args.format != "text":
+        from .report import render
+        print(render(report, args.format))
+        return 0
 
     print(f"scan {report.target}")
     print(f"  pages crawled     : {report.pages_crawled}")

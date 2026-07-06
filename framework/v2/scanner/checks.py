@@ -592,12 +592,18 @@ DESERIALIZATION_OOB = OOBCheck(
 )
 
 
+# Open redirect: an evidence-carrying point check (fires only on a real redirect
+# to the canary host), safe to run everywhere — the targeting selector still
+# prioritises redirect-ish params.
+OPEN_REDIRECT = OpenRedirectCheck()
+
 DEFAULT_CHECKS: tuple[Check, ...] = (
     BOOLEAN_SQLI,
     REFLECTED_XSS,
     SSTI_REFLECTION,
     PATH_TRAVERSAL,
     ERROR_BASED,
+    OPEN_REDIRECT,
     SSRF_OOB,
     XXE_OOB,
     RCE_OOB,
