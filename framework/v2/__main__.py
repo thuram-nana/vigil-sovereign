@@ -83,6 +83,11 @@ def _collaborator(argv: list[str]) -> int:
     return collaborator_cli.main(argv)
 
 
+def _benchmark(argv: list[str]) -> int:
+    from .eval import benchmark_run
+    return benchmark_run.main(argv)
+
+
 def _verify(argv: list[str]) -> int:
     from .verify import reverify
     return reverify.main(argv)
@@ -130,6 +135,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "engage": _engage,
     "verify": _verify,
     "collaborator": _collaborator,
+    "benchmark": _benchmark,
     "status": _status,
 }
 

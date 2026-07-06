@@ -70,12 +70,14 @@ from . import (
     library,
     quantum_era,
     race,
+    report,
     self_improve,
     sequencer,
     smuggling,
     spa_crawler,
     websocket,
 )
+from .report import build_report, render, to_html, to_json, to_sarif
 from .check_synthesis import CheckEval, evaluate_check, synthesize_check
 from .constraints import InferenceResult, InferredConstraint, infer_predicate
 from .fitness import differential_proximity, reflection_proximity, unblocked_gate
