@@ -44,6 +44,7 @@ from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import HttpRequest, InsertionKind
 from .jwt import JwtNoneCheck
 from .learning import ContextualBandit
+from .progress import ProgressSink
 from .library import LibraryEntry, load_library, select_entries, split_checks
 from .passive import PassiveFinding
 from .targeting import select_checks
@@ -143,10 +144,16 @@ class WebScanCampaign:
         grammar_fuzz: int = 0,
         grammar_fuzz_seed: int = 0,
         priors: "Iterable[object] | None" = None,
+        progress: "ProgressSink | None" = None,
     ) -> None:
         self._send = send
         self.scope = scope
         self.checks = checks
+        # OPT-IN live-progress sink (scanner.progress). Default None -> the run makes
+        # NO calls (byte-for-byte the current behaviour, zero cost). When attached it
+        # is invoked only on rare events (phase boundaries + confirmed findings, never
+        # per-request), so a live view never perturbs scan efficiency.
+        self._progress = progress
         # Opt-in adaptive WAF-bypass: filtered-but-plausible probes get a synthesized
         # bypassing form (see AuditEngine.waf_adaptive). Off by default (extra traffic).
         self.waf_adaptive = waf_adaptive
@@ -360,6 +367,8 @@ class WebScanCampaign:
 
     def run(self, seed_url: str) -> ScanReport:
         started = time.monotonic()
+        if self._progress is not None:
+            self._progress.phase("crawl", target=seed_url)
         crawl = Crawler(
             self._send, scope=self.scope,
             max_pages=self.max_pages, max_depth=self.max_depth,
@@ -405,6 +414,10 @@ class WebScanCampaign:
             if self.grammar_fuzz > 0:
                 all_requests += self._grammar_requests(crawl.requests)
 
+            if self._progress is not None:
+                self._progress.phase("audit", surface=len(all_requests),
+                                     pages=len(crawl.pages), discovered=len(crawl.requests))
+
             active: list[AuditFinding] = []
             audited = 0
             seen_hosts: set[str] = set()
@@ -432,9 +445,14 @@ class WebScanCampaign:
                         tuple(self.request_checks) + library_request_checks
                         if host not in seen_hosts else ())
                     seen_hosts.add(host)
-                    active.extend(engine.audit(
+                    new_findings = engine.audit(
                         req, checks=active_checks, insertion_kinds=self.insertion_kinds,
-                        selector=selector, request_checks=point_request_checks))
+                        selector=selector, request_checks=point_request_checks)
+                    if self._progress is not None:  # rare event: only on a confirmed finding
+                        for f in new_findings:
+                            self._progress.finding(f.bug_class, f.confirmed_by, f.param,
+                                                   f.endpoint, f.confidence)
+                    active.extend(new_findings)
                     audited += 1
                     if self.max_audit_requests and engine.requests_sent >= self.max_audit_requests:
                         break  # budget spent; stop auditing further endpoints
@@ -459,13 +477,17 @@ class WebScanCampaign:
             if browser is not None:
                 browser.stop()
 
+        elapsed = round(time.monotonic() - started, 3)
+        if self._progress is not None:
+            self._progress.done(findings=len(active), requests_sent=requests_sent, elapsed_s=elapsed)
+
         return ScanReport(
             target=seed_url,
             pages_crawled=len(crawl.pages),
             requests_discovered=len(crawl.requests),
             requests_audited=audited,
             audit_requests_sent=requests_sent,
-            elapsed_s=round(time.monotonic() - started, 3),
+            elapsed_s=elapsed,
             active_findings=active,
             passive_findings=crawl.passive_findings,
             dom_xss_candidates=candidates,

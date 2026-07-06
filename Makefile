@@ -44,3 +44,7 @@ baseline:
 
 test:
 	$(PY) -m pytest framework/v2 -q
+
+# Loopback, read-only operator console (a UI over the artifacts; never in the hot path).
+console:
+	$(V2) console --open
