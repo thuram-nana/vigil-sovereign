@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-git-head",
+  "bug_class": "exposure",
+  "title": "Exposed .git/HEAD",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/.git/HEAD",
+    "signature": "ref:"
+  },
+  "references": [
+    "CWE-527",
+    "CWE-16"
+  ],
+  "remediation": "Block access to .git/*.",
+  "payload_family": "exposure-git-head"
+}

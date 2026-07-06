@@ -264,12 +264,18 @@ def test_compile_timing_yields_timing_check() -> None:
 
 
 def test_compile_library_compiles_all_entries() -> None:
+    from framework.v2.scanner.library import REQUEST_LEVEL_KINDS, split_checks
     entries = _seed()
+    # compile_library returns POINT-level checks; request-level entries (e.g.
+    # signature framework packs) compile via split_checks instead.
+    point_entries = [e for e in entries if e.oracle.kind not in REQUEST_LEVEL_KINDS]
     checks = compile_library(entries)
-    assert len(checks) == len(entries)
+    assert len(checks) == len(point_entries)
     assert all(isinstance(c, Check) for c in checks)
-    # id + bug_class round-trip from entry to compiled check
-    assert {c.id for c in checks} == {e.id for e in entries}
+    # split_checks compiles EVERY entry across the two buckets
+    point, request = split_checks(entries)
+    assert len(point) + len(request) == len(entries)
+    assert {c.id for c in point} | {c.id for c in request} == {e.id for e in entries}
 
 
 # ---------------------------------------------------------------------------

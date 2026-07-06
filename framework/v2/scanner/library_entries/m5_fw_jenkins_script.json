@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-jenkins-script",
+  "bug_class": "exposure",
+  "title": "Jenkins Groovy script console reachable",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/script",
+    "signature": "Groovy"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Restrict /script to admins; it is RCE.",
+  "payload_family": "exposure-jenkins-script"
+}

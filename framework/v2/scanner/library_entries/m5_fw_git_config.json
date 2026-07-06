@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-git-config",
+  "bug_class": "exposure",
+  "title": "Exposed .git/config repository metadata",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/.git/config",
+    "signature": "repositoryformatversion"
+  },
+  "references": [
+    "CWE-527",
+    "CWE-16"
+  ],
+  "remediation": "Do not deploy the .git directory to the webroot; block dotfiles at the web server.",
+  "payload_family": "exposure-git-config"
+}

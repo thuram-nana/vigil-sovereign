@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-swagger-json",
+  "bug_class": "exposure",
+  "title": "OpenAPI/Swagger definition exposed",
+  "severity": "Info",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/swagger.json",
+    "signature": "\"swagger\""
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Restrict API docs in production if the surface is sensitive.",
+  "payload_family": "exposure-swagger-json"
+}

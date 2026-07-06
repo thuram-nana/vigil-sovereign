@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-phpinfo",
+  "bug_class": "exposure",
+  "title": "phpinfo() exposed",
+  "severity": "High",
+  "applies_when": {
+    "category": "php"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/phpinfo.php",
+    "signature": "phpinfo()"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Remove phpinfo pages from production.",
+  "payload_family": "exposure-phpinfo"
+}

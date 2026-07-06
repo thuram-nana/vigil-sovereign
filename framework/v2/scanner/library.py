@@ -50,7 +50,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from ..common.errors import CrucibleError
 from .checks import (
     Check, DifferentialCheck, ErrorSignatureCheck, EvaluationCheck,
-    MarkerReflectionCheck, OOBCheck, TimingCheck,
+    MarkerReflectionCheck, OOBCheck, PathProbeCheck, TimingCheck,
 )
 from .insertion import InsertionKind
 
@@ -59,8 +59,13 @@ LIBRARY_DIR: Path = Path(__file__).resolve().parent / "library_entries"
 
 # The concrete check shapes an entry's oracle can name.
 ORACLE_KINDS: frozenset[str] = frozenset(
-    {"differential", "reflection", "oob", "timing", "evaluation", "error_signature"}
+    {"differential", "reflection", "oob", "timing", "evaluation", "error_signature", "signature"}
 )
+
+# Kinds that compile to a REQUEST-level check (probe the whole request/host once)
+# rather than a point-level check (fuzz one insertion point). The campaign routes
+# these into its per-host request_checks, the others into the per-point checks.
+REQUEST_LEVEL_KINDS: frozenset[str] = frozenset({"signature"})
 
 # Severities an entry may claim (aligns with the framework's finding template).
 SEVERITIES: frozenset[str] = frozenset({"Critical", "High", "Medium", "Low", "Info"})
@@ -224,6 +229,10 @@ class OracleSpec(BaseModel):
         default=None, description="The distinctive value the expression computes to (evaluation).")
     # error_signature (error-based injection) — reuses `benign`; a syntax-breaking probe
     error_probe: str | None = Field(default=None, description="Syntax-breaking payload (error_signature).")
+    # signature (framework/CMS exposure) — GET a known path, confirm a distinctive signature
+    probe_path: str | None = Field(default=None, description="Path to fetch, e.g. /actuator/env (signature).")
+    signature: str | None = Field(default=None, description="Distinctive string that confirms exposure (signature).")
+    http_method: str = Field(default="GET", description="Method for the path probe (signature).")
 
     @model_validator(mode="after")
     def _check_shape(self) -> "OracleSpec":
@@ -255,6 +264,9 @@ class OracleSpec(BaseModel):
             _require(self, "expected_result")
         elif k == "error_signature":
             _require(self, "error_probe")
+        elif k == "signature":
+            _require(self, "probe_path")
+            _require(self, "signature")
         return self
 
 
@@ -379,13 +391,33 @@ def compile_entry(entry: LibraryEntry) -> Check:
             id=entry.id, bug_class=entry.bug_class,
             probe_payload=spec.error_probe, benign=benign,  # type: ignore[arg-type]
         )
+    if kind == "signature":
+        return PathProbeCheck(
+            id=entry.id, bug_class=entry.bug_class,
+            probe_path=spec.probe_path, signature=spec.signature,  # type: ignore[arg-type]
+            http_method=spec.http_method,
+        )
     # OracleSpec validation makes this unreachable; kept as a defensive guard.
     raise LibraryError(f"unknown oracle kind {kind!r} in entry {entry.id!r}")
 
 
 def compile_library(entries: Iterable[LibraryEntry]) -> list[Check]:
-    """Compile a list of entries into runnable checks, order-preserving."""
-    return [compile_entry(e) for e in entries]
+    """Compile a list of POINT-level entries into runnable checks, order-preserving.
+    Request-level entries (see :data:`REQUEST_LEVEL_KINDS`) are skipped — use
+    :func:`split_checks` to get both kinds routed correctly."""
+    return [compile_entry(e) for e in entries if e.oracle.kind not in REQUEST_LEVEL_KINDS]
+
+
+def split_checks(entries: Iterable[LibraryEntry]) -> tuple[list[Check], list]:
+    """Compile ``entries`` into ``(point_checks, request_checks)``: point-level
+    checks fuzz one insertion point (the engine's ``checks``), request-level checks
+    probe the whole host once (the engine's ``request_checks``)."""
+    point: list[Check] = []
+    request: list = []
+    for e in entries:
+        compiled = compile_entry(e)
+        (request if e.oracle.kind in REQUEST_LEVEL_KINDS else point).append(compiled)
+    return point, request
 
 
 # ---------------------------------------------------------------------------

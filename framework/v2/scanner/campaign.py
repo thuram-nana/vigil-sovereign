@@ -40,7 +40,7 @@ from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import HttpRequest, InsertionKind
 from .jwt import JwtNoneCheck
 from .learning import ContextualBandit
-from .library import LibraryEntry, compile_library, load_library, select_entries
+from .library import LibraryEntry, load_library, select_entries, split_checks
 from .passive import PassiveFinding
 from .targeting import select_checks
 
@@ -304,14 +304,16 @@ class WebScanCampaign:
             # at a Spring app.
             fp: Fingerprint | None = None
             active_checks = self.checks
+            library_request_checks: tuple = ()
             library_checks_run = 0
             if self.use_library:
                 fp = fingerprint(crawl.pages)
                 entries = self._library_entries if self._library_entries is not None else load_library()
                 selected = select_entries(entries, fp.tokens)
-                lib_checks = tuple(compile_library(selected))
-                library_checks_run = len(lib_checks)
-                active_checks = tuple(self.checks) + lib_checks
+                point_lib, request_lib = split_checks(selected)
+                library_request_checks = tuple(request_lib)
+                library_checks_run = len(point_lib) + len(request_lib)
+                active_checks = tuple(self.checks) + tuple(point_lib)
 
             # SPA-discovered in-scope GET endpoints join the audit surface.
             all_requests = list(crawl.requests) + extra_requests
@@ -338,7 +340,9 @@ class WebScanCampaign:
                     # per host (on the first request seen for that host) — not per
                     # parameter, which would re-confirm the same host CORS/JWT N times.
                     host = urlsplit(req.url).netloc
-                    point_request_checks = self.request_checks if host not in seen_hosts else ()
+                    point_request_checks = (
+                        tuple(self.request_checks) + library_request_checks
+                        if host not in seen_hosts else ())
                     seen_hosts.add(host)
                     active.extend(engine.audit(
                         req, checks=active_checks, insertion_kinds=self.insertion_kinds,
