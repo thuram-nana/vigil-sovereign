@@ -69,6 +69,8 @@ def run_engagement(
     bandit_path: str | None = None,
     enable_domxss: bool = False,
     enable_oob: bool = True,
+    enable_browser_xss: bool = False,
+    enable_spa_crawl: bool = False,
     oob_advertise_base_url: str | None = None,
     oob_relay_url: str | None = None,
     oob_relay_secret: str | None = None,
@@ -90,6 +92,12 @@ def run_engagement(
             raise EngagementRefused(
                 f"OOB {label} host not on charter allowlist ({d.refusal_kind}): {d.reason}")
 
+    # The dynamic browser passes navigate DIRECTLY (not via the gated executor),
+    # so on a remote target the browser is confined at the resolver layer to the
+    # in-scope host — it cannot pull the browser off to third-party hosts.
+    browser_allowed_hosts = {urlsplit(seed_url).hostname} if (enable_browser_xss or enable_spa_crawl) else None
+    browser_allowed_hosts = {h for h in (browser_allowed_hosts or set()) if h}
+
     ex = HttpExecutor(
         engagement_slug=slug,
         base_url=_origin(seed_url),
@@ -104,6 +112,9 @@ def run_engagement(
             max_audit_requests=max_audit_requests,
             enable_oob=enable_oob,
             enable_domxss=enable_domxss,
+            enable_browser_xss=enable_browser_xss,
+            enable_spa_crawl=enable_spa_crawl,
+            browser_allowed_hosts=browser_allowed_hosts or None,
             bandit_path=bandit_path,
             bandit_context=slug,
             oob_advertise_base_url=oob_advertise_base_url,
@@ -128,6 +139,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit.")
     parser.add_argument("--domxss", action="store_true", help="Also emit static DOM-XSS leads.")
+    parser.add_argument("--browser-xss", action="store_true",
+                        help="Confirm DOM-XSS by real execution in a headless browser "
+                             "(browser confined to the in-scope host at the resolver layer).")
+    parser.add_argument("--spa", action="store_true",
+                        help="Run the SPA crawler to capture fetch/XHR endpoints (browser confined to scope).")
     parser.add_argument("--oob-relay", default=None,
                         help="Operator-hosted, charter-allowlisted OOB callback base URL to ADVERTISE "
                              "(tunnel model; hits delivered to a loopback receiver).")
@@ -146,6 +162,8 @@ def main(argv: list[str]) -> int:
             max_audit_requests=args.max_audit_requests,
             bandit_path=args.bandit_file,
             enable_domxss=args.domxss,
+            enable_browser_xss=args.browser_xss,
+            enable_spa_crawl=args.spa,
             oob_advertise_base_url=args.oob_relay,
             oob_relay_url=args.oob_relay_url,
             oob_relay_secret=args.oob_relay_secret,

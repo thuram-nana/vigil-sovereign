@@ -34,6 +34,9 @@ import time
 import urllib.request
 from pathlib import Path
 from types import TracebackType
+from urllib.parse import urlsplit
+
+_LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 from ..common.errors import CrucibleError
 from .browser import find_browser
@@ -71,6 +74,11 @@ class CdpSession:
         self._id = 0
         self._events: list[dict] = []
 
+    def _ingest(self, msg: dict) -> dict:
+        """Buffer one event and return it (single funnel for all read loops)."""
+        self._events.append(msg)
+        return msg
+
     def send(self, method: str, params: dict | None = None, *, timeout: float = 10.0) -> dict:
         self._id += 1
         mid = self._id
@@ -89,7 +97,7 @@ class CdpSession:
                     raise CdpError(f"{method} failed: {msg['error']}")
                 return msg.get("result", {})
             if "method" in msg:
-                self._events.append(msg)
+                self._ingest(msg)
         raise CdpError(f"CDP timeout waiting for {method}")
 
     def drain_events(self, *, timeout: float = 1.0) -> list[dict]:
@@ -106,7 +114,7 @@ class CdpSession:
             except ValueError:
                 continue
             if "method" in msg:
-                self._events.append(msg)
+                self._ingest(msg)
         return list(self._events)
 
     def events_of(self, method: str) -> list[dict]:
@@ -128,9 +136,9 @@ class CdpSession:
             except ValueError:
                 continue
             if "method" in msg:
-                self._events.append(msg)
-                if msg["method"] == method:
-                    return msg
+                got = self._ingest(msg)
+                if got is not None and got.get("method") == method:
+                    return got
         return None
 
     # -- high-level helpers -------------------------------------------------
@@ -193,12 +201,16 @@ class CdpBrowser:
     the debugger never comes up — callers then skip the dynamic path."""
 
     def __init__(self, *, browser_path: str | None = None, launch_timeout: float = 20.0,
-                 extra_flags: tuple[str, ...] = ()) -> None:
+                 extra_flags: tuple[str, ...] = (), allowed_hosts=None) -> None:
         self._path = browser_path or find_browser()
         if not self._path:
             raise CdpError("no Chromium/Chrome binary found for the CDP driver")
         self._launch_timeout = launch_timeout
         self._extra = extra_flags
+        # When set, EVERY session this browser hands out is restricted to these
+        # hosts (plus loopback): the browser cannot egress off the allowlist. This
+        # is what lets the dynamic path run against a remote (engage) target safely.
+        self._allowed_hosts = set(allowed_hosts) if allowed_hosts is not None else None
         self._proc: subprocess.Popen | None = None
         self._udd: str | None = None
         self._port: int | None = None
@@ -208,7 +220,18 @@ class CdpBrowser:
         if self._proc is not None:
             return self
         self._udd = tempfile.mkdtemp(prefix="crucible-cdp-")
-        argv = [self._path, *_LAUNCH_FLAGS, *self._extra, f"--user-data-dir={self._udd}", "about:blank"]
+        flags = [*_LAUNCH_FLAGS, *self._extra]
+        if self._allowed_hosts is not None:
+            # Gate the browser's OWN egress at the resolver: every off-scope
+            # hostname fails to resolve, so a remote target's page cannot pull the
+            # browser off to third-party hosts. Loopback + the charter allowlist
+            # are EXCLUDE-d (resolve normally). This is what makes the dynamic path
+            # safe for the remote `engage` target. (IP-literal off-scope refs — rare
+            # in real pages — are not resolver-gated; documented limitation.)
+            allow = sorted({str(h).lower() for h in self._allowed_hosts} | {"127.0.0.1", "localhost", "::1"})
+            excludes = "".join(f",EXCLUDE {h}" for h in allow)
+            flags.append(f"--host-resolver-rules=MAP * ~NOTFOUND{excludes}")
+        argv = [self._path, *flags, f"--user-data-dir={self._udd}", "about:blank"]
         self._proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         portfile = Path(self._udd) / "DevToolsActivePort"
         deadline = time.monotonic() + self._launch_timeout

@@ -483,6 +483,30 @@ class ErrorSignatureCheck:
 
 
 @dataclass(frozen=True)
+class ContentSignatureCheck:
+    """File read / local file inclusion by KNOWN-CONTENT signature.
+
+    Injects a payload (e.g. a traversal ``../../../../etc/passwd``) into the
+    insertion point and confirms via the side-effect oracle ONLY when a
+    distinctive signature of the *target file's content* (``root:x:0:0:``, a
+    ``[extensions]`` INI section, ``<web-app``) appears in the response — proof the
+    file was actually READ, not merely that the path was reflected. The signature
+    is specific enough that its presence is the proof; a reflected-but-not-read
+    payload does not fire (the current marker-reflection path-traversal check only
+    proved reflection, which is not a file read)."""
+
+    id: str
+    bug_class: str
+    payload: str
+    signature: str
+
+    def probe(self, template: RequestTemplate, point: InsertionPoint, send: Send) -> FindingContext | None:
+        resp = send(template.render(point, self.payload))
+        body = resp.get("body", "") if isinstance(resp, dict) else str(resp)
+        return FindingContext.from_side_effect(self.signature, body, bug_class=self.bug_class)
+
+
+@dataclass(frozen=True)
 class PathProbeCheck:
     """Framework/CMS exposure via a known-path signature (a request-level check).
 

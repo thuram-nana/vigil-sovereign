@@ -91,6 +91,17 @@ def _deny(_q: str, _t: float) -> bool:
     return False
 
 
+def _dom_root(request) -> Response:
+    return Response('<a href="/s?q=hi">go</a>', status=200, mimetype="text/html")
+
+
+def _dom_sink(request) -> Response:
+    # q flows into innerHTML unsanitised — DOM-XSS confirmable by execution
+    body = ("<div id=o></div><script>document.getElementById('o').innerHTML="
+            "new URLSearchParams(location.search).get('q')||''</script>")
+    return Response(body, status=200, mimetype="text/html")
+
+
 def test_engage_confirms_findings_with_reverifiable_certificates(
     isolated_engagement, httpserver: HTTPServer,
 ):
@@ -163,3 +174,27 @@ def test_oob_relay_advertises_remote_but_records_loopback_delivery():
         urllib.request.urlopen(loopback_hit, timeout=5).read()  # noqa: S310 (loopback)
         hits = oob.poll(token)
         assert hits and hits[0].token == token
+
+
+def test_engage_browser_xss_confirms_by_execution_confined_to_scope(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """The remote browser path: engage drives a headless browser (confined to the
+    in-scope host at the resolver layer) that confirms DOM-XSS by real execution."""
+    from framework.v2.scanner.cdp import cdp_available
+    if not cdp_available():
+        import pytest as _pytest
+        _pytest.skip("no Chromium/Chrome for the CDP driver")
+
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_dom_root)
+    httpserver.expect_request("/s").respond_with_handler(_dom_sink)
+
+    report = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=3, enable_oob=False, enable_browser_xss=True, prompt_callback=_deny,
+    )
+    dom = [f for f in report.active_findings if f.confirmed_by == "dom_execution"]
+    assert dom, "engage browser pass did not confirm the DOM-XSS by execution"
+    assert dom[0].oracle_context is not None  # re-verifiable certificate

@@ -16,16 +16,16 @@ loopback target and reports only oracle-confirmed findings.
 **CRUCIBLE precision target:** ≥ 0.98 (zero false
 positives on the safe endpoints is the hard requirement).
 
-**CRUCIBLE result:** precision 1.000 (MEETS target), recall 1.000, f1 1.000 (tp=8, fp=0, fn=0).
+**CRUCIBLE result:** precision 1.000 (MEETS target), recall 1.000, f1 1.000 (tp=9, fp=0, fn=0).
 
 ## Scoreboard
 
 | tool | tp | fp | fn | precision | recall | f1 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| crucible | 8 | 0 | 0 | 1.000 | 1.000 | 1.000 |
-| sqlmap | 0 | 0 | 8 | 0.000 | 0.000 | 0.000 |
-| wapiti | 1 | 7 | 7 | 0.125 | 0.125 | 0.125 |
-| nikto | 0 | 6 | 8 | 0.000 | 0.000 | 0.000 |
+| crucible | 9 | 0 | 0 | 1.000 | 1.000 | 1.000 |
+| sqlmap | 0 | 0 | 9 | 0.000 | 0.000 | 0.000 |
+| wapiti | 2 | 7 | 7 | 0.222 | 0.222 | 0.222 |
+| nikto | 0 | 7 | 9 | 0.000 | 0.000 | 0.000 |
 
 ### Reading the table
 

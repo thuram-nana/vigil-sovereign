@@ -1,0 +1,20 @@
+{
+  "id": "h1-lfi-win-ini",
+  "bug_class": "path_traversal",
+  "title": "Path traversal reading Windows win.ini",
+  "severity": "High",
+  "applies_when": {
+    "category": "windows"
+  },
+  "oracle": {
+    "kind": "content",
+    "content_payload": "..\\..\\..\\..\\..\\..\\windows\\win.ini",
+    "content_signature": "[extensions]"
+  },
+  "references": [
+    "CWE-22",
+    "CAPEC-126"
+  ],
+  "remediation": "Canonicalise the resolved path and confine it to an allow-listed base directory; reject '..'/absolute paths; never build a filesystem path from input.",
+  "payload_family": "lfi-win-ini"
+}
