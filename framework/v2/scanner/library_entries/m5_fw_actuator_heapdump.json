@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-actuator-heapdump",
+  "bug_class": "exposure",
+  "title": "Spring Actuator heapdump downloadable",
+  "severity": "High",
+  "applies_when": {
+    "category": "java"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/actuator/heapdump",
+    "signature": "JAVA PROFILE"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Never expose /actuator/heapdump.",
+  "payload_family": "exposure-actuator-heapdump"
+}

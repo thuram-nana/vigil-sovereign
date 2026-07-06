@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-env-dbpass",
+  "bug_class": "exposure",
+  "title": "Exposed .env database credentials",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/.env",
+    "signature": "DB_PASSWORD"
+  },
+  "references": [
+    "CWE-538",
+    "CWE-16"
+  ],
+  "remediation": "Never serve .env; rotate credentials.",
+  "payload_family": "exposure-env-dbpass"
+}

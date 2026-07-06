@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-spring-actuator-env",
+  "bug_class": "exposure",
+  "title": "Spring Boot Actuator /env exposed (secrets)",
+  "severity": "High",
+  "applies_when": {
+    "category": "java"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/actuator/env",
+    "signature": "propertySources"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Restrict Actuator endpoints; do not expose /env, /heapdump, /threaddump publicly.",
+  "payload_family": "exposure-spring-actuator-env"
+}

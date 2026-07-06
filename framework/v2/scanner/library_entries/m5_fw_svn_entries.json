@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-svn-entries",
+  "bug_class": "exposure",
+  "title": "Exposed .svn metadata",
+  "severity": "Medium",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/.svn/wc.db",
+    "signature": "SQLite format"
+  },
+  "references": [
+    "CWE-527",
+    "CWE-16"
+  ],
+  "remediation": "Block access to .svn/*.",
+  "payload_family": "exposure-svn-entries"
+}

@@ -27,7 +27,7 @@ import math
 import time
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from ..verify.adapter import FindingContext
 from ..verify.oob import OOBReceiver
@@ -479,6 +479,42 @@ class ErrorSignatureCheck:
         probe_body = probe.get("body", "") if isinstance(probe, dict) else str(probe)
         return FindingContext.from_error_signature(
             probe_body, control_body=control_body, bug_class=self.bug_class,
+        )
+
+
+@dataclass(frozen=True)
+class PathProbeCheck:
+    """Framework/CMS exposure via a known-path signature (a request-level check).
+
+    Fetches a fixed path relative to the target (e.g. ``/actuator/env``,
+    ``/wp-json``, ``/.git/config``) and confirms exposure ONLY when a distinctive
+    signature the framework leaks (``propertySources``, ``DB_PASSWORD``, a WP REST
+    JSON) appears in the response — adjudicated by the predicate oracle, not a mere
+    2xx. The signature must be specific enough that its presence is proof; a 404 or
+    a signature-less response does not fire. Runs once per host."""
+
+    id: str
+    bug_class: str
+    probe_path: str
+    signature: str
+    http_method: str = "GET"
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        req = template.request
+        parts = urlsplit(req.url)
+        base = f"{parts.scheme}://{parts.netloc}/"
+        url = urljoin(base, self.probe_path.lstrip("/"))
+        resp = send(req.model_copy(update={"method": self.http_method, "url": url, "body": ""}))
+        if not isinstance(resp, dict):
+            return None
+        status = int(resp.get("status", 0))
+        body = str(resp.get("body", ""))
+        if status in (0, 404):
+            return None  # not present -> nothing to adjudicate
+        return FindingContext.from_predicate(
+            {"status": status, "body": body},
+            {"all": [{"icontains": [{"var": "body"}, self.signature]}]},
+            bug_class=self.bug_class,
         )
 
 

@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-env-file",
+  "bug_class": "exposure",
+  "title": "Exposed .env with application secrets",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/.env",
+    "signature": "APP_KEY"
+  },
+  "references": [
+    "CWE-538",
+    "CWE-16"
+  ],
+  "remediation": "Never serve .env; move secrets out of the webroot and rotate any exposed keys.",
+  "payload_family": "exposure-env-file"
+}

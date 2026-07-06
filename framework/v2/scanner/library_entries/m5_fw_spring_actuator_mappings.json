@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-spring-actuator-mappings",
+  "bug_class": "exposure",
+  "title": "Spring Boot Actuator /mappings exposed",
+  "severity": "Medium",
+  "applies_when": {
+    "category": "java"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/actuator/mappings",
+    "signature": "handlerMethod"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Restrict Actuator endpoints to authenticated ops.",
+  "payload_family": "exposure-spring-actuator-mappings"
+}

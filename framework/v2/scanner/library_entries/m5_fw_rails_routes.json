@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-rails-routes",
+  "bug_class": "exposure",
+  "title": "Rails route listing exposed",
+  "severity": "Medium",
+  "applies_when": {
+    "category": "ruby"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/rails/info/routes",
+    "signature": "URI Pattern"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Disable the routes info page in production.",
+  "payload_family": "exposure-rails-routes"
+}

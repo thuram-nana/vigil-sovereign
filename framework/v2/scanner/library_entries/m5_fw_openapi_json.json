@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-openapi-json",
+  "bug_class": "exposure",
+  "title": "OpenAPI definition exposed",
+  "severity": "Info",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/openapi.json",
+    "signature": "\"openapi\""
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Restrict API docs in production if sensitive.",
+  "payload_family": "exposure-openapi-json"
+}

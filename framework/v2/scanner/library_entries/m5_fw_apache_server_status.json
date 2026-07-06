@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-apache-server-status",
+  "bug_class": "exposure",
+  "title": "Apache mod_status exposed",
+  "severity": "Medium",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/server-status",
+    "signature": "Apache Server Status"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Restrict mod_status to localhost/authenticated.",
+  "payload_family": "exposure-apache-server-status"
+}

@@ -40,6 +40,7 @@ from .checks import (
     MarkerReflectionCheck,
     OOBCheck,
     OpenRedirectCheck,
+    PathProbeCheck,
     RequestCheck,
     TimingCheck,
 )
@@ -53,26 +54,48 @@ from . import (
     benchmark,
     browser,
     browser_crawler,
+    browser_xss,
+    cdp,
     check_synthesis,
     constraints,
     detection_cost,
+    discovery,
     domxss,
+    fingerprint,
     fitness,
     graphql,
     grammar,
     jwt,
     learning,
+    library,
     quantum_era,
     race,
     self_improve,
     sequencer,
     smuggling,
+    spa_crawler,
     websocket,
 )
 from .check_synthesis import CheckEval, evaluate_check, synthesize_check
 from .constraints import InferenceResult, InferredConstraint, infer_predicate
 from .fitness import differential_proximity, reflection_proximity, unblocked_gate
 from .grammar import RequestGrammar, infer_grammar
+from .cdp import CdpBrowser, CdpSession, cdp_available
+from .browser_xss import DomXssResult, confirm_dom_xss
+from .spa_crawler import SpaCrawlResult, crawl_spa, detect_framework
+from .discovery import (
+    ApiOperation,
+    DiscoveredPath,
+    JsFindings,
+    discover_content,
+    mine_js,
+    mine_params,
+    parse_openapi,
+    parse_robots,
+    parse_sitemap,
+)
+from .fingerprint import Fingerprint, fingerprint
+from .library import LibraryEntry, compile_entry, load_library, select_entries, split_checks
 from .adaptive import AdaptResult, EvolveResult, evolve, waf_adapt
 from .benchmark import BenchmarkReport, run_benchmark
 from .detection_cost import detection_cost_of_technique, path_detection_cost, rank_paths

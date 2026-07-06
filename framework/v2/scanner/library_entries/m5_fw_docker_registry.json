@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-docker-registry",
+  "bug_class": "exposure",
+  "title": "Docker registry catalog exposed",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/v2/_catalog",
+    "signature": "\"repositories\""
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Require auth on the registry API.",
+  "payload_family": "exposure-docker-registry"
+}

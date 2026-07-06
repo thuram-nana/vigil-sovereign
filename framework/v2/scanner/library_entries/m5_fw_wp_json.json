@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-wp-json",
+  "bug_class": "exposure",
+  "title": "WordPress REST API exposed",
+  "severity": "Info",
+  "applies_when": {
+    "tech": "wordpress"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/wp-json/",
+    "signature": "\"namespaces\""
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Restrict the REST API surface if not needed.",
+  "payload_family": "exposure-wp-json"
+}
