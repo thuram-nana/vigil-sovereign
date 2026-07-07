@@ -152,6 +152,7 @@ class GuardedHttpTransport:
         capture_dir: Path | None = None,
         timeout: float = 8.0,
         target_hosts: tuple[str, ...] = (),
+        response_normalizer: "object | None" = None,
     ) -> None:
         if not collector_hosts:
             raise CrucibleError(
@@ -176,6 +177,8 @@ class GuardedHttpTransport:
         self._capture_dir = Path(capture_dir) if capture_dir else None
         self._timeout = timeout
         self._client = client  # injected guarded httpx.Client, or None to build lazily
+        # optional (source_kind, raw_json) -> canonical payload mapper for live sources.
+        self._normalizer = response_normalizer
 
     def _ensure_client(self) -> object:
         if self._client is not None:
@@ -211,6 +214,9 @@ class GuardedHttpTransport:
         try:
             resp = client.get(url)  # type: ignore[attr-defined]
             payload = _decode(resp)
+            if self._normalizer is not None:
+                # map the source's raw JSON onto the collectors' canonical payload shape
+                payload = self._normalizer(source_kind, payload)  # type: ignore[operator]
             rec = RawRecord(source_kind=source_kind, query=query, payload=payload,
                             endpoint=url, fetched_seq=seq, ok=200 <= resp.status_code < 300)
         except Exception as e:  # network / parse failure — recorded, never raised past here

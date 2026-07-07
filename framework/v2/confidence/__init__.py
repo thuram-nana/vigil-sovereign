@@ -25,9 +25,10 @@ from .models import (
     ScientificHypothesis,
 )
 from .engine import assess
+from .decision import assess_finding
 
 __all__ = [
     "AlternativeHypothesis", "CandidateObservation", "ConfidenceReport", "Evidence",
     "EvidenceValuation", "HypothesisPosterior", "Provenance", "ScientificHypothesis",
-    "assess",
+    "assess", "assess_finding",
 ]

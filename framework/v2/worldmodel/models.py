@@ -133,6 +133,7 @@ class EdgeKind(str, enum.Enum):
     OBSERVED_ON = "observed_on"
     ASSET_OWNS = "asset_owns"
     SAME_AS = "same_as"
+    CO_HOSTED_WITH = "co_hosted_with"   # two distinct assets share infrastructure (derived, symmetric)
 
 
 # ---------------------------------------------------------------------------

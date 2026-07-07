@@ -41,6 +41,19 @@ class RdapCollector(Collector):
         p = rec.payload if isinstance(rec.payload, dict) else {}
         out = []
         idx = 0
+        # Carry registrant email / nameservers onto the domain node so downstream
+        # inference can attribute shared ownership (registrant is an OWNER signal — it
+        # must NOT merge assets, only attribute them; intel.infer handles that).
+        if subject.kind is NodeKind.DOMAIN:
+            dom_attrs: dict = {}
+            if p.get("registrant_email"):
+                dom_attrs["registrant_email"] = str(p["registrant_email"]).strip().lower()
+            if p.get("nameservers"):
+                dom_attrs["nameservers"] = str(p["nameservers"])
+            if dom_attrs:
+                out.append(self._mint(subject, rec=rec, seq=seq, idx=idx, confidence=0.85,
+                                      attrs=dom_attrs))
+                idx += 1
         org_name = str(p.get("org") or p.get("holder") or "").strip()
         if org_name:
             org = canonicalize(NodeKind.ORGANIZATION, org_name)

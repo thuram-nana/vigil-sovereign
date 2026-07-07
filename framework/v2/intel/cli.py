@@ -63,8 +63,18 @@ def _emit(obj) -> int:
 
 
 def _ingest(args: argparse.Namespace) -> int:
-    fixtures = Path(args.fixtures) if args.fixtures else _BUNDLED_FIXTURES
-    transport = FixtureTransport(fixtures)
+    if getattr(args, "live", False):
+        # GATED live recon against third-party sources (never the target). Egress is an
+        # explicit opt-in; the allowlist is disjoint from the seed by construction.
+        from .live import DEFAULT_COLLECTOR_HOSTS, build_live_transport
+        hosts = tuple(h.strip() for h in (args.collector_hosts or "").split(",") if h.strip())
+        transport = build_live_transport(
+            collector_hosts=hosts or DEFAULT_COLLECTOR_HOSTS,
+            target_hosts=(args.seed,),
+            capture_dir=Path(args.capture) if args.capture else None)
+    else:
+        fixtures = Path(args.fixtures) if args.fixtures else _BUNDLED_FIXTURES
+        transport = FixtureTransport(fixtures)
     store, istore = _open(args.slug)
     world = WorldModel()
     ing = IntelIngest(world, store=istore, engagement_slug=args.slug or "")
@@ -198,12 +208,18 @@ def main(argv: list[str]) -> int:
         description="Intelligence & Reconnaissance Engine — reason over intel, offline by default.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("ingest", help="run passive collectors offline and ingest")
+    p = sub.add_parser("ingest", help="run passive collectors (offline by default) and ingest")
     p.add_argument("--seed", required=True, help="apex domain to seed recon from")
     p.add_argument("--fixtures", default="", help="fixtures dir (default: bundled)")
     p.add_argument("--slug", default="", help="persist under this engagement slug")
     p.add_argument("--archetype", default="", help="target archetype for source-yield learning")
     p.add_argument("--max-depth", type=int, default=2, dest="max_depth")
+    p.add_argument("--live", action="store_true",
+                   help="GATED live recon against public third-party sources "
+                        "(DoH / crt.sh / RDAP / RIPEstat — never the target). Opt-in egress.")
+    p.add_argument("--collector-hosts", default="", dest="collector_hosts",
+                   help="comma-separated source allowlist for --live (default: the four public sources)")
+    p.add_argument("--capture", default="", help="mirror live responses to this dir to seed offline fixtures")
     p.set_defaults(fn=_ingest)
 
     p = sub.add_parser("resolve", help="resolved entities with merge explanations")

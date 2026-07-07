@@ -67,6 +67,10 @@ class EngagementResult:
     entities: list["Entity"] = field(default_factory=list)
     predictions: list["AssetHypothesis"] = field(default_factory=list)
     world: WorldModel | None = None
+    # Per-finding scientific confidence: each confirmed finding assessed as a hypothesis
+    # against its benign alternatives (posterior + credible interval + most-decisive next
+    # test). Pure reasoning over the oracle's own verdicts — the oracle stays authoritative.
+    finding_confidence: list = field(default_factory=list)
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -133,11 +137,31 @@ def _intel_finalize(ingest: object, report: ScanReport) -> tuple[list, list]:
     from .intel.predict import AssetPredictor
     from .worldmodel.models import NodeKind
 
+    from .intel.infer import derive_and_project
+
     ingest.ingest(observations_from_report(report, seq=ingest.high_water() + 1))  # type: ignore[attr-defined]
+    # DERIVE over the accreted asset graph (transitive ownership, co-hosting, shared
+    # registrant) before resolving — inference enriches the graph it reasons over.
+    derive_and_project(ingest.world, seq=ingest.high_water() + 1)                   # type: ignore[attr-defined]
     entities = ingest.resolve(seq=ingest.high_water()).entities                    # type: ignore[attr-defined]
     domains = sorted({m.key for e in entities for m in e.members if m.kind is NodeKind.DOMAIN})
     predictions = AssetPredictor().predict(observed_domains=domains) if domains else []
     return entities, predictions
+
+
+def _assess_findings(report: ScanReport) -> list:
+    """Score each confirmed finding as a scientific hypothesis (posterior + competing
+    benign explanation + most-decisive next test). Pure reasoning over the oracle's
+    verdicts; best-effort."""
+    from .confidence.decision import assess_finding
+
+    reports = []
+    for f in report.active_findings:
+        try:
+            reports.append(assess_finding(f))
+        except Exception:
+            continue
+    return reports
 
 
 def run_engagement(
@@ -243,6 +267,12 @@ def run_engagement(
             result.entities, result.predictions = _intel_finalize(ingest, report)
         except Exception:
             pass
+    # Scientific confidence per finding — pure reasoning over the oracle's verdicts,
+    # never traffic; best-effort so it can never sink the engagement.
+    try:
+        result.finding_confidence = _assess_findings(report)
+    except Exception:
+        pass
     # Findings project ABOVE the intel recon band on the shared clock, so the monotonic
     # world-model time never inverts across the recon→scan handoff. Derived from the
     # SHARED WORLD itself (not the ingest handle), so it is correct even if recon
@@ -342,9 +372,16 @@ def main(argv: list[str]) -> int:
     print(f"  pages crawled     : {report.pages_crawled}")
     print(f"  requests audited  : {report.requests_audited} ({report.audit_requests_sent} sent)")
     print(f"  confirmed findings: {len(report.active_findings)}")
+    conf_by_surface = {}
+    for cr in result.finding_confidence:
+        conf_by_surface[cr.focal.id] = cr
     for f in report.active_findings:
         cert = "cert" if f.oracle_context else "no-cert"
-        print(f"    [{f.confirmed_by}/{cert}] {f.bug_class} @ {f.insertion_point} (conf {f.confidence:.2f})")
+        line = f"    [{f.confirmed_by}/{cert}] {f.bug_class} @ {f.insertion_point} (conf {f.confidence:.2f})"
+        cr = conf_by_surface.get(f"REAL:{f.bug_class}")
+        if cr is not None:
+            line += f"  → posterior {cr.focal.posterior:.3f}" + (" ✓target" if cr.reaches_target else "")
+        print(line)
     if report.passive_findings:
         print(f"  passive findings  : {len(report.passive_findings)}")
     if report.dom_xss_candidates:

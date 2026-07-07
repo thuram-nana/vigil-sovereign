@@ -47,6 +47,7 @@ class IntelSourceKind(str, enum.Enum):
     FINGERPRINT = "fingerprint"       # the intake fingerprinter feeding the engine
     OPERATOR_INGEST = "operator_ingest"  # operator-provided data (offline path)
     SCAN = "scan"                     # a confirmed scan/engage finding
+    INFERENCE = "inference"           # a fact DERIVED from other observations (intel.infer)
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,

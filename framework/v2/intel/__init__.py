@@ -35,6 +35,12 @@ from .transport import (
 from .ingest import IngestResult, IntelIngest
 from .planner import ReconPlan, ReconPlanner, ReconTask
 from .store import IntelStore
+from .live import (
+    DEFAULT_COLLECTOR_HOSTS,
+    LIVE_ENDPOINTS,
+    build_live_transport,
+    normalize_response,
+)
 from .temporal import (
     ENUMERATIVE_SOURCE_KINDS,
     SurfaceDelta,
@@ -59,6 +65,8 @@ __all__ = [
     "MappingTransport", "GuardedHttpTransport",
     "IntelIngest", "IngestResult", "IntelStore",
     "ReconPlanner", "ReconPlan", "ReconTask",
+    # gated live recon
+    "build_live_transport", "normalize_response", "LIVE_ENDPOINTS", "DEFAULT_COLLECTOR_HOSTS",
     # Phase C — temporal + prediction
     "TemporalIndex", "SurfaceDelta", "TimelineEvent", "ENUMERATIVE_SOURCE_KINDS",
     "AssetPredictor", "AssetHypothesis", "assess_prediction",
