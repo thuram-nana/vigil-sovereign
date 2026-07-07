@@ -129,6 +129,64 @@ def test_engage_confirms_findings_with_reverifiable_certificates(
         assert confirmed is not None, f"certificate for {f.bug_class} did not re-verify"
 
 
+_INTEL_PREFIXES = ("host:", "domain:", "application:", "service:", "certificate:",
+                   "asn:", "netblock:", "organization:")
+_ATTACK_PREFIXES = ("endpoint:", "finding:", "datastore:", "cloud_resource:", "attacker")
+
+
+def test_engage_recon_joins_intel_and_attack_on_one_clock_safe_world(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, enable_recon=True, prompt_callback=_deny,
+    )
+    # the scan still works — recon must not disturb it
+    assert result.report.active_findings, "recon must not break the scan"
+    # the target was resolved into the intel inventory
+    assert result.entities, "recon produced no asset inventory"
+    assert any(m.node_id == "host:127.0.0.1" for e in result.entities for m in e.members)
+    # predictions (if any — an IP target yields no sibling domains) are ALWAYS gated
+    assert all(p.gated for p in result.predictions)
+
+    # intel assets and attack facts coexist on ONE shared world with disjoint ids...
+    world = result.world
+    assert world is not None
+    intel = [n for n in world.all_nodes() if n.id.startswith(_INTEL_PREFIXES)]
+    attack = [n for n in world.all_nodes() if n.id.startswith(_ATTACK_PREFIXES)]
+    assert intel and attack, "expected both intel and attack nodes on the shared world"
+    # ...and the monotonic clock never inverts: every attack fact is stamped strictly
+    # ABOVE the recon band (the fix for the partial-failure seq_base collapse).
+    assert min(a.first_seen for a in attack) > max(i.last_seen for i in intel)
+
+
+def test_engage_default_path_produces_no_intel_and_is_unchanged(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny,  # enable_recon defaults False
+    )
+    assert result.report.active_findings                 # scan unchanged
+    assert result.entities == [] and result.predictions == []  # no intel on the default path
+    # world carries only attack facts, and finding projection starts at seq 1 (seq_base
+    # default) exactly as before the integration.
+    assert result.world is not None
+    assert not [n for n in result.world.all_nodes() if n.id.startswith(_INTEL_PREFIXES)]
+    attack = [n for n in result.world.all_nodes() if n.id.startswith(_ATTACK_PREFIXES)]
+    assert attack and min(n.first_seen for n in attack) == 1
+
+
 def test_engage_refuses_tripped_killswitch_before_any_traffic(
     isolated_engagement, httpserver: HTTPServer,
 ):

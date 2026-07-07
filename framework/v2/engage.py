@@ -113,9 +113,15 @@ def _intel_recon(world: WorldModel, slug: str, seed_url: str, *,
     ingest = IntelIngest(world, engagement_slug=slug)
     host = urlsplit(seed_url).hostname or ""
     if fixtures_dir and host:
-        ingest.run_collectors(
-            [host_ref(host)], list(DEFAULT_COLLECTORS), FixtureTransport(fixtures_dir),
-            seq=0, max_depth=max_depth, planner=ReconPlanner(list(DEFAULT_COLLECTORS)))
+        try:
+            ingest.run_collectors(
+                [host_ref(host)], list(DEFAULT_COLLECTORS), FixtureTransport(fixtures_dir),
+                seq=0, max_depth=max_depth, planner=ReconPlanner(list(DEFAULT_COLLECTORS)))
+        except Exception:
+            # a partial recon failure keeps whatever already projected AND the ingest
+            # handle — never discard it (discarding it would collapse the seq base and
+            # invert the shared clock when findings project next).
+            pass
     return ingest
 
 
@@ -238,8 +244,11 @@ def run_engagement(
         except Exception:
             pass
     # Findings project ABOVE the intel recon band on the shared clock, so the monotonic
-    # world-model time never inverts across the recon→scan handoff.
-    seq_base = (ingest.high_water() + 1) if (enable_recon and ingest is not None) else 1
+    # world-model time never inverts across the recon→scan handoff. Derived from the
+    # SHARED WORLD itself (not the ingest handle), so it is correct even if recon
+    # partially failed and left nodes behind — and is exactly 1 when recon is off (empty
+    # world), reproducing the standalone behaviour.
+    seq_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
 
     # Forward reasoning over the confirmed facts (no traffic). Best-effort: the
     # scan result is authoritative and must survive any chaining error.

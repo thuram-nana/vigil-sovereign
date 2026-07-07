@@ -142,15 +142,18 @@ def test_seed_tree_predictions_are_gated_and_never_claimed() -> None:
                    if n.is_leaf() and n.bug_class == "asset-existence"]
     assert len(pred_leaves) == 2
     assert all(n.status == "deferred" for n in pred_leaves)          # born deferred
-    # the planner's selectors only consider open/claimed leaves → a prediction is
-    # NEVER auto-claimed and NEVER dispatched.
-    for _ in range(20):
-        leaf = tree.best_open_leaf()
-        if leaf is None:
-            break
-        assert leaf.bug_class != "asset-existence"
-        tree.mark_status(leaf.id, "failed")
+    # ALL three planner selectors only consider open/claimed leaves (they share
+    # open_leaves()), so a prediction is NEVER auto-claimed and NEVER dispatched.
+    for selector in (tree.best_open_leaf, tree.best_open_leaf_voi):
+        for _ in range(30):
+            leaf = selector()
+            if leaf is None:
+                break
+            assert leaf.bug_class != "asset-existence"
+            tree.mark_status(leaf.id, "failed")
     assert all(n.status == "deferred" for n in pred_leaves)          # still gated after draining
+    # open_leaves() (the shared filter) never yields a deferred prediction
+    assert all(l.bug_class != "asset-existence" for l in tree.open_leaves())
 
 
 def test_seed_tree_prediction_surface_is_not_a_dispatchable_url() -> None:
