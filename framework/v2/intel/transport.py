@@ -151,6 +151,7 @@ class GuardedHttpTransport:
         client: object | None = None,
         capture_dir: Path | None = None,
         timeout: float = 8.0,
+        target_hosts: tuple[str, ...] = (),
     ) -> None:
         if not collector_hosts:
             raise CrucibleError(
@@ -158,6 +159,18 @@ class GuardedHttpTransport:
                 "an empty allowlist would refuse every fetch — use FixtureTransport for "
                 "offline data instead."
             )
+        if target_hosts:
+            # Enforce the doctrine: recon sources must be disjoint from target scope, so
+            # a collector can never be pointed at the engagement's own target.
+            from ..agents.egress_guard import collector_scope_conflicts
+            conflicts = collector_scope_conflicts(collector_hosts, target_hosts)
+            if conflicts:
+                raise CollectorEgressRefused(
+                    f"collector_hosts {conflicts} overlap the engagement target scope "
+                    f"{tuple(target_hosts)}; recon sources must be third parties DISJOINT "
+                    f"from the target. Refusing to construct a collector transport that "
+                    f"could query the target itself."
+                )
         self._hosts = tuple(collector_hosts)
         self._endpoints = dict(endpoints)
         self._capture_dir = Path(capture_dir) if capture_dir else None

@@ -87,6 +87,33 @@ def test_point_query_silence_is_stale_not_disappeared() -> None:
     assert d.disappeared == []
 
 
+def test_disappearance_does_not_leak_across_scopes() -> None:
+    # Re-enumerating apex a.com must NEVER disappear an asset under apex b.com —
+    # a complete-list source is only authoritative over ITS OWN scope.
+    idx = TemporalIndex.from_observations([
+        _ct_node("api.a.com", "a.com", 1),
+        _ct_node("x.b.com", "b.com", 1),
+        _ct_node("api.a.com", "a.com", 3),   # re-enumerate a.com ONLY
+    ])
+    d = idx.delta(1, 3)
+    assert "domain:x.b.com" not in d.disappeared     # b.com was not re-enumerated
+    assert "domain:x.b.com" in d.stale               # → unknown, not gone
+
+
+def test_point_query_asset_never_disappears_even_with_an_enumerative_sweep() -> None:
+    # legacy.company.com is only ever attested by DNS (a point query) and never had a
+    # cert. A normal CT sweep of the apex that omits it must NOT report it gone — CT
+    # never listed it, so its absence carries no information about legacy's existence.
+    idx = TemporalIndex.from_observations([
+        _dns_node("legacy.company.com", 1),
+        _ct_node("api.company.com", "company.com", 1),
+        _ct_node("api.company.com", "company.com", 3),   # CT sweep omits legacy (never had it)
+    ])
+    d = idx.delta(1, 3)
+    assert "domain:legacy.company.com" not in d.disappeared
+    assert "domain:legacy.company.com" in d.stale
+
+
 def test_reappearance_is_not_disappearance() -> None:
     idx = TemporalIndex.from_observations([
         _ct_node("api.company.com", "company.com", 1),

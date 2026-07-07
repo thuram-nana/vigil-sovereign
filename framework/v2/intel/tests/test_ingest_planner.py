@@ -13,7 +13,7 @@ import pytest
 
 from framework.v2.intel.collectors import DEFAULT_COLLECTORS, DnsCollector
 from framework.v2.intel.ingest import IntelIngest
-from framework.v2.intel.models import IntelSourceKind
+from framework.v2.intel.models import IntelSourceKind, Observation
 from framework.v2.intel.planner import ReconPlanner
 from framework.v2.intel.refs import canonicalize
 from framework.v2.intel.store import IntelStore
@@ -21,10 +21,35 @@ from framework.v2.intel.transport import (
     CollectorEgressRefused,
     FixtureTransport,
     GuardedHttpTransport,
+    RawRecord,
 )
 from framework.v2.memory.store import open_store
 from framework.v2.worldmodel.graph import WorldModel
-from framework.v2.worldmodel.models import NodeKind
+from framework.v2.worldmodel.models import EdgeKind, NodeKind
+
+
+class _RecordingClient:
+    """A stand-in httpx client that records every .get() — lets us prove the egress
+    guard checks the host BEFORE any network call (no bytes leave on refusal)."""
+
+    def __init__(self, status: int = 200, payload=None) -> None:
+        self.calls: list[str] = []
+        self._status = status
+        self._payload = payload if payload is not None else {}
+
+    def get(self, url: str):
+        self.calls.append(url)
+        return _Resp(self._status, self._payload)
+
+
+class _Resp:
+    def __init__(self, status: int, payload) -> None:
+        self.status_code = status
+        self._p = payload
+        self.text = ""
+
+    def json(self):
+        return self._p
 
 _FIX = Path(__file__).resolve().parents[1] / "collectors" / "fixtures"
 
@@ -95,6 +120,54 @@ def test_reingest_is_idempotent() -> None:
     assert {e.canonical_id for e in r1.entities} == {e.canonical_id for e in r2.entities}
 
 
+def _node_obs(oid: str, dom: str, seq: int = 1) -> Observation:
+    return Observation(obs_id=oid, source="dns", source_kind=IntelSourceKind.DNS,
+                       subject=canonicalize(NodeKind.DOMAIN, dom), confidence=0.9, seq=seq)
+
+
+def _same_as(oid: str, a: str, b: str, seq: int = 1) -> Observation:
+    return Observation(obs_id=oid, source="dns", source_kind=IntelSourceKind.DNS,
+                       subject=canonicalize(NodeKind.DOMAIN, a), relation=EdgeKind.SAME_AS,
+                       object=canonicalize(NodeKind.DOMAIN, b), confidence=0.92, seq=seq)
+
+
+def test_reingest_same_batch_is_noop() -> None:
+    # re-ingesting identical observations must not re-project (false corroboration) or
+    # re-accumulate (double-counted SAME_AS/ANNOUNCES).
+    world = WorldModel()
+    ing = IntelIngest(world)
+    batch = [_node_obs("o1", "api.acme.com")]
+    ing.ingest(batch)
+    b1 = world.get_node("domain:api.acme.com").belief_mean
+    res2 = ing.ingest(batch)   # same obs_id again
+    b2 = world.get_node("domain:api.acme.com").belief_mean
+    assert res2.applied == 0 and abs(b1 - b2) < 1e-12   # belief unchanged — a true no-op
+
+
+def test_incremental_reingest_gcs_superseded_entities(tmp_path: Path) -> None:
+    # domB is a singleton entity after ingest 1; ingest 2 merges domA≡domB (CNAME), so
+    # the old ent:domain:domB canonical_id must be GARBAGE-COLLECTED, not left a phantom.
+    store = open_store(tmp_path / "mls.sqlite")
+    istore = IntelStore(store)
+    ing = IntelIngest(WorldModel(), store=istore, engagement_slug="e")
+    ing.ingest([_node_obs("o1", "beta.acme.com")])
+    assert {e.canonical_id for e in istore.entities(engagement_slug="e")} == {"ent:domain:beta.acme.com"}
+    ing.ingest([_same_as("o2", "alpha.acme.com", "beta.acme.com")])   # merges → one cluster
+    ids = {e.canonical_id for e in istore.entities(engagement_slug="e")}
+    assert ids == {"ent:domain:alpha.acme.com"}, ids          # phantom beta singleton GC'd
+    assert istore.entity_for_node("domain:beta.acme.com", engagement_slug="e") == "ent:domain:alpha.acme.com"
+    store.close()
+
+
+def test_run_collectors_seed_order_independent() -> None:
+    seeds_a = [canonicalize(NodeKind.DOMAIN, "company.com"),
+               canonicalize(NodeKind.DOMAIN, "other.example")]
+    seeds_b = list(reversed(seeds_a))
+    r1 = IntelIngest(WorldModel()).run_collectors(seeds_a, list(DEFAULT_COLLECTORS), _transport(), max_depth=2)
+    r2 = IntelIngest(WorldModel()).run_collectors(seeds_b, list(DEFAULT_COLLECTORS), _transport(), max_depth=2)
+    assert {e.canonical_id for e in r1.entities} == {e.canonical_id for e in r2.entities}
+
+
 # ---- ReconPlanner: value-of-information -------------------------------------
 
 
@@ -143,6 +216,50 @@ def test_guarded_transport_refuses_host_off_allowlist() -> None:
         endpoints={IntelSourceKind.CERT_TRANSPARENCY: "https://evil.example/?q={query}"})
     with pytest.raises(CollectorEgressRefused):
         t.fetch(IntelSourceKind.CERT_TRANSPARENCY, "company.com", seq=1)
+
+
+def test_guarded_transport_permits_allowlisted_host_and_calls_once() -> None:
+    # positive control: an ALLOWLISTED host is permitted, returns ok, and hits the
+    # network exactly once (guards against a regression that refuses everything).
+    client = _RecordingClient(status=200, payload=[{"fingerprint": "z", "names": ["api.company.com"]}])
+    t = GuardedHttpTransport(
+        collector_hosts=("crt.sh",),
+        endpoints={IntelSourceKind.CERT_TRANSPARENCY: "https://crt.sh/?q={query}"},
+        client=client)
+    rec = t.fetch(IntelSourceKind.CERT_TRANSPARENCY, "company.com", seq=1)
+    assert rec.ok is True and len(client.calls) == 1
+
+
+def test_guarded_transport_no_bytes_leave_on_refusal() -> None:
+    # the host check must happen BEFORE any network call — on refusal client.get is
+    # never invoked (this is the load-bearing "before bytes leave" property).
+    client = _RecordingClient()
+    t = GuardedHttpTransport(
+        collector_hosts=("crt.sh",),
+        endpoints={IntelSourceKind.CERT_TRANSPARENCY: "https://evil.example/?q={query}"},
+        client=client)
+    with pytest.raises(CollectorEgressRefused):
+        t.fetch(IntelSourceKind.CERT_TRANSPARENCY, "company.com", seq=1)
+    assert client.calls == []
+
+
+def test_guarded_transport_rejects_collector_target_overlap() -> None:
+    # recon sources must be disjoint from target scope — construction refuses overlap.
+    with pytest.raises(CollectorEgressRefused):
+        GuardedHttpTransport(
+            collector_hosts=("app.target.com",),
+            endpoints={IntelSourceKind.DNS: "https://app.target.com/{query}"},
+            target_hosts=("*.target.com",))
+    # a genuinely third-party source constructs fine
+    GuardedHttpTransport(collector_hosts=("crt.sh",), endpoints={},
+                         target_hosts=("app.target.com",))
+
+
+def test_collector_scope_conflicts_helper() -> None:
+    from framework.v2.agents.egress_guard import collector_scope_conflicts
+    assert collector_scope_conflicts(("crt.sh",), ("app.target.com",)) == []
+    assert collector_scope_conflicts(("app.target.com",), ("*.target.com",)) == ["app.target.com"]
+    assert collector_scope_conflicts(("app.target.com",), ("app.target.com",)) == ["app.target.com"]
 
 
 def test_guarded_transport_requires_nonempty_allowlist() -> None:

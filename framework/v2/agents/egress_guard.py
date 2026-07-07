@@ -136,6 +136,26 @@ def build_engagement_allowlist(
     )
 
 
+def collector_scope_conflicts(
+    collector_hosts: Iterable[str], target_hosts: Iterable[str],
+) -> list[str]:
+    """Collector hosts that OVERLAP the engagement's target scope, in either direction
+    (a collector host covered by target scope, or a target host covered by a collector
+    wildcard). The intel doctrine requires recon sources to be third parties disjoint
+    from the target; this makes that property checkable rather than merely asserted.
+    Empty list ⇒ genuinely disjoint."""
+    targets = list(target_hosts)
+    ch = list(collector_hosts)
+    conflicts: list[str] = []
+    for h in ch:
+        if not h:
+            continue
+        if ethics.host_matches_scope(h, targets) or any(
+                ethics.host_matches_scope(t, [h]) for t in targets if t):
+            conflicts.append(h)
+    return conflicts
+
+
 class SovereignHttpxTransport(httpx.BaseTransport):
     """httpx transport that refuses requests to hosts outside the
     allowlist. Wraps an inner transport (defaults to a fresh

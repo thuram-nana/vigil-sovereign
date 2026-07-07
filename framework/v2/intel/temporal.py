@@ -153,11 +153,12 @@ class TemporalIndex:
 
     def _latest_enumeration(self, scope_apex: str, lo: int, hi: int) -> tuple[int, set[str]] | None:
         """The most recent enumerative sweep of ``scope_apex`` in ``(lo, hi]``: its
-        seq and the COMPLETE set of asset node_ids it listed. None if the scope was
-        not re-enumerated in the window (⇒ no authority to declare anything gone)."""
+        seq and the COMPLETE set of asset node_ids it listed (affirming claims only).
+        None if the scope was not enumerated in the window."""
         by_seq: dict[int, set[str]] = defaultdict(set)
         for o in self._obs:
             if (o.source_kind in ENUMERATIVE_SOURCE_KINDS and o.relation is None
+                    and o.truth_confidence() >= 0.5
                     and lo < o.seq <= hi and str(o.attrs.get("apex", "")) == scope_apex):
                 by_seq[o.seq].add(o.subject.node_id)
         if not by_seq:
@@ -165,25 +166,9 @@ class TemporalIndex:
         top = max(by_seq)
         return top, by_seq[top]
 
-    def _scopes_reenumerated(self, lo: int, hi: int) -> dict[str, set[str]]:
-        """apex → complete enumerated set, for every scope re-swept in ``(lo, hi]``."""
-        apexes = {str(o.attrs.get("apex", "")) for o in self._obs
-                  if o.source_kind in ENUMERATIVE_SOURCE_KINDS and o.attrs.get("apex")}
-        out: dict[str, set[str]] = {}
-        for apex in sorted(a for a in apexes if a):
-            enum = self._latest_enumeration(apex, lo, hi)
-            if enum is not None:
-                out[apex] = enum[1]
-        return out
-
-    @staticmethod
-    def _in_scope(node_id: str, apex: str) -> bool:
-        # domain node ids only; a domain is in an apex's scope if it is the apex
-        # or a subdomain of it.
-        if not node_id.startswith("domain:"):
-            return False
-        name = node_id.split(":", 1)[1]
-        return name == apex or name.endswith("." + apex)
+    def _enumerative_apexes(self) -> list[str]:
+        return sorted({str(o.attrs.get("apex", "")) for o in self._obs
+                       if o.source_kind in ENUMERATIVE_SOURCE_KINDS and o.attrs.get("apex")})
 
     # -- the delta ------------------------------------------------------------
 
@@ -193,22 +178,32 @@ class TemporalIndex:
         Each asset known-present at ``from_seq`` is classified by what happened in
         the window ``(from_seq, to_seq]``:
           * re-affirmed          → PERSISTED
-          * omitted by a fresh enumerative sweep of its scope → DISAPPEARED
-          * neither (not re-checked by any complete-list source) → STALE
-        Assets first affirmed inside the window (and not already known) → APPEARED."""
+          * dropped from a complete-list source that PREVIOUSLY listed it → DISAPPEARED
+          * neither (not re-checked by a complete-list source that ever saw it) → STALE
+        Assets first affirmed inside the window (and not already known) → APPEARED.
+
+        Disappearance is a SET DIFFERENCE between two complete enumerative snapshots of
+        the same scope: a baseline sweep at/ before ``from_seq`` that LISTED the asset,
+        and a fresh sweep in the window that OMITS it. An asset a complete-list source
+        never listed (e.g. one only ever seen via a point query, or an apex the source
+        emits no node-claim for) can never be reported gone — its silence is STALE, not
+        absence. Claiming otherwise would convert 'we stopped looking' into 'it's gone'."""
         if to_seq < from_seq:
             from_seq, to_seq = to_seq, from_seq
         before = self.present_at(from_seq)
         reaffirmed = self._affirmed_in_window(from_seq, to_seq)
 
-        # disappearance is authorised ONLY by an enumerative re-check of the scope.
-        reenum = self._scopes_reenumerated(from_seq, to_seq)
-
-        def _enumeratively_absent(nid: str) -> bool:
-            for apex, complete in reenum.items():
-                if self._in_scope(nid, apex) and nid not in complete:
-                    return True
-            return False
+        # Per scope, diff the baseline complete list (≤ from_seq) against the fresh one
+        # (in window). Only assets the baseline LISTED and the fresh sweep DROPPED count.
+        disappeared_set: set[str] = set()
+        for apex in self._enumerative_apexes():
+            base = self._latest_enumeration(apex, -1, from_seq)   # baseline complete snapshot
+            fresh = self._latest_enumeration(apex, from_seq, to_seq)  # fresh complete snapshot
+            if base is None or fresh is None:
+                continue   # need BOTH snapshots to assert a set-difference; else no authority
+            for nid in (base[1] - fresh[1]):
+                if nid in before:
+                    disappeared_set.add(nid)
 
         persisted: list[str] = []
         disappeared: list[str] = []
@@ -216,7 +211,7 @@ class TemporalIndex:
         for nid in sorted(before):
             if nid in reaffirmed:
                 persisted.append(nid)
-            elif _enumeratively_absent(nid):
+            elif nid in disappeared_set:
                 disappeared.append(nid)
             else:
                 stale.append(nid)

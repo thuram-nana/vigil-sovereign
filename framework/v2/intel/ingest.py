@@ -67,6 +67,7 @@ class IntelIngest:
         self.store = store
         self.engagement_slug = engagement_slug
         self._observations: list[Observation] = []   # everything seen this session (for resolve)
+        self._seen_obs_ids: set[str] = set()          # dedup: obs_ids are deterministic
 
     # -- the core seam --------------------------------------------------------
 
@@ -78,6 +79,11 @@ class IntelIngest:
         applied = dropped = persisted = 0
         per_source: dict[str, int] = {}
         for obs in observations:
+            if obs.obs_id in self._seen_obs_ids:
+                continue   # re-ingesting the same observation is a no-op (idempotent):
+                           # do NOT re-project (would falsely corroborate) or re-accumulate
+                           # (would double-count SAME_AS/ANNOUNCES signals in resolve).
+            self._seen_obs_ids.add(obs.obs_id)
             s = seq if seq is not None else obs.seq
             if self.store is not None:
                 self.store.record_observation(obs, engagement_slug=self.engagement_slug)
@@ -91,8 +97,9 @@ class IntelIngest:
 
         rr = self.resolve(seq=seq or 0)
         if self.store is not None:
-            for ent in rr.entities:
-                self.store.upsert_entity(ent, engagement_slug=self.engagement_slug, seq=seq or 0)
+            # sync the FULL current clustering (GC superseded canonical_ids) — resolve()
+            # recomputes over all observations, so entities can merge across ingests.
+            self.store.sync_entities(rr.entities, engagement_slug=self.engagement_slug, seq=seq or 0)
             self.store.commit()
 
         new_subjects = self._discover_subjects(observations)
@@ -125,6 +132,10 @@ class IntelIngest:
         queries: dict[str, int] = {}
         cur_seq = seq
         while frontier:
+            # sort BEFORE popping so the very first subject (and every subject) is chosen
+            # in deterministic (depth, node_id) order — provenance seqs then don't depend
+            # on seed input order.
+            frontier.sort(key=lambda t: (t[0], t[1].node_id))
             depth, subject = frontier.pop(0)
             if subject.node_id in seen or depth > max_depth:
                 continue
@@ -141,7 +152,6 @@ class IntelIngest:
             for ns in res.new_subjects:
                 if ns.node_id not in seen:
                     frontier.append((depth + 1, ns))
-            frontier.sort(key=lambda t: (t[0], t[1].node_id))
         agg.entities = self.resolve(seq=cur_seq).entities
         agg.queries_per_source = queries
         agg.entities_per_source = self._attribute_entities(agg.entities)

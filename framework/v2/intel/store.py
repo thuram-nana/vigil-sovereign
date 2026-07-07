@@ -86,9 +86,14 @@ class IntelStore:
             (ent.canonical_id, engagement_slug, ent.tier, ent.primary_kind.value,
              ent.confidence, len(ent.members), ",".join(ent.owned_by), seq, ent.model_dump_json()),
         )
-        # refresh flattened membership + merge log for this cluster
+        # refresh flattened membership + merge log for this cluster: full replace so a
+        # re-clustered entity never carries stale members or superseded/renumbered merge
+        # events (event_ids are recomputed positionally each resolve).
         self._s.execute(
             "DELETE FROM intel_entity_members WHERE engagement_slug=? AND canonical_id=?",
+            (engagement_slug, ent.canonical_id))
+        self._s.execute(
+            "DELETE FROM intel_merge_log WHERE engagement_slug=? AND canonical_id=?",
             (engagement_slug, ent.canonical_id))
         for m in ent.members:
             self._s.execute(
@@ -98,6 +103,24 @@ class IntelStore:
                 (engagement_slug, ent.canonical_id, m.node_id, m.kind.value, seq))
         for ev in ent.merge_log:
             self._record_merge(ev, canonical_id=ent.canonical_id, engagement_slug=engagement_slug)
+
+    def sync_entities(self, entities: list[Entity], *, engagement_slug: str = "", seq: int = 0) -> None:
+        """Persist the CURRENT complete entity set for an engagement, garbage-collecting
+        any canonical_id that ceased to exist. `resolve()` recomputes the full clustering
+        over all observations each call, so a canonical_id emitted earlier can be absorbed
+        under another later; without this GC the old singleton (its members, its merge log)
+        would linger as a phantom. This makes persistence a faithful mirror of the current
+        clustering — no orphans, no contradictory membership."""
+        current = {e.canonical_id for e in entities}
+        existing = {r["canonical_id"] for r in self._s.fetchall(
+            "SELECT canonical_id FROM intel_entities WHERE engagement_slug=?", (engagement_slug,))}
+        for cid in sorted(existing - current):
+            for tbl in ("intel_entities", "intel_entity_members", "intel_merge_log"):
+                self._s.execute(
+                    f"DELETE FROM {tbl} WHERE engagement_slug=? AND canonical_id=?",
+                    (engagement_slug, cid))
+        for e in entities:
+            self.upsert_entity(e, engagement_slug=engagement_slug, seq=seq)
 
     def _record_merge(self, ev: MergeEvent, *, canonical_id: str, engagement_slug: str) -> None:
         self._s.execute(
@@ -121,7 +144,8 @@ class IntelStore:
     def entity_for_node(self, node_id: str, *, engagement_slug: str = "") -> str | None:
         row = self._s.fetchone(
             "SELECT canonical_id FROM intel_entity_members "
-            "WHERE engagement_slug=? AND member_node_id=?", (engagement_slug, node_id))
+            "WHERE engagement_slug=? AND member_node_id=? ORDER BY canonical_id LIMIT 1",
+            (engagement_slug, node_id))
         return row["canonical_id"] if row else None
 
     # -- source-yield learning (Phase D) --------------------------------------

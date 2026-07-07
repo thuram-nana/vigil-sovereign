@@ -165,10 +165,17 @@ def resolve(observations: list[Observation], *, seq: int = 0) -> ResolveResult:
     same_as: list[SignalHit] = []
     edge_prob: dict[tuple[str, str], float] = {}
     ev = 0
-    for pair, hits in sorted(pair_hits.items()):
+
+    def _order(hs: list[SignalHit]) -> list[SignalHit]:
+        # strongest first, with a total tie-break so hits order / trigger / citation are
+        # input-order-independent (audit-grade determinism).
+        return sorted(hs, key=lambda h: (-h.llr_bits, h.kind.value, h.via, h.a.node_id, h.b.node_id))
+
+    for pair, raw_hits in sorted(pair_hits.items()):
+        hits = _order(raw_hits)
         total = sum(h.llr_bits for h in hits)
         if total >= MERGE_THRESHOLD_BITS:
-            trigger = max(hits, key=lambda h: h.llr_bits)
+            trigger = hits[0]
             ev += 1
             p = _prob(total)
             edge_prob[pair] = p
@@ -177,7 +184,7 @@ def resolve(observations: list[Observation], *, seq: int = 0) -> ResolveResult:
                 probability=round(p, 5), trigger=trigger.kind, hits=hits, seq=seq))
             uf.union(pair[0], pair[1])
         elif total >= POSSIBLE_THRESHOLD_BITS:
-            same_as.append(max(hits, key=lambda h: h.llr_bits))
+            same_as.append(hits[0])
 
     # --- clusters + attach dedicated linking artifacts ----------------------
     # Seeds are the "named" assets. A host that is a RESOLUTION TARGET is an artifact
@@ -224,7 +231,7 @@ def resolve(observations: list[Observation], *, seq: int = 0) -> ResolveResult:
 
     # --- owner links (ASSET_OWNS): ASN announces a netblock that contains a host ----
     owns: list[OwnsLink] = []
-    for asn, netblock in announces:
+    for asn, netblock in sorted(announces, key=lambda t: (t[0].node_id, t[1].node_id)):
         try:
             net = ipaddress.ip_network(netblock.key, strict=False)
         except ValueError:
@@ -234,15 +241,15 @@ def resolve(observations: list[Observation], *, seq: int = 0) -> ResolveResult:
                 if m.kind is NodeKind.HOST:
                     try:
                         if ipaddress.ip_address(m.key) in net:
-                            if ent.canonical_id not in _owned(ent):
+                            if asn.node_id not in ent.owned_by:   # dedup on the OWNER id
                                 ent.owned_by.append(asn.node_id)
                             owns.append(OwnsLink(owner=asn, entity_canonical_id=ent.canonical_id, via=netblock.node_id))
                             break
                     except ValueError:
                         continue
 
+    # audit-grade determinism: owner lists + links independent of announcement order.
+    for ent in entities:
+        ent.owned_by = sorted(set(ent.owned_by))
+    owns.sort(key=lambda o: (o.entity_canonical_id, o.owner.node_id, o.via))
     return ResolveResult(entities=entities, same_as=same_as, owns=owns, merge_log=merge_log)
-
-
-def _owned(ent: Entity) -> set[str]:
-    return set(ent.owned_by)
