@@ -67,7 +67,8 @@ class EngagementResult:
     entities: list["Entity"] = field(default_factory=list)
     predictions: list["AssetHypothesis"] = field(default_factory=list)
     world: WorldModel | None = None
-    # Per-finding scientific confidence: each confirmed finding assessed as a hypothesis
+    # Per-finding scientific confidence, INDEX-ALIGNED with report.active_findings (a
+    # None entry means that finding could not be assessed). Each is a hypothesis assessed
     # against its benign alternatives (posterior + credible interval + most-decisive next
     # test). Pure reasoning over the oracle's own verdicts — the oracle stays authoritative.
     finding_confidence: list = field(default_factory=list)
@@ -160,7 +161,7 @@ def _assess_findings(report: ScanReport) -> list:
         try:
             reports.append(assess_finding(f))
         except Exception:
-            continue
+            reports.append(None)   # keep index-aligned with active_findings
     return reports
 
 
@@ -372,13 +373,11 @@ def main(argv: list[str]) -> int:
     print(f"  pages crawled     : {report.pages_crawled}")
     print(f"  requests audited  : {report.requests_audited} ({report.audit_requests_sent} sent)")
     print(f"  confirmed findings: {len(report.active_findings)}")
-    conf_by_surface = {}
-    for cr in result.finding_confidence:
-        conf_by_surface[cr.focal.id] = cr
-    for f in report.active_findings:
+    for i, f in enumerate(report.active_findings):
         cert = "cert" if f.oracle_context else "no-cert"
         line = f"    [{f.confirmed_by}/{cert}] {f.bug_class} @ {f.insertion_point} (conf {f.confidence:.2f})"
-        cr = conf_by_surface.get(f"REAL:{f.bug_class}")
+        # per-finding report, paired by INDEX (bug_class is not unique across findings)
+        cr = result.finding_confidence[i] if i < len(result.finding_confidence) else None
         if cr is not None:
             line += f"  → posterior {cr.focal.posterior:.3f}" + (" ✓target" if cr.reaches_target else "")
         print(line)

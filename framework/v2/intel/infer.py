@@ -49,6 +49,15 @@ from .refs import EntityRef
 _INFER_RELIABILITY = SourceReliability(reliability=Reliability.C, credibility=Credibility.C2)
 _OWNERSHIP_DISCOUNT = 0.85   # a clean transitive-ownership chain
 _COHOST_DISCOUNT = 0.7       # co-hosting is a weaker, sharing relation
+# BGP ANNOUNCES is a ROUTING-origin fact, not a registry ownership fact — a transit AS
+# announces prefixes it does not own — so it is far weaker evidence of ownership.
+_ANNOUNCES_OWNERSHIP_FACTOR = 0.5
+_ASSET_OWNS_OWNERSHIP_FACTOR = 1.0
+# Blocks LARGER than these are aggregates / transit space, not dedicated allocations —
+# ownership must not be inferred across them (an AS announcing 4.0.0.0/9 owns the
+# routing, not the domains that happen to resolve somewhere inside it).
+_MIN_OWNED_PREFIXLEN_V4 = 16
+_MIN_OWNED_PREFIXLEN_V6 = 32
 
 # The ONLY edge kinds inference may emit — asset-tier, never attacker-state.
 _ALLOWED_DERIVED_EDGES = frozenset({EdgeKind.ASSET_OWNS, EdgeKind.CO_HOSTED_WITH})
@@ -62,7 +71,9 @@ def _mk(subject: EntityRef, relation: EdgeKind, obj: EntityRef, *, confidence: f
         raise ValueError(
             f"intel.infer may only derive {_ALLOWED_DERIVED_EDGES}; refusing to emit "
             f"{relation!r} (deriving an attacker-state edge would hallucinate reachability)")
-    oid = f"infer:{rule}:{seq}:{subject.node_id}|{relation.value}|{obj.node_id}"
+    # CLAIM-based id (no seq): re-deriving the same fact yields the SAME obs_id, so a
+    # re-run is stable regardless of the seq it is called with.
+    oid = f"infer:{rule}:{subject.node_id}|{relation.value}|{obj.node_id}"
     return Observation(
         obs_id=oid, source="infer", source_kind=IntelSourceKind.INFERENCE, collector="infer",
         subject=subject, relation=relation, object=obj, attrs=attrs or {},
@@ -83,11 +94,17 @@ def _edge_belief(world: WorldModel, src: str, dst: str, kind: EdgeKind) -> float
 def derive_transitive_ownership(world: WorldModel, *, seq: int) -> list[Observation]:
     """owner→netblock (ASSET_OWNS/ANNOUNCES) ∧ host∈netblock ∧ domain→host (RESOLVES_TO)
     ⟹ owner ASSET_OWNS domain. Weakest-link belief × ownership discount."""
-    # owner → netblock, from either an org's ASSET_OWNS or an ASN's ANNOUNCES.
-    owner_blocks: list[tuple[str, str, float]] = []
+    # owner → netblock, tagged by HOW we know it: registry ownership (ASSET_OWNS) is
+    # strong; routing origin (ANNOUNCES) is weak (a transit AS announces what it does
+    # not own).
+    owner_blocks: list[tuple[str, str, float, float]] = []
     for e in world.all_edges():
-        if e.kind in (EdgeKind.ASSET_OWNS, EdgeKind.ANNOUNCES) and e.dst.startswith("netblock:"):
-            owner_blocks.append((e.src, e.dst, e.belief_mean))
+        if not e.dst.startswith("netblock:"):
+            continue
+        if e.kind is EdgeKind.ASSET_OWNS:
+            owner_blocks.append((e.src, e.dst, e.belief_mean, _ASSET_OWNS_OWNERSHIP_FACTOR))
+        elif e.kind is EdgeKind.ANNOUNCES:
+            owner_blocks.append((e.src, e.dst, e.belief_mean, _ANNOUNCES_OWNERSHIP_FACTOR))
 
     # domain → host (resolution), grouped by host.
     host_domains: dict[str, list[tuple[str, float]]] = defaultdict(list)
@@ -97,10 +114,15 @@ def derive_transitive_ownership(world: WorldModel, *, seq: int) -> list[Observat
 
     out: list[Observation] = []
     emitted: set[tuple[str, str]] = set()
-    for owner_id, nb_id, own_belief in sorted(owner_blocks):
+    for owner_id, nb_id, own_belief, kind_factor in sorted(owner_blocks):
         try:
             net = ipaddress.ip_network(nb_id.split(":", 1)[1], strict=False)
         except ValueError:
+            continue
+        # Size guard: a block larger than /16 (v4) or /32 (v6) is an aggregate / transit
+        # allocation — do NOT infer ownership of anything merely reachable inside it.
+        min_prefix = _MIN_OWNED_PREFIXLEN_V4 if net.version == 4 else _MIN_OWNED_PREFIXLEN_V6
+        if net.prefixlen < min_prefix:
             continue
         for host_id, domains in sorted(host_domains.items()):
             try:
@@ -109,21 +131,20 @@ def derive_transitive_ownership(world: WorldModel, *, seq: int) -> list[Observat
             except ValueError:
                 continue
             # Fanout discount: a host serving MANY domains is shared hosting — the
-            # netblock owner (a hosting provider) owns the block, not its tenants'
-            # domains. A dedicated host (fanout 1) keeps full strength; a busy one
-            # attributes only faintly. Without this the rule would falsely attribute
-            # every co-tenant of a cloud netblock to the provider's ASN.
+            # netblock owner owns the block, not its tenants' domains. Dedicated host
+            # (fanout 1) keeps full (kind-scaled) strength; a busy one attributes faintly.
             fanout_factor = 1.0 / (1.0 + math.log2(max(1, len(domains))))
             for dom_id, res_belief in sorted(domains):
                 key = (owner_id, dom_id)
                 if key in emitted:
                     continue
                 emitted.add(key)
-                conf = min(own_belief, res_belief) * _OWNERSHIP_DISCOUNT * fanout_factor
+                conf = min(own_belief, res_belief) * _OWNERSHIP_DISCOUNT * kind_factor * fanout_factor
                 out.append(_mk(_ref(owner_id), EdgeKind.ASSET_OWNS, _ref(dom_id),
                                confidence=conf, rule="transitive_ownership", seq=seq,
                                attrs={"via_host": host_id, "via_netblock": nb_id,
-                                      "host_fanout": len(domains)}))
+                                      "host_fanout": len(domains), "via_kind": (
+                                          "announces" if kind_factor == _ANNOUNCES_OWNERSHIP_FACTOR else "asset_owns")}))
     return out
 
 
@@ -198,18 +219,20 @@ def derive_and_project(world: WorldModel, *, seq: int) -> int:
     the number of derived facts newly applied.
 
     A derivation is a deterministic FUNCTION of the graph, not independent evidence — so
-    re-deriving the same fact must not re-corroborate it (that would inflate belief in a
-    fixpoint loop). An already-derived edge (one whose provenance is exactly this derived
-    obs) is therefore skipped, making the pass idempotent and fixpoint-safe."""
+    re-deriving a fact must not re-corroborate it (that would inflate belief in a fixpoint
+    loop). A derived EDGE THAT ALREADY EXISTS — whether from a prior derivation or a
+    stronger DIRECT observation — is therefore skipped entirely: the derivation adds no
+    new structural information and must not bump the Beta belief. This makes the pass
+    idempotent under ANY seq and safe against a direct-vs-derived provenance collision (a
+    weaker derived fact never re-corroborates a stronger observed one)."""
     from .project import project_observation
 
     derived = derive(world, seq=seq)
     applied = 0
     for i, obs in enumerate(derived):
         if obs.relation is not None and obs.object is not None:
-            existing = world.get_edge(obs.subject.node_id, obs.object.node_id, obs.relation)
-            if existing is not None and existing.provenance == f"intel:{obs.obs_id}":
-                continue   # this exact derivation is already recorded — no new information
+            if world.get_edge(obs.subject.node_id, obs.object.node_id, obs.relation) is not None:
+                continue   # edge already present (any source) — no independent evidence to add
         if project_observation(world, obs, seq=seq + i):
             applied += 1
     return applied

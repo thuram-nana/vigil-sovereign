@@ -187,6 +187,25 @@ def test_engage_default_path_produces_no_intel_and_is_unchanged(
     assert attack and min(n.first_seen for n in attack) == 1
 
 
+def test_finding_confidence_is_per_finding_not_collapsed_by_bug_class() -> None:
+    # two findings of the SAME bug_class must each get their OWN confidence report,
+    # index-aligned — a weak passive finding must not inherit a strong sibling's posterior.
+    from framework.v2.engage import _assess_findings
+    from framework.v2.scanner.campaign import ScanReport
+    from framework.v2.scanner.engine import AuditFinding
+
+    rep = ScanReport(target="https://x/", active_findings=[
+        AuditFinding(check_id="a", bug_class="xss", insertion_point="q.b", param="b",
+                     confidence=0.4, confirmed_by="passive"),
+        AuditFinding(check_id="c", bug_class="xss", insertion_point="q.a", param="a",
+                     confidence=0.9, confirmed_by="oracle", oracle_context={"x": 1}),
+    ])
+    reports = _assess_findings(rep)
+    assert len(reports) == 2                                   # index-aligned with findings
+    assert reports[0].focal.posterior < reports[1].focal.posterior
+    assert not reports[0].reaches_target and reports[1].reaches_target
+
+
 def test_engage_refuses_tripped_killswitch_before_any_traffic(
     isolated_engagement, httpserver: HTTPServer,
 ):

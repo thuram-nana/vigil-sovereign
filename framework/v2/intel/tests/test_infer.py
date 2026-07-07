@@ -67,6 +67,41 @@ def test_transitive_ownership_belief_is_weakest_link_discounted() -> None:
     assert derived and all(0.0 < o.confidence < 0.9 for o in derived)
 
 
+def _announce(world, asn, netblock, seq):
+    project_observation(world, Observation(
+        obs_id=f"ann:{asn}:{seq}", source="asn_bgp", source_kind=IntelSourceKind.ASN_BGP,
+        subject=EntityRef(kind=NodeKind.ASN, key=asn), relation=EdgeKind.ANNOUNCES,
+        object=EntityRef(kind=NodeKind.NETBLOCK, key=netblock), confidence=0.9, seq=seq))
+
+
+def _resolves(world, domain, host, seq):
+    project_observation(world, Observation(
+        obs_id=f"res:{domain}:{seq}", source="dns", source_kind=IntelSourceKind.DNS,
+        subject=canonicalize(NodeKind.DOMAIN, domain), relation=EdgeKind.RESOLVES_TO,
+        object=canonicalize(NodeKind.HOST, host), confidence=0.9, seq=seq))
+
+
+def test_transitive_ownership_not_derived_across_transit_aggregate() -> None:
+    # a transit AS announcing a huge aggregate must NOT be attributed ownership of a
+    # domain that merely resolves somewhere inside it (soundness — the shared/transit rule)
+    world = WorldModel()
+    _announce(world, "AS3356", "4.0.0.0/9", 1)
+    _resolves(world, "victim-unrelated.com", "4.2.2.2", 2)
+    derived = derive_transitive_ownership(world, seq=100)
+    assert not any(o.object.node_id == "domain:victim-unrelated.com" for o in derived)
+
+
+def test_transitive_ownership_busy_host_attributes_faintly() -> None:
+    # 8 tenant domains on one dedicated-looking host inside an owner /24 → each ownership
+    # attribution is faint (shared host → the owner owns the block, not the tenants)
+    world = WorldModel()
+    _announce(world, "AS64500", "198.51.100.0/24", 1)
+    for i in range(8):
+        _resolves(world, f"tenant{i}.example.com", "198.51.100.7", i + 2)
+    derived = derive_transitive_ownership(world, seq=100)
+    assert derived and all(o.confidence < 0.25 for o in derived)   # faint by fanout discount
+
+
 # ---- co-hosting -------------------------------------------------------------
 
 
@@ -149,12 +184,36 @@ def test_derive_only_produces_asset_tier_edges() -> None:
         assert o.relation in (EdgeKind.ASSET_OWNS, EdgeKind.CO_HOSTED_WITH)
 
 
-def test_derive_and_project_is_idempotent() -> None:
+def _cohost_beliefs(world) -> dict:
+    return {(e.src, e.dst, e.kind.value): e.belief_mean
+            for e in world.all_edges() if e.kind is EdgeKind.CO_HOSTED_WITH}
+
+
+def test_derive_and_project_is_idempotent_across_seqs() -> None:
     world = _worked_world()
     n1 = derive_and_project(world, seq=1000)
-    b1 = {e.node_id if False else (e.src, e.dst, e.kind.value): e.belief_mean
-          for e in world.all_edges() if e.kind is EdgeKind.CO_HOSTED_WITH}
-    derive_and_project(world, seq=1000)   # same seq/obs_ids → no runaway
-    b2 = {(e.src, e.dst, e.kind.value): e.belief_mean
-          for e in world.all_edges() if e.kind is EdgeKind.CO_HOSTED_WITH}
-    assert n1 > 0 and b1 == b2
+    b1 = _cohost_beliefs(world)
+    # re-run with a DIFFERENT seq (the production caller advances the high-water mark) —
+    # belief must not runaway: an already-present edge adds no independent evidence.
+    n2 = derive_and_project(world, seq=9999)
+    b2 = _cohost_beliefs(world)
+    assert n1 > 0 and n2 == 0 and b1 == b2
+
+
+def test_derivation_never_recorroborates_a_direct_edge() -> None:
+    # a strong DIRECT ownership edge that the transitive rule would also derive must be
+    # left untouched (a weaker derived fact must not bump the stronger observed belief)
+    world = WorldModel()
+    project_observation(world, Observation(
+        obs_id="rdap-own", source="rdap", source_kind=IntelSourceKind.RDAP_WHOIS,
+        subject=EntityRef(kind=NodeKind.ORGANIZATION, key="acme"), relation=EdgeKind.ASSET_OWNS,
+        object=canonicalize(NodeKind.DOMAIN, "example.com"), confidence=0.95, seq=1))
+    project_observation(world, Observation(
+        obs_id="rdap-nb", source="rdap", source_kind=IntelSourceKind.RDAP_WHOIS,
+        subject=EntityRef(kind=NodeKind.ORGANIZATION, key="acme"), relation=EdgeKind.ASSET_OWNS,
+        object=EntityRef(kind=NodeKind.NETBLOCK, key="192.0.2.0/24"), confidence=0.9, seq=2))
+    _resolves(world, "example.com", "192.0.2.5", 3)
+    before = world.get_edge("organization:acme", "domain:example.com", EdgeKind.ASSET_OWNS).belief_mean
+    derive_and_project(world, seq=100)
+    after = world.get_edge("organization:acme", "domain:example.com", EdgeKind.ASSET_OWNS).belief_mean
+    assert after == before   # the direct edge already existed → derivation skipped it
