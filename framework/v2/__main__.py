@@ -28,6 +28,11 @@ def _memory(argv: list[str]) -> int:
     return memory_cli.main(argv)
 
 
+def _intel(argv: list[str]) -> int:
+    from .intel import cli as intel_cli
+    return intel_cli.main(argv)
+
+
 def _kernel(argv: list[str]) -> int:
     from .kernel import cli as kernel_cli
     return kernel_cli.main(argv)
@@ -128,6 +133,7 @@ def _status(argv: list[str]) -> int:
 _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "intake": _intake,
     "memory": _memory,
+    "intel": _intel,
     "kernel": _kernel,
     "entitlement": _entitlement,
     "eval": _eval,

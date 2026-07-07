@@ -65,6 +65,17 @@ class NodeKind(str, enum.Enum):
     CONTROL = "control"                 # a defensive control (WAF, auth, MFA)
     FINDING = "finding"                 # a confirmed vulnerability
 
+    # Intelligence / asset-graph kinds (scanner.intel) — the recon substrate. An
+    # Observation projects onto one of these with a Beta belief, exactly like the
+    # attack kinds above; pathsearch scopes the two apart via `edge_kinds`.
+    DOMAIN = "domain"                   # a DNS name (apex or sub)
+    CERTIFICATE = "certificate"         # an X.509 leaf (by sha256 fingerprint)
+    ASN = "asn"                         # an autonomous system (AS<n>)
+    NETBLOCK = "netblock"               # an announced/allocated CIDR
+    ORGANIZATION = "organization"       # an owning org / registrant
+    IDENTITY = "identity"               # an OSINT persona/email (NOT a PRINCIPAL auth actor)
+    APPLICATION = "application"         # a non-web application (NOT a WEBAPP)
+
 
 class EdgeKind(str, enum.Enum):
     """What one node asserts about another. Directed: `src` -> `dst`.
@@ -85,6 +96,19 @@ class EdgeKind(str, enum.Enum):
     OWNS            src (attacker) controls dst (host/service/resource/principal).
     HOLDS           src (attacker) holds dst (credential/session/token).
     REACHED         src (attacker) has reached dst (service/endpoint/segment).
+
+    Intelligence / asset-graph edges (scanner.intel — recon substrate):
+    RESOLVES_TO     src (domain) resolves to dst (host/ip).
+    PRESENTS_CERT   src (host/service/domain) presents dst (certificate).
+    ANNOUNCES       src (asn) announces dst (netblock).
+    HOSTS           src (host/netblock) hosts dst (service/application).
+    RUNS            src (host/service) runs dst (application/webapp).
+    OBSERVED_ON     src (asset) was observed on dst (source/time context).
+    ASSET_OWNS      src (org/asn/netblock) owns dst (asset). NOTE: deliberately
+                    distinct from OWNS above — OWNS is an ATTACKER-state postcondition
+                    and a derivation rule keyed on OWNS would hallucinate attacker
+                    reachability from mere asset ownership.
+    SAME_AS         src (asset-ref) is believed the same asset as dst (entity resolution).
     """
 
     REACHABLE_FROM = "reachable_from"
@@ -100,6 +124,16 @@ class EdgeKind(str, enum.Enum):
     OWNS = "owns"
     HOLDS = "holds"
     REACHED = "reached"
+    # intelligence / asset-graph edges
+    RESOLVES_TO = "resolves_to"
+    PRESENTS_CERT = "presents_cert"
+    ANNOUNCES = "announces"
+    HOSTS = "hosts"
+    RUNS = "runs"
+    OBSERVED_ON = "observed_on"
+    ASSET_OWNS = "asset_owns"
+    SAME_AS = "same_as"
+    CO_HOSTED_WITH = "co_hosted_with"   # two distinct assets share infrastructure (derived, symmetric)
 
 
 # ---------------------------------------------------------------------------

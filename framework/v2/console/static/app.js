@@ -32,6 +32,7 @@ const Console = (() => {
     { id: 'coverage',   label: 'Coverage',      group: 'OPERATIONS',  glyph: '▦', render: renderCoverage },
 
     { id: 'reasoning',  label: 'Reasoning Brain', group: 'INTELLIGENCE', glyph: '❋', render: renderReasoning },
+    { id: 'intel',      label: 'Intelligence',  group: 'INTELLIGENCE', glyph: '❂', render: renderIntel },
     { id: 'planner',    label: 'Planner',       group: 'INTELLIGENCE', glyph: '⌘', render: renderPlanner },
     { id: 'memory',     label: 'Memory',        group: 'INTELLIGENCE', glyph: '❒', render: renderMemory },
     { id: 'kernel',     label: 'Kernel',        group: 'INTELLIGENCE', glyph: '◆', render: renderKernel },
@@ -523,6 +524,49 @@ const Console = (() => {
         <div class="card"><h3>Incumbent versions + invocations</h3><div class="kv">
           ${Object.entries(res.incumbent_versions||{}).map(([k,v]) => `<div class="k">${esc(k)}</div><div class="v mono">${esc(v)} — <span class="muted">${esc((res.incumbent_invocations||{})[k]||'')}</span></div>`).join('')}</div></div>`;
     }).catch((e) => { document.getElementById('benchBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+  }
+
+  // ---- screens: Intelligence --------------------------------------------
+  function renderIntel(main) {
+    const slug = state.activeSlug;
+    main.innerHTML = `<div class="screen-head"><h1>Intelligence</h1><span class="sub">reason over recon — resolved entities, source-yield learning, gated predictions</span></div><div id="intelBody"><div class="muted">${slug ? 'loading…' : 'select an engagement'}</div></div>`;
+    if (!slug) return;
+    getJSON('/api/intel/' + encodeURIComponent(slug)).then((d) => {
+      const ents = d.entities || [], ys = d.source_yield || [], preds = d.predictions || [];
+      const entRows = ents.map((e) => `
+        <tr><td class="mono">${esc(e.id)}</td>
+          <td><span class="badge ${e.confidence>=.9?'ok':e.confidence>=.7?'warn':''}">${e.confidence}</span></td>
+          <td class="muted">${e.members.map(esc).join('<br>')}</td>
+          <td class="mono">${(e.owned_by||[]).map(esc).join(', ') || '<span class="muted">—</span>'}</td>
+          <td class="muted" style="font-size:var(--fs-xs)">${(e.why||[]).map(esc).join('<br>') || '<span class="muted">single reference</span>'}</td></tr>`).join('');
+      const yRows = ys.map((y) => `
+        <tr><td class="mono">${esc(y.source_kind)}</td><td class="muted">${dash(y.archetype)}</td>
+          <td>${num(y.queries)}</td><td>${num(y.observations_yielded)}</td><td>${num(y.entities_yielded)}</td>
+          <td>${num(y.findings_downstream)}</td>
+          <td><span class="badge ${y.calibrated_prior>=.6?'ok':y.calibrated_prior>=.4?'warn':''}">${y.calibrated_prior}</span></td></tr>`).join('');
+      const predRows = preds.map((p) => `
+        <tr><td class="mono">${esc(p.predicted)}</td><td class="muted">${esc(p.pattern)}</td>
+          <td>${p.prior}</td><td><span class="badge oracle">${p.posterior}</span></td>
+          <td class="muted" style="font-size:var(--fs-xs)">${esc(p.decisive_test)}</td>
+          <td><span class="badge warn">gated</span></td></tr>`).join('');
+      document.getElementById('intelBody').innerHTML = `
+        <div class="grid cols-4" style="margin-bottom:var(--sp-4)">
+          <div class="tile"><div class="k">observations</div><div class="v">${num(d.observations)}</div></div>
+          <div class="tile"><div class="k">entities</div><div class="v">${num(ents.length)}</div></div>
+          <div class="tile"><div class="k">owned assets</div><div class="v">${num(ents.filter((e)=>(e.owned_by||[]).length).length)}</div></div>
+          <div class="tile"><div class="k">predictions</div><div class="v">${num(preds.length)}</div></div>
+        </div>
+        <div class="card"><h3>Resolved entities <span class="muted" style="font-weight:400">— many references, one asset, explainably</span></h3>
+        ${ents.length ? `<div class="scroll-x"><table class="tbl"><thead><tr><th>entity</th><th>conf</th><th>members</th><th>owned by</th><th>why (merge signals)</th></tr></thead><tbody>${entRows}</tbody></table></div>`
+          : '<div class="muted">no entities yet — run <span class="mono">intel ingest --seed &lt;apex&gt; --slug '+esc(slug)+'</span></div>'}</div>
+        <div class="card"><h3>Source-yield learning <span class="muted" style="font-weight:400">— which recon source pays off, calibrated priors feed the planner</span></h3>
+        ${ys.length ? `<div class="scroll-x"><table class="tbl"><thead><tr><th>source</th><th>archetype</th><th>queries</th><th>obs</th><th>entities</th><th>findings</th><th>prior</th></tr></thead><tbody>${yRows}</tbody></table></div>`
+          : '<div class="muted">no yield recorded yet — accrues as sources are queried across engagements</div>'}</div>
+        <div class="card"><h3>Prediction queue <span class="muted" style="font-weight:400">— gated hypotheses, never facts, never auto-scanned</span></h3>
+        ${preds.length ? `<div class="scroll-x"><table class="tbl"><thead><tr><th>predicted asset</th><th>pattern</th><th>prior</th><th>posterior</th><th>decisive test</th><th>status</th></tr></thead><tbody>${predRows}</tbody></table></div>`
+          : '<div class="muted">no predictions — they derive from observed assets</div>'}
+        <div class="muted" style="font-size:var(--fs-xs);margin-top:10px">${esc(d.doctrine||'')}</div></div>`;
+    }).catch((e) => { document.getElementById('intelBody').innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
   }
 
   // ---- screens: Memory ---------------------------------------------------

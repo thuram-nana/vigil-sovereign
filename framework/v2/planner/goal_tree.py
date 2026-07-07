@@ -257,6 +257,7 @@ class GoalTree:
         bug_class: str = "",
         surface: str = "",
         estimate: CostEstimate | None = None,
+        status: GoalStatus = "open",
     ) -> int:
         if parent_id is not None and parent_id not in self.nodes:
             raise KeyError(f"parent {parent_id} not in tree")
@@ -266,6 +267,7 @@ class GoalTree:
             prior_p_success=prior, value=value,
             bug_class=bug_class, surface=surface,
             estimate=estimate or CostEstimate(),
+            status=status,
         )
         self.nodes[new_id] = node
         if parent_id is not None:

@@ -68,11 +68,18 @@ _LOCAL_LLM_HOSTS: frozenset[str] = frozenset({
 class EgressAllowlist:
     """Hosts permitted to receive HTTP requests from this process.
 
-    Three categories:
+    Four categories:
       - `target_hosts`: parsed from the engagement charter; HttpExecutor
         traffic goes here.
       - `llm_hosts`: the current LLM backend's endpoint host. Under
         sovereign mode this is always `localhost`-equivalent.
+      - `collector_hosts`: third-party passive-recon sources the intel
+        engine may query (a CT log, a DNS-over-HTTPS resolver, an RDAP
+        server). These are DISJOINT from `target_hosts` by construction —
+        recon sources are never the target itself — so a collector can
+        reach a CT log without being able to reach the engagement's scope,
+        and vice versa. Populated only when live collection is explicitly
+        enabled; empty by default (offline recon uses fixtures).
       - `extra_hosts`: operator-supplied additions for one-off needs
         (e.g. an internal package mirror during install).
 
@@ -82,10 +89,12 @@ class EgressAllowlist:
 
     target_hosts: tuple[str, ...] = ()
     llm_hosts: tuple[str, ...] = tuple(_LOCAL_LLM_HOSTS)
+    collector_hosts: tuple[str, ...] = ()
     extra_hosts: tuple[str, ...] = ()
 
     def all_entries(self) -> tuple[str, ...]:
-        return tuple(self.target_hosts) + tuple(self.llm_hosts) + tuple(self.extra_hosts)
+        return (tuple(self.target_hosts) + tuple(self.llm_hosts)
+                + tuple(self.collector_hosts) + tuple(self.extra_hosts))
 
     def permits(self, host: str) -> bool:
         if not host:
@@ -127,6 +136,26 @@ def build_engagement_allowlist(
     )
 
 
+def collector_scope_conflicts(
+    collector_hosts: Iterable[str], target_hosts: Iterable[str],
+) -> list[str]:
+    """Collector hosts that OVERLAP the engagement's target scope, in either direction
+    (a collector host covered by target scope, or a target host covered by a collector
+    wildcard). The intel doctrine requires recon sources to be third parties disjoint
+    from the target; this makes that property checkable rather than merely asserted.
+    Empty list ⇒ genuinely disjoint."""
+    targets = list(target_hosts)
+    ch = list(collector_hosts)
+    conflicts: list[str] = []
+    for h in ch:
+        if not h:
+            continue
+        if ethics.host_matches_scope(h, targets) or any(
+                ethics.host_matches_scope(t, [h]) for t in targets if t):
+            conflicts.append(h)
+    return conflicts
+
+
 class SovereignHttpxTransport(httpx.BaseTransport):
     """httpx transport that refuses requests to hosts outside the
     allowlist. Wraps an inner transport (defaults to a fresh
@@ -158,6 +187,7 @@ class SovereignHttpxTransport(httpx.BaseTransport):
                 f"(URL={request.url}, method={request.method}). "
                 f"Allowlist: target_hosts={self._allowlist.target_hosts}, "
                 f"llm_hosts={self._allowlist.llm_hosts}, "
+                f"collector_hosts={self._allowlist.collector_hosts}, "
                 f"extra_hosts={self._allowlist.extra_hosts}. "
                 f"If this host is legitimately required, add it to the "
                 f"engagement charter scope or pass extra_hosts=... "

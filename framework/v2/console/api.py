@@ -350,3 +350,54 @@ def reports_data(slug: str) -> dict[str, Any]:
         return {"slug": slug, "reports": sorted(files, key=lambda x: x["name"])}
 
     return _safe(_read, default={"slug": slug, "reports": []})
+
+
+# ---------------------------------------------------------------------------
+# intelligence & reconnaissance (Intelligence Engine)
+# ---------------------------------------------------------------------------
+
+
+def intel_data(slug: str) -> dict[str, Any]:
+    """The Intelligence Engine's picture for an engagement: resolved entities (with
+    merge explanations), source-yield learning with calibrated priors, and the gated
+    prediction queue (never facts). Read-only over the durable intel store; safe on a
+    fresh tree (no intel rows yet)."""
+    if not slug:
+        return {"slug": None, "note": "select an engagement"}
+
+    def _read() -> dict[str, Any]:
+        from ..intel import learn
+        from ..intel.models import IntelSourceKind
+        from ..intel.predict import AssetPredictor, assess_prediction
+        from ..intel.store import IntelStore
+        from ..memory.store import Store
+        from ..worldmodel.models import NodeKind
+
+        istore = IntelStore(Store())
+        ents = _safe(lambda: istore.entities(engagement_slug=slug), default=[]) or []
+        entities = [{
+            "id": e.canonical_id, "kind": e.primary_kind.value, "confidence": e.confidence,
+            "members": [m.node_id for m in e.members], "owned_by": e.owned_by,
+            "why": e.explain(),
+        } for e in ents]
+
+        source_kinds = [IntelSourceKind.DNS, IntelSourceKind.CERT_TRANSPARENCY,
+                        IntelSourceKind.RDAP_WHOIS, IntelSourceKind.ASN_BGP]
+        yields = _safe(lambda: [{
+            **row, "calibrated_prior": learn.source_prior(istore, row["source_kind"],
+                                                          archetype=row["archetype"]),
+        } for row in istore.all_source_yield()], default=[])
+
+        domains = sorted({m.key for e in ents for m in e.members if m.kind is NodeKind.DOMAIN})
+        preds = _safe(lambda: [assess_prediction(p)
+                               for p in AssetPredictor().predict(observed_domains=domains)[:12]],
+                      default=[])
+
+        return {"slug": slug, "observations": _safe(
+                    lambda: istore.observation_count(engagement_slug=slug), default=0),
+                "entities": entities, "source_yield": yields, "predictions": preds,
+                "doctrine": "Predictions are gated hypotheses — never facts, never auto-scanned. "
+                            "Oracle/verify stays the sole authority on what is real."}
+
+    return _safe(_read, default={"slug": slug, "entities": [], "source_yield": [],
+                                 "predictions": [], "note": "no intel store yet"})

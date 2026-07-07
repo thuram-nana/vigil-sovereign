@@ -147,13 +147,24 @@ class AutonomousCampaign:
         ).run(seed_url)
         return self.chain_findings(report)
 
-    def chain_findings(self, report: ScanReport) -> AutonomousResult:
+    def chain_findings(
+        self, report: ScanReport, *,
+        world: WorldModel | None = None, seq_base: int = 1,
+    ) -> AutonomousResult:
         """Turn a scan report into an attack graph, chain the operators over the
         confirmed facts, and extract the attacker→crown-jewel paths. Split out from
-        :meth:`run` so the reasoning is testable without a live scan."""
-        world = WorldModel()
-        populate_worldmodel(report, world, seq=1)
-        seq = _Seq(2)
+        :meth:`run` so the reasoning is testable without a live scan.
+
+        ``world`` lets the caller pass a PRE-POPULATED graph — e.g. one an intel recon
+        pass already projected assets onto — so findings accrete onto the SAME
+        substrate rather than a fresh graph (attack-tier ids ``endpoint:*``/``finding:*``
+        are disjoint from intel-tier ids ``domain:*``/``host:*``, so they coexist).
+        ``seq_base`` is where finding projection starts on the monotonic clock; a caller
+        that already spent seqs ``0..N`` on recon passes ``N+1`` so the clock never
+        inverts. Defaults (``None``/``1``) reproduce the standalone behaviour exactly."""
+        world = world if world is not None else WorldModel()
+        populate_worldmodel(report, world, seq=seq_base)
+        seq = _Seq(seq_base + 1)
 
         attacker = AttackerState(world)
         attacker.ensure(seq=seq.next())

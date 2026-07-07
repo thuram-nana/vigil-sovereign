@@ -19,8 +19,9 @@ from ..common.errors import SchemaMismatch
 
 
 _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
+_INTEL_SCHEMA_SQL = Path(__file__).parent / "intel_schema.sql"
 
-_CURRENT_VERSION = 1
+_CURRENT_VERSION = 2
 
 
 def _read_version(conn: sqlite3.Connection) -> int:
@@ -47,8 +48,16 @@ def _migration_1(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL.read_text(encoding="utf-8"))
 
 
+def _migration_2(conn: sqlite3.Connection) -> None:
+    """Intelligence & Reconnaissance durable store: the observation log, resolved
+    entities + members, the merge audit trail, and cross-engagement source-yield
+    learning. All ``CREATE TABLE IF NOT EXISTS`` — idempotent at the SQL level."""
+    conn.executescript(_INTEL_SCHEMA_SQL.read_text(encoding="utf-8"))
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
+    2: _migration_2,
 }
 
 
