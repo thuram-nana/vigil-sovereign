@@ -198,3 +198,20 @@ def _apex_of(name: str) -> str:
     """Registrable-ish apex: the last two labels (best-effort, no PSL dependency)."""
     parts = name.split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else name
+
+
+def assess_prediction(pred: AssetHypothesis) -> dict:
+    """Score a prediction through the Scientific Confidence Engine and render it as a
+    display dict: prior, posterior, and the decisive next test. With no evidence yet
+    the posterior is the normalised prior — an honest 'here is how likely, and what
+    would settle it', never a claim of fact."""
+    from ..confidence import assess
+
+    report = assess(pred.hypothesis, candidates=[_resolution_candidate(pred.predicted)])
+    return {
+        "predicted": pred.node_id, "pattern": pred.pattern, "gated": pred.gated,
+        "status": pred.status, "prior": round(pred.prior, 4),
+        "posterior": report.focal.posterior,
+        "decisive_test": report.best_next.statement if report.best_next else "",
+        "rationale": pred.rationale,
+    }

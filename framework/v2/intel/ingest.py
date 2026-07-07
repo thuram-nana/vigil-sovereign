@@ -46,7 +46,9 @@ class IngestResult(BaseModel):
     persisted: int = 0
     entities: list[Entity] = Field(default_factory=list)
     new_subjects: list[EntityRef] = Field(default_factory=list)
-    per_source: dict[str, int] = Field(default_factory=dict)
+    per_source: dict[str, int] = Field(default_factory=dict)          # observations per source_kind
+    queries_per_source: dict[str, int] = Field(default_factory=dict)  # collector invocations per source_kind
+    entities_per_source: dict[str, int] = Field(default_factory=dict)  # distinct entities each source helped resolve
 
 
 class IntelIngest:
@@ -120,6 +122,7 @@ class IntelIngest:
         seen: set[str] = set()
         frontier: list[tuple[int, EntityRef]] = [(0, s) for s in seeds]
         agg = IngestResult()
+        queries: dict[str, int] = {}
         cur_seq = seq
         while frontier:
             depth, subject = frontier.pop(0)
@@ -131,9 +134,8 @@ class IntelIngest:
                 if not c.accepts(subject):
                     continue
                 cur_seq += 1
+                queries[c.source_kind.value] = queries.get(c.source_kind.value, 0) + 1
                 batch.extend(c.collect(subject, transport, seq=cur_seq))
-                if self.store is not None:
-                    self.store.bump_source_yield(c.source_kind.value, queries=1)
             res = self.ingest(batch, seq=None)
             agg = _merge_results(agg, res)
             for ns in res.new_subjects:
@@ -141,7 +143,27 @@ class IntelIngest:
                     frontier.append((depth + 1, ns))
             frontier.sort(key=lambda t: (t[0], t[1].node_id))
         agg.entities = self.resolve(seq=cur_seq).entities
+        agg.queries_per_source = queries
+        agg.entities_per_source = self._attribute_entities(agg.entities)
         return agg
+
+    def _attribute_entities(self, entities: list[Entity]) -> dict[str, int]:
+        """Distinct entities each source helped resolve: a source is credited for an
+        entity if any of the entity's members was observed by that source. The
+        coverage signal for source-yield learning."""
+        node_sources: dict[str, set[str]] = {}
+        for o in self._observations:
+            for ref in (o.subject, o.object):
+                if ref is not None:
+                    node_sources.setdefault(ref.node_id, set()).add(o.source_kind.value)
+        counts: dict[str, int] = {}
+        for ent in entities:
+            srcs: set[str] = set()
+            for m in ent.members:
+                srcs |= node_sources.get(m.node_id, set())
+            for s in srcs:
+                counts[s] = counts.get(s, 0) + 1
+        return counts
 
     # -- helpers --------------------------------------------------------------
 

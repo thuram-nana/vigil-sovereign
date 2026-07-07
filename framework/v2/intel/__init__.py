@@ -41,7 +41,14 @@ from .temporal import (
     TemporalIndex,
     TimelineEvent,
 )
-from .predict import AssetHypothesis, AssetPredictor
+from .predict import AssetHypothesis, AssetPredictor, assess_prediction
+from .learn import (
+    SourceYield,
+    credit_discovery,
+    credit_finding,
+    planner_priors,
+    source_prior,
+)
 
 __all__ = [
     "ArtifactTier", "EntityRef", "canonicalize",
@@ -54,5 +61,7 @@ __all__ = [
     "ReconPlanner", "ReconPlan", "ReconTask",
     # Phase C — temporal + prediction
     "TemporalIndex", "SurfaceDelta", "TimelineEvent", "ENUMERATIVE_SOURCE_KINDS",
-    "AssetPredictor", "AssetHypothesis",
+    "AssetPredictor", "AssetHypothesis", "assess_prediction",
+    # Phase D — learning
+    "SourceYield", "source_prior", "planner_priors", "credit_discovery", "credit_finding",
 ]
