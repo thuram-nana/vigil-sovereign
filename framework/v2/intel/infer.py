@@ -108,15 +108,22 @@ def derive_transitive_ownership(world: WorldModel, *, seq: int) -> list[Observat
                     continue
             except ValueError:
                 continue
+            # Fanout discount: a host serving MANY domains is shared hosting — the
+            # netblock owner (a hosting provider) owns the block, not its tenants'
+            # domains. A dedicated host (fanout 1) keeps full strength; a busy one
+            # attributes only faintly. Without this the rule would falsely attribute
+            # every co-tenant of a cloud netblock to the provider's ASN.
+            fanout_factor = 1.0 / (1.0 + math.log2(max(1, len(domains))))
             for dom_id, res_belief in sorted(domains):
                 key = (owner_id, dom_id)
                 if key in emitted:
                     continue
                 emitted.add(key)
-                conf = min(own_belief, res_belief) * _OWNERSHIP_DISCOUNT
+                conf = min(own_belief, res_belief) * _OWNERSHIP_DISCOUNT * fanout_factor
                 out.append(_mk(_ref(owner_id), EdgeKind.ASSET_OWNS, _ref(dom_id),
                                confidence=conf, rule="transitive_ownership", seq=seq,
-                               attrs={"via_host": host_id, "via_netblock": nb_id}))
+                               attrs={"via_host": host_id, "via_netblock": nb_id,
+                                      "host_fanout": len(domains)}))
     return out
 
 

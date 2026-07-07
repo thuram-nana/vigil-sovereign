@@ -90,14 +90,19 @@ def assess_finding(
     focal_evidence += list(corroborations or [])
 
     alt_id, alt_stmt = _ALTERNATIVES.get(bug_class, _GENERIC_ALT)
+    focal_prior = min(0.9, max(0.05, prior))   # the scanner's scalar seeds it, never pins it
+    # the remaining mass is a REAL competitor (the benign explanation) plus a residual —
+    # a genuine MECE contest, so the alternative can actually win when evidence is weak.
+    alt_prior = (1.0 - focal_prior) * 0.7
     hypothesis = ScientificHypothesis(
         id=f"REAL:{bug_class or 'finding'}",
         statement=f"the {bug_class or 'reported'} finding is a real, exploitable bug",
         surface=str(_get(finding, "insertion_point", "") or _get(finding, "param", "") or ""),
         bug_class=bug_class,
-        prior=min(0.9, max(0.05, prior)),   # the scanner's scalar seeds the prior, never pins it
+        prior=focal_prior,
         evidence=focal_evidence,
-        alternatives=[AlternativeHypothesis(id=alt_id, statement=alt_stmt, prior=0.0)],
+        alternatives=[AlternativeHypothesis(id=alt_id, statement=alt_stmt, prior=alt_prior)],
+        residual_prior=(1.0 - focal_prior) * 0.3,
         refute_on=f"a test that distinguishes '{alt_stmt}' from a real {bug_class or 'bug'}",
     )
     return assess(hypothesis, candidates=candidates, target_confidence=target_confidence)

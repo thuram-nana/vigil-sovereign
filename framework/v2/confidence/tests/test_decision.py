@@ -28,10 +28,13 @@ def test_oracle_confirmation_yields_high_posterior() -> None:
 
 def test_passive_signal_leaves_the_alternative_live() -> None:
     strong = assess_finding(_finding(confirmed_by="oracle")).focal.posterior
-    weak = assess_finding(_finding(confirmed_by="passive", confidence=0.5, cert=False)).focal.posterior
-    assert weak < strong
+    weak_report = assess_finding(_finding(confirmed_by="passive", confidence=0.4, cert=False))
+    assert weak_report.focal.posterior < strong
     # a merely-passive finding does NOT reach a 0.99 target on its own
-    assert not assess_finding(_finding(confirmed_by="passive", confidence=0.5, cert=False)).reaches_target
+    assert not weak_report.reaches_target
+    # the benign alternative is a REAL competitor — it holds meaningful posterior mass
+    # when the evidence is weak (not a vacuous 0-prior placeholder)
+    assert weak_report.alternatives and weak_report.alternatives[0].posterior > 0.1
 
 
 def test_certificate_strengthens_confirmation() -> None:
