@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .agents.http_executor import HttpExecutor, PromptCallback, parse_posture, stdin_prompt_with_timeout
@@ -33,6 +34,11 @@ from .agents.scope_gate import validate_action
 from .authority.killswitch import KillSwitch
 from .scanner.campaign import ScanReport, WebScanCampaign
 from .scanner.orchestrator import AttackPath, AutonomousCampaign, ChainedConclusion
+from .worldmodel.graph import WorldModel
+
+if TYPE_CHECKING:  # intel types are only referenced in annotations on the default path
+    from .intel.predict import AssetHypothesis
+    from .intel.resolve import Entity
 
 
 class EngagementRefused(RuntimeError):
@@ -54,6 +60,13 @@ class EngagementResult:
     attack_paths: list[AttackPath] = field(default_factory=list)
     path_portfolio: list[AttackPath] = field(default_factory=list)
     chained_conclusions: list[ChainedConclusion] = field(default_factory=list)
+    # Intelligence Engine (opt-in ``enable_recon``): the resolved asset inventory this
+    # engagement observed/discovered, and the GATED prediction queue (where-to-look-next
+    # hypotheses — never facts, never auto-scanned). ``world`` is the shared graph the
+    # intel recon and the finding-chaining both project onto.
+    entities: list["Entity"] = field(default_factory=list)
+    predictions: list["AssetHypothesis"] = field(default_factory=list)
+    world: WorldModel | None = None
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -84,6 +97,43 @@ def preflight(slug: str, seed_url: str) -> None:
             f"seed out of scope ({decision.refusal_kind}): {decision.reason}")
 
 
+def _intel_recon(world: WorldModel, slug: str, seed_url: str, *,
+                 fixtures_dir: str | None, max_depth: int) -> object:
+    """Best-effort intel recon bound to the run's SHARED world-model. Returns the
+    `IntelIngest` (bound to ``world``) so the caller can finalize + read the seq
+    high-water mark. Pre-scan collector discovery runs only when an offline fixtures
+    dir is supplied, in the ReconPlanner's value-of-information order. Collectors query
+    THIRD-PARTY sources (never the target), and nothing predicted is ever projected."""
+    from .intel.collectors import DEFAULT_COLLECTORS
+    from .intel.from_scan import host_ref
+    from .intel.ingest import IntelIngest
+    from .intel.planner import ReconPlanner
+    from .intel.transport import FixtureTransport
+
+    ingest = IntelIngest(world, engagement_slug=slug)
+    host = urlsplit(seed_url).hostname or ""
+    if fixtures_dir and host:
+        ingest.run_collectors(
+            [host_ref(host)], list(DEFAULT_COLLECTORS), FixtureTransport(fixtures_dir),
+            seq=0, max_depth=max_depth, planner=ReconPlanner(list(DEFAULT_COLLECTORS)))
+    return ingest
+
+
+def _intel_finalize(ingest: object, report: ScanReport) -> tuple[list, list]:
+    """Post-scan: register the target + fingerprinted stack the scan observed, resolve
+    the asset inventory, and produce the GATED prediction queue. Predictions are never
+    projected onto the world-model and never auto-scanned — a where-to-look-next queue."""
+    from .intel.from_scan import observations_from_report
+    from .intel.predict import AssetPredictor
+    from .worldmodel.models import NodeKind
+
+    ingest.ingest(observations_from_report(report, seq=ingest.high_water() + 1))  # type: ignore[attr-defined]
+    entities = ingest.resolve(seq=ingest.high_water()).entities                    # type: ignore[attr-defined]
+    domains = sorted({m.key for e in entities for m in e.members if m.kind is NodeKind.DOMAIN})
+    predictions = AssetPredictor().predict(observed_domains=domains) if domains else []
+    return entities, predictions
+
+
 def run_engagement(
     slug: str,
     seed_url: str,
@@ -100,6 +150,9 @@ def run_engagement(
     oob_relay_url: str | None = None,
     oob_relay_secret: str | None = None,
     enable_chaining: bool = True,
+    enable_recon: bool = False,
+    recon_fixtures: str | None = None,
+    recon_depth: int = 2,
     detection_budget: float = 2.0,
     waf_adaptive: bool = False,
     grammar_fuzz: int = 0,
@@ -135,6 +188,18 @@ def run_engagement(
     browser_allowed_hosts = {urlsplit(seed_url).hostname} if (enable_browser_xss or enable_spa_crawl) else None
     browser_allowed_hosts = {h for h in (browser_allowed_hosts or set()) if h}
 
+    # The single run-owned world-model: intel recon projects assets onto it, and finding
+    # chaining accretes attack facts onto the SAME graph (disjoint id namespaces). Built
+    # even when recon is off, so chaining shares it and the result exposes it.
+    world = WorldModel()
+    ingest = None
+    if enable_recon:
+        try:
+            ingest = _intel_recon(world, slug, seed_url,
+                                  fixtures_dir=recon_fixtures, max_depth=recon_depth)
+        except Exception:
+            ingest = None   # recon is value-add; a recon failure never sinks the engagement
+
     ex = HttpExecutor(
         engagement_slug=slug,
         base_url=_origin(seed_url),
@@ -164,14 +229,25 @@ def run_engagement(
     finally:
         ex.close()
 
+    # Post-scan intel: register the observed target + stack, resolve the asset
+    # inventory, and produce the gated prediction queue. Best-effort.
+    result = EngagementResult(report=report, world=world)
+    if enable_recon and ingest is not None:
+        try:
+            result.entities, result.predictions = _intel_finalize(ingest, report)
+        except Exception:
+            pass
+    # Findings project ABOVE the intel recon band on the shared clock, so the monotonic
+    # world-model time never inverts across the recon→scan handoff.
+    seq_base = (ingest.high_water() + 1) if (enable_recon and ingest is not None) else 1
+
     # Forward reasoning over the confirmed facts (no traffic). Best-effort: the
     # scan result is authoritative and must survive any chaining error.
-    result = EngagementResult(report=report)
     if enable_chaining:
         try:
             auto = AutonomousCampaign(
                 _no_send, detection_budget=detection_budget,
-            ).chain_findings(report)
+            ).chain_findings(report, world=world, seq_base=seq_base)
             result.attack_paths = auto.attack_paths
             result.path_portfolio = auto.path_portfolio
             result.chained_conclusions = auto.chained_conclusions
@@ -218,6 +294,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--grammar-fuzz", type=int, default=0, metavar="N",
                         help="Induce a request grammar from the crawl and audit N extra "
                              "structurally-valid synthesized requests (in-scope, deduped).")
+    parser.add_argument("--recon", action="store_true",
+                        help="Run the Intelligence Engine alongside the scan: resolve an "
+                             "asset inventory into the shared world-model and produce a "
+                             "GATED prediction queue. Sends no traffic to the target "
+                             "(collectors query third-party sources; predictions are never "
+                             "auto-scanned).")
+    parser.add_argument("--recon-fixtures", default=None, metavar="DIR",
+                        help="Offline collector fixtures dir for --recon (DNS/CT/RDAP/ASN). "
+                             "Without it, --recon still registers the scanned target + stack.")
     args = parser.parse_args(argv)
 
     try:
@@ -234,6 +319,8 @@ def main(argv: list[str]) -> int:
             oob_relay_url=args.oob_relay_url,
             oob_relay_secret=args.oob_relay_secret,
             enable_chaining=not args.no_chaining,
+            enable_recon=args.recon,
+            recon_fixtures=args.recon_fixtures,
             waf_adaptive=args.waf_adaptive,
             grammar_fuzz=args.grammar_fuzz,
         )
@@ -260,4 +347,16 @@ def main(argv: list[str]) -> int:
             print(f"    [{ap.detection_cost:.2f} detect] {ap.describe()}")
     elif result.chained_conclusions:
         print(f"  chained facts     : {len(result.chained_conclusions)} derived (no full path to a crown jewel)")
+    # Intelligence Engine: the asset inventory + the gated prediction queue.
+    if result.entities:
+        owned = [e for e in result.entities if e.owned_by]
+        print(f"  intel entities    : {len(result.entities)} resolved"
+              + (f", {len(owned)} owner-attributed" if owned else ""))
+        for e in result.entities[:5]:
+            own = f" owned_by={e.owned_by}" if e.owned_by else ""
+            print(f"    [{e.confidence:.2f}] {e.canonical_id} ({len(e.members)} refs){own}")
+    if result.predictions:
+        print(f"  predictions       : {len(result.predictions)} GATED (never auto-scanned)")
+        for p in result.predictions[:5]:
+            print(f"    [prior {p.prior:.2f}] {p.node_id} ({p.pattern}) — awaiting operator approval")
     return 0

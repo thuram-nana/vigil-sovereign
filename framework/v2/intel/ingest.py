@@ -68,6 +68,13 @@ class IntelIngest:
         self.engagement_slug = engagement_slug
         self._observations: list[Observation] = []   # everything seen this session (for resolve)
         self._seen_obs_ids: set[str] = set()          # dedup: obs_ids are deterministic
+        self._max_seq: int = 0                        # high-water mark on the monotonic clock
+
+    def high_water(self) -> int:
+        """The highest seq this ingest has projected. A downstream consumer sharing the
+        world-model (e.g. finding projection) starts at ``high_water() + 1`` so the
+        monotonic clock never inverts across the recon→scan handoff."""
+        return self._max_seq
 
     # -- the core seam --------------------------------------------------------
 
@@ -85,6 +92,7 @@ class IntelIngest:
                            # (would double-count SAME_AS/ANNOUNCES signals in resolve).
             self._seen_obs_ids.add(obs.obs_id)
             s = seq if seq is not None else obs.seq
+            self._max_seq = max(self._max_seq, s)
             if self.store is not None:
                 self.store.record_observation(obs, engagement_slug=self.engagement_slug)
                 persisted += 1
@@ -121,12 +129,21 @@ class IntelIngest:
         *,
         seq: int = 0,
         max_depth: int = 1,
+        planner: "object | None" = None,
+        priors: dict[str, float] | None = None,
     ) -> IngestResult:
         """Fetch ``seeds`` through ``collectors`` and ingest the results, following
         newly discovered subjects up to ``max_depth`` hops. Deterministic: subjects
         are processed in sorted order; ``seq`` advances per collector call so
-        provenance is ordered. Bounded — never an unbounded crawl."""
+        provenance is ordered. Bounded — never an unbounded crawl.
+
+        When a ``planner`` (a ReconPlanner) is supplied, the collectors for each subject
+        are run in the planner's VALUE-OF-INFORMATION order (highest expected information
+        gain per cost first, using ``priors`` from source-yield learning), and completed
+        (subject, collector) pairs are fed back as ``already_run`` so an exhausted source
+        is damped. Without a planner the order is the roster order (still deterministic)."""
         seen: set[str] = set()
+        already_run: set[tuple[str, str]] = set()
         frontier: list[tuple[int, EntityRef]] = [(0, s) for s in seeds]
         agg = IngestResult()
         queries: dict[str, int] = {}
@@ -140,13 +157,18 @@ class IntelIngest:
             if subject.node_id in seen or depth > max_depth:
                 continue
             seen.add(subject.node_id)
+            cols = [c for c in collectors if c.accepts(subject)]
+            if planner is not None:
+                # order this subject's collectors by value-of-information (desc)
+                plan = planner.plan([subject], priors=priors, already_run=already_run)
+                rank = {t.collector: t.eig_per_cost for t in plan.tasks}
+                cols.sort(key=lambda c: (-rank.get(c.name, 0.0), c.name))
             batch: list[Observation] = []
-            for c in collectors:
-                if not c.accepts(subject):
-                    continue
+            for c in cols:
                 cur_seq += 1
                 queries[c.source_kind.value] = queries.get(c.source_kind.value, 0) + 1
                 batch.extend(c.collect(subject, transport, seq=cur_seq))
+                already_run.add((subject.node_id, c.name))
             res = self.ingest(batch, seq=None)
             agg = _merge_results(agg, res)
             for ns in res.new_subjects:
