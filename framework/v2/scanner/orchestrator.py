@@ -129,9 +129,14 @@ class AutonomousCampaign:
         max_depth: int = 6,
         max_audit_requests: int = 0,
         detection_budget: float = 2.0,
+        impact_model: object | None = None,
     ) -> None:
+        from ..worldmodel.impact import ImpactModel
         self._send = send
         self.detection_budget = detection_budget
+        # Business-impact model — mission-aware path/portfolio value. Uniform by default
+        # (every crown jewel worth 1.0), so the default behaviour is byte-identical.
+        self.impact_model = impact_model or ImpactModel.uniform()
         self.checks = checks
         self.insertion_kinds = insertion_kinds
         self.internal_resources = internal_resources
@@ -259,7 +264,11 @@ class AutonomousCampaign:
             ]
             if steps:
                 cost = path_detection_cost([s.technique for s in steps])
-                paths.append(AttackPath(steps=steps, detection_cost=round(cost, 3)))
+                # business worth of THIS route = impact of the crown jewel it reaches
+                # (feeds AttackPath.value → the portfolio optimiser's value_of).
+                value = self.impact_model.impact_of(world.get_node(p.nodes[-1])) if p.nodes else 1.0
+                paths.append(AttackPath(steps=steps, detection_cost=round(cost, 3),
+                                        value=round(float(value), 4)))
         # stealthiest first — the DEL telemetry accounting lets the operator (or a
         # planner) prefer the least-detectable route to the same crown jewel.
         paths.sort(key=lambda ap: ap.detection_cost)

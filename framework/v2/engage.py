@@ -285,8 +285,10 @@ def run_engagement(
     # scan result is authoritative and must survive any chaining error.
     if enable_chaining:
         try:
+            from .worldmodel.impact import ImpactModel
             auto = AutonomousCampaign(
                 _no_send, detection_budget=detection_budget,
+                impact_model=ImpactModel.from_slug(slug),   # mission-aware path/portfolio value
             ).chain_findings(report, world=world, seq_base=seq_base)
             result.attack_paths = auto.attack_paths
             result.path_portfolio = auto.path_portfolio
