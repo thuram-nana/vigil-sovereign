@@ -66,6 +66,19 @@ def test_claim_mismatch_is_flagged() -> None:
     assert r.reproduced and r.matches_claim is False and not r.ok
 
 
+def test_reverify_refuses_a_bug_class_the_evidence_does_not_prove() -> None:
+    # the retained evidence adjudicates boolean_sqli; asking it to re-verify 'rce' (a
+    # relabelled finding) must NOT reproduce — the requested class is load-bearing, not
+    # silently overridden by the context's own embedded class. This is the binding that
+    # stops a genuine SQLi proof from grounding a fabricated RCE claim.
+    ctx = _ctx(_DIVERGENT).model_dump(mode="json")
+    flipped = reverify.reverify_context(ctx, bug_class="rce")
+    assert not flipped.reproduced and not flipped.ok and "does not match" in flipped.note
+    # the genuine class still reproduces cleanly
+    genuine = reverify.reverify_context(ctx, bug_class="boolean_sqli")
+    assert genuine.reproduced and genuine.ok
+
+
 def test_reverify_report_and_cli(tmp_path) -> None:
     good = _finding_from(_ctx(_DIVERGENT))
     report = {"target": "http://t/", "active_findings": [good]}

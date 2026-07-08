@@ -75,6 +75,21 @@ def reverify_context(
             note=f"unparseable oracle_context: {e}",
         )
 
+    # BINDING: the retained evidence adjudicates its OWN bug_class. `confirm_finding`
+    # re-derives the class from the context (the requested `bug_class` only fills in when
+    # the context has none), so a caller asking to re-verify a DIFFERENT class than the
+    # evidence proves would otherwise be silently re-fired under the evidence's own class —
+    # letting a finding whose bug_class was flipped (e.g. sqli evidence relabelled 'rce')
+    # re-confirm as the flipped class. Refuse the mismatch here, at the re-execution
+    # boundary, so the requested class is actually load-bearing.
+    evidence_class = str(ctx.to_verifier_context().get("bug_class") or "")
+    if bug_class and evidence_class and bug_class != evidence_class:
+        return ReverifyResult(
+            finding_ref=ref, reproduced=False, matches_claim=False,
+            note=f"requested bug_class {bug_class!r} does not match the evidence's own "
+                 f"{evidence_class!r} — the retained proof adjudicates a different class",
+        )
+
     confirmed = confirm_finding(
         finding={"bug_class": bug_class}, context=ctx, verifier=verifier,
     )
