@@ -75,6 +75,7 @@ class NodeKind(str, enum.Enum):
     ORGANIZATION = "organization"       # an owning org / registrant
     IDENTITY = "identity"               # an OSINT persona/email (NOT a PRINCIPAL auth actor)
     APPLICATION = "application"         # a non-web application (NOT a WEBAPP)
+    PACKAGE = "package"                 # a software dependency (supply-chain node)
 
 
 class EdgeKind(str, enum.Enum):
@@ -134,6 +135,7 @@ class EdgeKind(str, enum.Enum):
     ASSET_OWNS = "asset_owns"
     SAME_AS = "same_as"
     CO_HOSTED_WITH = "co_hosted_with"   # two distinct assets share infrastructure (derived, symmetric)
+    DEPENDS_ON = "depends_on"           # a component depends on a package (supply-chain)
 
 
 # ---------------------------------------------------------------------------

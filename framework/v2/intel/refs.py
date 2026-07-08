@@ -30,7 +30,7 @@ class ArtifactTier(str, enum.Enum):
 
 _ASSET_TIER = frozenset({
     NodeKind.HOST, NodeKind.SERVICE, NodeKind.DOMAIN, NodeKind.CERTIFICATE,
-    NodeKind.APPLICATION, NodeKind.WEBAPP, NodeKind.ENDPOINT,
+    NodeKind.APPLICATION, NodeKind.WEBAPP, NodeKind.ENDPOINT, NodeKind.PACKAGE,
 })
 _OWNER_TIER = frozenset({
     NodeKind.ASN, NodeKind.NETBLOCK, NodeKind.ORGANIZATION, NodeKind.IDENTITY,
