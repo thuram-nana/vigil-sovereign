@@ -39,18 +39,12 @@ from .tokens import Ground, GroundingToken
 
 _BELIEF_FLOOR = 0.5    # a world-model node grounds a fact only above this evidence-discounted belief
 _LCB_Z = 1.0
-# Provenance ALLOWLIST (belief-tracing, NOT a denylist): a world-model node grounds a
-# FACT only if its provenance traces to a real deterministic origin — a fired oracle, a
-# signed cert, or a promoted finding. Collected intelligence ("intel:"), derivations
-# ("derived:"), and LLM assertions do NOT reach fact strength here (they are legitimate
-# but weaker grounds handled elsewhere). An allowlist can't be bypassed by a post-colon
-# marker the way the old denylist could.
-_GROUNDED_PROV_PREFIXES = ("oracle:", "cert:", "finding:", "evidence:")
-
-
 def _provenance_traces_to_proof(provenance: str) -> bool:
-    p = (provenance or "").lower()
-    return any(p.startswith(pre) for pre in _GROUNDED_PROV_PREFIXES)
+    # Single source of truth: a world-model node grounds a FACT only if its provenance
+    # classifies as GROUNDED (traces to a fired oracle / signed cert / promoted finding).
+    # Collected intelligence and derivations are legitimate but do NOT reach fact strength.
+    from ..worldmodel.models import GROUNDING_GROUNDED, classify_provenance
+    return classify_provenance(provenance) == GROUNDING_GROUNDED
 
 
 def _oracle_ok(tok: GroundingToken, claim: "Claim", verifier) -> tuple[bool, float]:

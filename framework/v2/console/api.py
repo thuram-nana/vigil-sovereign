@@ -222,12 +222,14 @@ def worldmodel(run_id: str) -> dict[str, Any]:
             "belief": round(n.belief_mean, 3), "confidence": round(n.confidence, 3),
             "provenance": n.provenance, "detail": n.attrs.get("detail") or n.attrs.get("bug_class") or "",
             "first_seen": n.first_seen, "last_seen": n.last_seen,
+            "grounding": getattr(n, "grounding", "unclassified"),   # anti-hallucination tier
         } for n in world.all_nodes()]
         edges = [{
             "src": e.src, "dst": e.dst, "kind": getattr(e.kind, "value", str(e.kind)),
             "technique": str(e.attrs.get("technique", e.provenance.split(":", 1)[-1])),
             "belief": round(e.belief_mean, 3), "provenance": e.provenance,
             "first_seen": e.first_seen, "last_seen": e.last_seen,
+            "grounding": getattr(e, "grounding", "unclassified"),
         } for e in world.all_edges()]
         paths = [{
             "description": p.describe(), "detection_cost": p.detection_cost, "hops": p.hops,

@@ -33,7 +33,20 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 
 from ..common.errors import CrucibleError
-from .models import Edge, EdgeKind, Node, NodeKind
+from .models import (
+    GROUNDING_UNGROUNDED,
+    Edge,
+    EdgeKind,
+    Node,
+    NodeKind,
+    classify_provenance,
+)
+
+# In STRICT grounding mode, a write whose provenance classifies as UNGROUNDED (an LLM
+# assertion, a bare assumption) has its belief SEEDED at this low floor instead of its
+# asserted confidence — so a hallucinated fact cannot enter the graph at high belief.
+# Default mode leaves belief untouched (only the grounding tag is recorded).
+_UNGROUNDED_BELIEF_FLOOR = 0.2
 
 
 class WorldModelError(CrucibleError):
@@ -68,11 +81,20 @@ def _update_belief(alpha: float, beta: float, confidence: float) -> tuple[float,
 class WorldModel:
     """A typed attack-graph. Construct empty, then accrete facts."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, strict_grounding: bool = False) -> None:
         self._nodes: dict[str, Node] = {}
         # kind is stored by its str value so keys are JSON-friendly.
         self._out: dict[str, dict[str, dict[str, Edge]]] = {}
         self._in: dict[str, dict[str, dict[str, Edge]]] = {}
+        # Anti-hallucination P2: when True, an UNGROUNDED write (LLM/assumption
+        # provenance) is seeded at a low belief floor. Default False = belief unchanged;
+        # only the provenance grounding tag is recorded on every write.
+        self._strict_grounding = strict_grounding
+
+    def _grounded_seed_confidence(self, confidence: float, grounding: str) -> float:
+        if self._strict_grounding and grounding == GROUNDING_UNGROUNDED:
+            return min(confidence, _UNGROUNDED_BELIEF_FLOOR)
+        return confidence
 
     # -- nodes --------------------------------------------------------------
 
@@ -89,8 +111,10 @@ class WorldModel:
         failed re-observation even though max-confidence cannot."""
         existing = self._nodes.get(node.id)
         if existing is None:
-            a, b = _seed_belief(node.confidence, node.alpha, node.beta)
-            stored = node.model_copy(update={"alpha": a, "beta": b})
+            g = classify_provenance(node.provenance)
+            a, b = _seed_belief(self._grounded_seed_confidence(node.confidence, g),
+                                node.alpha, node.beta)
+            stored = node.model_copy(update={"alpha": a, "beta": b, "grounding": g})
             self._nodes[node.id] = stored
             self._out.setdefault(node.id, {})
             self._in.setdefault(node.id, {})
@@ -116,6 +140,7 @@ class WorldModel:
                 "alpha": alpha,
                 "beta": beta,
                 "provenance": provenance,
+                "grounding": classify_provenance(provenance),  # follows the winning provenance
                 "first_seen": min(existing.first_seen, node.first_seen),
                 "last_seen": max(existing.last_seen, node.last_seen),
             }
@@ -163,13 +188,16 @@ class WorldModel:
                     "alpha": alpha,
                     "beta": beta,
                     "provenance": provenance,
+                    "grounding": classify_provenance(provenance),
                     "first_seen": min(existing.first_seen, edge.first_seen),
                     "last_seen": max(existing.last_seen, edge.last_seen),
                 }
             )
         else:
-            a, b = _seed_belief(edge.confidence, edge.alpha, edge.beta)
-            stored = edge.model_copy(update={"alpha": a, "beta": b})
+            g = classify_provenance(edge.provenance)
+            a, b = _seed_belief(self._grounded_seed_confidence(edge.confidence, g),
+                                edge.alpha, edge.beta)
+            stored = edge.model_copy(update={"alpha": a, "beta": b, "grounding": g})
         self._out.setdefault(edge.src, {}).setdefault(edge.dst, {})[kv] = stored
         self._in.setdefault(edge.dst, {}).setdefault(edge.src, {})[kv] = stored
         return stored
