@@ -52,6 +52,7 @@ _PREFIX_ROUTES = {
     "/api/planner/": api.planner_data,
     "/api/reports/": api.reports_data,
     "/api/intel/": api.intel_data,
+    "/api/evidence/": api.evidence,
 }
 
 

@@ -29,6 +29,8 @@ const Console = (() => {
     { id: 'engagements',label: 'Engagements',   group: 'OPERATIONS',  glyph: '▤', render: renderEngagements },
     { id: 'findings',   label: 'Findings',      group: 'OPERATIONS',  glyph: '◈', render: renderFindings },
     { id: 'graph',      label: 'Attack Graph',  group: 'OPERATIONS',  glyph: '⧉', render: renderGraph },
+    { id: 'evidence',   label: 'Evidence',      group: 'OPERATIONS',  glyph: '⚿', render: renderEvidence },
+    { id: 'timeline',   label: 'Timeline',      group: 'OPERATIONS',  glyph: '⏱', render: renderTimeline },
     { id: 'coverage',   label: 'Coverage',      group: 'OPERATIONS',  glyph: '▦', render: renderCoverage },
 
     { id: 'reasoning',  label: 'Reasoning Brain', group: 'INTELLIGENCE', glyph: '❋', render: renderReasoning },
@@ -451,12 +453,15 @@ const Console = (() => {
           </div>
           <div class="card" style="margin-bottom:var(--sp-4)"><h3>World-model</h3><div id="graphCanvas"></div></div>
           <div class="grid cols-2">
-            <div class="card"><h3>Attack paths</h3>${(d.paths||[]).length ? d.paths.map((p) =>
-              `<div style="padding:6px 0;border-bottom:1px solid var(--border)"><span class="badge ${p.detection_cost<.5?'ok':p.detection_cost<.8?'warn':'danger'}">${Number(p.detection_cost).toFixed(2)} detect</span>
+            <div class="card"><h3>Attack paths <span class="muted" style="font-weight:400">(mission-ranked)</span></h3>${(d.paths||[]).length ?
+              d.paths.slice().sort((a,b)=>(b.value||1)-(a.value||1)).map((p) =>
+              `<div style="padding:6px 0;border-bottom:1px solid var(--border)"><span class="badge oracle" title="business impact of the crown jewel reached">◆ ${Number(p.value||1).toFixed(1)}</span>
+                <span class="badge ${p.detection_cost<.5?'ok':p.detection_cost<.8?'warn':'danger'}" style="margin-left:4px">${Number(p.detection_cost).toFixed(2)} detect</span>
                 <span class="mono" style="margin-left:8px;font-size:var(--fs-xs)">${esc(p.description)}</span></div>`).join('') : '<div class="muted">no attacker→crown-jewel path (findings not chainable to a crown jewel)</div>'}</div>
-            <div class="card"><h3>Choke-points <span class="muted" style="font-weight:400">(cut these to disconnect)</span></h3>
-              ${(d.chokes||[]).length ? `<table class="tbl"><thead><tr><th>edge</th><th>betw.</th><th>bridge</th><th>disconnects</th></tr></thead><tbody>
+            <div class="card"><h3>Choke-points <span class="muted" style="font-weight:400">(cut these to disconnect — impact-ranked)</span></h3>
+              ${(d.chokes||[]).length ? `<table class="tbl"><thead><tr><th>edge</th><th>impact</th><th>betw.</th><th>bridge</th><th>disc.</th></tr></thead><tbody>
                 ${d.chokes.map((c) => `<tr><td class="mono" style="font-size:var(--fs-xs)">${esc(c.src)} →<br>${esc(c.dst)}</td>
+                  <td><span class="badge ${(c.impact_disconnected||0)>0?'warn':''}">${Number(c.impact_disconnected||0).toFixed(1)}</span></td>
                   <td>${c.betweenness}</td><td>${c.is_bridge?'<span class="badge danger">yes</span>':dash()}</td>
                   <td>${num((c.disconnects||[]).length)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">none computed</div>'}</div>
           </div>`;
@@ -466,6 +471,73 @@ const Console = (() => {
           <div class="k">confidence</div><div class="v">${esc(n.confidence)}</div>
           <div class="k">provenance</div><div class="v mono">${esc(n.provenance)}</div>
           <div class="k">detail</div><div class="v">${dash(n.detail)}</div></div>`));
+      }).catch((e) => { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+    });
+  }
+
+  // ---- screens: Evidence Browser ----------------------------------------
+  function renderEvidence(main) {
+    withRun(main, 'Evidence', 'provable findings — every certificate re-verified offline (prove-don’t-guess)', (run) => {
+      const body = document.getElementById('runBody'); body.innerHTML = '<div class="muted">re-verifying certificates…</div>';
+      getJSON('/api/evidence/' + encodeURIComponent(run)).then((d) => {
+        if (d.pending) { body.innerHTML = '<div class="stub">run still in progress</div>'; return; }
+        const fs = d.findings || [];
+        const soundBadge = (f) => f.sound ? '<span class="badge ok">sound</span>'
+          : (f.has_certificate ? '<span class="badge danger">FAILED</span>' : '<span class="badge">no cert</span>');
+        body.innerHTML = `
+          <div class="grid cols-4" style="margin-bottom:var(--sp-4)">
+            <div class="tile"><div class="k">Findings</div><div class="v">${num(fs.length)}</div></div>
+            <div class="tile"><div class="k">Re-verified</div><div class="v">${num(d.reproduced)}</div><div class="foot">reproduced offline</div></div>
+            <div class="tile"><div class="k">With certificate</div><div class="v">${num(fs.filter((f)=>f.has_certificate).length)}</div></div>
+            <div class="tile"><div class="k">Tampered / spurious</div><div class="v">${num(fs.filter((f)=>f.has_certificate && !f.sound).length)}</div></div>
+          </div>
+          <div class="card"><h3>Certificates <span class="muted" style="font-weight:400">— each re-runs with no target and no trust in the producing tool</span></h3>
+          ${fs.length ? `<div class="scroll-x"><table class="tbl"><thead><tr><th>finding</th><th>bug class</th><th>surface</th><th>confirmed by</th><th>conf</th><th>status</th></tr></thead><tbody>
+            ${fs.map((f) => `<tr><td class="mono">${esc(f.ref)}</td><td class="mono">${esc(f.bug_class)}</td>
+              <td class="muted">${dash(f.surface)}</td><td>${dash(f.confirmed_by)}</td><td>${esc(f.confidence)}</td>
+              <td>${soundBadge(f)}${f.matches_claim===false?' <span class="badge danger" title="'+esc(f.note)+'">claim-mismatch</span>':''}</td></tr>`).join('')}</tbody></table></div>`
+            : '<div class="muted">no findings to re-verify</div>'}
+          <div class="muted" style="font-size:var(--fs-xs);margin-top:10px">${esc(d.doctrine||'')}</div></div>`;
+      }).catch((e) => { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
+    });
+  }
+
+  // ---- screens: Timeline ------------------------------------------------
+  function renderTimeline(main) {
+    withRun(main, 'Timeline', 'how the world-model was built — scrub the monotonic sequence to replay graph growth', (run) => {
+      const body = document.getElementById('runBody'); body.innerHTML = '<div class="muted">reconstructing…</div>';
+      getJSON('/api/worldmodel/' + encodeURIComponent(run)).then((d) => {
+        if (d.pending) { body.innerHTML = '<div class="stub">run still in progress</div>'; return; }
+        const nodes = d.nodes || [], edges = d.edges || [];
+        const maxSeq = Math.max(1, ...nodes.map((n)=>n.last_seen||0), ...edges.map((e)=>e.last_seen||0));
+        body.innerHTML = `
+          <div class="card" style="margin-bottom:var(--sp-4)">
+            <h3>Replay <span class="muted" style="font-weight:400">seq <span id="tlSeq">${maxSeq}</span> / ${maxSeq}</span></h3>
+            <input id="tlSlider" type="range" min="1" max="${maxSeq}" value="${maxSeq}" style="width:100%">
+            <div class="grid cols-3" style="margin-top:var(--sp-3)">
+              <div class="tile"><div class="k">Nodes present</div><div class="v" id="tlNodes">${nodes.length}</div></div>
+              <div class="tile"><div class="k">Edges present</div><div class="v" id="tlEdges">${edges.length}</div></div>
+              <div class="tile"><div class="k">Newest</div><div class="v" id="tlNew" style="font-size:var(--fs-sm)">—</div></div>
+            </div>
+          </div>
+          <div class="card"><h3>Appearance order</h3><div id="tlLog" class="feed" style="max-height:340px"></div></div>`;
+        const rows = [
+          ...nodes.map((n)=>({seq:n.first_seen||1, kind:'node', label:n.id, tag:n.kind})),
+          ...edges.map((e)=>({seq:e.first_seen||1, kind:'edge', label:`${e.src} --${e.kind}--> ${e.dst}`, tag:e.technique})),
+        ].sort((a,b)=>a.seq-b.seq);
+        const slider = document.getElementById('tlSlider');
+        const apply = (t) => {
+          document.getElementById('tlSeq').textContent = t;
+          document.getElementById('tlNodes').textContent = nodes.filter((n)=>(n.first_seen||1)<=t).length;
+          document.getElementById('tlEdges').textContent = edges.filter((e)=>(e.first_seen||1)<=t).length;
+          const shown = rows.filter((r)=>r.seq<=t);
+          document.getElementById('tlNew').textContent = shown.length ? ('seq '+shown[shown.length-1].seq) : '—';
+          document.getElementById('tlLog').innerHTML = shown.map((r)=>`<div class="row"><span class="t">${r.seq}</span>
+            <span class="ev ${r.kind==='edge'?'gate':''}">${r.kind}</span><span class="msg mono">${esc(r.label)}</span>
+            <span class="muted" style="font-size:var(--fs-xs)">${esc(r.tag||'')}</span></div>`).join('') || '<div class="muted" style="padding:var(--sp-3)">nothing yet</div>';
+        };
+        slider.addEventListener('input', () => apply(Number(slider.value)));
+        apply(maxSeq);
       }).catch((e) => { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
     });
   }

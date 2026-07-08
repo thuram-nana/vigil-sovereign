@@ -210,37 +210,85 @@ def worldmodel(run_id: str) -> dict[str, Any]:
         from ..scanner.campaign import ScanReport
         from ..scanner.orchestrator import _CROWN_KINDS, _TRAVERSABLE, AutonomousCampaign
         from ..worldmodel.attacker import ATTACKER_ID
-        from ..worldmodel.pathsearch import choke_points
+
+        from ..worldmodel.impact import ImpactModel, rank_choke_points
 
         report = ScanReport.model_validate(doc)
         auto = AutonomousCampaign(_no_send).chain_findings(report)
         world = auto.world
+        # first_seen/last_seen drive the Timeline-replay screen (monotonic graph growth).
         nodes = [{
             "id": n.id, "kind": getattr(n.kind, "value", str(n.kind)),
             "belief": round(n.belief_mean, 3), "confidence": round(n.confidence, 3),
             "provenance": n.provenance, "detail": n.attrs.get("detail") or n.attrs.get("bug_class") or "",
+            "first_seen": n.first_seen, "last_seen": n.last_seen,
         } for n in world.all_nodes()]
         edges = [{
             "src": e.src, "dst": e.dst, "kind": getattr(e.kind, "value", str(e.kind)),
             "technique": str(e.attrs.get("technique", e.provenance.split(":", 1)[-1])),
             "belief": round(e.belief_mean, 3), "provenance": e.provenance,
+            "first_seen": e.first_seen, "last_seen": e.last_seen,
         } for e in world.all_edges()]
         paths = [{
             "description": p.describe(), "detection_cost": p.detection_cost, "hops": p.hops,
-            "destination": p.destination,
+            "destination": p.destination, "value": getattr(p, "value", 1.0),
             "steps": [{"src": s.src, "edge": s.edge, "dst": s.dst, "technique": s.technique} for s in p.steps],
         } for p in auto.attack_paths]
+        # impact-ranked remediation levers (P2): weighted by the crown-jewel worth each severs
         chokes: list[dict[str, Any]] = []
         if world.get_node(ATTACKER_ID) is not None:
-            for c in _safe(lambda: choke_points(world, ATTACKER_ID, _CROWN_KINDS, edge_kinds=_TRAVERSABLE), default=[]) or []:
+            impact = ImpactModel.uniform()
+            for c in _safe(lambda: rank_choke_points(world, ATTACKER_ID, _CROWN_KINDS, impact,
+                                                     edge_kinds=_TRAVERSABLE), default=[]) or []:
                 chokes.append({"src": c.edge.src, "dst": c.edge.dst,
                                "kind": getattr(c.edge.kind, "value", str(c.edge.kind)),
-                               "betweenness": c.betweenness, "disconnects": c.disconnects, "is_bridge": c.is_bridge})
+                               "betweenness": c.betweenness, "disconnects": c.disconnects,
+                               "is_bridge": c.is_bridge, "impact_disconnected": c.impact_disconnected})
         return {"run_id": run_id, "nodes": nodes, "edges": edges, "paths": paths, "chokes": chokes,
                 "node_count": world.node_count, "edge_count": world.edge_count}
 
     return _safe(_build, default={"run_id": run_id, "error": "could not reconstruct world-model",
                                   "nodes": [], "edges": [], "paths": [], "chokes": []})
+
+
+def evidence(run_id: str) -> dict[str, Any]:
+    """The Evidence Browser: every confirmed finding's certificate, INDEPENDENTLY
+    re-verified offline (pure oracle re-run over the retained oracle_context) so the
+    operator sees which findings are provable — reproduced + matches-claim — and which
+    carry a re-runnable certificate at all. Read-only; sends no traffic."""
+    from . import actions
+
+    rj = actions.run_dir(run_id) / "reverifiable.json"
+    doc = _safe(lambda: json.loads(rj.read_text(encoding="utf-8")), default=None)
+    if doc is None:
+        return {"run_id": run_id, "pending": True, "findings": []}
+
+    def _build() -> dict[str, Any]:
+        from ..verify.reverify import reverify_document
+        results = reverify_document(doc)
+        findings = doc.get("active_findings") or []
+        out = []
+        for i, r in enumerate(results):
+            f = findings[i] if i < len(findings) else {}
+            out.append({
+                "ref": r.finding_ref,
+                "bug_class": f.get("bug_class", ""),
+                "surface": f.get("insertion_point") or f.get("param") or "",
+                "confirmed_by": r.confirmed_by or f.get("confirmed_by", ""),
+                "confidence": round(r.confidence, 3),
+                "has_certificate": bool(f.get("oracle_context")),
+                "reproduced": r.reproduced,
+                "matches_claim": r.matches_claim,
+                "sound": r.ok,
+                "note": r.note,
+            })
+        n_ok = sum(1 for x in out if x["sound"])
+        return {"run_id": run_id, "findings": out,
+                "reproduced": n_ok, "total": len(out),
+                "doctrine": "Each certificate re-verifies OFFLINE with no target and no trust "
+                            "in the tool that produced it — prove-don't-guess, made checkable."}
+
+    return _safe(_build, default={"run_id": run_id, "findings": [], "error": "could not re-verify"})
 
 
 # ---------------------------------------------------------------------------
