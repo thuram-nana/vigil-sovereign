@@ -53,6 +53,13 @@ class Prompt:
     structured_input: dict[str, Any] = field(default_factory=dict)
     temperature: float = 0.2
     max_tokens: int = 4096
+    # Self-consistency policy (anti-hallucination P5), for NO-ORACLE bindings only. samples>1
+    # declares that the call site wants N-sample agreement clustering (see kernel.consistency);
+    # agreement_gate is the modal-share threshold below which the site should ABSTAIN. Defaults
+    # (samples=1) are single-shot — identical to pre-P5 behaviour. Oracle-backed sites leave
+    # these at the default; an LLM vote must never dispose a claim an oracle settles.
+    samples: int = 1
+    agreement_gate: float = 0.6
 
 
 @dataclass
