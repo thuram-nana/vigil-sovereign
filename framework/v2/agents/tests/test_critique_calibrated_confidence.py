@@ -129,6 +129,8 @@ def test_legacy_confirmed_finding_has_no_oracle_score(
     CritiqueAgent(bb, _SLUG, ledger=OutcomeLedger()).step()
 
     live = _live(bb, "003-legacy")
-    assert live["critique_status"] == "confirmed"
+    # No oracle backs it, so an LLM "confirm" can never reach "confirmed" — it is
+    # llm_advisory (recorded + shown, never promoted as fact) and earns no oracle score.
+    assert live["critique_status"] == "llm_advisory"
     assert live["verified_by_oracle"] is False
     assert live["confidence"] is None

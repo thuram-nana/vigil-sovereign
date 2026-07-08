@@ -75,10 +75,11 @@ def _post(bb: Blackboard, payload: FindingPayload) -> None:
             payload=payload.model_dump())
 
 
-def _confirmed_rows(bb: Blackboard):
+def _reportable_rows(bb: Blackboard):
+    # oracle-confirmed AND llm_advisory — the report shows both, distinctly labelled.
     return [
         r for r in bb.read(engagement=_SLUG, kinds=["finding"])
-        if r.payload.get("critique_status") == "confirmed"
+        if r.payload.get("critique_status") in ("confirmed", "llm_advisory")
     ]
 
 
@@ -91,7 +92,7 @@ def test_report_shows_oracle_kind_confidence_and_rationale(
     _post(bb, _finding("001-verified", _firing_ctx()))
     CritiqueAgent(bb, _SLUG, ledger=OutcomeLedger()).step()
 
-    rows = _confirmed_rows(bb)
+    rows = _reportable_rows(bb)
     assert len(rows) == 1
     payload = rows[0].payload
     # The oracle path populated the provenance fields.
@@ -121,7 +122,7 @@ def test_report_marks_llm_advisory_confirmation(
     _post(bb, _finding("002-advisory", None))
     CritiqueAgent(bb, _SLUG).step()
 
-    rows = _confirmed_rows(bb)
+    rows = _reportable_rows(bb)
     md = ReporterAgent(bb, _SLUG)._render(rows)
     assert "LLM-advisory confirmation" in md
     assert "deterministic oracle signal" in md

@@ -129,7 +129,12 @@ class FindingPayload(BaseModel):
     derived_from_hypothesis: str | None = Field(
         default=None, description="Hypothesis handle this finding confirms.",
     )
-    critique_status: Literal["pending", "confirmed", "objections"] = "pending"
+    # "confirmed" is RESERVED for a fired deterministic oracle — the sole authority.
+    # An LLM-only advisory verdict (no oracle) can never reach "confirmed"; it is
+    # "llm_advisory" (recorded + shown, but never promoted or reported as fact).
+    critique_status: Literal["pending", "confirmed", "objections", "llm_advisory"] = "pending"
+    critique_dryrun: bool = Field(
+        default=False, description="The advisory critique came from a dry-run LLM call (not a real inference).")
     oracle_context: dict[str, Any] | None = Field(
         default=None,
         description=(

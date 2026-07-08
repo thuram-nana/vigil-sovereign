@@ -154,12 +154,14 @@ class CritiqueAgent(Agent):
         oracle_present = finding.oracle_context is not None
         oracle_fired = oracle_confirmed is not None
 
+        cr_dryrun = False
         try:
-            cr, _trace = urk_critique(
+            cr, trace = urk_critique(
                 claim=f"{finding.title}: {finding.summary}",
                 evidence=evidence,
                 context=f"finding_slug={finding.finding_slug}; severity={finding.severity}",
             )
+            cr_dryrun = bool(getattr(trace, "is_dryrun", False))
         except Exception as e:
             self._log.warning(
                 "agent.critique.urk_error", id=f_event.id, error=str(e),
@@ -194,16 +196,23 @@ class CritiqueAgent(Agent):
         if oracle_present:
             # The oracle is authoritative: a fired signal is required, and the
             # LLM's advisory verdict cannot override it in either direction.
+            # "confirmed" is now RESERVED for this path — a fired deterministic oracle.
             new_status = "confirmed" if oracle_fired else "objections"
             verified = oracle_fired
         else:
-            # Legacy LLM-advisory path — unchanged.
-            new_status = "confirmed" if cr.decision == "confirm" else "objections"
+            # No oracle backs this finding. An LLM verdict — however confident, and
+            # ESPECIALLY a dry-run canned one — can NEVER reach "confirmed" (that word
+            # is oracle-only). It becomes "llm_advisory": recorded and shown, but never
+            # promoted, memory-recorded, or reported as a confirmed fact. This is the
+            # veracity invariant: the LLM layer may only advise, never confirm.
+            wants_confirm = cr is not None and cr.decision == "confirm"
+            new_status = "llm_advisory" if wants_confirm else "objections"
             verified = False
 
         update: dict[str, Any] = {
             "critique_status": new_status,
             "verified_by_oracle": verified,
+            "critique_dryrun": cr_dryrun,
         }
         # Calibrated exploitability score at the confirmation site — the fired
         # oracle's signal confidence mapped through calibration (identity under
