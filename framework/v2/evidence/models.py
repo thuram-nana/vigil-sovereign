@@ -123,6 +123,54 @@ class SignedEvidence(BaseModel):
     signatures: list[Signature] = Field(default_factory=list)
 
 
+class PathStep(BaseModel):
+    """One hop of a derived attack path: a typed edge established by a technique."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    src: str
+    edge: str
+    dst: str
+    technique: str = ""
+
+
+class PathCertificate(BaseModel):
+    """A DERIVED attack path bound to the confirmed-finding certificates its hops depend on.
+
+    A forward-reasoning attack path (attacker → crown jewel) is a CLAIM about what the
+    confirmed facts compose into — it is only as sound as the findings under it. This
+    certificate records the ordered hops and the ``backing_cert_digests`` (the cert_digests
+    of the finding ``EvidenceCertificate``s the caller cites as the path's support).
+
+    What ``verify_bundle`` then PROVES, precisely: (1) the path is tamper-evident and
+    anchored — its digest rides the same signed chain head, so altering a hop or the
+    backing list breaks the chain; and (2) every cited backing finding is present in the
+    bundle AND itself verified, so a path with no reproducing evidence, or leaning on an
+    absent/unverified finding, fails CLOSED. What it does NOT do: re-derive that those
+    findings CAUSALLY establish these specific hops — that hop↦finding linkage is the
+    reasoning layer's assertion (a deterministic bundle check cannot re-run pathsearch),
+    exactly as the report gate cannot do natural-language entailment. So the guarantee is
+    "the route's cited support is real and reproduces," not "the machine re-proved the route."
+
+    Deterministic (no wallclock; ``seq`` is the order; backing digests are sorted), so its
+    canonical bytes are stable across producer and verifier."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+    engagement_slug: str = ""
+    destination: str = ""              # crown-jewel node the path reaches
+    steps: list[PathStep] = Field(default_factory=list)
+    backing_cert_digests: list[str] = Field(default_factory=list)  # sorted; the findings under the path
+    seq: int = Field(ge=0, default=0)
+
+    @property
+    def cert_digest(self) -> str:
+        """sha256 of this path certificate's canonical bytes — what the chain links on."""
+        from .canonical import digest_payload
+        return digest_payload(self.model_dump(mode="json"))
+
+
 class ChainEntry(BaseModel):
     """One link in the tamper-evident evidence log. ``entry_hash`` chains prev+cert+seq;
     a break anywhere is detectable by recomputation."""
