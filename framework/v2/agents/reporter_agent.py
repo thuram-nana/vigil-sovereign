@@ -146,12 +146,13 @@ class ReporterAgent(Agent):
                     "",
                 ]
             else:
-                lines += [
-                    "### Verification",
-                    "",
-                    "_LLM-advisory confirmation — no deterministic oracle signal._",
-                    "",
-                ]
+                dryrun = getattr(f, "critique_dryrun", False)
+                note = ("_LLM-advisory confirmation — no deterministic oracle signal; "
+                        "and produced by a DRY-RUN (canned) model call, NOT a live "
+                        "inference. Treat as a placeholder lead only._" if dryrun else
+                        "_LLM-advisory confirmation — no deterministic oracle signal. "
+                        "A lead to verify, NOT a confirmed fact._")
+                lines += ["### Verification", "", note, ""]
             if f.cvss_vector:
                 lines += [f"**CVSS 3.1 vector:** `{f.cvss_vector}`  ", ""]
             if f.cvss_base is not None:

@@ -41,7 +41,7 @@ def _trust_root():
 def test_oracle_ground_admits_a_reproducing_context() -> None:
     ctx = _oracle_ctx()
     c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=FindingContext.model_validate(ctx))
-    claim = Claim(text="boolean sqli at q", source="llm:critique", tokens=[
+    claim = Claim(text="boolean sqli at q", source="llm:critique", bug_class="boolean_sqli", tokens=[
         GroundingToken.oracle(ctx, bug_class="boolean_sqli",
                               confirmed_by=c.confirmed_by.value, confidence=c.confidence)])
     a = admit(claim)
@@ -49,11 +49,41 @@ def test_oracle_ground_admits_a_reproducing_context() -> None:
 
 
 def test_oracle_ground_rejects_a_non_firing_context() -> None:
-    claim = Claim(text="fabricated sqli", tokens=[
+    claim = Claim(text="fabricated sqli", bug_class="boolean_sqli", tokens=[
         GroundingToken.oracle(_oracle_ctx(_BASE), bug_class="boolean_sqli",  # non-divergent → won't fire
                               confirmed_by="differential_response")])
     a = admit(claim)
     assert a.verdict is VeracityVerdict.UNGROUNDED and not a.is_fact
+
+
+# ---- BINDING: a proof grounds only the claim it actually backs (review fix #1) -----
+
+
+def test_oracle_token_cannot_ground_a_mismatched_bug_class_claim() -> None:
+    # a REAL, reproducing SQLi certificate must NOT ground a fabricated 'rce' claim —
+    # reverifying the SQLi context under bug_class='rce' does not fire.
+    ctx = _oracle_ctx()  # a genuine boolean_sqli proof
+    forged = Claim(text="Attacker gets RCE via /admin", bug_class="rce", tokens=[
+        GroundingToken.oracle(ctx, bug_class="boolean_sqli")])
+    a = admit(forged)
+    assert not a.is_fact and a.verdict is VeracityVerdict.UNGROUNDED
+
+
+def test_oracle_fact_requires_a_declared_subject() -> None:
+    # a valid proof with NO bug_class subject on the claim grounds nothing (unbound).
+    ctx = _oracle_ctx()
+    a = admit(Claim(text="something is confirmed", tokens=[
+        GroundingToken.oracle(ctx, bug_class="boolean_sqli")]))  # claim.bug_class == ""
+    assert not a.is_fact and "bind" in a.reason.lower()
+
+
+def test_calibrated_confidence_is_the_reexecuted_value_not_the_proposed_one() -> None:
+    ctx = _oracle_ctx()
+    c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=FindingContext.model_validate(ctx))
+    a = admit(Claim(text="sqli", bug_class="boolean_sqli", proposed_confidence=0.99, tokens=[
+        GroundingToken.oracle(ctx, bug_class="boolean_sqli")]))
+    assert a.is_fact and a.calibrated_confidence is not None
+    assert abs(a.calibrated_confidence - c.confidence) < 1e-6 and a.calibrated_confidence != 0.99
 
 
 # ---- CERT ground ------------------------------------------------------------
@@ -66,7 +96,7 @@ def test_cert_ground_admits_a_verifying_certificate() -> None:
     finding = {"check_id": "s1", "bug_class": "boolean_sqli", "confirmed_by": c.confirmed_by.value,
                "confidence": c.confidence, "oracle_context": ctx}
     signed = sign_certificate(build_certificate(finding, seq=0), signers)
-    claim = Claim(text="signed sqli", tokens=[
+    claim = Claim(text="signed sqli", bug_class="boolean_sqli", tokens=[
         GroundingToken.cert(signed.model_dump(mode="json"), oracle_context=ctx)])
     a = admit(claim, trust_root=tr)
     assert a.is_fact and a.strength is Ground.CERT
@@ -90,7 +120,26 @@ def _world() -> WorldModel:
     for c in (0.05, 0.05, 0.05):
         w.add_node(Node(id="host:refuted", kind=NodeKind.HOST, provenance="oracle:x",
                         confidence=c, first_seen=1, last_seen=1))
+    # a high-belief node whose provenance is COLLECTED INTELLIGENCE, not an oracle/cert
+    for _ in range(4):
+        w.add_node(Node(id="domain:intel", kind=NodeKind.DOMAIN, provenance="intel:obs-42",
+                        confidence=0.9, first_seen=1, last_seen=1))
     return w
+
+
+def test_intel_provenance_does_not_reach_fact_strength() -> None:
+    # a well-corroborated INTEL node (provenance='intel:...') is legitimate intelligence
+    # but NOT an oracle/cert-proven fact — the allowlist (belief-tracing) excludes it.
+    a = admit(Claim(text="intel domain is exploitable", entity_refs=["domain:intel"],
+                    tokens=[GroundingToken.worldmodel("domain:intel")]), world=_world())
+    assert not a.is_fact and a.verdict is VeracityVerdict.UNGROUNDED
+
+
+def test_worldmodel_ground_requires_the_node_be_named_by_the_claim() -> None:
+    # a genuinely-grounded node cannot ground a claim that does NOT name it (binding).
+    a = admit(Claim(text="something about a real endpoint", entity_refs=[],
+                    tokens=[GroundingToken.worldmodel("endpoint:real")]), world=_world())
+    assert not a.is_fact
 
 
 def test_worldmodel_ground_admits_belief_floored_grounded_node() -> None:
@@ -146,7 +195,8 @@ def test_dryrun_claim_still_stands_on_reexecutable_oracle_proof() -> None:
     # re-executable proof stands on its own regardless of how the claim was authored
     ctx = _oracle_ctx()
     c = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=FindingContext.model_validate(ctx))
-    a = admit(Claim(text="dryrun-authored but oracle-proven", from_dryrun=True, tokens=[
+    a = admit(Claim(text="dryrun-authored but oracle-proven", bug_class="boolean_sqli",
+                    from_dryrun=True, tokens=[
         GroundingToken.oracle(ctx, bug_class="boolean_sqli", confirmed_by=c.confirmed_by.value)]))
     assert a.is_fact
 

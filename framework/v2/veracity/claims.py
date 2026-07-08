@@ -32,6 +32,10 @@ class Claim(BaseModel):
 
     text: str = ""
     source: str = ""                                   # e.g. "llm:critique", "scanner", "intel:infer"
+    # the STRUCTURED subject the claim asserts — what a ground must be BOUND to. A ground
+    # backs the claim only if it proves THIS subject: an oracle must re-fire for this
+    # bug_class, a cert must certify it, a world-model node must be named in entity_refs.
+    bug_class: str = ""
     tokens: list[GroundingToken] = Field(default_factory=list)
     entity_refs: list[str] = Field(default_factory=list)   # world-model node ids this claim names
     proposed_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
