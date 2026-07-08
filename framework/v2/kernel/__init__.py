@@ -24,9 +24,10 @@ and returns a deterministic stub. Set ANTHROPIC_API_KEY (and install
 
 from __future__ import annotations
 
+from .consistency import ConsistencyResult, consistency_evidence, run_consistent
 from .critique import critique
 from .decide import decide
-from .hypothesize import hypothesize
+from .hypothesize import hypothesize, hypothesize_consistent
 from .opsec import opsec
 from .pivot import pivot
 from .threat_model import threat_model
@@ -35,6 +36,10 @@ __all__ = [
     "critique",
     "decide",
     "hypothesize",
+    "hypothesize_consistent",
+    "run_consistent",
+    "ConsistencyResult",
+    "consistency_evidence",
     "opsec",
     "pivot",
     "threat_model",

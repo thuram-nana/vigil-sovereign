@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from .binding import run
+from .consistency import ConsistencyResult, run_consistent
 from .llm import LLMBackend
 from .models import CallTrace, HypothesisSet
 
@@ -68,3 +69,34 @@ def hypothesize(
     )
     assert isinstance(parsed, HypothesisSet)
     return parsed, trace
+
+
+def _bug_class_signature(hs: HypothesisSet) -> list[str]:
+    """The decision-bearing signature of a generation: the SORTED DISTINCT bug classes it
+    proposed. Two generations that reach for the same attack surface cluster together; a
+    fabrication that scatters across unrelated classes does not."""
+    return sorted({h.bug_class for h in hs.hypotheses})
+
+
+def hypothesize_consistent(
+    observation: str,
+    *,
+    surface: str = "",
+    context: str = "",
+    bug_classes: Iterable[str] = (),
+    samples: int = 5,
+    agreement_gate: float = 0.6,
+    backend: LLMBackend | None = None,
+) -> ConsistencyResult:
+    """Self-consistent hypothesis generation (anti-hallucination P5) — a NO-ORACLE binding.
+
+    Runs :func:`hypothesize` ``samples`` times and clusters the generations by the set of
+    bug classes they propose. Returns a :class:`ConsistencyResult`: ``modal`` is the most-
+    agreed generation, and ``abstained`` is True when the runs disagree enough that the
+    output should be routed to ``needs_evidence`` rather than acted on. With the deterministic
+    dry-run backend every sample is identical, so it agrees trivially (agreement 1.0); the
+    signal only bites against a live, temperature>0 backend."""
+    return run_consistent(
+        lambda: hypothesize(observation, surface=surface, context=context,
+                            bug_classes=bug_classes, backend=backend),
+        samples=samples, agreement_gate=agreement_gate, key_fn=_bug_class_signature)
