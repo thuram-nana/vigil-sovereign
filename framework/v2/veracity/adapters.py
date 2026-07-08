@@ -47,10 +47,17 @@ def _endpoint_node_id(finding: Any) -> str:
 
 
 def claim_from_finding(finding: Any, *, source: str = "finding",
-                       from_dryrun: bool = False) -> Claim:
+                       from_dryrun: bool = False, match_confidence: bool = True) -> Claim:
     """Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_context
     becomes an ORACLE token bound to the finding's bug_class; the finding's endpoint
-    becomes the named entity the graph is consulted about."""
+    becomes the named entity the graph is consulted about.
+
+    ``match_confidence`` (default True) threads the finding's recorded confidence into the
+    token as a tamper-check claim — correct when that number is the RAW oracle confidence
+    (a scanner AuditFinding). Set it False when the recorded confidence has been
+    post-processed/CALIBRATED (a blackboard finding), so re-verification checks that the
+    oracle re-fires for the bound bug_class WITHOUT falsely demoting on a legitimate
+    calibration delta between the stored value and the raw re-fire."""
     bug_class = str(_get(finding, "bug_class", "") or "")
     tokens: list[GroundingToken] = []
     oc = _get(finding, "oracle_context")
@@ -58,7 +65,7 @@ def claim_from_finding(finding: Any, *, source: str = "finding",
         tokens.append(GroundingToken.oracle(
             oc, bug_class=bug_class,
             confirmed_by=_get(finding, "confirmed_by"),
-            confidence=_get(finding, "confidence"),
+            confidence=_get(finding, "confidence") if match_confidence else None,
             from_dryrun=from_dryrun))
     entity = _endpoint_node_id(finding)
     ipoint = _get(finding, "insertion_point", "") or ""

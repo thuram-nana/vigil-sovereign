@@ -1,12 +1,12 @@
 # Graph Report - /home/kali/Pictures/PENTEST-main  (2026-07-08)
 
 ## Corpus Check
-- 513 files · ~510,008 words
+- 516 files · ~513,304 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 7319 nodes · 29543 edges · 193 communities detected
-- Extraction: 35% EXTRACTED · 65% INFERRED · 0% AMBIGUOUS · INFERRED: 19244 edges (avg confidence: 0.6)
+- 7368 nodes · 29771 edges · 191 communities detected
+- Extraction: 35% EXTRACTED · 65% INFERRED · 0% AMBIGUOUS · INFERRED: 19399 edges (avg confidence: 0.6)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -201,8 +201,6 @@
 - [[_COMMUNITY_Community 188|Community 188]]
 - [[_COMMUNITY_Community 189|Community 189]]
 - [[_COMMUNITY_Community 190|Community 190]]
-- [[_COMMUNITY_Community 191|Community 191]]
-- [[_COMMUNITY_Community 192|Community 192]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `NodeKind` - 451 edges
@@ -213,8 +211,8 @@
 6. `CrucibleError` - 301 edges
 7. `Edge` - 299 edges
 8. `WebScanCampaign` - 285 edges
-9. `FindingContext` - 253 edges
-10. `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` - 252 edges
+9. `FindingContext` - 256 edges
+10. `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` - 253 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `CLI entry point for v2. Invoke with:      python3 -m framework.v2 <subcommand> [` --uses--> `CrucibleError`  [INFERRED]
@@ -232,103 +230,103 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.01
-Nodes (686): Agent, detect(), api_detection — identify API patterns (REST / GraphQL / SOAP / RPC)., detect(), auth_detection — identify the authentication scheme(s)., Agent, Base class for every agent under MAO.      Subclasses set the class-level `name`, Return True if there is work for this agent right now.          Cheap; called ev (+678 more)
+Nodes (882): console.api — read-only data providers for the Ops Console.  Every function here, Every engagement (a slug = a directory under ``targets/``), with its     safety/, One engagement's full at-a-glance state (charter presence, safety, logs)., Console-launched scan runs, newest first, with their meta + finding count., The saved `build_report` document for a console run (findings + attack_paths +, Reconstruct the world-model attack graph for a saved run — a PURE re-run of, Call a zero-arg read and swallow any error into ``default`` — the console     mu, The committed benchmark scoreboard + the regression baseline — reused as-is (+874 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.01
-Nodes (663): FindingContext, from_error_signature(), from_timing_samples(), Typed, replayable bundle of the observations one finding is judged on.      A fi, The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp, AttackType, intruder.attack — the four attack-type combinatorics.  Given marked insertion po, Place several (point, payload) pairs on the base request. Applied     sequential (+655 more)
+Nodes (676): FindingContext, Typed, replayable bundle of the observations one finding is judged on.      A fi, AttackType, intruder.attack — the four attack-type combinatorics.  Given marked insertion po, Place several (point, payload) pairs on the base request. Applied     sequential, Yield ``(payloads, rendered_request)`` for each iteration of the attack.      SN, render_attack(), _render_multi() (+668 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.01
-Nodes (513): Trip the kill-switch for an engagement — the emergency stop. Idempotent (the, trip_killswitch(), console.api — read-only data providers for the Ops Console.  Every function here, Every engagement (a slug = a directory under ``targets/``), with its     safety/, One engagement's full at-a-glance state (charter presence, safety, logs)., Console-launched scan runs, newest first, with their meta + finding count., The saved `build_report` document for a console run (findings + attack_paths +, Reconstruct the world-model attack graph for a saved run — a PURE re-run of (+505 more)
+Nodes (566): Agent, Agent, Base class for every agent under MAO.      Subclasses set the class-level `name`, Return True if there is work for this agent right now.          Cheap; called ev, Do one unit of work; return the number of events posted.          Implementation, Events posted to this engagement since this agent's cursor., Move the cursor to the latest event id seen., Blackboard (+558 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.02
-Nodes (531): AttackerState, worldmodel.attacker — the attacker's own state as first-class, persistent facts., Record that the attacker has reached ``service_id`` (a service /         endpoin, Node ids the attacker currently controls (deterministic order)., Credential/session/token ids the attacker currently holds., Service/endpoint/segment ids the attacker has reached., A thin, typed view over a :class:`WorldModel` for recording and querying     wha, Idempotently add the attacker principal node. Returns its id. (+523 more)
+Nodes (355): AdapterError, _burp_issue_list(), BurpAdapter, AdapterError, _nikto_class(), _nikto_hosts(), _nikto_location(), NiktoAdapter (+347 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.02
-Nodes (352): AdapterError, _burp_issue_list(), BurpAdapter, AdapterError, _nikto_class(), _nikto_hosts(), _nikto_location(), NiktoAdapter (+344 more)
+Cohesion: 0.01
+Nodes (255): console_dir(), launch_scan(), console.actions — the SAFE operator actions (the only mutations the console make, Spawn a loopback `scan` subprocess that streams progress + saves its report., Re-run the retained oracle certificates in a saved run's report — a pure,     of, reverify_run(), run_dir(), _write_meta() (+247 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.02
-Nodes (378): binding_satisfied(), current_host_identifiers(), The set of identifiers the running host can present. Compared,     case-sensitiv, Return (ok, reason). A 'none' binding is always satisfied. A     'host_attestati, _read_machine_ids(), authority_signing_bytes(), canonical_json(), digest_payload() (+370 more)
+Nodes (319): Trip the kill-switch for an engagement — the emergency stop. Idempotent (the, trip_killswitch(), binding_satisfied(), current_host_identifiers(), The set of identifiers the running host can present. Compared,     case-sensitiv, Return (ok, reason). A 'none' binding is always satisfied. A     'host_attestati, _read_machine_ids(), authority_signing_bytes() (+311 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.01
-Nodes (219): _coerce_text(), from_boolean_probes(), from_dom_execution(), from_evaluation(), from_http_responses(), from_predicate(), from_process_output(), from_side_effect() (+211 more)
+Cohesion: 0.02
+Nodes (285): AnthropicBackend, AnthropicBackend — live LLM via the Anthropic Messages API.  Activates when:   -, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, detect(), detect(), BaseModel, BedrockBackend, BedrockBackend — Claude on AWS Bedrock with regional restriction.  Sovereign-clo (+277 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.02
-Nodes (292): AnthropicBackend, AnthropicBackend — live LLM via the Anthropic Messages API.  Activates when:   -, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, BaseModel, BedrockBackend, BedrockBackend — Claude on AWS Bedrock with regional restriction.  Sovereign-clo, build_system_prompt(), build_user_prompt() (+284 more)
+Nodes (270): BlackboardError, Anything wrong with a blackboard operation (validation, IO)., PatternAnalyzer, _r(), analysis.analyzers.builtin — the offline pattern analyzer.  A real, dependency-f, Offline pattern-based static analyzer. Always available., _Rule, _analyzers() (+262 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.01
-Nodes (240): from_oob(), _hit_to_dict(), Reduce one OOB interaction (OOBHit model, mapping, or duck-typed object)     to, _no_send(), find_browser(), scanner.browser — dynamic DOM-XSS confirmation via a headless browser.  Static a, Path to a usable headless Chromium/Chrome, or None., Render ``url`` in headless mode and return the post-JavaScript DOM as HTML     ( (+232 more)
+Nodes (285): from_evaluation(), The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp, _clause_true(), confirm_against_local_target(), confirm_finding(), ConfirmedFinding, _DemoHandler, DifferentialDemoHandler (+277 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.02
-Nodes (227): PatternAnalyzer, _r(), analysis.analyzers.builtin — the offline pattern analyzer.  A real, dependency-f, Offline pattern-based static analyzer. Always available., _Rule, _analyzers(), _backend(), _index() (+219 more)
+Cohesion: 0.01
+Nodes (239): from_oob(), _hit_to_dict(), Reduce one OOB interaction (OOBHit model, mapping, or duck-typed object)     to, _no_send(), Confirm DOM-XSS at ``base_url`` by injecting an execution-marker payload     (in, scan_dom_xss(), main(), verify.collaborator_cli — `python3 -m framework.v2 collaborator serve`.  Runs th (+231 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.02
-Nodes (240): _add_request(), _Extractor, _Form, _form_to_request(), from_seed(), _location(), Page, scanner.crawler — the autonomous surface-discovery engine.  The audit engine can (+232 more)
+Nodes (232): What a crawl found: the fuzzable requests (ready for ``AuditEngine.audit``),, What a crawl found: the fuzzable requests (ready for ``AuditEngine.audit``),, Breadth-first, scope-bounded, cycle-safe crawler. ``send(HttpRequest) ->     {st, Breadth-first, scope-bounded, cycle-safe crawler. ``send(HttpRequest) ->     {st, Canonical location key: identical param *names* (not values) collapse, so     ``, Canonical location key: identical param *names* (not values) collapse, so     ``, CrucibleError, analyze_html() (+224 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.02
-Nodes (229): _clause_true(), confirm_against_local_target(), confirm_finding(), _DemoHandler, DifferentialDemoHandler, _finding_to_dict(), _query_param(), verify.confirmation — the oracle as the confirmation authority, end to end.  Thi (+221 more)
+Cohesion: 0.01
+Nodes (214): api_detection — identify API patterns (REST / GraphQL / SOAP / RPC)., auth_detection — identify the authentication scheme(s)., blackboard_path(), cdn_waf_detection — identify CDN, WAF, and edge-protection layers., cms_detection — identify the CMS / off-the-shelf application., body(), cookie(), evaluate() (+206 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.02
-Nodes (188): BenchmarkReport, _add_action_args(), _annotate(), _assess(), build_parser(), _descriptor(), _is_loopback(), _load_message() (+180 more)
+Cohesion: 0.03
+Nodes (197): BenchmarkReport, ClassScore, Per-``bug_class`` confusion counts and derived precision/recall., The honest detection-quality number: how much of the planted ground truth     th, BlackboardEventRow, Materialised view of a row, with payload already deserialised., _bin_edges(), brier_score() (+189 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.02
-Nodes (159): console_dir(), launch_scan(), console.actions — the SAFE operator actions (the only mutations the console make, Spawn a loopback `scan` subprocess that streams progress + saves its report., Re-run the retained oracle certificates in a saved run's report — a pure,     of, reverify_run(), run_dir(), _write_meta() (+151 more)
+Cohesion: 0.03
+Nodes (183): from_http_responses(), admit_finding(), claim_from_finding(), _endpoint_node_id(), _get(), Read a field from a finding that may be a pydantic model or a plain dict., The world-model node a finding is about — matches the id the chainer mints     (, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex (+175 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.02
-Nodes (146): detect_outliers(), _median(), intruder.analysis — anomaly detection over an attack's result population.  Burp, Indices of anomalous rows.      A row is flagged if ANY of: its status code is a, _Row, _check_bound(), _classify(), detection_cost_of_technique() (+138 more)
+Cohesion: 0.03
+Nodes (132): _memory_summary(), Insert a new event. Validates payload against the kind's schema., Convenience: post a new event with supersedes_id=old_id,         copying engagem, _payloads(), _priors(), _seed(), _similar(), _wins() (+124 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.03
-Nodes (106): _memory_summary(), _payloads(), _priors(), _seed(), _similar(), _wins(), blob_to_vec(), cosine() (+98 more)
+Cohesion: 0.04
+Nodes (116): _add_action_args(), _annotate(), _assess(), build_parser(), _descriptor(), _load_message(), defender.cli — `python3 -m framework.v2 defender <subcommand>`.  Subcommands:, Malformed message artifact. (+108 more)
 
 ### Community 16 - "Community 16"
 Cohesion: 0.03
-Nodes (88): AdaptResult, _alt_case(), _crossover(), _double_url_encode(), evolve(), EvolveResult, _fullwidth(), _mutate() (+80 more)
+Nodes (86): confirm_dom_xss(), DomXssResult, _inject(), scanner.browser_xss — DOM-XSS confirmed by EXECUTION in a real browser.  Static, One execution attempt: the payload, where it was injected, whether the     brows, Render ``payload`` into ``url`` — into query parameter ``param`` (the app     de, Drive execution payloads into ``url`` (via query ``param`` or the fragment), CdpError (+78 more)
 
 ### Community 17 - "Community 17"
-Cohesion: 0.06
-Nodes (84): proposal_signing_bytes(), The exact bytes a governance approver signs to approve a merge., _horizon(), _load_snapshot(), _now(), _review(), ingest_horizon(), load_horizon_feed() (+76 more)
+Cohesion: 0.03
+Nodes (104): detect_outliers(), _median(), intruder.analysis — anomaly detection over an attack's result population.  Burp, Indices of anomalous rows.      A row is flagged if ANY of: its status code is a, _Row, _check_bound(), bit_flipper(), brute_force() (+96 more)
 
 ### Community 18 - "Community 18"
-Cohesion: 0.06
-Nodes (77): assess_finding(), _get(), confidence.decision — the Scientific Confidence Engine at the vulnerability gate, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, assess(), _credible_interval(), _logscore(), _norm_priors() (+69 more)
+Cohesion: 0.03
+Nodes (88): AdaptResult, _alt_case(), _crossover(), _double_url_encode(), evolve(), EvolveResult, _fullwidth(), _mutate() (+80 more)
 
 ### Community 19 - "Community 19"
 Cohesion: 0.06
-Nodes (71): admit_finding(), claim_from_finding(), _endpoint_node_id(), _get(), Read a field from a finding that may be a pydantic model or a plain dict., The world-model node a finding is about — matches the id the chainer mints     (, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex (+63 more)
+Nodes (84): proposal_signing_bytes(), _horizon(), _load_snapshot(), _now(), _review(), ingest_horizon(), load_horizon_feed(), improve.horizon — fold newly disclosed CVEs / techniques into gaps.  The horizon (+76 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.05
-Nodes (63): body(), cookie(), evaluate(), _evaluate_signature(), hdr(), _matches(), path(), intake.fingerprint._common — shared signature engine.  Every detector is a list (+55 more)
+Cohesion: 0.04
+Nodes (73): _classify(), detection_cost_of_technique(), _edge_cost(), _noisy_or(), path_detection_cost(), _path_techniques(), rank_paths(), scanner.detection_cost — stealth ranking via detection ACCOUNTING.  Rank candida (+65 more)
 
 ### Community 21 - "Community 21"
-Cohesion: 0.05
-Nodes (55): diff_summary(), main(), make_request(), Print per-class summary., Compare valid vs invalid stats., Make one login attempt with the wrong password., summarize(), arm_key() (+47 more)
+Cohesion: 0.07
+Nodes (64): assess_finding(), _get(), confidence.decision — the Scientific Confidence Engine at the vulnerability gate, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, assess(), _credible_interval(), _logscore(), _norm_priors() (+56 more)
 
 ### Community 22 - "Community 22"
-Cohesion: 0.04
-Nodes (52): _cl_0(), _control(), detect(), detect_h2c_upgrade(), _h2c_upgrade_request(), _offers_h2c(), scanner.smuggling — HTTP request-smuggling detection (raw sockets, timing-based), TE.CL-space — a space between the field-name and the colon     (``Transfer-Encod (+44 more)
-
-### Community 23 - "Community 23"
 Cohesion: 0.05
 Nodes (59): _add_secret(), ApiOperation, _as_obj(), _candidate_paths(), _content_type(), discover_content(), DiscoveredPath, _excerpt() (+51 more)
 
-### Community 24 - "Community 24"
+### Community 23 - "Community 23"
 Cohesion: 0.15
 Nodes (14): analyze(), collect_tokens(), _is_sequential(), scanner.sequencer — session-token / nonce randomness analysis.  A session token, Interpret a token as an integer via decimal, hex, or base64-big-endian., True if the tokens decode to integers forming an arithmetic progression or     p, The randomness verdict for a set of tokens., Call ``issue`` up to ``n`` times, collecting the non-empty tokens it     returns (+6 more)
+
+### Community 24 - "Community 24"
+Cohesion: 1.0
+Nodes (0): 
 
 ### Community 25 - "Community 25"
 Cohesion: 1.0
@@ -356,27 +354,27 @@ Nodes (0):
 
 ### Community 31 - "Community 31"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): Adapt a ``kernel.Hypothesis`` (given/if/then/because + refute_on + confidence)
 
 ### Community 32 - "Community 32"
 Cohesion: 1.0
-Nodes (1): Adapt a ``kernel.Hypothesis`` (given/if/then/because + refute_on + confidence)
+Nodes (0): 
 
 ### Community 33 - "Community 33"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): |mean_pred - mean_actual| — this bin's contribution to miscalibration.
 
 ### Community 34 - "Community 34"
 Cohesion: 1.0
-Nodes (1): |mean_pred - mean_actual| — this bin's contribution to miscalibration.
+Nodes (0): 
 
 ### Community 35 - "Community 35"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): True iff evolution beat the best seed.
 
 ### Community 36 - "Community 36"
 Cohesion: 1.0
-Nodes (1): True iff evolution beat the best seed.
+Nodes (0): 
 
 ### Community 37 - "Community 37"
 Cohesion: 1.0
@@ -408,15 +406,15 @@ Nodes (0):
 
 ### Community 44 - "Community 44"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): True only if the claim is grounded at FACT strength (oracle / cert / belief).
 
 ### Community 45 - "Community 45"
 Cohesion: 1.0
-Nodes (1): True only if the claim is grounded at FACT strength (oracle / cert / belief).
+Nodes (1): How a report should present it.
 
 ### Community 46 - "Community 46"
 Cohesion: 1.0
-Nodes (1): How a report should present it.
+Nodes (0): 
 
 ### Community 47 - "Community 47"
 Cohesion: 1.0
@@ -432,11 +430,11 @@ Nodes (0):
 
 ### Community 50 - "Community 50"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): recall — fraction of ground truth rediscovered.
 
 ### Community 51 - "Community 51"
 Cohesion: 1.0
-Nodes (1): recall — fraction of ground truth rediscovered.
+Nodes (0): 
 
 ### Community 52 - "Community 52"
 Cohesion: 1.0
@@ -476,19 +474,19 @@ Nodes (0):
 
 ### Community 61 - "Community 61"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): The fired signals; the subset that carried the confirmation.
 
 ### Community 62 - "Community 62"
 Cohesion: 1.0
-Nodes (1): The fired signals; the subset that carried the confirmation.
+Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
 
 ### Community 63 - "Community 63"
 Cohesion: 1.0
-Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
+Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
 
 ### Community 64 - "Community 64"
 Cohesion: 1.0
-Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
+Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
 
 ### Community 65 - "Community 65"
 Cohesion: 1.0
@@ -496,11 +494,11 @@ Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`      
 
 ### Community 66 - "Community 66"
 Cohesion: 1.0
-Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
+Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
 
 ### Community 67 - "Community 67"
 Cohesion: 1.0
-Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
+Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
 
 ### Community 68 - "Community 68"
 Cohesion: 1.0
@@ -508,27 +506,27 @@ Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/   
 
 ### Community 69 - "Community 69"
 Cohesion: 1.0
-Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
+Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
 
 ### Community 70 - "Community 70"
 Cohesion: 1.0
-Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
+Nodes (1): An injected expression, the value it computes to, and the response it         wa
 
 ### Community 71 - "Community 71"
 Cohesion: 1.0
-Nodes (1): An injected expression, the value it computes to, and the response it         wa
+Nodes (1): A response (and an optional benign control) for the error-signature         orac
 
 ### Community 72 - "Community 72"
 Cohesion: 1.0
-Nodes (1): A response (and an optional benign control) for the error-signature         orac
+Nodes (1): The arguments a page passed to the CDP execution binding, plus the         uniqu
 
 ### Community 73 - "Community 73"
 Cohesion: 1.0
-Nodes (1): The arguments a page passed to the CDP execution binding, plus the         uniqu
+Nodes (1): The callback base a probe embeds. The operator-hosted relay URL when         one
 
 ### Community 74 - "Community 74"
 Cohesion: 1.0
-Nodes (1): The callback base a probe embeds. The operator-hosted relay URL when         one
+Nodes (0): 
 
 ### Community 75 - "Community 75"
 Cohesion: 1.0
@@ -536,7 +534,7 @@ Nodes (0):
 
 ### Community 76 - "Community 76"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
 
 ### Community 77 - "Community 77"
 Cohesion: 1.0
@@ -544,139 +542,139 @@ Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
 
 ### Community 78 - "Community 78"
 Cohesion: 1.0
-Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
+Nodes (1): The path's success belief: the product of its edges' belief means         (indep
 
 ### Community 79 - "Community 79"
 Cohesion: 1.0
-Nodes (1): The path's success belief: the product of its edges' belief means         (indep
+Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
 
 ### Community 80 - "Community 80"
 Cohesion: 1.0
-Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
+Nodes (1): Confidence of the weakest edge — the path is no stronger.
 
 ### Community 81 - "Community 81"
 Cohesion: 1.0
-Nodes (1): Confidence of the weakest edge — the path is no stronger.
+Nodes (1): The provenance id of each hop, in order.
 
 ### Community 82 - "Community 82"
 Cohesion: 1.0
-Nodes (1): The provenance id of each hop, in order.
+Nodes (1): The path's success belief: the product of its edges' belief means         (indep
 
 ### Community 83 - "Community 83"
 Cohesion: 1.0
-Nodes (1): The path's success belief: the product of its edges' belief means         (indep
+Nodes (0): 
 
 ### Community 84 - "Community 84"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): Does any entity the claim names sit at a net-refuted belief in ``world``? Return
 
 ### Community 85 - "Community 85"
 Cohesion: 1.0
-Nodes (1): Does any entity the claim names sit at a net-refuted belief in ``world``? Return
+Nodes (1): Project a BATCH-fused posterior (Path B / backfill): write the Beta(alpha, beta)
 
 ### Community 86 - "Community 86"
 Cohesion: 1.0
-Nodes (1): Project a BATCH-fused posterior (Path B / backfill): write the Beta(alpha, beta)
+Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
 
 ### Community 87 - "Community 87"
 Cohesion: 1.0
-Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
+Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu
 
 ### Community 88 - "Community 88"
 Cohesion: 1.0
-Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu
+Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
 
 ### Community 89 - "Community 89"
 Cohesion: 1.0
-Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
+Nodes (1): The provenance id of each hop, in order.
 
 ### Community 90 - "Community 90"
 Cohesion: 1.0
-Nodes (1): The provenance id of each hop, in order.
+Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
 
 ### Community 91 - "Community 91"
 Cohesion: 1.0
-Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
+Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
 
 ### Community 92 - "Community 92"
 Cohesion: 1.0
-Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
+Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
 
 ### Community 93 - "Community 93"
 Cohesion: 1.0
-Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
+Nodes (1): The provenance id of each hop, in order.
 
 ### Community 94 - "Community 94"
 Cohesion: 1.0
-Nodes (1): The provenance id of each hop, in order.
+Nodes (1): A conservative lower credible bound on the path's success belief — the         p
 
 ### Community 95 - "Community 95"
 Cohesion: 1.0
-Nodes (1): A conservative lower credible bound on the path's success belief — the         p
+Nodes (1): The firewall's verdict on one claim. ``is_fact`` is the single thing every     d
 
 ### Community 96 - "Community 96"
 Cohesion: 1.0
-Nodes (1): The firewall's verdict on one claim. ``is_fact`` is the single thing every     d
+Nodes (1): True only if the claim is grounded at FACT strength (oracle / cert / belief).
 
 ### Community 97 - "Community 97"
 Cohesion: 1.0
-Nodes (1): True only if the claim is grounded at FACT strength (oracle / cert / belief).
+Nodes (1): How a report should present it.
 
 ### Community 98 - "Community 98"
 Cohesion: 1.0
-Nodes (1): How a report should present it.
+Nodes (1): A choice made by the coordinator or planner. URK decide()-backed.
 
 ### Community 99 - "Community 99"
 Cohesion: 1.0
-Nodes (1): A choice made by the coordinator or planner. URK decide()-backed.
+Nodes (1): The verdict of a single oracle over already-observed data.
 
 ### Community 100 - "Community 100"
 Cohesion: 1.0
-Nodes (1): The verdict of a single oracle over already-observed data.
+Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
 
 ### Community 101 - "Community 101"
 Cohesion: 1.0
-Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
+Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu
 
 ### Community 102 - "Community 102"
 Cohesion: 1.0
-Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu
+Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
 
 ### Community 103 - "Community 103"
 Cohesion: 1.0
-Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
+Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
 
 ### Community 104 - "Community 104"
 Cohesion: 1.0
-Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
+Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
 
 ### Community 105 - "Community 105"
 Cohesion: 1.0
-Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
+Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
 
 ### Community 106 - "Community 106"
 Cohesion: 1.0
-Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
+Nodes (1): Confidence of the weakest edge — the path is no stronger.
 
 ### Community 107 - "Community 107"
 Cohesion: 1.0
-Nodes (1): Confidence of the weakest edge — the path is no stronger.
+Nodes (1): The provenance id of each hop, in order.
 
 ### Community 108 - "Community 108"
 Cohesion: 1.0
-Nodes (1): The provenance id of each hop, in order.
+Nodes (1): The path's success belief: the product of its edges' belief means         (indep
 
 ### Community 109 - "Community 109"
 Cohesion: 1.0
-Nodes (1): The path's success belief: the product of its edges' belief means         (indep
+Nodes (1): A conservative lower credible bound on the path's success belief — the         p
 
 ### Community 110 - "Community 110"
 Cohesion: 1.0
-Nodes (1): A conservative lower credible bound on the path's success belief — the         p
+Nodes (1): The fired signals; the subset that carried the confirmation.
 
 ### Community 111 - "Community 111"
 Cohesion: 1.0
-Nodes (1): The fired signals; the subset that carried the confirmation.
+Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
 
 ### Community 112 - "Community 112"
 Cohesion: 1.0
@@ -684,328 +682,322 @@ Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
 
 ### Community 113 - "Community 113"
 Cohesion: 1.0
-Nodes (1): Posterior mean of the Beta belief, alpha / (alpha + beta).
+Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
 
 ### Community 114 - "Community 114"
 Cohesion: 1.0
-Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
+Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
 
 ### Community 115 - "Community 115"
 Cohesion: 1.0
-Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
+Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
 
 ### Community 116 - "Community 116"
 Cohesion: 1.0
-Nodes (1): Ordered node ids along the path: src of each edge, then final dst.
+Nodes (1): Confidence of the weakest edge — the path is no stronger.
 
 ### Community 117 - "Community 117"
 Cohesion: 1.0
-Nodes (1): Confidence of the weakest edge — the path is no stronger.
+Nodes (1): The provenance id of each hop, in order.
 
 ### Community 118 - "Community 118"
 Cohesion: 1.0
-Nodes (1): The provenance id of each hop, in order.
+Nodes (1): The path's success belief: the product of its edges' belief means         (indep
 
 ### Community 119 - "Community 119"
 Cohesion: 1.0
-Nodes (1): The path's success belief: the product of its edges' belief means         (indep
+Nodes (1): A conservative lower credible bound on the path's success belief — the         p
 
 ### Community 120 - "Community 120"
 Cohesion: 1.0
-Nodes (1): A conservative lower credible bound on the path's success belief — the         p
+Nodes (1): What one node asserts about another. Directed: `src` -> `dst`.      REACHABLE_FR
 
 ### Community 121 - "Community 121"
 Cohesion: 1.0
-Nodes (1): What one node asserts about another. Directed: `src` -> `dst`.      REACHABLE_FR
+Nodes (1): One typed entity in the world-model.      `id` is caller-assigned and stable — r
 
 ### Community 122 - "Community 122"
 Cohesion: 1.0
-Nodes (1): One typed entity in the world-model.      `id` is caller-assigned and stable — r
+Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu
 
 ### Community 123 - "Community 123"
 Cohesion: 1.0
-Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu
+Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0.
 
 ### Community 124 - "Community 124"
 Cohesion: 1.0
-Nodes (1): Lower credible bound: belief_mean - z * sd, floored at 0.
+Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
 
 ### Community 125 - "Community 125"
 Cohesion: 1.0
-Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
+Nodes (1): Confidence of the weakest edge — the path is no stronger.
 
 ### Community 126 - "Community 126"
 Cohesion: 1.0
-Nodes (1): Confidence of the weakest edge — the path is no stronger.
+Nodes (1): The path's success belief: the product of its edges' belief means         (indep
 
 ### Community 127 - "Community 127"
 Cohesion: 1.0
-Nodes (1): The path's success belief: the product of its edges' belief means         (indep
+Nodes (1): A conservative lower credible bound on the path's success belief — the         p
 
 ### Community 128 - "Community 128"
 Cohesion: 1.0
-Nodes (1): A conservative lower credible bound on the path's success belief — the         p
+Nodes (1): Run every passive check over one response and return all findings, in     check-
 
 ### Community 129 - "Community 129"
 Cohesion: 1.0
-Nodes (1): Run every passive check over one response and return all findings, in     check-
+Nodes (1): A passive, abstract description of what an oracle must compare.      This is del
 
 ### Community 130 - "Community 130"
 Cohesion: 1.0
-Nodes (1): A passive, abstract description of what an oracle must compare.      This is del
+Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
 
 ### Community 131 - "Community 131"
 Cohesion: 1.0
-Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
+Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
 
 ### Community 132 - "Community 132"
 Cohesion: 1.0
-Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
+Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
 
 ### Community 133 - "Community 133"
 Cohesion: 1.0
-Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
+Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
 
 ### Community 134 - "Community 134"
 Cohesion: 1.0
-Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
+Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
 
 ### Community 135 - "Community 135"
 Cohesion: 1.0
-Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
+Nodes (1): Raw observed values plus a declarative dangerous-condition predicate         for
 
 ### Community 136 - "Community 136"
 Cohesion: 1.0
-Nodes (1): Raw observed values plus a declarative dangerous-condition predicate         for
+Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
 
 ### Community 137 - "Community 137"
 Cohesion: 1.0
-Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
+Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
 
 ### Community 138 - "Community 138"
 Cohesion: 1.0
-Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
+Nodes (1): An injected expression, the value it computes to, and the response it         wa
 
 ### Community 139 - "Community 139"
 Cohesion: 1.0
-Nodes (1): An injected expression, the value it computes to, and the response it         wa
+Nodes (1): A response (and an optional benign control) for the error-signature         orac
 
 ### Community 140 - "Community 140"
 Cohesion: 1.0
-Nodes (1): A response (and an optional benign control) for the error-signature         orac
+Nodes (1): Fold another context's populated inputs into this one, so a single         findi
 
 ### Community 141 - "Community 141"
 Cohesion: 1.0
-Nodes (1): Fold another context's populated inputs into this one, so a single         findi
+Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
 
 ### Community 142 - "Community 142"
 Cohesion: 1.0
-Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
+Nodes (1): The fired signals; the subset that carried the confirmation.
 
 ### Community 143 - "Community 143"
 Cohesion: 1.0
-Nodes (1): The fired signals; the subset that carried the confirmation.
+Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
 
 ### Community 144 - "Community 144"
 Cohesion: 1.0
-Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
+Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
 
 ### Community 145 - "Community 145"
 Cohesion: 1.0
-Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
+Nodes (1): Fold another context's populated inputs into this one, so a single         findi
 
 ### Community 146 - "Community 146"
 Cohesion: 1.0
-Nodes (1): Fold another context's populated inputs into this one, so a single         findi
+Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
 
 ### Community 147 - "Community 147"
 Cohesion: 1.0
-Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
+Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
 
 ### Community 148 - "Community 148"
 Cohesion: 1.0
-Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
+Nodes (1): Raw observed values plus a declarative dangerous-condition predicate         for
 
 ### Community 149 - "Community 149"
 Cohesion: 1.0
-Nodes (1): Raw observed values plus a declarative dangerous-condition predicate         for
+Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
 
 ### Community 150 - "Community 150"
 Cohesion: 1.0
-Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
+Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
 
 ### Community 151 - "Community 151"
 Cohesion: 1.0
-Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
+Nodes (1): An injected expression, the value it computes to, and the response it         wa
 
 ### Community 152 - "Community 152"
 Cohesion: 1.0
-Nodes (1): An injected expression, the value it computes to, and the response it         wa
+Nodes (1): Fold another context's populated inputs into this one, so a single         findi
 
 ### Community 153 - "Community 153"
 Cohesion: 1.0
-Nodes (1): Fold another context's populated inputs into this one, so a single         findi
+Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
 
 ### Community 154 - "Community 154"
 Cohesion: 1.0
-Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
+Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
 
 ### Community 155 - "Community 155"
 Cohesion: 1.0
-Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
+Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
 
 ### Community 156 - "Community 156"
 Cohesion: 1.0
-Nodes (1): Aligned per-round responses for the SPRT boolean-inference oracle:         for e
+Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
 
 ### Community 157 - "Community 157"
 Cohesion: 1.0
-Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
+Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
 
 ### Community 158 - "Community 158"
 Cohesion: 1.0
-Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
+Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
 
 ### Community 159 - "Community 159"
 Cohesion: 1.0
-Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
+Nodes (1): Raw observed values plus a declarative dangerous-condition predicate         for
 
 ### Community 160 - "Community 160"
 Cohesion: 1.0
-Nodes (1): Raw observed values plus a declarative dangerous-condition predicate         for
+Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
 
 ### Community 161 - "Community 161"
 Cohesion: 1.0
-Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
+Nodes (1): Fold another context's populated inputs into this one, so a single         findi
 
 ### Community 162 - "Community 162"
 Cohesion: 1.0
-Nodes (1): Fold another context's populated inputs into this one, so a single         findi
+Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
 
 ### Community 163 - "Community 163"
 Cohesion: 1.0
-Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
+Nodes (1): What a node *is*. The set spans the surfaces a modern engagement     touches — w
 
 ### Community 164 - "Community 164"
 Cohesion: 1.0
-Nodes (1): What a node *is*. The set spans the surfaces a modern engagement     touches — w
+Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
 
 ### Community 165 - "Community 165"
 Cohesion: 1.0
-Nodes (1): The identity triple (src, dst, kind-value) used for upsert.
+Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
 
 ### Community 166 - "Community 166"
 Cohesion: 1.0
-Nodes (1): An enumerated simple path through the world-model: an ordered list     of the ed
+Nodes (1): The provenance id of each hop, in order.
 
 ### Community 167 - "Community 167"
 Cohesion: 1.0
-Nodes (1): The provenance id of each hop, in order.
+Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
 
 ### Community 168 - "Community 168"
 Cohesion: 1.0
-Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
+Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
 
 ### Community 169 - "Community 169"
 Cohesion: 1.0
-Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
+Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
 
 ### Community 170 - "Community 170"
 Cohesion: 1.0
-Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
+Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
 
 ### Community 171 - "Community 171"
 Cohesion: 1.0
-Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
+Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
 
 ### Community 172 - "Community 172"
 Cohesion: 1.0
-Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
+Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
 
 ### Community 173 - "Community 173"
 Cohesion: 1.0
-Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
+Nodes (1): Fold another context's populated inputs into this one, so a single         findi
 
 ### Community 174 - "Community 174"
 Cohesion: 1.0
-Nodes (1): Fold another context's populated inputs into this one, so a single         findi
+Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
 
 ### Community 175 - "Community 175"
 Cohesion: 1.0
-Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
+Nodes (1): Side-effect reflection: place a unique canary (wrapped by `payload_template`)
 
 ### Community 176 - "Community 176"
 Cohesion: 1.0
-Nodes (1): Side-effect reflection: place a unique canary (wrapped by `payload_template`)
+Nodes (1): A passive, abstract description of what an oracle must compare.      This is del
 
 ### Community 177 - "Community 177"
 Cohesion: 1.0
-Nodes (1): A passive, abstract description of what an oracle must compare.      This is del
+Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
 
 ### Community 178 - "Community 178"
 Cohesion: 1.0
-Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
+Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
 
 ### Community 179 - "Community 179"
 Cohesion: 1.0
-Nodes (1): Paired latency samples (a benign baseline vs a delay-injected probe)         for
+Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
 
 ### Community 180 - "Community 180"
 Cohesion: 1.0
-Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
+Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
 
 ### Community 181 - "Community 181"
 Cohesion: 1.0
-Nodes (1): An expected (attacker-predicted) vs. observed state pair for the         achieve
+Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
 
 ### Community 182 - "Community 182"
 Cohesion: 1.0
-Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
+Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
 
 ### Community 183 - "Community 183"
 Cohesion: 1.0
-Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
+Nodes (1): Fold another context's populated inputs into this one, so a single         findi
 
 ### Community 184 - "Community 184"
 Cohesion: 1.0
-Nodes (1): Fold another context's populated inputs into this one, so a single         findi
+Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
 
 ### Community 185 - "Community 185"
 Cohesion: 1.0
-Nodes (1): The fired signals; the subset that carried the confirmation.
+Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
 
 ### Community 186 - "Community 186"
 Cohesion: 1.0
-Nodes (1): A baseline vs. mutated response pair, for the differential oracle         (boole
+Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
 
 ### Community 187 - "Community 187"
 Cohesion: 1.0
-Nodes (1): A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned
+Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
 
 ### Community 188 - "Community 188"
 Cohesion: 1.0
-Nodes (1): Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort
+Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
 
 ### Community 189 - "Community 189"
 Cohesion: 1.0
-Nodes (1): A unique canary marker plus the sink it was observed in, for the         side-ef
-
-### Community 190 - "Community 190"
-Cohesion: 1.0
-Nodes (1): The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp
-
-### Community 191 - "Community 191"
-Cohesion: 1.0
 Nodes (1): Mint a fresh correlation token and return (token, callback_url).          The UR
 
-### Community 192 - "Community 192"
+### Community 190 - "Community 190"
 Cohesion: 1.0
 Nodes (1): Return all hits recorded against `token` so far (possibly empty).
 
 ## Knowledge Gaps
-- **481 isolated node(s):** ``logging.bind_engagement(slug)` sets a module-level slug that     routes subsequ`, `Laplace-smoothed success rate.`, `Wilson 95% lower bound — conservative for the planner.`, `memory.embed — embeddings for similarity search.  Two backends ship in this sess`, `Feature-hashing TF vectorizer. 256-dim, L2-normalized, signed.` (+476 more)
+- **480 isolated node(s):** ``logging.bind_engagement(slug)` sets a module-level slug that     routes subsequ`, `Laplace-smoothed success rate.`, `Wilson 95% lower bound — conservative for the planner.`, `memory.embed — embeddings for similarity search.  Two backends ship in this sess`, `Feature-hashing TF vectorizer. 256-dim, L2-normalized, signed.` (+475 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 25`** (2 nodes): `escapeHtml()`, `app.js`
+- **Thin community `Community 24`** (2 nodes): `escapeHtml()`, `app.js`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 25`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 26`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -1015,19 +1007,19 @@ Nodes (1): Return all hits recorded against `token` so far (possibly empty).
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 29`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 30`** (1 nodes): `__init__.py`
+- **Thin community `Community 30`** (1 nodes): `app.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 31`** (1 nodes): `app.js`
+- **Thin community `Community 31`** (1 nodes): `Adapt a ``kernel.Hypothesis`` (given/if/then/because + refute_on + confidence)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 32`** (1 nodes): `Adapt a ``kernel.Hypothesis`` (given/if/then/because + refute_on + confidence)`
+- **Thin community `Community 32`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 33`** (1 nodes): `__init__.py`
+- **Thin community `Community 33`** (1 nodes): `|mean_pred - mean_actual| — this bin's contribution to miscalibration.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 34`** (1 nodes): `|mean_pred - mean_actual| — this bin's contribution to miscalibration.`
+- **Thin community `Community 34`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 35`** (1 nodes): `__init__.py`
+- **Thin community `Community 35`** (1 nodes): `True iff evolution beat the best seed.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 36`** (1 nodes): `True iff evolution beat the best seed.`
+- **Thin community `Community 36`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 37`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -1043,11 +1035,11 @@ Nodes (1): Return all hits recorded against `token` so far (possibly empty).
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 43`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 44`** (1 nodes): `__init__.py`
+- **Thin community `Community 44`** (1 nodes): `True only if the claim is grounded at FACT strength (oracle / cert / belief).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 45`** (1 nodes): `True only if the claim is grounded at FACT strength (oracle / cert / belief).`
+- **Thin community `Community 45`** (1 nodes): `How a report should present it.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 46`** (1 nodes): `How a report should present it.`
+- **Thin community `Community 46`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 47`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -1055,302 +1047,298 @@ Nodes (1): Return all hits recorded against `token` so far (possibly empty).
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 49`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 50`** (1 nodes): `__init__.py`
+- **Thin community `Community 50`** (1 nodes): `recall — fraction of ground truth rediscovered.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 51`** (1 nodes): `recall — fraction of ground truth rediscovered.`
+- **Thin community `Community 51`** (1 nodes): `app.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 52`** (1 nodes): `app.js`
+- **Thin community `Community 52`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 53`** (1 nodes): `__init__.py`
+- **Thin community `Community 53`** (1 nodes): `codeinj.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 54`** (1 nodes): `codeinj.js`
+- **Thin community `Community 54`** (1 nodes): `ssrf.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 55`** (1 nodes): `ssrf.js`
+- **Thin community `Community 55`** (1 nodes): `pathtrav.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 56`** (1 nodes): `pathtrav.js`
+- **Thin community `Community 56`** (1 nodes): `cmdi.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 57`** (1 nodes): `cmdi.js`
+- **Thin community `Community 57`** (1 nodes): `nosqli.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 58`** (1 nodes): `nosqli.js`
+- **Thin community `Community 58`** (1 nodes): `sqli.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 59`** (1 nodes): `sqli.js`
+- **Thin community `Community 59`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 60`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 61`** (1 nodes): `__init__.py`
+- **Thin community `Community 61`** (1 nodes): `The fired signals; the subset that carried the confirmation.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 62`** (1 nodes): `The fired signals; the subset that carried the confirmation.`
+- **Thin community `Community 62`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 63`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
+- **Thin community `Community 63`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 64`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
+- **Thin community `Community 64`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 65`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 66`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
+- **Thin community `Community 66`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 67`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
+- **Thin community `Community 67`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 68`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 69`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
+- **Thin community `Community 69`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 70`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
+- **Thin community `Community 70`** (1 nodes): `An injected expression, the value it computes to, and the response it         wa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 71`** (1 nodes): `An injected expression, the value it computes to, and the response it         wa`
+- **Thin community `Community 71`** (1 nodes): `A response (and an optional benign control) for the error-signature         orac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 72`** (1 nodes): `A response (and an optional benign control) for the error-signature         orac`
+- **Thin community `Community 72`** (1 nodes): `The arguments a page passed to the CDP execution binding, plus the         uniqu`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 73`** (1 nodes): `The arguments a page passed to the CDP execution binding, plus the         uniqu`
+- **Thin community `Community 73`** (1 nodes): `The callback base a probe embeds. The operator-hosted relay URL when         one`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 74`** (1 nodes): `The callback base a probe embeds. The operator-hosted relay URL when         one`
+- **Thin community `Community 74`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 75`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 76`** (1 nodes): `__init__.py`
+- **Thin community `Community 76`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 77`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 78`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
+- **Thin community `Community 78`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 79`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
+- **Thin community `Community 79`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 80`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
+- **Thin community `Community 80`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 81`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
+- **Thin community `Community 81`** (1 nodes): `The provenance id of each hop, in order.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 82`** (1 nodes): `The provenance id of each hop, in order.`
+- **Thin community `Community 82`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 83`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
+- **Thin community `Community 83`** (1 nodes): `__init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 84`** (1 nodes): `__init__.py`
+- **Thin community `Community 84`** (1 nodes): `Does any entity the claim names sit at a net-refuted belief in ``world``? Return`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 85`** (1 nodes): `Does any entity the claim names sit at a net-refuted belief in ``world``? Return`
+- **Thin community `Community 85`** (1 nodes): `Project a BATCH-fused posterior (Path B / backfill): write the Beta(alpha, beta)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 86`** (1 nodes): `Project a BATCH-fused posterior (Path B / backfill): write the Beta(alpha, beta)`
+- **Thin community `Community 86`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 87`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
+- **Thin community `Community 87`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 88`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu`
+- **Thin community `Community 88`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 89`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
+- **Thin community `Community 89`** (1 nodes): `The provenance id of each hop, in order.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 90`** (1 nodes): `The provenance id of each hop, in order.`
+- **Thin community `Community 90`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 91`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
+- **Thin community `Community 91`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 92`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
+- **Thin community `Community 92`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 93`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
+- **Thin community `Community 93`** (1 nodes): `The provenance id of each hop, in order.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 94`** (1 nodes): `The provenance id of each hop, in order.`
+- **Thin community `Community 94`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 95`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
+- **Thin community `Community 95`** (1 nodes): `The firewall's verdict on one claim. ``is_fact`` is the single thing every     d`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 96`** (1 nodes): `The firewall's verdict on one claim. ``is_fact`` is the single thing every     d`
+- **Thin community `Community 96`** (1 nodes): `True only if the claim is grounded at FACT strength (oracle / cert / belief).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 97`** (1 nodes): `True only if the claim is grounded at FACT strength (oracle / cert / belief).`
+- **Thin community `Community 97`** (1 nodes): `How a report should present it.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 98`** (1 nodes): `How a report should present it.`
+- **Thin community `Community 98`** (1 nodes): `A choice made by the coordinator or planner. URK decide()-backed.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 99`** (1 nodes): `A choice made by the coordinator or planner. URK decide()-backed.`
+- **Thin community `Community 99`** (1 nodes): `The verdict of a single oracle over already-observed data.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 100`** (1 nodes): `The verdict of a single oracle over already-observed data.`
+- **Thin community `Community 100`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 101`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
+- **Thin community `Community 101`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 102`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu`
+- **Thin community `Community 102`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 103`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
+- **Thin community `Community 103`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 104`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
+- **Thin community `Community 104`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 105`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
+- **Thin community `Community 105`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 106`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
+- **Thin community `Community 106`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 107`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
+- **Thin community `Community 107`** (1 nodes): `The provenance id of each hop, in order.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 108`** (1 nodes): `The provenance id of each hop, in order.`
+- **Thin community `Community 108`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 109`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
+- **Thin community `Community 109`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 110`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
+- **Thin community `Community 110`** (1 nodes): `The fired signals; the subset that carried the confirmation.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 111`** (1 nodes): `The fired signals; the subset that carried the confirmation.`
+- **Thin community `Community 111`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 112`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 113`** (1 nodes): `Posterior mean of the Beta belief, alpha / (alpha + beta).`
+- **Thin community `Community 113`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 114`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
+- **Thin community `Community 114`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 115`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
+- **Thin community `Community 115`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 116`** (1 nodes): `Ordered node ids along the path: src of each edge, then final dst.`
+- **Thin community `Community 116`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 117`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
+- **Thin community `Community 117`** (1 nodes): `The provenance id of each hop, in order.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 118`** (1 nodes): `The provenance id of each hop, in order.`
+- **Thin community `Community 118`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 119`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
+- **Thin community `Community 119`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 120`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
+- **Thin community `Community 120`** (1 nodes): `What one node asserts about another. Directed: `src` -> `dst`.      REACHABLE_FR`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 121`** (1 nodes): `What one node asserts about another. Directed: `src` -> `dst`.      REACHABLE_FR`
+- **Thin community `Community 121`** (1 nodes): `One typed entity in the world-model.      `id` is caller-assigned and stable — r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 122`** (1 nodes): `One typed entity in the world-model.      `id` is caller-assigned and stable — r`
+- **Thin community `Community 122`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 123`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0. A high-mean         bu`
+- **Thin community `Community 123`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 124`** (1 nodes): `Lower credible bound: belief_mean - z * sd, floored at 0.`
+- **Thin community `Community 124`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 125`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
+- **Thin community `Community 125`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 126`** (1 nodes): `Confidence of the weakest edge — the path is no stronger.`
+- **Thin community `Community 126`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 127`** (1 nodes): `The path's success belief: the product of its edges' belief means         (indep`
+- **Thin community `Community 127`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 128`** (1 nodes): `A conservative lower credible bound on the path's success belief — the         p`
+- **Thin community `Community 128`** (1 nodes): `Run every passive check over one response and return all findings, in     check-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 129`** (1 nodes): `Run every passive check over one response and return all findings, in     check-`
+- **Thin community `Community 129`** (1 nodes): `A passive, abstract description of what an oracle must compare.      This is del`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 130`** (1 nodes): `A passive, abstract description of what an oracle must compare.      This is del`
+- **Thin community `Community 130`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 131`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
+- **Thin community `Community 131`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 132`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
+- **Thin community `Community 132`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 133`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
+- **Thin community `Community 133`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 134`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
+- **Thin community `Community 134`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 135`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
+- **Thin community `Community 135`** (1 nodes): `Raw observed values plus a declarative dangerous-condition predicate         for`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 136`** (1 nodes): `Raw observed values plus a declarative dangerous-condition predicate         for`
+- **Thin community `Community 136`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 137`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
+- **Thin community `Community 137`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 138`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
+- **Thin community `Community 138`** (1 nodes): `An injected expression, the value it computes to, and the response it         wa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 139`** (1 nodes): `An injected expression, the value it computes to, and the response it         wa`
+- **Thin community `Community 139`** (1 nodes): `A response (and an optional benign control) for the error-signature         orac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 140`** (1 nodes): `A response (and an optional benign control) for the error-signature         orac`
+- **Thin community `Community 140`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 141`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
+- **Thin community `Community 141`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 142`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
+- **Thin community `Community 142`** (1 nodes): `The fired signals; the subset that carried the confirmation.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 143`** (1 nodes): `The fired signals; the subset that carried the confirmation.`
+- **Thin community `Community 143`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 144`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
+- **Thin community `Community 144`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 145`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
+- **Thin community `Community 145`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 146`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
+- **Thin community `Community 146`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 147`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
+- **Thin community `Community 147`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 148`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
+- **Thin community `Community 148`** (1 nodes): `Raw observed values plus a declarative dangerous-condition predicate         for`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 149`** (1 nodes): `Raw observed values plus a declarative dangerous-condition predicate         for`
+- **Thin community `Community 149`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 150`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
+- **Thin community `Community 150`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 151`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
+- **Thin community `Community 151`** (1 nodes): `An injected expression, the value it computes to, and the response it         wa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 152`** (1 nodes): `An injected expression, the value it computes to, and the response it         wa`
+- **Thin community `Community 152`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 153`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
+- **Thin community `Community 153`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 154`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
+- **Thin community `Community 154`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 155`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
+- **Thin community `Community 155`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 156`** (1 nodes): `Aligned per-round responses for the SPRT boolean-inference oracle:         for e`
+- **Thin community `Community 156`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 157`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
+- **Thin community `Community 157`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 158`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
+- **Thin community `Community 158`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 159`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
+- **Thin community `Community 159`** (1 nodes): `Raw observed values plus a declarative dangerous-condition predicate         for`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 160`** (1 nodes): `Raw observed values plus a declarative dangerous-condition predicate         for`
+- **Thin community `Community 160`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 161`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
+- **Thin community `Community 161`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 162`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
+- **Thin community `Community 162`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 163`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
+- **Thin community `Community 163`** (1 nodes): `What a node *is*. The set spans the surfaces a modern engagement     touches — w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 164`** (1 nodes): `What a node *is*. The set spans the surfaces a modern engagement     touches — w`
+- **Thin community `Community 164`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 165`** (1 nodes): `The identity triple (src, dst, kind-value) used for upsert.`
+- **Thin community `Community 165`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 166`** (1 nodes): `An enumerated simple path through the world-model: an ordered list     of the ed`
+- **Thin community `Community 166`** (1 nodes): `The provenance id of each hop, in order.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 167`** (1 nodes): `The provenance id of each hop, in order.`
+- **Thin community `Community 167`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 168`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
+- **Thin community `Community 168`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 169`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
+- **Thin community `Community 169`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 170`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
+- **Thin community `Community 170`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 171`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
+- **Thin community `Community 171`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 172`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
+- **Thin community `Community 172`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 173`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
+- **Thin community `Community 173`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 174`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
+- **Thin community `Community 174`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 175`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
+- **Thin community `Community 175`** (1 nodes): `Side-effect reflection: place a unique canary (wrapped by `payload_template`)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 176`** (1 nodes): `Side-effect reflection: place a unique canary (wrapped by `payload_template`)`
+- **Thin community `Community 176`** (1 nodes): `A passive, abstract description of what an oracle must compare.      This is del`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 177`** (1 nodes): `A passive, abstract description of what an oracle must compare.      This is del`
+- **Thin community `Community 177`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 178`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
+- **Thin community `Community 178`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 179`** (1 nodes): `Paired latency samples (a benign baseline vs a delay-injected probe)         for`
+- **Thin community `Community 179`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 180`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
+- **Thin community `Community 180`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 181`** (1 nodes): `An expected (attacker-predicted) vs. observed state pair for the         achieve`
+- **Thin community `Community 181`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 182`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
+- **Thin community `Community 182`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 183`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
+- **Thin community `Community 183`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 184`** (1 nodes): `Fold another context's populated inputs into this one, so a single         findi`
+- **Thin community `Community 184`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 185`** (1 nodes): `The fired signals; the subset that carried the confirmation.`
+- **Thin community `Community 185`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 186`** (1 nodes): `A baseline vs. mutated response pair, for the differential oracle         (boole`
+- **Thin community `Community 186`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 187`** (1 nodes): `A list of out-of-band interactions (whatever `OOBReceiver.poll`         returned`
+- **Thin community `Community 187`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 188`** (1 nodes): `Captured stdout/stderr for the sanitizer oracle (ASAN/UBSAN/panic/         abort`
+- **Thin community `Community 188`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 189`** (1 nodes): `A unique canary marker plus the sink it was observed in, for the         side-ef`
+- **Thin community `Community 189`** (1 nodes): `Mint a fresh correlation token and return (token, callback_url).          The UR`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 190`** (1 nodes): `The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 191`** (1 nodes): `Mint a fresh correlation token and return (token, callback_url).          The UR`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 192`** (1 nodes): `Return all hits recorded against `token` so far (possibly empty).`
+- **Thin community `Community 190`** (1 nodes): `Return all hits recorded against `token` so far (possibly empty).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` connect `Community 2` to `Community 0`, `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 16`, `Community 17`, `Community 18`, `Community 19`, `Community 20`, `Community 23`, `Community 24`?**
-  _High betweenness centrality (0.192) - this node is a cross-community bridge._
-- **Why does `HttpRequest` connect `Community 1` to `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 8`, `Community 10`, `Community 12`, `Community 14`, `Community 21`, `Community 23`?**
-  _High betweenness centrality (0.058) - this node is a cross-community bridge._
-- **Why does `CrucibleError` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 12`, `Community 13`, `Community 15`, `Community 20`, `Community 21`?**
-  _High betweenness centrality (0.050) - this node is a cross-community bridge._
+- **Why does `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 16`, `Community 17`, `Community 18`, `Community 19`, `Community 20`, `Community 21`, `Community 22`, `Community 23`?**
+  _High betweenness centrality (0.178) - this node is a cross-community bridge._
+- **Why does `HttpRequest` connect `Community 1` to `Community 0`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 9`, `Community 10`, `Community 12`, `Community 15`, `Community 17`, `Community 22`?**
+  _High betweenness centrality (0.060) - this node is a cross-community bridge._
+- **Why does `WorldModel` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 13`, `Community 15`, `Community 17`, `Community 21`?**
+  _High betweenness centrality (0.056) - this node is a cross-community bridge._
 - **Are the 448 inferred relationships involving `NodeKind` (e.g. with `EngagementRefused` and `EngagementResult`) actually correct?**
   _`NodeKind` has 448 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 432 inferred relationships involving `WorldModel` (e.g. with `EngagementRefused` and `EngagementResult`) actually correct?**
