@@ -44,6 +44,27 @@ def test_worked_example_one_asset_owned_by_asn() -> None:
     assert e.explain()                            # every merge cites its signal
 
 
+def test_confidence_basis_labels_the_derivation() -> None:
+    # a structural GUESS must never be mistaken for a measured merge posterior: every
+    # entity carries confidence_basis stating how its confidence was derived.
+    seen = set()
+    examples = [
+        _worked_example(),
+        [_o("s0", NodeKind.DOMAIN, "a.example.com", EdgeKind.RESOLVES_TO, NodeKind.HOST, "203.0.113.9"),
+         _o("c0", NodeKind.DOMAIN, "a.example.com", EdgeKind.PRESENTS_CERT, NodeKind.CERTIFICATE, "cx")],
+    ]
+    for ex in examples:
+        for e in resolve(ex, seq=1).entities:
+            seen.add(e.confidence_basis)
+            if e.merge_log:
+                assert e.confidence_basis == "merge-llr"
+            elif len(e.members) > 1:
+                assert e.confidence_basis == "structural-default" and abs(e.confidence - 0.9) < 1e-9
+            else:
+                assert e.confidence_basis == "singleton-default" and abs(e.confidence - 0.6) < 1e-9
+    assert "merge-llr" in seen                        # the worked example has scored merges
+
+
 def test_owner_tier_never_merges_into_asset() -> None:
     r = resolve(_worked_example(), seq=1)
     for e in r.entities:

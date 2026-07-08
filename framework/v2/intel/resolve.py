@@ -63,6 +63,12 @@ class Entity(BaseModel):
     primary_kind: NodeKind
     members: list[EntityRef]
     confidence: float = Field(ge=0.0, le=1.0)   # bottleneck of the merge tree
+    # How ``confidence`` was derived, so a structural GUESS is never mistaken for a measured
+    # posterior: "merge-llr" = a real log-likelihood-ratio merge probability; "structural-
+    # default" = a fixed 0.9 for a multi-member cluster with no scored merge edge; "singleton-
+    # default" = a fixed 0.6 for a lone unresolved reference. The latter two are heuristics,
+    # not evidence — a consumer sorting by confidence must not rank them above measured merges.
+    confidence_basis: str = "merge-llr"
     merge_log: list[MergeEvent] = Field(default_factory=list)
     owned_by: list[str] = Field(default_factory=list)   # owner-entity canonical ids (ASSET_OWNS)
 
@@ -222,12 +228,15 @@ def resolve(observations: list[Observation], *, seq: int = 0) -> ResolveResult:
         cl_merges = [m for m in merge_log if m.a.node_id in cluster_ids and m.b.node_id in cluster_ids]
         if cl_merges:
             conf = min(min(m.probability for m in cl_merges), 0.99)
+            basis = "merge-llr"
         elif len(uniq) > 1:
             conf = 0.9   # a dedicated artifact attached, no scored merge edge
+            basis = "structural-default"
         else:
             conf = 0.6   # a lone unresolved reference
+            basis = "singleton-default"
         entities.append(Entity(canonical_id=canonical, primary_kind=uniq[0].kind, members=uniq,
-                               confidence=round(conf, 5), merge_log=cl_merges))
+                               confidence=round(conf, 5), confidence_basis=basis, merge_log=cl_merges))
 
     # --- owner links (ASSET_OWNS): ASN announces a netblock that contains a host ----
     owns: list[OwnsLink] = []

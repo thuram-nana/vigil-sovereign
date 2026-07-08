@@ -75,6 +75,40 @@ class ReportFinding:
     remediation: str = ""
     references: list[str] = field(default_factory=list)
     re_verifiable: bool = False
+    # The live veracity verdict at render time (anti-hallucination P4b): "fact" when the
+    # finding's own oracle RE-FIRES, "contradicted" / "ungrounded" when it does not,
+    # "unclassified" for passive/dom leads that carry no oracle proof. Honest by default —
+    # the export states what actually re-executes, not merely that a certificate exists.
+    grounding: str = "unclassified"
+
+
+def _grounding_label(admitted) -> str:
+    """Map an AdmittedClaim to the export's small, stable grounding vocabulary."""
+    if admitted is None:
+        return "unclassified"
+    if admitted.is_fact:
+        return "fact"
+    ra = admitted.render_as
+    if ra == "hypothesis":
+        return "hypothesis"
+    if ra == "contradicted":
+        return "contradicted"
+    return "ungrounded"
+
+
+def _assess_active_grounding(report: ScanReport) -> list:
+    """Run each active finding through the veracity firewall (re-executing its own oracle)
+    so the export can state its LIVE grounding. Index-aligned with report.active_findings;
+    a None entry means it could not be assessed. Pure, read-only, best-effort — it re-runs
+    the deterministic oracle over retained evidence and sends no traffic."""
+    verdicts: list = []
+    for f in report.active_findings:
+        try:
+            from ..veracity import admit_finding
+            verdicts.append(admit_finding(f, None))
+        except Exception:
+            verdicts.append(None)
+    return verdicts
 
 
 def _library_index() -> dict[str, Any]:
@@ -119,19 +153,34 @@ def _serialize_attack_paths(attack_paths: list | None) -> list[dict]:
     return out
 
 
-def build_report(report: ScanReport, *, attack_paths: list | None = None) -> dict:
+def build_report(report: ScanReport, *, attack_paths: list | None = None,
+                 grounding: list | None = None, strict_evidence: bool = False) -> dict:
     """Normalise a ScanReport into a stable, enriched report document.
 
     ``attack_paths`` (the forward reasoning from :func:`engage.run_engagement` /
     :class:`scanner.orchestrator.AutonomousCampaign`) is optional: when present, the
     document gains an ``attack_paths`` array — the multi-hop routes the confirmed
     findings unlock — so a machine consumer (CI, a dashboard) sees not just isolated
-    findings but the chains they compose into."""
+    findings but the chains they compose into.
+
+    ``grounding`` (anti-hallucination P4b) is the per-active-finding veracity verdict,
+    index-aligned with ``report.active_findings``. When omitted it is COMPUTED here by
+    re-executing each finding's oracle — the export is honest by default. ``strict_evidence``
+    omits any active finding that does not re-ground as a fact from the rendered document
+    (it stays in the raw ScanReport / reverifiable artifact — nothing is lost internally)."""
     lib = _library_index()
     findings: list[ReportFinding] = []
+    if grounding is None:
+        grounding = _assess_active_grounding(report)
 
-    for f in report.active_findings:
+    for i, f in enumerate(report.active_findings):
         sev, rem, refs = _meta_for(f.check_id, f.bug_class, lib)
+        g = grounding[i] if i < len(grounding) else None
+        label = _grounding_label(g)
+        # strict export: withhold an active finding whose proof did not re-ground as a fact
+        # (kept in the raw report + reverifiable artifact; only the rendered doc omits it).
+        if strict_evidence and label != "fact":
+            continue
         findings.append(ReportFinding(
             kind="active", bug_class=f.bug_class,
             title=f"{f.bug_class} confirmed at {f.param}",
@@ -140,6 +189,7 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None) -> dic
             confirmed_by=f.confirmed_by, evidence=f.rationale,
             remediation=rem, references=refs,
             re_verifiable=f.oracle_context is not None,
+            grounding=label,
         ))
     for p in report.passive_findings:
         _, rem, refs = _meta_for("", getattr(p, "bug_class", ""), lib)
@@ -162,6 +212,12 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None) -> dic
     counts: dict[str, int] = {}
     for f in findings:
         counts[f.severity] = counts.get(f.severity, 0) + 1
+    # per-grounding breakdown over ACTIVE findings — drives the honest footer and lets CI
+    # gate on it. Computed over the full active set (not the strict-filtered export) so the
+    # summary tells the truth even when strict mode withholds ungrounded findings.
+    g_counts: dict[str, int] = {}
+    for g in (grounding or []):
+        g_counts[_grounding_label(g)] = g_counts.get(_grounding_label(g), 0) + 1
 
     return {
         "tool": "CRUCIBLE",
@@ -174,6 +230,8 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None) -> dic
             "dom_xss_candidates": len(report.dom_xss_candidates),
             "discovered_endpoints": len(report.discovered_endpoints),
             "by_severity": counts,
+            "by_grounding": g_counts,
+            "strict_evidence": strict_evidence,
         },
         "fingerprint": sorted(report.fingerprint.tokens) if report.fingerprint else [],
         "discovered_endpoints": list(report.discovered_endpoints),
@@ -182,16 +240,20 @@ def build_report(report: ScanReport, *, attack_paths: list | None = None) -> dic
     }
 
 
-def to_json(report: ScanReport, *, attack_paths: list | None = None, indent: int | None = 2) -> str:
+def to_json(report: ScanReport, *, attack_paths: list | None = None,
+            grounding: list | None = None, strict_evidence: bool = False,
+            indent: int | None = 2) -> str:
     return json.dumps(
-        build_report(report, attack_paths=attack_paths),
+        build_report(report, attack_paths=attack_paths, grounding=grounding,
+                     strict_evidence=strict_evidence),
         indent=indent, sort_keys=False, ensure_ascii=False,
     )
 
 
-def to_sarif(report: ScanReport) -> str:
+def to_sarif(report: ScanReport, *, grounding: list | None = None,
+             strict_evidence: bool = False) -> str:
     """SARIF 2.1.0 — one rule per bug class, one result per finding."""
-    doc = build_report(report)
+    doc = build_report(report, grounding=grounding, strict_evidence=strict_evidence)
     rules: dict[str, dict] = {}
     results: list[dict] = []
     for f in doc["findings"]:
@@ -212,6 +274,7 @@ def to_sarif(report: ScanReport) -> str:
             "properties": {
                 "kind": f["kind"], "confidence": f["confidence"],
                 "confirmedBy": f["confirmed_by"], "reVerifiable": f["re_verifiable"],
+                "grounding": f.get("grounding", "unclassified"),
             },
         })
     sarif = {
@@ -229,9 +292,10 @@ def to_sarif(report: ScanReport) -> str:
     return json.dumps(sarif, indent=2, ensure_ascii=False)
 
 
-def to_html(report: ScanReport) -> str:
+def to_html(report: ScanReport, *, grounding: list | None = None,
+            strict_evidence: bool = False) -> str:
     """A self-contained human report: severity summary + per-finding cards."""
-    doc = build_report(report)
+    doc = build_report(report, grounding=grounding, strict_evidence=strict_evidence)
     s = doc["summary"]
     e = html.escape
     rows = "".join(
@@ -241,10 +305,13 @@ def to_html(report: ScanReport) -> str:
     cards = []
     for f in doc["findings"]:
         refs = ", ".join(e(r) for r in f["references"]) or "&mdash;"
-        badge = "✓ re-verifiable" if f["re_verifiable"] else e(f["confirmed_by"])
+        g = f.get("grounding", "unclassified")
+        badge = ("✓ re-verified (fact)" if g == "fact"
+                 else f"⚠ {e(g)}" if f["kind"] == "active"
+                 else e(f["confirmed_by"]))
         cards.append(
             f"<div class=card><h3>[{e(f['severity'])}] {e(f['title'])}</h3>"
-            f"<p class=meta>{e(f['kind'])} · confirmed by <b>{badge}</b> · confidence {e(f['confidence'])}</p>"
+            f"<p class=meta>{e(f['kind'])} · <b>{badge}</b> · confidence {e(f['confidence'])}</p>"
             f"<p><b>Location:</b> <code>{e(f['location'])}</code></p>"
             f"<p><b>Evidence:</b> {e(f['evidence']) or '&mdash;'}</p>"
             f"<p><b>Remediation:</b> {e(f['remediation']) or '&mdash;'}</p>"
@@ -262,18 +329,45 @@ code{{background:#f5f5f5;padding:.1rem .3rem;border-radius:3px}}
 <h1>CRUCIBLE report</h1>
 <p class=sub>{e(doc['target'])} · {s['confirmed']} confirmed · {s['passive']} passive · {s['dom_xss_candidates']} DOM-XSS leads · {s['discovered_endpoints']} endpoints</p>
 <h2>Severity summary</h2><table><tr><th>Severity</th><th>Count</th></tr>{rows}</table>
-<p class=sub>Every "confirmed" finding is oracle-adjudicated and marked re-verifiable — its certificate re-runs offline via <code>python3 -m framework.v2 verify</code>.</p>
+<p class=sub>{_footer_note(s)}</p>
 <h2>Findings</h2>{''.join(cards) or '<p>No findings.</p>'}
 </body></html>"""
 
 
-def render(report: ScanReport, fmt: str = "json") -> str:
+def _footer_note(summary: dict) -> str:
+    """A PER-FINDING-HONEST re-verification note. Only the findings whose oracle actually
+    re-fired at render time are claimed re-verifiable; if any active finding did NOT
+    re-ground, say so plainly rather than blanket-asserting sign-off over all of them. The
+    wording tracks the strict flag: under strict, non-fact findings are WITHHELD from this
+    document (not shown), so the note must say so rather than call them visible leads."""
+    g = summary.get("by_grounding", {})
+    strict = summary.get("strict_evidence", False)
+    n_fact = g.get("fact", 0)
+    n_not = sum(v for k, v in g.items() if k != "fact")
+    verify_cmd = 'its certificate re-runs offline via <code>python3 -m framework.v2 verify</code>'
+    # where the non-fact findings ended up in THIS rendered document
+    disposition = ("were WITHHELD from this report (retained in the raw report / "
+                   "<code>--reverifiable-out</code>)" if strict
+                   else "are shown as leads, not proven facts")
+    if n_fact and not n_not:
+        return f'All {n_fact} confirmed finding(s) re-verified at render time — {verify_cmd}.'
+    if n_fact and n_not:
+        return (f'{n_fact} confirmed finding(s) re-verified at render time ({verify_cmd}); '
+                f'{n_not} did NOT re-ground and {disposition}.')
+    if n_not:
+        return (f'{n_not} confirmed finding(s) did NOT re-ground at render time and '
+                f'{disposition} — investigate why the evidence no longer reproduces.')
+    return 'No oracle-confirmed findings to re-verify.'
+
+
+def render(report: ScanReport, fmt: str = "json", *,
+           grounding: list | None = None, strict_evidence: bool = False) -> str:
     """Render ``report`` in ``fmt`` (json | sarif | html)."""
     fmt = (fmt or "json").lower()
     if fmt == "json":
-        return to_json(report)
+        return to_json(report, grounding=grounding, strict_evidence=strict_evidence)
     if fmt == "sarif":
-        return to_sarif(report)
+        return to_sarif(report, grounding=grounding, strict_evidence=strict_evidence)
     if fmt == "html":
-        return to_html(report)
+        return to_html(report, grounding=grounding, strict_evidence=strict_evidence)
     raise ValueError(f"unknown report format {fmt!r}; expected json|sarif|html")

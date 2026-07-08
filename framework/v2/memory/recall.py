@@ -55,6 +55,11 @@ class WinningHypothesis:
     surface: str
     summary: str
     archetype: str
+    # How ``score`` was derived, so a consumer never mistakes a placeholder for a measured
+    # similarity: "cosine" = a real query-similarity score; "unranked" = no text query was
+    # given, so rows are in recency order and ``score`` is a constant 1.0 placeholder, NOT a
+    # similarity. Default "cosine" preserves the scored path's meaning.
+    score_kind: str = "cosine"
 
 
 @dataclass
@@ -177,9 +182,12 @@ def winning_hypotheses(
         scored.sort(key=lambda t: t[0], reverse=True)
         rows = [r for _, r in scored[:limit]]
         scores = [s for s, _ in scored[:limit]]
+        score_kind = "cosine"
     else:
+        # no text query → recency order; the 1.0 is a placeholder, NOT a similarity score.
         scores = [1.0] * min(limit, len(rows))
         rows = rows[:limit]
+        score_kind = "unranked"
 
     out: list[WinningHypothesis] = []
     for r, score in zip(rows, scores):
@@ -189,6 +197,7 @@ def winning_hypotheses(
         )
         out.append(WinningHypothesis(
             score=score,
+            score_kind=score_kind,
             provenance=Provenance(
                 table="hypotheses", row_id=int(r["id"]),
                 engagement_id=int(r["eid"]), engagement_slug=r["eslug"],

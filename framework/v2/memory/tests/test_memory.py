@@ -227,6 +227,12 @@ def test_recall_winning_hypotheses_returns_seeded(fresh_store: Store) -> None:
     classes = {w.bug_class for w in wins}
     # at least the three seeded confirmed classes should be present
     assert {"webhook-forgery", "IDOR", "mass-assignment"} <= classes
+    # no text query → the 1.0 score is a recency placeholder, labelled honestly as unranked
+    assert wins and all(w.score_kind == "unranked" and w.score == 1.0 for w in wins)
+    # a text query yields real cosine similarity scores, labelled as such
+    scored = recall.winning_hypotheses(
+        fresh_store, archetype="PHP-Smarty SMM-panel fork", text="webhook signature bypass", limit=10)
+    assert scored and all(w.score_kind == "cosine" for w in scored)
 
 
 def test_recall_payload_priors_returns_seeded(fresh_store: Store) -> None:

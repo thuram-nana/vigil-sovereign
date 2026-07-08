@@ -90,6 +90,11 @@ def main(argv: list[str]) -> int:
                         help="Archetype key the bandit keys its posteriors on.")
     parser.add_argument("--format", choices=("text", "json", "sarif", "html"), default="text",
                         help="Report format (json/sarif/html emit a machine/CI/human report to stdout).")
+    parser.add_argument("--strict-evidence", action="store_true",
+                        help="Withhold any confirmed finding that does NOT re-ground as a fact "
+                             "at render time from the rendered report (json/sarif/html). The "
+                             "finding stays in --reverifiable-out (nothing is lost internally); "
+                             "off by default (default = label every finding with its grounding).")
     parser.add_argument("--progress-log", default=None,
                         help="Append live phase/finding events as JSONL here (for the Ops Console "
                              "live view). Off by default; adds no cost when unset.")
@@ -135,7 +140,7 @@ def main(argv: list[str]) -> int:
 
     if args.format != "text":
         from .report import render
-        print(render(report, args.format))
+        print(render(report, args.format, strict_evidence=args.strict_evidence))
         return 0
 
     print(f"scan {report.target}")
