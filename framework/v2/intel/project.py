@@ -56,7 +56,8 @@ def project_observation(world: WorldModel, obs: Observation, *, seq: int | None 
     if obs.relation is not None and obs.object is not None:
         _node(obs.object)
         world.add_edge(Edge(
-            src=obs.subject.node_id, dst=obs.object.node_id, kind=obs.relation, attrs={},
+            src=obs.subject.node_id, dst=obs.object.node_id, kind=obs.relation,
+            attrs=dict(obs.attrs),   # carry the rationale (e.g. infer's via_host/fanout) onto the edge
             provenance=f"intel:{obs.obs_id}", confidence=c, first_seen=s, last_seen=s,
         ))
     return True

@@ -143,6 +143,40 @@ class EdgeKind(str, enum.Enum):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Provenance grounding classification (anti-hallucination P2)
+# ---------------------------------------------------------------------------
+
+# A node/edge's GROUNDING is derived from WHERE it came from — the one thing the
+# world-model can cheaply assert about every write. It never changes belief; it makes
+# grounding queryable (the console + consumers filter on it) and is the substrate for
+# an opt-in strict mode. The veracity firewall reuses this classifier so "what counts
+# as fact-grounded" is defined in exactly one place.
+_GROUNDED_PROV_PREFIXES = ("oracle:", "cert:", "finding:", "evidence:")
+_INTEL_PROV_PREFIXES = ("intel:", "intel-fused:", "derived:", "infer:", "scan:", "fingerprint:")
+_UNGROUNDED_PROV_MARKERS = ("llm", "assume", "guess", "hallucin", "unverified", "ungrounded", "advisory")
+
+GROUNDING_GROUNDED = "grounded"        # traces to a fired oracle / signed cert / promoted finding
+GROUNDING_INTEL = "intel"              # collected intelligence / derivation — real, but not oracle-proof
+GROUNDING_UNGROUNDED = "ungrounded"    # an LLM assertion / bare assumption — NOT a fact
+GROUNDING_UNCLASSIFIED = "unclassified"
+
+
+def classify_provenance(provenance: str) -> str:
+    """Classify a provenance string into a grounding tier. Total (never raises); the
+    single source of truth for 'is this write oracle/cert-grounded'."""
+    p = (provenance or "").strip().lower()
+    if not p:
+        return GROUNDING_UNCLASSIFIED
+    if any(p.startswith(x) for x in _GROUNDED_PROV_PREFIXES):
+        return GROUNDING_GROUNDED
+    if any(p.startswith(m) for m in _UNGROUNDED_PROV_MARKERS):
+        return GROUNDING_UNGROUNDED
+    if any(p.startswith(x) for x in _INTEL_PROV_PREFIXES):
+        return GROUNDING_INTEL
+    return GROUNDING_UNCLASSIFIED
+
+
 class Node(BaseModel):
     """One typed entity in the world-model.
 
@@ -172,6 +206,10 @@ class Node(BaseModel):
     beta: float = Field(default=1.0, gt=0.0, description="Beta belief: 1 + refutation weight.")
     first_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
     last_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
+    # Grounding tier derived from provenance at write time (graph.add_node). Additive;
+    # never affects belief. "unclassified" until the graph classifies it on upsert.
+    grounding: str = Field(default=GROUNDING_UNCLASSIFIED,
+                           description="Anti-hallucination provenance tier (see classify_provenance).")
 
     @model_validator(mode="after")
     def _check_seen(self) -> "Node":
@@ -219,6 +257,8 @@ class Edge(BaseModel):
     beta: float = Field(default=1.0, gt=0.0, description="Beta belief: 1 + refutation weight.")
     first_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
     last_seen: int = Field(ge=0, description="Monotonic sequence int, not wallclock.")
+    grounding: str = Field(default=GROUNDING_UNCLASSIFIED,
+                           description="Anti-hallucination provenance tier (see classify_provenance).")
 
     @model_validator(mode="after")
     def _check_seen(self) -> "Edge":

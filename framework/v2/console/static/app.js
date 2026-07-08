@@ -465,8 +465,10 @@ const Console = (() => {
                   <td>${c.betweenness}</td><td>${c.is_bridge?'<span class="badge danger">yes</span>':dash()}</td>
                   <td>${num((c.disconnects||[]).length)}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">none computed</div>'}</div>
           </div>`;
+        const gBadge = (g) => { const cls = g==='grounded'?'ok':g==='ungrounded'?'danger':g==='intel'?'warn':''; return `<span class="badge ${cls}">${esc(g||'unclassified')}</span>`; };
         Graph.render(document.getElementById('graphCanvas'), d, (n) => drawer(n.id, `<div class="kv">
           <div class="k">kind</div><div class="v"><span class="badge" style="color:${Graph.color(n.kind)}">${esc(n.kind)}</span></div>
+          <div class="k">grounding</div><div class="v">${gBadge(n.grounding)}</div>
           <div class="k">belief (mean)</div><div class="v">${esc(n.belief)}</div>
           <div class="k">confidence</div><div class="v">${esc(n.confidence)}</div>
           <div class="k">provenance</div><div class="v mono">${esc(n.provenance)}</div>
