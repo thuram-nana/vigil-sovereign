@@ -72,6 +72,13 @@ class EngagementResult:
     # against its benign alternatives (posterior + credible interval + most-decisive next
     # test). Pure reasoning over the oracle's own verdicts — the oracle stays authoritative.
     finding_confidence: list = field(default_factory=list)
+    # Per-finding VERACITY verdict from the anti-hallucination firewall, INDEX-ALIGNED with
+    # report.active_findings. Each is an `AdmittedClaim`: the firewall re-fires the
+    # finding's own retained oracle_context (never trusting the recorded verdict) and labels
+    # the result GROUNDED (fact) / UNGROUNDED / CONTRADICTED. A shipped "active" finding
+    # whose proof no longer reproduces surfaces here as not-a-fact — the firewall running
+    # live over real output, not just its tests. Best-effort; the layer only ever demotes.
+    grounding: list = field(default_factory=list)
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -163,6 +170,26 @@ def _assess_findings(report: ScanReport) -> list:
         except Exception:
             reports.append(None)   # keep index-aligned with active_findings
     return reports
+
+
+def _assess_grounding(report: ScanReport, world: "WorldModel") -> list:
+    """Run each active finding through the veracity firewall against the chained world —
+    the anti-hallucination layer applied to LIVE output. The firewall re-fires the
+    finding's OWN retained oracle_context (never trusting the recorded verdict): a finding
+    that still re-confirms is labelled a fact; one that no longer reproduces (altered
+    evidence, a dry-run stub) is demoted to UNGROUNDED even though the scan marked it
+    active; one whose surface the graph net-refutes is CONTRADICTED. Index-aligned with
+    report.active_findings; a None entry means that finding could not be assessed. Pure,
+    read-only, best-effort — the layer only ever demotes, never promotes."""
+    from .veracity import admit_finding
+
+    verdicts = []
+    for f in report.active_findings:
+        try:
+            verdicts.append(admit_finding(f, world))
+        except Exception:
+            verdicts.append(None)   # keep index-aligned with active_findings
+    return verdicts
 
 
 def run_engagement(
@@ -296,6 +323,14 @@ def run_engagement(
         except Exception:
             # chaining is value-add; a reasoning failure never sinks the engagement
             pass
+    # Veracity firewall over the live findings — re-execute each finding's own oracle
+    # against the (now chained) world-model and label GROUNDED/UNGROUNDED/CONTRADICTED.
+    # Runs AFTER chaining so the world holds the endpoint nodes the check consults.
+    # Best-effort: the anti-hallucination pass can only demote, never sink the engagement.
+    try:
+        result.grounding = _assess_grounding(report, world)
+    except Exception:
+        pass
     return result
 
 
@@ -382,6 +417,11 @@ def main(argv: list[str]) -> int:
         cr = result.finding_confidence[i] if i < len(result.finding_confidence) else None
         if cr is not None:
             line += f"  → posterior {cr.focal.posterior:.3f}" + (" ✓target" if cr.reaches_target else "")
+        # veracity firewall verdict: flag any active finding whose own oracle did NOT
+        # re-fire (a fact demoted to commentary) — the anti-hallucination catch made visible.
+        gv = result.grounding[i] if i < len(result.grounding) else None
+        if gv is not None and not gv.is_fact:
+            line += f"  ⚠ {gv.render_as} ({gv.verdict.value}: {gv.reason})"
         print(line)
     if report.passive_findings:
         print(f"  passive findings  : {len(report.passive_findings)}")

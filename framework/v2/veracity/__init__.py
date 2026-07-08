@@ -19,9 +19,11 @@ from .tokens import Ground, GroundingToken
 from .claims import AdmittedClaim, Claim, VeracityVerdict
 from .consistency import contradicts
 from .firewall import admit
+from .adapters import admit_finding, claim_from_finding
 
 __all__ = [
     "Ground", "GroundingToken",
     "Claim", "AdmittedClaim", "VeracityVerdict",
     "contradicts", "admit",
+    "admit_finding", "claim_from_finding",
 ]
