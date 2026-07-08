@@ -50,6 +50,7 @@ from .calibrate import (
     pav,
     reliability_report,
 )
+from .conformal import ConformalBand, band_for_prediction, conformal_band, conformal_halfwidth
 from .ledger import LedgerEntry, LedgerError, OutcomeLedger
 from .models import (
     Bin,
@@ -82,4 +83,9 @@ __all__ = [
     "MIN_LABELS",
     "MIN_ORACLE_LABELS",
     "MAX_PROB",
+    # conformal
+    "ConformalBand",
+    "conformal_band",
+    "conformal_halfwidth",
+    "band_for_prediction",
 ]
