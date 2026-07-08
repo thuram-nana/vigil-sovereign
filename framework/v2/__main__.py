@@ -103,6 +103,11 @@ def _verify(argv: list[str]) -> int:
     return reverify.main(argv)
 
 
+def _evidence(argv: list[str]) -> int:
+    from .evidence import cli as evidence_cli
+    return evidence_cli.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -145,6 +150,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "scan": _scan,
     "engage": _engage,
     "verify": _verify,
+    "evidence": _evidence,
     "collaborator": _collaborator,
     "benchmark": _benchmark,
     "console": _console,

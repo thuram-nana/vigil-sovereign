@@ -31,6 +31,11 @@ PyYAML>=6,<7
 beautifulsoup4>=4.12,<5
 Jinja2>=3.1,<4
 
+# Ed25519 signatures for the governance trust-root, engagement authorities, and
+# signed evidence certificates (entitlement/, authority/, evidence/). pyca; we do
+# not roll our own crypto. Runtime verifies; signing is provisioning-side.
+cryptography>=42,<50
+
 # Test-only: HttpExecutor unit tests run against a local mock HTTP
 # server fixture so they never hit a real network. Sovereign-strict
 # CI omits this entry from the runtime install.

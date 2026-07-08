@@ -19,6 +19,8 @@ requests>=2.32,<3
 PyYAML>=6,<7
 beautifulsoup4>=4.12,<5
 Jinja2>=3.1,<4
+# Ed25519 signatures (entitlement/authority/evidence trust-root + signed certificates).
+cryptography>=42,<50
 
 # Test-only dependency: HttpExecutor unit tests run against a local
 # mock HTTP server fixture (pytest-httpserver) so they never hit a
