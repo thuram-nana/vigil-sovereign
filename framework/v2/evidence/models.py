@@ -18,11 +18,36 @@ existing oracle_context, and the runtime only ever VERIFIES (signing is provisio
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from ..entitlement.models import Signature
 
 _GENESIS_PREV: str = "0" * 64
+
+
+class ReportClaim(BaseModel):
+    """One report sentence bound into a certificate. Signing the certificate signs the
+    sentence too, so its text is tamper-evident; ``verify_certificate`` additionally
+    re-admits each ``render_as == "fact"`` claim through the veracity firewall against the
+    authenticated oracle_context.
+
+    What that fact check DOES enforce: the declared ``bug_class`` must re-verify against the
+    evidence — a claim declaring a class the evidence does not prove (a relabelled claim)
+    fails the certificate closed (a proof is bound to its subject, P3). What it does NOT do:
+    entailment over the sentence's natural language — a deterministic gate cannot read
+    English, so free prose is bound as labelled ``analyst-commentary`` (retained,
+    tamper-evident, but never asserted as a machine-verified fact), and the only fact a
+    certificate asserts is the canonical STRUCTURED statement (see evidence.claims), which
+    re-grounds by construction. ``render_as`` is the producer's claim; verify recomputes the
+    truth of a fact claim and never trusts the label for grounding.
+
+    Deterministic (no wallclock, stable field set) so it does not perturb canonical bytes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sentence: str
+    bug_class: str = ""
+    render_as: str = "analyst-commentary"   # producer's claim; verify re-derives fact truth
 
 
 class ArtifactRef(BaseModel):
@@ -65,6 +90,22 @@ class EvidenceCertificate(BaseModel):
     oracle_context_digest: str         # sha256 of the canonical oracle_context
     artifacts: list[ArtifactRef] = Field(default_factory=list)
     seq: int = Field(ge=0, default=0)
+    # Atomic report sentences bound into (and thus signed with) this certificate. Kept
+    # None/empty by default so an existing certificate serialises BYTE-IDENTICALLY (see
+    # the serializer below) — no existing signature or digest changes. When present, the
+    # governance signature and the chain digest cover it automatically (the whole model is
+    # signed), so a flipped sentence breaks authenticity, and verify re-admits each one.
+    report_claims: list[ReportClaim] | None = None
+
+    @model_serializer(mode="wrap")
+    def _ser(self, handler):
+        """Drop ``report_claims`` from the canonical form when it is empty, so a
+        certificate built without bound sentences hashes/signs exactly as it did before
+        this field existed (default-safety: no existing evidence bundle changes bytes)."""
+        data = handler(self)
+        if not data.get("report_claims"):
+            data.pop("report_claims", None)
+        return data
 
     @property
     def cert_digest(self) -> str:

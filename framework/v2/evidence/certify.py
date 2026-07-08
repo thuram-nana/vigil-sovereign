@@ -31,7 +31,7 @@ from ..verify.reverify import reverify_context
 from .canonical import digest_payload, evidence_signing_bytes
 from .chain import verify_chain, verify_head
 from .manifest import manifest_dir, verify_manifest
-from .models import ChainEntry, EvidenceCertificate, SignedChainHead, SignedEvidence
+from .models import ChainEntry, EvidenceCertificate, ReportClaim, SignedChainHead, SignedEvidence
 
 
 def build_certificate(
@@ -41,15 +41,20 @@ def build_certificate(
     seq: int = 0,
     evidence_root: Path | None = None,
     action_id: str | None = None,
+    report_claims: "list[ReportClaim] | None" = None,
 ) -> EvidenceCertificate:
     """Build an (unsigned) certificate from a serialized finding carrying an
     `oracle_context`. If an evidence dir is given, its raw artifacts are manifested by
-    per-file sha256 and bound into the certificate."""
+    per-file sha256 and bound into the certificate. ``report_claims`` (optional) binds
+    atomic report sentences INTO the certificate so the signature covers them and
+    ``verify_certificate`` re-admits each — sorted for deterministic canonical bytes."""
     oracle_context = finding.get("oracle_context") or {}
     artifacts = []
     if evidence_root is not None and action_id:
         artifacts = manifest_dir(Path(evidence_root) / action_id, root=Path(evidence_root))
+    claims = sorted(report_claims, key=lambda c: (c.sentence, c.bug_class)) if report_claims else None
     return EvidenceCertificate(
+        schema_version=2 if claims else 1,   # claim-bearing certs are schema v2
         engagement_slug=engagement_slug,
         finding_ref=str(finding.get("check_id") or finding.get("finding_slug")
                         or finding.get("bug_class") or "finding"),
@@ -60,6 +65,7 @@ def build_certificate(
         oracle_context_digest=digest_payload(oracle_context),
         artifacts=artifacts,
         seq=seq,
+        report_claims=claims,
     )
 
 
@@ -81,12 +87,46 @@ class EvidenceVerification(BaseModel):
     bound: bool = False            # oracle_context_digest matches the presented context
     artifacts_ok: bool = True      # every manifested raw file still hashes correctly
     reproduced: bool = False       # the pure oracle re-fires and matches the claim
+    claims_grounded: bool = True   # every fact-bound report sentence re-admits as a fact
     valid_signers: tuple[str, ...] = ()
     reason: str = ""
 
     @property
     def ok(self) -> bool:
-        return self.authentic and self.bound and self.artifacts_ok and self.reproduced
+        return (self.authentic and self.bound and self.artifacts_ok and self.reproduced
+                and self.claims_grounded)
+
+
+def _claims_grounded(cert: EvidenceCertificate, oracle_context: dict) -> tuple[bool, str]:
+    """5th layer: every report sentence bound into the certificate as a fact
+    (``render_as == "fact"``) must have its DECLARED bug_class re-admit through the veracity
+    firewall against the authenticated oracle_context. Because a proof is bound to its
+    subject (P3), a claim declaring a class the evidence does not prove — a relabelled claim
+    — does NOT ground and fails the certificate closed. Fail-closed: a fact claim that
+    cannot be re-grounded (e.g. an empty/altered context) is not sound.
+
+    Scope, stated honestly: this checks the declared CLASS re-executes, not the sentence's
+    natural language. A deterministic gate does no entailment, so free prose is bound as
+    labelled analyst commentary (no obligation); the only fact producers emit via
+    evidence.claims is the canonical structured statement, which re-grounds by construction.
+    The signature over the whole certificate makes every bound sentence's TEXT tamper-evident
+    regardless of its render_as."""
+    fact_claims = [rc for rc in (cert.report_claims or []) if rc.render_as == "fact"]
+    if not fact_claims:
+        return (True, "no fact-bound report claims")
+    from ..veracity.claims import Claim
+    from ..veracity.firewall import admit
+    from ..veracity.tokens import GroundingToken
+    for rc in fact_claims:
+        claim = Claim(text=rc.sentence, source="report", bug_class=rc.bug_class, tokens=[
+            GroundingToken.oracle(oracle_context, bug_class=rc.bug_class,
+                                  confirmed_by=cert.confirmed_by or None,
+                                  confidence=cert.confidence)])
+        if not admit(claim).is_fact:
+            return (False, f"a fact-bound report sentence declares bug_class "
+                           f"{rc.bug_class!r} but that class does not re-verify against the "
+                           f"evidence: {rc.sentence!r}")
+    return (True, f"{len(fact_claims)} fact-bound report sentence(s) re-grounded")
 
 
 def verify_certificate(
@@ -125,13 +165,15 @@ def verify_certificate(
         claimed_confirmed_by=cert.confirmed_by, claimed_confidence=cert.confidence,
         ref=cert.finding_ref)
 
+    claims_grounded, claims_note = _claims_grounded(cert, oracle_context)
+
     reason = (f"signature: {thr.reason}; "
               f"binding: {'oracle_context matches digest' if bound else 'DIGEST MISMATCH — signature is for different evidence'}; "
-              f"reproduction: {rr.note}{artifact_note}")
+              f"reproduction: {rr.note}; claims: {claims_note}{artifact_note}")
     return EvidenceVerification(
         finding_ref=cert.finding_ref, authentic=thr.satisfied, bound=bound,
-        artifacts_ok=artifacts_ok, reproduced=rr.ok, valid_signers=thr.valid_signers,
-        reason=reason)
+        artifacts_ok=artifacts_ok, reproduced=rr.ok, claims_grounded=claims_grounded,
+        valid_signers=thr.valid_signers, reason=reason)
 
 
 class BundleVerification(BaseModel):
