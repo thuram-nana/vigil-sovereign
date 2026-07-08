@@ -23,6 +23,8 @@ from .models import (
     ArtifactRef,
     ChainEntry,
     EvidenceCertificate,
+    PathCertificate,
+    PathStep,
     ReportClaim,
     SignedChainHead,
     SignedEvidence,
@@ -32,7 +34,9 @@ from .manifest import manifest_dir, verify_manifest
 from .certify import (
     BundleVerification,
     EvidenceVerification,
+    PathVerification,
     build_certificate,
+    build_path_certificate,
     sign_certificate,
     verify_bundle,
     verify_certificate,
@@ -42,9 +46,11 @@ from .chain import append_entry, build_chain, sign_head, verify_chain, verify_he
 __all__ = [
     "canonical_json", "digest_payload", "evidence_signing_bytes", "sha256_hex",
     "ArtifactRef", "EvidenceCertificate", "SignedEvidence", "ChainEntry", "SignedChainHead",
+    "PathCertificate", "PathStep",
     "ReportClaim", "claims_for_finding", "decompose_prose", "canonical_fact_sentence",
     "manifest_dir", "verify_manifest",
-    "EvidenceVerification", "BundleVerification", "build_certificate", "sign_certificate",
+    "EvidenceVerification", "BundleVerification", "PathVerification",
+    "build_certificate", "build_path_certificate", "sign_certificate",
     "verify_certificate", "verify_bundle",
     "append_entry", "build_chain", "sign_head", "verify_chain", "verify_head",
 ]

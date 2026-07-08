@@ -31,7 +31,15 @@ from ..verify.reverify import reverify_context
 from .canonical import digest_payload, evidence_signing_bytes
 from .chain import verify_chain, verify_head
 from .manifest import manifest_dir, verify_manifest
-from .models import ChainEntry, EvidenceCertificate, ReportClaim, SignedChainHead, SignedEvidence
+from .models import (
+    ChainEntry,
+    EvidenceCertificate,
+    PathCertificate,
+    PathStep,
+    ReportClaim,
+    SignedChainHead,
+    SignedEvidence,
+)
 
 
 def build_certificate(
@@ -67,6 +75,23 @@ def build_certificate(
         seq=seq,
         report_claims=claims,
     )
+
+
+def build_path_certificate(attack_path, *, backing_cert_digests: list[str],
+                           engagement_slug: str = "", seq: int = 0) -> PathCertificate:
+    """Build a (chain-anchored) certificate binding a derived attack path to the
+    confirmed-finding certificates its hops depend on. ``attack_path`` is duck-typed (the
+    ``scanner.orchestrator.AttackPath``: ``.steps`` of src/edge/dst/technique + a
+    ``.destination``), so the evidence layer stays decoupled from the reasoning layer.
+    ``backing_cert_digests`` are the ``cert_digest``s of the findings the caller determined
+    established the path (e.g. by walking the world-model path edges' finding provenance);
+    they are de-duplicated and sorted for deterministic canonical bytes."""
+    steps = [PathStep(src=s.src, edge=s.edge, dst=s.dst, technique=getattr(s, "technique", ""))
+             for s in getattr(attack_path, "steps", [])]
+    dest = getattr(attack_path, "destination", "") or (steps[-1].dst if steps else "")
+    return PathCertificate(
+        engagement_slug=engagement_slug, destination=dest, steps=steps,
+        backing_cert_digests=sorted(set(backing_cert_digests or [])), seq=seq)
 
 
 def sign_certificate(cert: EvidenceCertificate, signers: list[tuple[str, str]]) -> SignedEvidence:
@@ -176,22 +201,70 @@ def verify_certificate(
         valid_signers=thr.valid_signers, reason=reason)
 
 
+class PathVerification(BaseModel):
+    """The verdict on one derived attack-path certificate. ``ok`` requires that every
+    finding certificate the path is bound to is present in the bundle AND itself verified —
+    a path with no reproducing evidence under it can never pass as a proven route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    destination: str = ""
+    backing_bound: bool = False
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.backing_bound
+
+
 class BundleVerification(BaseModel):
     """The verdict on a whole evidence bundle. ``ok`` requires that the chain covers
     EXACTLY the certificates present (nothing suppressed/injected/reordered), every
-    certificate is individually sound, and the chain is anchored + not rolled back."""
+    certificate is individually sound, the chain is anchored + not rolled back, and every
+    derived attack path is bound to backing findings that themselves verified."""
 
     model_config = ConfigDict(extra="forbid")
 
     certificate_results: list[EvidenceVerification] = Field(default_factory=list)
-    cert_set_bound: bool = False   # chain digests == the certificates' digests, in order
+    path_results: list[PathVerification] = Field(default_factory=list)
+    cert_set_bound: bool = False   # chain digests == (finding + path) certs' digests, in order
     chain_ok: bool = False
     chain_note: str = ""
 
     @property
     def ok(self) -> bool:
         return (bool(self.certificate_results) and self.cert_set_bound and self.chain_ok
-                and all(r.ok for r in self.certificate_results))
+                and all(r.ok for r in self.certificate_results)
+                and all(p.ok for p in self.path_results))
+
+
+def _verify_paths(path_certs: list[PathCertificate], verified_finding_digests: set[str],
+                  *, head_anchored: bool) -> list[PathVerification]:
+    """Fail-closed: a path is sound only if (0) a VALID governance-signed chain head anchors
+    it, (1) it cites ≥1 backing finding certificate, AND (2) every backing digest resolves
+    to a finding certificate that itself verified. Requirement (0) is load-bearing: unlike
+    finding certificates, path certificates are NOT individually signed — the signed head is
+    their only governance anchor, so without it an attacker could fabricate an arbitrary
+    route, rebuild the (unsigned) chain to match, and it would otherwise pass. A path with no
+    anchor, no backing, or citing an absent/unverified finding is an unsupported route."""
+    out: list[PathVerification] = []
+    for pc in path_certs:
+        backing = set(pc.backing_cert_digests)
+        if not head_anchored:
+            out.append(PathVerification(destination=pc.destination, backing_bound=False,
+                reason="path certificate is not anchored by a valid governance-signed chain "
+                       "head — an unsigned/absent head cannot rule out a fabricated route, refused"))
+        elif not backing:
+            out.append(PathVerification(destination=pc.destination, backing_bound=False,
+                reason="path cites NO backing finding certificate — an unsupported route, refused"))
+        elif backing - verified_finding_digests:
+            out.append(PathVerification(destination=pc.destination, backing_bound=False,
+                reason=f"path cites backing certificate(s) absent or unverified: "
+                       f"{sorted(backing - verified_finding_digests)}"))
+        else:
+            out.append(PathVerification(destination=pc.destination, backing_bound=True,
+                reason=f"all {len(backing)} backing finding certificate(s) present and verified"))
+    return out
 
 
 def verify_bundle(
@@ -203,15 +276,24 @@ def verify_bundle(
     trust_root: TrustRoot,
     evidence_root: Path | None = None,
     prev_highwater: int | None = None,
+    path_certs: list[PathCertificate] | None = None,
 ) -> BundleVerification:
     """Verify a bundle as a WHOLE. Beyond per-certificate soundness, this binds the
     certificate SET to the hash chain (the chain's digests must equal the certificates'
     digests, in order) so a certificate cannot be silently deleted, injected, or
     reordered while leaving a valid-looking chain — and applies the monotonic
-    anti-rollback high-water on the signed head."""
+    anti-rollback high-water on the signed head.
+
+    ``path_certs`` (derived attack paths, anti-hallucination P4c) are anchored in the SAME
+    chain AFTER the finding certificates: their digests extend the chain-set binding, and
+    each path is verified to be backed by finding certificates that themselves verified —
+    so a fabricated or under-supported path fails the bundle CLOSED."""
+    path_certs = path_certs or []
     cert_digests = [sc.certificate.cert_digest for sc in certificates]
+    path_digests = [pc.cert_digest for pc in path_certs]
     chain_digests = [e.cert_digest for e in chain]
-    cert_set_bound = cert_digests == chain_digests
+    # the chain must cover the finding certs THEN the path certs, in that order.
+    cert_set_bound = (cert_digests + path_digests) == chain_digests
 
     results = [
         verify_certificate(sc, oracle_context=contexts.get(sc.certificate.finding_ref, {}),
@@ -224,9 +306,18 @@ def verify_bundle(
         chain_ok, chain_note = verify_chain(chain)
         chain_note += " (UNSIGNED head — not anchored to governance)"
 
+    # Path certificates are NOT individually signed; a VALID signed head is their only
+    # governance anchor. Verify chain/head FIRST, then anchor the paths on it — so a
+    # fabricated route in an unsigned (or invalidly-signed) bundle fails closed rather than
+    # riding an attacker-rebuilt chain.
+    verified_finding_digests = {
+        sc.certificate.cert_digest for sc, r in zip(certificates, results) if r.ok}
+    path_results = _verify_paths(path_certs, verified_finding_digests,
+                                 head_anchored=(head is not None and chain_ok))
+
     if not cert_set_bound:
-        chain_note += (f"; CERT-SET MISMATCH: {len(cert_digests)} certificate(s) vs "
-                       f"{len(chain_digests)} chain entr(ies) — a certificate was "
-                       f"suppressed, injected, or reordered")
-    return BundleVerification(certificate_results=results, cert_set_bound=cert_set_bound,
-                              chain_ok=chain_ok, chain_note=chain_note)
+        chain_note += (f"; CERT-SET MISMATCH: {len(cert_digests)} finding + {len(path_digests)} "
+                       f"path certificate(s) vs {len(chain_digests)} chain entr(ies) — a "
+                       f"certificate was suppressed, injected, or reordered")
+    return BundleVerification(certificate_results=results, path_results=path_results,
+                              cert_set_bound=cert_set_bound, chain_ok=chain_ok, chain_note=chain_note)
