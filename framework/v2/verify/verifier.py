@@ -14,7 +14,9 @@ never an assumed pass.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Annotated, Any, Mapping
+
+from pydantic import AfterValidator, BeforeValidator
 
 from . import oracles
 from .models import OracleKind, OracleSignal, VerificationResult
@@ -128,6 +130,57 @@ def normalize_bug_class(bug_class: str) -> str:
     while "__" in key:
         key = key.replace("__", "_")
     return _ALIASES.get(key, key)
+
+
+# ---------------------------------------------------------------------------
+# Value-membership (anti-hallucination P6): the bug_class VOCABULARY, plus
+# reusable pydantic validators so an INVENTED class cannot silently ride a
+# structured LLM output. A class is "known" when it (canonically) maps to at
+# least one oracle — i.e. it is something the deterministic substrate can
+# actually adjudicate. Exploratory hypotheses may name broader classes (a
+# race/cache-poisoning lead is legitimate); a class asserted as oracle-provable
+# must be in this set or it is fabricated.
+# ---------------------------------------------------------------------------
+
+
+def known_bug_classes() -> frozenset[str]:
+    """The canonical bug classes an oracle can prove (the value-membership universe).
+    Includes the alias source spellings so a normalised alias also reads as known."""
+    return frozenset(BUG_CLASS_ORACLES) | frozenset(_ALIASES) | frozenset(_ALIASES.values())
+
+
+def is_known_bug_class(bug_class: str) -> bool:
+    """True iff ``bug_class`` (after normalisation) is one the oracle vocabulary knows —
+    i.e. a class the deterministic substrate can actually confirm."""
+    return normalize_bug_class(bug_class) in known_bug_classes()
+
+
+def canonical_bug_class(bug_class: str) -> str | None:
+    """The canonical, oracle-provable class for ``bug_class``, or None if it is unknown
+    (out of vocabulary → not something any oracle can prove)."""
+    n = normalize_bug_class(bug_class)
+    return n if n in known_bug_classes() else None
+
+
+def require_known_bug_class(bug_class: str) -> str:
+    """Pydantic AfterValidator: normalise, and REJECT an out-of-vocabulary class at PARSE
+    time so an invented bug_class cannot survive into a schema field that asserts an
+    oracle-provable subject. Use on fact/oracle-bound fields — NOT on exploratory
+    hypotheses, whose class set is legitimately broader than the provable vocabulary."""
+    n = normalize_bug_class(bug_class)
+    if n not in known_bug_classes():
+        raise ValueError(
+            f"unknown bug_class {bug_class!r} (normalised {n!r}) — not in the oracle "
+            f"vocabulary; an invented class cannot be asserted as oracle-provable")
+    return n
+
+
+# Reusable pydantic field types for structured LLM outputs:
+#   NormalizedBugClass — canonicalise at parse (always; default-safe, no rejection).
+#   KnownBugClass      — canonicalise AND reject an out-of-vocabulary class at parse
+#                        (for fields that assert an oracle-provable subject).
+NormalizedBugClass = Annotated[str, BeforeValidator(normalize_bug_class)]
+KnownBugClass = Annotated[str, AfterValidator(require_known_bug_class)]
 
 
 class OracleVerifier:

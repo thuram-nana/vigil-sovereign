@@ -89,3 +89,24 @@ def test_hypothesize_consistent_is_stable_on_the_deterministic_backend() -> None
     assert isinstance(r, ConsistencyResult)
     assert not r.abstained and r.agreement == 1.0 and r.n_samples == 3
     assert r.modal is not None and r.modal.hypotheses            # a real HypothesisSet
+
+
+# ---- P6: bug_class value-membership on the Hypothesis schema ----------------
+
+
+def test_hypothesis_flags_oracle_provability_without_mutating_the_label() -> None:
+    from framework.v2.kernel.models import Hypothesis
+
+    def _h(bc):
+        return Hypothesis.model_validate({
+            "id": "H-1", "surface": "/x", "bug_class": bc, "given": "g",
+            "if": "a", "then": "o", "because": "m", "refute_on": "r", "cheap_test": "c"})
+
+    # the RAW label is preserved (downstream exploit/planner keys match its exact spelling),
+    # but oracle_provable normalises internally to report whether an oracle can confirm it.
+    prov = _h("IDOR")
+    assert prov.bug_class == "IDOR" and prov.oracle_provable is True
+    assert prov.model_dump()["oracle_provable"] is True          # surfaced in the output
+    # an exploratory class is KEPT verbatim but flagged NOT provable
+    lead = _h("cache-poisoning")
+    assert lead.bug_class == "cache-poisoning" and lead.oracle_provable is False

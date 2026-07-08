@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
+
+from ..verify.verifier import is_known_bug_class
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +33,10 @@ class Hypothesis(BaseModel):
 
     id: str = Field(description="Stable handle (e.g. H-007). Short.")
     surface: str = Field(description="Endpoint, feature, or flow under test.")
+    # Value-membership (anti-hallucination P6): the raw label is preserved (downstream
+    # exploit-scenario / planner keys match on its exact spelling), but ``oracle_provable``
+    # (below) reports whether the class — after normalisation — is one an oracle can actually
+    # confirm, so an exploratory lead is never mistaken for a provable fact.
     bug_class: str = Field(
         description="Single bug class label: SQLi, IDOR, SSRF, race, etc."
     )
@@ -53,6 +59,18 @@ class Hypothesis(BaseModel):
         ge=0.0, le=1.0, default=0.5,
         description="Tester's prior on this being a real bug.",
     )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def oracle_provable(self) -> bool:
+        """True iff this bug_class is in the CURATED oracle vocabulary — i.e. it maps to
+        specific confirming oracle(s). False marks a class outside that set: an exploratory
+        lead not known to be provable on the strength of its label. (It is NOT a guarantee
+        that no oracle could ever fire — the verifier's fallback can still try generic
+        oracles for an unknown class — so the deterministic oracle re-fire, not this flag,
+        remains the authority for any FACT claim.) Surfaced in the serialized hypothesis so
+        the planner can prefer provable leads."""
+        return is_known_bug_class(self.bug_class)
 
 
 class HypothesisSet(BaseModel):
