@@ -48,6 +48,8 @@ from .temporal import (
     TimelineEvent,
 )
 from .predict import AssetHypothesis, AssetPredictor, assess_prediction
+from .from_cloud import observations_from_cloud
+from .from_sbom import observations_from_sbom
 from .learn import (
     SourceYield,
     credit_discovery,
@@ -72,4 +74,6 @@ __all__ = [
     "AssetPredictor", "AssetHypothesis", "assess_prediction",
     # Phase D — learning
     "SourceYield", "source_prior", "planner_priors", "credit_discovery", "credit_finding",
+    # offline asset-graph ingestion (cloud/IAM + supply-chain)
+    "observations_from_cloud", "observations_from_sbom",
 ]

@@ -97,6 +97,32 @@ def _ingest(args: argparse.Namespace) -> int:
 # ---- resolve -----------------------------------------------------------------
 
 
+def _ingest_offline(args: argparse.Namespace, adapter) -> int:
+    """Ingest an operator-provided offline inventory (cloud/IAM or SBOM) into the graph."""
+    doc = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    obs = adapter(doc, seq=0)
+    store, istore = _open(args.slug)
+    world = WorldModel()
+    ing = IntelIngest(world, store=istore, engagement_slug=args.slug or "")
+    res = ing.ingest(obs)
+    out = {"observations": len(obs), "applied": res.applied,
+           "nodes": world.node_count, "edges": world.edge_count,
+           "entities": len(res.entities)}
+    if store is not None:
+        store.close()
+    return _emit(out)
+
+
+def _ingest_cloud(args: argparse.Namespace) -> int:
+    from .from_cloud import observations_from_cloud
+    return _ingest_offline(args, observations_from_cloud)
+
+
+def _ingest_sbom(args: argparse.Namespace) -> int:
+    from .from_sbom import observations_from_sbom
+    return _ingest_offline(args, observations_from_sbom)
+
+
 def _resolve(args: argparse.Namespace) -> int:
     store, istore = _open(args.slug)
     if istore is None:
@@ -221,6 +247,16 @@ def main(argv: list[str]) -> int:
                    help="comma-separated source allowlist for --live (default: the four public sources)")
     p.add_argument("--capture", default="", help="mirror live responses to this dir to seed offline fixtures")
     p.set_defaults(fn=_ingest)
+
+    p = sub.add_parser("ingest-cloud", help="ingest an operator cloud/IAM inventory (offline) → PRINCIPAL/resource + IAM edges")
+    p.add_argument("--file", required=True, help="cloud inventory JSON (principals + resources)")
+    p.add_argument("--slug", default="")
+    p.set_defaults(fn=_ingest_cloud)
+
+    p = sub.add_parser("ingest-sbom", help="ingest an operator SBOM (offline) → PACKAGE nodes + DEPENDS_ON edges")
+    p.add_argument("--file", required=True, help="SBOM JSON (normalized or CycloneDX)")
+    p.add_argument("--slug", default="")
+    p.set_defaults(fn=_ingest_sbom)
 
     p = sub.add_parser("resolve", help="resolved entities with merge explanations")
     p.add_argument("--slug", required=True)
