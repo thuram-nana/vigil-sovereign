@@ -192,12 +192,13 @@ def test_oracle_silent_vetoes_confirming_llm(
 # ---------------------------------------------------------------------------
 
 
-def test_no_oracle_context_uses_legacy_llm_path(
+def test_no_oracle_context_uses_llm_advisory_path(
     bb: Blackboard, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Legacy behaviour: the LLM's `confirm` is authoritative, and an
-    # `objections` verdict yields `objections` — both with verified_by_oracle
-    # False (advisory confirmation, exactly as before Wave 3).
+    # No oracle backs this finding, so the LLM's `confirm` can NEVER reach
+    # "confirmed" (that word is oracle-only). It becomes "llm_advisory": recorded and
+    # shown, but never promoted/reported as a confirmed fact. An `objections` verdict
+    # still yields `objections`. Both carry verified_by_oracle=False.
     monkeypatch.setattr(critique_mod, "urk_critique", _stub_urk("confirm"))
     confirmed_finding = FindingPayload(
         finding_slug="003-llm-confirm",
@@ -211,7 +212,7 @@ def test_no_oracle_context_uses_legacy_llm_path(
 
     CritiqueAgent(bb, "oracle-authority").step()
     live = _latest_finding(bb, "003-llm-confirm")
-    assert live["critique_status"] == "confirmed"
+    assert live["critique_status"] == "llm_advisory"
     assert live["verified_by_oracle"] is False
     assert live.get("oracle_context") is None
 

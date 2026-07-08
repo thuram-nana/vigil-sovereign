@@ -39,6 +39,7 @@ from framework.v2.common import paths
 from framework.v2.intake.http import Fetcher
 from framework.v2.intake.models import HTTPExchange
 from framework.v2.memory.store import open_store
+from framework.v2.verify.adapter import FindingContext
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,14 @@ def _executor_with_one_real_bug_and_one_hedged() -> DeterministicExecutor:
         impact="Horizontal data exposure across all customers.",
         cvss_vector="AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
         cvss_base=6.5,
+        # A CONFIRMED finding must carry real oracle proof, not just prose. The IDOR
+        # achieved-state oracle fires: the attacker reached an illicit state (read
+        # victim B's order) — so this promotes to "confirmed" by the deterministic
+        # oracle, not by the LLM's say-so.
+        oracle_context=FindingContext.from_state(
+            {"owner": "victimB", "readable_by_attackerA": True},
+            {"owner": "victimB", "readable_by_attackerA": True},
+            bug_class="idor").model_dump(mode="json"),
     )
     hedged_finding = FindingPayload(
         finding_slug="002-massassign-orders",
@@ -208,7 +217,7 @@ def test_mao_end_to_end_against_fixture_target(isolated_paths: Path) -> None:
     report_path = paths.target_dir("fixture-engagement") / "reports" / "technical.md"
     assert report_path.is_file()
     text = report_path.read_text(encoding="utf-8")
-    assert "Confirmed findings" in text
+    assert "oracle-confirmed" in text
     assert "001-idor-orders" in text  # the confident one
     assert "002-massassign-orders" not in text  # hedged one was blocked
 

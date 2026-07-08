@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from framework.v2.verify.adapter import FindingContext
 from framework.v2.agents.blackboard import open_blackboard
 from framework.v2.agents.coordinator import Coordinator
 from framework.v2.agents.critique_agent import CritiqueAgent
@@ -162,6 +163,13 @@ def test_full_pipeline_url_to_report(
             "balance; signature verification absent."
         ),
         impact="Direct unbounded balance creation.",
+        # A CONFIRMED finding must carry real oracle proof: the achieved-state oracle
+        # fires on the illicit state (a forged webhook was accepted) — deterministic
+        # promotion, not the LLM's say-so.
+        oracle_context=FindingContext.from_state(
+            {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
+            {"forged_webhook_accepted": True, "balance_credited_to_attacker": True},
+            bug_class="webhook_forgery").model_dump(mode="json"),
     )
     outcomes = {
         ("webhook-forgery", "/api/v2/orders/123"): ExecutionOutcome(

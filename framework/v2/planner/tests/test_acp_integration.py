@@ -23,6 +23,7 @@ from typing import Iterator
 
 import pytest
 
+from framework.v2.verify.adapter import FindingContext
 from framework.v2.agents.blackboard import open_blackboard
 from framework.v2.agents.coordinator import Coordinator
 from framework.v2.agents.critique_agent import CritiqueAgent
@@ -128,6 +129,12 @@ def test_simulated_run_terminates_cleanly_on_no_more_leaves(
             "is intentionally past the critique-agent's confirm threshold."
         ),
         impact="cross-tenant data exposure",
+        # Real oracle proof (achieved-state): the attacker reached victim B's order.
+        # A "confirmed" finding is oracle-backed, never LLM-only.
+        oracle_context=FindingContext.from_state(
+            {"owner": "victimB", "readable_by_attackerA": True},
+            {"owner": "victimB", "readable_by_attackerA": True},
+            bug_class="idor").model_dump(mode="json"),
     )
     outcomes = {
         ("IDOR", "/api/v2/orders/123"): ExecutionOutcome(
