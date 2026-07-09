@@ -15,7 +15,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from ..common import ethics
+from ..common import ethics, paths
 from . import intake
 
 
@@ -64,13 +64,16 @@ def _authorize(args: argparse.Namespace) -> int:
         return 2
 
     led = ethics.authorization_ledger()
-    led.parent.mkdir(parents=True, exist_ok=True)
     if not led.exists():
-        ethics.init_authorization_ledger()
+        ethics.init_authorization_ledger()      # X2: secure_write → 0600 on fresh create
 
     line = f"{ethics.now_iso()} | {args.operator} | {host}\n"
     with led.open("a", encoding="utf-8") as f:
         f.write(line)
+    # X2: re-tighten a pre-existing loose ledger (e.g. a pre-X2 0644 file) on every append,
+    # so a leaky legacy ledger self-heals — matching the DB stores that secure_existing on
+    # each connect. open("a") never re-chmods on its own.
+    paths.secure_existing(led)
     print(f"appended to {led}: {line.strip()}")
     return 0
 
