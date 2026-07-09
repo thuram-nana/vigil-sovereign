@@ -10,10 +10,18 @@ from __future__ import annotations
 
 from typing import Iterable
 
+import os
+
 from .binding import run
-from .consistency import ConsistencyResult, run_consistent
-from .llm import LLMBackend
+from .consistency import ConsistencyResult, RateLimiter, run_consistent
+from .llm import LLMBackend, get_backend
 from .models import CallTrace, HypothesisSet
+
+# X4 — parallelism + optional throttle for live self-consistency. A dry-run/deterministic
+# backend stays serial (every sample is identical; 5 parallel dumps would also race on the
+# timestamped filename), so behaviour + n_samples are byte-identical there.
+_LLM_MAX_WORKERS = max(1, int(os.environ.get("CRUCIBLE_LLM_MAX_WORKERS", "4") or "4"))
+_LLM_MIN_INTERVAL_S = float(os.environ.get("CRUCIBLE_LLM_MIN_INTERVAL_S", "0") or "0")
 
 
 def hypothesize(
@@ -96,7 +104,16 @@ def hypothesize_consistent(
     output should be routed to ``needs_evidence`` rather than acted on. With the deterministic
     dry-run backend every sample is identical, so it agrees trivially (agreement 1.0); the
     signal only bites against a live, temperature>0 backend."""
+    # Probe the backend ONLY to decide serial-vs-parallel; the sample lambda still passes the
+    # ORIGINAL `backend` (None → binding._bind's failover path) so the parallel samples keep
+    # backend failover. A deterministic dry-run backend runs serially (byte-identical, no dump
+    # filename race); a live backend runs its N samples through a bounded pool.
+    probe = backend or get_backend()
+    workers = 1 if getattr(probe, "is_dryrun", False) else _LLM_MAX_WORKERS
+    limiter = (RateLimiter(_LLM_MIN_INTERVAL_S)
+               if (workers > 1 and _LLM_MIN_INTERVAL_S > 0) else None)
     return run_consistent(
         lambda: hypothesize(observation, surface=surface, context=context,
                             bug_classes=bug_classes, backend=backend),
-        samples=samples, agreement_gate=agreement_gate, key_fn=_bug_class_signature)
+        samples=samples, agreement_gate=agreement_gate, key_fn=_bug_class_signature,
+        max_workers=workers, rate_limiter=limiter)

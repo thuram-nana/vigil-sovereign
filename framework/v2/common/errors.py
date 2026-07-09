@@ -154,6 +154,13 @@ class BackendError(CrucibleError):
     """LLM backend was reachable but returned a failure."""
 
 
+class BackendOverloaded(BackendError):
+    """A transient LLM backend failure that survived in-backend retry/backoff — rate
+    limited (429), overloaded (529), a 5xx, or a connection/timeout. Distinct from a
+    plain BackendError (a permanent/parse failure) so the dispatch layer can FAIL OVER
+    to the next permitted backend in-tier rather than aborting the call (Speed X4)."""
+
+
 class MemoryStoreError(CrucibleError):
     """MLS-layer error (storage, embedding, recall)."""
 

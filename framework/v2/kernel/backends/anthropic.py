@@ -33,15 +33,70 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 
 from ...common import logging as v2log
-from ...common.errors import BackendError, BackendUnavailable
+from ...common.errors import BackendError, BackendOverloaded, BackendUnavailable
 from ..llm import LLMBackend, LLMResult, Prompt, make_call_trace, parse_json_response
 
 
 _log = v2log.get_logger(__name__)
 _DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# X4 — transient-failure backoff. On a rate-limit / overload / 5xx / connection error we retry
+# in-backend with exponential backoff + full jitter (honouring a Retry-After header when the
+# server sends one); after this many attempts we raise BackendOverloaded so the dispatch layer
+# fails over to the next permitted backend. The anthropic client's own retries are disabled
+# (max_retries=0) so this is the single, explicit, provider-agnostic backoff policy.
+_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+_MAX_API_ATTEMPTS = 4
+_BASE_BACKOFF_S = 0.5
+_MAX_BACKOFF_S = 20.0
+# A hostile / misconfigured server can send an enormous Retry-After (e.g. 999999s ≈ 11 days);
+# honouring it verbatim would hang the call. Cap the per-attempt wait — a backend that wants
+# longer simply gets retried after the cap and, if still failing, exhausts to a failover.
+_MAX_RETRY_AFTER_S = _MAX_BACKOFF_S
+_JITTER = random.Random()   # non-deterministic jitter (anti-thundering-herd); off the replay path
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """The server-advised Retry-After delay in seconds, if present + numeric. An HTTP-date
+    form is ignored (we fall back to computed backoff), never raising."""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        return None
+    try:
+        val = headers.get("retry-after")
+    except Exception:
+        return None
+    if not val:
+        return None
+    try:
+        # cap to bound the per-attempt wait — never honour an absurd/hostile Retry-After.
+        return min(_MAX_RETRY_AFTER_S, max(0.0, float(val)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _classify_transient(exc: Exception) -> tuple[bool, float | None]:
+    """(is_transient, retry_after_seconds). Transient = a retryable HTTP status or a
+    connection/timeout/overload class — the failures worth backing off + failing over on."""
+    status = getattr(exc, "status_code", None)
+    name = type(exc).__name__.lower()
+    transient = (
+        (isinstance(status, int) and status in _RETRYABLE_STATUS)
+        or "overloaded" in name or "ratelimit" in name
+        or "timeout" in name or "connection" in name
+    )
+    return transient, (_retry_after_seconds(exc) if transient else None)
+
+
+def _backoff_delay(attempt: int) -> float:
+    """Exponential backoff with full jitter, capped at _MAX_BACKOFF_S."""
+    ceiling = min(_MAX_BACKOFF_S, _BASE_BACKOFF_S * (2 ** (attempt - 1)))
+    return _JITTER.uniform(0.0, ceiling)
 
 
 class AnthropicBackend(LLMBackend):
@@ -84,8 +139,41 @@ class AnthropicBackend(LLMBackend):
     def _client_obj(self) -> object:
         if self._client is None:
             import anthropic
-            self._client = anthropic.Anthropic()
+            # max_retries=0: the SDK's internal retry/backoff is disabled so `_create_with_backoff`
+            # below is the single, explicit, testable backoff policy (X4).
+            self._client = anthropic.Anthropic(max_retries=0)
         return self._client
+
+    def _create_with_backoff(self, client: object, sys_prompt: str, user_msg: str,
+                             prompt: Prompt) -> object:
+        """Issue one Messages API call, retrying transient failures (429/overload/5xx/
+        connection) with backoff + jitter, honouring Retry-After. Raises BackendOverloaded when
+        the transient failure persists (so dispatch fails over) or BackendError for a permanent
+        failure (e.g. a 400/401 — failing over would not help)."""
+        last: Exception | None = None
+        for api_attempt in range(1, _MAX_API_ATTEMPTS + 1):
+            try:
+                return client.messages.create(  # type: ignore[attr-defined]
+                    model=self.model,
+                    system=sys_prompt,
+                    messages=[{"role": "user", "content": user_msg}],
+                    temperature=prompt.temperature,
+                    max_tokens=prompt.max_tokens,
+                )
+            except Exception as e:  # noqa: BLE001 — classify below; never leak a raw SDK error
+                last = e
+                transient, retry_after = _classify_transient(e)
+                if transient and api_attempt < _MAX_API_ATTEMPTS:
+                    delay = retry_after if retry_after is not None else _backoff_delay(api_attempt)
+                    _log.warning("kernel.anthropic.backoff", attempt=api_attempt,
+                                 delay_s=round(delay, 2), error=str(e)[:150])
+                    time.sleep(delay)
+                    continue
+                if transient:
+                    raise BackendOverloaded(
+                        f"Anthropic transient failure after {api_attempt} attempts: {e}") from e
+                raise BackendError(f"Anthropic API error: {e}") from e
+        raise BackendOverloaded(f"Anthropic unreachable: {last}")   # unreachable in practice
 
     def _build_system(self, prompt: Prompt) -> str:
         schema_json = json.dumps(prompt.schema.model_json_schema(), indent=2)
@@ -107,16 +195,9 @@ class AnthropicBackend(LLMBackend):
         last_error: Exception | None = None
         for attempt in (1, 2):
             t0 = time.perf_counter()
-            try:
-                rsp = client.messages.create(  # type: ignore[attr-defined]
-                    model=self.model,
-                    system=sys_prompt,
-                    messages=[{"role": "user", "content": user_msg}],
-                    temperature=prompt.temperature,
-                    max_tokens=prompt.max_tokens,
-                )
-            except Exception as e:
-                raise BackendError(f"Anthropic API error: {e}") from e
+            # transient failures (429/overload/5xx/connection) are retried with backoff inside
+            # here; a persistent transient raises BackendOverloaded for the dispatch failover (X4).
+            rsp = self._create_with_backoff(client, sys_prompt, user_msg, prompt)
             latency = (time.perf_counter() - t0) * 1000.0
 
             text_parts = [
