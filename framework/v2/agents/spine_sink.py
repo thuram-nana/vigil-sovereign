@@ -92,6 +92,10 @@ class SpineSink:
 
     def critic_verdict(self, critic: str, target_event_id: int, verdict: str, *,
                        severity: str = "info", rationale: str = "") -> int | None:
+        # parent_id = the finding this verdict is ABOUT (the provenance edge), MIRRORING
+        # MultiCriticAgent. Without it, the panel quorum's indexed parent_id read
+        # (agents/critics.py::panel_verdict_for) would not see this spine-posted verdict —
+        # only the payload target_event_id would, and that read now filters on parent_id.
         return self._post("critic_verdict", {"critic": critic, "target_event_id": target_event_id,
                                              "verdict": verdict, "severity": severity,
-                                             "rationale": rationale})
+                                             "rationale": rationale}, parent_id=target_event_id)

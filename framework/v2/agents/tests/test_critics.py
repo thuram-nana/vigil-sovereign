@@ -136,3 +136,39 @@ def test_multi_critic_agent_reviews_each_finding_exactly_once(tmp_path: Path) ->
     assert agent.should_run() and agent.step() == 3
     assert len(bb.read(engagement="e", kinds=["critic_verdict"])) == 6   # exactly 3 per finding, no dupes
     bb.close()
+
+
+def test_panel_verdict_isolates_and_indexes_by_parent(tmp_path: Path) -> None:
+    # X3 O(N^2) fix: panel_verdict_for reads ONLY the verdicts about the target finding, via the
+    # indexed parent_id — not every verdict in the engagement filtered in Python. Correctness:
+    # two findings each get their own 3-verdict panel; and the DB filter (not a full scan) is used.
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    bb.engagement_id("e")
+    fe1 = bb.post(engagement="e", kind="finding", agent_name="x", payload=_finding(finding_slug="1").model_dump())
+    fe2 = bb.post(engagement="e", kind="finding", agent_name="x", payload=_finding(finding_slug="2").model_dump())
+    agent = MultiCriticAgent(bb, "e")
+    assert agent.step() == 6                                       # 3 verdicts per finding
+    # each finding's panel is computed from exactly its own 3 verdicts — no cross-contamination.
+    assert panel_verdict_for(bb, "e", fe1).verdict == "endorse"
+    assert len(panel_verdict_for(bb, "e", fe1).verdicts) == 3
+    assert len(panel_verdict_for(bb, "e", fe2).verdicts) == 3
+    # the read is a parent_id-filtered query: a finding with no verdicts reads zero rows.
+    assert bb.read(engagement="e", kinds=["critic_verdict"], parent_id=999_999) == []
+    assert len(bb.read(engagement="e", kinds=["critic_verdict"], parent_id=fe1)) == 3
+    bb.close()
+
+
+def test_panel_includes_spinesink_posted_verdicts(tmp_path: Path) -> None:
+    # X3 regression (review HIGH): the parent_id-filtered panel read must still see a verdict
+    # posted via the shipped SpineSink helper — which the old target_event_id-payload scan caught.
+    # SpineSink.critic_verdict now sets parent_id=target_event_id so the indexed read includes it.
+    from framework.v2.agents.spine_sink import SpineSink
+
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    bb.engagement_id("e")
+    fe = bb.post(engagement="e", kind="finding", agent_name="exploit", payload=_finding().model_dump())
+    sink = SpineSink(bb, "e")
+    assert sink.critic_verdict("soundness", target_event_id=fe, verdict="object", severity="major") is not None
+    panel = panel_verdict_for(bb, "e", fe)
+    assert len(panel.verdicts) == 1 and panel.verdict == "object"   # the spine verdict is counted
+    bb.close()

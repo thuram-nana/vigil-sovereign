@@ -81,15 +81,43 @@ class ReflectionAgent:
         self.slug = engagement_slug
         self.engagement_id = blackboard.engagement_id(engagement_slug)
         self._stall_actions = stall_actions
+        # X3 cursors: fold already-posted reflection keys incrementally (durable since_id), and
+        # memoize the pending set within a tick so should_run()+step() don't each re-scan the log.
+        self._dedup_cursor = 0
+        self._posted_keys: set[str] = set()
+        self._pending_cache: tuple[int, list[dict]] | None = None
 
     def _already_posted(self) -> set[str]:
-        return {_dedup_key(r.payload)
-                for r in _all_events(self.bb, self.engagement_id) if r.kind == "reflection"}
+        # X3: accumulate the set of already-posted reflection dedup keys through a durable
+        # since_id cursor over reflection events (paged to exhaustion) instead of re-scanning the
+        # whole log each call. Monotonic ids mean the cursor only advances; the set is complete.
+        since = self._dedup_cursor
+        while True:
+            batch = self.bb.read(engagement=self.engagement_id, kinds=["reflection"],
+                                 since_id=since, limit=5000)
+            if not batch:
+                break
+            for r in batch:
+                self._posted_keys.add(_dedup_key(r.payload))
+            since = batch[-1].id
+            if len(batch) < 5000:
+                break
+        self._dedup_cursor = since
+        return self._posted_keys
 
     def _pending(self) -> list[dict]:
+        # X3: reflect() is a full-log analysis; memoize its filtered result within a tick — if no
+        # event has been appended since the last computation the pending set is identical, so
+        # should_run() + step() in one tick do not each re-scan the whole log. `count` grows on
+        # any post (including a supersede), so it is a sound monotonic change-detector.
+        head = self.bb.count(engagement=self.engagement_id)
+        if self._pending_cache is not None and self._pending_cache[0] == head:
+            return self._pending_cache[1]
         posted = self._already_posted()
-        return [r for r in reflect(self.bb, self.engagement_id, stall_actions=self._stall_actions)
-                if _dedup_key(r) not in posted]
+        pending = [r for r in reflect(self.bb, self.engagement_id, stall_actions=self._stall_actions)
+                   if _dedup_key(r) not in posted]
+        self._pending_cache = (head, pending)
+        return pending
 
     def should_run(self) -> bool:
         return bool(self._pending())

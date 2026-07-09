@@ -91,6 +91,11 @@ class Blackboard:
         paths.secure_existing(self.path)              # 0600 the spine DB (dir 0700 guards WAL sidecars)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # X3: under WAL (set in schema.sql), synchronous=NORMAL drops the per-commit fsync
+        # (durable across app crashes; only an OS/power crash can lose the last commit) — the
+        # standard, safe WAL setting. The append-only log, its ids/posted_at and the immutability
+        # triggers are unaffected; only the fsync per post() is elided.
+        self._conn.execute("PRAGMA synchronous = NORMAL")
         self._migrate()
 
     # context manager helpers
@@ -248,11 +253,18 @@ class Blackboard:
         engagement: str | int,
         kinds: Iterable[EventKind] | None = None,
         agent: str | None = None,
+        parent_id: int | None = None,
         since_id: int = 0,
         include_superseded: bool = False,
         limit: int = 1000,
     ) -> list[BlackboardEventRow]:
-        """Read events for an engagement. Defaults exclude superseded rows."""
+        """Read events for an engagement. Defaults exclude superseded rows.
+
+        ``parent_id`` (X3) restricts to the direct children of one event — served by the
+        ``idx_events_parent`` index, so a consumer that wants only the events posted ABOUT a
+        given event (e.g. the critic verdicts on a finding) reads O(children) rows instead of
+        scanning every event of that kind and filtering in Python. Additive: ``None`` (default)
+        yields the identical query as before."""
         eid = engagement if isinstance(engagement, int) else self.engagement_id(engagement, create=False)
 
         sql = ["SELECT e.* FROM events e"]
@@ -265,6 +277,9 @@ class Blackboard:
         params.append(eid)
         if not include_superseded:
             sql.append("AND s.id IS NULL")
+        if parent_id is not None:
+            sql.append("AND e.parent_id = ?")
+            params.append(parent_id)
         if since_id > 0:
             sql.append("AND e.id > ?")
             params.append(since_id)
