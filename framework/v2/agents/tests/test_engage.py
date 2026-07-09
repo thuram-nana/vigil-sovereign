@@ -355,3 +355,69 @@ def test_engage_chaining_is_best_effort(
     assert result.report.active_findings, "report must survive a chaining failure"
     assert result.attack_paths == []
     assert result.chained_conclusions == []
+
+
+# ---------------------------------------------------------------------------
+# Nervous-System N0 — the engagement mirrors onto the immutable event spine.
+# ---------------------------------------------------------------------------
+
+
+def test_engage_spine_mirrors_findings_onto_the_immutable_stream(
+    isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
+):
+    from framework.v2.agents.blackboard import open_blackboard
+
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+
+    bb = open_blackboard(db_path=tmp_path / "spine.sqlite")
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny, spine=bb,
+    )
+    assert result.report.active_findings, "engage confirmed nothing"
+
+    # every confirmed finding is mirrored as a finding event, index-for-index
+    finding_events = bb.read(engagement="alpha", kinds=["finding"])
+    assert len(finding_events) == len(result.report.active_findings)
+    # oracle authority preserved in the mirror: a re-grounded finding is 'confirmed'
+    assert all(fe.payload["critique_status"] in ("confirmed", "llm_advisory") for fe in finding_events)
+    assert any(fe.payload["verified_by_oracle"] for fe in finding_events)
+    # scan progress observations + a summary decision also landed on the spine
+    assert bb.read(engagement="alpha", kinds=["observation"])
+    assert bb.read(engagement="alpha", kinds=["decision"])
+    bb.close()
+
+
+def test_spine_finding_mirror_never_claims_confirmed_without_a_live_verdict():
+    # oracle-authority fidelity (N0 review fix): with NO live grounding verdict, the mirror
+    # must NOT launder certificate-presence into 'confirmed'/verified_by_oracle — it mirrors
+    # honestly as llm_advisory (matching scanner.report._grounding_label's admitted-is-None).
+    class _F:
+        bug_class = "boolean_sqli"
+        insertion_point = "query:q"
+        param = "q"
+        confidence = 0.9
+        confirmed_by = "differential_response"
+        rationale = "rows diverged"
+        oracle_context = {"bug_class": "boolean_sqli"}   # a certificate is PRESENT...
+    p = engage_mod._spine_finding_payload(_F(), None)     # ...but NO live grounding verdict
+    assert p["verified_by_oracle"] is False and p["critique_status"] == "llm_advisory"
+    assert p["oracle_context"] is not None                # retained so downstream can re-verify
+
+
+def test_engage_spine_records_a_refusal_as_evidence(isolated_engagement, tmp_path: Path):
+    from framework.v2.agents.blackboard import open_blackboard
+
+    isolated_engagement("alpha", "127.0.0.1")   # only 127.0.0.1 is in scope
+    bb = open_blackboard(db_path=tmp_path / "spine.sqlite")
+    # the refusal STILL propagates (fail-closed) AND is recorded as evidence on the spine
+    with pytest.raises(EngagementRefused, match="out of scope"):
+        run_engagement("alpha", "http://10.11.12.13/", enable_oob=False,
+                       prompt_callback=_deny, spine=bb)
+    refusals = bb.read(engagement="alpha", kinds=["refusal"])
+    assert refusals and refusals[0].payload["fatal"] is True
+    assert refusals[0].payload["gate"] == "preflight"
+    bb.close()
