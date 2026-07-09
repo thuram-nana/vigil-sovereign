@@ -9,6 +9,7 @@ draft the regulator-readable impact paragraph.
 from __future__ import annotations
 
 from .binding import run
+from .consistency import ConsistencyResult, run_consistent, sample_workers
 from .llm import LLMBackend
 from .models import CallTrace, SeverityDecision
 
@@ -70,3 +71,40 @@ def decide(
     )
     assert isinstance(parsed, SeverityDecision)
     return parsed, trace
+
+
+def _severity_signature(sd: SeverityDecision) -> tuple[str, str]:
+    """The decision-bearing signature of a severity call: the ``(severity, worth_reporting)`` pair
+    — both categorical DECISIONS, never the prose (contextual_note / regulator_paragraph). Two
+    calls that reach the same verdict cluster together; an unstable one scatters."""
+    return (str(sd.severity), str(sd.worth_reporting))
+
+
+def decide_consistent(
+    finding_summary: str,
+    *,
+    affected_endpoint: str = "",
+    preconditions: str = "",
+    impact_observed: str = "",
+    chain_candidates: list[str] | None = None,
+    samples: int = 5,
+    agreement_gate: float = 0.6,
+    backend: LLMBackend | None = None,
+) -> ConsistencyResult:
+    """Self-consistent severity decision (anti-hallucination) — a NO-ORACLE binding. Runs
+    :func:`decide` ``samples`` times and clusters by the ``(severity, worth_reporting)`` decision.
+    ``abstained`` is True when the samples disagree enough that the severity should be treated as
+    LOW-CONFIDENCE (routed to needs_evidence) rather than asserted.
+
+    ADVISORY only: it discounts the LLM's confidence in its OWN severity — it NEVER enters the
+    deterministic oracle / SCE / calibration inputs (which score exploitability from real evidence,
+    not the LLM's stability). Byte-identical on the deterministic dry-run backend (every sample is
+    identical -> agreement 1.0, abstained False)."""
+    workers, limiter = sample_workers(backend)
+    chain = list(chain_candidates) if chain_candidates is not None else None
+    return run_consistent(
+        lambda: decide(finding_summary, affected_endpoint=affected_endpoint,
+                       preconditions=preconditions, impact_observed=impact_observed,
+                       chain_candidates=chain, backend=backend),
+        samples=samples, agreement_gate=agreement_gate, key_fn=_severity_signature,
+        max_workers=workers, rate_limiter=limiter)
