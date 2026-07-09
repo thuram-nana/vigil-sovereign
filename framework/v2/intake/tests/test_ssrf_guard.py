@@ -165,3 +165,28 @@ def test_intake_run_refuses_non_http_scheme(_authorized) -> None:
     _authorized("internal.example")
     with pytest.raises(SSRFRefused):
         intake_mod.run("ftp://internal.example/", record_to_memory=False)
+
+
+def test_authorize_ledger_is_owner_only_and_self_heals(tmp_path, monkeypatch) -> None:
+    # Speed X2 (follow-up): the intake authorization ledger holds operator name + every
+    # authorized target hostname. It must be owner-only, and a pre-existing world-readable
+    # (pre-X2) ledger must self-heal to 0600 on the next append — not stay 0644 forever.
+    import os
+    import stat
+    from argparse import Namespace
+
+    from framework.v2.common import ethics
+    from framework.v2.intake.cli import _authorize
+
+    ledger = tmp_path / "auth.txt"
+    monkeypatch.setattr(ethics, "authorization_ledger", lambda: ledger)
+
+    # simulate a pre-X2 ledger created world-readable
+    ledger.write_text("# legacy\n", encoding="utf-8")
+    os.chmod(ledger, 0o644)
+
+    rc = _authorize(Namespace(url="example-target.example", operator="testbot"))
+    assert rc == 0
+    if os.name == "posix":
+        assert stat.S_IMODE(ledger.stat().st_mode) == 0o600      # self-healed, not left 0644
+    assert "example-target.example" in ledger.read_text(encoding="utf-8")
