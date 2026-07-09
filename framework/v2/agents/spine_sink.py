@@ -99,3 +99,19 @@ class SpineSink:
         return self._post("critic_verdict", {"critic": critic, "target_event_id": target_event_id,
                                              "verdict": verdict, "severity": severity,
                                              "rationale": rationale}, parent_id=target_event_id)
+
+    def tool_call(self, tool: str, *, tier: str = "", capability: str = "", target: str = "",
+                  args_summary: str = "", parent_id: int | None = None) -> int | None:
+        """Record the reasoning core's REQUEST to run a gated tool/sensor (W1.4), before it runs.
+        ``parent_id`` links it to the driving event (a hypothesis/decision)."""
+        return self._post("tool_call", {"tool": tool, "tier": tier, "capability": capability,
+                                        "target": target, "args_summary": args_summary},
+                          parent_id=parent_id)
+
+    def tool_result(self, tool: str, *, ok: bool, refused: bool = False, gate: str = "",
+                    summary: str = "", note: str = "", tool_call_id: int | None = None) -> int | None:
+        """Record a gated tool/sensor invocation's outcome (a provenance-labelled observation, not
+        a fact). ``parent_id = tool_call_id`` is the provenance edge back to the request."""
+        return self._post("tool_result", {"tool": tool, "ok": bool(ok), "refused": bool(refused),
+                                          "gate": gate, "summary": summary, "note": note},
+                          parent_id=tool_call_id)

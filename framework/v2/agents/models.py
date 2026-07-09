@@ -40,12 +40,16 @@ EventKind = Literal[
     "critic_verdict", # one critic's ADVISORY verdict (multi-critic panel)
     "reflection",     # an in-loop metacognitive reflection (re-rank/defer only)
     "refusal",        # a recorded refusal (a gate fired) — refusals are evidence
+    # --- Agentic tool-use / sensor-driving spine kinds (additive; W1.4). ---
+    "tool_call",      # the reasoning core invoked a gated tool/sensor (the request)
+    "tool_result",    # that invocation's outcome (a PROVENANCE-labelled observation, not a fact)
 ]
 
 ALL_EVENT_KINDS: tuple[EventKind, ...] = (
     "observation", "hypothesis", "plan", "action",
     "result", "finding", "critique", "decision",
     "reward", "critic_verdict", "reflection", "refusal",
+    "tool_call", "tool_result",
 )
 
 
@@ -260,6 +264,33 @@ class RefusalPayload(BaseModel):
     fatal: bool = Field(default=False, description="True if the refusal halted the engagement.")
 
 
+class ToolCallPayload(BaseModel):
+    """The reasoning core's REQUEST to run a gated tool/sensor — recorded BEFORE the tool runs,
+    so the intent is on the immutable stream even if the run refuses or fails. Carries no raw
+    wallclock (the spine digest is time-independent); ``args_summary`` is a short, redacted view
+    of the arguments (never secrets, never full payloads)."""
+
+    tool: str = Field(description="Registered tool/sensor name.")
+    tier: str = Field(default="", description="Governance tier: 'T1'/'T2'/'T3' (passive/active/adversary-sim).")
+    capability: str = Field(default="", description="Entitlement capability the tool requires ('' = none).")
+    target: str = Field(default="", description="Target/host the tool acts on, if any (for scope/egress).")
+    args_summary: str = Field(default="", description="Short redacted view of the arguments.")
+
+
+class ToolResultPayload(BaseModel):
+    """The outcome of a gated tool/sensor invocation — a PROVENANCE-LABELLED OBSERVATION, never a
+    fact. A tool's output becomes a fact only if a deterministic oracle later re-verifies it; on
+    the spine it is tagged with its source (the tool) and whether a gate refused it. Provenance-
+    linked to its ``tool_call`` via ``parent_id`` (mirroring the Action->Result idiom)."""
+
+    tool: str = Field(description="Registered tool/sensor name.")
+    ok: bool = Field(description="True iff the tool ran and returned a result (not refused, not errored).")
+    refused: bool = Field(default=False, description="True iff a fail-closed gate declined the invocation.")
+    gate: str = Field(default="", description="Which gate refused ('' if not refused).")
+    summary: str = Field(default="", description="Short summary of the observation the tool produced.")
+    note: str = Field(default="", description="Error/refusal reason or an operator-facing note.")
+
+
 # Map kind -> Pydantic class so the blackboard can validate generically.
 PAYLOAD_BY_KIND: dict[EventKind, type[BaseModel]] = {
     "observation": ObservationPayload,
@@ -274,6 +305,8 @@ PAYLOAD_BY_KIND: dict[EventKind, type[BaseModel]] = {
     "critic_verdict": CriticVerdictPayload,
     "reflection":     ReflectionPayload,
     "refusal":        RefusalPayload,
+    "tool_call":      ToolCallPayload,
+    "tool_result":    ToolResultPayload,
 }
 
 
