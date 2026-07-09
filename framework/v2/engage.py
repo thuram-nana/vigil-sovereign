@@ -392,7 +392,13 @@ def run_engagement(
         try:
             for i, f in enumerate(report.active_findings):
                 g = result.grounding[i] if i < len(result.grounding) else None
-                sink.finding_event(_spine_finding_payload(f, g))
+                fe = sink.finding_event(_spine_finding_payload(f, g))
+                # reward bus: a spine reward for the confirmed finding — the effort-credit
+                # signal on the unified stream. Non-circular calibration labels are resolved
+                # separately from independent cross-oracle corroboration (reward_bus /
+                # critique_agent); this records that the surface produced a confirmed finding.
+                sink.reward("engage", 1.0, arm=str(f.bug_class), signal="oracle_confirmed",
+                            target_event_id=fe, rationale=f"confirmed_by={f.confirmed_by}")
             sink.decision(
                 "engagement summary",
                 f"{len(report.active_findings)} finding(s), {len(result.attack_paths)} attack path(s)",

@@ -283,10 +283,10 @@ class CritiqueAgent(Agent):
         # labels come from an INDEPENDENT adjudicator (the eval harness scoring
         # against a known corpus, or the operator) via record_outcome; until then
         # the calibrator honestly falls back to identity.
-        if oracle_fired and _distinct_confirming_kinds(oracle_result) >= 2:
-            label = OutcomeLabel.EXPLOITABLE
-        else:
-            label = OutcomeLabel.DISPUTED
+        # The non-circular label rule, single-sourced in calibration.reward_bus so the
+        # critique agent and the reward-bus fan-out can never drift apart.
+        from ..calibration.reward_bus import outcome_label
+        label = outcome_label(oracle_fired, _distinct_confirming_kinds(oracle_result))
         pred_seq = 2 * finding_event_id
         try:
             self._ledger.add_prediction(

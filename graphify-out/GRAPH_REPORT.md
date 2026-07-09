@@ -1,12 +1,12 @@
 # Graph Report - /home/kali/Pictures/PENTEST-main  (2026-07-08)
 
 ## Corpus Check
-- 526 files · ~524,865 words
+- 530 files · ~526,345 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 7604 nodes · 30705 edges · 210 communities detected
-- Extraction: 35% EXTRACTED · 65% INFERRED · 0% AMBIGUOUS · INFERRED: 20029 edges (avg confidence: 0.6)
+- 7627 nodes · 30778 edges · 210 communities detected
+- Extraction: 35% EXTRACTED · 65% INFERRED · 0% AMBIGUOUS · INFERRED: 20078 edges (avg confidence: 0.6)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -249,87 +249,87 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.01
-Nodes (657): FindingContext, Typed, replayable bundle of the observations one finding is judged on.      A fi, The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp, detect_outliers(), _median(), intruder.analysis — anomaly detection over an attack's result population.  Burp, Indices of anomalous rows.      A row is flagged if ANY of: its status code is a, _Row (+649 more)
+Nodes (670): FindingContext, Typed, replayable bundle of the observations one finding is judged on.      A fi, detect_outliers(), _median(), intruder.analysis — anomaly detection over an attack's result population.  Burp, Indices of anomalous rows.      A row is flagged if ANY of: its status code is a, _Row, AttackType (+662 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.01
-Nodes (571): from_http_responses(), Agent, Agent, Base class for every agent under MAO.      Subclasses set the class-level `name`, Return True if there is work for this agent right now.          Cheap; called ev, Do one unit of work; return the number of events posted.          Implementation, Events posted to this engagement since this agent's cursor., Move the cursor to the latest event id seen. (+563 more)
+Nodes (549): from_http_responses(), Agent, detect(), api_detection — identify API patterns (REST / GraphQL / SOAP / RPC)., detect(), auth_detection — identify the authentication scheme(s)., run(), open_blackboard() (+541 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.01
-Nodes (495): console_dir(), launch_scan(), console.actions — the SAFE operator actions (the only mutations the console make, Trip the kill-switch for an engagement — the emergency stop. Idempotent (the, Spawn a loopback `scan` subprocess that streams progress + saves its report., Re-run the retained oracle certificates in a saved run's report — a pure,     of, reverify_run(), run_dir() (+487 more)
+Nodes (551): Trip the kill-switch for an engagement — the emergency stop. Idempotent (the, trip_killswitch(), AdapterError, _burp_issue_list(), BurpAdapter, AdapterError, _nikto_class(), _nikto_hosts() (+543 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.01
-Nodes (554): claim_from_finding(), _endpoint_node_id(), _get(), Read a field from a finding that may be a pydantic model or a plain dict., The world-model node a finding is about — matches the id the chainer mints     (, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex, Run a finding through the veracity firewall against ``world``. The world-model i (+546 more)
+Nodes (487): BaseModel, binding_satisfied(), current_host_identifiers(), The set of identifiers the running host can present. Compared,     case-sensitiv, Return (ok, reason). A 'none' binding is always satisfied. A     'host_attestati, _read_machine_ids(), Replay the event spine in strict id (logical-clock) order from ``since_id`` — th, authority_signing_bytes() (+479 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.02
-Nodes (474): admit_finding(), AttackerState, worldmodel.attacker — the attacker's own state as first-class, persistent facts., Record that the attacker has reached ``service_id`` (a service /         endpoin, Node ids the attacker currently controls (deterministic order)., Credential/session/token ids the attacker currently holds., Service/endpoint/segment ids the attacker has reached., A thin, typed view over a :class:`WorldModel` for recording and querying     wha (+466 more)
+Nodes (463): AttackerState, worldmodel.attacker — the attacker's own state as first-class, persistent facts., Record that the attacker has reached ``service_id`` (a service /         endpoin, Node ids the attacker currently controls (deterministic order)., Credential/session/token ids the attacker currently holds., Service/endpoint/segment ids the attacker has reached., A thin, typed view over a :class:`WorldModel` for recording and querying     wha, Idempotently add the attacker principal node. Returns its id. (+455 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.01
-Nodes (439): AnthropicBackend, AnthropicBackend — live LLM via the Anthropic Messages API.  Activates when:   -, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, detect(), detect(), BedrockBackend, BedrockBackend — Claude on AWS Bedrock with regional restriction.  Sovereign-clo, _region_allowlist() (+431 more)
+Cohesion: 0.02
+Nodes (346): AsnBgpCollector, intel.collectors.asn_bgp — ASN / BGP routing origin as Observations.  For a host, Collector, collector_for_subject(), _default_collectors(), _LazyRoster, agents.base — common Agent interface.  Every specialist agent subclasses `Agent`, The collectors that can be asked about ``subject`` — deterministic order. (+338 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.02
-Nodes (371): AdapterError, _burp_issue_list(), BurpAdapter, AdapterError, _nikto_class(), _nikto_hosts(), _nikto_location(), NiktoAdapter (+363 more)
+Cohesion: 0.01
+Nodes (244): _coerce_text(), from_boolean_probes(), from_dom_execution(), from_predicate(), from_process_output(), from_side_effect(), from_state(), from_timing_samples() (+236 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.02
-Nodes (266): PatternAnalyzer, _r(), analysis.analyzers.builtin — the offline pattern analyzer.  A real, dependency-f, Offline pattern-based static analyzer. Always available., _Rule, _as_dict(), _analyzers(), _index() (+258 more)
+Nodes (264): BlackboardError, Anything wrong with a blackboard operation (validation, IO)., PatternAnalyzer, _r(), analysis.analyzers.builtin — the offline pattern analyzer.  A real, dependency-f, Offline pattern-based static analyzer. Always available., _Rule, _as_dict() (+256 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.01
-Nodes (288): _clause_true(), confirm_against_local_target(), _DemoHandler, DifferentialDemoHandler, _finding_to_dict(), _http_get(), _query_param(), verify.confirmation — the oracle as the confirmation authority, end to end.  Thi (+280 more)
+Nodes (310): from_error_signature(), from_evaluation(), The exact mapping `OracleVerifier.confirm` consumes. Only keys whose         inp, _clause_true(), confirm_against_local_target(), _DemoHandler, DifferentialDemoHandler, _finding_to_dict() (+302 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.02
-Nodes (264): api_detection — identify API patterns (REST / GraphQL / SOAP / RPC)., auth_detection — identify the authentication scheme(s)., cdn_waf_detection — identify CDN, WAF, and edge-protection layers., cms_detection — identify the CMS / off-the-shelf application., body(), cookie(), evaluate(), _evaluate_signature() (+256 more)
+Nodes (278): AnthropicBackend, AnthropicBackend — live LLM via the Anthropic Messages API.  Activates when:   -, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, BedrockBackend, BedrockBackend — Claude on AWS Bedrock with regional restriction.  Sovereign-clo, _region_allowlist(), build_system_prompt(), build_user_prompt() (+270 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.01
-Nodes (176): _coerce_text(), from_boolean_probes(), from_dom_execution(), from_error_signature(), from_evaluation(), from_predicate(), from_process_output(), from_side_effect() (+168 more)
+Cohesion: 0.02
+Nodes (277): Agent, Base class for every agent under MAO.      Subclasses set the class-level `name`, Return True if there is work for this agent right now.          Cheap; called ev, Do one unit of work; return the number of events posted.          Implementation, BenchmarkReport, Blackboard, BlackboardEventRow, Materialised view of a row, with payload already deserialised. (+269 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.02
-Nodes (222): BenchmarkReport, BlackboardEventRow, Materialised view of a row, with payload already deserialised., _bin_edges(), brier_score(), Calibrator, _clamp(), fit() (+214 more)
+Cohesion: 0.01
+Nodes (263): console_dir(), launch_scan(), console.actions — the SAFE operator actions (the only mutations the console make, Spawn a loopback `scan` subprocess that streams progress + saves its report., Re-run the retained oracle certificates in a saved run's report — a pure,     of, reverify_run(), run_dir(), _write_meta() (+255 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.02
-Nodes (133): find_browser(), scanner.browser — dynamic DOM-XSS confirmation via a headless browser.  Static a, Path to a usable headless Chromium/Chrome, or None., Render ``url`` in headless mode and return the post-JavaScript DOM as HTML     (, Confirm DOM-XSS at ``base_url`` by injecting an execution-marker payload     (in, render_dom(), scan_dom_xss(), confirm_dom_xss() (+125 more)
+Nodes (179): _memory_summary(), Events posted to this engagement since this agent's cursor., Move the cursor to the latest event id seen., from_sqlite(), Insert a new event. Validates payload against the kind's schema., Convenience: post a new event with supersedes_id=old_id,         copying engagem, Read events for an engagement. Defaults exclude superseded rows., _is_loopback() (+171 more)
 
 ### Community 13 - "Community 13"
 Cohesion: 0.02
-Nodes (137): _memory_summary(), Insert a new event. Validates payload against the kind's schema., _payloads(), _postmortem(), _priors(), _seed(), _similar(), _wins() (+129 more)
+Nodes (231): What a crawl found: the fuzzable requests (ready for ``AuditEngine.audit``),, What a crawl found: the fuzzable requests (ready for ``AuditEngine.audit``),, Breadth-first, scope-bounded, cycle-safe crawler. ``send(HttpRequest) ->     {st, Breadth-first, scope-bounded, cycle-safe crawler. ``send(HttpRequest) ->     {st, Canonical location key: identical param *names* (not values) collapse, so     ``, Canonical location key: identical param *names* (not values) collapse, so     ``, CrucibleError, analyze_html() (+223 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.04
-Nodes (127): _add_action_args(), _annotate(), build_parser(), _descriptor(), _rules(), _ruleset(), _classify(), detection_cost_of_technique() (+119 more)
+Cohesion: 0.03
+Nodes (153): _annotate(), _descriptor(), _rules(), _ruleset(), _classify(), detection_cost_of_technique(), _edge_cost(), _noisy_or() (+145 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.02
-Nodes (112): diff_summary(), main(), make_request(), Print per-class summary., Compare valid vs invalid stats., Make one login attempt with the wrong password., summarize(), _check_bound() (+104 more)
+Cohesion: 0.03
+Nodes (84): _classify(), _gen_value(), generate(), infer_grammar(), ParamModel, scanner.grammar — probabilistic request-grammar inference for structure-valid fu, Induce a probabilistic request grammar from an observed corpus., Sample the grammar for one structurally-valid request: a frequency-weighted (+76 more)
 
 ### Community 16 - "Community 16"
-Cohesion: 0.03
-Nodes (104): evaluate_predicate(), load_library(), select_entries(), _PlainApp, M1 gate — data-driven, fingerprint-scoped coverage running in a real scan.  A li, A WordPress-fingerprinted, boolean-SQLi-vulnerable fixture., Same bug surface but a non-WordPress, non-PHP stack (no WP/PHP tells)., _server() (+96 more)
+Cohesion: 0.04
+Nodes (76): find_browser(), render_dom(), scan_dom_xss(), confirm_dom_xss(), DomXssResult, _inject(), scanner.browser_xss — DOM-XSS confirmed by EXECUTION in a real browser.  Static, One execution attempt: the payload, where it was injected, whether the     brows (+68 more)
 
 ### Community 17 - "Community 17"
-Cohesion: 0.03
-Nodes (94): pytest_configure(), `logging.bind_engagement(slug)` sets a module-level slug that     routes subsequ, _unbind_engagement_after_test(), bind_engagement(), _emit_json(), _engagement_log_path(), common.logging — structured JSON-lines logs per engagement.  Every subsystem log, Final processor: write the event to disk and stop the chain.      Signature is i (+86 more)
+Cohesion: 0.05
+Nodes (95): proposal_signing_bytes(), _horizon(), _load_snapshot(), _now(), _review(), ingest_horizon(), load_horizon_feed(), improve.horizon — fold newly disclosed CVEs / techniques into gaps.  The horizon (+87 more)
 
 ### Community 18 - "Community 18"
 Cohesion: 0.03
-Nodes (84): _alt_case(), _crossover(), _double_url_encode(), evolve(), _fullwidth(), _mutate(), _null_suffix(), ProbeOutcome (+76 more)
+Nodes (85): AdaptResult, _alt_case(), _crossover(), _double_url_encode(), evolve(), EvolveResult, _fullwidth(), _mutate() (+77 more)
 
 ### Community 19 - "Community 19"
-Cohesion: 0.06
-Nodes (84): proposal_signing_bytes(), The exact bytes a governance approver signs to approve a merge., _horizon(), _load_snapshot(), _now(), _review(), ingest_horizon(), load_horizon_feed() (+76 more)
+Cohesion: 0.05
+Nodes (75): evaluate_predicate(), load_library(), select_entries(), _PlainApp, M1 gate — data-driven, fingerprint-scoped coverage running in a real scan.  A li, A WordPress-fingerprinted, boolean-SQLi-vulnerable fixture., Same bug surface but a non-WordPress, non-PHP stack (no WP/PHP tells)., _server() (+67 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.03
-Nodes (80): draft_attack_tree(), detect(), _cl_0(), _control(), detect(), detect_h2c_upgrade(), _h2c_upgrade_request(), _offers_h2c() (+72 more)
+Cohesion: 0.06
+Nodes (71): admit_finding(), claim_from_finding(), _endpoint_node_id(), _get(), Read a field from a finding that may be a pydantic model or a plain dict., The world-model node a finding is about — matches the id the chainer mints     (, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex (+63 more)
 
 ### Community 21 - "Community 21"
 Cohesion: 0.07
@@ -337,23 +337,23 @@ Nodes (68): assess_finding(), _get(), confidence.decision — the Scientific Con
 
 ### Community 22 - "Community 22"
 Cohesion: 0.05
-Nodes (42): from_oob(), _hit_to_dict(), Reduce one OOB interaction (OOBHit model, mapping, or duck-typed object)     to, main(), verify.collaborator_cli — `python3 -m framework.v2 collaborator serve`.  Runs th, port(), verify.collaborator — a self-hostable out-of-band interaction relay.  `verify.oo, A context-managed OOB relay the operator hosts on an allowlisted host.      ``ho (+34 more)
+Nodes (46): from_oob(), _hit_to_dict(), Reduce one OOB interaction (OOBHit model, mapping, or duck-typed object)     to, _no_send(), main(), verify.collaborator_cli — `python3 -m framework.v2 collaborator serve`.  Runs th, port(), verify.collaborator — a self-hostable out-of-band interaction relay.  `verify.oo (+38 more)
 
 ### Community 23 - "Community 23"
-Cohesion: 0.06
-Nodes (41): arm_key(), BetaPosterior, _candidates(), context_key(), from_dict(), from_json(), LearningError, load() (+33 more)
+Cohesion: 0.05
+Nodes (59): _add_secret(), ApiOperation, _as_obj(), _candidate_paths(), _content_type(), discover_content(), DiscoveredPath, _excerpt() (+51 more)
 
 ### Community 24 - "Community 24"
-Cohesion: 0.06
-Nodes (51): _add_secret(), _as_obj(), _candidate_paths(), _content_type(), discover_content(), _excerpt(), _expand_word(), _js_unescape() (+43 more)
-
-### Community 25 - "Community 25"
 Cohesion: 0.13
 Nodes (33): _assess(), _load_message(), Malformed message artifact., SocialDefenseError, assess_message(), _band(), _domain(), socialdefense.detectors — the inbound social-engineering indicator engine.  Dete (+25 more)
 
+### Community 25 - "Community 25"
+Cohesion: 0.12
+Nodes (26): _all_entries(), _by_id(), _dq_enc(), _dq_raw(), _enc(), _handler(), _m2_entries(), _plain_encoded_text() (+18 more)
+
 ### Community 26 - "Community 26"
-Cohesion: 0.23
-Nodes (8): JsonlSink, scanner.progress — an OPT-IN, no-op-by-default progress sink for live views.  Th, Append-only JSONL progress sink. One event per line     (`{"event": "scan.<kind>, The opt-in live-progress sink (scanner.progress) — the ONE engine touch for the, test_default_progress_is_none_no_op(), test_jsonl_sink_swallows_write_errors(), test_jsonl_sink_writes_phase_finding_done(), test_spine_sink_satisfies_progress_sink()
+Cohesion: 0.2
+Nodes (11): analyze(), _is_sequential(), scanner.sequencer — session-token / nonce randomness analysis.  A session token, Interpret a token as an integer via decimal, hex, or base64-big-endian., True if the tokens decode to integers forming an arithmetic progression or     p, The randomness verdict for a set of tokens., Measure the randomness of ``tokens`` and flag the weaknesses that make a     ses, SequencerResult (+3 more)
 
 ### Community 27 - "Community 27"
 Cohesion: 1.0
@@ -1088,7 +1088,7 @@ Cohesion: 1.0
 Nodes (1): Return all hits recorded against `token` so far (possibly empty).
 
 ## Knowledge Gaps
-- **523 isolated node(s):** ``logging.bind_engagement(slug)` sets a module-level slug that     routes subsequ`, `Laplace-smoothed success rate.`, `Wilson 95% lower bound — conservative for the planner.`, `memory.embed — embeddings for similarity search.  Two backends ship in this sess`, `Feature-hashing TF vectorizer. 256-dim, L2-normalized, signed.` (+518 more)
+- **524 isolated node(s):** ``logging.bind_engagement(slug)` sets a module-level slug that     routes subsequ`, `Laplace-smoothed success rate.`, `Wilson 95% lower bound — conservative for the planner.`, `memory.embed — embeddings for similarity search.  Two backends ship in this sess`, `Feature-hashing TF vectorizer. 256-dim, L2-normalized, signed.` (+519 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Community 27`** (2 nodes): `escapeHtml()`, `app.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -1460,12 +1460,12 @@ Nodes (1): Return all hits recorded against `token` so far (possibly empty).
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` connect `Community 3` to `Community 0`, `Community 1`, `Community 2`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 17`, `Community 18`, `Community 19`, `Community 21`, `Community 22`, `Community 25`?**
-  _High betweenness centrality (0.181) - this node is a cross-community bridge._
-- **Why does `WorldModel` connect `Community 4` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 5`, `Community 6`, `Community 7`, `Community 21`?**
-  _High betweenness centrality (0.052) - this node is a cross-community bridge._
-- **Why does `Path` connect `Community 4` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 10`, `Community 11`, `Community 12`, `Community 14`, `Community 16`, `Community 17`, `Community 19`, `Community 23`, `Community 25`, `Community 26`?**
-  _High betweenness centrality (0.045) - this node is a cross-community bridge._
+- **Why does `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` connect `Community 5` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 16`, `Community 17`, `Community 18`, `Community 20`, `Community 21`, `Community 22`, `Community 23`, `Community 24`, `Community 26`?**
+  _High betweenness centrality (0.178) - this node is a cross-community bridge._
+- **Why does `CrucibleError` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 15`, `Community 16`, `Community 24`?**
+  _High betweenness centrality (0.047) - this node is a cross-community bridge._
+- **Why does `WorldModel` connect `Community 4` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 5`, `Community 7`, `Community 11`, `Community 20`, `Community 21`?**
+  _High betweenness centrality (0.039) - this node is a cross-community bridge._
 - **Are the 453 inferred relationships involving `NodeKind` (e.g. with `EngagementRefused` and `EngagementResult`) actually correct?**
   _`NodeKind` has 453 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 436 inferred relationships involving `WorldModel` (e.g. with `EngagementRefused` and `EngagementResult`) actually correct?**
