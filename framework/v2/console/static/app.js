@@ -328,7 +328,7 @@ const Console = (() => {
     if (!target) { msg.innerHTML = '<span class="badge warn">enter a loopback target</span>'; return; }
     msg.innerHTML = '<span class="muted">launching…</span>';
     try {
-      const r = await fetch('/api/launch/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const r = await fetch('/api/launch/scan', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' },
         body: JSON.stringify({ target }) });
       const d = await r.json();
       if (d.error) { msg.innerHTML = `<span class="badge danger">${esc(d.error)}</span>`; return; }
@@ -414,7 +414,7 @@ const Console = (() => {
   async function reverify(runId) {
     const msg = document.getElementById('reverifyMsg'); msg.innerHTML = '<span class="muted">re-verifying…</span>';
     try {
-      const r = await fetch('/api/reverify/' + encodeURIComponent(runId), { method: 'POST' });
+      const r = await fetch('/api/reverify/' + encodeURIComponent(runId), { method: 'POST', headers: { 'X-Requested-With': 'fetch' } });
       const d = await r.json();
       msg.innerHTML = d.error ? `<span class="badge danger">${esc(d.error)}</span>`
         : `<span class="badge ${d.reproduced === d.total ? 'ok' : 'warn'}">${d.reproduced}/${d.total} certificates reproduced</span>`;
@@ -708,7 +708,7 @@ const Console = (() => {
   async function tripKill(slug) {
     if (!confirm(`Trip the kill-switch for "${slug}"? This is an emergency hard stop.`)) return;
     const msg=document.getElementById('tripMsg'); msg.innerHTML='<span class="muted">tripping…</span>';
-    try { const r=await fetch('/api/killswitch/'+encodeURIComponent(slug)+'/trip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'tripped from Ops Console'})});
+    try { const r=await fetch('/api/killswitch/'+encodeURIComponent(slug)+'/trip',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},body:JSON.stringify({reason:'tripped from Ops Console'})});
       const d=await r.json(); msg.innerHTML = d.error?`<span class="badge danger">${esc(d.error)}</span>`:'<span class="badge danger">tripped</span>';
       refreshSafety(); setTimeout(()=>route(),400);
     } catch(e){ msg.innerHTML=`<span class="badge danger">${esc(e.message)}</span>`; }

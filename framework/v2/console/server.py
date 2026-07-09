@@ -11,11 +11,29 @@ re-verify / kill-switch trip) are added in a later phase behind explicit POST ro
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+
+# X6 — a custom request header the same-origin SPA fetch sets and a cross-site HTML form cannot.
+_CSRF_HEADER = "X-Requested-With"
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for a genuine loopback host: the name ``localhost`` or ANY loopback IP —
+    127.0.0.0/8 (not just 127.0.0.1) and every IPv6 loopback form (``::1``, expanded,
+    bracketed). Rejects a routable host / a DNS-rebinding domain."""
+    h = (host or "").strip().strip("[]").lower()
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 from . import actions, api
 from .sse import EventTailer, stream_path
@@ -156,9 +174,70 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _same_origin_as_console(self) -> tuple[bool, str]:
+        """X6: refuse a cross-site POST. The console binds to loopback, but a malicious web page
+        the operator visits (or a DNS-rebinding domain that resolves to 127.0.0.1) could POST to
+        127.0.0.1:<port> and drive the console's actions from the operator's browser. Accept a POST
+        only when it is same-origin to the loopback console:
+          * the Host header MUST be present and name the loopback console with the exact port (an
+            HTTP/1.1 request always carries Host; a missing/rebinding/wrong-port Host is refused);
+          * an Origin, when present, MUST likewise be the loopback console with the exact port (a
+            modern browser sends Origin on EVERY cross-origin POST, so this catches the CSRF page);
+          * a cross-site Sec-Fetch-Site is refused.
+        Read-only GET/SSE are unaffected. Port comparison is exact — a portless or wrong-port
+        loopback Origin (e.g. another local service on :80) is NOT treated as same-origin."""
+        port = self.server.server_address[1]
+        # POSITIVE proof of same-origin, not merely absence-of-signal: require a CUSTOM header the
+        # SPA's fetch sets and a cross-site HTML <form> physically CANNOT (a custom header forces a
+        # CORS preflight the console never answers). This is the load-bearing check — it closes the
+        # gap where a cross-site form POST omits BOTH Origin and Sec-Fetch-Site (Safari <16.4,
+        # in-app WebViews), which a deny-by-signal guard would let through.
+        if not self.headers.get(_CSRF_HEADER):
+            return False, f"missing {_CSRF_HEADER} (cross-site form / non-SPA client)"
+        sfs = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        if sfs and sfs not in ("same-origin", "none"):        # cross-site / same-site → refuse
+            return False, f"Sec-Fetch-Site={sfs}"
+
+        def _port_ok(parsed, scheme_default: int) -> bool:
+            # a missing port means the scheme default (so a legit SPA on a default port — where the
+            # browser omits the port in Host/Origin — is accepted); a malformed port fails closed.
+            try:
+                p = parsed.port
+            except ValueError:
+                return False
+            return (p if p is not None else scheme_default) == port
+
+        def _authority_ok(value: str, scheme_default: int) -> bool:
+            # Parse a host[:port] authority and check loopback + matching port. urlsplit itself
+            # raises ValueError on a malformed IPv6 authority (e.g. "127.0.0.1]"), so the parse is
+            # guarded — a malformed Host/Origin fails CLOSED (a clean 403), never a 500/traceback.
+            try:
+                u = urlsplit("//" + value if "//" not in value else value)
+                return _is_loopback_host(u.hostname or "") and _port_ok(u, scheme_default)
+            except ValueError:
+                return False
+
+        # Host is mandatory (an HTTP/1.1 request always carries it) + strict (loopback + matching
+        # port) — this refuses a DNS-rebinding domain even if it forged the custom header.
+        host_hdr = self.headers.get("Host", "").strip()
+        if not host_hdr:
+            return False, "Host missing"
+        if not _authority_ok(host_hdr, 80):
+            return False, f"Host={host_hdr!r}"                # missing / rebinding / wrong-port / malformed
+        origin = self.headers.get("Origin", "").strip()
+        if origin:
+            scheme_default = 443 if origin.lower().startswith("https:") else 80
+            if not _authority_ok(origin, scheme_default):
+                return False, f"Origin={origin}"
+        return True, ""
+
     def do_POST(self) -> None:  # noqa: N802
         """The three SAFE actions — the only mutations the console makes. Each is
         non-destructive and cannot relax scope or bypass a gate."""
+        ok, why = self._same_origin_as_console()
+        if not ok:
+            self._json({"error": f"cross-site POST refused ({why})"}, status=403)
+            return
         path = urlsplit(self.path).path
         body = self._read_body()
         try:

@@ -226,6 +226,26 @@ def test_get_backend_permissive_unchanged_for_dryrun(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_sovereignty_seal_latches_tier_immutable(monkeypatch):
+    # X6: with CRUCIBLE_SOVEREIGNTY_SEALED the env-derived tier is latched ONCE and a later env
+    # flip cannot relax it mid-process (fail-safe: the seal can only PIN, never loosen).
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_SEALED", "1")
+    assert current().tier is sovereignty.Tier.AIR_GAPPED
+    assert sovereignty.is_sealed()
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")   # attempt to relax mid-run
+    assert current().tier is sovereignty.Tier.AIR_GAPPED           # still sealed to AIR_GAPPED
+
+
+def test_without_seal_env_flip_takes_effect(monkeypatch):
+    # default (unsealed) behaviour: a tier flip is re-read on the next call.
+    monkeypatch.delenv("CRUCIBLE_SOVEREIGNTY_SEALED", raising=False)
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+    assert current().tier is sovereignty.Tier.AIR_GAPPED and not sovereignty.is_sealed()
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")
+    assert current().tier is sovereignty.Tier.PERMISSIVE
+
+
 def test_set_policy_overrides_env(monkeypatch):
     monkeypatch.delenv("CRUCIBLE_SOVEREIGN_MODE", raising=False)
     set_policy(SovereigntyPolicy(strict=True))

@@ -12,9 +12,13 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 
+import json
+
+import pytest
+
 from framework.v2.scanner.checks import OOBCheck
 from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate
-from framework.v2.verify.collaborator import RelayClient, RelayServer
+from framework.v2.verify.collaborator import _POLL_PREFIX, _RELAY_KEY_HEADER, RelayClient, RelayServer
 from framework.v2.verify.confirmation import confirm_finding
 from framework.v2.verify.verifier import OracleVerifier
 
@@ -44,8 +48,41 @@ def test_poll_requires_the_secret() -> None:
         _fetch(f"{callback}/x")
         # wrong secret -> the relay returns 403, the client fails safe to []
         assert client_bad.poll(token) == []
-        # right secret sees the recorded hit
+        # right secret (sent in the X-Relay-Key HEADER now) sees the recorded hit
         assert RelayClient(relay.base_url, "right").poll(token)
+
+
+def test_poll_secret_is_accepted_via_header_and_legacy_query() -> None:
+    # X6: the secret authenticates via the X-Relay-Key HEADER (kept out of access logs); the
+    # legacy ?key= query is still accepted server-side for back-compat.
+    with RelayServer(secret="s3cret") as relay:
+        client = RelayClient(relay.base_url, "s3cret")
+        token, _ = client.register_token()
+        poll_url = f"{relay.base_url}{_POLL_PREFIX}{token}"
+        # header auth (no ?key= in the URL) → 200
+        req = urllib.request.Request(poll_url, headers={_RELAY_KEY_HEADER: "s3cret"})
+        with urllib.request.urlopen(req, timeout=5) as r:      # noqa: S310 (loopback)
+            assert r.status == 200 and json.loads(r.read()) == []
+        # legacy query auth still works (back-compat)
+        with urllib.request.urlopen(f"{poll_url}?key=s3cret", timeout=5) as r:  # noqa: S310
+            assert r.status == 200
+        # neither → 403
+        try:
+            urllib.request.urlopen(poll_url, timeout=5)        # noqa: S310
+            assert False, "expected 403"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+
+
+def test_relay_client_requires_https_for_remote() -> None:
+    # X6: a non-loopback relay must use https — the poll secret + interaction data must not cross
+    # the network in the clear. Loopback http and remote https are both fine.
+    with pytest.raises(ValueError):
+        RelayClient("http://relay.example.com:9000", "s3cret")
+    RelayClient("http://127.0.0.1:9000", "s3cret")               # loopback http OK
+    RelayClient("http://127.0.0.2:9000", "s3cret")               # 127.0.0.0/8 loopback OK
+    RelayClient("http://[::1]:9000", "s3cret")                   # IPv6 loopback OK
+    RelayClient("https://relay.example.com", "s3cret")           # remote https OK
 
 
 def test_poll_failure_is_safe_empty() -> None:

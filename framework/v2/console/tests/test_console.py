@@ -139,6 +139,60 @@ def test_server_blocks_path_traversal_and_unknown_api() -> None:
         assert ei.value.code == 404
 
 
+def _post(url: str, *, headers=None, data=b"{}", csrf=True):
+    req = urllib.request.Request(url, method="POST", data=data)
+    if csrf:                                    # the custom header the SPA's fetch sets
+        req.add_header("X-Requested-With", "fetch")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def test_console_refuses_post_without_custom_header() -> None:
+    # X6 (review survivor): a cross-site <form> POST that omits Origin + Sec-Fetch-Site (Safari
+    # <16.4, in-app WebViews) but carries a legit loopback Host must STILL be refused — the guard
+    # requires POSITIVE proof (a custom header a cross-site form cannot set), not mere absence.
+    with _running_server() as base:
+        st, body = _post(base + "/api/killswitch/victim/trip", csrf=False)
+        assert st == 403 and b"X-Requested-With" in body
+
+
+def test_console_refuses_cross_site_post() -> None:
+    # X6: even WITH the custom header (a rebinding page could forge it), a cross-site Sec-Fetch,
+    # a foreign Origin, or a rebinding Host is refused.
+    with _running_server() as base:
+        st, body = _post(base + "/api/launch/scan", headers={"Sec-Fetch-Site": "cross-site"})
+        assert st == 403 and b"cross-site" in body                 # cross-site fetch metadata
+        st, _ = _post(base + "/api/launch/scan", headers={"Origin": "http://evil.example"})
+        assert st == 403                                           # foreign Origin
+        st, _ = _post(base + "/api/launch/scan", headers={"Host": "evil.example"})
+        assert st == 403                                           # DNS-rebinding Host
+
+
+def test_console_refuses_malformed_host_cleanly() -> None:
+    # X6 (2nd-pass review): a malformed Host must fail CLOSED as a clean 403, not raise an
+    # unhandled ValueError — both a bad port (caught in _port_ok) and a malformed IPv6 authority
+    # (which raises in urlsplit itself, before the port check) are guarded.
+    with _running_server() as base:
+        for bad in ("127.0.0.1:notaport", "127.0.0.1]", "[::1", "127.0.0.1:99999"):
+            st, _ = _post(base + "/api/launch/scan", headers={"Host": bad})
+            assert st == 403, f"malformed Host {bad!r} should be a clean 403, got {st}"
+
+
+def test_console_allows_same_origin_post() -> None:
+    # a same-origin POST (custom header + same-origin Sec-Fetch) passes the CSRF guard (it then
+    # hits the action, which may itself refuse a bad target — but it is NOT blocked as cross-site).
+    with _running_server() as base:
+        st, _ = _post(base + "/api/launch/scan",
+                      headers={"Sec-Fetch-Site": "same-origin"},
+                      data=b'{"target":"http://127.0.0.1:9/"}')
+        assert st != 403
+
+
 def test_only_safe_actions_no_clear_or_destructive_route() -> None:
     # The console exposes exactly three SAFE POST actions (launch / reverify / trip).
     # It must NOT expose a kill-switch CLEAR, a scope/authority edit, or any other
@@ -146,10 +200,8 @@ def test_only_safe_actions_no_clear_or_destructive_route() -> None:
     with _running_server() as base:
         for bad in ("/api/killswitch/x/clear", "/api/scope/edit", "/api/authority/x/grant",
                     "/api/destroy", "/api/launch/engage-destructive"):
-            req = urllib.request.Request(base + bad, method="POST", data=b"{}")
-            with pytest.raises(urllib.error.HTTPError) as ei:
-                urllib.request.urlopen(req, timeout=5)  # noqa: S310
-            assert ei.value.code in (404, 501), f"{bad} should not be a route"
+            st, _ = _post(base + bad)      # passes the CSRF guard, then must not route
+            assert st in (404, 501), f"{bad} should not be a route"
 
 
 def test_launch_rejects_non_loopback_target() -> None:
