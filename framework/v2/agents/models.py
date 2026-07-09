@@ -35,11 +35,17 @@ EventKind = Literal[
     "finding",
     "critique",
     "decision",
+    # --- Nervous-System spine kinds (additive; N0). The original 8 are untouched. ---
+    "reward",         # a learning/credit signal (RL reward bus)
+    "critic_verdict", # one critic's ADVISORY verdict (multi-critic panel)
+    "reflection",     # an in-loop metacognitive reflection (re-rank/defer only)
+    "refusal",        # a recorded refusal (a gate fired) — refusals are evidence
 ]
 
 ALL_EVENT_KINDS: tuple[EventKind, ...] = (
     "observation", "hypothesis", "plan", "action",
     "result", "finding", "critique", "decision",
+    "reward", "critic_verdict", "reflection", "refusal",
 )
 
 
@@ -202,6 +208,58 @@ class DecisionPayload(BaseModel):
     rationale: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Nervous-System spine payloads (N0). These carry the learning / metacognition /
+# refusal signals onto the SAME append-only event stream every subsystem shares.
+# ---------------------------------------------------------------------------
+
+
+class RewardPayload(BaseModel):
+    """A learning reward/credit signal emitted once an outcome is known — the RL feedback
+    on the spine. Reward derives from INDEPENDENT ground truth (never P(exploit|oracle));
+    ``source`` names the learner it credits."""
+
+    source: str = Field(description="Learner/subsystem: 'bandit' / 'ledger' / 'credit' / 'intel-yield'.")
+    arm: str = Field(default="", description="The (context:arm) key the reward credits.")
+    signal: str = Field(default="", description="What produced it: 'oracle_confirmed' / 'refuted' / 'disputed'.")
+    reward: float = Field(ge=0.0, le=1.0, description="Normalised reward in [0,1].")
+    target_event_id: int | None = Field(default=None, description="The finding/decision event credited, if any.")
+    rationale: str = ""
+
+
+class CriticVerdictPayload(BaseModel):
+    """One critic's ADVISORY verdict on a target event (multi-critic panel). Deliberately has
+    NO 'confirm' value — critics advise/object/abstain; only a fired deterministic oracle
+    confirms. A verdict can never promote a finding to fact."""
+
+    critic: str = Field(description="Critic role: 'soundness' / 'scope-safety' / 'calibration' / 'deception' / 'novelty'.")
+    target_event_id: int = Field(description="The event under review (usually a finding).")
+    verdict: Literal["endorse", "object", "abstain"] = Field(description="Advisory only — never 'confirm'.")
+    severity: Literal["info", "minor", "major", "critical"] = "info"
+    rationale: str = ""
+
+
+class ReflectionPayload(BaseModel):
+    """An in-loop metacognitive reflection over the reasoning trace: what it reveals (dead
+    threads, refuted hypotheses, drift, wasted budget) and how to RE-ORIENT next. Re-orient =
+    re-rank/defer only; it can never gate or skip an attack surface (coverage doctrine)."""
+
+    trigger: str = Field(description="'phase-boundary' / 'stall' / 'surprise' / 'periodic'.")
+    observations: list[str] = Field(default_factory=list, description="What the trace revealed.")
+    reorientation: str = Field(default="", description="How to re-rank/defer next — never gates a surface.")
+    rationale: str = ""
+
+
+class RefusalPayload(BaseModel):
+    """A refusal recorded as evidence: which gate fired, what was declined, and whether it
+    halted the run. Refusals are NEVER silently dropped — every one lands on the spine."""
+
+    gate: str = Field(description="'kill-switch' / 'scope' / 'sovereignty' / 'ethics' / 'entitlement' / 'epistemic'.")
+    action_refused: str = Field(description="The target/action/conclusion that was declined.")
+    reason: str = ""
+    fatal: bool = Field(default=False, description="True if the refusal halted the engagement.")
+
+
 # Map kind -> Pydantic class so the blackboard can validate generically.
 PAYLOAD_BY_KIND: dict[EventKind, type[BaseModel]] = {
     "observation": ObservationPayload,
@@ -212,6 +270,10 @@ PAYLOAD_BY_KIND: dict[EventKind, type[BaseModel]] = {
     "finding":     FindingPayload,
     "critique":    CritiquePayload,
     "decision":    DecisionPayload,
+    "reward":         RewardPayload,
+    "critic_verdict": CriticVerdictPayload,
+    "reflection":     ReflectionPayload,
+    "refusal":        RefusalPayload,
 }
 
 

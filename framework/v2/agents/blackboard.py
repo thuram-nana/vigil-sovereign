@@ -280,6 +280,24 @@ class Blackboard:
         rows = self._conn.execute(" ".join(sql), tuple(params)).fetchall()
         return [BlackboardEventRow.from_sqlite(r) for r in rows]
 
+    def replay(
+        self,
+        *,
+        engagement: str | int,
+        since_id: int = 0,
+        kinds: Iterable[EventKind] | None = None,
+        include_superseded: bool = False,
+        limit: int = 100_000,
+    ) -> list[BlackboardEventRow]:
+        """Replay the event spine in strict id (logical-clock) order from ``since_id`` — the
+        unified subscribe/replay API every subsystem reads the stream through. A consumer polls
+        with the last id it saw as ``since_id`` to receive only new events (a durable cursor);
+        ``since_id=0`` replays the whole stream. Superseded rows are excluded by default so a
+        replay reflects the current view — pass ``include_superseded=True`` for the full,
+        never-edited history (the audit view). Read-only; the log stays append-only."""
+        return self.read(engagement=engagement, since_id=since_id, kinds=kinds,
+                         include_superseded=include_superseded, limit=limit)
+
     def count(
         self, *, engagement: str | int, kind: EventKind | None = None,
     ) -> int:

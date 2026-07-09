@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS events (
     engagement_id   INTEGER NOT NULL REFERENCES bb_engagements(id),
     kind            TEXT NOT NULL CHECK(kind IN (
         'observation','hypothesis','plan','action',
-        'result','finding','critique','decision'
+        'result','finding','critique','decision',
+        -- Nervous-System spine kinds (additive; kept in lockstep with agents/models.py).
+        'reward','critic_verdict','reflection','refusal'
     )),
     agent_name      TEXT NOT NULL,
     posted_at       TEXT NOT NULL,

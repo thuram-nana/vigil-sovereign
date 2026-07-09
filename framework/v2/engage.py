@@ -192,6 +192,46 @@ def _assess_grounding(report: ScanReport, world: "WorldModel") -> list:
     return verdicts
 
 
+def _make_spine_sink(spine: object, slug: str):
+    """Build a best-effort SpineSink over a caller-supplied Blackboard, or None. Never raises
+    — spine emission is opt-in and must never perturb the engagement."""
+    if spine is None:
+        return None
+    try:
+        from .agents.spine_sink import SpineSink
+        return SpineSink(spine, slug)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _spine_finding_payload(f, admitted) -> dict:
+    """A FindingPayload-shaped mirror of an AuditFinding, tagged with its LIVE grounding
+    verdict (P3). Oracle authority preserved: ``critique_status='confirmed'`` /
+    ``verified_by_oracle=True`` ONLY when the finding re-grounds as a fact under live
+    re-execution. When the grounding verdict is unavailable (``admitted is None`` — the pass
+    was skipped or could not assess) or the finding was demoted, it mirrors conservatively as
+    ``llm_advisory`` / not-verified — never asserting confirmation from the mere PRESENCE of a
+    certificate (that would launder an un-re-verified finding onto the immutable stream). The
+    ``oracle_context`` is retained so downstream can re-verify. This matches the honest
+    ``scanner.report._grounding_label`` (``admitted is None → not fact``). Severity is a coarse
+    mirror — the authoritative severity is rendered by scanner.report."""
+    is_fact = bool(getattr(admitted, "is_fact", False))
+    return {
+        "finding_slug": (f"{f.bug_class}:{f.insertion_point}"[:120]) or f.bug_class,
+        "title": f"{f.bug_class} confirmed at {f.param}",
+        "severity": "High",
+        "bug_class": f.bug_class,
+        "surface": f.insertion_point,
+        "summary": f.rationale or f"{f.bug_class} at {f.param}",
+        "critique_status": "confirmed" if is_fact else "llm_advisory",
+        "oracle_context": f.oracle_context,
+        "verified_by_oracle": is_fact,
+        "confidence": f.confidence,
+        "oracle_kind": f.confirmed_by,
+        "oracle_rationale": f.rationale,
+    }
+
+
 def run_engagement(
     slug: str,
     seed_url: str,
@@ -216,6 +256,7 @@ def run_engagement(
     grammar_fuzz: int = 0,
     priors: object = None,
     prompt_callback: PromptCallback | None = None,
+    spine: object = None,
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -227,7 +268,16 @@ def run_engagement(
     world-model and the technique operators are run to a fixpoint to extract
     attacker→crown-jewel attack paths. Chaining sends NO traffic and is best-effort:
     if it fails, the engagement still returns its report with empty paths."""
-    preflight(slug, seed_url)
+    # Opt-in event-spine sink (default None → byte-identical behaviour). When present, every
+    # gate refusal is recorded as evidence on the spine before it propagates.
+    sink = _make_spine_sink(spine, slug)
+
+    try:
+        preflight(slug, seed_url)
+    except EngagementRefused as e:
+        if sink is not None:
+            sink.refusal("preflight", seed_url, reason=str(e), fatal=True)
+        raise
 
     # Any OOB callback base the target will contact — the advertise host or the
     # collaborator relay — must itself be on the charter allowlist.
@@ -237,6 +287,9 @@ def run_engagement(
         posture = parse_posture(slug)
         d = validate_action(slug=slug, method="GET", target_url=relay, posture=posture)
         if not d.allowed:
+            if sink is not None:
+                sink.refusal("scope", f"OOB {label} host {relay}",
+                             reason=f"{d.refusal_kind}: {d.reason}", fatal=True)
             raise EngagementRefused(
                 f"OOB {label} host not on charter allowlist ({d.refusal_kind}): {d.reason}")
 
@@ -283,6 +336,7 @@ def run_engagement(
             waf_adaptive=waf_adaptive,
             grammar_fuzz=grammar_fuzz,
             priors=priors,
+            progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
         ).run(seed_url)
     finally:
         ex.close()
@@ -331,6 +385,20 @@ def run_engagement(
         result.grounding = _assess_grounding(report, world)
     except Exception:
         pass
+    # Mirror the authoritative findings (with their live grounding verdict) + a summary onto
+    # the event spine, so the whole engagement is replayable from one immutable stream.
+    # Best-effort: a spine failure never sinks the engagement.
+    if sink is not None:
+        try:
+            for i, f in enumerate(report.active_findings):
+                g = result.grounding[i] if i < len(result.grounding) else None
+                sink.finding_event(_spine_finding_payload(f, g))
+            sink.decision(
+                "engagement summary",
+                f"{len(report.active_findings)} finding(s), {len(result.attack_paths)} attack path(s)",
+                rationale=f"target={report.target}")
+        except Exception:
+            pass
     return result
 
 
@@ -380,11 +448,24 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--recon-fixtures", default=None, metavar="DIR",
                         help="Offline collector fixtures dir for --recon (DNS/CT/RDAP/ASN). "
                              "Without it, --recon still registers the scanned target + stack.")
+    parser.add_argument("--spine", action="store_true",
+                        help="Mirror the whole engagement onto the immutable blackboard event "
+                             "spine (phases, findings with their live grounding verdict, "
+                             "refusals). Opt-in, best-effort; off by default (zero impact).")
     args = parser.parse_args(argv)
+
+    spine = None
+    if args.spine:
+        try:
+            from .agents.blackboard import open_blackboard
+            spine = open_blackboard()
+        except Exception:
+            spine = None   # spine is opt-in telemetry; never block the engagement on it
 
     try:
         result = run_engagement(
             args.slug, args.seed_url,
+            spine=spine,
             request_budget=args.request_budget,
             max_pages=args.max_pages,
             max_audit_requests=args.max_audit_requests,
