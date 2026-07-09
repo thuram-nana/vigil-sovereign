@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,14 @@ from .confirmation import confirm_finding
 from .verifier import OracleVerifier
 
 _CLAIM_EPS = 1e-6
+
+# Bound on the memoization cache below. Re-verification is one of the hottest paths in
+# the system: the same retained oracle_context is re-fired at N different grounding-
+# assessment sites (engage's live grounding, the report export, the reporter agent, the
+# critic panel, and evidence certification), all over the SAME evidence. Because the
+# oracle functions are pure and deterministic (the whole premise of re-verification),
+# re-running them for byte-identical inputs is wasted work whose result cannot differ.
+_REVERIFY_CACHE_MAX = 4096
 
 
 class ReverifyResult(BaseModel):
@@ -53,6 +62,36 @@ class ReverifyResult(BaseModel):
         return self.reproduced and self.matches_claim is not False
 
 
+def _cache_key(oracle_context: dict) -> str | None:
+    """A stable, hashable key for one retained oracle_context: its canonical JSON
+    (sorted keys, compact) — the same discipline evidence integrity uses. Returns None
+    when the context is not JSON-serialisable, so the caller falls back to a live
+    re-fire rather than caching an un-keyable input."""
+    try:
+        return json.dumps(oracle_context, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+
+
+@lru_cache(maxsize=_REVERIFY_CACHE_MAX)
+def _reverify_cached(
+    oracle_json: str,
+    bug_class: str,
+    claimed_confirmed_by: str | None,
+    claimed_confidence: float | None,
+) -> ReverifyResult:
+    """Memoized re-execution keyed on the canonical evidence bytes + the claim under the
+    DEFAULT deterministic verifier. Determinism-safe: a pure function of its key, so the
+    memo can only ever elide a recompute that would have produced the identical result;
+    it never changes an output (replay / `make gate` stay byte-identical). The result is
+    labelled ``finding_ref="finding"``; the public wrapper stamps the caller's ref."""
+    return _reverify_context_impl(
+        json.loads(oracle_json), bug_class=bug_class,
+        claimed_confirmed_by=claimed_confirmed_by,
+        claimed_confidence=claimed_confidence, ref="finding", verifier=None)
+
+
 def reverify_context(
     oracle_context: dict,
     *,
@@ -62,7 +101,35 @@ def reverify_context(
     ref: str = "finding",
     verifier: OracleVerifier | None = None,
 ) -> ReverifyResult:
-    """Re-run the deterministic oracle over a retained FindingContext dict."""
+    """Re-run the deterministic oracle over a retained FindingContext dict.
+
+    Memoized on the DEFAULT verifier path (``verifier is None``): identical
+    (oracle_context, bug_class, claimed_confirmed_by, claimed_confidence) re-fires the
+    oracle at most once. A caller-supplied ``verifier`` bypasses the memo (it may carry a
+    different threshold / behaviour, so its result is not cache-shareable). The returned
+    object is always a fresh copy, so a caller may mutate it without corrupting the memo."""
+    if verifier is None:
+        key = _cache_key(oracle_context)
+        if key is not None:
+            cached = _reverify_cached(key, bug_class, claimed_confirmed_by, claimed_confidence)
+            # fresh copy carrying the caller's ref — never hand back the shared cached object.
+            return cached.model_copy(update={"finding_ref": ref})
+    return _reverify_context_impl(
+        oracle_context, bug_class=bug_class,
+        claimed_confirmed_by=claimed_confirmed_by,
+        claimed_confidence=claimed_confidence, ref=ref, verifier=verifier)
+
+
+def _reverify_context_impl(
+    oracle_context: dict,
+    *,
+    bug_class: str,
+    claimed_confirmed_by: str | None = None,
+    claimed_confidence: float | None = None,
+    ref: str = "finding",
+    verifier: OracleVerifier | None = None,
+) -> ReverifyResult:
+    """The uncached re-execution. See :func:`reverify_context` for the public contract."""
     verifier = verifier or OracleVerifier()
     has_claim = claimed_confirmed_by is not None or claimed_confidence is not None
 

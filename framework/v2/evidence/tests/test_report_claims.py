@@ -143,6 +143,33 @@ def test_tampering_a_bound_sentence_breaks_authenticity() -> None:
     assert not v.authentic and not v.ok
 
 
+def test_verify_certificate_refires_the_oracle_once(monkeypatch) -> None:
+    # Speed X1 — verify_certificate re-fires the retained oracle TWICE over byte-identical
+    # evidence: once for the reproduction check (layer 4) and again inside the 5th-layer
+    # claims-grounded re-admission (a fact sentence whose declared class == the cert's class).
+    # The pure-function reverify memo collapses those into ONE oracle run without changing a
+    # verdict. Build + sign first, then install the counter, so only verify is measured.
+    import framework.v2.verify.reverify as reverify
+
+    tr, signers = _trust_root()
+    f = _finding()
+    signed = sign_certificate(
+        build_certificate(f, report_claims=claims_for_finding(f), seq=0), signers[:2])
+
+    reverify._reverify_cached.cache_clear()
+    calls = {"n": 0}
+    real = reverify.confirm_finding
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(reverify, "confirm_finding", _counting)
+    v = verify_certificate(signed, oracle_context=f["oracle_context"], trust_root=tr)
+    assert v.ok and v.claims_grounded
+    assert calls["n"] == 1        # reproduction + claims-grounding share ONE memoized re-fire
+
+
 def test_fact_claim_fails_closed_when_context_cannot_reground() -> None:
     # a fact claim whose backing evidence no longer re-fires (non-divergent context)
     # fails closed — reproduced AND claims_grounded both False.

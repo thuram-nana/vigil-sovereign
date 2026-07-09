@@ -42,6 +42,7 @@ through the engine's gated ``send``.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -438,21 +439,14 @@ def split_checks(entries: Iterable[LibraryEntry]) -> tuple[list[Check], list]:
 # ---------------------------------------------------------------------------
 
 
-def load_library(directory: str | Path = LIBRARY_DIR) -> list[LibraryEntry]:
-    """Load every ``*.json`` entry under ``directory``, validate each into a
-    :class:`LibraryEntry`, and return them sorted by id.
-
-    Deterministic: files are read in sorted order and the result is sorted by id,
-    so two runs over the same directory yield the same list. A file that is not
-    valid JSON, or does not validate against the schema, raises a
-    :class:`LibraryError` naming the file — a broken entry fails loudly, it does
-    not silently drop. Duplicate ids across files are likewise an error."""
-    path = Path(directory)
-    if not path.is_dir():
-        raise LibraryError(f"library directory not found: {path}")
+def _read_library_dir(directory: Path) -> tuple[LibraryEntry, ...]:
+    """Read + validate every ``*.json`` under ``directory`` into an immutable tuple,
+    sorted by id, rejecting broken files + duplicate ids (see :func:`load_library`)."""
+    if not directory.is_dir():
+        raise LibraryError(f"library directory not found: {directory}")
 
     entries: list[LibraryEntry] = []
-    for f in sorted(path.glob("*.json")):
+    for f in sorted(directory.glob("*.json")):
         try:
             raw = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
@@ -467,7 +461,36 @@ def load_library(directory: str | Path = LIBRARY_DIR) -> list[LibraryEntry]:
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     if dupes:
         raise LibraryError(f"duplicate entry ids across the library: {dupes}")
-    return entries
+    return tuple(entries)
+
+
+@lru_cache(maxsize=1)
+def _load_shipped_library() -> tuple[LibraryEntry, ...]:
+    """The shipped library (``LIBRARY_DIR``) is immutable at runtime, yet re-read at every
+    report render, corpus row, and campaign run (~170 JSON files each time). Parse it ONCE.
+    Only the default dir is memoized — an arbitrary directory (test fixtures, custom packs)
+    is always read fresh, so no caller can ever observe a stale directory. Determinism is
+    unchanged: same files, same sorted result — caching drops only the redundant file IO."""
+    return _read_library_dir(Path(LIBRARY_DIR))
+
+
+def load_library(directory: str | Path = LIBRARY_DIR) -> list[LibraryEntry]:
+    """Load every ``*.json`` entry under ``directory``, validate each into a
+    :class:`LibraryEntry`, and return them sorted by id.
+
+    Deterministic: files are read in sorted order and the result is sorted by id,
+    so two runs over the same directory yield the same list. A file that is not
+    valid JSON, or does not validate against the schema, raises a
+    :class:`LibraryError` naming the file — a broken entry fails loudly, it does
+    not silently drop. Duplicate ids across files are likewise an error.
+
+    The shipped default library is memoized (parsed once per process); any other directory
+    is read fresh. A FRESH list is returned every call, so callers keep sort/append freedom
+    while the ~170 shipped files are parsed only once."""
+    path = Path(directory)
+    if path == Path(LIBRARY_DIR):
+        return list(_load_shipped_library())
+    return list(_read_library_dir(path))
 
 
 def select_entries(entries: Iterable[LibraryEntry], tokens: set[str]) -> list[LibraryEntry]:
