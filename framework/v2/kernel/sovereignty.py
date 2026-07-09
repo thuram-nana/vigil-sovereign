@@ -345,13 +345,39 @@ def backend_egress_hosts(backend_name: str) -> tuple[str, ...]:
 
 _active_policy: SovereigntyPolicy | None = None
 
+# X6 — the sovereignty SEAL. By default `current()` re-reads the env each call (dev convenience:
+# a tier flip takes effect immediately). On a long-running production process that is a hazard —
+# a later env mutation could RELAX the tier mid-engagement. Setting CRUCIBLE_SOVEREIGNTY_SEALED
+# latches the env-derived tier ONCE at first use into an immutable value for the process lifetime;
+# later env changes are ignored. Opt-in, fail-safe (it can only PIN the tier, never relax it).
+_SEAL_ENV = "CRUCIBLE_SOVEREIGNTY_SEALED"
+_sealed_policy: SovereigntyPolicy | None = None
+
+
+def _seal_requested() -> bool:
+    return os.environ.get(_SEAL_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_sealed() -> bool:
+    """True once the sovereignty tier has been latched immutable for the process (X6). Reflects
+    the latch state: True after `current()` has latched under CRUCIBLE_SOVEREIGNTY_SEALED."""
+    return _sealed_policy is not None
+
 
 def current() -> SovereigntyPolicy:
-    """Return the active policy. If no explicit policy was set, derive
-    one from the environment on each call (so env-var flips take
-    effect immediately in long-running shells)."""
+    """Return the active policy. An explicitly injected policy always wins. Otherwise, when the
+    seal (`CRUCIBLE_SOVEREIGNTY_SEALED`) is requested, the env-derived tier is latched ONCE and
+    returned immutably for the process lifetime (a later env flip cannot relax it); without the
+    seal it is derived from the environment on each call (so a flip takes effect immediately in a
+    long-running shell)."""
     if _active_policy is not None:
         return _active_policy
+    global _sealed_policy
+    if _sealed_policy is not None:
+        return _sealed_policy
+    if _seal_requested():
+        _sealed_policy = SovereigntyPolicy.from_env()      # latch once, immutable hereafter
+        return _sealed_policy
     return SovereigntyPolicy.from_env()
 
 
@@ -359,5 +385,6 @@ def set_policy(policy: SovereigntyPolicy | None) -> None:
     """Inject a policy (use `None` to revert to env-derived). Tests
     use this; production deployments should set
     `CRUCIBLE_SOVEREIGNTY_TIER` in the systemd unit or container env."""
-    global _active_policy
+    global _active_policy, _sealed_policy
     _active_policy = policy
+    _sealed_policy = None       # clear the X6 seal latch too, so a revert-to-env is clean

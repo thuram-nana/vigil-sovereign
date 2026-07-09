@@ -132,6 +132,31 @@ def _status(argv: list[str]) -> int:
         mark = "✓" if available else "·"
         print(f"    {mark} {name:<10s} {note}")
     print()
+
+    # X6 — surface the runtime governance state PROMINENTLY (not just a log line), so an operator
+    # sees at a glance whether the sovereignty tier is sealed and whether capability entitlement
+    # is actually enforced or the deployment is running UNGOVERNED.
+    print("  Governance        :")
+    try:
+        from .kernel import sovereignty
+        pol = sovereignty.current()
+        sealed = " [SEALED]" if sovereignty.is_sealed() else " (unsealed — env-mutable)"
+        print(f"    sovereignty tier : {pol.tier.name}{sealed}")
+    except Exception as e:  # noqa: BLE001 — status must never crash on one subsystem
+        print(f"    sovereignty tier : ERROR — {type(e).__name__}: {e}")
+    try:
+        from .entitlement.policy import EntitlementPolicy
+        ent = EntitlementPolicy.from_provisioned()
+        if ent.enforced:
+            tier = ent.granted_tier.name if ent.granted_tier else "—"
+            print(f"    entitlement      : ENFORCED (granted tier {tier})")
+        else:
+            print(f"    entitlement      : ⚠ UNGOVERNED — {ent.explain()}")
+            print("                       exploitation runs unentitled; provision a trust root and set")
+            print("                       CRUCIBLE_ENTITLEMENT_ENFORCED to govern it.")
+    except Exception as e:  # noqa: BLE001
+        print(f"    entitlement      : ERROR — {type(e).__name__}: {e}")
+    print()
     return 0
 
 

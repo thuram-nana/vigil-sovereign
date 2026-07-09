@@ -50,6 +50,24 @@ import urllib.request
 from .oob import OOBHit
 
 _POLL_PREFIX = "/_poll/"
+# X6 — the poll secret travels in this request HEADER, not the query string, so it never lands
+# in the relay's HTTP access logs (a `?key=<secret>` does). The legacy query form is still
+# accepted server-side for back-compat.
+_RELAY_KEY_HEADER = "X-Relay-Key"
+
+
+def _is_loopback(host: str) -> bool:
+    """True for a genuine loopback host: the name ``localhost`` or ANY loopback IP — the whole
+    127.0.0.0/8 range and every IPv6 loopback form — so a legitimate non-canonical loopback relay
+    (e.g. 127.0.0.2 or an expanded ::1) is not wrongly forced onto https."""
+    h = (host or "").strip().strip("[]").lower()
+    if h == "localhost":
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +107,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
         server: _RelayHTTPServer = self.server  # type: ignore[assignment]
         split = urlsplit(self.path)
 
-        # Authenticated poll endpoint: /_poll/<token>?key=<secret>
+        # Authenticated poll endpoint: /_poll/<token>. X6: the secret is read from the
+        # X-Relay-Key header (not logged); the legacy ?key= query is still accepted for
+        # back-compat with an older client.
         if split.path.startswith(_POLL_PREFIX):
             token = split.path[len(_POLL_PREFIX):].strip("/").split("/")[0]
-            key = parse_qs(split.query).get("key", [""])[0]
+            key = self.headers.get(_RELAY_KEY_HEADER, "") or parse_qs(split.query).get("key", [""])[0]
             if not server._secret_ok(key):
                 self._reply(403, b'{"error":"forbidden"}', "application/json")
                 return
@@ -209,6 +229,14 @@ class RelayClient:
 
     def __init__(self, base_url: str, secret: str, *, timeout: float = 5.0) -> None:
         self._base = base_url.rstrip("/")
+        # X6: a REMOTE relay's secret + polled interaction data must travel over TLS. Refuse a
+        # non-loopback http:// relay — the poll secret and recorded hits would otherwise cross
+        # the network in the clear. A loopback relay (the local test/tunnel model) may use http.
+        parts = urlsplit(self._base)
+        if not _is_loopback(parts.hostname or "") and parts.scheme != "https":
+            raise ValueError(
+                f"remote OOB relay {self._base!r} must use https:// — refusing to send the poll "
+                f"secret and interaction data in plaintext to a non-loopback host")
         self._secret = secret
         self._timeout = timeout
 
@@ -241,9 +269,12 @@ class RelayClient:
     def poll(self, token: str) -> list[OOBHit]:
         """Fetch the interactions the relay recorded for ``token`` (possibly
         empty). Authenticated with the shared secret; fail-safe to ``[]``."""
-        url = f"{self._base}{_POLL_PREFIX}{token}?key={self._secret}"
+        url = f"{self._base}{_POLL_PREFIX}{token}"   # X6: secret in a header, not the query string
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "CRUCIBLE-collaborator/1.0"})
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "CRUCIBLE-collaborator/1.0",
+                _RELAY_KEY_HEADER: self._secret,
+            })
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
                 data = json.loads(resp.read().decode("utf-8", "replace"))
         except (urllib.error.URLError, OSError, ValueError):

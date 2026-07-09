@@ -32,11 +32,17 @@ def main(argv: list[str]) -> int:
     if args.cmd == "serve":
         relay = RelayServer(host=args.host, port=args.port, secret=args.secret)
         relay.start()
+        # X6: this stdlib relay serves plain HTTP. For a REMOTE bind, front it with a TLS reverse
+        # proxy and give the scanner the https:// URL — the scanner REFUSES a non-loopback http://
+        # relay (the poll secret + hits must not cross the network in the clear). The poll secret
+        # goes in the X-Relay-Key HEADER, never a ?key= query (which lands in access logs).
+        _scheme = "http" if args.host in ("127.0.0.1", "localhost", "::1") else "https (front with TLS)"
         print("CRUCIBLE OOB relay")
-        print(f"  listening : http://{args.host}:{relay.port}")
+        print(f"  bound     : http://{args.host}:{relay.port}  (serve URL to scanner as: {_scheme})")
         print(f"  secret    : {relay.secret}")
-        print(f"  callbacks : http://<this-host>:{relay.port}/<token>")
-        print(f"  poll      : GET http://<this-host>:{relay.port}/_poll/<token>?key=<secret>")
+        print(f"  callbacks : {_scheme}://<this-host>:{relay.port}/<token>")
+        print(f"  poll      : GET {_scheme}://<this-host>:{relay.port}/_poll/<token>")
+        print(f"              header  X-Relay-Key: <secret>")
         print("  (put this host on the engagement charter allowlist; Ctrl-C to stop)")
         relay.serve_forever()
         return 0

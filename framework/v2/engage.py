@@ -25,7 +25,9 @@ Fail-closed by construction:
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -410,6 +412,26 @@ def run_engagement(
     return result
 
 
+def _resolve_oob_relay_secret(args: argparse.Namespace) -> str | None:
+    """Resolve the collaborator-relay poll secret WITHOUT leaking it on argv (X6). Preference:
+    a file (--oob-relay-secret-file), then the CRUCIBLE_OOB_RELAY_SECRET env var, then the
+    deprecated --oob-relay-secret argv flag (warned — it is visible in `ps` / shell history)."""
+    path = getattr(args, "oob_relay_secret_file", None)
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip() or None
+        except OSError as e:
+            print(f"warning: could not read --oob-relay-secret-file {path}: {e}")
+    env = os.environ.get("CRUCIBLE_OOB_RELAY_SECRET")
+    if env and env.strip():
+        return env.strip()
+    if getattr(args, "oob_relay_secret", None):
+        print("warning: --oob-relay-secret is visible in `ps` / shell history; prefer "
+              "CRUCIBLE_OOB_RELAY_SECRET or --oob-relay-secret-file")
+        return args.oob_relay_secret
+    return None
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 engage",
@@ -436,7 +458,12 @@ def main(argv: list[str]) -> int:
                         help="Operator-hosted OOB COLLABORATOR relay base URL to poll "
                              "(run `collaborator serve`; unlocks blind confirmation on remote targets).")
     parser.add_argument("--oob-relay-secret", default=None,
-                        help="Shared secret for the collaborator relay's poll endpoint.")
+                        help="Shared secret for the collaborator relay's poll endpoint. INSECURE "
+                             "(visible in `ps`/shell history) — prefer CRUCIBLE_OOB_RELAY_SECRET "
+                             "or --oob-relay-secret-file.")
+    parser.add_argument("--oob-relay-secret-file", default=None,
+                        help="Read the collaborator relay poll secret from this file (kept off "
+                             "argv). Takes precedence over the env var and --oob-relay-secret.")
     parser.add_argument("--no-chaining", action="store_true",
                         help="Skip the forward reasoning pass (do not derive attack paths "
                              "from the confirmed findings). Chaining sends no traffic.")
@@ -483,7 +510,7 @@ def main(argv: list[str]) -> int:
             enable_spa_crawl=args.spa,
             oob_advertise_base_url=args.oob_relay,
             oob_relay_url=args.oob_relay_url,
-            oob_relay_secret=args.oob_relay_secret,
+            oob_relay_secret=_resolve_oob_relay_secret(args),
             enable_chaining=not args.no_chaining,
             enable_recon=args.recon,
             recon_fixtures=args.recon_fixtures,
