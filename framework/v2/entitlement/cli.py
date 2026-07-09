@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from ..common import paths
 from .models import Capability
 from .policy import EntitlementPolicy, reset_policy
 from .registry import required_tier
@@ -81,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    paths.tighten_umask()   # X2: owner-only files even when this CLI is run standalone
     parser = build_parser()
     args = parser.parse_args(argv)
     fn = args.fn  # type: ignore[attr-defined]

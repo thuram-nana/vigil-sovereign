@@ -65,6 +65,7 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..common import paths
 from ..common.errors import CrucibleError
 
 SCHEMA_VERSION = 1
@@ -389,8 +390,7 @@ class ContextualBandit:
     def save(self, path: Path | str, *, indent: int | None = 2) -> None:
         """Write the bandit to ``path`` (parent dirs created)."""
         p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(self.to_json(indent=indent), encoding="utf-8")
+        paths.secure_write(p, self.to_json(indent=indent))   # X2: owner-only (learned target signal)
 
     @classmethod
     def load(cls, path: Path | str) -> "ContextualBandit":

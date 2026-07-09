@@ -161,6 +161,13 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
+    # At-rest protection (X2): latch an owner-only umask before anything writes to
+    # disk, so every secret / integrity store / captured-evidence file this process
+    # (and any child it spawns) creates is 0600 and every directory 0700. Only ever
+    # tightens; never loosens a stricter ambient umask.
+    from .common import paths as _paths
+    _paths.tighten_umask()
+
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2",
         description="CRUCIBLE v2 — see framework/v2/README.md",

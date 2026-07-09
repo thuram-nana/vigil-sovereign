@@ -74,6 +74,90 @@ def _reset_cache() -> None:
 
 
 # ---------------------------------------------------------------------------
+# At-rest protection (Speed program X2). CRUCIBLE writes secrets (entitlement
+# trust root, authority + kill-switch), integrity state (the append-only SQLite
+# spine / memory / world-model / ledgers) and captured evidence (raw HTTP with
+# Authorization/Cookie headers + response bodies) to disk. On a shared host those
+# must never be world- or group-readable. These helpers make every framework
+# write owner-only, with no encryption dependency (operator decision): a
+# restrictive umask latch for the broad stroke, plus explicit 0600-file / 0700-dir
+# creation at the sensitive stores for defence-in-depth. All best-effort and
+# offline: a filesystem that cannot represent POSIX modes (a mounted/Windows FS)
+# is never an error — the write still happens.
+# ---------------------------------------------------------------------------
+
+# owner-only: rw------- for files, rwx------ for directories.
+SECURE_FILE_MODE = 0o600
+SECURE_DIR_MODE = 0o700
+# the bits a restrictive umask must mask off (all group + other permissions).
+_UMASK_RESTRICT = 0o077
+
+
+def tighten_umask() -> int:
+    """Latch a restrictive umask so every file this process (and its children)
+    creates is owner-only (0600) and every directory owner-only (0700). Only ADDS
+    restrictions — it unions the requested mask with whatever the environment
+    already set, so a stricter ambient umask is never loosened. Returns the
+    effective umask. Idempotent. Call once at CLI start; harmless to call again."""
+    prev = os.umask(_UMASK_RESTRICT)      # read prev + provisionally restrict
+    effective = prev | _UMASK_RESTRICT    # union: keep any stricter ambient bits
+    os.umask(effective)
+    return effective
+
+
+def secure_dir(path: Path, *, mode: int = SECURE_DIR_MODE) -> Path:
+    """Ensure ``path`` exists as a directory and return it, chmod'ing it owner-only
+    (0700) ONLY when this call CREATED it. A pre-existing directory is left exactly
+    as the operator set it — we never re-permission a directory we did not make.
+    This is load-bearing: a sensitive store's parent can be a SHARED path (the
+    framework source root for the ambient log, an operator-chosen evidence output
+    dir), and silently chmod'ing that to 0700 would lock other users out of a whole
+    tree. New CRUCIBLE state dirs (.memory/.entitlement/.authority/…) are created
+    here and so become 0700; their files are independently 0600. Best-effort — a
+    filesystem that cannot represent the mode is not an error."""
+    existed = path.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    if not existed:                    # only tighten a directory WE just created
+        try:
+            path.chmod(mode)
+        except OSError:
+            pass
+    return path
+
+
+def secure_write(path: Path, data: str | bytes, *, mode: int = SECURE_FILE_MODE) -> Path:
+    """Write ``data`` to ``path`` owner-only (0600 by default) with NO
+    world-readable window: the file is created via ``os.open`` with the restrictive
+    mode BEFORE any bytes are written (not created-then-chmod'd). The parent dir is
+    ensured owner-only. Overwrites (and re-tightens) an existing file. Content is
+    byte-for-byte what a plain write would produce — only the permissions differ, so
+    determinism/replay and report byte-identity are unaffected."""
+    secure_dir(path.parent)
+    is_bytes = isinstance(data, (bytes, bytearray))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "wb" if is_bytes else "w",
+                   encoding=None if is_bytes else "utf-8") as f:
+        f.write(data)
+    try:
+        os.chmod(path, mode)   # tighten a pre-existing file that O_CREAT did not chmod
+    except OSError:
+        pass
+    return path
+
+
+def secure_existing(path: Path, *, mode: int = SECURE_FILE_MODE) -> Path:
+    """Best-effort tighten the permissions of an already-written file (e.g. a
+    SQLite database created by ``sqlite3.connect``, which we cannot open with an
+    explicit mode). No-op if the path does not exist or the FS cannot chmod."""
+    try:
+        if path.exists():
+            path.chmod(mode)
+    except OSError:
+        pass
+    return path
+
+
+# ---------------------------------------------------------------------------
 # v1 paths (read-only from v2's perspective)
 # ---------------------------------------------------------------------------
 

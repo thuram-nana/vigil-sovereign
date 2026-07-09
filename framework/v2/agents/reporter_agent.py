@@ -44,8 +44,7 @@ class ReporterAgent(Agent):
             return 0
         body = self._render(confirmed)
         out = paths.target_dir(self.slug) / "reports" / "technical.md"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(body, encoding="utf-8")
+        paths.secure_write(out, body)   # X2: findings report (PoCs/confirmed vulns) is owner-only
         self._last_emitted_count = len(confirmed)
         self._advance_cursor()
         return 1

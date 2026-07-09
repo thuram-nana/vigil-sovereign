@@ -519,3 +519,21 @@ def test_dry_run_does_not_hit_network(
     assert out.status_code == 0
     assert "dry_run" in out.note
     assert len(httpserver.log) == 0
+
+
+def test_evidence_http_dump_masks_credential_headers() -> None:
+    # Speed X2 — the archived request.http / response.http must not carry the raw
+    # Authorization / Cookie value on disk (a shared-host credential leak). The
+    # formatter keeps the header NAME and masks only the VALUE; non-credential
+    # headers (proof) pass through untouched.
+    from framework.v2.agents.http_executor import HttpExecutor
+    from framework.v2.common.redact import MASK
+
+    ex = HttpExecutor(engagement_slug="<unused>", base_url="https://unused.example", dry_run=True)
+    dump = ex._format_request("GET", "https://unused.example/pay",
+                              {"Authorization": "Bearer SECRET", "Cookie": "sid=abc",
+                               "Accept": "application/json"})
+    assert "SECRET" not in dump and "sid=abc" not in dump
+    assert f"Authorization: {MASK}" in dump
+    assert f"Cookie: {MASK}" in dump
+    assert "Accept: application/json" in dump          # non-credential header intact

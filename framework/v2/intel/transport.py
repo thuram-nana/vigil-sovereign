@@ -29,6 +29,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..common import paths
 from ..common.errors import CrucibleError, SovereigntyViolation
 from .models import IntelSourceKind
 
@@ -223,9 +224,9 @@ class GuardedHttpTransport:
             rec = RawRecord(source_kind=source_kind, query=query, endpoint=url,
                             fetched_seq=seq, ok=False, note=f"{type(e).__name__}: {e}")
         if self._capture_dir is not None and rec.ok:
-            self._capture_dir.mkdir(parents=True, exist_ok=True)
-            (self._capture_dir / _fixture_name(source_kind, query)).write_text(
-                rec.model_dump_json(indent=2), encoding="utf-8")
+            # X2: captured third-party HTTP (may carry PII) is owner-only.
+            paths.secure_write(self._capture_dir / _fixture_name(source_kind, query),
+                               rec.model_dump_json(indent=2))
         return rec
 
 

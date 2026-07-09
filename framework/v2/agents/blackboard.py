@@ -86,8 +86,9 @@ class Blackboard:
 
     def __init__(self, *, db_path: Path | None = None) -> None:
         self.path = db_path or blackboard_path()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        paths.secure_dir(self.path.parent)            # owner-only spine dir (X2)
         self._conn = sqlite3.connect(self.path, detect_types=sqlite3.PARSE_DECLTYPES)
+        paths.secure_existing(self.path)              # 0600 the spine DB (dir 0700 guards WAL sidecars)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._migrate()

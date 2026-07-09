@@ -73,7 +73,7 @@ class KillSwitch:
     def trip(self, reason: str) -> None:
         """Halt the engagement. Idempotent: the first reason is preserved
         so the original cause is not overwritten by a later trip."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        paths.secure_dir(self._path.parent)          # X2: owner-only authority dir
         if self._path.is_file():
             _log.warning("authority.killswitch.already_tripped", slug=self._slug)
             return
@@ -82,7 +82,7 @@ class KillSwitch:
             "reason": reason,
             "tripped_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        paths.secure_write(self._path, json.dumps(payload, indent=2))   # X2: owner-only
         _log.warning("authority.killswitch.tripped", slug=self._slug, reason=reason)
 
     def reason(self) -> str | None:

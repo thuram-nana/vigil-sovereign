@@ -229,9 +229,8 @@ def require_authorized_intake(target_url: str) -> None:
 def init_authorization_ledger() -> None:
     """Create the ledger with a header comment if it does not exist."""
     led = authorization_ledger()
-    led.parent.mkdir(parents=True, exist_ok=True)
     if not led.exists():
-        led.write_text(_LEDGER_HEADER, encoding="utf-8")
+        paths.secure_write(led, _LEDGER_HEADER)   # X2: authorization integrity record, owner-only
 
 
 def now_iso() -> str:

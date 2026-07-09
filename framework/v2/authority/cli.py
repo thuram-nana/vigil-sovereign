@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from ..common import paths
 from .gate import authorize_action
 from .killswitch import KillSwitch
 from .models import ActionRequest
@@ -107,6 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    paths.tighten_umask()   # X2: owner-only files even when this CLI is run standalone
     parser = build_parser()
     args = parser.parse_args(argv)
     fn = args.fn  # type: ignore[attr-defined]
