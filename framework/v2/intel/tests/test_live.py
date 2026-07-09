@@ -128,6 +128,32 @@ def test_live_transport_refuses_target_overlap() -> None:
         build_live_transport(collector_hosts=("crt.sh",), target_hosts=("crt.sh",))
 
 
+def test_lazy_client_is_built_once_under_concurrency() -> None:
+    # Speed X5 (review LOW): under the parallel collector fan-out, concurrent _ensure_client
+    # calls must build the guarded httpx client EXACTLY ONCE — an unsynchronized lazy build would
+    # race N threads into N clients and leak all but one connection pool. Double-checked lock.
+    import threading
+
+    transport = build_live_transport(target_hosts=("company.com",))   # client=None → lazy
+    barrier = threading.Barrier(8)
+    got: list = []
+    got_lock = threading.Lock()
+
+    def _race():
+        barrier.wait()                       # maximise the collision window
+        c = transport._ensure_client()
+        with got_lock:
+            got.append(c)
+
+    threads = [threading.Thread(target=_race) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(got) == 8
+    assert all(c is got[0] for c in got)     # every thread saw the SAME single client
+
+
 def test_live_transport_default_hosts_match_endpoints() -> None:
     # every configured endpoint host is on the default allowlist (else it would refuse)
     from urllib.parse import urlsplit

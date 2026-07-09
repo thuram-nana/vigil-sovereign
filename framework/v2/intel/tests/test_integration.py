@@ -106,6 +106,43 @@ def test_run_collectors_voi_order_preserves_result() -> None:
     assert any(e.owned_by for e in voi.entities)
 
 
+def _serialized_recon(world, res):
+    """A byte-comparable snapshot of a recon run: the applied/dropped counts, the resolved
+    entities (canonical id + sorted members + ownership), the per-source query/entity tallies,
+    and the full projected world-model graph — everything a downstream consumer sees."""
+    from framework.v2.worldmodel.store import to_json
+    return {
+        "applied": res.applied, "dropped": res.dropped,
+        "queries_per_source": res.queries_per_source,
+        "entities_per_source": res.entities_per_source,
+        "entities": sorted((e.canonical_id, tuple(sorted(m.node_id for m in e.members)),
+                            e.owned_by) for e in res.entities),
+        "world": to_json(world, indent=0),
+    }
+
+
+def test_run_collectors_parallel_is_byte_identical_to_serial() -> None:
+    # Speed X5: fanning one subject's collectors out over a thread pool must produce a
+    # BYTE-IDENTICAL result to the serial run — seqs are pre-assigned in collector order, so
+    # every obs_id, the resolved entities, and the whole projected world-model are unchanged.
+    seeds = [canonicalize(NodeKind.DOMAIN, "company.com")]
+    w_serial, w_parallel = WorldModel(), WorldModel()
+    serial = IntelIngest(w_serial).run_collectors(
+        seeds, list(DEFAULT_COLLECTORS), FixtureTransport(_FIX), max_depth=2, max_workers=1)
+    parallel = IntelIngest(w_parallel).run_collectors(
+        seeds, list(DEFAULT_COLLECTORS), FixtureTransport(_FIX), max_depth=2, max_workers=8)
+    assert _serialized_recon(w_serial, serial) == _serialized_recon(w_parallel, parallel)
+    # and with the VOI planner order too (the other deterministic ordering path)
+    w_s2, w_p2 = WorldModel(), WorldModel()
+    s2 = IntelIngest(w_s2).run_collectors(
+        seeds, list(DEFAULT_COLLECTORS), FixtureTransport(_FIX), max_depth=2, max_workers=1,
+        planner=ReconPlanner(list(DEFAULT_COLLECTORS)))
+    p2 = IntelIngest(w_p2).run_collectors(
+        seeds, list(DEFAULT_COLLECTORS), FixtureTransport(_FIX), max_depth=2, max_workers=8,
+        planner=ReconPlanner(list(DEFAULT_COLLECTORS)))
+    assert _serialized_recon(w_s2, s2) == _serialized_recon(w_p2, p2)
+
+
 # ---- goal-tree seeding: entities dispatchable, predictions GATED ------------
 
 

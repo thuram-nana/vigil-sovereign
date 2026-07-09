@@ -24,6 +24,7 @@ in the collectors.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -178,21 +179,28 @@ class GuardedHttpTransport:
         self._capture_dir = Path(capture_dir) if capture_dir else None
         self._timeout = timeout
         self._client = client  # injected guarded httpx.Client, or None to build lazily
+        # X5: guard the lazy build so a parallel collector fan-out (run_collectors max_workers>1)
+        # cannot race two threads into each constructing a client — which would leak all but one
+        # connection pool. Double-checked below.
+        self._client_lock = threading.Lock()
         # optional (source_kind, raw_json) -> canonical payload mapper for live sources.
         self._normalizer = response_normalizer
 
     def _ensure_client(self) -> object:
         if self._client is not None:
             return self._client
-        import httpx  # lazy: offline paths never import httpx
+        with self._client_lock:
+            if self._client is not None:            # double-checked: another thread may have built it
+                return self._client
+            import httpx  # lazy: offline paths never import httpx
 
-        from ..agents.egress_guard import EgressAllowlist, SovereignHttpxTransport
+            from ..agents.egress_guard import EgressAllowlist, SovereignHttpxTransport
 
-        allow = EgressAllowlist(target_hosts=(), collector_hosts=self._hosts)
-        self._client = httpx.Client(
-            transport=SovereignHttpxTransport(allowlist=allow),
-            timeout=self._timeout,
-        )
+            allow = EgressAllowlist(target_hosts=(), collector_hosts=self._hosts)
+            self._client = httpx.Client(
+                transport=SovereignHttpxTransport(allowlist=allow),
+                timeout=self._timeout,
+            )
         return self._client
 
     def fetch(self, source_kind: IntelSourceKind, query: str, *, seq: int) -> RawRecord:
