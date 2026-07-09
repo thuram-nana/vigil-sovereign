@@ -95,6 +95,8 @@ class Planner:
         objectives: "Iterable[NodeKind] | None" = None,
         world_source: str | None = None,
         use_voi: bool = False,
+        use_lookahead: bool = False,
+        lookahead_depth: int = 3,
     ) -> None:
         self.bb = blackboard
         self.coord = coordinator
@@ -118,6 +120,11 @@ class Planner:
         # unit cost) instead of greedy prior*value/cost. Off by default so the
         # legacy selection path is unchanged.
         self.use_voi = bool(use_voi)
+        # Opt-in budget-bounded MULTI-STEP lookahead leaf selection: exact enumeration over the
+        # subsets of the best crown-jewel routes, valuing completion of a route within the request
+        # budget. Off by default so the legacy myopic selection path is byte-identical.
+        self.use_lookahead = bool(use_lookahead)
+        self.lookahead_depth = int(lookahead_depth)
         self._cursor = 0  # blackboard cursor
         self._last_checkpoint_at = 0.0
         self.checkpoint_interval_s = checkpoint_interval_s
@@ -155,7 +162,20 @@ class Planner:
             and self.objectives
             and self.world_source is not None
         )
-        if self.use_voi:
+        if self.use_lookahead:
+            # Budget-bounded MULTI-STEP lookahead: pick the leaf beginning the best sequence
+            # affordable within the REMAINING request budget, valuing completion of a
+            # crown-jewel attack path. Falls back to the myopic pick when the world/objectives/
+            # foothold are absent or nothing is affordable.
+            leaf = self.tree.best_open_leaf_lookahead(
+                world=self.world if world_aware else None,
+                objective_kinds=self.objectives if world_aware else None,
+                source=self.world_source if world_aware else None,
+                budget_requests=max(0, self.budget.request_max - self.budget.request_used),
+                depth=self.lookahead_depth,
+                use_voi=self.use_voi,
+            )
+        elif self.use_voi:
             # Value-of-information selection (expected information gain per cost),
             # with the world-model path boost when a world+objectives+foothold
             # are wired in.

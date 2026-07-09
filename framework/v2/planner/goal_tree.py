@@ -35,6 +35,11 @@ if TYPE_CHECKING:  # avoid a hard import-time dependency on the world-model.
     from ..worldmodel.models import Edge, NodeKind
 
 
+# Upper bound on how many crown-jewel routes the lookahead selector enumerates subsets of, so
+# its 2^(routes) combination count stays bounded regardless of the caller's ``k`` (2^8 = 256).
+_MAX_LOOKAHEAD_ROUTES = 8
+
+
 # ---------------------------------------------------------------------------
 # World-model-aware leaf scoring (optional, additive)
 # ---------------------------------------------------------------------------
@@ -388,6 +393,162 @@ class GoalTree:
             return None
         scored.sort(key=lambda t: (t[0], t[1]))
         return scored[0][2]
+
+    def best_open_leaf_lookahead(
+        self,
+        *,
+        world: "WorldModel | None" = None,
+        objective_kinds: "Iterable[NodeKind] | None" = None,
+        source: str | None = None,
+        budget_requests: int | None = None,
+        depth: int = 3,
+        boost: float = 2.0,
+        k: int = 3,
+        weight_fn: "Callable[[Edge], float] | None" = None,
+        edge_kinds: "Iterable | None" = None,
+        tpr: float = 0.9,
+        fpr: float = 0.02,
+        use_voi: bool = False,
+    ) -> GoalNode | None:
+        """Deterministic, budget-bounded MULTI-STEP leaf selection.
+
+        Choose the best budget-feasible PLAN — a set of open leaves whose total request cost fits
+        ``budget_requests`` and whose size is ``<= depth`` — then return the plan's highest-value
+        single step to execute now (receding-horizon). A plan's value is the sum of its leaves'
+        myopic (path-boosted) scores PLUS a bonus for every crown-jewel attack path it COMPLETES
+        (every OPEN leaf lying on a :func:`worldmodel.pathsearch.best_paths` route to an
+        ``objective_kinds`` node is in the plan). This is genuinely non-myopic: because the route
+        bonus is earned only by a plan that includes ALL of a route's leaves, a tight budget makes
+        the planner DROP the single highest-scoring leaf when finishing an affordable route is
+        worth more — so the pick can differ from :meth:`best_open_leaf` /
+        :meth:`best_open_leaf_pathaware` / :meth:`best_open_leaf_voi`.
+
+        Falls back VERBATIM to the myopic selector (``best_open_leaf_voi`` if ``use_voi`` else
+        ``best_open_leaf_pathaware``) when there is no world / objectives / source, no reachable
+        crown-jewel, or no affordable plan — so with those unset it is byte-identical to the
+        existing behaviour.
+
+        EXACT over the meaningful decision space (no lossy beam): the crown-jewel route bonus is
+        BACK-LOADED (earned only when a route's LAST leaf is included), which a greedy beam would
+        prune away as a low-value prefix before it can complete. So instead of discovering routes
+        by search, this evaluates each of the ``<= 2^k`` subsets of the (``<= k``) best routes
+        DIRECTLY: force-include that combination's on-path leaves, greedily fill the remaining
+        budget with the highest-base leaves, and score. Every candidate spends the same budget, so
+        their totals are comparable; a route of ANY length that fits the budget is evaluated.
+
+        DETERMINISM: route combinations are enumerated in fixed index order; a plan's value is
+        summed over its leaves in ascending-id (canonical) order, so it is order-independent —
+        avoiding the non-associative-float trap where the same set summed two ways compares
+        unequal. Ties break exactly on ``(-value, size, id-tuple)`` (integers, not floats);
+        :func:`pathsearch.best_paths` and the greedy fill (descending base, ascending id) are
+        deterministic."""
+        def _myopic() -> GoalNode | None:
+            if use_voi:
+                return self.best_open_leaf_voi(
+                    world=world, objective_kinds=objective_kinds, source=source,
+                    boost=boost, k=k, weight_fn=weight_fn, edge_kinds=edge_kinds, tpr=tpr, fpr=fpr)
+            return self.best_open_leaf_pathaware(
+                world=world, objective_kinds=objective_kinds, source=source,
+                boost=boost, k=k, weight_fn=weight_fn, edge_kinds=edge_kinds)
+
+        # No world context → a plan carries no route bonus, so its best step is exactly the myopic
+        # pick; defer (and inherit the myopic selector's own world=None backward-compat).
+        if world is None or not objective_kinds or source is None:
+            return _myopic()
+
+        leaves = sorted(self.open_leaves(), key=lambda l: l.id)
+        if not leaves:
+            return None
+
+        from ..worldmodel import pathsearch
+        paths = pathsearch.best_paths(
+            world, source, objective_kinds, weight_fn, k=k, edge_kinds=edge_kinds)
+        if not paths:
+            return _myopic()   # no crown-jewel reachable → nothing to look ahead toward
+
+        # From ONE deterministic best_paths call derive BOTH the per-node path-membership
+        # multiplier (same formula as _path_node_boosts) and, per path, its realizable route
+        # value + the set of OPEN leaves that lie on it.
+        leaf_node = {leaf.id: surface_to_node_id(world, leaf.surface) for leaf in leaves}
+        node_boosts: dict[str, float] = {}
+        path_specs: list[tuple[frozenset, float]] = []
+        for rank, p in enumerate(paths):
+            nodes = p.nodes
+            n = len(nodes)
+            conf = p.min_confidence
+            for pos, nid in enumerate(nodes):
+                mult = 1.0 + boost * ((pos + 1) / n) * (conf / (rank + 1))
+                if mult > node_boosts.get(nid, 1.0):
+                    node_boosts[nid] = mult
+            node_set = set(nodes)
+            members = frozenset(l.id for l in leaves if leaf_node[l.id] in node_set)
+            if members:
+                path_specs.append((members, boost * conf / (rank + 1)))
+
+        ids = [leaf.id for leaf in leaves]                      # ascending (leaves sorted)
+        base: dict[int, float] = {}
+        for leaf in leaves:
+            s = leaf.eig_score(tpr=tpr, fpr=fpr) if use_voi else leaf.score()
+            nid = leaf_node[leaf.id]
+            base[leaf.id] = s * (node_boosts.get(nid, 1.0) if nid is not None else 1.0)
+        cost = {leaf.id: max(1, leaf.estimate.requests) for leaf in leaves}
+        cap = max(1, int(depth))
+        by_base = sorted(ids, key=lambda i: (-base[i], i))       # greedy-fill order (fixed)
+
+        def _fill(plan: set, spent: int) -> None:
+            """Fill the remaining budget/size cap with the highest-base leaves not already in the
+            plan (deterministic: descending base, then ascending id)."""
+            for lid in by_base:
+                if len(plan) >= cap:
+                    break
+                if lid in plan:
+                    continue
+                c = cost[lid]
+                if budget_requests is not None and spent + c > budget_requests:
+                    continue
+                plan.add(lid)
+                spent += c
+
+        def _value(plan: set) -> float:
+            v = 0.0
+            for lid in sorted(plan):                             # canonical order → stable sum
+                v += base[lid]
+            for members, pv in path_specs:
+                if members <= plan:
+                    v += pv
+            return v
+
+        # Evaluate each subset of the (<= k) best routes DIRECTLY: force its leaves in, greedily
+        # fill the rest of the budget, and score. The empty subset is the pure-greedy plan.
+        best_plan: tuple = ()
+        best_key: tuple | None = None       # maximise (value, -size, negated id-tuple)
+        # path_specs is rank-ordered (best routes first); cap the number of routes we enumerate
+        # subsets of so the 2^(routes) combination count stays bounded even if a caller passes a
+        # large ``k`` (default k=3 → <= 8 combos; the cap keeps a pathological k from exploding).
+        route_sets = [members for members, _ in path_specs][:_MAX_LOOKAHEAD_ROUTES]
+        for r in range(len(route_sets) + 1):
+            for combo in itertools.combinations(range(len(route_sets)), r):
+                forced: set = set()
+                for i in combo:
+                    forced |= route_sets[i]
+                forced_cost = sum(cost[lid] for lid in forced)
+                if len(forced) > cap or (
+                        budget_requests is not None and forced_cost > budget_requests):
+                    continue
+                plan = set(forced)
+                _fill(plan, forced_cost)
+                if not plan:
+                    continue
+                pset = tuple(sorted(plan))
+                key = (_value(plan), -len(pset), tuple(-x for x in pset))
+                if best_key is None or key > best_key:
+                    best_key, best_plan = key, pset
+
+        if not best_plan:
+            return _myopic()   # nothing affordable this budget → defer to the myopic pick
+        # Execute the plan's highest-value step now (tie: ascending id).
+        first = min(best_plan, key=lambda lid: (-base[lid], lid))
+        return self.nodes.get(first) or _myopic()
 
     def mark_status(
         self, node_id: int, status: GoalStatus, *, reason: str = "",
