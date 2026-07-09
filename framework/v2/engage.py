@@ -236,6 +236,113 @@ def _spine_finding_payload(f, admitted) -> dict:
     }
 
 
+def _distinct_confirming_kinds(f) -> int:
+    """How many DISTINCT oracle kinds independently confirmed this finding — the reward-bus
+    corroboration signal (the non-circular bar for an autonomous EXPLOITABLE label is >= 2
+    distinct kinds). A scanner finding confirmed by a single oracle is ONE kind — honest: not
+    cross-corroborated. Counts a retained corroboration set when the finding carries one."""
+    for attr in ("corroborating_kinds", "confirmed_by_kinds", "confirmations"):
+        kinds = getattr(f, attr, None)
+        if kinds:
+            try:
+                return max(1, len({str(k) for k in kinds}))
+            except Exception:
+                return 1
+    return 1 if getattr(f, "confirmed_by", None) else 0
+
+
+def _scanner_verification_claim(f) -> dict:
+    """The finding AS THE SCAN CONCLUDED IT — asserting the scan's OWN oracle-verification claim
+    (a retained certificate = ``oracle_context``). This is what ``epistemic_refusal`` must be fed,
+    NOT the post-grounding mirror from ``_spine_finding_payload``: that mirror's
+    ``verified_by_oracle`` is the ALREADY-demoted live verdict, so feeding it would make the
+    refusal a no-op on exactly the findings it must catch (the ones that fail to re-ground).
+
+    Carries NO ``param`` on purpose: the refusal turns on the oracle RE-EXECUTION (does the
+    retained certificate still re-fire?), not world-membership. Naming an entity would make
+    ``admit``'s ``require_entities`` demote a perfectly good finding whose endpoint node the
+    chainer never modelled — a false refusal. So we ground the refusal purely on re-execution."""
+    return {
+        "bug_class": getattr(f, "bug_class", ""),
+        "verified_by_oracle": bool(getattr(f, "oracle_context", None)),
+        "oracle_context": getattr(f, "oracle_context", None),
+        "confidence": getattr(f, "confidence", None),
+        "confirmed_by": getattr(f, "confirmed_by", None),
+        "insertion_point": getattr(f, "insertion_point", ""),
+    }
+
+
+def _advise_critics(sink, finding: dict, finding_event_id: int | None) -> None:
+    """Run the deterministic multi-critic panel over one mirrored finding and record each
+    verdict + the aggregate quorum on the spine. ADVISORY ONLY: a critic can endorse / object /
+    abstain — NEVER confirm (only a fired oracle confirms; agents.critics enforces this at the
+    type level). No LLM, no egress — safe on every finding."""
+    if finding_event_id is None:
+        return
+    from .agents.critics import aggregate_panel, run_panel
+    verdicts = run_panel(finding)
+    for v in verdicts:
+        sink.critic_verdict(v.critic, finding_event_id, v.verdict,
+                            severity=v.severity, rationale=v.rationale)
+    panel = aggregate_panel(verdicts)
+    sink.decision(f"critic panel: {finding.get('bug_class', '?')}", panel.verdict,
+                  rationale=f"{panel.rationale} (agreement={panel.agreement}, entropy={panel.entropy})")
+
+
+def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
+    """W1.1 — the nervous system, ADVISORY-ONLY, over the authoritative findings.
+
+    Runs ONLY when the event spine is attached (opt-in telemetry). It NEVER alters
+    ``report.active_findings`` nor any oracle verdict — it mirrors each finding, then re-grounds
+    (critic panel), refuses-to-conclude (cognitive refusal), and credits the outcome (reward
+    bus), recording each on the immutable stream. Because ``make gate`` runs WITHOUT a spine,
+    this path never executes during the eval gate, so the gate stays byte-identical. Best-effort
+    throughout — a reasoning failure never sinks the engagement."""
+    try:
+        from .agents.cognitive_refusal import emit_refusal, epistemic_refusal
+        from .agents.reflection import reflect
+        from .calibration.reward_bus import credit_outcome
+
+        grounding = result.grounding or []
+        for i, f in enumerate(report.active_findings):
+            g = grounding[i] if i < len(grounding) else None
+            finding = _spine_finding_payload(f, g)
+            fe = sink.finding_event(finding)
+
+            # (1) multi-critic panel — re-ground / provenance / calibration lenses, advisory.
+            _advise_critics(sink, finding, fe)
+
+            # (2) cognitive refusal — feed the finding AS THE SCAN CONCLUDED IT (its retained
+            # certificate), so the primitive independently RE-EXECUTES that certificate and
+            # refuses to conclude when it no longer re-fires. Feeding the post-grounding mirror
+            # would make this inert (its verified_by_oracle is the already-demoted verdict).
+            emit_refusal(sink, epistemic_refusal(_scanner_verification_claim(f), world=world))
+
+            # (3) reward-bus fan-out — the NON-CIRCULAR outcome label + reward on the unified
+            # stream (replaces the flat 1.0). oracle_fired iff the finding re-grounds as a fact;
+            # spine-only (no persistent learner mutation here) keeps behaviour default-safe.
+            credit_outcome(
+                oracle_fired=bool(finding.get("verified_by_oracle")),
+                distinct_confirming_kinds=_distinct_confirming_kinds(f),
+                seq=fe or 0, spine_sink=sink, target_event_id=fe,
+                arm=str(f.bug_class), bug_class=str(f.bug_class))
+
+        # (4) reflection — dead-thread / stall re-orientation over the spine's own state. A
+        # graceful no-op on the pure-scanner spine (no hypothesis/action events yet); it lights
+        # up automatically as richer producers land on the stream in later waves.
+        for r in reflect(spine, slug):
+            sink.reflection(r.get("trigger", "reflection"), r.get("observations", []),
+                            reorientation=r.get("reorientation", ""),
+                            rationale=r.get("rationale", ""))
+
+        sink.decision(
+            "engagement summary",
+            f"{len(report.active_findings)} finding(s), {len(result.attack_paths)} attack path(s)",
+            rationale=f"target={report.target}")
+    except Exception:
+        pass
+
+
 def run_engagement(
     slug: str,
     seed_url: str,
@@ -389,26 +496,12 @@ def run_engagement(
         result.grounding = _assess_grounding(report, world)
     except Exception:
         pass
-    # Mirror the authoritative findings (with their live grounding verdict) + a summary onto
-    # the event spine, so the whole engagement is replayable from one immutable stream.
-    # Best-effort: a spine failure never sinks the engagement.
+    # Mirror the authoritative findings onto the event spine AND run the reasoning pass over
+    # them (W1.1: multi-critic panel + cognitive refusal + reward-bus credit + reflection) —
+    # ADVISORY ONLY. This never alters report.active_findings nor the oracle verdict, and it
+    # runs only when a spine is attached (so `make gate`, which uses no spine, is byte-identical).
     if sink is not None:
-        try:
-            for i, f in enumerate(report.active_findings):
-                g = result.grounding[i] if i < len(result.grounding) else None
-                fe = sink.finding_event(_spine_finding_payload(f, g))
-                # reward bus: a spine reward for the confirmed finding — the effort-credit
-                # signal on the unified stream. Non-circular calibration labels are resolved
-                # separately from independent cross-oracle corroboration (reward_bus /
-                # critique_agent); this records that the surface produced a confirmed finding.
-                sink.reward("engage", 1.0, arm=str(f.bug_class), signal="oracle_confirmed",
-                            target_event_id=fe, rationale=f"confirmed_by={f.confirmed_by}")
-            sink.decision(
-                "engagement summary",
-                f"{len(report.active_findings)} finding(s), {len(result.attack_paths)} attack path(s)",
-                rationale=f"target={report.target}")
-        except Exception:
-            pass
+        _run_reasoning_pass(sink, spine, slug, report, result, world)
     return result
 
 

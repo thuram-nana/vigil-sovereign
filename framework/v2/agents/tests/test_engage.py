@@ -421,3 +421,85 @@ def test_engage_spine_records_a_refusal_as_evidence(isolated_engagement, tmp_pat
     assert refusals and refusals[0].payload["fatal"] is True
     assert refusals[0].payload["gate"] == "preflight"
     bb.close()
+
+
+# ---------------------------------------------------------------------------
+# Wave 1 / W1.1 — the nervous system runs ADVISORY-ONLY over the mirrored findings.
+# ---------------------------------------------------------------------------
+
+
+def test_engage_spine_runs_advisory_reasoning_pass(
+    isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
+):
+    # W1.1: with a spine attached, engage runs the multi-critic panel + cognitive refusal +
+    # reward-bus credit over each authoritative finding — all ADVISORY. The findings themselves
+    # are unchanged (oracle authority preserved); the reasoning only lands as evidence events.
+    from framework.v2.agents.blackboard import open_blackboard
+
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+
+    bb = open_blackboard(db_path=tmp_path / "spine.sqlite")
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny, spine=bb,
+    )
+    assert result.report.active_findings, "engage confirmed nothing"
+
+    # (1) the multi-critic panel posted verdicts, each hung off its finding via parent_id, and
+    # NO verdict is 'confirm' — a critic can only endorse/object/abstain (oracle authority).
+    verdicts = bb.read(engagement="alpha", kinds=["critic_verdict"])
+    assert verdicts, "the critic panel produced no verdicts on the spine"
+    assert all(v.payload["verdict"] in ("endorse", "object", "abstain") for v in verdicts)
+    finding_ids = {fe.id for fe in bb.read(engagement="alpha", kinds=["finding"])}
+    assert all(v.parent_id in finding_ids for v in verdicts)
+
+    # (2) the reward-bus credited each finding onto the unified stream (non-circular label).
+    rewards = bb.read(engagement="alpha", kinds=["reward"])
+    assert rewards and all(r.payload["source"] == "reward-bus" for r in rewards)
+
+    # (3) an aggregate critic-panel decision landed alongside the engagement summary.
+    questions = [d.payload["question"] for d in bb.read(engagement="alpha", kinds=["decision"])]
+    assert any(q.startswith("critic panel:") for q in questions)
+    assert "engagement summary" in questions
+
+    # (4) NO spurious cognitive refusal: genuinely re-grounding findings must NOT be refused
+    # (the refusal fires only when a certificate no longer re-executes — guarded here so the
+    # W1.1 fix cannot regress into false refusals on every good finding).
+    refusals = bb.read(engagement="alpha", kinds=["refusal"])
+    assert all(r.payload.get("gate") != "epistemic" for r in refusals), \
+        "a genuinely-confirmed finding was wrongly refused"
+    bb.close()
+
+
+def test_engage_cognitive_refusal_is_not_inert():
+    # W1.1 review-fix: the cognitive-refusal primitive must ACTUALLY fire. It is fed the finding
+    # AS THE SCAN CONCLUDED IT (its retained certificate) — not the post-grounding mirror, whose
+    # verified_by_oracle is already demoted, which would make the check a no-op on exactly the
+    # findings it must catch. When the retained certificate no longer re-executes, it refuses.
+    from framework.v2.agents.cognitive_refusal import epistemic_refusal
+    from framework.v2.engage import _scanner_verification_claim
+
+    class _F:
+        check_id = "c"
+        bug_class = "reflected_xss"
+        insertion_point = "query:q"
+        param = "q"
+        endpoint = "http://x/"
+        confidence = 0.9
+        confirmed_by = "reflected_marker"
+        rationale = "r"
+        oracle_context = {"bug_class": "reflected_xss"}   # a certificate PRESENT but too thin to re-fire
+
+    claim = _scanner_verification_claim(_F())
+    assert claim["verified_by_oracle"] is True            # asserts the scan's OWN oracle claim
+    assert "param" not in claim                           # refusal turns on re-execution, not world-membership
+    decision = epistemic_refusal(claim, world=None)
+    assert decision is not None and decision.gate == "epistemic"   # NOT inert — it refuses to conclude
+
+    # a finding with NO retained certificate makes no oracle claim → nothing to refuse (None)
+    class _G(_F):
+        oracle_context = None
+    assert epistemic_refusal(_scanner_verification_claim(_G()), world=None) is None
