@@ -31,7 +31,7 @@ from ..worldmodel.graph import WorldModel
 from ..worldmodel.models import NodeKind
 from . import learn
 from .collectors import DEFAULT_COLLECTORS
-from .ingest import IntelIngest
+from .ingest import RECON_MAX_WORKERS, IntelIngest
 from .models import IntelSourceKind
 from .planner import ReconPlanner
 from .predict import AssetPredictor, assess_prediction
@@ -80,7 +80,8 @@ def _ingest(args: argparse.Namespace) -> int:
     ing = IntelIngest(world, store=istore, engagement_slug=args.slug or "")
     seed = canonicalize(NodeKind.DOMAIN, args.seed)
     res = ing.run_collectors([seed], list(DEFAULT_COLLECTORS), transport,
-                             seq=0, max_depth=args.max_depth)
+                             seq=0, max_depth=args.max_depth,
+                             max_workers=RECON_MAX_WORKERS)
     if istore is not None:
         learn.credit_discovery(istore, res, archetype=args.archetype)
     owned = [{"id": e.canonical_id, "members": [m.node_id for m in e.members],

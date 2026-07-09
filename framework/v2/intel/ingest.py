@@ -22,6 +22,9 @@ along the way up to a bounded depth.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..worldmodel.graph import WorldModel
@@ -32,6 +35,17 @@ from .refs import EntityRef
 from .resolve import Entity, ResolveResult, resolve
 from .store import IntelStore
 from .transport import Transport
+
+# X5 — the per-subject collector fan-out width for the production recon callers (engage/intel CLI).
+# Collectors hit different hosts, so a pool respects every per-host throttle, and the RESULT is
+# BYTE-IDENTICAL to serial (seqs pre-assigned in collector order). OPT-IN (default 1 = serial):
+# the operator enables parallel recon with CRUCIBLE_RECON_MAX_WORKERS>1. Default-serial keeps the
+# doctrine of predictable, no-surprise traffic — it preserves serial's fail-fast, so a
+# mis-configured roster (a collector for a non-allowlisted host) still aborts the subject's batch
+# before a sibling egresses, exactly as before. Under opt-in parallelism the egress guard still
+# bounds every request to an allowlisted collector host (unauthorised egress remains impossible);
+# the only difference is a mis-configured partial allowlist may emit one extra AUTHORISED request.
+RECON_MAX_WORKERS = max(1, int(os.environ.get("CRUCIBLE_RECON_MAX_WORKERS", "1") or "1"))
 
 
 class IngestResult(BaseModel):
@@ -131,6 +145,7 @@ class IntelIngest:
         max_depth: int = 1,
         planner: "object | None" = None,
         priors: dict[str, float] | None = None,
+        max_workers: int = 1,
     ) -> IngestResult:
         """Fetch ``seeds`` through ``collectors`` and ingest the results, following
         newly discovered subjects up to ``max_depth`` hops. Deterministic: subjects
@@ -141,7 +156,15 @@ class IntelIngest:
         are run in the planner's VALUE-OF-INFORMATION order (highest expected information
         gain per cost first, using ``priors`` from source-yield learning), and completed
         (subject, collector) pairs are fed back as ``already_run`` so an exhausted source
-        is damped. Without a planner the order is the roster order (still deterministic)."""
+        is damped. Without a planner the order is the roster order (still deterministic).
+
+        ``max_workers`` > 1 (Speed X5) runs one subject's applicable collectors through a
+        bounded thread pool. Those collectors query DIFFERENT third-party hosts, so a pool
+        respects every per-host throttle. It is BYTE-IDENTICAL to the serial run: each
+        collector's seq is pre-assigned in the deterministic collector order BEFORE dispatch
+        (so every ``obs_id`` — a pure function of collector+seq+claim — is unchanged), and the
+        results are ingested in that same order (``ThreadPoolExecutor.map`` preserves input
+        order). The default (1) is exactly the old serial loop."""
         seen: set[str] = set()
         already_run: set[tuple[str, str]] = set()
         frontier: list[tuple[int, EntityRef]] = [(0, s) for s in seeds]
@@ -163,12 +186,23 @@ class IntelIngest:
                 plan = planner.plan([subject], priors=priors, already_run=already_run)
                 rank = {t.collector: t.eig_per_cost for t in plan.tasks}
                 cols.sort(key=lambda c: (-rank.get(c.name, 0.0), c.name))
-            batch: list[Observation] = []
-            for c in cols:
-                cur_seq += 1
+            # Pre-assign a seq to each collector IN cols ORDER (deterministic) BEFORE dispatch,
+            # so provenance seqs — and thus every obs_id — are identical whether the collectors
+            # run serially or in a pool. cols is already deterministically ordered (roster / VOI).
+            assigned = [(c, cur_seq + 1 + i) for i, c in enumerate(cols)]
+            cur_seq += len(cols)
+            for c, _s in assigned:
                 queries[c.source_kind.value] = queries.get(c.source_kind.value, 0) + 1
-                batch.extend(c.collect(subject, transport, seq=cur_seq))
                 already_run.add((subject.node_id, c.name))
+            if max_workers > 1 and len(assigned) > 1:
+                with ThreadPoolExecutor(max_workers=min(int(max_workers), len(assigned))) as ex:
+                    # map preserves input order → ingest order (and the resolved world-model)
+                    # is byte-identical to the serial run.
+                    per_collector = list(ex.map(
+                        lambda cs: cs[0].collect(subject, transport, seq=cs[1]), assigned))
+            else:
+                per_collector = [c.collect(subject, transport, seq=s) for c, s in assigned]
+            batch: list[Observation] = [obs for obss in per_collector for obs in obss]
             res = self.ingest(batch, seq=None)
             agg = _merge_results(agg, res)
             for ns in res.new_subjects:

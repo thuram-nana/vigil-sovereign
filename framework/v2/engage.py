@@ -126,9 +126,11 @@ def _intel_recon(world: WorldModel, slug: str, seed_url: str, *,
     host = urlsplit(seed_url).hostname or ""
     if fixtures_dir and host:
         try:
+            from .intel.ingest import RECON_MAX_WORKERS
             ingest.run_collectors(
                 [host_ref(host)], list(DEFAULT_COLLECTORS), FixtureTransport(fixtures_dir),
-                seq=0, max_depth=max_depth, planner=ReconPlanner(list(DEFAULT_COLLECTORS)))
+                seq=0, max_depth=max_depth, planner=ReconPlanner(list(DEFAULT_COLLECTORS)),
+                max_workers=RECON_MAX_WORKERS)
         except Exception:
             # a partial recon failure keeps whatever already projected AND the ingest
             # handle — never discard it (discarding it would collapse the seq base and
