@@ -20,6 +20,7 @@ import json
 import sys
 from pathlib import Path
 
+from ..common import paths
 from ..entitlement.crypto import generate_keypair
 from ..entitlement.models import TrustRoot
 from .certify import build_certificate, sign_certificate, verify_bundle
@@ -65,14 +66,13 @@ def _certify(args: argparse.Namespace) -> int:
     chain = build_chain([sc.certificate.cert_digest for sc in signed_certs])
     head = sign_head(chain, engagement_slug=args.slug, signers=signers) if signers else None
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "evidence-bundle.json").write_text(json.dumps({
+    out = paths.secure_dir(Path(args.out))          # X2: owner-only evidence dir
+    paths.secure_write(out / "evidence-bundle.json", json.dumps({
         "engagement_slug": args.slug,
         "certificates": [sc.model_dump(mode="json") for sc in signed_certs],
         "chain": [e.model_dump(mode="json") for e in chain],
         "head": head.model_dump(mode="json") if head else None,
-    }, indent=2), encoding="utf-8")
+    }, indent=2))
     print(f"wrote {len(signed_certs)} certificate(s) + a {len(chain)}-entry chain to {out}"
           + ("" if signers else "  (UNSIGNED — no --signer given)"))
     return 0

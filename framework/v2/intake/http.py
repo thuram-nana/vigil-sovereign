@@ -36,6 +36,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..common import logging as v2log
+from ..common import paths
 from ..common.errors import EthicsViolation, IntakeBudgetExceeded
 from .models import HTTPExchange
 
@@ -170,11 +171,9 @@ def _fixture_key(method: str, url: str) -> str:
 
 
 def _save_fixture(dir_: Path, exchange: HTTPExchange) -> None:
-    dir_.mkdir(parents=True, exist_ok=True)
     key = _fixture_key(exchange.method, exchange.url)
-    (dir_ / f"{key}.json").write_text(
-        exchange.model_dump_json(indent=2), encoding="utf-8",
-    )
+    # X2: a captured target request/response can carry PII/credentials — owner-only.
+    paths.secure_write(dir_ / f"{key}.json", exchange.model_dump_json(indent=2))
 
 
 def _load_fixture(dir_: Path, method: str, url: str) -> HTTPExchange | None:

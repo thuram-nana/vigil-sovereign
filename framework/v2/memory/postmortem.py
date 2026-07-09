@@ -201,6 +201,5 @@ def run(store: Store, slug: str) -> Path:
     _update_priors_from_engagement(store, slug)
 
     out = paths.target_dir(slug) / "postmortem.md"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_render_markdown(summary), encoding="utf-8")
+    paths.secure_write(out, _render_markdown(summary))   # X2: engagement postmortem is owner-only
     return out

@@ -32,8 +32,7 @@ class AuthorityUnsigned(AuthorityError):
 
 def save_authority(authority: EngagementAuthority, path: Path | None = None) -> Path:
     p = path if path is not None else paths.authority_path(authority.engagement_slug)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(authority.model_dump(mode="json"), indent=2), encoding="utf-8")
+    paths.secure_write(p, json.dumps(authority.model_dump(mode="json"), indent=2))  # X2: owner-only
     return p
 
 
@@ -58,8 +57,7 @@ def load_authority(slug: str, path: Path | None = None) -> EngagementAuthority:
 
 def save_signed_authority(signed: SignedAuthority, path: Path | None = None) -> Path:
     p = path if path is not None else paths.authority_path(signed.document.engagement_slug)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(signed.model_dump(mode="json"), indent=2), encoding="utf-8")
+    paths.secure_write(p, json.dumps(signed.model_dump(mode="json"), indent=2))  # X2: owner-only
     return p
 
 

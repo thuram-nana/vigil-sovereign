@@ -82,8 +82,8 @@ def sign_revocation(
 
 
 def _write_json(path: Path, payload: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(payload, encoding="utf-8")
+    # X2: entitlement material (trust root / entitlement / revocation) is owner-only.
+    paths.secure_write(path, payload)
 
 
 def write_trust_root(trust_root: TrustRoot, path: Path | None = None) -> Path:

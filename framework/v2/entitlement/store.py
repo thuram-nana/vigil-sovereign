@@ -106,5 +106,4 @@ def store_revocation_highwater(serial: int, path: Path | None = None) -> None:
     """Persist `serial` as the new high-water mark. Written only after the
     revocation list it came from was verified validly signed."""
     p = path or revocation_highwater_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"serial": serial}), encoding="utf-8")
+    paths.secure_write(p, json.dumps({"serial": serial}))   # X2: owner-only

@@ -47,19 +47,20 @@ class DryRunBackend(LLMBackend):
 
         t0 = time.perf_counter()
 
-        # 1. write the prompt to disk for audit
-        d = paths.dryrun_dir()
-        d.mkdir(parents=True, exist_ok=True)
+        # 1. write the prompt to disk for audit (X2: owner-only — a dry-run dump is the
+        #    full LLM reasoning context, which can embed target data / findings).
+        d = paths.secure_dir(paths.dryrun_dir())
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out = d / f"{ts}-{prompt.schema_name}.txt"
-        with out.open("w", encoding="utf-8") as f:
-            f.write(f"# DryRun prompt — schema={prompt.schema_name}\n")
-            f.write(f"# cognitive_doc={prompt.cognitive_doc}\n")
-            f.write(f"# sections={prompt.cognitive_sections}\n")
-            f.write("# ----- system -----\n")
-            f.write(prompt.system + "\n\n")
-            f.write("# ----- user -----\n")
-            f.write(prompt.user + "\n")
+        paths.secure_write(out, (
+            f"# DryRun prompt — schema={prompt.schema_name}\n"
+            f"# cognitive_doc={prompt.cognitive_doc}\n"
+            f"# sections={prompt.cognitive_sections}\n"
+            "# ----- system -----\n"
+            f"{prompt.system}\n\n"
+            "# ----- user -----\n"
+            f"{prompt.user}\n"
+        ))
 
         # 2. ask the per-schema fixture provider for an instance
         provider = fixtures.get_provider(prompt.schema_name)

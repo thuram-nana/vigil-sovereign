@@ -25,6 +25,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from ..common import paths
 from .graph import WorldModel, WorldModelError
 from .models import Edge, Node
 
@@ -87,8 +88,7 @@ def from_json(text: str) -> WorldModel:
 def save(model: WorldModel, path: Path | str, *, indent: int | None = 2) -> None:
     """Write the world-model to `path` (parent dirs created)."""
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(to_json(model, indent=indent), encoding="utf-8")
+    paths.secure_write(p, to_json(model, indent=indent))   # X2: owner-only (holds intel/PII)
 
 
 def load(path: Path | str) -> WorldModel:

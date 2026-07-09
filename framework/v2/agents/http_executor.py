@@ -48,7 +48,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlu
 import httpx
 
 from ..common import logging as v2log
-from ..common import paths
+from ..common import paths, redact
 from ..common.errors import SovereigntyViolation
 from ..verify.adapter import FindingContext
 from ..authority import (
@@ -656,7 +656,7 @@ class HttpExecutor:
         ua = user_agent_for(self._resolved_posture, self.operator_identifier)
         headers = {"User-Agent": ua, "Accept": "*/*"}
         evidence_dir = self._evidence_dir(action_id)
-        evidence_dir.mkdir(parents=True, exist_ok=True)
+        paths.secure_dir(evidence_dir)          # X2: owner-only evidence dir
 
         redirect_chain: list[tuple[int, str]] = []
         redirect_refused: str | None = None
@@ -795,7 +795,7 @@ class HttpExecutor:
         and redirects re-enter ``_gate_redirect`` here. ``body`` is sent on the
         initial hop and dropped on any redirect (which becomes a GET)."""
         evidence_dir = self._evidence_dir(action_id)
-        evidence_dir.mkdir(parents=True, exist_ok=True)
+        paths.secure_dir(evidence_dir)          # X2: owner-only evidence dir
         redirect_chain: list[tuple[int, str]] = []
         redirect_refused: str | None = None
         try:
@@ -911,9 +911,12 @@ class HttpExecutor:
     def _format_request(
         self, method: str, url: str, headers: dict[str, str],
     ) -> str:
+        # X2: mask credential header VALUES (Authorization/Cookie/…) in the archived
+        # human-readable dump — a shared-host credential leak that outlives the run.
+        # The name is kept; the raw response.body is untouched (byte-fidelity).
         lines = [f"{method} {url} HTTP/1.1"]
         for k, v in headers.items():
-            lines.append(f"{k}: {v}")
+            lines.append(f"{k}: {redact.redact_header(k, v)}")
         lines.append("")
         return "\n".join(lines)
 
@@ -922,7 +925,7 @@ class HttpExecutor:
     ) -> str:
         lines = [f"HTTP/{response.http_version} {response.status_code} {response.reason_phrase}"]
         for k, v in response.headers.items():
-            lines.append(f"{k}: {v}")
+            lines.append(f"{k}: {redact.redact_header(k, v)}")   # X2: mask Set-Cookie/token values
         lines.append("")
         lines.append("# redirect chain (status, url):")
         for st, u in chain:
