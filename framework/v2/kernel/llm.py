@@ -32,7 +32,9 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..common import logging as v2log
-from ..common.errors import BackendError, BackendUnavailable, SovereigntyViolation
+from ..common.errors import (
+    BackendError, BackendOverloaded, BackendUnavailable, SovereigntyViolation,
+)
 from . import sovereignty
 from .models import CallTrace
 
@@ -184,6 +186,54 @@ def get_backend(force: str | None = None, refresh: bool = False) -> LLMBackend:
 def reset_cache() -> None:
     global _cached_backend
     _cached_backend = None
+
+
+def complete_with_failover(prompt: "Prompt") -> "LLMResult":
+    """Complete ``prompt``, failing over across the permitted backends IN-TIER on a transient
+    overload (Speed X4). Tries the auto-selected primary (the cached ``get_backend()``); a
+    :class:`BackendOverloaded` — a rate-limit / overload / 5xx / connection failure that
+    survived the backend's own backoff — advances to the NEXT available backend in the tier's
+    ``permitted_preference()``. A plain :class:`BackendError` (a permanent / parse failure) is
+    NOT failed over — another backend would not fix it. The answering backend is recorded in the
+    returned trace. NEVER escapes the sovereignty tier: only ``permitted_preference()`` backends
+    are tried, each re-asserting the policy on construction.
+
+    An explicit env-override backend is honoured as the operator's choice (no failover). This is
+    the auto-selection path binding._bind uses when no backend is passed; an explicitly-passed
+    backend bypasses this entirely (the caller owns that choice)."""
+    override = os.environ.get(_ENV_OVERRIDE, "").strip().lower()
+    if override:
+        return get_backend().complete(prompt)      # explicit operator choice: no failover
+
+    primary = get_backend()                          # cached + logged selection (common path)
+    last_overload: BackendOverloaded | None = None
+    try:
+        return primary.complete(prompt)
+    except BackendOverloaded as e:
+        last_overload = e
+        _log.warning("kernel.backend.failover", from_backend=primary.name, error=str(e)[:200])
+
+    tried = {primary.name}
+    for name in sovereignty.current().permitted_preference():
+        try:
+            cand = _construct(name)                  # re-asserts sovereignty
+        except (BackendUnavailable, SovereigntyViolation):
+            continue
+        if cand.name in tried:
+            continue
+        ok, _note = cand.is_available()
+        if not ok:
+            continue
+        tried.add(cand.name)
+        try:
+            return cand.complete(prompt)
+        except BackendOverloaded as e:
+            last_overload = e
+            _log.warning("kernel.backend.failover", from_backend=cand.name, error=str(e)[:200])
+            continue
+    # every in-tier candidate was overloaded — surface the overload (never silently drop).
+    raise last_overload if last_overload is not None else BackendUnavailable(
+        "no permitted backend available for failover")
 
 
 # ---------------------------------------------------------------------------

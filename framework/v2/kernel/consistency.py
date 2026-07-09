@@ -19,9 +19,40 @@ from __future__ import annotations
 
 import json
 import math
+import threading
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+
+class RateLimiter:
+    """A minimum-interval throttle shared across parallel self-consistency samples — the LLM
+    path's missing rate limit (Speed X4). Thread-safe; only ever DELAYS a call, never changes an
+    output, so it is determinism-neutral and off the replay path. ``min_interval_s <= 0`` is a
+    no-op (the default), so wiring it is opt-in and changes no default timing."""
+
+    def __init__(self, min_interval_s: float) -> None:
+        self._min = max(0.0, float(min_interval_s))
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def __call__(self) -> None:
+        if self._min <= 0.0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next - now
+            self._next = max(now, self._next) + self._min
+        if wait > 0.0:
+            time.sleep(wait)
+
+
+def _guarded(run_fn: Callable[[], Any], rate_limiter: Callable[[], None] | None) -> Any:
+    if rate_limiter is not None:
+        rate_limiter()
+    return run_fn()
 
 
 def categorical_entropy(counts: Any, *, n_samples: int | None = None) -> float:
@@ -76,13 +107,21 @@ def run_consistent(
     agreement_gate: float = 0.6,
     entropy_gate: float = 1.0,
     key_fn: Callable[[Any], Any] | None = None,
+    max_workers: int = 1,
+    rate_limiter: Callable[[], None] | None = None,
 ) -> ConsistencyResult:
     """Sample ``run_fn`` (a no-oracle binding call returning ``(parsed, trace)``) ``samples``
     times, cluster by ``key_fn`` (the decision-bearing signature; defaults to the whole
     structured output), and ABSTAIN when agreement < ``agreement_gate`` or entropy >
     ``entropy_gate``. Returns the modal answer either way — but ``abstained`` tells the caller
     whether to act on it or route it to ``needs_evidence``. Pure over ``run_fn``: it sources
-    no randomness itself (variation comes from the backend's own sampling temperature)."""
+    no randomness itself (variation comes from the backend's own sampling temperature).
+
+    ``max_workers`` (X4) runs the samples through a bounded thread pool for external speed on a
+    network-bound backend. Results are gathered in SUBMISSION ORDER (``ThreadPoolExecutor.map``
+    preserves input order), so the modal representative — the first sample in the largest cluster
+    — is byte-identical to the serial run. ``max_workers <= 1`` (the default) is exactly the old
+    serial loop. ``rate_limiter`` (opt-in) spaces the concurrent calls."""
     # Agreement (modal share) is the PRIMARY gate; entropy is a secondary tripwire + the
     # confidence penalty. entropy_gate defaults to 1.0 (inclusive-off): since normalised
     # entropy is bounded by 1.0 and the check is strict `>`, the entropy condition never
@@ -90,7 +129,13 @@ def run_consistent(
     # Lower entropy_gate below 1.0 to add an independent entropy tripwire.
     key_fn = key_fn or _default_key
     n = max(1, int(samples))
-    outs: list[tuple[Any, Any]] = [run_fn() for _ in range(n)]
+    workers = max(1, int(max_workers))
+    if workers <= 1 or n <= 1:
+        outs: list[tuple[Any, Any]] = [_guarded(run_fn, rate_limiter) for _ in range(n)]
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, n)) as ex:
+            # map preserves input (submission) order → byte-stable modal representative.
+            outs = list(ex.map(lambda _i: _guarded(run_fn, rate_limiter), range(n)))
     keys = [_canon(key_fn(p)) for p, _ in outs]
     counts = Counter(keys)
     modal_key, modal_n = counts.most_common(1)[0]

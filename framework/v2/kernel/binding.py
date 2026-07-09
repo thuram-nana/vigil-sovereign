@@ -25,7 +25,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..common import docs
-from .llm import LLMBackend, Prompt, get_backend
+from .llm import LLMBackend, Prompt, complete_with_failover, get_backend
 from .models import CallTrace
 
 
@@ -309,6 +309,11 @@ def run(
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    be = backend or get_backend()
-    result = be.complete(prompt)
+    # An explicitly-passed backend is the caller's choice (tests / a pinned run) — use it
+    # directly. The auto-selected production path goes through complete_with_failover, which
+    # retries a transient overload and fails over to the next permitted backend in-tier (X4).
+    if backend is not None:
+        result = backend.complete(prompt)
+    else:
+        result = complete_with_failover(prompt)
     return result.parsed, result.trace
