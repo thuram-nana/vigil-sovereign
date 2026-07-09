@@ -181,10 +181,39 @@ def _format_section_excerpt(doc: docs.Document, anchor: str, max_chars: int = 15
     return f"### § {sec.heading}\n\n{sec.excerpt(max_chars)}"
 
 
+_GOV_PREAMBLE: str | None = None
+
+
+def _governance_preamble() -> str:
+    """A bounded, CACHE-STABLE governance block quoted verbatim from
+    ``framework/cognitive/metacognition.md`` — the metacognition / multi-critic / cognitive-
+    refusal / self-consistency / learning doctrine that is in force on EVERY reasoning call,
+    above the per-call doc. Built once and identical across calls, so it keeps the system-
+    prompt PREFIX stable (cache-friendly). The doc ships WITH the code (loaded relative to the
+    framework package, not CRUCIBLE_ROOT), so it travels with any checkout. Additive + graceful:
+    a missing doc yields an empty block and the prompt is byte-identical to before."""
+    global _GOV_PREAMBLE
+    if _GOV_PREAMBLE is not None:
+        return _GOV_PREAMBLE
+    try:
+        from pathlib import Path
+        # framework/v2/kernel/binding.py -> framework/ -> framework/cognitive/metacognition.md
+        path = Path(__file__).resolve().parents[2] / "cognitive" / "metacognition.md"
+        gov_doc = docs.load(str(path))
+        # the metacognition sections are short by design; quote each in full (~400 chars) so a
+        # directive is never truncated mid-sentence. Bounded overall (~6 short sections).
+        lines = [f"- **{s.heading}** — {s.excerpt(600)}" for s in gov_doc.at_level(2)]
+        _GOV_PREAMBLE = "\n".join(lines)
+    except Exception:
+        _GOV_PREAMBLE = ""   # governance is additive; a missing doc must never break a call
+    return _GOV_PREAMBLE
+
+
 def build_system_prompt(
     doc: docs.Document, section_anchors: list[str], task_directive: str,
 ) -> str:
-    """Construct a system prompt by quoting the cognitive doc."""
+    """Construct a system prompt by quoting the cognitive doc, under the standing governance
+    preamble (metacognition/critic/refusal doctrine) that is in force on every call."""
     body_parts = []
     for a in section_anchors:
         try:
@@ -194,10 +223,13 @@ def build_system_prompt(
             # the source-of-truth for which sections exist.
             continue
     quoted = "\n\n".join(body_parts)
+    gov = _governance_preamble()
+    gov_block = (f"--- Governance (in force on every call) ---\n\n{gov}\n\n" if gov else "")
     return (
         "You are OBSIDIAN, the offensive-security agent. The framework "
         "you operate is CRUCIBLE.  The sections below are the v1 cognitive "
         "doctrine that governs this specific call. Reason from them.\n\n"
+        f"{gov_block}"
         f"--- Source: framework/cognitive/{doc.path.name} ---\n\n"
         f"{quoted}\n\n"
         "--- Task ---\n\n"
