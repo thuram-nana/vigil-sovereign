@@ -308,6 +308,9 @@ oracle, so adding coverage cannot add false positives.
 
 ## See also
 
+- [CRUCIBLE-AI.md](./CRUCIBLE-AI.md) — the AI's guide to the system: agents, the immutable
+  event spine, the veracity (anti-hallucination) layer, the learning/metacognition core, and
+  the safety stack (paired with the loadable `/.claude/skills/crucible/SKILL.md`).
 - [OPERATOR-GUIDE.md](./OPERATOR-GUIDE.md) — install, authorization, running
   `scan`/`engage`, OOB, the kill-switch.
 - [CHECK-AUTHORING.md](./CHECK-AUTHORING.md) — add a bug class as one JSON file.

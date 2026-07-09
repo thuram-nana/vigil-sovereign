@@ -422,6 +422,13 @@ files and target working files is fine — it's how you stay informed.
 ## XIII. References
 
 - `ENGAGEMENT-LIFECYCLE.md` — full lifecycle.
+- `.claude/skills/crucible/SKILL.md` — the AI skill entry: how to operate the engine,
+  its invariants, and the `python3 -m framework.v2 <subcommand>` workflows.
+- `framework/v2/docs/CRUCIBLE-AI.md` — the AI's full map of the system: agents, the
+  immutable event spine, the veracity (anti-hallucination) layer, the learning/
+  metacognition core, and the safety stack.
+- `framework/cognitive/metacognition.md` — the runtime doctrine injected into every
+  LLM reasoning call (prove-don't-guess, critics, refusal, self-consistency, learning).
 - `framework/cognitive/` — how you think.
 - `framework/playbooks/` — what you test.
 - `framework/knowledge-base/` — what you know.
