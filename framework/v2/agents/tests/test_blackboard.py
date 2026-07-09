@@ -61,6 +61,31 @@ def test_engagement_create_false_raises_when_missing(bb: Blackboard) -> None:
         bb.engagement_id("does-not-exist", create=False)
 
 
+def test_wal_and_synchronous_normal(bb: Blackboard) -> None:
+    # X3: WAL (persisted, from schema.sql) + synchronous=NORMAL (per-connection) — the standard
+    # safe fast setting that drops the per-commit fsync without risking corruption.
+    assert bb._conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    assert int(bb._conn.execute("PRAGMA synchronous").fetchone()[0]) == 1   # 1 == NORMAL
+
+
+def test_read_parent_id_filter(bb: Blackboard) -> None:
+    # X3: read(parent_id=...) restricts to the direct children of one event (served by
+    # idx_events_parent), and is additive — parent_id=None yields the full set as before.
+    bb.engagement_id("e")
+    root = bb.post(engagement="e", kind="observation", agent_name="a",
+                   payload={"source": "recon", "surface": "/x", "summary": "root"})
+    c1 = bb.post(engagement="e", kind="observation", agent_name="a", parent_id=root,
+                 payload={"source": "recon", "surface": "/x", "summary": "c1"})
+    c2 = bb.post(engagement="e", kind="observation", agent_name="a", parent_id=root,
+                 payload={"source": "recon", "surface": "/x", "summary": "c2"})
+    bb.post(engagement="e", kind="observation", agent_name="a",
+            payload={"source": "recon", "surface": "/x", "summary": "unrelated"})
+    kids = bb.read(engagement="e", parent_id=root)
+    assert {r.id for r in kids} == {c1, c2}                       # only root's children
+    assert bb.read(engagement="e", parent_id=999_999) == []       # no children -> empty
+    assert len(bb.read(engagement="e")) == 4                       # parent_id=None -> unchanged
+
+
 # ---------------------------------------------------------------------------
 # post + validation
 # ---------------------------------------------------------------------------

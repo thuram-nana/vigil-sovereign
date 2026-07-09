@@ -74,3 +74,48 @@ def test_reflection_agent_dedups_and_quiesces(tmp_path: Path) -> None:
     assert agent.step() == 0 and not agent.should_run()                # deduped; no repeats
     assert len(b.read(engagement="e", kinds=["reflection"])) == n
     b.close()
+
+
+def test_reflection_cursor_picks_up_new_threads_without_reposting(tmp_path: Path) -> None:
+    # X3 durable dedup cursor: after quiescing, a NEW dead thread (new hypothesis) is detected
+    # and posted exactly once; old reflections are never re-posted (the incremental cursor is
+    # complete and monotonic). Equivalent behaviour to the old full-scan dedup, at O(new) cost.
+    b = _bb(tmp_path)
+    _hyp(b, "H-1")
+    for _ in range(5):
+        _action(b)
+    agent = ReflectionAgent(b, "e")
+    assert agent.step() >= 2 and agent.step() == 0                      # posted once, then quiesces
+    _hyp(b, "H-2")                                                      # a new dead thread appears
+    assert agent.should_run()
+    assert agent.step() >= 1                                            # the new thread is posted
+    assert agent.step() == 0                                            # and never re-posted
+    keys = [(r.payload.get("trigger"), r.payload.get("reorientation"))
+            for r in b.read(engagement="e", kinds=["reflection"], limit=10_000)]
+    assert len(keys) == len(set(keys))                                 # no duplicate reflections
+    b.close()
+
+
+def test_pending_is_memoized_within_a_tick(tmp_path: Path, monkeypatch) -> None:
+    # X3: reflect() is a full-log analysis; should_run() + step() in ONE tick (no new events
+    # between them) must not each re-scan the log — the count-keyed memo serves the second call.
+    import framework.v2.agents.reflection as refl
+
+    b = _bb(tmp_path)
+    _hyp(b, "H-1")
+    for _ in range(5):
+        _action(b)
+    agent = refl.ReflectionAgent(b, "e")
+    calls = {"n": 0}
+    real = refl.reflect
+
+    def counting_reflect(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(refl, "reflect", counting_reflect)
+    assert agent.should_run()                       # computes reflect() once, memoized at head=N
+    after_should_run = calls["n"]
+    agent.step()                                    # head unchanged until it posts -> memo hit
+    assert calls["n"] == after_should_run           # step() did NOT re-run reflect() before posting
+    b.close()

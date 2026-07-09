@@ -157,13 +157,17 @@ def aggregate_panel(verdicts: list[CriticVerdict], *, entropy_gate: float = 0.5)
                         rationale=f"{modal_n}/{len(verdicts)} critics {modal}")
 
 
-def _all_of_kind(bb: Any, engagement: Any, kind: str) -> list:
-    """Every event of ``kind`` for the engagement, in id order — paged to exhaustion so a large
-    log is never silently truncated by the read default limit (the N1/N3 truncation lesson)."""
+def _verdicts_about(bb: Any, engagement: Any, finding_event_id: int) -> list:
+    """Every critic_verdict event posted ABOUT ``finding_event_id``, in id order — paged to
+    exhaustion so a large log is never silently truncated (the N1/N3 lesson). X3: filters on the
+    indexed ``parent_id`` (which ``MultiCriticAgent`` sets to the finding id) so this reads only
+    the verdicts on THIS finding, not every verdict in the engagement — the panel quorum gate is
+    O(verdicts-on-this-finding), not O(all-verdicts) per finding."""
     out: list = []
     since = 0
     while True:
-        batch = bb.read(engagement=engagement, kinds=[kind], since_id=since, limit=5000)
+        batch = bb.read(engagement=engagement, kinds=["critic_verdict"],
+                        parent_id=finding_event_id, since_id=since, limit=5000)
         if not batch:
             break
         out.extend(batch)
@@ -177,8 +181,11 @@ def panel_verdict_for(bb: Any, engagement: Any, finding_event_id: int,
                       *, entropy_gate: float = 0.5) -> PanelVerdict:
     """Read the critic_verdict events posted about ``finding_event_id`` and aggregate them
     into the panel verdict — the quorum gate a coordinator can consult before promotion. Reads
-    the FULL verdict set (paged) so a recent finding's verdicts are never dropped by a limit."""
-    rows = _all_of_kind(bb, engagement, "critic_verdict")
+    the FULL verdict set for this finding (paged) so none is dropped by a limit. The
+    ``target_event_id`` payload check is kept as a belt-and-suspenders over the indexed
+    ``parent_id`` filter (both are the finding id), so a verdict posted with a divergent
+    parent_id can never be mis-attributed."""
+    rows = _verdicts_about(bb, engagement, finding_event_id)
     verdicts = [
         CriticVerdict(critic=r.payload["critic"], verdict=r.payload["verdict"],
                       severity=r.payload.get("severity", "info"),
