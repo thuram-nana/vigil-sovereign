@@ -51,6 +51,8 @@ class IntelSourceKind(str, enum.Enum):
     PACKET_CAPTURE = "packet_capture"  # observed in captured traffic (a pcap read by a packet engine)
     WEB_SCANNER = "web_scanner"       # a third-party web scanner's heuristic match (Nuclei/ZAP/Burp) —
     #                                   a LEAD, never a fact, until a CRUCIBLE oracle re-verifies it
+    MCP_TOOL = "mcp_tool"             # an external MCP tool consumed as a gated sensor (mcp.sensor) —
+    #                                   a third-party say-so; a LEAD, never a fact, until an oracle re-verifies it
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,
