@@ -226,6 +226,50 @@ def test_engage_refuses_out_of_scope_seed(isolated_engagement):
         run_engagement("alpha", "http://10.11.12.13/", enable_oob=False, prompt_callback=_deny)
 
 
+def _dotenv(request) -> Response:
+    return Response("SECRET=hunter2", status=200, mimetype="text/plain")
+
+
+def test_engage_arsenal_off_is_the_default_and_surfaces_nothing(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+
+    report = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny,  # enable_arsenal defaults False
+    ).report
+    # the arsenal never ran: its lead lists are empty and no arsenal-only class landed
+    assert report.discovered_paths == []
+    assert report.js_secrets == []
+    assert report.arsenal_leads == []
+    assert all(f.bug_class not in {"request_smuggling", "cross_site_websocket_hijacking",
+                                   "request_race"} for f in report.active_findings)
+
+
+def test_engage_arsenal_on_surfaces_discovery_leads_through_the_gated_executor(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+    httpserver.expect_request("/.env").respond_with_handler(_dotenv)
+
+    report = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny, enable_arsenal=True,
+    ).report
+    # content discovery ran through the gated executor and reached the hidden path
+    assert any(p.path == "/.env" and p.status == 200 for p in report.discovered_paths), \
+        report.discovered_paths
+    # the scan itself is unaffected — arsenal is purely additive
+    assert report.active_findings
+
+
 def test_engage_refuses_relay_host_not_in_scope(isolated_engagement, httpserver: HTTPServer):
     port = httpserver.port
     isolated_engagement("alpha", "127.0.0.1")

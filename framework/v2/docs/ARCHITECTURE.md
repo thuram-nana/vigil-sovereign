@@ -216,6 +216,17 @@ browser check never guesses.
 The same driver powers the `--spa` crawler, which records the `fetch`/XHR
 endpoints an SPA only exposes after interaction.
 
+**The browser's own egress is gated two ways.** When the browser is confined to an
+allowlist (the `engage` runner passes the charter's in-scope hosts), it launches with
+resolver rules (`--host-resolver-rules=MAP * ~NOTFOUND` with the allowlist EXCLUDE-d)
+*and* every CDP session enables a fail-closed **request allowlist**: `Fetch.enable`
+pauses each page-initiated request, and the driver continues it iff its host is
+allowed (loopback always is) or fails it with `AccessDenied` before a byte leaves the
+browser. The request allowlist catches what the resolver rules cannot (IP-literal
+references), so a remote target's page can never pull the browser off-scope. With no
+allowlist (the loopback `scan` path) neither gate is installed — the behaviour is
+unchanged.
+
 ---
 
 ## 6. The out-of-band collaborator
@@ -282,10 +293,22 @@ oracle, so adding coverage cannot add false positives.
 
 ## 8. Honest current limitations
 
-- **The browser path is loopback-only.** `--browser-xss` and `--spa` are exposed on
-  `scan` (loopback) but **not** on `engage`. A remote browser path is pending a CDP
-  request-allowlist so the headless browser's own egress can be gated the way the
-  HTTP executor gates the scanner's.
+- **The browser path now has a request allowlist (was: loopback-only).** `--browser-xss`
+  and `--spa` run on `engage` against a remote in-scope target because the headless
+  browser's own egress is gated fail-closed at the CDP layer (`Fetch.enable` +
+  per-request host allowlist, §5) on top of the resolver-rules gate. Residual limit:
+  the request allowlist is host-based (loopback + charter hosts); it does not yet do
+  per-path scoping, and a browser too old to support the `Fetch` domain falls back to
+  the resolver-rules gate alone.
+- **The advanced arsenal is opt-in, not default.** HTTP request-smuggling detection,
+  Cross-Site WebSocket Hijacking, content/JS discovery, and the single-packet race
+  engine are wired into `WebScanCampaign`/`engage` behind `--arsenal` (default off →
+  the default scan and `make gate` are byte-identical). The raw-socket modules
+  (smuggling/CSWSH/race) bypass the gated `send`, so they are authorized host-by-host
+  through the full authority/scope/kill-switch chain before any byte leaves the box;
+  the destructive race engine runs only against explicit operator-supplied targets,
+  never a blindly-swept endpoint. Every arsenal finding is still oracle-confirmed.
+  `https` origins are skipped by the cleartext raw-socket smuggling/race probes.
 - **OOB is HTTP-only; DNS-only interactions are not covered.** The collaborator
   relay records HTTP fetches of the callback. A DNS-only interaction (a
   `nslookup`/`dig` with no HTTP fetch) needs a DNS-capable relay — a documented

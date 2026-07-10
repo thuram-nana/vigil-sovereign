@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import contextlib
 import random
+import re
 import time
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urlsplit
+from typing import Callable, Iterable
+from urllib.parse import urljoin, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,6 +37,7 @@ from ..worldmodel.graph import WorldModel
 from ..worldmodel.models import Edge, EdgeKind, Node, NodeKind
 from .checks import CorsActiveCheck, DEFAULT_CHECKS, Check, HostHeaderCheck, RequestCheck, Send
 from .crawler import Crawler, Scope
+from .discovery import DiscoveredPath, JsSecret
 from .domxss import DomXssCandidate, analyze_html
 from .engine import AuditEngine, AuditFinding
 from .fingerprint import Fingerprint, fingerprint
@@ -91,6 +93,18 @@ class ScanReport(BaseModel):
     # Endpoints the SPA crawler observed the app call (method + absolute URL) —
     # the fetch/XHR surface a static crawl cannot see.
     discovered_endpoints: list[str] = Field(default_factory=list)
+    # --- opt-in advanced web arsenal (enable_arsenal) — LEADS, never confirmed ---
+    # These are populated only when the arsenal pass ran. Like dom_xss_candidates
+    # they are strictly separated from active_findings: they record reachability /
+    # references, not exploitability. The arsenal's oracle-CONFIRMED findings
+    # (request smuggling, CSWSH, request race) land in active_findings with an
+    # oracle_context certificate like any other confirmed finding — they are NOT
+    # here. Empty on every default (arsenal-off) run.
+    discovered_paths: list[DiscoveredPath] = Field(default_factory=list)
+    js_secrets: list[JsSecret] = Field(default_factory=list)
+    # Human-readable capability/reference leads the arsenal surfaced (an offered
+    # h2c upgrade, mined ws:// endpoints, mined API refs) — context, not findings.
+    arsenal_leads: list[str] = Field(default_factory=list)
 
     @property
     def total_findings(self) -> int:
@@ -145,6 +159,10 @@ class WebScanCampaign:
         grammar_fuzz_seed: int = 0,
         priors: "Iterable[object] | None" = None,
         progress: "ProgressSink | None" = None,
+        enable_arsenal: bool = False,
+        arsenal_authz: "Callable[[str], bool] | None" = None,
+        arsenal_race_targets: "tuple[tuple[str, int], ...]" = (),
+        arsenal_max_probes: int = 64,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -222,6 +240,30 @@ class WebScanCampaign:
         # caller inject a check set; None loads the shipped library from disk.
         self.use_library = use_library
         self._library_entries = library_entries
+        # Opt-in advanced web arsenal (default OFF → the default scan is byte-for-byte
+        # unchanged). When on, an ADDITIVE post-audit pass runs the built-but-unwired
+        # request-level modules — content/JS discovery (leads via the gated `send`),
+        # HTTP request-smuggling detection, and Cross-Site WebSocket Hijacking — plus,
+        # only when explicit race targets are supplied, the single-packet race engine.
+        # Every arsenal finding is oracle-confirmed exactly like a built-in (a smuggle
+        # is a fact only when the latency oracle fires on a real hang), so precision is
+        # unaffected; the raw-socket modules that bypass the injected `send` are gated
+        # host-by-host through `arsenal_authz` (fail-closed).
+        self.enable_arsenal = enable_arsenal
+        # Host authorization for the RAW-SOCKET arsenal (smuggling/CSWSH/race), which
+        # speaks bytes on the wire directly and so does NOT flow through the injected
+        # gated `send`. The engage runner sets this to the full authority/kill-switch/
+        # scope/posture chain (no traffic); None → loopback-only (the `scan` discipline).
+        # A gate that refuses (or errors) means NO probe leaves the box for that host.
+        self._arsenal_authz = arsenal_authz
+        # The single-packet race engine writes concurrent requests at an action and is
+        # therefore DESTRUCTIVE — it is never fired blindly at a swept endpoint (that
+        # would be both unsafe and false-positive-prone without a known atomicity limit).
+        # It runs only against operator-supplied ``(action_path, max_allowed)`` targets,
+        # each still host-gated. Empty (default) → the race engine never runs.
+        self.arsenal_race_targets = tuple(arsenal_race_targets)
+        # Bound the content-discovery probe count so an arsenal pass stays cheap.
+        self.arsenal_max_probes = arsenal_max_probes
 
     def _resolve_bandit(self) -> ContextualBandit:
         """The explicit bandit, else a warm-start from the persisted file if one
@@ -378,6 +420,258 @@ class WebScanCampaign:
                     break  # one confirmed execution per parameter is enough
         return findings
 
+    # ---------------------------------------------------------------------
+    # opt-in advanced web arsenal (enable_arsenal) — additive, gated, oracle-anchored
+    # ---------------------------------------------------------------------
+
+    def _arsenal_host_allowed(self, url: str) -> bool:
+        """Fail-closed authorization for the RAW-SOCKET arsenal (smuggling / CSWSH /
+        race), which sends bytes on the wire directly and so cannot ride the injected
+        gated ``send``. With an ``arsenal_authz`` gate (the engage runner's full
+        authority/kill-switch/scope/posture chain) the host must clear it; a refusal
+        OR a gate error means no probe leaves the box. Without a gate (loopback
+        ``scan``) only loopback hosts are allowed, mirroring the ``scan`` discipline —
+        the raw-socket arsenal can never egress off-box unauthorized."""
+        if self._arsenal_authz is not None:
+            try:
+                return bool(self._arsenal_authz(url))
+            except Exception:
+                return False   # fail closed on a gate error — never assume authorized
+        host = (urlsplit(url).hostname or "").lower()
+        return host in {"127.0.0.1", "localhost", "::1"}
+
+    @staticmethod
+    def _arsenal_finding(confirmed, *, check_id: str, insertion_point: str,
+                         param: str, endpoint: str, oracle_context: dict | None) -> AuditFinding:
+        """Adapt an oracle-confirmed arsenal result into the same AuditFinding shape
+        the built-in checks emit, retaining the serialized FindingContext as the
+        re-verifiable certificate."""
+        kind = confirmed.confirmed_by
+        return AuditFinding(
+            check_id=check_id, bug_class=confirmed.bug_class,
+            insertion_point=insertion_point, param=param, endpoint=endpoint,
+            confidence=confirmed.confidence,
+            confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
+            rationale=confirmed.rationale,
+            oracle_context=oracle_context,
+        )
+
+    def _discovery_leads(self, seed_url: str, crawl) -> tuple[list[DiscoveredPath], list[JsSecret], list[str]]:
+        """Content discovery (via the gated ``send``) + JS secret/endpoint mining over
+        the already-crawled corpus (no extra traffic). All LEADS — reachability and
+        references, never confirmed vulnerabilities. Deterministic; robust to a
+        partial/absent corpus. Also surfaces mined ws:// endpoints as arsenal leads."""
+        from .discovery import discover_content, mine_js
+
+        leads: list[str] = []
+        secrets: list[JsSecret] = []
+        try:
+            sp = urlsplit(seed_url)
+            base = f"{sp.scheme}://{sp.netloc}/"
+            paths = discover_content(base, self._send, max=self.arsenal_max_probes)
+        except Exception:
+            paths = []
+        seen_secret: set[tuple[str, str]] = set()
+        seen_lead: set[str] = set()
+        for page in crawl.pages:
+            body = page.body or ""
+            if not body:
+                continue
+            try:
+                mined = mine_js(body, base_url=page.url)
+            except Exception:
+                mined = None
+            for s in (mined.secrets if mined is not None else []):
+                key = (s.kind, s.value)
+                if key not in seen_secret:
+                    seen_secret.add(key)
+                    secrets.append(s)
+            # mine_js recognises http(s)/path endpoints; ws:// refs (the CSWSH surface)
+            # need a direct scan, so surface them as leads here too.
+            for ep in re.findall(r"wss?://[^\s'\"<>)]+", body):
+                if ep not in seen_lead:
+                    seen_lead.add(ep)
+                    leads.append(f"ws-endpoint {ep}")
+        return paths, secrets, leads
+
+    def _http_origins(self, seed_url: str, crawl) -> list[tuple[str, int, str]]:
+        """The distinct plain-HTTP origins the crawl touched (seed included), as
+        ``(host, port, origin_url)``. Only ``http`` origins — the raw-socket
+        smuggling/race probes speak cleartext, so ``https`` origins are skipped
+        (documented limitation). Bounded and deterministic (first-seen order)."""
+        origins: list[tuple[str, int, str]] = []
+        seen: set[str] = set()
+        urls = [seed_url] + [r.url for r in crawl.requests]
+        for u in urls:
+            sp = urlsplit(u)
+            if sp.scheme != "http" or not sp.hostname:
+                continue
+            netloc = sp.netloc
+            if netloc in seen:
+                continue
+            seen.add(netloc)
+            origins.append((sp.hostname, sp.port or 80, f"http://{netloc}/"))
+            if len(origins) >= 8:
+                break
+        return origins
+
+    def _smuggling_findings(self, origins: list[tuple[str, int, str]]) -> tuple[list[AuditFinding], list[str]]:
+        """Probe each authorized origin for HTTP request-smuggling desync and h2c
+        capability. A ``detected`` desync is promoted to an oracle-confirmed
+        AuditFinding (the latency oracle fired on a real hang); an offered h2c
+        upgrade is a capability lead. Every origin clears ``_arsenal_host_allowed``
+        first — an unauthorized host is never touched."""
+        from .smuggling import detect, detect_h2c_upgrade
+        from ..verify.adapter import FindingContext
+        from ..verify.confirmation import confirm_finding
+
+        findings: list[AuditFinding] = []
+        leads: list[str] = []
+        for host, port, origin_url in origins:
+            if not self._arsenal_host_allowed(origin_url):
+                continue
+            try:
+                results = detect(host, port)
+            except Exception:
+                results = []
+            for r in results:
+                if not r.detected:
+                    continue
+                ctx = FindingContext.from_http_responses(
+                    {"status": 200, "body": "control"}, {"status": 200, "body": "control"},
+                    bug_class="request_smuggling",
+                    baseline_latency_ms=r.control_ms, mutated_latency_ms=r.probe_ms,
+                    discriminator={"dimensions": ["latency"], "latency_threshold_ms": 1500.0})
+                confirmed = confirm_finding(
+                    {"bug_class": "request_smuggling", "title": f"{r.technique} desync",
+                     "severity": "High", "surface": origin_url,
+                     "summary": f"{r.technique} timing desync (connection hung on the probe)"},
+                    ctx)
+                if confirmed is None:
+                    continue
+                findings.append(self._arsenal_finding(
+                    confirmed, check_id=f"smuggling-{r.technique}",
+                    insertion_point=f"request:{r.technique}", param=r.technique,
+                    endpoint=origin_url, oracle_context=ctx.model_dump(mode="json")))
+            try:
+                if detect_h2c_upgrade(host, port):
+                    leads.append(f"h2c-upgrade offered at {origin_url} (escalate to an h2 tool)")
+            except Exception:
+                pass
+        return findings, leads
+
+    def _ws_candidates(self, seed_url: str, crawl, spa_endpoints: list[str]) -> list[str]:
+        """In-scope ws:// / wss:// endpoints to test for CSWSH: mined from crawled
+        page bodies and from any SPA-discovered ws endpoints, deduped, restricted to
+        the seed host, bounded. No candidates → the WS checks simply do not run."""
+        seed_host = urlsplit(seed_url).hostname or ""
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def _add(u: str) -> None:
+            if len(out) >= 8 or u in seen:
+                return
+            h = urlsplit(u).hostname or ""
+            if h and h == seed_host:
+                seen.add(u)
+                out.append(u)
+
+        for page in crawl.pages:
+            for m in re.findall(r"wss?://[^\s'\"<>)]+", page.body or ""):
+                _add(m)
+        for ep in spa_endpoints:
+            token = ep.split(" ", 1)[-1]
+            if token.startswith(("ws://", "wss://")):
+                _add(token)
+        return out
+
+    def _cswsh_findings(self, ws_urls: list[str]) -> list[AuditFinding]:
+        """Test each in-scope ws endpoint for Cross-Site WebSocket Hijacking: a
+        handshake accepted from a FOREIGN origin (while the trusted origin also
+        succeeds) means Origin is not validated. Oracle-confirmed via achieved-state;
+        each endpoint clears ``_arsenal_host_allowed`` first."""
+        from .websocket import CswshCheck
+        from ..verify.adapter import FindingContext
+
+        findings: list[AuditFinding] = []
+        for ws_url in ws_urls:
+            probe_url = ws_url.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
+            if not self._arsenal_host_allowed(probe_url):
+                continue
+            try:
+                confirmed = CswshCheck(url=ws_url).probe()
+            except Exception:
+                continue
+            if confirmed is None:
+                continue
+            ctx = FindingContext.from_state(
+                {"cross_origin_ws_accepted": True}, {"cross_origin_ws_accepted": True},
+                bug_class="cross_site_websocket_hijacking")
+            findings.append(self._arsenal_finding(
+                confirmed, check_id="cswsh", insertion_point=f"websocket:{ws_url}",
+                param=ws_url, endpoint=ws_url, oracle_context=ctx.model_dump(mode="json")))
+        return findings
+
+    def _race_findings(self, seed_url: str) -> list[AuditFinding]:
+        """Fire the single-packet race engine ONLY at operator-supplied
+        ``(action_path, max_allowed)`` targets (never a blindly-swept endpoint). An
+        action that overran its atomicity limit under the burst is promoted to an
+        oracle-confirmed ``request_race`` finding. Each target's origin is host-gated."""
+        from .race import race_burst
+        from ..verify.adapter import FindingContext
+        from ..verify.confirmation import confirm_finding
+
+        if not self.arsenal_race_targets:
+            return []
+        sp = urlsplit(seed_url)
+        base = f"{sp.scheme}://{sp.netloc}"
+        findings: list[AuditFinding] = []
+        for action_path, max_allowed in self.arsenal_race_targets:
+            target_url = urljoin(base + "/", action_path.lstrip("/"))
+            if not self._arsenal_host_allowed(target_url):
+                continue
+            try:
+                result = race_burst(base, action_path, max_allowed=int(max_allowed))
+            except Exception:
+                continue
+            if not result.over_run:
+                continue
+            ctx = FindingContext.from_predicate(
+                {"action": action_path, "successes": result.successes, "max_allowed": int(max_allowed)},
+                {"gt": [{"var": "successes"}, {"var": "max_allowed"}]},
+                bug_class="request_race")
+            confirmed = confirm_finding(
+                {"bug_class": "request_race", "title": f"Limit-overrun race on {action_path}",
+                 "severity": "High", "surface": f"POST {action_path}",
+                 "summary": f"action succeeded {result.successes}x under a burst (limit {max_allowed})"},
+                ctx)
+            if confirmed is None:
+                continue
+            findings.append(self._arsenal_finding(
+                confirmed, check_id="race", insertion_point=f"race:{action_path}",
+                param=action_path, endpoint=target_url, oracle_context=ctx.model_dump(mode="json")))
+        return findings
+
+    def _arsenal_pass(
+        self, seed_url: str, crawl, spa_endpoints: list[str],
+    ) -> tuple[list[AuditFinding], list[DiscoveredPath], list[JsSecret], list[str]]:
+        """Run the opt-in arsenal and return (confirmed findings, discovered-path
+        leads, JS-secret leads, misc leads). Each sub-pass is best-effort and gated;
+        a failure in one never sinks the scan. Oracle-confirmed findings flow back
+        into active_findings; everything else is a clearly-separated lead."""
+        active: list[AuditFinding] = []
+        leads: list[str] = []
+        paths, secrets, disc_leads = self._discovery_leads(seed_url, crawl)
+        leads.extend(disc_leads)
+
+        smug_findings, smug_leads = self._smuggling_findings(self._http_origins(seed_url, crawl))
+        active.extend(smug_findings)
+        leads.extend(smug_leads)
+
+        active.extend(self._cswsh_findings(self._ws_candidates(seed_url, crawl, spa_endpoints)))
+        active.extend(self._race_findings(seed_url))
+        return active, paths, secrets, leads
+
     def run(self, seed_url: str) -> ScanReport:
         started = time.monotonic()
         if self._progress is not None:
@@ -486,6 +780,17 @@ class WebScanCampaign:
             # land in active_findings with a dom_execution certificate.
             if browser is not None and self.enable_browser_xss:
                 active.extend(self._browser_xss_pass(crawl, browser))
+
+            # Opt-in advanced arsenal (default OFF → this whole block is skipped and
+            # the run is byte-identical). Additive: its oracle-confirmed findings join
+            # active_findings; its leads populate the separate lead lists below.
+            discovered_paths: list[DiscoveredPath] = []
+            js_secrets: list[JsSecret] = []
+            arsenal_leads: list[str] = []
+            if self.enable_arsenal:
+                a_findings, discovered_paths, js_secrets, arsenal_leads = self._arsenal_pass(
+                    seed_url, crawl, spa_endpoints)
+                active.extend(a_findings)
         finally:
             if browser is not None:
                 browser.stop()
@@ -505,6 +810,9 @@ class WebScanCampaign:
             passive_findings=crawl.passive_findings,
             dom_xss_candidates=candidates,
             discovered_endpoints=spa_endpoints,
+            discovered_paths=discovered_paths,
+            js_secrets=js_secrets,
+            arsenal_leads=arsenal_leads,
             fingerprint=fp,
             library_checks_run=library_checks_run,
         )
