@@ -59,6 +59,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     invocation — every sensor is still gated at ``run_sensor`` time, so registering the active Nmap
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
     from .nmap import NmapServiceSensor
+    from .sbom import SbomVulnSensor
     from .tshark import TsharkFlowSensor
     from .web_scanner import (
         BurpWebSensor,
@@ -70,6 +71,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     registry.register(DeclaredServiceSensor())
     registry.register(NmapServiceSensor())
     registry.register(TsharkFlowSensor())
+    registry.register(SbomVulnSensor())   # passive SCA: grype/osv report -> vulnerable-dependency leads
     # Web-scanner sensors: Nuclei/ZAP/Burp as gated LEAD producers. Registration is not invocation —
     # each is still gated at run_sensor time (ACTIVE_RECON + charter scope for the active ones, the
     # egress allowlist for the Burp REST pull), so registering them here is safe.

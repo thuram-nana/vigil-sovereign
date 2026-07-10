@@ -83,6 +83,9 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # TLS posture: a deprecated protocol / weak cipher is a FACT only when a real handshake negotiated
     # it (verify.tls captures it; the oracle judges the negotiated version/suite).
     "weak_tls": (OracleKind.TLS_WEAKNESS,),
+    # supply chain: a scanner's "package @ version is affected by CVE" is a FACT only when the version
+    # provably falls in the advisory's affected range (verify.version's deterministic membership check).
+    "vulnerable_dependency": (OracleKind.VERSION_RANGE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -135,6 +138,11 @@ _ALIASES: dict[str, str] = {
     "deprecated_tls": "weak_tls",
     "ssl_weakness": "weak_tls",
     "weak_ssl": "weak_tls",
+    "vulnerable_component": "vulnerable_dependency",
+    "known_vulnerable_dependency": "vulnerable_dependency",
+    "outdated_dependency": "vulnerable_dependency",
+    "sca": "vulnerable_dependency",
+    "cve": "vulnerable_dependency",
 }
 
 _ALL_ORACLES: tuple[OracleKind, ...] = tuple(OracleKind)
@@ -223,6 +231,7 @@ class OracleVerifier:
           oob_hits                           -> oob_callback_oracle
           handshake                          -> service_reachability_oracle
           tls                                -> tls_weakness_oracle
+          version_advisory                   -> version_range_oracle
         """
         ctx = dict(finding_context or {})
         bug_class = str(ctx.get("bug_class", ""))
@@ -336,6 +345,10 @@ class OracleVerifier:
         if kind is OracleKind.TLS_WEAKNESS:
             if "tls" in ctx:
                 return oracles.tls_weakness_oracle(ctx["tls"])
+            return None
+        if kind is OracleKind.VERSION_RANGE:
+            if "version_advisory" in ctx:
+                return oracles.version_range_oracle(ctx["version_advisory"])
             return None
         return None
 

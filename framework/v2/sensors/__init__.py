@@ -20,6 +20,7 @@ from .base import Sensor, SensorResult, service_observations
 from .builtin import DeclaredServiceSensor, default_registry, register_builtin_sensors
 from .nmap import NmapServiceSensor, parse_nmap_xml
 from .pipeline import run_sensor
+from .sbom import SbomVulnSensor, parse_sca_report, sca_observations
 from .tshark import TsharkFlowSensor, parse_tshark_fields
 from .web_scanner import (
     BurpWebSensor,
