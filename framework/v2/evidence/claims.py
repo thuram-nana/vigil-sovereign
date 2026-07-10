@@ -23,6 +23,14 @@ canonical structured statement, which re-grounds by construction — plus one la
 API to stamp arbitrary prose as a fact, so an over-claiming narrative cannot launder into
 a governance-signed "proven fact." Decomposition is a deterministic regex (no LLM), so the
 gate itself introduces no hallucination.
+
+Distinct-by-design from ``veracity/claims.py`` (do NOT merge — different layer, same name):
+this module defines no claim MODEL — it emits ``ReportClaim`` (from ``evidence/models.py``),
+a certificate-bound report sentence — whereas ``veracity/claims.py`` owns the firewall's
+runtime ``Claim``/``AdmittedClaim`` admission types. The two interoperate one-directionally:
+``certify._claims_grounded`` re-admits each ``render_as="fact"`` ``ReportClaim`` through the
+veracity firewall, so the evidence layer depends on veracity, never the reverse. They share a
+vocabulary (``render_as``, "fact", "analyst-commentary"), not code.
 """
 
 from __future__ import annotations
