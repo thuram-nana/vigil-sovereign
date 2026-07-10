@@ -251,6 +251,22 @@ def test_web_leads_from_findings_drops_off_host() -> None:
     assert len(leads) == 1 and leads[0].location == "http://127.0.0.1:9/a?q=1"
 
 
+def test_scheme_less_foreign_host_is_dropped_not_planted() -> None:
+    # nuclei's ssl/network/tcp/dns templates emit scheme-less host:port `matched-at` values. A foreign
+    # one must be dropped (symmetric with require_in_scope), not read as a bare in-scope path — else it
+    # plants an out-of-scope asset in the world-model. A genuine relative path stays in-scope.
+    from framework.v2.eval.validation import NormalizedFinding
+    findings = [
+        NormalizedFinding(tool="nuclei", bug_class="exposure", location="evil.example.net:443"),
+        NormalizedFinding(tool="nuclei", bug_class="exposure", location="10.9.9.9:22"),
+        NormalizedFinding(tool="nuclei", bug_class="xss", location="/in/scope/path?q=1"),  # relative -> kept
+    ]
+    obs = web_lead_observations(TARGET, findings, seq=1, source="nuclei")
+    ids = [o.subject.node_id for o in obs]
+    assert not any("evil.example.net" in i or "10.9.9.9" in i for i in ids)   # foreign hosts dropped
+    assert any("/in/scope/path" in i for i in ids)                             # relative path kept
+
+
 # ===========================================================================
 # malformed / graceful degradation (normalize)
 # ===========================================================================

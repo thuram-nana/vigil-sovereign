@@ -102,12 +102,17 @@ def _target_host(target: str) -> str:
 
 
 def _location_host(location: str) -> str:
-    """The lowercased hostname a finding's location sits on, or "" when the location carries no host
-    (a bare path / path+param / parameter token — which is in-scope by construction, since it is
-    relative to the scoped target)."""
+    """The lowercased hostname a finding's location sits on, or "" when the location is a RELATIVE
+    reference (a path / query / fragment) that is in-scope by construction. A scheme-LESS authority
+    (``host`` / ``host:port`` — the form nuclei emits for ssl/network/tcp/dns templates) IS resolved
+    to its host, symmetric with ``common.ethics.require_in_scope`` (which prepends ``https://`` before
+    reading the hostname). Without this, a scheme-less foreign ``host:port`` reads as a bare path and
+    the off-host drop is skipped — planting an out-of-scope asset in the world-model."""
     s = (location or "").strip()
+    if not s or s[0] in "/?#":
+        return ""                       # a relative path / query / fragment — in-scope by construction
     if "://" not in s:
-        return ""
+        s = "https://" + s              # a bare host[:port] — resolve it the way the scope gate does
     return (urlsplit(s).hostname or "").lower()
 
 
