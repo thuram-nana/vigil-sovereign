@@ -34,6 +34,22 @@ def _args_summary(args: object) -> str:
     return str(type(args).__name__)
 
 
+def _scope_target(args: object) -> str:
+    """The concrete host/target a tool acts on, for the charter-scope gate. Checks the conventional
+    keys in order — ``target`` (the HTTP/tool convention) then ``host`` (the sensor convention) — so
+    a SENSOR that acts on ``args['host']`` is scope-gated exactly like a tool that acts on
+    ``args['target']``. Without this a sensor's host is invisible to the gate and out-of-charter
+    assets would enter the world-model unscoped. A tool naming neither key acts on no concrete host,
+    so the scope gate is skipped (unchanged) — the gate only ever tightens, never loosens."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("target", "host"):
+        v = args.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 def _as_hosts(value: object) -> tuple:
     """Normalise a tool's declared ``egress_hosts`` to a tuple of host strings — DEFENSIVELY and
     without ever raising (base.py's contract: metadata is read defensively, never a crash):
@@ -139,7 +155,7 @@ def invoke_tool(registry: ToolRegistry, name: str, args: dict, ctx: ToolContext,
     capability = getattr(tool, "capability", None)
     destructive = bool(getattr(tool, "destructive", False))
     egress_hosts = _as_hosts(getattr(tool, "egress_hosts", ()))
-    target = str(args.get("target", "")) if isinstance(args, dict) else ""
+    target = _scope_target(args)
 
     # Record the intent BEFORE anything else — even a refused/failed call is on the stream.
     call_id = _emit_call(sink, tool.name, tier=tier, capability=capability, target=target,
