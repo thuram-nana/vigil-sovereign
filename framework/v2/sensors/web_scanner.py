@@ -109,9 +109,16 @@ def _location_host(location: str) -> str:
     reading the hostname). Without this, a scheme-less foreign ``host:port`` reads as a bare path and
     the off-host drop is skipped — planting an out-of-scope asset in the world-model."""
     s = (location or "").strip()
-    if not s or s[0] in "/?#":
-        return ""                       # a relative path / query / fragment — in-scope by construction
-    if "://" not in s:
+    if not s or s[0] in "?#":
+        return ""                       # a query / fragment — in-scope by construction
+    if s.startswith("//"):
+        s = "https:" + s                # protocol-relative //host/path — a FOREIGN authority, resolve it
+    elif "://" not in s:
+        # scheme-less: an AUTHORITY has a host-like head (a dotted name / IP, or a ':port'); a leading-
+        # slash path, a bare relative path segment, or a param token does not — those are in-scope.
+        head = s.split("/", 1)[0]
+        if s[0] == "/" or ("." not in head and ":" not in head):
+            return ""                   # relative path / bare param token — in-scope by construction
         s = "https://" + s              # a bare host[:port] — resolve it the way the scope gate does
     return (urlsplit(s).hostname or "").lower()
 

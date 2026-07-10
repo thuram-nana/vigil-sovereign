@@ -267,6 +267,17 @@ def test_scheme_less_foreign_host_is_dropped_not_planted() -> None:
     assert any("/in/scope/path" in i for i in ids)                             # relative path kept
 
 
+def test_location_host_resolves_authorities_but_keeps_relative_refs() -> None:
+    # the shared minter's scope guard: unambiguous FOREIGN authorities are dropped (incl. the
+    # protocol-relative //host form), while genuine relative references (leading-slash paths, bare
+    # param tokens, no-leading-slash relative paths — the forms sqlmap emits) stay in-scope.
+    from framework.v2.sensors.web_scanner import _location_host
+    for foreign in ("evil.example.net:443", "10.9.9.9:22", "//evil.example.net/x", "http://evil.test/y"):
+        assert _location_host(foreign) not in ("", "127.0.0.1")   # resolves to a droppable foreign host
+    for relative in ("/admin/login?id=1", "?q=1", "#frag", "id", "username", "admin/login.php"):
+        assert _location_host(relative) == ""                     # in-scope by construction, never dropped
+
+
 # ===========================================================================
 # malformed / graceful degradation (normalize)
 # ===========================================================================
