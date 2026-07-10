@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from ..agents.tools import ToolContext, ToolResult
 from ..intel.models import Credibility, IntelSourceKind, Observation, Reliability, SourceReliability
@@ -32,6 +33,10 @@ from .base import service_observations  # noqa: F401  (kept for parity; sbom min
 # An SCA scanner match: a reliable tool, but a version-range CLAIM that is not proof until the oracle
 # re-derives membership. Admiralty B2 — the finding is a lead, never an auto-fact.
 _SCA_RELIABILITY = SourceReliability(reliability=Reliability.B, credibility=Credibility.C2)
+
+# grype appends a trailing version-format tag to every versionConstraint (" (unknown)", " (python)",
+# " (apk)", ...) — a comment, not part of the range.
+_GRYPE_FMT_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
 
 
 def _advisories_from_grype(report: dict) -> list[dict]:
@@ -52,7 +57,10 @@ def _advisories_from_grype(report: dict) -> list[dict]:
             found = (d or {}).get("found") or {}
             c = found.get("versionConstraint")
             if isinstance(c, str) and c.strip():
-                constraints.append(c.strip())
+                # grype ALWAYS appends a trailing format tag, e.g. ">=2.0.0,<2.15.0 (unknown)" /
+                # "< 2.17.1 (python)" — strip it so the oracle's comparator does not read "(unknown)"
+                # as an unparseable clause and fail the whole (real) constraint closed.
+                constraints.append(_GRYPE_FMT_SUFFIX.sub("", c).strip())
         out.append({
             "package": name, "version": version,
             "vuln_id": str(vuln.get("id") or "").strip(),

@@ -27,34 +27,37 @@ from .adapter import FindingContext
 from .models import VerificationResult
 from .verifier import OracleVerifier
 
-# One comparable component: an int sorts below a str of the same position is handled by the tuple of
-# (is_int, value) so numeric and alphanumeric segments never compare across types.
-_SEG_RE = re.compile(r"[.\-+_~]")
-
-
 def _loose_key(version: str) -> tuple | None:
-    """A comparable key for a version ``packaging`` cannot parse (loose semver / vendor strings).
-    Splits on ``. - + _ ~`` into numeric-aware segments; a release with a pre-release tag sorts BELOW
-    the same release without one (``1.2.0-rc1`` < ``1.2.0``). Returns None if there is no digit at all
-    (not a version)."""
-    v = version.strip().lstrip("vV=").strip()
+    """A comparable key for a version ``packaging`` cannot parse (loose semver / Maven SNAPSHOT / Go
+    pseudo-version / vendor strings). The RELEASE is the leading run of numeric segments; the first
+    non-numeric segment starts the PRE-RELEASE tail. A FINAL release (no pre-release tail) sorts ABOVE
+    the same release WITH one (``1.2.0`` > ``1.2.0-rc1`` > a ``1.2.0-SNAPSHOT`` dev build), per
+    semver/PEP 440 precedence. Build metadata after ``+`` is ignored (it does not affect precedence).
+    Returns None if there is no digit at all (not a version)."""
+    v = version.strip().lstrip("vV=").strip().split("+", 1)[0]   # drop build metadata
     if not v or not any(c.isdigit() for c in v):
         return None
-    segs = [s for s in _SEG_RE.split(v) if s != ""]
-    key: list[tuple[int, int, str]] = []
-    saw_prerelease = False
-    for s in segs:
+    # The FIRST '-' or '~' is the semver / Debian pre-release separator (so a Go pseudo-version
+    # '1.2.0-0.<ts>-<hash>' is release 1.2.0 with a pre-release tail, NOT release 1.2.0.0.<ts>).
+    sep = re.search(r"[-~]", v)
+    rel_str, pre_str = (v[:sep.start()], v[sep.start() + 1:]) if sep else (v, "")
+    release: list[int] = []
+    pre_segs: list[str] = []
+    for i, s in enumerate([x for x in re.split(r"[._]", rel_str) if x != ""]):
         if s.isdigit():
-            key.append((0, int(s), ""))
-        else:
-            saw_prerelease = True
-            # split a mixed segment like 'rc1' into ('rc', 1) so 'rc2' > 'rc1'
-            m = re.match(r"^([A-Za-z]*)(\d*)$", s)
-            alpha = (m.group(1) if m else s).lower()
-            num = int(m.group(2)) if (m and m.group(2)) else -1
-            key.append((1, num, alpha))
-    # a trailing pre-release tag makes the whole version sort just BELOW its release counterpart
-    return (tuple(key), 0 if saw_prerelease else 1)
+            release.append(int(s))
+        else:                                   # a non-numeric segment (e.g. '1.2.0.rc1') begins the tail
+            pre_segs = [x for x in re.split(r"[._]", rel_str) if x != ""][i:]
+            break
+    pre_segs += [x for x in re.split(r"[._\-~]", pre_str) if x != ""]
+    pre: list[tuple[str, int]] = []
+    for s in pre_segs:
+        m = re.match(r"^([A-Za-z]*)(\d*)$", s)   # split a mixed 'rc1' into ('rc', 1) so 'rc2' > 'rc1'
+        alpha = (m.group(1) if m else s).lower()
+        num = int(m.group(2)) if (m and m.group(2)) else -1
+        pre.append((alpha, num))
+    # final_flag 1 (no pre-release tail) sorts ABOVE 0 (has one) at the same release.
+    return (tuple(release), 1 if not pre else 0, tuple(pre))
 
 
 class _Ver:
@@ -123,25 +126,27 @@ _CMP_RE = re.compile(r"^\s*(>=|<=|==|=|>|<|~=)?\s*(.+?)\s*$")
 
 def _in_comparator_string(ver: _Ver, spec: str) -> bool:
     """Membership in a comma/space-separated comparator string like ``>=1.0.0,<2.0.0`` (all clauses
-    must hold). An unparseable clause makes the whole spec fail (fail-closed). ``~=`` is treated as
-    ``>=`` on the same string (conservative)."""
+    must hold). FAIL-CLOSED: an unparseable clause, or an operator whose exact semantics we do not
+    model, makes the whole spec fail rather than confirm — a missed vuln (a lead) is safer than a
+    fabricated one. (PEP 440 ``~=X.Y.Z`` is the bounded ``[X.Y.Z, X.Y+1.0)``, NOT a bare ``>=``;
+    widening its upper bound to infinity would fabricate vulnerabilities, so an un-modelled ``~=`` is
+    fail-closed here rather than confirmed — it is rare in OSV/grype AFFECTED ranges.)"""
     clauses = [c for c in re.split(r"[,\s]+", spec.strip()) if c]
     if not clauses:
         return False
+    ops = {
+        ">=": ver.ge, ">": ver.gt, "<=": ver.le, "<": ver.lt,
+        "==": lambda b: ver.ge(b) and ver.le(b), "=": lambda b: ver.ge(b) and ver.le(b),
+    }
     for c in clauses:
         m = _CMP_RE.match(c)
         if not m:
             return False
         op = m.group(1) or "=="
+        if op not in ops:
+            return False                      # un-modelled operator (e.g. ~=) -> fail-closed
         bound = _Ver(m.group(2))
-        if not bound.ok:
-            return False
-        ok = {
-            ">=": ver.ge, ">": ver.gt, "<=": ver.le, "<": ver.lt,
-            "==": lambda b: ver.ge(b) and ver.le(b), "=": lambda b: ver.ge(b) and ver.le(b),
-            "~=": ver.ge,
-        }[op](bound)
-        if not ok:
+        if not bound.ok or not ops[op](bound):
             return False
     return True
 

@@ -43,7 +43,7 @@ _OSV = """
 def test_parse_grype_and_osv() -> None:
     g = parse_sca_report(_GRYPE)
     assert len(g) == 2 and g[0]["package"] == "log4j-core" and g[0]["version"] == "2.14.1"
-    assert g[0]["affected"] == [">=2.0.0,<2.15.0 (unknown)"]
+    assert g[0]["affected"] == [">=2.0.0,<2.15.0"]     # grype's trailing " (unknown)" tag is stripped
     o = parse_sca_report(_OSV)
     assert len(o) == 1 and o[0]["package"] == "django"
     assert o[0]["affected"] == [{"introduced": "3.2.0", "fixed": "3.2.5"}]
