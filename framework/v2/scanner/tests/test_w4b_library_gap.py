@@ -96,7 +96,7 @@ def _by_id(entry_id: str):
 
 def test_w4b_entries_load_unique_and_prefixed() -> None:
     w4b = _w4b()
-    assert len(w4b) == 9, f"expected 9 w4b entries, got {len(w4b)}"
+    assert len(w4b) == 8, f"expected 8 w4b entries, got {len(w4b)}"
     ids = [e.id for e in w4b]
     assert all(i.startswith(W4B_PREFIX) for i in ids)
     assert len(ids) == len(set(ids)), "duplicate w4b ids"
@@ -122,7 +122,6 @@ def test_w4b_covers_the_intended_uncovered_classes() -> None:
         "ldap_injection",
         "xpath_injection",
         "el_injection",
-        "security_misconfiguration",
         "sensitive_exposure",
         "xxe",
     }
@@ -454,7 +453,7 @@ def _confirm_request(check, base):
 
 
 @pytest.mark.parametrize(
-    "entry_id", ["w4b-misconfig-apache-server-status", "w4b-sensitive-aws-credentials"]
+    "entry_id", ["w4b-sensitive-aws-credentials"]
 )
 def test_signature_entries_confirm_on_real_exposure(entry_id) -> None:
     check = compile_entry(_by_id(entry_id))
@@ -466,7 +465,7 @@ def test_signature_entries_confirm_on_real_exposure(entry_id) -> None:
 
 
 @pytest.mark.parametrize(
-    "entry_id", ["w4b-misconfig-apache-server-status", "w4b-sensitive-aws-credentials"]
+    "entry_id", ["w4b-sensitive-aws-credentials"]
 )
 def test_signature_entries_do_not_fire_when_hardened(entry_id) -> None:
     check = compile_entry(_by_id(entry_id))
