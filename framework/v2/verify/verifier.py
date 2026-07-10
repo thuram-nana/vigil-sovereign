@@ -77,6 +77,9 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "buffer_overflow": (OracleKind.SANITIZER_SIGNAL,),
     "use_after_free": (OracleKind.SANITIZER_SIGNAL,),
     "crash": (OracleKind.SANITIZER_SIGNAL,),
+    # network-service reachability: a scanner's "open port" observation is confirmed a FACT only when
+    # a real transport handshake reproduces (verify.reachability captures it; the oracle judges it).
+    "service_reachable": (OracleKind.SERVICE_REACHABILITY,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -120,6 +123,10 @@ _ALIASES: dict[str, str] = {
     "framework_exposure": "exposure",
     "local_file_inclusion": "lfi",
     "file_read": "lfi",
+    "port_open": "service_reachable",
+    "reachable": "service_reachable",
+    "service_reachability": "service_reachable",
+    "open_port": "service_reachable",
 }
 
 _ALL_ORACLES: tuple[OracleKind, ...] = tuple(OracleKind)
@@ -206,6 +213,7 @@ class OracleVerifier:
           marker, observed_sink              -> side_effect_oracle
           process_output                     -> sanitizer_signal_oracle
           oob_hits                           -> oob_callback_oracle
+          handshake                          -> service_reachability_oracle
         """
         ctx = dict(finding_context or {})
         bug_class = str(ctx.get("bug_class", ""))
@@ -311,6 +319,10 @@ class OracleVerifier:
         if kind is OracleKind.OOB_CALLBACK:
             if "oob_hits" in ctx:
                 return oracles.oob_callback_oracle(ctx["oob_hits"])
+            return None
+        if kind is OracleKind.SERVICE_REACHABILITY:
+            if "handshake" in ctx:
+                return oracles.service_reachability_oracle(ctx["handshake"])
             return None
         return None
 
