@@ -118,6 +118,19 @@ def test_evtx_garbage_is_skipped_not_raised() -> None:
     assert parse_evtx_json('[{"ok": 1}, "not-a-dict", 42]')  # the one dict survives; others skipped
 
 
+def test_evtx_deeply_nested_data_chain_does_not_raise() -> None:
+    # a crafted Data-chain nested far past Python's recursion limit must NOT RecursionError — the
+    # total-parser contract ("a malformed record is skipped, never raised") holds for any input.
+    inner = "1"
+    for _ in range(1500):
+        inner = '{"Data":' + inner + '}'
+    hostile = '{"Event":{"EventData":' + inner + '}}'
+    assert parse_evtx_json(hostile) == []            # over the depth bound -> skipped, no crash
+    # a normal record right after still parses (the depth guard doesn't break real records)
+    ev = parse_evtx_json('{"Event":{"EventData":{"Data":[{"@Name":"User","#text":"alice"}]}}}')[0]
+    assert ev.fields.get("User") == "alice"
+
+
 # --- format detection + unified entry --------------------------------------
 
 def test_detect_format() -> None:

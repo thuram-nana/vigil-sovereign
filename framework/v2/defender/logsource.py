@@ -48,6 +48,7 @@ _MAX_EVENTS = 200_000              # cap the number of normalized events
 _MAX_LINE = 64 * 1024              # a single line/record longer than this is truncated
 _MAX_FIELDS = 256                  # cap distinct fields per event (a hostile line can't explode memory)
 _MAX_VALUE = 8 * 1024             # cap one field value's length
+_MAX_DEPTH = 64                   # cap EVTX Data-chain recursion depth (a crafted deep nest can't RecursionError)
 
 Fields = dict[str, "str | int"]
 
@@ -301,12 +302,14 @@ def _flatten_evtx_record(rec: object) -> "Fields | None":
             fields[k] = _coerce(str(val))
         # dict/list values are containers, not leaf fields — skipped (handled by callers below)
 
-    def _absorb_map(d: object) -> None:
-        if not isinstance(d, dict):
+    def _absorb_map(d: object, depth: int = 0) -> None:
+        # _MAX_DEPTH bounds the _absorb_map<->_absorb_data mutual recursion so a crafted deeply-nested
+        # "Data" chain cannot raise RecursionError (the total-parser contract must hold for any input).
+        if depth > _MAX_DEPTH or not isinstance(d, dict):
             return
         for k, v in d.items():
             if k == "Data":
-                _absorb_data(v)
+                _absorb_data(v, depth + 1)
             elif isinstance(v, dict):
                 # a leaf like {"#text": "...", "@Name": "..."} or a small nested map
                 if "#text" in v and "@Name" in v:
@@ -316,16 +319,18 @@ def _flatten_evtx_record(rec: object) -> "Fields | None":
             else:
                 _put(k, v)
 
-    def _absorb_data(data: object) -> None:
+    def _absorb_data(data: object, depth: int = 0) -> None:
         # EventData.Data is commonly a list of {"@Name": ..., "#text": ...}, or a dict, or a scalar.
+        if depth > _MAX_DEPTH:
+            return
         if isinstance(data, list):
             for item in data:
                 if isinstance(item, dict) and "@Name" in item:
                     _put(item.get("@Name"), item.get("#text"))
                 elif isinstance(item, dict):
-                    _absorb_map(item)
+                    _absorb_map(item, depth + 1)
         elif isinstance(data, dict):
-            _absorb_map(data)
+            _absorb_map(data, depth + 1)
 
     inner = rec.get("Event") if isinstance(rec.get("Event"), dict) else rec
     if isinstance(inner, dict):
@@ -382,7 +387,10 @@ def parse_evtx_json(text: str) -> list[LogEvent]:
     for rec in records:
         if len(out) >= _MAX_EVENTS:
             break
-        fields = _flatten_evtx_record(rec)
+        try:                                    # total-parser contract: one bad record never raises
+            fields = _flatten_evtx_record(rec)
+        except Exception:
+            continue
         if fields is None:
             continue
         out.append(LogEvent(channel="windows", source_format="evtx_json", fields=fields,
