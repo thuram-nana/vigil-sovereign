@@ -154,6 +154,7 @@ constructive alternative is purple-team detection-efficacy, never anti-defender 
 | Goal | Command |
 |------|---------|
 | Authorized end-to-end engagement | `engage <slug> <seed-url> [--recon] [--spine]` |
+| Purple-team defense report (detection gaps + Sigma efficacy + ATT&CK, over offline logs) | `engage … --defender [--defender-sigma DIR] [--defender-log FILE]` |
 | Loopback quick scan (grounded export) | `scan http://127.0.0.1:<port>/ --format json\|sarif\|html [--strict-evidence]` |
 | Re-verify a report offline | `verify <report.json>` |
 | Build / verify signed evidence | `evidence …` |

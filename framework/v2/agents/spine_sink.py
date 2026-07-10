@@ -73,6 +73,28 @@ class SpineSink:
     def decision(self, question: str, choice: str, rationale: str = "") -> int | None:
         return self._post("decision", {"question": question, "choice": choice, "rationale": rationale})
 
+    def defender_report(self, defense: Any) -> None:
+        """Mirror the DEFENSIVE purple-team report onto the spine using the EXISTING event kinds
+        (no schema change): one ``observation`` for the detection-gap summary and one ``decision``
+        for the detection-efficacy verdict. Best-effort; a ``defense`` missing a field is skipped."""
+        try:
+            uncovered = getattr(defense, "uncovered", []) or []
+            n_candidates = len(getattr(defense, "candidate_sigma", []) or [])
+            self._post("observation", {
+                "source": "defender:gap-report",
+                "surface": str(getattr(defense, "target", "") or "(target)"),
+                "summary": (f"purple-team: {len(uncovered)} detection gap(s), "
+                            f"{n_candidates} candidate Sigma rule(s)")})
+            eff = getattr(defense, "efficacy", None)
+            if eff is not None:
+                self.decision(
+                    "defender: detection efficacy",
+                    f"{getattr(eff, 'detected_count', 0)}/{getattr(eff, 'total', 0)} caught "
+                    f"(efficacy {getattr(eff, 'efficacy', 0.0):.2f})",
+                    rationale=eff.summary() if hasattr(eff, "summary") else "")
+        except Exception:
+            pass
+
     def refusal(self, gate: str, action_refused: str, *, reason: str = "",
                 fatal: bool = False) -> int | None:
         """Record a refusal AS EVIDENCE on the spine (a gate fired). Never dropped."""

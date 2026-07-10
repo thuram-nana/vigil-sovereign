@@ -81,6 +81,13 @@ class EngagementResult:
     # whose proof no longer reproduces surfaces here as not-a-fact — the firewall running
     # live over real output, not just its tests. Best-effort; the layer only ever demotes.
     grounding: list = field(default_factory=list)
+    # DEFENSIVE / purple-team deliverable (opt-in ``enable_defender``, default None → the
+    # engagement is byte-identical). A `defender.DefenseReport`: for each confirmed action, whether
+    # the operator's detection ruleset catches it (+ a synthesized candidate Sigma rule for each
+    # miss), the detection-EFFICACY of an operator Sigma ruleset over what the scan DID (mapped to
+    # ATT&CK), and Sigma evaluated over any operator-supplied OFFLINE logs. Derived purely from the
+    # oracle-confirmed findings (prove-don't-guess); it NEVER changes the scan or an oracle verdict.
+    defense: object = None
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -194,6 +201,78 @@ def _assess_grounding(report: ScanReport, world: "WorldModel") -> list:
         except Exception:
             verdicts.append(None)   # keep index-aligned with active_findings
     return verdicts
+
+
+def _ingest_defender_logs(slug: str, log_path: str, log_format: str | None, sink) -> list:
+    """Read an operator-supplied OFFLINE log/alert file through the gated ``log_source`` sensor
+    (Tier-1, kill-switch-only) and return the normalized ``LogEvent``s. UNTRUSTED input: the parser
+    is bounded and total, and the read runs through ``invoke_tool``'s fail-closed chain so a tripped
+    kill-switch REFUSES it (recorded on the spine). A missing/oversized/unreadable file degrades to
+    ``[]`` — a clean skip, never a crash. Best-effort throughout."""
+    try:
+        from .agents.tools import ToolContext, ToolRegistry
+        from .agents.tools.invoker import invoke_tool
+        from .defender.logsource import LogEvent, LogSourceSensor
+
+        registry = ToolRegistry()
+        registry.register(LogSourceSensor())
+        result = invoke_tool(registry, "log_source",
+                             {"log": log_path, "format": log_format or "auto"},
+                             ToolContext(slug=slug), sink=sink)
+        if not result.ok or result.refused:
+            return []
+        events: list = []
+        for e in (result.output or {}).get("events", []) or []:
+            try:
+                events.append(LogEvent(channel=str(e.get("channel", "")),
+                                       fields=dict(e.get("fields") or {}),
+                                       source_format=str(e.get("source_format", "")),
+                                       raw=str(e.get("raw", ""))))
+            except Exception:
+                continue
+        return events
+    except Exception:
+        return []
+
+
+def _run_defender_pass(report, *, ruleset_path, sigma_dir, log_path, log_format, slug, sink):
+    """Build the DEFENSIVE purple-team ``DefenseReport`` (opt-in). READ-ONLY over the authoritative
+    scan: it reasons over the oracle-confirmed findings (prove-don't-guess), sends no traffic, and
+    NEVER changes a finding or an oracle verdict. It (1) runs each confirmed action through the
+    operator's detection ruleset and synthesizes a candidate Sigma rule for each MISS, (2) evaluates
+    an operator Sigma ruleset (``--defender-sigma``) over what the scan DID → a detection-efficacy
+    signal mapped to ATT&CK, and (3) evaluates that ruleset over any operator-supplied OFFLINE logs
+    (``--defender-log``, kill-switch-gated). Best-effort; returns a DefenseReport or None."""
+    try:
+        from .defender.efficacy import build_defense_report
+        from .defender.rules import DetectionRuleset
+        from .defender.sigma import load_sigma_dir
+
+        ruleset = None
+        if ruleset_path:
+            try:
+                ruleset = DetectionRuleset.from_file(ruleset_path)
+            except Exception:
+                ruleset = None   # a bad ruleset file falls back to the DEL default — never a crash
+
+        sigma_rules = load_sigma_dir(sigma_dir) if sigma_dir else []
+        ingested = _ingest_defender_logs(slug, log_path, log_format, sink) if log_path else []
+
+        return build_defense_report(
+            report, ruleset=ruleset,
+            sigma_rules=sigma_rules or None,
+            ingested_events=ingested or None)
+    except Exception:
+        return None
+
+
+def _mirror_defense(sink, defense) -> None:
+    """Mirror the DefenseReport onto the event spine (existing observation/decision kinds).
+    Best-effort — a spine write never perturbs the engagement."""
+    try:
+        sink.defender_report(defense)
+    except Exception:
+        pass
 
 
 def _make_spine_sink(spine: object, slug: str):
@@ -371,6 +450,11 @@ def run_engagement(
     transfer_archetype: str | None = None,
     prompt_callback: PromptCallback | None = None,
     spine: object = None,
+    enable_defender: bool = False,
+    defender_ruleset: str | None = None,
+    defender_sigma_dir: str | None = None,
+    defender_log: str | None = None,
+    defender_log_format: str | None = None,
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -542,6 +626,22 @@ def run_engagement(
         result.grounding = _assess_grounding(report, world)
     except Exception:
         pass
+    # DEFENSIVE / purple-team pass (opt-in ``enable_defender``, default OFF → this whole block is
+    # skipped and the engagement is byte-identical). It reasons over the confirmed findings to tell
+    # the blue team where their detection coverage has holes: candidate Sigma rules for the misses,
+    # a detection-efficacy signal (would the operator's Sigma ruleset have caught what CRUCIBLE did?)
+    # mapped to ATT&CK, and Sigma over any operator-supplied OFFLINE logs (kill-switch-gated read).
+    # READ-ONLY over the authoritative scan — it changes no finding and no oracle verdict.
+    if enable_defender:
+        try:
+            result.defense = _run_defender_pass(
+                report, ruleset_path=defender_ruleset, sigma_dir=defender_sigma_dir,
+                log_path=defender_log, log_format=defender_log_format, slug=slug, sink=sink)
+            if sink is not None and result.defense is not None:
+                _mirror_defense(sink, result.defense)
+        except Exception:
+            # the defensive pass is value-add; a failure never sinks the engagement
+            pass
     # Mirror the authoritative findings onto the event spine AND run the reasoning pass over
     # them (W1.1: multi-critic panel + cognitive refusal + reward-bus credit + reflection) —
     # ADVISORY ONLY. This never alters report.active_findings nor the oracle verdict, and it
@@ -637,6 +737,26 @@ def main(argv: list[str]) -> int:
                         help="Mirror the whole engagement onto the immutable blackboard event "
                              "spine (phases, findings with their live grounding verdict, "
                              "refusals). Opt-in, best-effort; off by default (zero impact).")
+    parser.add_argument("--defender", action="store_true",
+                        help="DEFENSIVE / purple-team pass (opt-in; off = byte-identical). Over the "
+                             "confirmed findings: report detection GAPS in the operator's ruleset and "
+                             "synthesize a candidate Sigma rule for each miss, score detection EFFICACY "
+                             "of an operator Sigma ruleset over what the scan did (mapped to ATT&CK), "
+                             "and evaluate that ruleset over operator-supplied OFFLINE logs. Read-only: "
+                             "sends no traffic and never changes a finding or an oracle verdict.")
+    parser.add_argument("--defender-ruleset", default=None, metavar="FILE",
+                        help="JSON detection ruleset (DEL DetectionRule list) for the gap report. "
+                             "Default: the DEL built-in baseline ruleset.")
+    parser.add_argument("--defender-sigma", default=None, metavar="DIR",
+                        help="Directory of Sigma rules (*.yml/*.yaml) to evaluate for the "
+                             "detection-efficacy signal + ATT&CK mapping. Missing dir = clean skip.")
+    parser.add_argument("--defender-log", default=None, metavar="FILE",
+                        help="Operator-supplied OFFLINE log/alert file (syslog/CEF/EVTX-JSON) to "
+                             "ingest and evaluate the Sigma ruleset against. UNTRUSTED input, read "
+                             "through the kill-switch-gated log_source sensor; missing file = skip.")
+    parser.add_argument("--defender-log-format", default="auto",
+                        choices=["auto", "syslog", "cef", "evtx_json"],
+                        help="Format of --defender-log (default: auto-detect).")
     args = parser.parse_args(argv)
 
     spine = None
@@ -668,6 +788,11 @@ def main(argv: list[str]) -> int:
             waf_adaptive=args.waf_adaptive,
             grammar_fuzz=args.grammar_fuzz,
             enable_arsenal=args.arsenal,
+            enable_defender=args.defender,
+            defender_ruleset=args.defender_ruleset,
+            defender_sigma_dir=args.defender_sigma,
+            defender_log=args.defender_log,
+            defender_log_format=args.defender_log_format,
         )
     except EngagementRefused as e:
         print(f"engagement refused: {e}")
@@ -722,4 +847,22 @@ def main(argv: list[str]) -> int:
         print(f"  predictions       : {len(result.predictions)} GATED (never auto-scanned)")
         for p in result.predictions[:5]:
             print(f"    [prior {p.prior:.2f}] {p.node_id} ({p.pattern}) — awaiting operator approval")
+    # DEFENSIVE / purple-team: detection gaps, candidate Sigma rules, and detection efficacy.
+    defense = getattr(result, "defense", None)
+    if defense is not None:
+        uncovered = defense.uncovered
+        print(f"  detection gaps    : {len(uncovered)}/{len(defense.gaps)} action(s) uncovered"
+              f" ({len(defense.candidate_sigma)} candidate Sigma rule(s))")
+        for g in uncovered[:5]:
+            cand = g.candidate_rule.id if g.candidate_rule else "no candidate (generic telemetry)"
+            print(f"    [gap] {g.label} → {cand}")
+        if defense.efficacy is not None:
+            eff = defense.efficacy
+            print(f"  detection efficacy: {eff.detected_count}/{eff.total} caught "
+                  f"(efficacy {eff.efficacy:.2f}); ATT&CK covered "
+                  f"{eff.techniques_covered or 'none'}, missed {eff.techniques_missed or 'none'}")
+        if defense.ingested is not None:
+            print(f"  ingested logs     : {defense.ingested_events} event(s); "
+                  f"{len(defense.ingested.matched_rule_ids)} Sigma rule(s) fired "
+                  f"(ATT&CK {defense.ingested.techniques_detected or 'none'})")
     return 0
