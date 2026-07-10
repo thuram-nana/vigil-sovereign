@@ -1,0 +1,23 @@
+{
+  "id": "w4b-timeblind-generic",
+  "bug_class": "time_based",
+  "title": "Time-based blind injection (context-agnostic delay probe)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "timing",
+    "benign": "1",
+    "sleep_payload": "1 OR SLEEP(5)",
+    "injected_ms": 5000
+  },
+  "references": [
+    "CWE-89",
+    "CWE-407",
+    "CAPEC-7"
+  ],
+  "remediation": "Bind all input as data, never as query/expression structure, so a delay-inducing clause cannot be evaluated server-side. The timing oracle confirms only a statistically significant, dose-matched latency shift, so a benign backend never reads as a finding.",
+  "payload_family": "time-based-blind"
+}
