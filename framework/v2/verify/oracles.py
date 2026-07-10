@@ -1256,3 +1256,157 @@ def tls_weakness_oracle(observed_tls: Any) -> OracleSignal:
         kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
         evidence=f"no TLS weakness: negotiated {version_raw or '?'} / {cipher_raw or '?'}",
         observed={"host": host, "tls_version": version_raw, "cipher": cipher_raw})
+
+
+# ---------------------------------------------------------------------------
+# Policy path — a real IAM grant path lets a principal reach a resource (privesc)
+# ---------------------------------------------------------------------------
+
+# Access lattice (a granted level >= the requested level authorises the request). Unknown non-empty
+# access tokens are treated as read-tier (2) — a named-but-unrecognised action is not assumed to be
+# admin. An UNSPECIFIED (empty) granted access is treated as the MINIMUM (1): a grant statement that
+# names no action cannot, by itself, prove a specific write/admin request — it only proves bare
+# reachability (a request for access "" — "any path at all"). Conservative by construction.
+_ACCESS_LEVEL: dict[str, int] = {
+    "list": 1, "read": 2, "get": 2, "describe": 2, "readonly": 2, "read_only": 2, "view": 2,
+    "write": 3, "put": 3, "modify": 3, "update": 3, "delete": 3, "create": 3,
+    "read_write": 3, "readwrite": 3,
+    "admin": 4, "owner": 4, "full": 4, "root": 4, "all": 4, "*": 4, "manage": 4,
+}
+
+
+def _access_level(access: Any) -> int:
+    """The lattice level of an access token. Empty/None -> 1 (minimum); an unrecognised non-empty
+    token -> 2 (read-tier, never assumed admin); a known token -> its level."""
+    a = str(access or "").strip().lower().replace("-", "_")
+    if not a:
+        return 1
+    return _ACCESS_LEVEL.get(a, 2)
+
+
+def _access_grants(granted: Any, requested: Any) -> bool:
+    """True iff a grant of ``granted`` access authorises a request for ``requested`` access. An empty
+    request ("any access path") is satisfied by any grant; otherwise the granted level must dominate."""
+    if not str(requested or "").strip():
+        return True
+    return _access_level(granted) >= _access_level(requested)
+
+
+def _norm_id(value: Any) -> str:
+    """Canonical (lowercased, stripped) node key — matches ``intel.from_cloud``'s key normalisation so
+    the retained graph and the query agree on identity."""
+    return str(value or "").strip().lower()
+
+
+def policy_path_oracle(observed_policy: Any) -> OracleSignal:
+    """Fire when a REAL IAM policy PATH lets a principal reach a resource — the privilege-path half of
+    prove-don't-guess for cloud posture. A cloud sensor's "principal X is over-privileged / can reach
+    sensitive resource R" is a heuristic LEAD; this oracle does NOT trust that judgement — it
+    RE-DERIVES, over the RETAINED raw policy graph, a concrete grant path and fires only if one exists.
+    The path (the ordered assume/member hops plus the granting statement) IS the evidence, so the
+    verdict re-verifies OFFLINE from the certificate exactly like every other oracle: pure graph search,
+    deterministic, no clock/rng, re-runnable by anyone with no cloud and no trust in the sensor.
+
+    ``observed_policy`` is the JSON-safe retained policy graph + the reachability query it is judged on::
+
+        {"principal": "role/dev", "resource": "s3/customer-data", "access": "read"?,
+         "grants":    [{"principal": "role/admin", "resource": "s3/customer-data", "access": "read"}],
+         "assume":    [{"src": "role/dev",  "dst": "role/admin"}],   # src CAN_ASSUME dst -> inherits its grants
+         "member_of": [{"src": "role/dev",  "dst": "group/eng"}]}    # src MEMBER_OF dst -> inherits its grants
+
+    A principal reaches the resource iff SOME principal in its assume/member closure holds a grant over
+    the resource whose access dominates the requested access (``access`` omitted / "" means "any grant
+    path at all"). No path — or an insufficient access level — does NOT fire (a benign config is not
+    confirmed). Matching is exact on canonical (lowercased) ids. GROUNDING is procedural: the graph MUST
+    be built from the raw retained export (``verify.policy_path.build_policy_graph``), NEVER laundered
+    from the sensor's minted world-model beliefs — that is what keeps this a re-derivation, not a
+    rubber-stamp of the sensor's say-so."""
+    if not isinstance(observed_policy, Mapping):
+        return OracleSignal(kind=OracleKind.POLICY_PATH, fired=False, confidence=0.0,
+                            evidence="no policy graph evidence")
+
+    start = _norm_id(observed_policy.get("principal"))
+    target = _norm_id(observed_policy.get("resource"))
+    requested = str(observed_policy.get("access") or "").strip()
+    if not start or not target:
+        return OracleSignal(
+            kind=OracleKind.POLICY_PATH, fired=False, confidence=0.0,
+            evidence="policy query needs both a principal and a resource",
+            observed={"principal": start, "resource": target})
+
+    # principal -> principal adjacency (CAN_ASSUME / MEMBER_OF both let the source inherit the dst's
+    # grants), and principal -> [(resource, access), ...] grants. Deterministic (sorted) construction.
+    adj: dict[str, list[tuple[str, str]]] = {}
+    for rel_key, via in (("assume", "can_assume"), ("member_of", "member_of")):
+        for e in observed_policy.get(rel_key) or []:
+            if not isinstance(e, Mapping):
+                continue
+            src, dst = _norm_id(e.get("src")), _norm_id(e.get("dst"))
+            if src and dst:
+                adj.setdefault(src, []).append((dst, via))
+    grants: dict[str, list[tuple[str, str]]] = {}
+    for g in observed_policy.get("grants") or []:
+        if not isinstance(g, Mapping):
+            continue
+        p, r = _norm_id(g.get("principal")), _norm_id(g.get("resource"))
+        if p and r:
+            grants.setdefault(p, []).append((r, str(g.get("access") or "")))
+    for k in adj:
+        adj[k].sort()
+    for k in grants:
+        grants[k].sort()
+
+    # BFS from the query principal over the assume/member closure, recording the predecessor edge so a
+    # firing path can be reconstructed. Deterministic: sorted adjacency, first-found path.
+    prev: dict[str, tuple[str, str]] = {}   # node -> (from_node, via)
+    order = [start]
+    seen = {start}
+    hit: tuple[str, str, str] | None = None   # (holder_principal, resource, granted_access)
+    i = 0
+    while i < len(order):
+        cur = order[i]
+        i += 1
+        for res, acc in grants.get(cur, ()):
+            if res == target and _access_grants(acc, requested):
+                hit = (cur, res, acc)
+                break
+        if hit is not None:
+            break
+        for nxt, via in adj.get(cur, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                prev[nxt] = (cur, via)
+                order.append(nxt)
+
+    if hit is None:
+        return OracleSignal(
+            kind=OracleKind.POLICY_PATH, fired=False, confidence=0.0,
+            evidence=(f"no IAM policy path grants {start!r} "
+                      f"{('access '+requested+' ') if requested else ''}to {target!r} "
+                      f"(closure of {len(seen)} principal(s) holds no dominating grant)"),
+            observed={"principal": start, "resource": target, "access": requested,
+                      "reachable_principals": sorted(seen)})
+
+    holder, res, granted = hit
+    # reconstruct principal hops start -> ... -> holder
+    hops: list[str] = [holder]
+    node = holder
+    while node != start and node in prev:
+        node = prev[node][0]
+        hops.append(node)
+    hops.reverse()
+    path_steps: list[dict[str, str]] = []
+    for a, b in zip(hops, hops[1:]):
+        via = prev[b][1] if b in prev else "?"
+        path_steps.append({"from": a, "via": via, "to": b})
+    path_steps.append({"from": holder, "via": "has_grant", "to": res, "access": granted})
+    chain = " -> ".join([start] + [f"[{s['via']}] {s['to']}" for s in path_steps])
+    return OracleSignal(
+        kind=OracleKind.POLICY_PATH,
+        fired=True,
+        confidence=0.9,
+        evidence=(f"IAM policy path grants {start!r} "
+                  f"{('access '+requested) if requested else 'access'} to {target!r}: {chain}"),
+        observed={"principal": start, "resource": target, "requested_access": requested,
+                  "grant_holder": holder, "granted_access": granted, "path": path_steps,
+                  "hops": len(path_steps) - 1})

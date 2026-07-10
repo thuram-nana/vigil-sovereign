@@ -34,10 +34,17 @@ from .oracles import (
     achieved_state_oracle,
     differential_response_oracle,
     oob_callback_oracle,
+    policy_path_oracle,
     sanitizer_signal_oracle,
     service_reachability_oracle,
     side_effect_oracle,
     tls_weakness_oracle,
+)
+from .policy_path import (
+    build_policy_graph,
+    confirm_privilege_path,
+    policy_path_context,
+    privilege_path_query,
 )
 from .reachability import capture_handshake, confirm_reachable, reachable_context
 from .tls import capture_tls_handshake, confirm_weak_tls, weak_tls_context
@@ -62,6 +69,7 @@ __all__ = [
     "oob_callback_oracle",
     "service_reachability_oracle",
     "tls_weakness_oracle",
+    "policy_path_oracle",
     # reachability
     "capture_handshake",
     "confirm_reachable",
@@ -70,6 +78,11 @@ __all__ = [
     "capture_tls_handshake",
     "confirm_weak_tls",
     "weak_tls_context",
+    # cloud IAM privilege path
+    "build_policy_graph",
+    "privilege_path_query",
+    "policy_path_context",
+    "confirm_privilege_path",
     # oob
     "OOBReceiver",
     "OOBHit",

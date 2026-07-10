@@ -48,6 +48,7 @@ class OracleKind(str, enum.Enum):
     DOM_EXECUTION = "dom_execution"                   # injected JS actually executed in a real DOM (DOM-XSS)
     SERVICE_REACHABILITY = "service_reachability"     # a real transport handshake reproduced (port open)
     TLS_WEAKNESS = "tls_weakness"                     # a real TLS handshake negotiated a weak protocol/cipher
+    POLICY_PATH = "policy_path"                       # a real IAM grant path lets a principal reach a resource
 
 
 class OracleProbe(BaseModel):

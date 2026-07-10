@@ -83,6 +83,13 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # TLS posture: a deprecated protocol / weak cipher is a FACT only when a real handshake negotiated
     # it (verify.tls captures it; the oracle judges the negotiated version/suite).
     "weak_tls": (OracleKind.TLS_WEAKNESS,),
+    # Cloud IAM privilege path: a cloud sensor's "over-privileged / can reach R" is a LEAD; it becomes
+    # a FACT only when the policy-path oracle re-derives a real grant path over the retained policy
+    # graph (verify.policy_path builds the graph; the oracle judges reachability). Distinct from the
+    # generic ACHIEVED_STATE-backed `privilege_escalation` (a runtime state), this proves the IAM path.
+    "privilege_path": (OracleKind.POLICY_PATH,),
+    "iam_privilege_escalation": (OracleKind.POLICY_PATH,),
+    "excessive_privilege": (OracleKind.POLICY_PATH,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -135,6 +142,16 @@ _ALIASES: dict[str, str] = {
     "deprecated_tls": "weak_tls",
     "ssl_weakness": "weak_tls",
     "weak_ssl": "weak_tls",
+    # cloud IAM privilege-path aliases (a cloud/IAM posture lead an oracle proves via a grant path)
+    "iam_privesc": "iam_privilege_escalation",
+    "iam_privilege_path": "privilege_path",
+    "privilege_escalation_path": "privilege_path",
+    "iam_path": "privilege_path",
+    "over_privileged": "excessive_privilege",
+    "overprivileged": "excessive_privilege",
+    "excessive_permissions": "excessive_privilege",
+    "excessive_privileges": "excessive_privilege",
+    "over_permissioned": "excessive_privilege",
 }
 
 _ALL_ORACLES: tuple[OracleKind, ...] = tuple(OracleKind)
@@ -223,6 +240,7 @@ class OracleVerifier:
           oob_hits                           -> oob_callback_oracle
           handshake                          -> service_reachability_oracle
           tls                                -> tls_weakness_oracle
+          policy                             -> policy_path_oracle
         """
         ctx = dict(finding_context or {})
         bug_class = str(ctx.get("bug_class", ""))
@@ -336,6 +354,10 @@ class OracleVerifier:
         if kind is OracleKind.TLS_WEAKNESS:
             if "tls" in ctx:
                 return oracles.tls_weakness_oracle(ctx["tls"])
+            return None
+        if kind is OracleKind.POLICY_PATH:
+            if "policy" in ctx:
+                return oracles.policy_path_oracle(ctx["policy"])
             return None
         return None
 

@@ -188,6 +188,10 @@ class FindingContext(BaseModel):
     # tls_weakness_oracle (a real TLS handshake negotiated a deprecated protocol / weak cipher)
     tls: dict[str, Any] | None = None
 
+    # policy_path_oracle (a real IAM grant path lets a principal reach a resource) — the retained raw
+    # policy graph + the reachability query it is judged on
+    policy: dict[str, Any] | None = None
+
     # -- builders ----------------------------------------------------------
 
     @classmethod
@@ -330,6 +334,19 @@ class FindingContext(BaseModel):
         ``tls`` evidence MUST come from a real gated capture (``tls.capture_tls_handshake``), never a
         scanner's parsed row — the oracle re-verifies by an INDEPENDENT handshake."""
         return cls(bug_class=bug_class, tls=dict(tls or {}))
+
+    @classmethod
+    def from_policy_graph(
+        cls, policy: Mapping[str, Any], *, bug_class: str = "privilege_path"
+    ) -> "FindingContext":
+        """A retained IAM policy graph + reachability query (verify.policy_path), for the policy-path
+        oracle — the retained evidence that turns a cloud sensor's "over-privileged / can reach R"
+        LEAD into a FACT. Like ``from_handshake``, the ``policy`` graph MUST be re-derived from the raw
+        operator export (``policy_path.build_policy_graph``), never laundered from the sensor's minted
+        world-model beliefs: the oracle re-derives the grant path over the retained raw policy, so the
+        certificate re-verifies offline. ``policy`` carries {principal, resource, access?, grants,
+        assume, member_of}."""
+        return cls(bug_class=bug_class, policy=dict(policy or {}))
 
     @classmethod
     def from_process_output(
@@ -482,4 +499,6 @@ class FindingContext(BaseModel):
             ctx["handshake"] = self.handshake
         if self.tls is not None:
             ctx["tls"] = self.tls
+        if self.policy is not None:
+            ctx["policy"] = self.policy
         return ctx
