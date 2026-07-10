@@ -76,6 +76,8 @@ class NodeKind(str, enum.Enum):
     IDENTITY = "identity"               # an OSINT persona/email (NOT a PRINCIPAL auth actor)
     APPLICATION = "application"         # a non-web application (NOT a WEBAPP)
     PACKAGE = "package"                 # a software dependency (supply-chain node)
+    VULNERABILITY = "vulnerability"     # a CVE / advisory (a threat-intel LEAD, NOT a confirmed FINDING)
+    INDICATOR = "indicator"             # a threat-intel IOC that is not itself an asset (file hash, mutex, …)
 
 
 class EdgeKind(str, enum.Enum):
@@ -136,6 +138,8 @@ class EdgeKind(str, enum.Enum):
     SAME_AS = "same_as"
     CO_HOSTED_WITH = "co_hosted_with"   # two distinct assets share infrastructure (derived, symmetric)
     DEPENDS_ON = "depends_on"           # a component depends on a package (supply-chain)
+    AFFECTS = "affects"                 # src (vulnerability/advisory) affects dst (package/application) —
+    #                                     a threat-intel LEAD; the SBOM oracle proves version-range membership
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,23 @@
+{
+  "Event": {
+    "uuid": "5f3c-demo-event",
+    "info": "OBSIDIAN-TEST phishing infrastructure",
+    "Tag": [{"name": "tlp:amber"}, {"name": "malware:emotet"}],
+    "Attribute": [
+      {"type": "domain", "value": "api.company.com", "category": "Network activity", "to_ids": true},
+      {"type": "domain", "value": "phish-evil.example", "category": "Network activity", "to_ids": true},
+      {"type": "ip-dst", "value": "203.0.113.9", "category": "Network activity", "to_ids": true},
+      {"type": "url", "value": "http://phish-evil.example/login", "category": "Payload delivery", "to_ids": true},
+      {"type": "sha256", "value": "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899", "category": "Payload delivery", "to_ids": true},
+      {"type": "email-src", "value": "attacker@phish-evil.example", "category": "Payload delivery", "to_ids": true},
+      {"type": "vulnerability", "value": "CVE-2021-44228", "category": "External analysis"},
+      {"type": "domain", "value": "benign-not-really.example", "category": "Network activity", "to_ids": false,
+       "Tag": [{"name": "false-positive"}]}
+    ],
+    "Object": [
+      {"name": "file", "Attribute": [
+        {"type": "md5", "value": "d41d8cd98f00b204e9800998ecf8427e", "category": "Payload delivery", "to_ids": true}
+      ]}
+    ]
+  }
+}

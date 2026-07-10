@@ -94,4 +94,11 @@ def canonicalize(kind: NodeKind, raw: str) -> EntityRef:
         return EntityRef(kind=kind, key=low if _SHA256_RE.match(low) else low)
     if kind is NodeKind.SERVICE:
         return EntityRef(kind=kind, key=s.lower())  # host:port/proto
+    if kind is NodeKind.VULNERABILITY:
+        # advisory ids (CVE-…, GHSA-…, OSV-…) are conventionally upper-cased; fold to one form so
+        # the same CVE from two feeds collapses to one node.
+        return EntityRef(kind=kind, key=s.upper() if s else "?")
+    if kind is NodeKind.INDICATOR:
+        # an atomic IOC carried as "<type>:<value>" (e.g. "sha256:ab…"); hashes/values are lower-cased.
+        return EntityRef(kind=kind, key=s.lower() if s else "?")
     return EntityRef(kind=kind, key=s.lower() if s else "?")

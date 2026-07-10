@@ -54,6 +54,9 @@ class IntelSourceKind(str, enum.Enum):
     CLOUD_POSTURE = "cloud_posture"   # a cloud/IAM posture export (ScoutSuite/Prowler/provider) — the
     #                                   IAM topology + mis-config LEADS; a privilege PATH is a fact only
     #                                   when the policy-path oracle re-derives it over the retained graph
+    MISP = "misp"                     # a MISP threat-intel event feed (IOCs) — a LEAD/corroboration, never a fact
+    STIX = "stix"                     # a STIX 2.x bundle (IOC indicators + vulnerability objects) — a LEAD
+    #                                   NOTE: CVE / advisory observations use VULN_DB above, whatever the feed format.
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,

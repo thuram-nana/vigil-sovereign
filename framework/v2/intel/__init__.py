@@ -50,6 +50,15 @@ from .temporal import (
 from .predict import AssetHypothesis, AssetPredictor, assess_prediction
 from .from_cloud import observations_from_cloud
 from .from_sbom import observations_from_sbom
+from .from_threatintel import (
+    build_threatintel_live_transport,
+    detect_format,
+    live_cve_observations,
+    observations_from_cve,
+    observations_from_misp,
+    observations_from_stix,
+    observations_from_threat_feed,
+)
 from .learn import (
     SourceYield,
     credit_discovery,
@@ -76,4 +85,8 @@ __all__ = [
     "SourceYield", "source_prior", "planner_priors", "credit_discovery", "credit_finding",
     # offline asset-graph ingestion (cloud/IAM + supply-chain)
     "observations_from_cloud", "observations_from_sbom",
+    # threat-intel sensors (MISP / STIX / NVD / OSV → IOC + CVE observations)
+    "observations_from_threat_feed", "observations_from_misp", "observations_from_stix",
+    "observations_from_cve", "detect_format",
+    "build_threatintel_live_transport", "live_cve_observations",
 ]
