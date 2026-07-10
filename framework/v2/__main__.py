@@ -98,6 +98,16 @@ def _console(argv: list[str]) -> int:
     return console_cli.main(argv)
 
 
+def _api(argv: list[str]) -> int:
+    from .api import cli as api_cli
+    return api_cli.main(argv)
+
+
+def _imports(argv: list[str]) -> int:
+    from .imports import cli as imports_cli
+    return imports_cli.main(argv)
+
+
 def _verify(argv: list[str]) -> int:
     from .verify import reverify
     return reverify.main(argv)
@@ -191,6 +201,8 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "benchmark": _benchmark,
     "console": _console,
     "mcp": _mcp,
+    "api": _api,
+    "imports": _imports,
     "status": _status,
 }
 
