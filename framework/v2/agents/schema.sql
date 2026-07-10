@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS events (
         'observation','hypothesis','plan','action',
         'result','finding','critique','decision',
         -- Nervous-System spine kinds (additive; kept in lockstep with agents/models.py).
-        'reward','critic_verdict','reflection','refusal'
+        'reward','critic_verdict','reflection','refusal',
+        -- Agentic tool-use / sensor-driving spine kinds (additive; W1.4).
+        'tool_call','tool_result'
     )),
     agent_name      TEXT NOT NULL,
     posted_at       TEXT NOT NULL,
