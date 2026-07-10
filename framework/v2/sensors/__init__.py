@@ -9,7 +9,9 @@ entitlement / scope / destructive / egress), then its ``normalize`` turns the ra
 
 Wave 2.1 ships the framework + a safe reference producer (``DeclaredServiceSensor``, the first
 HOST/SERVICE/HOSTS minter). Wave 2.2 adds the ``NmapServiceSensor`` (the first mature external engine
-driven as a gated sensor); Wave 2.3 the service-reachability oracle.
+driven as a gated sensor); Wave 2.3 the service-reachability oracle. Wave 4a wraps the Nuclei/ZAP/Burp
+parsers as gated WEB-SCANNER sensors (``web_scanner``) that mint findings as third-party LEADS which
+a CRUCIBLE oracle re-verifies.
 """
 
 from __future__ import annotations
@@ -19,6 +21,18 @@ from .builtin import DeclaredServiceSensor, default_registry, register_builtin_s
 from .nmap import NmapServiceSensor, parse_nmap_xml
 from .pipeline import run_sensor
 from .tshark import TsharkFlowSensor, parse_tshark_fields
+from .web_scanner import (
+    BurpWebSensor,
+    NucleiResultsImportSensor,
+    NucleiTemplateSensor,
+    NucleiWebSensor,
+    WebLead,
+    ZapWebSensor,
+    confirm_web_lead,
+    web_lead_from_finding,
+    web_lead_observations,
+    web_leads_from_findings,
+)
 
 __all__ = [
     "Sensor", "SensorResult", "service_observations",
@@ -26,4 +40,9 @@ __all__ = [
     "DeclaredServiceSensor", "default_registry", "register_builtin_sensors",
     "NmapServiceSensor", "parse_nmap_xml",
     "TsharkFlowSensor", "parse_tshark_fields",
+    # Wave 4a — web-scanner sensors
+    "NucleiWebSensor", "NucleiTemplateSensor", "NucleiResultsImportSensor",
+    "ZapWebSensor", "BurpWebSensor",
+    "WebLead", "web_lead_observations", "web_lead_from_finding",
+    "web_leads_from_findings", "confirm_web_lead",
 ]

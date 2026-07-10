@@ -49,6 +49,8 @@ class IntelSourceKind(str, enum.Enum):
     SCAN = "scan"                     # a confirmed scan/engage finding
     INFERENCE = "inference"           # a fact DERIVED from other observations (intel.infer)
     PACKET_CAPTURE = "packet_capture"  # observed in captured traffic (a pcap read by a packet engine)
+    WEB_SCANNER = "web_scanner"       # a third-party web scanner's heuristic match (Nuclei/ZAP/Burp) —
+    #                                   a LEAD, never a fact, until a CRUCIBLE oracle re-verifies it
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,
