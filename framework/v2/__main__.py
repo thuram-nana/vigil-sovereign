@@ -128,6 +128,11 @@ def _mcp(argv: list[str]) -> int:
     return mcp_cli.main(argv)
 
 
+def _report(argv: list[str]) -> int:
+    from .report import cli as report_cli
+    return report_cli.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -197,6 +202,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "verify": _verify,
     "capabilities": _capabilities,
     "evidence": _evidence,
+    "report": _report,
     "collaborator": _collaborator,
     "benchmark": _benchmark,
     "console": _console,
