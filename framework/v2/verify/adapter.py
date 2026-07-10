@@ -182,6 +182,9 @@ class FindingContext(BaseModel):
     # oob_callback_oracle
     oob_hits: list[Any] | None = None
 
+    # service_reachability_oracle (a real transport handshake reproduced a scanner's "open port")
+    handshake: dict[str, Any] | None = None
+
     # -- builders ----------------------------------------------------------
 
     @classmethod
@@ -300,6 +303,20 @@ class FindingContext(BaseModel):
             observed_evidence={str(k): v for k, v in dict(observed_evidence or {}).items()},
             predicate=dict(predicate),
         )
+
+    @classmethod
+    def from_handshake(
+        cls, handshake: Mapping[str, Any], *, bug_class: str = "service_reachable"
+    ) -> "FindingContext":
+        """A captured transport handshake (verify.reachability), for the service-reachability
+        oracle — the retained connect evidence that turns a scanner's "open port" into a FACT.
+
+        The ``handshake`` MUST come from a real gated connect (``reachability.capture_handshake``),
+        NEVER a scanner's parsed "open" row: the oracle re-verifies reachability by an INDEPENDENT
+        handshake, so laundering a sensor's ``open`` observation straight into this context would
+        defeat prove-don't-guess (the observation stays GROUNDING_INTEL until a live connect
+        reproduces it)."""
+        return cls(bug_class=bug_class, handshake=dict(handshake or {}))
 
     @classmethod
     def from_process_output(
@@ -448,4 +465,6 @@ class FindingContext(BaseModel):
             ctx["process_output"] = self.process_output
         if self.oob_hits is not None:
             ctx["oob_hits"] = self.oob_hits
+        if self.handshake is not None:
+            ctx["handshake"] = self.handshake
         return ctx

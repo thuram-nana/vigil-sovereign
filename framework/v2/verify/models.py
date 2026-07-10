@@ -46,6 +46,7 @@ class OracleKind(str, enum.Enum):
     EVALUATION = "evaluation"                         # server evaluated an injected expression (SSTI/EL)
     ERROR_SIGNATURE = "error_signature"               # a datastore/parser error a payload provoked (error-based)
     DOM_EXECUTION = "dom_execution"                   # injected JS actually executed in a real DOM (DOM-XSS)
+    SERVICE_REACHABILITY = "service_reachability"     # a real transport handshake reproduced (port open)
 
 
 class OracleProbe(BaseModel):

@@ -35,8 +35,10 @@ from .oracles import (
     differential_response_oracle,
     oob_callback_oracle,
     sanitizer_signal_oracle,
+    service_reachability_oracle,
     side_effect_oracle,
 )
+from .reachability import capture_handshake, confirm_reachable, reachable_context
 from .verifier import (
     BUG_CLASS_ORACLES,
     HIGH_CONFIDENCE,
@@ -56,6 +58,11 @@ __all__ = [
     "side_effect_oracle",
     "sanitizer_signal_oracle",
     "oob_callback_oracle",
+    "service_reachability_oracle",
+    # reachability
+    "capture_handshake",
+    "confirm_reachable",
+    "reachable_context",
     # oob
     "OOBReceiver",
     "OOBHit",

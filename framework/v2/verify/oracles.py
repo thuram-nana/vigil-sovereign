@@ -1113,3 +1113,71 @@ def _hit_summary(hit: Any) -> str:
     path = getattr(hit, "path", "?")
     client = getattr(hit, "client_ip", "?")
     return f"{method} {path} from {client}"
+
+
+# ---------------------------------------------------------------------------
+# Service reachability — a real transport handshake reproduced (port open)
+# ---------------------------------------------------------------------------
+
+
+def service_reachability_oracle(observed_handshake: Any) -> OracleSignal:
+    """Fire when a REAL transport handshake to a service reproduced — a completed TCP connect to the
+    claimed host:port (optionally corroborated by a service banner the endpoint sent). This is what
+    promotes a scanner's "open 443" OBSERVATION (Nmap et al.) into a reachability FACT: the port is
+    open iff a live handshake actually connected, judged here over the RETAINED connect evidence —
+    pure, deterministic, and re-runnable offline, so a scanner's say-so alone never confirms.
+
+    ``observed_handshake`` is the JSON-safe evidence a reachability probe captured::
+
+        {"connected": bool, "host": str, "port": int, "protocol": "tcp"|"udp",
+         "peer": "ip:port"?, "banner": str?, "error": str?}
+
+    Fires only when ``connected is True`` AND the evidence names the concrete host+port the connect
+    resolved to. A completed TCP three-way handshake IS the proof of reachability, so a bare connect
+    confirms at 0.90; a captured service BANNER — raw application-layer bytes the endpoint actually
+    sent, a genuine re-derivable artifact — raises it to 0.97. (The captured ``peer`` is retained for
+    the audit trail but does NOT raise confidence: ``getpeername`` returns the very port we dialled,
+    so a "peer port matches" check is self-referential and would over-state a bare connect.) A refused
+    / timed-out / UDP-without-a-banner / malformed handshake does not fire — an absent or negative
+    signal is never an assumed pass.
+
+    GROUNDING is procedural, exactly as for every oracle: the handshake MUST originate from a real
+    gated capture (``verify.reachability.capture_handshake``), never a scanner's parsed "open" row —
+    that is what keeps this a re-verification rather than a rubber-stamp of the scanner's say-so."""
+    if not isinstance(observed_handshake, Mapping):
+        return OracleSignal(kind=OracleKind.SERVICE_REACHABILITY, fired=False, confidence=0.0,
+                            evidence="no handshake evidence")
+    hs = observed_handshake
+    connected = hs.get("connected")
+    host = _coerce_text(hs.get("host")).strip()
+    protocol = (_coerce_text(hs.get("protocol")).strip().lower() or "tcp")
+    try:
+        port_i = int(hs["port"]) if hs.get("port") is not None else None
+    except (TypeError, ValueError, KeyError):
+        port_i = None
+
+    if connected is not True or not host or port_i is None:
+        reason = _coerce_text(hs.get("error")).strip() or "no completed handshake to a concrete host:port"
+        return OracleSignal(
+            kind=OracleKind.SERVICE_REACHABILITY, fired=False, confidence=0.0,
+            evidence=f"not reachable: {reason}",
+            observed={"host": host, "port": port_i, "connected": connected})
+
+    banner = _coerce_text(hs.get("banner")).strip()
+    peer = _coerce_text(hs.get("peer")).strip()
+    # UDP has no connection handshake — only an application-layer response proves reachability.
+    if protocol == "udp" and not banner:
+        return OracleSignal(
+            kind=OracleKind.SERVICE_REACHABILITY, fired=False, confidence=0.0,
+            evidence="udp reachability needs a service response (no banner)",
+            observed={"host": host, "port": port_i, "protocol": protocol})
+
+    # Only a real service banner corroborates beyond the bare handshake — the captured peer port is
+    # definitionally the one we dialled, so it carries no independent signal.
+    confidence = 0.97 if banner else 0.90
+    detail = f"banner {banner[:48]!r}" if banner else (f"peer {peer}" if peer else "tcp connect")
+    return OracleSignal(
+        kind=OracleKind.SERVICE_REACHABILITY, fired=True, confidence=confidence,
+        evidence=f"{protocol} handshake reproduced to {host}:{port_i} ({detail})",
+        observed={"host": host, "port": port_i, "protocol": protocol,
+                  "peer": peer, "banner": banner[:96]})
