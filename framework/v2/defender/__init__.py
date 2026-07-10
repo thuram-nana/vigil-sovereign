@@ -40,9 +40,40 @@ from .models import (
     Posture,
     PostureAnnotation,
 )
+from .efficacy import (
+    DefenseReport,
+    DetectionEfficacy,
+    FindingDetection,
+    attack_technique_for,
+    build_defense_report,
+    detection_efficacy,
+    detection_rule_to_sigma,
+    scan_action_descriptors,
+    scan_action_events,
+)
+from .gap_report import DetectionGap, detection_gaps, synthesize_rule
+from .logsource import (
+    LogEvent,
+    LogLoad,
+    LogSourceSensor,
+    load_log_file,
+    parse_cef,
+    parse_evtx_json,
+    parse_log,
+    parse_syslog,
+)
 from .posture import annotate_action
 from .rules import DetectionRuleset, default_ruleset
 from .scoring import score_action
+from .sigma import (
+    SigmaEvalResult,
+    SigmaMatch,
+    SigmaRule,
+    evaluate_events,
+    load_sigma_dir,
+    parse_sigma_rule,
+    rule_matches_event,
+)
 from .telemetry import TelemetryModel, model_telemetry
 
 __all__ = [
@@ -60,4 +91,35 @@ __all__ = [
     "default_ruleset",
     "score_action",
     "annotate_action",
+    # gap-report (purple-team detection-gap synthesizer)
+    "DetectionGap",
+    "detection_gaps",
+    "synthesize_rule",
+    # log/alert ingestion (offline, operator-supplied)
+    "LogEvent",
+    "LogLoad",
+    "LogSourceSensor",
+    "load_log_file",
+    "parse_log",
+    "parse_syslog",
+    "parse_cef",
+    "parse_evtx_json",
+    # Sigma runtime + ATT&CK mapping
+    "SigmaRule",
+    "SigmaMatch",
+    "SigmaEvalResult",
+    "parse_sigma_rule",
+    "load_sigma_dir",
+    "rule_matches_event",
+    "evaluate_events",
+    # detection efficacy + assembled defense report
+    "DefenseReport",
+    "DetectionEfficacy",
+    "FindingDetection",
+    "build_defense_report",
+    "detection_efficacy",
+    "detection_rule_to_sigma",
+    "scan_action_descriptors",
+    "scan_action_events",
+    "attack_technique_for",
 ]
