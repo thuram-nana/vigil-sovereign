@@ -162,9 +162,18 @@ constructive alternative is purple-team detection-efficacy, never anti-defender 
 | Cross-engagement memory / priors | `memory …` |
 | Authorise (not apply) a self-improvement | `improve …` |
 | Read-only operator console (loopback) | `console` |
+| Enumerate the unified capability catalog | `capabilities [--json] [--kind sensor\|tool\|oracle\|operator\|command]` |
 | Status / kill-switch / authority | `status`, `authority …` |
 
 Run any subcommand with `--help` for its flags. Full dispatch table: `framework/v2/__main__.py`.
+
+`capabilities` is a READ-ONLY, deterministic view (`plugins/registry.py::capability_registry`) over CRUCIBLE's
+several rosters — the sensor registry, the internal-tool registry, the oracle catalog (`BUG_CLASS_ORACLES`),
+the operator catalogs, and the CLI table — DISCOVERED, never re-typed. It shows what each capability produces,
+its gating tier / entitlement, and its graceful-absent behaviour. It is the substrate a future MCP/API layer
+enumerates. A plugin publishes a sensor/oracle/operator through `plugins.register_*` (mirroring
+`ToolRegistry.register`) and it appears — building the catalog is metadata only and never runs a capability
+(registration ≠ invocation; every capability stays gated at run time).
 
 ---
 
