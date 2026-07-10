@@ -103,6 +103,11 @@ def _verify(argv: list[str]) -> int:
     return reverify.main(argv)
 
 
+def _capabilities(argv: list[str]) -> int:
+    from .plugins import cli as plugins_cli
+    return plugins_cli.main(argv)
+
+
 def _evidence(argv: list[str]) -> int:
     from .evidence import cli as evidence_cli
     return evidence_cli.main(argv)
@@ -175,6 +180,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "scan": _scan,
     "engage": _engage,
     "verify": _verify,
+    "capabilities": _capabilities,
     "evidence": _evidence,
     "collaborator": _collaborator,
     "benchmark": _benchmark,
