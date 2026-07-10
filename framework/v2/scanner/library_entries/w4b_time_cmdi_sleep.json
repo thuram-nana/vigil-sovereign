@@ -1,0 +1,22 @@
+{
+  "id": "w4b-time-cmdi-sleep",
+  "bug_class": "time_based_command_injection",
+  "title": "Blind OS command injection confirmed by an injected shell delay",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "timing",
+    "benign": "1",
+    "sleep_payload": "1; sleep 5",
+    "injected_ms": 5000
+  },
+  "references": [
+    "CWE-78",
+    "CAPEC-248"
+  ],
+  "remediation": "Never pass user input to a shell. Invoke programs with an argument vector (no shell interpolation) and validate against a strict allowlist. A reproducible, dose-matched latency shift from an injected 'sleep' is proof the shell executed the delay out of any visible response channel.",
+  "payload_family": "shell-sleep"
+}

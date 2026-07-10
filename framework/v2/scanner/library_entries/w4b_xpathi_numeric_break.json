@@ -1,0 +1,25 @@
+{
+  "id": "w4b-xpathi-numeric-break",
+  "bug_class": "xpath_injection",
+  "title": "XPath injection into an unquoted predicate (error-based)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "query_value",
+    "body_form_value",
+    "json_value"
+  ],
+  "oracle": {
+    "kind": "error_signature",
+    "error_probe": "1] | //*[",
+    "benign": "crucible-benign-term"
+  },
+  "references": [
+    "CWE-643",
+    "CAPEC-83"
+  ],
+  "remediation": "Never build an XPath expression from raw input; use a precompiled query with variable binding (e.g. XPathVariableResolver) so input is a value, not structure. A distinctive XPath engine error (XPathException / 'Expression must evaluate to a node-set') provoked by the malformed predicate but ABSENT from the benign control confirms injectability.",
+  "payload_family": "xpath-predicate-break"
+}

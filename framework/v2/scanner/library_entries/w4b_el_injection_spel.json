@@ -1,0 +1,25 @@
+{
+  "id": "w4b-el-injection-spel",
+  "bug_class": "el_injection",
+  "title": "Expression-language injection (server evaluated an EL arithmetic)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "query_value",
+    "body_form_value",
+    "json_value"
+  ],
+  "oracle": {
+    "kind": "evaluation",
+    "probe_expr": "#{73331*73331}",
+    "expected_result": "5377435561"
+  },
+  "references": [
+    "CWE-917",
+    "CAPEC-242"
+  ],
+  "remediation": "Do not evaluate user input as an expression. Disable EL/OGNL/SpEL evaluation on untrusted data and treat request values as inert strings. The evaluation oracle fires only when the server COMPUTED the arithmetic (the product is present and the raw '#{...}' is absent), so a merely reflected payload never confirms.",
+  "payload_family": "el-arithmetic"
+}
