@@ -18,10 +18,12 @@ from .base import Sensor, SensorResult, service_observations
 from .builtin import DeclaredServiceSensor, default_registry, register_builtin_sensors
 from .nmap import NmapServiceSensor, parse_nmap_xml
 from .pipeline import run_sensor
+from .tshark import TsharkFlowSensor, parse_tshark_fields
 
 __all__ = [
     "Sensor", "SensorResult", "service_observations",
     "run_sensor",
     "DeclaredServiceSensor", "default_registry", "register_builtin_sensors",
     "NmapServiceSensor", "parse_nmap_xml",
+    "TsharkFlowSensor", "parse_tshark_fields",
 ]

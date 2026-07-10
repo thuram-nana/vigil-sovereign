@@ -59,8 +59,10 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     invocation — every sensor is still gated at ``run_sensor`` time, so registering the active Nmap
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
     from .nmap import NmapServiceSensor
+    from .tshark import TsharkFlowSensor
     registry.register(DeclaredServiceSensor())
     registry.register(NmapServiceSensor())
+    registry.register(TsharkFlowSensor())
     return registry
 
 
