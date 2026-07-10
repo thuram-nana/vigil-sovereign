@@ -130,12 +130,21 @@ class MCPSensor:
         remote_args = args.get("remote_args") if isinstance(args, dict) else None
         if remote_args is not None and not isinstance(remote_args, dict):
             return ToolResult(ok=False, note=f"{self.name} args['remote_args'] must be an object")
+        # SCOPE INVARIANT: the external tool is driven ONLY against the gate-validated scoped host. A
+        # caller-supplied remote_args['host'] must NEVER redirect the probe off-scope — the invoker's
+        # charter-scope gate only validates the top-level args['host'], so a conflicting remote host
+        # would be an authorization bypass. Refuse a conflicting host (fail-closed + visible), and
+        # FORCE the scoped host below (never setdefault, which a present key would silently defeat).
+        if isinstance(remote_args, dict) and "host" in remote_args and remote_args["host"] != host:
+            return ToolResult(ok=False, note=(
+                f"{self.name} refused: remote_args['host']={remote_args['host']!r} conflicts with the "
+                f"scoped host {host!r} — the external tool is only ever driven against the in-scope host"))
         # Dry-run exercises the gate chain without any external call (byte-safe rehearsal).
         if getattr(ctx, "dry_run", False):
             return ToolResult(ok=True, summary=f"[dry-run] {self.name} on {host}",
                               output={"host": host, "services": []})
         payload = dict(remote_args or {})
-        payload.setdefault("host", host)   # default the remote tool onto the SCOPED host
+        payload["host"] = host   # FORCE the SCOPED host — never overridable by the caller's remote_args
         try:
             res = self._client.call_tool(self._remote_tool, payload)
         except Exception as e:

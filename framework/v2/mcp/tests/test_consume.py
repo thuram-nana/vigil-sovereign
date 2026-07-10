@@ -192,6 +192,31 @@ def test_untrusted_remote_host_claim_is_ignored_scope_tight() -> None:
     assert not world.has_node("host:evil.example.com")
 
 
+def test_caller_remote_args_cannot_redirect_the_probe_off_scope() -> None:
+    # REGRESSION (Wave-6 review, HIGH): the invoker's charter-scope gate validates only the TOP-LEVEL
+    # args['host']; a caller-supplied remote_args['host'] must NOT be able to drive the external tool at
+    # an off-scope target. A conflicting remote host is refused BEFORE any call-out (fail-closed).
+    world = WorldModel()
+    fake = _FakeServer(result=_tool_result([{"port": 53, "protocol": "udp"}]))
+    res = _run(_sensor(fake), world, {"host": "10.0.0.5", "remote_args": {"host": "8.8.8.8"}})
+    assert not res.ok                                   # the sensor refused the conflicting host
+    assert fake.calls == []                             # NOTHING was sent to the external tool
+    assert res.observations == [] and not world.has_node("host:8.8.8.8")
+    assert not world.has_node("host:10.0.0.5")          # and no misattributed lead under the scoped host
+
+
+def test_scoped_host_is_forced_into_the_remote_payload() -> None:
+    # Non-target remote_args (e.g. ports) pass through, but the scoped host is FORCED onto the outbound
+    # arguments — never merely defaulted (a present-but-equal host is fine; other params are preserved).
+    world = WorldModel()
+    fake = _FakeServer(result=_tool_result([{"port": 443, "protocol": "tcp"}]))
+    res = _run(_sensor(fake), world, {"host": "10.0.0.5", "remote_args": {"ports": "1-1024"}})
+    assert res.ok and fake.calls
+    sent = fake.calls[0]["params"]["arguments"]
+    assert sent["host"] == "10.0.0.5"                   # the scoped host reached the tool
+    assert sent["ports"] == "1-1024"                    # the caller's non-target param was preserved
+
+
 def test_remote_tool_error_is_a_failed_result_not_a_guess() -> None:
     world = WorldModel()
     fake = _FakeServer(result=_tool_result([{"port": 443}], is_error=True))
