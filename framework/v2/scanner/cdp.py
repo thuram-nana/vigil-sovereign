@@ -42,6 +42,24 @@ from ..common.errors import CrucibleError
 from .browser import find_browser
 from .websocket import WSConnection, connect
 
+
+def _cdp_host_allowed(url: str, allowed_hosts) -> bool:
+    """Whether a page-initiated request URL may leave the browser under the CDP
+    request allowlist. Fail-closed: a named host must be on ``allowed_hosts``.
+
+    Loopback is always allowed. A URL with no network host (``data:``, ``about:``,
+    ``blob:``) is same-document, not egress, so it is allowed — refusing those would
+    break the page without gating any network traffic. Every other named host is
+    refused unless allowlisted, so a remote target's page cannot pull the browser
+    off-scope (this catches the IP-literal references the resolver-rules egress gate
+    documents as its own blind spot)."""
+    host = (urlsplit(url).hostname or "").lower()
+    if not host:
+        return True
+    if host in _LOOPBACK:
+        return True
+    return host in {str(h).lower() for h in (allowed_hosts or ())}
+
 # Flags that make Chromium headless, debuggable, and sandbox-tolerant. `port=0`
 # lets the OS assign a port; Chromium writes the chosen one to DevToolsActivePort.
 _LAUNCH_FLAGS = (
@@ -73,10 +91,19 @@ class CdpSession:
         self._conn = conn
         self._id = 0
         self._events: list[dict] = []
+        # When set (via enable_request_allowlist), a fail-closed CDP request
+        # allowlist is active: every intercepted request is continued iff its host
+        # is allowed, else failed. None → no interception (the default; loopback).
+        self._allow_hosts: set[str] | None = None
 
     def _ingest(self, msg: dict) -> dict:
-        """Buffer one event and return it (single funnel for all read loops)."""
+        """Buffer one event and return it (single funnel for all read loops). When
+        the request allowlist is active, a paused request is resolved here, riding
+        whichever read loop is pumping — continue if its host is allowed, else fail
+        it before a byte leaves the browser."""
         self._events.append(msg)
+        if self._allow_hosts is not None and msg.get("method") == "Fetch.requestPaused":
+            self._handle_paused(msg)
         return msg
 
     def send(self, method: str, params: dict | None = None, *, timeout: float = 10.0) -> dict:
@@ -188,6 +215,40 @@ class CdpSession:
                 for e in self.events_of("Runtime.bindingCalled")
                 if e.get("params", {}).get("name") == name]
 
+    # -- fail-closed request allowlist (§8: gate the browser's own egress) ------
+
+    def enable_request_allowlist(self, allowed_hosts) -> None:
+        """Turn on a fail-closed CDP request allowlist. ``Fetch.enable`` pauses every
+        page-initiated request; from then on each is continued iff its host is in
+        ``allowed_hosts`` (+ loopback) and FAILED otherwise — a per-request egress
+        gate for the headless browser, the analogue of the HTTP executor's egress
+        allowlist. Idempotent-safe to call once per session, before navigation, so
+        load-time requests are covered."""
+        self._allow_hosts = {str(h).lower() for h in (allowed_hosts or ())}
+        self.send("Fetch.enable", {"patterns": [{"urlPattern": "*"}]})
+
+    def _send_oneway(self, method: str, params: dict | None = None) -> None:
+        """Write a CDP command WITHOUT waiting for its result — used to resolve a
+        paused request from inside a read loop without re-entering it. The command's
+        ack arrives later as an ordinary id-tagged message and is harmlessly dropped."""
+        self._id += 1
+        self._conn.send_text(json.dumps({"id": self._id, "method": method, "params": params or {}}))
+
+    def _handle_paused(self, msg: dict) -> None:
+        """Resolve one ``Fetch.requestPaused`` event: continue an allowed-host request,
+        else fail it (``AccessDenied``) so it never reaches the network. Fail-closed —
+        a missing/garbled event is left alone (Chromium's own timeout then applies)."""
+        params = msg.get("params", {}) or {}
+        request_id = params.get("requestId")
+        if request_id is None:
+            return
+        url = (params.get("request", {}) or {}).get("url", "")
+        if _cdp_host_allowed(url, self._allow_hosts):
+            self._send_oneway("Fetch.continueRequest", {"requestId": request_id})
+        else:
+            self._send_oneway("Fetch.failRequest",
+                              {"requestId": request_id, "errorReason": "AccessDenied"})
+
     def close(self) -> None:
         self._conn.close()
 
@@ -261,13 +322,24 @@ class CdpBrowser:
         raise CdpError("no page target exposed by the browser")
 
     def session(self) -> CdpSession:
-        """Open a CDP session on the browser's page target."""
+        """Open a CDP session on the browser's page target. When this browser is
+        confined to an allowlist, the session gets a fail-closed CDP request
+        allowlist (Fetch interception), so a page-initiated request to an off-scope
+        host is refused before it leaves the browser — the §8 gap closed, layered on
+        top of the resolver-rules egress gate."""
         if self._proc is None:
             self.start()
         conn = connect(self._page_ws_url())
         if conn is None:
             raise CdpError("CDP websocket handshake failed")
         sess = CdpSession(conn)
+        if self._allowed_hosts is not None:
+            try:
+                sess.enable_request_allowlist(self._allowed_hosts)
+            except CdpError:
+                # Interception unavailable (old browser) → the resolver-rules egress
+                # gate still confines the browser; never fail open silently otherwise.
+                pass
         self._sessions.append(sess)
         return sess
 

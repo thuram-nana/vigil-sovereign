@@ -365,6 +365,8 @@ def run_engagement(
     detection_budget: float = 2.0,
     waf_adaptive: bool = False,
     grammar_fuzz: int = 0,
+    enable_arsenal: bool = False,
+    arsenal_race_targets: "tuple[tuple[str, int], ...]" = (),
     priors: object = None,
     transfer_archetype: str | None = None,
     prompt_callback: PromptCallback | None = None,
@@ -447,6 +449,22 @@ def run_engagement(
         except Exception:
             priors = None   # transfer is value-add; never sink the engagement on it
 
+    # Opt-in advanced arsenal (default OFF → byte-identical). Its RAW-SOCKET modules
+    # (smuggling/CSWSH/race) speak bytes on the wire directly, so they cannot ride the
+    # gated executor's `send`. Gate them fail-closed with the SAME chain the executor
+    # uses — kill-switch + charter/scope/posture — evaluated per host with NO traffic.
+    # A tripped kill-switch or an out-of-scope host means no probe leaves the box.
+    arsenal_authz = None
+    if enable_arsenal:
+        _posture = parse_posture(slug)
+        _killswitch = KillSwitch(slug)
+
+        def arsenal_authz(url: str) -> bool:
+            if _killswitch.is_tripped():
+                return False
+            return validate_action(
+                slug=slug, method="GET", target_url=url, posture=_posture).allowed
+
     ex = HttpExecutor(
         engagement_slug=slug,
         base_url=_origin(seed_url),
@@ -471,6 +489,9 @@ def run_engagement(
             oob_relay_secret=oob_relay_secret,
             waf_adaptive=waf_adaptive,
             grammar_fuzz=grammar_fuzz,
+            enable_arsenal=enable_arsenal,
+            arsenal_authz=arsenal_authz,
+            arsenal_race_targets=arsenal_race_targets,
             priors=priors,
             progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
         ).run(seed_url)
@@ -592,6 +613,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--grammar-fuzz", type=int, default=0, metavar="N",
                         help="Induce a request grammar from the crawl and audit N extra "
                              "structurally-valid synthesized requests (in-scope, deduped).")
+    parser.add_argument("--arsenal", action="store_true",
+                        help="Run the advanced web arsenal after the audit: content/JS "
+                             "discovery (leads via the gated executor), HTTP request-smuggling "
+                             "detection, and Cross-Site WebSocket Hijacking. Raw-socket modules "
+                             "are host-gated through the full authority/scope/kill-switch chain "
+                             "(fail-closed); every finding stays oracle-confirmed. Off = "
+                             "byte-identical. The destructive race engine is NOT auto-run.")
     parser.add_argument("--recon", action="store_true",
                         help="Run the Intelligence Engine alongside the scan: resolve an "
                              "asset inventory into the shared world-model and produce a "
@@ -639,6 +667,7 @@ def main(argv: list[str]) -> int:
             transfer_archetype=args.transfer_archetype,
             waf_adaptive=args.waf_adaptive,
             grammar_fuzz=args.grammar_fuzz,
+            enable_arsenal=args.arsenal,
         )
     except EngagementRefused as e:
         print(f"engagement refused: {e}")
@@ -666,6 +695,14 @@ def main(argv: list[str]) -> int:
         print(f"  passive findings  : {len(report.passive_findings)}")
     if report.dom_xss_candidates:
         print(f"  dom-xss leads     : {len(report.dom_xss_candidates)} (candidates)")
+    if report.discovered_paths:
+        print(f"  discovered paths  : {len(report.discovered_paths)} (arsenal leads)")
+    if report.js_secrets:
+        print(f"  js secrets        : {len(report.js_secrets)} (arsenal leads)")
+    if report.arsenal_leads:
+        print(f"  arsenal leads     : {len(report.arsenal_leads)}")
+        for lead in report.arsenal_leads[:10]:
+            print(f"    {lead}")
     # Forward reasoning: the multi-hop attack paths the confirmed facts unlock.
     if result.attack_paths:
         print(f"  attack paths      : {len(result.attack_paths)} (attacker -> crown jewel)")

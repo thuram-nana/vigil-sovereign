@@ -84,6 +84,10 @@ def main(argv: list[str]) -> int:
                         help="Confirm DOM-XSS by real execution in a headless browser (needs Chromium).")
     parser.add_argument("--spa", action="store_true",
                         help="Run the SPA crawler to capture fetch/XHR endpoints (needs Chromium).")
+    parser.add_argument("--arsenal", action="store_true",
+                        help="Run the advanced web arsenal after the audit: content/JS "
+                             "discovery leads, HTTP request-smuggling detection, and CSWSH "
+                             "(all loopback here; smuggling/CSWSH findings stay oracle-confirmed).")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
@@ -125,6 +129,7 @@ def main(argv: list[str]) -> int:
         enable_domxss=args.domxss,
         enable_browser_xss=args.browser_xss,
         enable_spa_crawl=args.spa,
+        enable_arsenal=args.arsenal,
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
         progress=progress,
@@ -157,4 +162,14 @@ def main(argv: list[str]) -> int:
         print(f"  spa endpoints     : {len(report.discovered_endpoints)} discovered")
         for ep in report.discovered_endpoints[:20]:
             print(f"    {ep}")
+    if report.discovered_paths:
+        print(f"  discovered paths  : {len(report.discovered_paths)} (arsenal leads)")
+        for p in report.discovered_paths[:20]:
+            print(f"    [{p.status}] {p.path}")
+    if report.js_secrets:
+        print(f"  js secrets        : {len(report.js_secrets)} (arsenal leads)")
+    if report.arsenal_leads:
+        print(f"  arsenal leads     : {len(report.arsenal_leads)}")
+        for lead in report.arsenal_leads[:20]:
+            print(f"    {lead}")
     return 0
