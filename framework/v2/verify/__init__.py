@@ -39,8 +39,14 @@ from .oracles import (
     side_effect_oracle,
     tls_weakness_oracle,
 )
+from .oracles import version_range_oracle
 from .reachability import capture_handshake, confirm_reachable, reachable_context
 from .tls import capture_tls_handshake, confirm_weak_tls, weak_tls_context
+from .version import (
+    confirm_vulnerable_dependency,
+    version_in_affected,
+    vulnerable_dependency_context,
+)
 from .verifier import (
     BUG_CLASS_ORACLES,
     HIGH_CONFIDENCE,
@@ -62,6 +68,7 @@ __all__ = [
     "oob_callback_oracle",
     "service_reachability_oracle",
     "tls_weakness_oracle",
+    "version_range_oracle",
     # reachability
     "capture_handshake",
     "confirm_reachable",
@@ -70,6 +77,10 @@ __all__ = [
     "capture_tls_handshake",
     "confirm_weak_tls",
     "weak_tls_context",
+    # supply-chain version-range
+    "confirm_vulnerable_dependency",
+    "version_in_affected",
+    "vulnerable_dependency_context",
     # oob
     "OOBReceiver",
     "OOBHit",

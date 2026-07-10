@@ -188,6 +188,9 @@ class FindingContext(BaseModel):
     # tls_weakness_oracle (a real TLS handshake negotiated a deprecated protocol / weak cipher)
     tls: dict[str, Any] | None = None
 
+    # version_range_oracle (a package version provably falls in an advisory's affected range)
+    version_advisory: dict[str, Any] | None = None
+
     # -- builders ----------------------------------------------------------
 
     @classmethod
@@ -330,6 +333,16 @@ class FindingContext(BaseModel):
         ``tls`` evidence MUST come from a real gated capture (``tls.capture_tls_handshake``), never a
         scanner's parsed row — the oracle re-verifies by an INDEPENDENT handshake."""
         return cls(bug_class=bug_class, tls=dict(tls or {}))
+
+    @classmethod
+    def from_version_advisory(
+        cls, advisory: Mapping[str, Any], *, bug_class: str = "vulnerable_dependency"
+    ) -> "FindingContext":
+        """A scanner's advisory match ({package, version, affected range}) for the version-range
+        oracle — the retained evidence that proves a package version falls in an advisory's affected
+        range. The oracle re-derives membership deterministically, so a scanner's CVE match is
+        confirmed a FACT only by the actual version comparison, never the scanner's say-so."""
+        return cls(bug_class=bug_class, version_advisory=dict(advisory or {}))
 
     @classmethod
     def from_process_output(
@@ -482,4 +495,6 @@ class FindingContext(BaseModel):
             ctx["handshake"] = self.handshake
         if self.tls is not None:
             ctx["tls"] = self.tls
+        if self.version_advisory is not None:
+            ctx["version_advisory"] = self.version_advisory
         return ctx

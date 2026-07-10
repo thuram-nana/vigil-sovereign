@@ -1256,3 +1256,52 @@ def tls_weakness_oracle(observed_tls: Any) -> OracleSignal:
         kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
         evidence=f"no TLS weakness: negotiated {version_raw or '?'} / {cipher_raw or '?'}",
         observed={"host": host, "tls_version": version_raw, "cipher": cipher_raw})
+
+
+# ---------------------------------------------------------------------------
+# Version range — a package version provably falls in an advisory's affected range
+# ---------------------------------------------------------------------------
+
+
+def version_range_oracle(observed_advisory: Any) -> OracleSignal:
+    """Fire when a package's CONCRETE version PROVABLY falls inside a vulnerability advisory's affected
+    version range — the deterministic membership check that promotes a scanner's "package X @ V is
+    affected by CVE-Y" OBSERVATION into a FACT. A grype/osv/trivy match alone is a LEAD; this oracle
+    re-derives the verdict from the retained ``{version, affected}`` evidence, so a scanner's say-so
+    never becomes a fact and a mangled range never fabricates one.
+
+    ``observed_advisory`` is JSON-safe evidence::
+
+        {"package": str, "version": str, "vuln_id": str?, "ecosystem": str?,
+         "affected": [ {"introduced": "2.0", "fixed": "2.15.0"} | ">=1.0.0,<2.0.0" , ... ]}
+
+    Fires at 0.95 only when ``version_in_affected(version, affected)`` proves membership. Does NOT fire
+    when the version is outside the range, the version/range is unparseable, or ``affected`` is empty —
+    an absent or negative proof is never an assumed pass (FAIL-CLOSED). Pure and deterministic, so the
+    same verdict re-verifies offline from the retained context."""
+    from .version import version_in_affected
+
+    if not isinstance(observed_advisory, Mapping):
+        return OracleSignal(kind=OracleKind.VERSION_RANGE, fired=False, confidence=0.0,
+                            evidence="no advisory evidence")
+    adv = observed_advisory
+    package = _coerce_text(adv.get("package")).strip()
+    version = _coerce_text(adv.get("version")).strip()
+    vuln_id = _coerce_text(adv.get("vuln_id")).strip()
+    affected = adv.get("affected")
+
+    if not version or affected is None or (isinstance(affected, (list, tuple)) and not affected):
+        return OracleSignal(
+            kind=OracleKind.VERSION_RANGE, fired=False, confidence=0.0,
+            evidence="no concrete version or affected-range to adjudicate",
+            observed={"package": package, "version": version, "vuln_id": vuln_id})
+
+    if version_in_affected(version, affected):
+        return OracleSignal(
+            kind=OracleKind.VERSION_RANGE, fired=True, confidence=0.95,
+            evidence=f"{package or 'package'} {version} is in the affected range of {vuln_id or 'the advisory'}",
+            observed={"package": package, "version": version, "vuln_id": vuln_id, "reason": "in_range"})
+    return OracleSignal(
+        kind=OracleKind.VERSION_RANGE, fired=False, confidence=0.0,
+        evidence=f"{package or 'package'} {version} is NOT provably in {vuln_id or 'the advisory'}'s affected range",
+        observed={"package": package, "version": version, "vuln_id": vuln_id})
