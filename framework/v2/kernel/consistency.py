@@ -19,12 +19,18 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+# X4 — parallelism + optional throttle for LIVE self-consistency sweeps. A deterministic dry-run
+# backend stays serial (see sample_workers). Read once at import; env-overridable.
+_LLM_MAX_WORKERS = max(1, int(os.environ.get("CRUCIBLE_LLM_MAX_WORKERS", "4") or "4"))
+_LLM_MIN_INTERVAL_S = float(os.environ.get("CRUCIBLE_LLM_MIN_INTERVAL_S", "0") or "0")
 
 
 class RateLimiter:
@@ -170,3 +176,24 @@ def consistency_evidence(result: ConsistencyResult) -> dict[str, Any]:
         "penalty": result.entropy,          # multiply a no-oracle confidence by (1 - penalty)
         "abstained": result.abstained,
     }
+
+
+def sample_workers(backend: Any = None) -> tuple[int, "Callable[[], None] | None"]:
+    """Pick serial-vs-parallel for a self-consistency sweep of a no-oracle binding — the shared
+    engine behind every ``*_consistent`` wrapper (hypothesize/decide/pivot/threat-model).
+
+    A deterministic DRY-RUN backend runs SERIAL (``workers == 1``): every sample is identical, so
+    the swept result is byte-identical to a single call, and N parallel samples of one schema
+    within a second would race on the timestamped dry-run dump filename. A live backend runs its
+    samples through a bounded pool (``CRUCIBLE_LLM_MAX_WORKERS``, default 4) with an optional
+    min-interval throttle (``CRUCIBLE_LLM_MIN_INTERVAL_S``). Determinism-neutral: it only affects
+    timing/parallelism, never WHICH answer wins — ``run_consistent`` gathers in submission order.
+
+    The probe backend is used ONLY to pick serial-vs-parallel; the caller still passes its original
+    ``backend`` (usually None -> the failover path) into every sample so parallel samples keep
+    backend failover."""
+    from .llm import get_backend
+    probe = backend if backend is not None else get_backend()
+    workers = 1 if getattr(probe, "is_dryrun", False) else _LLM_MAX_WORKERS
+    limiter = RateLimiter(_LLM_MIN_INTERVAL_S) if (workers > 1 and _LLM_MIN_INTERVAL_S > 0) else None
+    return workers, limiter
