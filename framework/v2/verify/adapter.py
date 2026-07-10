@@ -185,6 +185,9 @@ class FindingContext(BaseModel):
     # service_reachability_oracle (a real transport handshake reproduced a scanner's "open port")
     handshake: dict[str, Any] | None = None
 
+    # tls_weakness_oracle (a real TLS handshake negotiated a deprecated protocol / weak cipher)
+    tls: dict[str, Any] | None = None
+
     # -- builders ----------------------------------------------------------
 
     @classmethod
@@ -317,6 +320,16 @@ class FindingContext(BaseModel):
         defeat prove-don't-guess (the observation stays GROUNDING_INTEL until a live connect
         reproduces it)."""
         return cls(bug_class=bug_class, handshake=dict(handshake or {}))
+
+    @classmethod
+    def from_tls_handshake(
+        cls, tls: Mapping[str, Any], *, bug_class: str = "weak_tls"
+    ) -> "FindingContext":
+        """A captured TLS handshake (verify.tls), for the TLS-weakness oracle — the retained negotiated
+        protocol/cipher that turns a "weak TLS" observation into a FACT. Like ``from_handshake``, the
+        ``tls`` evidence MUST come from a real gated capture (``tls.capture_tls_handshake``), never a
+        scanner's parsed row — the oracle re-verifies by an INDEPENDENT handshake."""
+        return cls(bug_class=bug_class, tls=dict(tls or {}))
 
     @classmethod
     def from_process_output(
@@ -467,4 +480,6 @@ class FindingContext(BaseModel):
             ctx["oob_hits"] = self.oob_hits
         if self.handshake is not None:
             ctx["handshake"] = self.handshake
+        if self.tls is not None:
+            ctx["tls"] = self.tls
         return ctx

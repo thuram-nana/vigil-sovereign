@@ -37,8 +37,10 @@ from .oracles import (
     sanitizer_signal_oracle,
     service_reachability_oracle,
     side_effect_oracle,
+    tls_weakness_oracle,
 )
 from .reachability import capture_handshake, confirm_reachable, reachable_context
+from .tls import capture_tls_handshake, confirm_weak_tls, weak_tls_context
 from .verifier import (
     BUG_CLASS_ORACLES,
     HIGH_CONFIDENCE,
@@ -59,10 +61,15 @@ __all__ = [
     "sanitizer_signal_oracle",
     "oob_callback_oracle",
     "service_reachability_oracle",
+    "tls_weakness_oracle",
     # reachability
     "capture_handshake",
     "confirm_reachable",
     "reachable_context",
+    # tls posture
+    "capture_tls_handshake",
+    "confirm_weak_tls",
+    "weak_tls_context",
     # oob
     "OOBReceiver",
     "OOBHit",
