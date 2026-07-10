@@ -101,30 +101,40 @@ def _target_host(target: str) -> str:
     return (host or "").lower()
 
 
+# A non-empty sentinel that equals no real host (contains a NUL), so a caller comparing
+# ``loc_host != base_host`` DROPS the lead. Used for any location that is not UNAMBIGUOUSLY on the
+# scoped host — fail-closed, so no off-host asset is ever planted.
+_OFF_HOST = "\x00off-host"
+
+
 def _location_host(location: str) -> str:
-    """The lowercased hostname a finding's location sits on, or "" when the location is a RELATIVE
-    reference (a path / query / fragment) that is in-scope by construction. A scheme-LESS authority
-    (``host`` / ``host:port`` — the form nuclei emits for ssl/network/tcp/dns templates) IS resolved
-    to its host, symmetric with ``common.ethics.require_in_scope`` (which prepends ``https://`` before
-    reading the hostname). Without this, a scheme-less foreign ``host:port`` reads as a bare path and
-    the off-host drop is skipped — planting an out-of-scope asset in the world-model."""
-    # Normalise backslashes to slashes first — clients/browsers do, so `\/host` / `/\host` / `\\host`
-    # are protocol-relative authorities, not paths.
-    s = (location or "").strip().replace("\\", "/")
+    """The lowercased host a finding's location sits on, or "" when the location is a genuine relative
+    reference (a single-slash path / query / fragment) on the scoped target.
+
+    FAIL-CLOSED by construction. Hand-rolling WHATWG URL parsing to classify a location leaks (interior
+    tab/newline, ``///`` runs, backslashes and ``userinfo@`` all defeat a naive slash/dot heuristic), so
+    instead: any location a client would strip/normalise into a DIFFERENT authority (a C0 control char
+    anywhere, a backslash, a ``//`` run that ``urlsplit`` cannot resolve to a host) is reported as the
+    ``_OFF_HOST`` sentinel and dropped; a real authority (``scheme://host``, ``//host``, or a bare
+    ``host[:port]``) is resolved by ``urlsplit`` and kept ONLY when its host equals the scoped host.
+    A plain single-slash path / query / fragment is in-scope. (A bare param token or a no-leading-slash
+    relative path resolves to its own host and is dropped — a fail-closed over-drop symmetric with the
+    scope gate; the wired scanners all emit absolute URLs or leading-slash paths.)"""
+    s = location or ""
+    if any(c in s for c in "\t\n\r\x00\x0b\x0c"):
+        return _OFF_HOST                 # C0 control chars a client strips -> not provably in-scope
+    s = s.strip()
     if not s or s[0] in "?#":
-        return ""                       # a query / fragment — in-scope by construction
-    if s.startswith("//"):
-        s = "https:" + s                # protocol-relative //host/path — a FOREIGN authority, resolve it
-    elif s[0] == "/":
-        return ""                       # a leading-slash path — relative, in-scope by construction
-    elif "://" not in s:
-        s = "https://" + s              # scheme-less: resolve AS A HOST, exactly like require_in_scope —
-        #                                 do NOT try to guess authority-vs-token (an ASCII dot/colon
-        #                                 heuristic leaks IDNA dots 'evil。net', userinfo 'a@localhost',
-        #                                 and decimal-IP '2130706433'); urlsplit extracts the real host,
-        #                                 so a foreign one is dropped and a bare param token is treated
-        #                                 as its own host (dropped too — symmetric with the scope gate).
-    return (urlsplit(s).hostname or "").lower()
+        return ""                        # query / fragment — on the scoped target
+    if "\\" in s:
+        return _OFF_HOST                 # a backslash normalises to an authority in a real client
+    if s[0] == "/":
+        if not s.startswith("//"):
+            return ""                    # a plain single-slash path — on the scoped target
+        return (urlsplit("https:" + s).hostname or _OFF_HOST).lower()   # //host (or //// -> no host)
+    if "://" in s:
+        return (urlsplit(s).hostname or _OFF_HOST).lower()
+    return (urlsplit("//" + s).hostname or _OFF_HOST).lower()           # bare authority host[:port]
 
 
 # ---------------------------------------------------------------------------
