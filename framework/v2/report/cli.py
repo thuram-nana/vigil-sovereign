@@ -28,6 +28,8 @@ import argparse
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from ..common import paths
 from .generate import ReportMeta, generate_reports
 
@@ -124,7 +126,13 @@ def main(argv: list[str]) -> int:
         generated_at=args.timestamp,
     )
 
-    docs = generate_reports(findings, meta)
+    try:
+        docs = generate_reports(findings, meta)
+    except ValidationError as e:
+        # a --from-json document can parse as JSON yet carry a finding missing/mistyping a required
+        # field; surface a clean error + exit 2 like every other bad-input case, never a raw traceback.
+        print(f"error: invalid finding data: {e}")
+        return 2
     if args.only:
         docs = {args.only: docs[args.only]}
 

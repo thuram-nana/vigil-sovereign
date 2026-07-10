@@ -68,6 +68,17 @@ def test_missing_source_errors_cleanly() -> None:
     assert report_cli.main(["--from-json", "/no/such/file.json"]) == 2
 
 
+def test_wellformed_json_with_invalid_finding_errors_cleanly_no_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # REGRESSION (Wave-6 review, LOW): a JSON doc that PARSES but carries a finding missing required
+    # fields must exit 2 with a clean message — not escape as an unhandled pydantic ValidationError.
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps({"findings": [{"title": "x"}]}), encoding="utf-8")
+    rc = report_cli.main(["--from-json", str(p), "--out", str(tmp_path / "r"), "--target", "acme"])
+    assert rc == 2
+    assert "error: invalid finding data" in capsys.readouterr().out
+
+
 def test_dispatch_is_wired_into_main(tmp_path: Path) -> None:
     # additive wiring: `python3 -m framework.v2 report ...` resolves and runs.
     assert "report" in v2main._DISPATCH
