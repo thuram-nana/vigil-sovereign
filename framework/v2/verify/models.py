@@ -49,6 +49,7 @@ class OracleKind(str, enum.Enum):
     SERVICE_REACHABILITY = "service_reachability"     # a real transport handshake reproduced (port open)
     TLS_WEAKNESS = "tls_weakness"                     # a real TLS handshake negotiated a weak protocol/cipher
     VERSION_RANGE = "version_range"                   # a package version provably falls in an advisory's affected range
+    POLICY_PATH = "policy_path"                       # a real IAM grant path lets a principal reach a resource
 
 
 class OracleProbe(BaseModel):

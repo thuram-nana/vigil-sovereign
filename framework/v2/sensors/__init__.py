@@ -18,6 +18,14 @@ from __future__ import annotations
 
 from .base import Sensor, SensorResult, service_observations
 from .builtin import DeclaredServiceSensor, default_registry, register_builtin_sensors
+from .cloud import (
+    CloudInventoryPullSensor,
+    CloudPostureImportSensor,
+    cloud_observations,
+    cloud_posture_leads,
+    confirm_cloud_privilege_path,
+    normalize_cloud_export,
+)
 from .nmap import NmapServiceSensor, parse_nmap_xml
 from .pipeline import run_sensor
 from .sbom import SbomVulnSensor, parse_sca_report, sca_observations
@@ -46,4 +54,8 @@ __all__ = [
     "ZapWebSensor", "BurpWebSensor",
     "WebLead", "web_lead_observations", "web_lead_from_finding",
     "web_leads_from_findings", "confirm_web_lead",
+    # Wave 5a — cloud / IAM / CSPM sensors
+    "CloudPostureImportSensor", "CloudInventoryPullSensor",
+    "cloud_observations", "cloud_posture_leads", "normalize_cloud_export",
+    "confirm_cloud_privilege_path",
 ]

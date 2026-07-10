@@ -86,6 +86,13 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # supply chain: a scanner's "package @ version is affected by CVE" is a FACT only when the version
     # provably falls in the advisory's affected range (verify.version's deterministic membership check).
     "vulnerable_dependency": (OracleKind.VERSION_RANGE,),
+    # Cloud IAM privilege path: a cloud sensor's "over-privileged / can reach R" is a LEAD; it becomes
+    # a FACT only when the policy-path oracle re-derives a real grant path over the retained policy
+    # graph (verify.policy_path builds the graph; the oracle judges reachability). Distinct from the
+    # generic ACHIEVED_STATE-backed `privilege_escalation` (a runtime state), this proves the IAM path.
+    "privilege_path": (OracleKind.POLICY_PATH,),
+    "iam_privilege_escalation": (OracleKind.POLICY_PATH,),
+    "excessive_privilege": (OracleKind.POLICY_PATH,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -143,6 +150,16 @@ _ALIASES: dict[str, str] = {
     "outdated_dependency": "vulnerable_dependency",
     "sca": "vulnerable_dependency",
     "cve": "vulnerable_dependency",
+    # cloud IAM privilege-path aliases (a cloud/IAM posture lead an oracle proves via a grant path)
+    "iam_privesc": "iam_privilege_escalation",
+    "iam_privilege_path": "privilege_path",
+    "privilege_escalation_path": "privilege_path",
+    "iam_path": "privilege_path",
+    "over_privileged": "excessive_privilege",
+    "overprivileged": "excessive_privilege",
+    "excessive_permissions": "excessive_privilege",
+    "excessive_privileges": "excessive_privilege",
+    "over_permissioned": "excessive_privilege",
 }
 
 _ALL_ORACLES: tuple[OracleKind, ...] = tuple(OracleKind)
@@ -232,6 +249,7 @@ class OracleVerifier:
           handshake                          -> service_reachability_oracle
           tls                                -> tls_weakness_oracle
           version_advisory                   -> version_range_oracle
+          policy                             -> policy_path_oracle
         """
         ctx = dict(finding_context or {})
         bug_class = str(ctx.get("bug_class", ""))
@@ -349,6 +367,9 @@ class OracleVerifier:
         if kind is OracleKind.VERSION_RANGE:
             if "version_advisory" in ctx:
                 return oracles.version_range_oracle(ctx["version_advisory"])
+        if kind is OracleKind.POLICY_PATH:
+            if "policy" in ctx:
+                return oracles.policy_path_oracle(ctx["policy"])
             return None
         return None
 

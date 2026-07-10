@@ -58,6 +58,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     """Register the built-in reference sensors onto ``registry`` and return it. Registration is not
     invocation — every sensor is still gated at ``run_sensor`` time, so registering the active Nmap
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
+    from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
     from .nmap import NmapServiceSensor
     from .sbom import SbomVulnSensor
     from .tshark import TsharkFlowSensor
@@ -80,6 +81,11 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     registry.register(NucleiResultsImportSensor())
     registry.register(ZapWebSensor())
     registry.register(BurpWebSensor())
+    # Cloud/IAM/CSPM sensors: the offline export importer (Tier-1) + the opt-in gated collector pull
+    # (Tier-2, egress-allowlisted). Registration is not invocation — each is still gated at run_sensor
+    # time (kill-switch for the importer; ACTIVE_RECON + the egress allowlist for the live pull).
+    registry.register(CloudPostureImportSensor())
+    registry.register(CloudInventoryPullSensor())
     return registry
 
 

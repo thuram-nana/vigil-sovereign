@@ -51,6 +51,9 @@ class IntelSourceKind(str, enum.Enum):
     PACKET_CAPTURE = "packet_capture"  # observed in captured traffic (a pcap read by a packet engine)
     WEB_SCANNER = "web_scanner"       # a third-party web scanner's heuristic match (Nuclei/ZAP/Burp) —
     #                                   a LEAD, never a fact, until a CRUCIBLE oracle re-verifies it
+    CLOUD_POSTURE = "cloud_posture"   # a cloud/IAM posture export (ScoutSuite/Prowler/provider) — the
+    #                                   IAM topology + mis-config LEADS; a privilege PATH is a fact only
+    #                                   when the policy-path oracle re-derives it over the retained graph
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,

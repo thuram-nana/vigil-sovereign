@@ -190,6 +190,9 @@ class FindingContext(BaseModel):
 
     # version_range_oracle (a package version provably falls in an advisory's affected range)
     version_advisory: dict[str, Any] | None = None
+    # policy_path_oracle (a real IAM grant path lets a principal reach a resource) — the retained raw
+    # policy graph + the reachability query it is judged on
+    policy: dict[str, Any] | None = None
 
     # -- builders ----------------------------------------------------------
 
@@ -345,6 +348,19 @@ class FindingContext(BaseModel):
         return cls(bug_class=bug_class, version_advisory=dict(advisory or {}))
 
     @classmethod
+    def from_policy_graph(
+        cls, policy: Mapping[str, Any], *, bug_class: str = "privilege_path"
+    ) -> "FindingContext":
+        """A retained IAM policy graph + reachability query (verify.policy_path), for the policy-path
+        oracle — the retained evidence that turns a cloud sensor's "over-privileged / can reach R"
+        LEAD into a FACT. Like ``from_handshake``, the ``policy`` graph MUST be re-derived from the raw
+        operator export (``policy_path.build_policy_graph``), never laundered from the sensor's minted
+        world-model beliefs: the oracle re-derives the grant path over the retained raw policy, so the
+        certificate re-verifies offline. ``policy`` carries {principal, resource, access?, grants,
+        assume, member_of}."""
+        return cls(bug_class=bug_class, policy=dict(policy or {}))
+
+    @classmethod
     def from_process_output(
         cls, captured: Any, *, bug_class: str = "crash"
     ) -> "FindingContext":
@@ -497,4 +513,6 @@ class FindingContext(BaseModel):
             ctx["tls"] = self.tls
         if self.version_advisory is not None:
             ctx["version_advisory"] = self.version_advisory
+        if self.policy is not None:
+            ctx["policy"] = self.policy
         return ctx
