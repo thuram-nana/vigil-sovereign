@@ -47,6 +47,7 @@ class OracleKind(str, enum.Enum):
     ERROR_SIGNATURE = "error_signature"               # a datastore/parser error a payload provoked (error-based)
     DOM_EXECUTION = "dom_execution"                   # injected JS actually executed in a real DOM (DOM-XSS)
     SERVICE_REACHABILITY = "service_reachability"     # a real transport handshake reproduced (port open)
+    TLS_WEAKNESS = "tls_weakness"                     # a real TLS handshake negotiated a weak protocol/cipher
 
 
 class OracleProbe(BaseModel):

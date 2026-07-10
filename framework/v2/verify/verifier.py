@@ -80,6 +80,9 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # network-service reachability: a scanner's "open port" observation is confirmed a FACT only when
     # a real transport handshake reproduces (verify.reachability captures it; the oracle judges it).
     "service_reachable": (OracleKind.SERVICE_REACHABILITY,),
+    # TLS posture: a deprecated protocol / weak cipher is a FACT only when a real handshake negotiated
+    # it (verify.tls captures it; the oracle judges the negotiated version/suite).
+    "weak_tls": (OracleKind.TLS_WEAKNESS,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -127,6 +130,11 @@ _ALIASES: dict[str, str] = {
     "reachable": "service_reachable",
     "service_reachability": "service_reachable",
     "open_port": "service_reachable",
+    "tls_weakness": "weak_tls",
+    "weak_cipher": "weak_tls",
+    "deprecated_tls": "weak_tls",
+    "ssl_weakness": "weak_tls",
+    "weak_ssl": "weak_tls",
 }
 
 _ALL_ORACLES: tuple[OracleKind, ...] = tuple(OracleKind)
@@ -214,6 +222,7 @@ class OracleVerifier:
           process_output                     -> sanitizer_signal_oracle
           oob_hits                           -> oob_callback_oracle
           handshake                          -> service_reachability_oracle
+          tls                                -> tls_weakness_oracle
         """
         ctx = dict(finding_context or {})
         bug_class = str(ctx.get("bug_class", ""))
@@ -323,6 +332,10 @@ class OracleVerifier:
         if kind is OracleKind.SERVICE_REACHABILITY:
             if "handshake" in ctx:
                 return oracles.service_reachability_oracle(ctx["handshake"])
+            return None
+        if kind is OracleKind.TLS_WEAKNESS:
+            if "tls" in ctx:
+                return oracles.tls_weakness_oracle(ctx["tls"])
             return None
         return None
 

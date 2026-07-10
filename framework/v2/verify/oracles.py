@@ -1181,3 +1181,78 @@ def service_reachability_oracle(observed_handshake: Any) -> OracleSignal:
         evidence=f"{protocol} handshake reproduced to {host}:{port_i} ({detail})",
         observed={"host": host, "port": port_i, "protocol": protocol,
                   "peer": peer, "banner": banner[:96]})
+
+
+# ---------------------------------------------------------------------------
+# TLS weakness — a real handshake negotiated a deprecated protocol / weak cipher
+# ---------------------------------------------------------------------------
+
+# Protocols no client should still negotiate (uppercased ``ssl.SSLSocket.version()`` strings).
+_DEPRECATED_TLS_VERSIONS = frozenset({"SSLV2", "SSLV3", "TLSV1", "TLSV1.1"})
+
+# Broken cipher-suite tokens (uppercased). Each names a construction with a known, practical weakness
+# (a keystream / key-size / hash / authentication break), so a suite carrying it is weak whatever the
+# protocol version.
+_WEAK_CIPHER_TOKENS: tuple[tuple[str, str], ...] = (
+    ("RC4", "RC4 keystream biases"),
+    ("RC2", "RC2 is broken"),
+    ("3DES", "3DES/Sweet32 (64-bit block)"),
+    ("DES-CBC3", "3DES/Sweet32 (64-bit block)"),
+    ("DES-CBC", "single-DES 56-bit key"),
+    ("EXPORT", "export-grade (deliberately weakened) crypto"),
+    ("EXP-", "export-grade (deliberately weakened) crypto"),
+    ("NULL", "NULL cipher — no encryption"),
+    ("ADH", "anonymous DH — no authentication"),
+    ("AECDH", "anonymous ECDH — no authentication"),
+    ("ANON", "anonymous key exchange — no authentication"),
+    ("MD5", "MD5 MAC is broken"),
+    ("IDEA", "IDEA is deprecated"),
+    ("SEED", "SEED is deprecated"),
+)
+
+
+def tls_weakness_oracle(observed_tls: Any) -> OracleSignal:
+    """Fire when a REAL TLS handshake negotiated a DEPRECATED protocol or a WEAK cipher suite — the
+    server actually agreed to it, so it is a re-verifiable FACT about the endpoint's crypto posture,
+    not a config guess. Judges the retained handshake (``verify.tls.capture_tls_handshake`` captured it
+    over a live connection); a strong TLS1.2/1.3 handshake with a modern suite does NOT fire (good
+    posture is not a finding), and an absent/failed handshake does not fire.
+
+    ``observed_tls`` is JSON-safe evidence::
+
+        {"connected": bool, "host": str, "port": int, "tls_version": "TLSv1"|"TLSv1.2"|...,
+         "cipher": "ECDHE-RSA-AES128-GCM-SHA256"|..., "cipher_bits": int?, "error": str?}
+
+    A deprecated protocol confirms at 0.95; a weak cipher at 0.92. Pure and deterministic, so the same
+    verdict re-verifies offline from the retained context — an absent signal is never an assumed pass."""
+    if not isinstance(observed_tls, Mapping):
+        return OracleSignal(kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+                            evidence="no tls handshake evidence")
+    tls = observed_tls
+    if tls.get("connected") is not True:
+        return OracleSignal(
+            kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+            evidence=f"no completed tls handshake: {_coerce_text(tls.get('error')).strip() or 'not connected'}")
+    host = _coerce_text(tls.get("host")).strip()
+    version_raw = _coerce_text(tls.get("tls_version")).strip()
+    cipher_raw = _coerce_text(tls.get("cipher")).strip()
+    version_u = version_raw.upper()
+    cipher_u = cipher_raw.upper()
+
+    if version_u in _DEPRECATED_TLS_VERSIONS:
+        return OracleSignal(
+            kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.95,
+            evidence=f"{host or 'endpoint'} negotiated deprecated protocol {version_raw}",
+            observed={"host": host, "tls_version": version_raw, "cipher": cipher_raw,
+                      "reason": "deprecated_protocol"})
+    for token, why in _WEAK_CIPHER_TOKENS:
+        if token in cipher_u:
+            return OracleSignal(
+                kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.92,
+                evidence=f"{host or 'endpoint'} negotiated weak cipher {cipher_raw or '?'} — {why}",
+                observed={"host": host, "tls_version": version_raw, "cipher": cipher_raw,
+                          "reason": "weak_cipher", "token": token})
+    return OracleSignal(
+        kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+        evidence=f"no TLS weakness: negotiated {version_raw or '?'} / {cipher_raw or '?'}",
+        observed={"host": host, "tls_version": version_raw, "cipher": cipher_raw})
