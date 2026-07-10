@@ -110,6 +110,11 @@ class HttpRepeaterTool:
                 ex = HttpExecutor(
                     engagement_slug=slug,
                     base_url=base_url,
+                    # Load the signed EngagementAuthority (time-box validity window, max-actions
+                    # ceiling, environment binding) exactly as the production engage path does
+                    # (engage.py) — else the offensive-tier repeater would enforce ONLY the
+                    # kill-switch and a replay could fire after the authorization window closed.
+                    auto_load_authority=True,
                     prompt_callback=getattr(ctx, "prompt_callback", None) or stdin_prompt_with_timeout,
                     request_budget=self._request_budget,
                     timeout_seconds=self._timeout_seconds,

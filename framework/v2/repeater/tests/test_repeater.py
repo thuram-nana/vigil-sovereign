@@ -217,6 +217,39 @@ def test_unsigned_charter_refuses_replay(
     rep.close()
 
     assert ex.refused and ex.gate == "scope" and not ex.sent
+
+
+def test_expired_authority_refuses_replay(
+    isolated_engagement, grant_exploit, httpserver: HTTPServer, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Review-fix regression: the repeater loads the signed EngagementAuthority (auto_load_authority),
+    # so a CLOSED time-box refuses a replay exactly as the production engage path does — even though
+    # the charter still lists the host and the kill-switch is untripped.
+    from datetime import datetime, timezone
+
+    from framework.v2.authority.models import EngagementAuthority, TargetEnvironment
+    from framework.v2.authority.store import save_authority
+    from framework.v2.common import paths as _p
+
+    isolated_engagement("alpha", httpserver.host)
+    httpserver.expect_request("/x").respond_with_data("ok")
+    apath = tmp_path / "alpha.authority.json"
+    monkeypatch.setattr(_p, "authority_path", lambda s: apath)
+    save_authority(EngagementAuthority(
+        engagement_slug="alpha",
+        environment=TargetEnvironment.TWIN,
+        scope=[httpserver.host],
+        not_before=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        not_after=datetime(2020, 1, 2, tzinfo=timezone.utc),   # window closed years ago
+    ), apath)
+
+    rep = Repeater(slug="alpha")
+    ex = rep.replay(RepeaterRequest.capture(httpserver.url_for("/x")))
+    rep.close()
+
+    assert ex.refused and not ex.sent               # the closed authorization window refuses the replay
+    assert len(httpserver.log) == 0                 # nothing ever left the host
     assert len(httpserver.log) == 0
 
 
