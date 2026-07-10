@@ -240,13 +240,26 @@ class WebScanCampaign:
         """Fold cross-engagement priors into this run's bandit: each prior's
         successes/attempts become Beta evidence on ``(this context, its bug_class)``,
         so a bug class that paid off in past engagements starts ranked higher. A
-        prior without a ``bug_class`` is skipped — this never invents an arm."""
+        prior without a ``bug_class`` is skipped — this never invents an arm.
+
+        Transfer is a ONE-TIME COLD START. An arm that already carries evidence — real
+        outcomes, OR a transfer already folded into a PERSISTED (``bandit_path``) bandit
+        that was just loaded — is left untouched. Re-seeding it every run would re-inject
+        the borrowed pseudo-counts, compounding unboundedly and diluting real learning
+        (borrowed evidence must count for LESS than direct, never override repeated real
+        disproof). ``observations == 0`` ⇔ the arm is still at the untouched Beta(1,1)
+        prior, i.e. genuinely cold."""
         if not self._priors:
             return
 
         def _key(prior: object) -> tuple[str, str] | None:
             bug_class = getattr(prior, "bug_class", None)
-            return (self.bandit_context, str(bug_class)) if bug_class else None
+            if not bug_class:
+                return None
+            arm = str(bug_class)
+            if bandit.observations(self.bandit_context, arm) > 0.0:
+                return None   # arm already has evidence — do not re-inject borrowed counts
+            return (self.bandit_context, arm)
 
         bandit.seed_from_priors(self._priors, _key)
 

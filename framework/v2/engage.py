@@ -366,6 +366,7 @@ def run_engagement(
     waf_adaptive: bool = False,
     grammar_fuzz: int = 0,
     priors: object = None,
+    transfer_archetype: str | None = None,
     prompt_callback: PromptCallback | None = None,
     spine: object = None,
 ) -> EngagementResult:
@@ -421,6 +422,30 @@ def run_engagement(
                                   fixtures_dir=recon_fixtures, max_depth=recon_depth)
         except Exception:
             ingest = None   # recon is value-add; a recon failure never sinks the engagement
+
+    # W1.3 cross-engagement TRANSFER (opt-in): when an archetype is named and no explicit
+    # priors were supplied, warm-start this run's check-ordering bandit from SMOOTHED priors
+    # for that archetype — blended from lexically SIMILAR past archetypes and evidence-gated
+    # (memory.priors.smoothed_priors_for). Best-effort; default (no archetype) leaves
+    # priors=None so behaviour — and `make gate`, which never names an archetype — is
+    # byte-identical. The bandit only ORDERS effort, so transfer never gates a surface.
+    if priors is None and transfer_archetype:
+        try:
+            from .common import paths as _paths
+            _db = _paths.memory_db()
+            # Read-only: only consult an EXISTING memory store — never create one just
+            # because transfer was requested on a system with no engagement history yet.
+            if _db.exists():
+                from .memory import priors as _priors_mod
+                from .memory.store import open_store
+                _store = open_store(_db)
+                try:
+                    transferred = _priors_mod.smoothed_priors_for(_store, transfer_archetype)
+                finally:
+                    _store.close()
+                priors = transferred or None
+        except Exception:
+            priors = None   # transfer is value-add; never sink the engagement on it
 
     ex = HttpExecutor(
         engagement_slug=slug,
@@ -573,6 +598,10 @@ def main(argv: list[str]) -> int:
                              "GATED prediction queue. Sends no traffic to the target "
                              "(collectors query third-party sources; predictions are never "
                              "auto-scanned).")
+    parser.add_argument("--transfer-archetype", default=None, metavar="NAME",
+                        help="Cross-engagement transfer (opt-in): warm-start the check-ordering "
+                             "bandit from smoothed priors for this archetype, blended from "
+                             "lexically similar past archetypes. Off (default) = byte-identical.")
     parser.add_argument("--recon-fixtures", default=None, metavar="DIR",
                         help="Offline collector fixtures dir for --recon (DNS/CT/RDAP/ASN). "
                              "Without it, --recon still registers the scanned target + stack.")
@@ -607,6 +636,7 @@ def main(argv: list[str]) -> int:
             enable_chaining=not args.no_chaining,
             enable_recon=args.recon,
             recon_fixtures=args.recon_fixtures,
+            transfer_archetype=args.transfer_archetype,
             waf_adaptive=args.waf_adaptive,
             grammar_fuzz=args.grammar_fuzz,
         )
