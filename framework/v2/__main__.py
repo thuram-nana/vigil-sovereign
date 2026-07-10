@@ -113,6 +113,11 @@ def _evidence(argv: list[str]) -> int:
     return evidence_cli.main(argv)
 
 
+def _mcp(argv: list[str]) -> int:
+    from .mcp import cli as mcp_cli
+    return mcp_cli.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -185,6 +190,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "collaborator": _collaborator,
     "benchmark": _benchmark,
     "console": _console,
+    "mcp": _mcp,
     "status": _status,
 }
 

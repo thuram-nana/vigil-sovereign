@@ -163,7 +163,18 @@ constructive alternative is purple-team detection-efficacy, never anti-defender 
 | Authorise (not apply) a self-improvement | `improve …` |
 | Read-only operator console (loopback) | `console` |
 | Enumerate the unified capability catalog | `capabilities [--json] [--kind sensor\|tool\|oracle\|operator\|command]` |
+| Expose gated capabilities as MCP tools (stdio) | `mcp serve --slug <slug>` / `mcp list --slug <slug>` |
 | Status / kill-switch / authority | `status`, `authority …` |
+
+The **MCP seam** (`mcp/`) is the Wave-6 platformization surface, in two directions, both inside the
+same safety stack. EXPOSE (`mcp/server.py`): other AI agents/clients enumerate + invoke a *default-safe
+allowlist* of CRUCIBLE capabilities over JSON-RPC-2.0-on-stdio; every `tools/call` routes through the
+SAME `agents.tools.invoke_tool` gate chain, so an unentitled / out-of-scope call is refused over MCP
+exactly as locally (the charter `slug` is server-fixed, never request-chosen; nothing exposed is
+ungated). CONSUME (`mcp/sensor.py`): an external MCP tool becomes a gated `sensors.base.Sensor` whose
+output enters the world-model as a provenance-labelled `MCP_TOOL` observation — a **lead, never a
+fact**, until an oracle re-verifies it. All wire input is untrusted (stdlib-only, bounded, safe-parse,
+no eval/shell).
 
 Run any subcommand with `--help` for its flags. Full dispatch table: `framework/v2/__main__.py`.
 
