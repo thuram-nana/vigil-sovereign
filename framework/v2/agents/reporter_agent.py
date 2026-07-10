@@ -81,21 +81,20 @@ class ReporterAgent(Agent):
         (identical to today); a finding recorded as confirmed whose proof no longer
         reproduces — tampered, or a dry-run stub — is demoted here and never asserted as a
         fact in the report. Pure and read-only; sends no traffic (the oracle re-runs over
-        retained evidence)."""
+        retained evidence).
+
+        Delegates to ``report.grounding.admit_for_report`` — the single shared grounding
+        authority the Wave-6 report layer reuses — so the reporter-agent and a rendered
+        report grade a finding by the SAME re-execution. ``match_confidence=False`` there:
+        the blackboard finding's confidence is CALIBRATED, not the raw oracle value, so the
+        gate checks re-firing + bug_class binding without falsely demoting on the legitimate
+        calibration delta. ``critique_dryrun`` is deliberately NOT propagated into the ORACLE
+        token — that flag marks the LLM critique as a dry-run; the oracle ground is a
+        deterministic re-fire of retained evidence, independent of the LLM, and the dry-run
+        label is surfaced in the advisory (non-fact) branch below, not here."""
         try:
-            from ..veracity import admit, claim_from_finding
-            # match_confidence=False: the blackboard finding's confidence is CALIBRATED,
-            # not the raw oracle value, so the gate checks re-firing + bug_class binding
-            # without falsely demoting on the legitimate calibration delta.
-            #
-            # NOTE: we do NOT propagate critique_dryrun into the ORACLE token. That flag
-            # marks the LLM CRITIQUE as a dry-run; the oracle ground is a DETERMINISTIC
-            # re-fire of retained evidence, independent of the LLM. Per the P1 doctrine,
-            # a dry-run critique only downgrades the no-oracle advisory path — it can never
-            # invalidate a real oracle proof. The dry-run label is surfaced in the advisory
-            # (non-fact) branch below, not here.
-            claim = claim_from_finding(f, source="report:reporter", match_confidence=False)
-            return admit(claim, world=None)
+            from ..report.grounding import admit_for_report
+            return admit_for_report(f, source="report:reporter")
         except Exception:
             return None
 
