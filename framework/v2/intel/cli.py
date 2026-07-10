@@ -124,6 +124,52 @@ def _ingest_sbom(args: argparse.Namespace) -> int:
     return _ingest_offline(args, observations_from_sbom)
 
 
+def _ingest_intel(args: argparse.Namespace) -> int:
+    """Ingest an operator-supplied threat-intel feed (MISP / STIX / NVD / OSV) OFFLINE →
+    IOC + CVE observations projected onto the world-model.
+
+    Fail-closed + gated: when run under an engagement ``--slug`` whose kill-switch is tripped,
+    it refuses before reading anything. Graceful absence: a missing feed file is a clean skip
+    (exit 0), not a crash. Live pulls are a deliberate code-level opt-in, never a CLI flag that
+    fires egress by surprise (see build_threatintel_live_transport)."""
+    from .from_threatintel import detect_format, observations_from_threat_feed
+
+    if args.slug:
+        from ..authority.killswitch import KillSwitch
+        if KillSwitch(args.slug).is_tripped():
+            print(f"refused: kill-switch tripped for engagement {args.slug!r}", file=sys.stderr)
+            return 3
+
+    path = Path(args.file)
+    if not path.is_file():
+        # graceful absence — no feed supplied is a normal, non-error state.
+        return _emit({"feed": str(path), "present": False, "observations": 0,
+                      "note": "feed file absent; nothing ingested"})
+
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"error: cannot read feed {path}: {e}", file=sys.stderr)
+        return 2
+
+    fmt = args.format or "auto"
+    obs = observations_from_threat_feed(doc, seq=0, fmt=fmt)
+    store, istore = _open(args.slug)
+    world = WorldModel()
+    ing = IntelIngest(world, store=istore, engagement_slug=args.slug or "")
+    res = ing.ingest(obs)
+    iocs = sum(1 for o in obs if o.source_kind in (IntelSourceKind.MISP, IntelSourceKind.STIX))
+    cves = sum(1 for o in obs if o.source_kind is IntelSourceKind.VULN_DB and o.relation is None)
+    out = {"feed": str(path), "present": True, "format": fmt if fmt != "auto" else detect_format(doc),
+           "observations": len(obs), "iocs": iocs, "cve_advisories": cves,
+           "applied": res.applied, "dropped": res.dropped,
+           "nodes": world.node_count, "edges": world.edge_count,
+           "slug": args.slug or "(ephemeral)"}
+    if store is not None:
+        store.close()
+    return _emit(out)
+
+
 def _resolve(args: argparse.Namespace) -> int:
     store, istore = _open(args.slug)
     if istore is None:
@@ -258,6 +304,15 @@ def main(argv: list[str]) -> int:
     p.add_argument("--file", required=True, help="SBOM JSON (normalized or CycloneDX)")
     p.add_argument("--slug", default="")
     p.set_defaults(fn=_ingest_sbom)
+
+    p = sub.add_parser("ingest-intel",
+                       help="ingest a threat-intel feed (offline) → IOC + CVE/advisory observations "
+                            "(MISP / STIX 2.x / NVD / OSV). LEADS, never facts.")
+    p.add_argument("--file", required=True, help="threat-intel feed JSON export")
+    p.add_argument("--format", default="auto", choices=["auto", "misp", "stix", "cve", "nvd", "osv"],
+                   help="feed format (default: auto-detect)")
+    p.add_argument("--slug", default="", help="persist under this engagement slug (kill-switch honored)")
+    p.set_defaults(fn=_ingest_intel)
 
     p = sub.add_parser("resolve", help="resolved entities with merge explanations")
     p.add_argument("--slug", required=True)

@@ -1,0 +1,31 @@
+{
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2021-44228",
+        "cisaExploitAdd": "2021-12-10",
+        "cisaRequiredAction": "Apply updates.",
+        "descriptions": [
+          {"lang": "en", "value": "Apache Log4j2 JNDI features do not protect against attacker controlled LDAP endpoints (Log4Shell)."}
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {"cvssData": {"baseScore": 10.0, "baseSeverity": "CRITICAL"}, "baseSeverity": "CRITICAL"}
+          ]
+        },
+        "references": [
+          {"url": "https://logging.apache.org/log4j/2.x/security.html", "tags": ["Vendor Advisory"]},
+          {"url": "https://example.com/exploit-poc", "tags": ["Exploit"]}
+        ],
+        "configurations": [
+          {"nodes": [
+            {"cpeMatch": [
+              {"criteria": "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*",
+               "versionEndExcluding": "2.15.0"}
+            ]}
+          ]}
+        ]
+      }
+    }
+  ]
+}

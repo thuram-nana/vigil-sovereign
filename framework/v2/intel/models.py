@@ -51,6 +51,9 @@ class IntelSourceKind(str, enum.Enum):
     PACKET_CAPTURE = "packet_capture"  # observed in captured traffic (a pcap read by a packet engine)
     WEB_SCANNER = "web_scanner"       # a third-party web scanner's heuristic match (Nuclei/ZAP/Burp) —
     #                                   a LEAD, never a fact, until a CRUCIBLE oracle re-verifies it
+    MISP = "misp"                     # a MISP threat-intel event feed (IOCs) — a LEAD/corroboration, never a fact
+    STIX = "stix"                     # a STIX 2.x bundle (IOC indicators + vulnerability objects) — a LEAD
+    #                                   NOTE: CVE / advisory observations use VULN_DB above, whatever the feed format.
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,

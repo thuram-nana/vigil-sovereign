@@ -1,0 +1,40 @@
+{
+  "type": "bundle",
+  "id": "bundle--obsidian-test",
+  "objects": [
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--1",
+      "name": "malicious domain",
+      "indicator_types": ["malicious-activity"],
+      "pattern": "[domain-name:value = 'c2.evil.example']",
+      "pattern_type": "stix"
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--2",
+      "name": "malicious file hash",
+      "pattern": "[file:hashes.'SHA-256' = 'feedfacecafebeef00112233445566778899aabbccddeeff00112233445566']",
+      "pattern_type": "stix"
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--3",
+      "name": "retracted indicator",
+      "revoked": true,
+      "pattern": "[ipv4-addr:value = '198.51.100.7']",
+      "pattern_type": "stix"
+    },
+    {
+      "type": "vulnerability",
+      "spec_version": "2.1",
+      "id": "vulnerability--1",
+      "name": "CVE-2021-44228",
+      "description": "Log4Shell remote code execution",
+      "external_references": [{"source_name": "cve", "external_id": "CVE-2021-44228"}]
+    }
+  ]
+}
