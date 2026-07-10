@@ -267,15 +267,21 @@ def test_scheme_less_foreign_host_is_dropped_not_planted() -> None:
     assert any("/in/scope/path" in i for i in ids)                             # relative path kept
 
 
-def test_location_host_resolves_authorities_but_keeps_relative_refs() -> None:
-    # the shared minter's scope guard: unambiguous FOREIGN authorities are dropped (incl. the
-    # protocol-relative //host form), while genuine relative references (leading-slash paths, bare
-    # param tokens, no-leading-slash relative paths — the forms sqlmap emits) stay in-scope.
+def test_location_host_resolves_every_authority_form_and_never_leaks() -> None:
+    # the shared minter's scope guard delegates host extraction to urlsplit (like require_in_scope),
+    # so NO foreign-authority form reads as a bare in-scope path: full URLs, host:port, protocol-
+    # relative //host, backslash variants, userinfo@host, decimal/hex IPs, and Unicode-IDNA dots all
+    # resolve to a concrete host that is then dropped when it != the scoped host.
     from framework.v2.sensors.web_scanner import _location_host
-    for foreign in ("evil.example.net:443", "10.9.9.9:22", "//evil.example.net/x", "http://evil.test/y"):
-        assert _location_host(foreign) not in ("", "127.0.0.1")   # resolves to a droppable foreign host
-    for relative in ("/admin/login?id=1", "?q=1", "#frag", "id", "username", "admin/login.php"):
-        assert _location_host(relative) == ""                     # in-scope by construction, never dropped
+    for foreign in (
+        "http://evil.test/y", "evil.example.net:443", "10.9.9.9:22",
+        "//evil.example.net/x", "/\\evil.example.net", "\\\\evil.example.net",
+        "admin@localhost", "user@evil.test", "evil。net", "evil．net",
+    ):
+        assert _location_host(foreign) not in ("",), f"{foreign!r} must resolve to a droppable host"
+    # only genuine relative references stay in-scope (leading-slash path, query, fragment)
+    for relative in ("/admin/login?id=1", "?q=1", "#frag", ""):
+        assert _location_host(relative) == ""
 
 
 # ===========================================================================

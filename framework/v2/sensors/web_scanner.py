@@ -108,18 +108,22 @@ def _location_host(location: str) -> str:
     to its host, symmetric with ``common.ethics.require_in_scope`` (which prepends ``https://`` before
     reading the hostname). Without this, a scheme-less foreign ``host:port`` reads as a bare path and
     the off-host drop is skipped — planting an out-of-scope asset in the world-model."""
-    s = (location or "").strip()
+    # Normalise backslashes to slashes first — clients/browsers do, so `\/host` / `/\host` / `\\host`
+    # are protocol-relative authorities, not paths.
+    s = (location or "").strip().replace("\\", "/")
     if not s or s[0] in "?#":
         return ""                       # a query / fragment — in-scope by construction
     if s.startswith("//"):
         s = "https:" + s                # protocol-relative //host/path — a FOREIGN authority, resolve it
+    elif s[0] == "/":
+        return ""                       # a leading-slash path — relative, in-scope by construction
     elif "://" not in s:
-        # scheme-less: an AUTHORITY has a host-like head (a dotted name / IP, or a ':port'); a leading-
-        # slash path, a bare relative path segment, or a param token does not — those are in-scope.
-        head = s.split("/", 1)[0]
-        if s[0] == "/" or ("." not in head and ":" not in head):
-            return ""                   # relative path / bare param token — in-scope by construction
-        s = "https://" + s              # a bare host[:port] — resolve it the way the scope gate does
+        s = "https://" + s              # scheme-less: resolve AS A HOST, exactly like require_in_scope —
+        #                                 do NOT try to guess authority-vs-token (an ASCII dot/colon
+        #                                 heuristic leaks IDNA dots 'evil。net', userinfo 'a@localhost',
+        #                                 and decimal-IP '2130706433'); urlsplit extracts the real host,
+        #                                 so a foreign one is dropped and a bare param token is treated
+        #                                 as its own host (dropped too — symmetric with the scope gate).
     return (urlsplit(s).hostname or "").lower()
 
 
