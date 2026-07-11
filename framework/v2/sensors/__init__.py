@@ -26,6 +26,7 @@ from .cloud import (
     confirm_cloud_privilege_path,
     normalize_cloud_export,
 )
+from .k8s_runtime import KubeBenchSensor, kube_bench_observations, parse_kube_bench
 from .nmap import NmapServiceSensor, parse_nmap_xml
 from .pipeline import run_sensor
 from .sbom import SbomVulnSensor, parse_sca_report, sca_observations
@@ -58,4 +59,6 @@ __all__ = [
     "CloudPostureImportSensor", "CloudInventoryPullSensor",
     "cloud_observations", "cloud_posture_leads", "normalize_cloud_export",
     "confirm_cloud_privilege_path",
+    # Workstream C — Kubernetes-runtime posture sensor (kube-bench offline ingest -> CIS leads)
+    "KubeBenchSensor", "parse_kube_bench", "kube_bench_observations",
 ]
