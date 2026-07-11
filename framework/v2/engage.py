@@ -315,6 +315,37 @@ def _spine_finding_payload(f, admitted) -> dict:
     }
 
 
+def _passive_finding_payload(pf) -> dict:
+    """A FindingPayload-shaped mirror of a scanner PASSIVE finding, graded as a LEAD.
+
+    A passive finding is a deterministic hygiene OBSERVATION (a missing header, a cookie flag) —
+    real, but NOT an oracle-confirmed attacker capability. So it carries NO ``oracle_context`` and
+    ``verified_by_oracle=False``, and the report grader renders it a LEAD, never a fact. This is
+    how the unified report composes the passive producer WITHOUT diluting prove-don't-guess.
+    ``critique_status='llm_advisory'`` is the reportable-but-lead bucket. Pure; no wallclock."""
+    sev = str(getattr(pf, "severity", "") or "").strip().title()
+    if sev not in ("Critical", "High", "Medium", "Low", "Info"):
+        sev = "Info"
+    check = str(getattr(pf, "check_id", "") or "passive")
+    url = str(getattr(pf, "url", "") or "")
+    title = str(getattr(pf, "title", "") or check)
+    return {
+        "finding_slug": (f"passive:{check}"[:120]) or check,
+        "title": title,
+        "severity": sev,
+        "bug_class": check,
+        "surface": url or "(response)",
+        "summary": str(getattr(pf, "evidence", "") or title),
+        "critique_status": "llm_advisory",
+        "critique_dryrun": False,
+        "oracle_context": None,
+        "verified_by_oracle": False,
+        "confidence": None,
+        "oracle_kind": None,
+        "oracle_rationale": "",
+    }
+
+
 def _distinct_confirming_kinds(f) -> int:
     """How many DISTINCT oracle kinds independently confirmed this finding — the reward-bus
     corroboration signal (the non-circular bar for an autonomous EXPLOITABLE label is >= 2
@@ -405,6 +436,14 @@ def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
                 distinct_confirming_kinds=_distinct_confirming_kinds(f),
                 seq=fe or 0, spine_sink=sink, target_event_id=fe,
                 arm=str(f.bug_class), bug_class=str(f.bug_class))
+
+        # (3b) PRODUCER UNIFICATION — the scanner's PASSIVE findings also reach the unified
+        # report, as LEADS. Honest grading: a passive hygiene observation is not an
+        # oracle-confirmed attacker capability, so its finding event carries no oracle_context and
+        # the report grader renders it a lead, never a fact (the active-finding events above are
+        # unchanged). Spine-only (this whole pass runs only with a spine) → gate byte-identical.
+        for pf in getattr(report, "passive_findings", None) or []:
+            sink.finding_event(_passive_finding_payload(pf))
 
         # (4) reflection — dead-thread / stall re-orientation over the spine's own state. A
         # graceful no-op on the pure-scanner spine (no hypothesis/action events yet); it lights

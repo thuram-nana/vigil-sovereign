@@ -117,3 +117,54 @@ def test_replay_returns_events_in_order_from_cursor(tmp_path: Path) -> None:
     tail = b.replay(engagement=_SLUG, since_id=ids[2])
     assert [e.id for e in tail] == ids[3:]                      # only after the cursor
     b.close()
+
+
+# ---- producer unification: passive findings reach the unified report as LEADS ----
+
+
+class _FakeReport:
+    """The minimal ScanReport surface ``engage._run_reasoning_pass`` reads."""
+
+    def __init__(self, passive) -> None:
+        self.target = "t"
+        self.active_findings: list = []      # keep the active loop a no-op for this test
+        self.passive_findings = passive
+
+
+class _FakeResult:
+    grounding: list = []
+    attack_paths: list = []
+
+
+def test_run_reasoning_pass_emits_passive_findings_as_reportable_leads(tmp_path: Path) -> None:
+    from framework.v2.engage import _run_reasoning_pass
+    from framework.v2.scanner.passive import PassiveFinding
+    from framework.v2.worldmodel.graph import WorldModel
+
+    b = _bb(tmp_path)
+    sink = SpineSink(b, _SLUG)
+    passive = [
+        PassiveFinding(check_id="missing-content-security-policy",
+                       title="Missing Content-Security-Policy", severity="Medium",
+                       confidence="Certain", url="https://acme.test/", evidence="csp absent"),
+        PassiveFinding(check_id="missing-hsts", title="Missing HSTS", severity="Low",
+                       confidence="Certain", url="https://acme.test/", evidence="hsts absent"),
+    ]
+    # spine == the blackboard, exactly as run_engagement passes it.
+    _run_reasoning_pass(sink, b, _SLUG, _FakeReport(passive), _FakeResult(), WorldModel())
+
+    findings = b.read(engagement=_SLUG, kinds=["finding"])
+    slugs = {r.payload["finding_slug"] for r in findings}
+    assert "passive:missing-content-security-policy" in slugs
+    assert "passive:missing-hsts" in slugs
+    # every passive event is honestly a LEAD (never a fact) and REPORTABLE (llm_advisory bucket).
+    for r in findings:
+        assert r.payload["verified_by_oracle"] is False
+        assert r.payload["oracle_context"] is None
+        assert r.payload["critique_status"] == "llm_advisory"
+
+    # ...and they pass the exact filter the unified report's `_reportable_from_blackboard` uses
+    # (critique_status in {"confirmed", "llm_advisory"}), so the report composes every one.
+    picked = [r for r in findings if r.payload.get("critique_status") in ("confirmed", "llm_advisory")]
+    assert len(picked) == 2
+    b.close()
