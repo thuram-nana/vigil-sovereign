@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from . import actions, reads
+from .authn import check_api_key, load_api_key
 from .guard import LOOPBACK_BIND_HOSTS, check_same_origin
 
 # a POST body is bounded so an untrusted client cannot exhaust memory. Generous enough
@@ -63,6 +64,21 @@ class ApiHandler(BaseHTTPRequestHandler):
     def log_message(self, *_args) -> None:  # noqa: D401
         return
 
+    # ---- optional API-key hardening (stacked ON TOP of loopback + same-origin) --
+
+    def _api_key_ok(self) -> bool:
+        """Fail-closed API-key gate, checked FIRST on every GET/POST dispatch. It is
+        STACKED ON TOP of the loopback bind + same-origin guards, never in place of them.
+        When no key is configured (the default) this is a NO-OP and behaviour is unchanged;
+        when a key IS configured, a missing key is 401 and a wrong key is 403, and the
+        request never reaches a read or an action."""
+        ok, why = check_api_key(self.headers, getattr(self.server, "api_key", None))
+        if ok:
+            return True
+        status = 401 if why.startswith("missing") else 403
+        self._json({"error": f"API key required ({why})"}, status=status)
+        return False
+
     # ---- response helpers -------------------------------------------------
 
     def _json(self, obj, status: int = 200) -> None:
@@ -81,6 +97,8 @@ class ApiHandler(BaseHTTPRequestHandler):
     # ---- GET (read-first) -------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+        if not self._api_key_ok():   # fail-closed key gate on top of the loopback bind
+            return
         path = urlsplit(self.path).path
         try:
             if path == f"{_API}/tools":
@@ -136,6 +154,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         return obj, ""
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._api_key_ok():   # fail-closed key gate ON TOP of same-origin (below)
+            return
         path = urlsplit(self.path).path
         # 1. same-origin / CSRF guard (loopback + custom header + Host/Origin proof).
         ok, why = check_same_origin(self.headers, self.server.server_address[1])
@@ -188,17 +208,26 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8799, *, registry=None,
-          import_store_factory=None) -> ThreadingHTTPServer:
+          import_store_factory=None, api_key: str | None = None) -> ThreadingHTTPServer:
     """Create (but do not block on) the loopback external API server. The caller runs
     ``serve_forever()``. Refuses any non-loopback host — the API is a single-operator,
     on-host surface by design (sovereignty), same as the console.
 
     ``registry`` overrides the SAFE default tool registry (tests inject a gated stub);
-    ``import_store_factory`` overrides the importer's persistence target (tests)."""
+    ``import_store_factory`` overrides the importer's persistence target (tests).
+
+    ``api_key`` opts IN to an additional shared-secret gate (see ``api.authn``): a request
+    then has to present it (``Authorization: Bearer <key>`` or ``X-Relay-Key``) STACKED ON
+    TOP of the loopback + same-origin guards, fail-closed. Left ``None`` (the default) it is
+    loaded from ``CRUCIBLE_API_KEY``; unset/blank there too → NO enforcement (behaviour
+    unchanged, still loopback + same-origin only). It is opt-in hardening for the one case
+    the loopback bind doesn't cover — an operator fronting the API behind a proxy/tunnel."""
     if host not in LOOPBACK_BIND_HOSTS:
         raise ValueError(f"api binds loopback only, refusing host {host!r}")
     httpd = ThreadingHTTPServer((host, port), ApiHandler)
     httpd.registry = registry if registry is not None else actions.default_registry(
         import_store_factory=import_store_factory)
     httpd.import_store_factory = import_store_factory
+    # None → load from CRUCIBLE_API_KEY; blank/unset → None → the default no-op.
+    httpd.api_key = load_api_key(api_key)
     return httpd
