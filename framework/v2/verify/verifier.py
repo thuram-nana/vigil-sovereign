@@ -93,6 +93,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "privilege_path": (OracleKind.POLICY_PATH,),
     "iam_privilege_escalation": (OracleKind.POLICY_PATH,),
     "excessive_privilege": (OracleKind.POLICY_PATH,),
+    # AEGIS (defensive dual) — the app's OWN LLM + the honeypot tripwire. These rows are the
+    # ONLY path an AEGIS oracle reaches confirm(): they are NOT in the frozen unknown-class
+    # fallback (_ALL_ORACLES below), so appending the AEGIS OracleKind members cannot grow the
+    # oracle set any pre-existing / unknown class runs, and `make gate` stays byte-identical.
+    # Honest scope: system_prompt_disclosure proves the SECRET LEAKED (canary substring);
+    # prompt_injection is reserved for a provable control-vs-treatment behavior delta;
+    # automated_access proves AUTOMATION (a honeypot fetch), never "scraping". See aegis/.
+    "prompt_injection": (OracleKind.PROMPT_INJECTION,),
+    "system_prompt_disclosure": (OracleKind.SYSTEM_PROMPT_DISCLOSURE,),
+    "automated_access": (OracleKind.AUTOMATED_ACCESS,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -160,9 +170,46 @@ _ALIASES: dict[str, str] = {
     "excessive_permissions": "excessive_privilege",
     "excessive_privileges": "excessive_privilege",
     "over_permissioned": "excessive_privilege",
+    # AEGIS aliases — spelling variants fold onto the HONEST canonical classes. Note
+    # `automated_scraping` is deliberately an ALIAS onto `automated_access` (the honeypot
+    # oracle proves AUTOMATION, not a "scraping" attack — P1), never its own confirmed class.
+    "jailbreak": "prompt_injection",
+    "llm_prompt_injection": "prompt_injection",
+    "indirect_prompt_injection": "prompt_injection",
+    "system_prompt_leak": "system_prompt_disclosure",
+    "system_prompt_exfiltration": "system_prompt_disclosure",
+    "canary_disclosure": "system_prompt_disclosure",
+    "automated_scraping": "automated_access",
+    "honeypot_hit": "automated_access",
+    "honeypot_fetch": "automated_access",
+    "bot_access": "automated_access",
 }
 
-_ALL_ORACLES: tuple[OracleKind, ...] = tuple(OracleKind)
+# G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
+# pre-AEGIS OracleKind members — it is NOT `tuple(OracleKind)`. If it were derived from the
+# enum, appending the AEGIS members would grow it, and every unknown-class finding in the
+# benchmark would begin running the AEGIS oracles (they would skip for want of inputs but
+# still land in `confirm()`'s `skipped` list and the serialized rationale), drifting the gate
+# output. Keeping this list explicit means AEGIS oracle kinds are reachable ONLY through their
+# explicit BUG_CLASS_ORACLES rows. A test asserts this tuple equals the members that existed
+# before AEGIS and that `oracles_for("<unknown>")` is unchanged after `import aegis`.
+_ALL_ORACLES: tuple[OracleKind, ...] = (
+    OracleKind.DIFFERENTIAL_RESPONSE,
+    OracleKind.ACHIEVED_STATE,
+    OracleKind.SIDE_EFFECT,
+    OracleKind.OOB_CALLBACK,
+    OracleKind.SANITIZER_SIGNAL,
+    OracleKind.TIMING,
+    OracleKind.BOOLEAN_INFERENCE,
+    OracleKind.REFLECTION_CONTEXT,
+    OracleKind.EVALUATION,
+    OracleKind.ERROR_SIGNATURE,
+    OracleKind.DOM_EXECUTION,
+    OracleKind.SERVICE_REACHABILITY,
+    OracleKind.TLS_WEAKNESS,
+    OracleKind.VERSION_RANGE,
+    OracleKind.POLICY_PATH,
+)
 
 
 def normalize_bug_class(bug_class: str) -> str:
@@ -370,6 +417,23 @@ class OracleVerifier:
         if kind is OracleKind.POLICY_PATH:
             if "policy" in ctx:
                 return oracles.policy_path_oracle(ctx["policy"])
+            return None
+        # -- AEGIS (defensive dual) — fire ONLY when the ctx carries the AEGIS keys; no
+        #    benchmark/scan/engage finding does, so these are inert on the gate path.
+        if kind is OracleKind.SYSTEM_PROMPT_DISCLOSURE:
+            if "canary" in ctx and "llm_output" in ctx:
+                return oracles.system_prompt_disclosure_oracle(ctx["canary"], ctx["llm_output"])
+            return None
+        if kind is OracleKind.PROMPT_INJECTION:
+            if "pi_control" in ctx and "pi_treatment" in ctx:
+                return oracles.prompt_injection_oracle(ctx["pi_control"], ctx["pi_treatment"])
+            return None
+        if kind is OracleKind.AUTOMATED_ACCESS:
+            if "requested_path" in ctx and "honeypot_paths" in ctx:
+                return oracles.honeypot_hit_oracle(
+                    ctx["requested_path"], ctx["honeypot_paths"],
+                    crawler_allowlisted=bool(ctx.get("crawler_allowlisted", False)),
+                )
             return None
         return None
 

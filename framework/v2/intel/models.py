@@ -59,6 +59,12 @@ class IntelSourceKind(str, enum.Enum):
     #                                   NOTE: CVE / advisory observations use VULN_DB above, whatever the feed format.
     MCP_TOOL = "mcp_tool"             # an external MCP tool consumed as a gated sensor (mcp.sensor) —
     #                                   a third-party say-so; a LEAD, never a fact, until an oracle re-verifies it
+    # AEGIS (the DEFENSIVE dual) — inbound, in-request-path telemetry the operator's OWN app emits
+    # about actors hitting it. A LEAD tier, exactly like the scanner/MISP sources above: an actor's
+    # request/LLM telemetry enters as GROUNDING_INTEL and becomes a FACT only when an AEGIS oracle
+    # (system_prompt_disclosure / prompt_injection / automated_access) re-fires over retained evidence.
+    REQUEST_TELEMETRY = "request_telemetry"  # in-request-path metadata (method/path/honeypot hit) — a LEAD
+    LLM_INTERACTION = "llm_interaction"      # the app's own LLM I/O (prompt/output/canary/behavior) — a LEAD
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,

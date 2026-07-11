@@ -44,6 +44,48 @@ def _coerce_text(value: Any) -> str:
     return str(value)
 
 
+# The bounded window AEGIS retains around a disclosed canary (PR1 privacy contract): the
+# sentinel is kept VERBATIM (so the oracle re-fires offline) plus a small context margin,
+# and the rest of the model transcript is dropped — never the whole output.
+_DISCLOSURE_MARGIN = 32
+
+
+def _bounded_disclosure_span(canary: str, output: Any, *, margin: int = _DISCLOSURE_MARGIN) -> str:
+    """Retain ONLY a bounded window around the canary's occurrence — the sentinel kept
+    verbatim (the reverify contract needs it) plus ``margin`` chars of context each side. If
+    the canary is absent (the oracle would not fire) retain NOTHING, so a non-disclosing
+    transcript is never over-retained into a certificate. PR1: the class-1 certificate holds
+    the sentinel + a bounded redacted span, never the raw transcript / PII."""
+    c = _coerce_text(canary)
+    o = _coerce_text(output)
+    if not c:
+        return ""
+    idx = o.find(c)
+    if idx < 0:
+        return ""
+    start = max(0, idx - margin)
+    end = min(len(o), idx + len(c) + margin)
+    span = o[start:end]
+    if start > 0:
+        span = "..." + span
+    if end < len(o):
+        span = span + "..."
+    return span
+
+
+# The ONLY structural behavior fields the prompt-injection oracle reads; anything else a
+# caller puts in a behavior dict (e.g. a raw transcript) is dropped, never retained.
+_PI_BEHAVIOR_KEYS = ("tool", "refused", "boundary_token_echoed")
+
+
+def _pi_retained(obs: Any) -> dict[str, Any]:
+    """Keep ONLY the three structurally-detectable fields the prompt-injection oracle compares
+    — so a behavior dict that also carries raw prompt/response text is not laundered into the
+    retained certificate. JSON-safe + deterministic."""
+    src = dict(obs) if isinstance(obs, Mapping) else {}
+    return {k: src[k] for k in _PI_BEHAVIOR_KEYS if k in src}
+
+
 def _response_to_dict(value: Any, latency_ms: float | None = None) -> dict[str, Any]:
     """Normalise one observed HTTP response into `{status?, body, latency_ms?}`.
 
@@ -187,6 +229,23 @@ class FindingContext(BaseModel):
 
     # tls_weakness_oracle (a real TLS handshake negotiated a deprecated protocol / weak cipher)
     tls: dict[str, Any] | None = None
+
+    # AEGIS system_prompt_disclosure_oracle (a planted high-entropy canary appeared VERBATIM
+    # in the app's own LLM output). PR1: these carry PLAINTEXT — the reverify contract re-fires
+    # on verbatim substrings, so the certificate honestly retains the random sentinel + a
+    # bounded, boundary-redacted output span (never proprietary prompt text, never raw PII).
+    canary: str | None = None
+    llm_output: str | None = None
+
+    # AEGIS prompt_injection_oracle (control-vs-treatment behavior delta — the ONLY path that
+    # earns the adversarial `prompt_injection` class). Each is a small JSON-safe behavior obs.
+    pi_control: dict[str, Any] | None = None
+    pi_treatment: dict[str, Any] | None = None
+
+    # AEGIS honeypot_hit_oracle (deterministic set-membership over seeded honeypot paths).
+    requested_path: str | None = None
+    honeypot_paths: list[str] | None = None
+    crawler_allowlisted: bool | None = None
 
     # version_range_oracle (a package version provably falls in an advisory's affected range)
     version_advisory: dict[str, Any] | None = None
@@ -440,6 +499,64 @@ class FindingContext(BaseModel):
             dom_canary=_coerce_text(canary),
         )
 
+    # -- AEGIS builders (the defensive dual) -------------------------------
+
+    @classmethod
+    def from_llm_disclosure(
+        cls, canary: str, llm_output: Any, *, bug_class: str = "system_prompt_disclosure"
+    ) -> "FindingContext":
+        """A planted canary sentinel plus the app's own LLM output, for the system-prompt-
+        disclosure oracle. Confirms the SECRET LEAKED (the sentinel appeared verbatim) — not
+        that an injection caused it. PR1: we retain ONLY a bounded window around the canary
+        (sentinel kept verbatim so the certificate re-fires offline), NOT the whole model
+        output — so a transcript that also contains PII/credentials is not over-retained."""
+        return cls(
+            bug_class=bug_class,
+            canary=_coerce_text(canary),
+            llm_output=_bounded_disclosure_span(canary, llm_output),
+        )
+
+    @classmethod
+    def from_prompt_injection(
+        cls,
+        control: Mapping[str, Any],
+        treatment: Mapping[str, Any],
+        *,
+        bug_class: str = "prompt_injection",
+    ) -> "FindingContext":
+        """A clean control-turn behavior obs vs the attacker treatment-turn behavior obs, for
+        the prompt-injection oracle. Each is a JSON-safe mapping over the structurally-
+        detectable fields {tool, refused, boundary_token_echoed}. Confirms injection ONLY on a
+        provable behavior delta (never on markers alone).
+
+        Retains ONLY those three structural fields — a caller-supplied behavior dict that also
+        carries a raw prompt/response transcript is NOT retained into the certificate (privacy:
+        the oracle reads only these keys, so nothing else is evidence)."""
+        return cls(
+            bug_class=bug_class,
+            pi_control=_pi_retained(control),
+            pi_treatment=_pi_retained(treatment),
+        )
+
+    @classmethod
+    def from_honeypot(
+        cls,
+        requested_path: str,
+        honeypot_paths: Sequence[str],
+        *,
+        crawler_allowlisted: bool = False,
+        bug_class: str = "automated_access",
+    ) -> "FindingContext":
+        """A requested path plus the seeded honeypot path set (and whether the requester is an
+        allowlisted known-good crawler), for the honeypot oracle. Confirms AUTOMATED ACCESS
+        (P1), never "scraping": a fetch of a resource no human UI links."""
+        return cls(
+            bug_class=bug_class,
+            requested_path=_coerce_text(requested_path),
+            honeypot_paths=[_coerce_text(p) for p in (honeypot_paths or [])],
+            crawler_allowlisted=bool(crawler_allowlisted),
+        )
+
     # -- combination -------------------------------------------------------
 
     def merge(self, other: "FindingContext") -> "FindingContext":
@@ -515,4 +632,16 @@ class FindingContext(BaseModel):
             ctx["version_advisory"] = self.version_advisory
         if self.policy is not None:
             ctx["policy"] = self.policy
+        # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
+        if self.canary is not None and self.llm_output is not None:
+            ctx["canary"] = self.canary
+            ctx["llm_output"] = self.llm_output
+        if self.pi_control is not None and self.pi_treatment is not None:
+            ctx["pi_control"] = self.pi_control
+            ctx["pi_treatment"] = self.pi_treatment
+        if self.requested_path is not None and self.honeypot_paths is not None:
+            ctx["requested_path"] = self.requested_path
+            ctx["honeypot_paths"] = self.honeypot_paths
+            if self.crawler_allowlisted is not None:
+                ctx["crawler_allowlisted"] = self.crawler_allowlisted
         return ctx
