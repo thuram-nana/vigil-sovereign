@@ -7,6 +7,13 @@ tokens that (may) back it and the entities it names. `admit()` turns it into an
 `AdmittedClaim` whose verdict is one of four — GROUNDED (fact- or hypothesis-strength),
 UNGROUNDED, CONTRADICTED, or ABSTAIN — and which NEVER silently becomes a fact: an
 ungrounded claim is stamped, not dropped, so the operator loses framing, never information.
+
+Distinct-by-design from ``evidence/claims.py`` (do NOT merge — different layer, same name):
+that module owns no claim type at all — it decomposes a finding's report prose into
+``ReportClaim`` objects (defined in ``evidence/models.py``) for binding into a signed
+certificate. The dependency is one-directional: the evidence layer sits ON TOP of this one —
+``evidence/certify.py::_claims_grounded`` builds a veracity ``Claim`` from each fact-labelled
+``ReportClaim`` and re-admits it through ``admit()`` here. This module never imports evidence.
 """
 
 from __future__ import annotations
