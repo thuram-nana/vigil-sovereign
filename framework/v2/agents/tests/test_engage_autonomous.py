@@ -282,9 +282,12 @@ def test_autonomous_tool_call_is_refused_by_tripped_killswitch(
 # ---------------------------------------------------------------------------
 
 
-def test_hooks_are_noop_when_absent():
-    # neither framework.v2.engage_fusion nor .engage_reasoning exists → clean skip
-    assert "framework.v2.engage_fusion" not in sys.modules
+def test_hooks_are_noop_when_absent(monkeypatch: pytest.MonkeyPatch):
+    # Simulate the WS-B/WS-F hook modules being ABSENT. They are now part of the tree, so a plain
+    # sys.modules check no longer reproduces "absent"; setting the entry to None makes the loader's
+    # ``from .engage_fusion import ...`` raise ImportError → the best-effort fallback path (clean skip).
+    monkeypatch.setitem(sys.modules, "framework.v2.engage_fusion", None)
+    monkeypatch.setitem(sys.modules, "framework.v2.engage_reasoning", None)
     world = _pathaware_world()
     result = _synthetic_result(world, [_finding("idor", "https://t.invalid/on-path", 0.9)])
     out = run_autonomous_cycle(result, slug="alpha", prompt_callback=_deny)
