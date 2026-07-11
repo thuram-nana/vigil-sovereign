@@ -51,8 +51,13 @@ Doctrine, by construction:
     gate chain. Preflight (in ``engage.run_engagement``) already refused an out-of-scope / kill-
     switched engagement before this cycle can run; each tool call is re-gated regardless.
   * DETERMINISM. Selection (``goal_tree.best_open_leaf_pathaware`` over ``pathsearch.best_paths``),
-    the gated invoke, and the fold are pure functions of ``(result, world, tree)`` — no wallclock,
-    no rng. Running the cycle twice over the same result yields the same step sequence.
+    the gated invoke, the reasoning-advice / meta-caution re-weight (recomputed from a fixed
+    baseline), and the fold are pure functions of ``(result, world, tree, advice, ledger)`` — no
+    wallclock, no rng. Running the cycle twice over the same inputs yields the same step sequence.
+  * CAUTION-ONLY LEARNING. The learner-health meta-monitor (``calibration.meta_monitor``) may only
+    ORDER effort (deprioritise borderline leaves when the calibrator/bands are untrustworthy); it
+    never gates a surface, never promotes a finding, and never feeds the deterministic oracle/SCE/
+    calibration inputs (coverage doctrine). Every open leaf stays selectable.
   * ADDITIVE + DEFAULT-OFF. Nothing here runs unless ``engage --autonomous`` is passed.
 """
 
@@ -146,6 +151,7 @@ class AutonomyResult:
     coordinator_events: int = 0        # total events the wired agents posted across all ticks
     critic_verdicts: int = 0           # critic_verdict events the multi-critic panel posted (advisory)
     reflections: int = 0               # reflection events the in-loop reflection posted (re-rank/defer)
+    meta_recommend: str = ""           # learner-health recommend (ok / gather_evidence / trust_confidence_less)
     planner_source: str | None = None  # the foothold node the planner reasons from
     objectives: list[str] = field(default_factory=list)
     world_nodes_before: int = 0
@@ -239,6 +245,7 @@ def _select(tree: Any, world: "WorldModel | None", objectives: list, source: str
 
 _ADVICE_CAP = 0.99        # priors are lifted toward, but never to, certainty (search weight only)
 _ADVICE_STRENGTH = 0.9    # rank-0 (focus) lift fraction toward the cap; decays as 1/(rank+1)
+_PRIOR_FLOOR = 1e-6       # a re-weighted prior never reaches 0 → the leaf stays selectable (never gated)
 
 
 def _duck(obj: Any, key: str, default: Any = None) -> Any:
@@ -317,28 +324,86 @@ def _advice_rank(node: Any, targets: list[tuple[str, str]]) -> int | None:
     return None
 
 
-def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None) -> int:
-    """Recompute each open leaf's prior FROM its baseline and lift the advice-matched leaves toward
-    the cap (rank-0 focus most, decaying by 1/(rank+1)). Returns the count of leaves actually moved.
+def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None,
+                  meta_caution: float = 0.0) -> int:
+    """Recompute each open leaf's prior FROM its baseline and apply the active advisory re-weighters,
+    then return the count of leaves actually moved. In order:
 
-    Bounded and idempotent (always from baseline). Never touches a resolved/pruned leaf and never
-    removes one — it only re-orders the OPEN frontier, so no attack surface is gated out."""
+      * meta_monitor CAUTION (I-D.4) — when the learners are unhealthy, deprioritise the most
+        BORDERLINE (nearest-coin-flip) leaves so effort orders toward more-decisive leads and
+        abstains more on uncertain ones. Caution-only: it can only lower a prior toward the floor,
+        never below it (the leaf stays selectable — no surface is gated).
+      * reasoning ADVICE (I-D.1) — lift an advice-matched leaf toward the cap (rank-0 focus most,
+        decaying by 1/(rank+1)).
+
+    Bounded and idempotent (always recomputed from the fixed baseline → no compounding). Never
+    touches a resolved/pruned leaf and never removes one — it only re-orders the OPEN frontier."""
     targets = _advice_targets(advice)
+    caution = min(1.0, max(0.0, float(meta_caution)))
     moved = 0
     for lid, base in baselines.items():
         node = tree.nodes.get(lid)
         if node is None or node.status not in ("open", "claimed"):
             continue
-        new_prior = base
+        p = base
+        # meta caution: borderline = 1 at prior 0.5 (max uncertainty), 0 at prior in {0, 1}.
+        if caution > 0.0:
+            borderline = 1.0 - abs(2.0 * base - 1.0)
+            p = p * (1.0 - caution * borderline)
+        # reasoning advice: lift the matched leaf from its (possibly cautioned) prior toward the cap.
         rank = _advice_rank(node, targets) if targets else None
         if rank is not None:
             lift = _ADVICE_STRENGTH / (rank + 1)
-            new_prior = base + (_ADVICE_CAP - base) * lift
-        new_prior = min(_ADVICE_CAP, max(0.0, new_prior))
-        if abs(new_prior - float(node.prior_p_success)) > 1e-12:
+            p = p + (_ADVICE_CAP - p) * lift
+        p = min(_ADVICE_CAP, max(_PRIOR_FLOOR, p))
+        if abs(p - float(node.prior_p_success)) > 1e-12:
             moved += 1
-        node.prior_p_success = new_prior
+        node.prior_p_success = p
     return moved
+
+
+# ---------------------------------------------------------------------------
+# I-D.4 — consult the learner-health meta-monitor to modulate effort (CAUTION-ONLY).
+#
+# assess_learner_health(ledger) diagnoses whether the learners (calibrator / conformal bands) are
+# trustworthy. Its recommend can only make the loop MORE cautious — never more confident, never
+# gate a surface, never promote. We map it to a caution STRENGTH fed into _reprioritise, which
+# deprioritises borderline leaves (orders effort), leaving every surface selectable.
+# ---------------------------------------------------------------------------
+
+_META_CAUTION = {"ok": 0.0, "gather_evidence": 0.5, "trust_confidence_less": 0.7}
+
+
+def _load_ledger(slug: str) -> Any:
+    """Best-effort load of the operator's OutcomeLedger at ``targets/<slug>/outcomes.json`` — so a
+    real engagement's accumulated labels modulate caution with zero wiring. Missing/malformed → None
+    (no modulation). Never raises."""
+    if not slug:
+        return None
+    try:
+        from .calibration.ledger import OutcomeLedger
+        from .common.paths import target_dir
+        path = target_dir(slug) / "outcomes.json"
+        if not path.is_file():
+            return None
+        return OutcomeLedger.load(path)
+    except Exception:
+        return None
+
+
+def _meta_caution(slug: str, ledger: Any) -> tuple[str, float]:
+    """Consult the meta-monitor over an OutcomeLedger and return ``(recommend, caution_strength)``.
+    CAUTION-ONLY: the strength can only deprioritise borderline leaves (order effort), never gate a
+    surface or promote a finding. No ledger / any error → ``("", 0.0)`` (no modulation). Pure."""
+    if ledger is None:
+        return ("", 0.0)
+    try:
+        from .calibration.meta_monitor import assess_learner_health
+        sig = assess_learner_health(ledger)
+        rec = str(getattr(sig, "recommend", "") or "")
+        return (rec, _META_CAUTION.get(rec, 0.0))
+    except Exception:
+        return ("", 0.0)
 
 
 def _advisory_agents(blackboard: Any, slug: str) -> list:
@@ -561,6 +626,7 @@ def run_autonomous_cycle(
     registry: Any = None,
     blackboard: Any = None,
     ctx: Any = None,
+    outcome_ledger: Any = None,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -602,11 +668,19 @@ def run_autonomous_cycle(
         out.reasoning_advice = _reason_step(world, findings, ctx)
         return out
 
+    # ORIENT (learner health) — consult the meta-monitor over the outcome ledger (explicit arg, else
+    # the operator's targets/<slug>/outcomes.json). CAUTION-ONLY: it orders effort (deprioritises
+    # borderline leaves), never gates a surface or promotes a finding. No ledger → no modulation.
+    ledger = outcome_ledger if outcome_ledger is not None else _load_ledger(slug)
+    out.meta_recommend, meta_caution = _meta_caution(slug, ledger)
+    if meta_caution > 0.0:
+        out.notes.append(f"meta-monitor: {out.meta_recommend} → caution ordering (no surface gated)")
+
     # ORIENT (reasoning) — run the WS-F step ONCE up front and feed its advice into the FIRST
     # selection, so reasoning drives the opening pick, not only the re-orient.
     advice = _reason_step(world, findings, ctx)
     out.reasoning_advice = advice
-    out.advice_reweighted += _reprioritise(tree, baselines, advice=advice)
+    out.advice_reweighted += _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution)
 
     # DRIVE (setup) — mirror the ALREADY oracle-confirmed findings onto the spine so the wired
     # advisory critic panel has material to review when the Coordinator ticks in-loop. This is
@@ -663,7 +737,7 @@ def run_autonomous_cycle(
         # advice changes which leaf the planner picks next.
         advice = _reason_step(world, findings, ctx)
         out.reasoning_advice = advice
-        step.advice_reweighted = _reprioritise(tree, baselines, advice=advice)
+        step.advice_reweighted = _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution)
         out.advice_reweighted += step.advice_reweighted
         nxt = _select(tree, world, objectives, source)
         step.reoriented_to = nxt.label if nxt is not None else "(no more actions)"
@@ -711,6 +785,8 @@ def render_summary(out: AutonomyResult) -> list[str]:
             f"    nervous system  : agents={','.join(out.agents_wired)}; "
             f"{out.coordinator_events} in-loop event(s) "
             f"({out.critic_verdicts} critic verdict(s), {out.reflections} reflection(s)) — advisory")
+    if out.meta_recommend and out.meta_recommend != "ok":
+        lines.append(f"    learner health  : {out.meta_recommend} → caution ordering (no surface gated)")
     if out.fused_observations:
         lines.append(f"    fused sensors   : {out.fused_observations} observation(s) (WS-B)")
     for s in out.cycles:

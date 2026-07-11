@@ -504,3 +504,55 @@ def test_planner_constructed_inert_without_blackboard():
     assert out.planner_driven is False
     assert out.agents_wired == [] and out.coordinator_events == 0
     assert out.cycles and out.cycles[0].gated is True   # the cycle still ran + gated the tool call
+
+
+# ---------------------------------------------------------------------------
+# (10) I-D.4 — the learner-health meta-monitor ORDERS effort (caution-only), never gates.
+# ---------------------------------------------------------------------------
+
+
+def _miscalibrated_ledger(n: int = 10):
+    """A ledger of high-scored findings that all turned out false — materially miscalibrated, so
+    assess_learner_health recommends 'trust_confidence_less' (be more cautious)."""
+    from framework.v2.calibration.ledger import OutcomeLedger
+    from framework.v2.calibration.models import Outcome, OutcomeLabel, Prediction
+
+    led = OutcomeLedger()
+    for i in range(n):
+        fid = f"f{i}"
+        led.add_prediction(Prediction(finding_id=fid, raw_score=0.9, feature_hash="h",
+                                      model_version="v1", oracle_confirmed=True), seq=i)
+        led.record_outcome(Outcome(finding_id=fid, label=OutcomeLabel.FALSE_POSITIVE), seq=1000 + i)
+    return led
+
+
+def test_meta_monitor_caution_orders_effort_never_gates():
+    """When the learners are unhealthy the meta-monitor deprioritises the MOST borderline leaf so
+    effort leads with a more-decisive lead — but EVERY surface stays covered across the run
+    (order effort, never gate a surface). Only a fired oracle can promote; meta never does."""
+    urls = ["https://t.invalid/a", "https://t.invalid/b", "https://t.invalid/c"]
+
+    def build_result() -> EngagementResult:
+        world = _greedy_world(urls)
+        return _synthetic_result(world, [
+            _finding("aaa", urls[0], 0.50),   # most borderline (nearest coin-flip)
+            _finding("bbb", urls[1], 0.45),
+            _finding("ccc", urls[2], 0.40)])  # most decisive
+
+    # CONTROL: no ledger → no caution → greedy leads with the highest prior (the coin-flip aaa).
+    control = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=3, prompt_callback=_deny)
+    assert control.meta_recommend == ""
+    assert control.cycles[0].picked_bug_class == "aaa"
+    assert {s.picked_bug_class for s in control.cycles} == {"aaa", "bbb", "ccc"}
+
+    # TREATMENT: a miscalibrated ledger → 'trust_confidence_less' → caution deprioritises the most
+    # borderline leaf, so effort now LEADS with the more-decisive ccc.
+    treated = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=3,
+                                   outcome_ledger=_miscalibrated_ledger(), prompt_callback=_deny)
+    assert treated.meta_recommend == "trust_confidence_less"
+    assert treated.cycles[0].picked_bug_class == "ccc", "meta caution did not re-order effort"
+    # NEVER GATES: all three surfaces are still covered across the run (coverage doctrine).
+    assert {s.picked_bug_class for s in treated.cycles} == {"aaa", "bbb", "ccc"}, \
+        "meta caution gated a surface"
+    # ADVISORY-ONLY: the authoritative findings are untouched.
+    assert {f.bug_class for f in treated.engagement.report.active_findings} == {"aaa", "bbb", "ccc"}
