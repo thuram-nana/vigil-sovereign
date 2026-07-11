@@ -82,6 +82,48 @@ def project_fused(world: WorldModel, obs: Observation, fused: FusedBelief, *, se
             alpha=fused.alpha, beta=fused.beta, first_seen=seq, last_seen=seq))
 
 
+_FINDING_SEVERITIES = ("Critical", "High", "Medium", "Low", "Info")
+
+
+def _coerce_severity(value: Any, *, default: str = "Info") -> str:
+    """Map a free-form severity onto the FindingPayload Literal, defaulting safely.
+    ``bb.post`` validates the finding payload, so an out-of-set severity would silently drop
+    the event — this keeps a lead event honest and always emittable."""
+    s = str(value or "").strip().title()
+    return s if s in _FINDING_SEVERITIES else default
+
+
+def observation_to_finding_payload(obs: Observation, *, critique_status: str = "llm_advisory") -> dict:
+    """Adapt a LEAD intel ``Observation`` into a ``FindingPayload``-shaped dict, graded as a LEAD.
+
+    THE producer-unification seam: a raw sensor observation is a LEAD, not a fact. The dict this
+    returns carries NO ``oracle_context`` and ``verified_by_oracle=False``, so the report grader
+    (``report.grounding.grade_finding``) renders it as an unconfirmed lead and can NEVER dress it
+    as a fact — a sensor observation, by construction, cannot carry a re-firing oracle proof.
+    That preserves prove-don't-guess while letting a fused-sensor producer reach the unified
+    report. Deterministic: a pure function of the observation (no wallclock, no rng).
+
+    ``critique_status`` defaults to ``llm_advisory`` — the REPORTABLE-but-lead bucket the report's
+    ``_reportable_from_blackboard`` picks up (``pending`` / ``objections`` would be dropped)."""
+    bug_class = str(obs.attrs.get("bug_class") or obs.source_kind.value)
+    subject = obs.subject.node_id
+    return {
+        "finding_slug": (f"lead:{obs.obs_id}"[:120]) or bug_class,
+        "title": f"{obs.source_kind.value} lead — {subject}",
+        "severity": _coerce_severity(obs.attrs.get("severity")),
+        "bug_class": bug_class,
+        "surface": subject,
+        "summary": (obs.evidence or obs.source or bug_class).strip() or bug_class,
+        "critique_status": critique_status,
+        "critique_dryrun": False,
+        "oracle_context": None,
+        "verified_by_oracle": False,
+        "confidence": None,
+        "oracle_kind": None,
+        "oracle_rationale": "",
+    }
+
+
 def observation_to_evidence(obs: Observation, *, baseline: float = 0.5):
     """Adapt an Observation into a `confidence.Evidence` — the seam between the graph
     substrate (Observations) and the Scientific Confidence Engine (Evidence). The
