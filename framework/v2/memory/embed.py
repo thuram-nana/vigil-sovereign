@@ -14,10 +14,21 @@ Two backends ship in this session:
                                  Default model: all-MiniLM-L6-v2 (384
                                  dims, ~80MB on first use).
 
-Selection:
-  - CRUCIBLE_EMBEDDER=lexical             → force lexical
+Selection (WS-G: lexical is the deterministic DEFAULT; semantic is opt-in):
+  - unset (default)                         → lexical  (deterministic, even if
+                                              sentence-transformers is installed)
+  - CRUCIBLE_EMBEDDER=lexical               → force lexical
   - CRUCIBLE_EMBEDDER=sentence-transformers → force ST (raises if missing)
-  - unset                                  → ST if importable else lexical
+        (aliases: st, semantic)
+  - CRUCIBLE_EMBEDDER=auto                  → ST if importable else lexical
+        (opt-in "best available"; makes embeddings model-dependent)
+
+Rationale: an optional heavy dep must not silently change the default/replayed
+path. Under the old "unset → ST if importable" rule, merely pip-installing
+sentence-transformers would swap the default embeddings to a nondeterministic,
+downloaded model. Now the default is always the deterministic lexical embedder;
+callers that want semantic neighbours ask for it by name. Probe availability
+with ``common.capabilities.has_semantic()``.
 
 Vectors round-trip through SQLite as BLOB via array('f').tobytes().
 """
@@ -33,6 +44,7 @@ import re
 from functools import lru_cache
 
 from ..common import logging as v2log
+from ..common.numerics import hashed_bincount
 
 
 _log = v2log.get_logger(__name__)
@@ -122,13 +134,19 @@ class LexicalEmbedder(Embedder):
         return idx, sign
 
     def embed(self, text: str) -> list[float]:
-        vec = [0.0] * self.dim
         tokens = _tokenize(text)
         if not tokens:
-            return vec
+            return [0.0] * self.dim
+        # Feature-hash each token to a (bucket, sign) pair, then scatter-add.
+        # The scatter-add is pure integer accumulation, so the optional numpy
+        # fast path in ``hashed_bincount`` is byte-identical to the loop.
+        indices: list[int] = []
+        signs: list[int] = []
         for t in tokens:
             i, s = self._index_and_sign(t)
-            vec[i] += s
+            indices.append(i)
+            signs.append(s)
+        vec = hashed_bincount(indices, signs, self.dim)
         # L2 normalize so cosine == dot product
         norm = math.sqrt(sum(v * v for v in vec))
         if norm == 0.0:
@@ -176,26 +194,46 @@ class SentenceTransformerEmbedder(Embedder):
 def get_embedder() -> Embedder:
     pref = os.environ.get("CRUCIBLE_EMBEDDER", "").strip().lower()
 
-    if pref == "lexical":
-        return LexicalEmbedder()
-    if pref in ("sentence-transformers", "st"):
+    if pref in ("sentence-transformers", "st", "semantic"):
+        # Explicit opt-in: use the semantic backend, raising if it is absent
+        # (the caller asked for it by name — fail loudly, don't silently
+        # downgrade).
         return SentenceTransformerEmbedder()
 
-    # auto
-    try:
-        st = SentenceTransformerEmbedder()
-        _log.info("memory.embed.selected", embedder=st.name, dim=st.dim, reason="auto-st")
-        return st
-    except ImportError:
-        lex = LexicalEmbedder()
+    if pref == "auto":
+        # Opt-in "best available": semantic if importable, else lexical. NOT
+        # the default — a consumer (e.g. cross-engagement recall that wants
+        # richer neighbours) selects it explicitly and accepts that its
+        # embeddings become model-dependent.
+        try:
+            st = SentenceTransformerEmbedder()
+            _log.info("memory.embed.selected", embedder=st.name, dim=st.dim, reason="auto-st")
+            return st
+        except ImportError:
+            lex = LexicalEmbedder()
+            _log.info(
+                "memory.embed.selected",
+                embedder=lex.name,
+                dim=lex.dim,
+                reason="auto-lexical-fallback",
+                note="sentence-transformers not installed",
+            )
+            return lex
+
+    # Default (unset or "lexical"): the deterministic, dependency-free lexical
+    # embedder. This is the DEFAULT even when sentence-transformers happens to
+    # be installed, so the default/replayed path stays deterministic and
+    # byte-identical regardless of the environment. Semantic is opt-in above.
+    lex = LexicalEmbedder()
+    if pref not in ("", "lexical"):
         _log.info(
             "memory.embed.selected",
             embedder=lex.name,
             dim=lex.dim,
-            reason="auto-lexical-fallback",
-            note="sentence-transformers not installed",
+            reason="default-lexical",
+            note=f"unrecognized CRUCIBLE_EMBEDDER={pref!r}; using deterministic default",
         )
-        return lex
+    return lex
 
 
 def reset_cache() -> None:

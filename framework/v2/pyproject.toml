@@ -18,10 +18,16 @@ dependencies = [
   "cryptography>=42,<50",
 ]
 
+# OPTIONAL, feature-flagged extras (WS-G). None are hard deps: every import is
+# try/except-guarded with a pure-Python/stdlib fallback, and the default
+# (extras-absent) path is byte-identical + deterministic. Probe availability
+# via framework.v2.common.capabilities (has_z3/has_semantic/has_numpy).
 [project.optional-dependencies]
 anthropic   = ["anthropic>=0.40,<1"]
-embeddings  = ["sentence-transformers>=2,<6"]
-analysis    = ["semgrep>=1.100"]   # DAA real taint/dataflow analysis
+embeddings  = ["sentence-transformers>=2,<6"]  # semantic embedder (opt-in; lexical is default)
+analysis    = ["semgrep>=1.100"]               # DAA real taint/dataflow analysis
+smt         = ["z3-solver>=4.12,<5"]           # bounded SMT / path-condition feasibility (analysis.smt)
+numerics    = ["numpy>=1.26,<3"]               # opt-in fast integer numerics (CRUCIBLE_FAST_NUMERICS)
 dev         = ["pytest>=8,<11", "mypy>=1.10,<2"]
 
 [tool.mypy]

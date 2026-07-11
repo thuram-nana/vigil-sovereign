@@ -46,6 +46,7 @@ from .models import (
     SkippedAnalyzer,
 )
 from .orchestrator import run_analysis
+from .smt import LinearConstraint, SmtResult, is_feasible, linear
 
 __all__ = [
     "AnalysisTarget",
@@ -59,4 +60,9 @@ __all__ = [
     "run_analysis",
     "SymbolIndex",
     "build_symbol_index",
+    # WS-G: optional bounded SMT / path-condition feasibility (advisory; z3-opt-in).
+    "LinearConstraint",
+    "SmtResult",
+    "is_feasible",
+    "linear",
 ]
