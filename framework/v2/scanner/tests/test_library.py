@@ -106,18 +106,17 @@ def test_seed_has_the_named_minimum_entries() -> None:
     assert by_id["m2-ssti-jinja2"].oracle.kind == "evaluation"
     assert by_id["h1-lfi-etc-passwd"].oracle.kind == "content"
     assert by_id["m2-errsqli-single-quote"].oracle.kind == "error_signature"
-    # The bare-callback OOB seeds blind-xxe-oob / command-injection-oob were exact behavioural
-    # duplicates of the code seeds XXE_OOB / RCE_OOB in scanner.checks.DEFAULT_CHECKS (same bug_class
-    # + same payload) AND their library ids never collide with a code-seed id (xxe-oob / rce-oob), so
-    # nothing looks them up — they were removed, the code seeds are the single source of truth.
-    # ssrf-oob is KEPT: it shares its id with the SSRF_OOB code seed, and scanner.report._meta_for
-    # looks up report references/remediation by check_id, so this library entry supplies the richer
-    # SSRF report metadata (CAPEC-664 + prose). Removing it would silently change OOB-SSRF reports.
-    assert by_id["ssrf-oob"].oracle.kind == "oob"
-    # ssrf-oob's id collides with the SSRF_OOB code seed, so scanner.report._meta_for supplies these
-    # report references via lib.get("ssrf-oob"); pin them so removing the entry can't silently drop
-    # CAPEC-664 from an OOB-SSRF report (the Wave-7 behavior-preservation review's finding).
-    assert by_id["ssrf-oob"].references == ["CWE-918", "CAPEC-664"]
+    # The bare-callback OOB seeds blind-xxe-oob / command-injection-oob / ssrf-oob were exact
+    # behavioural duplicates of the code seeds XXE_OOB / RCE_OOB / SSRF_OOB in
+    # scanner.checks.DEFAULT_CHECKS (same bug_class + same payload) and were removed — the code
+    # seeds are the single source of truth. blind-xxe-oob / command-injection-oob had no id
+    # collision (their code seeds use xxe-oob / rce-oob), so nothing looked them up (W7-B).
+    # ssrf-oob's id DID collide with the SSRF_OOB code seed, and scanner.report._meta_for looks up
+    # report references/remediation by check_id, so the JSON used to supply the OOB-SSRF report
+    # metadata (CAPEC-664 + prose). Its removal (Wave-7-final) is byte-identical because that exact
+    # metadata was first migrated into scanner.report._CHECK_META["ssrf-oob"]; the report layer now
+    # returns it when lib.get("ssrf-oob") is None. Pinned by test_report_check_meta.py.
+    assert "ssrf-oob" not in by_id  # the duplicate library entry is gone (metadata lives in _CHECK_META)
     assert by_id["m2-inj-ssrf-http-scheme"].oracle.kind == "oob"
     assert by_id["m2-inj-xxe-external-dtd"].oracle.kind == "oob"
     assert by_id["m2-inj-cmdi-pipe-curl"].oracle.kind == "oob"
