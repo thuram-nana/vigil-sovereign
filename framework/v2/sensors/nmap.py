@@ -52,19 +52,33 @@ _HOSTNAME_RE = re.compile(rf"^{_LABEL}(?:\.{_LABEL})*\.?$")
 _PORTS_RE = re.compile(r"^\d{1,5}(?:-\d{1,5})?(?:,\d{1,5}(?:-\d{1,5})?)*$")
 
 
+def _ipv6_literal(target: str) -> str | None:
+    """The bare IPv6 literal ``target`` denotes (accepting a bracketed ``[fe80::1]``
+    or bare ``fe80::1`` single host), else None. nmap wants the bare form + ``-6``."""
+    t = target.strip()
+    inner = t[1:-1] if (t.startswith("[") and t.endswith("]")) else t
+    try:
+        return inner if ipaddress.ip_address(inner).version == 6 else None
+    except ValueError:
+        return None
+
+
 def _is_single_host_target(target: str) -> bool:
-    """True iff ``target`` is EXACTLY one host — a single IPv4 literal or a single DNS hostname — and
-    nothing nmap would expand or reinterpret. This is the AUTHORIZATION-CRITICAL guard: the invoker's
-    charter-scope gate validates ``urlparse(target).hostname``, but nmap honours a richer target syntax
-    the URL parser silently drops — a CIDR/netmask ('10.0.0.5/24' → gate sees the base IP, nmap probes
-    256 hosts), an octet range ('10.0.0.1-50'), a wildcard ('10.0.0.*'), a comma list, or a leading
-    '-' (parsed as an nmap OPTION, e.g. --script/--datadir). Rejecting anything but a single host here
-    guarantees the string handed to nmap is the SAME host the gate authorized. IPv6 is deliberately
-    unsupported for now (the URL gate truncates a bare IPv6 and nmap needs -6) — a later revision adds
-    bracketed-IPv6 + -6."""
+    """True iff ``target`` is EXACTLY one host — a single IPv4/IPv6 literal or a single DNS hostname —
+    and nothing nmap would expand or reinterpret. This is the AUTHORIZATION-CRITICAL guard: the
+    invoker's charter-scope gate validates the hostname, but nmap honours a richer target syntax the
+    URL parser silently drops — a CIDR/netmask ('10.0.0.5/24' → gate sees the base IP, nmap probes 256
+    hosts), an octet range ('10.0.0.1-50'), a wildcard ('10.0.0.*'), a comma list, or a leading '-'
+    (parsed as an nmap OPTION, e.g. --script/--datadir). Rejecting anything but a single host here
+    guarantees the string handed to nmap is the SAME host the gate authorized. A single IPv6 literal
+    (bare ``fe80::1`` or bracketed ``[fe80::1]``) is accepted now that the scope gate brackets a bare
+    IPv6 before parsing (so it validates the SAME address nmap scans, run with ``-6``); an IPv6
+    CIDR/range/list still contains ``/`` , ``,`` , ``*`` or a space and is refused above."""
     t = target.strip()
     if not t or t.startswith("-") or any(c in t for c in "/,*") or any(c.isspace() for c in t):
         return False
+    if _ipv6_literal(t) is not None:
+        return True   # a single IPv6 literal (bare or bracketed)
     try:
         return ipaddress.ip_address(t).version == 4   # a single IPv4 literal (not a range/CIDR/list)
     except ValueError:

@@ -90,10 +90,11 @@ def is_destructive(method: str, url: str) -> bool:
 
 def parse_url(target_url: str) -> tuple[str, str]:
     """Normalise into (scheme, host). Raises ValueError if the URL is
-    not parseable as http/https."""
+    not parseable as http/https. A bare IPv6 literal is bracketed first so its
+    host is not truncated (``fe80::1`` would otherwise parse as host ``fe80``)."""
     if "://" not in target_url:
         target_url = "https://" + target_url
-    parsed = urlparse(target_url)
+    parsed = urlparse(ethics.bracket_bare_ipv6(target_url))
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"unsupported scheme: {parsed.scheme!r}")
     if not parsed.hostname:
