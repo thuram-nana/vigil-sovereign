@@ -62,6 +62,14 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "cross_site_websocket_hijacking": (OracleKind.ACHIEVED_STATE,),
     "websocket_injection": (OracleKind.SIDE_EFFECT, OracleKind.DIFFERENTIAL_RESPONSE),
     "request_race": (OracleKind.ACHIEVED_STATE,),
+    # business-logic / workflow abuse (scanner.bizlogic, OPT-IN — needs an operator
+    # workflow spec, NOT in DEFAULT_CHECKS): a skipped required step, a sequentially
+    # replayed one-time action, or price/qty tampering is a FACT only when the observed
+    # post-state proves the illegitimate state was reached. The predicate/achieved-state
+    # oracle judges the raw post-state — the detector never self-certifies. Additive row:
+    # it routes an opt-in class and sends 0 benchmark requests, so `make gate` stays
+    # byte-identical.
+    "business_logic": (OracleKind.ACHIEVED_STATE,),
     "ssrf": (OracleKind.OOB_CALLBACK,),
     "xxe": (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT),
     "blind_xxe": (OracleKind.OOB_CALLBACK,),
@@ -129,6 +137,13 @@ _ALIASES: dict[str, str] = {
     "authz": "authorization",
     "authentication_bypass": "auth_bypass",
     "privesc": "privilege_escalation",
+    # business-logic / workflow-abuse spellings fold onto the single canonical class.
+    "business_logic_abuse": "business_logic",
+    "workflow_violation": "business_logic",
+    "workflow_abuse": "business_logic",
+    "state_machine_abuse": "business_logic",
+    "parameter_tampering": "business_logic",
+    "insufficient_workflow_validation": "business_logic",
     "server_side_request_forgery": "ssrf",
     "xml_external_entity": "xxe",
     "insecure_deserialization": "deserialization",
