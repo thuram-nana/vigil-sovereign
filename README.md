@@ -134,8 +134,9 @@ the engine through one CLI: `python3 -m framework.v2 <subcommand>`.
 
 There is also a **defensive dual — AEGIS** (`framework/v2/aegis/`, the `aegis` subcommand): the same
 prove‑don't‑guess core pointed *inward* at the operator's own app as an embeddable AI‑attack‑detection
-library. It is deliberately isolated (lazily imported, never touched by `scan`/`engage`/`benchmark`),
-defensive‑only, and covered in §9.15 and §13.
+library (prompt‑injection, system‑prompt‑disclosure, automated‑access, and credential‑stuffing/ATO). It is
+deliberately isolated (lazily imported, never touched by `scan`/`engage`/`benchmark`), defensive‑only, and
+covered in §9.18 and §13.
 
 The two faces share the same doctrine. The exact same prove‑don't‑guess rules that bind OBSIDIAN's
 reasoning are the rules the engine enforces in code — and, as we'll see, the engine quotes that
@@ -1552,30 +1553,44 @@ what ships versus what is experimental or dormant:
 - The append‑only event spine with cryptographic tamper‑evidence, and the `--spine` engagement mirror.
 - The benchmark + `make gate` regression spine; the OSINT intel engine (offline by default).
 
-**Experimental, opt‑in, or built‑but‑not‑default‑wired:**
-- The **167‑entry check library** is exercised under the eval/benchmark harness; the *default interactive*
-  scan uses the 11 + 5 built‑in checks (enable the library per‑campaign via `use_library`).
+**Shipped, but opt‑in / off the default loop (powerful — and honestly gated):**
+- The **172‑entry check library** is exercised under the eval/benchmark harness; the *default interactive*
+  scan/engage uses the 11 + 5 built‑in checks (enable the library per‑campaign via `use_library`).
+- The **`engage --autonomous` OODA loop**, its **sensor fusion**, and the advisory **kernel reasoning** hook
+  (§9.16–9.17). This is the one place the **ACP goal‑tree planner** (budget/pruner/watchdog/resume) actually
+  runs — the *default* `engage` loop drives the scanner campaign + orchestrator, **not** the planner. Off =
+  byte‑identical.
+- The **specialized scanner arsenal** (smuggling, race, WebSocket, discovery, sequencer, grammar‑fuzz,
+  WAF‑evasion, `pqc_scan`) and the **`intruder/`** package — reachable via `--arsenal` / flags, not the
+  default campaign — plus the **opt‑in coverage packs** (GraphQL DoS, business logic, SSO/SAML/OIDC, the
+  two‑identity access‑control pack, the Nuclei‑template compiler) — §9.5.
 - The **nervous‑system primitives** (multi‑critic panel, reflection, cognitive refusal, `credit_outcome`
   fan‑out, meta‑monitor) and the **MAO coordinator + specialist agents** are unit‑tested and schedulable
-  but **not scheduled in the default `engage` loop** — their *doctrine* is nonetheless live in every
-  reasoning call via the governance preamble. Wiring them advisory‑only into `engage --spine` is **W1.1**,
-  which exists on branch `w1.1-wire-nervous-system` and is **not yet merged to `main`.**
-- The **ACP goal‑tree planner** (budget/pruner/watchdog/resume) is built and tested but **not wired into a
-  default runner** — `engage` drives the scanner campaign + orchestrator, not the planner.
-- The **specialized scanner arsenal** (smuggling, race, WebSocket, discovery, sequencer, grammar‑fuzz,
-  WAF‑evasion, `pqc_scan`) and the **`intruder/`** package are built and unit‑tested but reachable only via
-  the public API / flags — not part of the default campaign.
-- `defender/gap_report.py` is **built but unwired** into `engage`. DAA taint is **Python‑only** and the
-  Semgrep/Joern adapters are optional. The remote browser path is **loopback‑only on `engage`**. OOB
-  confirmation is **HTTP‑only** (a DNS‑only interaction needs a DNS‑capable relay). Memory embeddings are
-  **lexical by default**. Capability entitlement is **permissive / UNGOVERNED** until a trust root is
-  provisioned.
+  but **not scheduled in the default `engage --spine` loop** — their *doctrine* is nonetheless live in every
+  reasoning call via the governance preamble (§9.8).
+- **AEGIS** (§9.18) — the defensive dual — is lazy‑imported, defensive‑only, and never on the offensive
+  gate path. The **entitlement‑gated Tier‑3 validation layer** (§9.14) is **OFF by default**; the gated
+  **fuzz/ASan producer** refuses until an operator wires an `allowed_root`; **fleet transfer** (§9.9) and
+  the **optional heavy extras** (z3 / sentence‑transformers / numpy) are opt‑in and **default‑absent**.
+- The **`defender/` DEL pass** (detection‑gap report + Sigma efficacy) runs via **`engage --defender`**
+  (opt‑in); the **`report` SARIF/JSON export**, the loopback **`api`** (optional bearer / `X‑Relay‑Key`
+  auth), the **`mcp`** tool‑server, and **`imports`** are shipped but off the scan/engage gate path.
+
+**Constraints and honest limits:**
+- DAA taint is **Python‑only** and the Semgrep/Joern adapters are optional. The remote browser path is
+  **loopback‑only on `engage`**. OOB confirmation is **HTTP‑only** (a DNS‑only interaction needs a
+  DNS‑capable relay). Memory embeddings are **lexical by default**. Capability entitlement is
+  **permissive / UNGOVERNED** until a trust root is provisioned.
 - **Reasoning quality without a live LLM backend is bounded** — DryRun returns deterministic fixtures. The
   scanner and oracles need no LLM; the reasoning kernel benefits from one.
+- **Absent by design:** a mobile *runtime* engine (mobile is a *playbook* surface, not an engine); k8s and
+  cloud posture sensors stop at **leads** until their promotion oracles land; and — deliberately, per §10 —
+  detection‑evasion / identity‑rotation / C2 / persistence are excluded from the reasoning engine.
 - **The at‑scale autonomous finding‑discovery loop is not proven.** The plumbing is verified against a real
   target, but the one conservative real‑target run to date emitted zero findings. CRUCIBLE today is a
-  precision, prove‑don't‑guess scanner with a genuine reasoning/OSINT/evidence spine — **not** an
-  unattended frontier‑autonomy loop, and this README does not claim it is.
+  precision, prove‑don't‑guess scanner with a genuine reasoning/OSINT/evidence spine (and an opt‑in,
+  one‑cycle autonomous loop) — **not** an unattended frontier‑autonomy loop, and this README does not claim
+  it is.
 
 **Posture, restated:** authorized owner‑testing only; correlatable, not stealthy; deliberately **not**
 anti‑defender. If an operator instruction conflicts with scope, destruction, evidence, or honesty,
