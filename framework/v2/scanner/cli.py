@@ -88,6 +88,11 @@ def main(argv: list[str]) -> int:
                         help="Run the advanced web arsenal after the audit: content/JS "
                              "discovery leads, HTTP request-smuggling detection, and CSWSH "
                              "(all loopback here; smuggling/CSWSH findings stay oracle-confirmed).")
+    parser.add_argument("--sso", action="store_true",
+                        help="Also run the SSO/SAML/OIDC request checks (scanner.sso) against the "
+                             "operator's OWN SP/RP: each fires only when a request actually carries an "
+                             "SSO artifact (SAMLResponse/id_token/redirect_uri) and confirms via the "
+                             "achieved-state oracle. Off by default (0 SSO requests); never the IdP.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
@@ -130,6 +135,7 @@ def main(argv: list[str]) -> int:
         enable_browser_xss=args.browser_xss,
         enable_spa_crawl=args.spa,
         enable_arsenal=args.arsenal,
+        enable_sso=args.sso,
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
         progress=progress,
