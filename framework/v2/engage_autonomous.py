@@ -11,7 +11,11 @@ touches anything here, so it stays byte-identical.
 One cycle, over the AUTHORITATIVE ``EngagementResult`` the scan already produced:
 
   * OBSERVE  — the run's shared ``WorldModel`` (post-scan: WEBAPP/ENDPOINT/finding nodes + the
-    chained attack facts) and the oracle-confirmed findings.
+    chained attack facts) and the oracle-confirmed findings, RE-OBSERVED at the top of EVERY cycle:
+    the WS-B ``fuse_sensors`` hook runs each cycle and folds its (SAFE, offline) sensor observations
+    into the SAME world-model the planner reasons over, so fresh observations enrich the next pick.
+    (The first-slice allowlist stays the safe offline producers; extending it to the active sensors
+    is a documented ``engage_fusion`` roadmap item, not this slice.)
   * ORIENT   — build a goal tree over the confirmed findings and construct the ``Planner`` over the
     run world-model (objectives = crown-jewel node kinds, source = the attacker foothold). The
     planner's world-aware selection PICKS the next action (a leaf on the highest-value route to a
@@ -121,6 +125,7 @@ class AutonomyStep:
     folded_node: str = ""         # world-model node id the observation was folded onto ("" if none)
     reoriented_to: str = ""       # the next action the planner selected after the update
     advice_reweighted: int = 0    # open leaves the RE-ORIENT reasoning advice re-weighted this cycle
+    fused_observations: int = 0   # WS-B sensor observations folded into the world THIS cycle (OBSERVE)
 
 
 @dataclass
@@ -438,10 +443,6 @@ def run_autonomous_cycle(
     objectives = _objective_kinds()
     out.objectives = [getattr(k, "value", str(k)) for k in objectives]
 
-    # OBSERVE — WS-B sensor fusion first, so the planner reasons over the enriched world.
-    fused = _fuse_sensors(world, slug, ctx)
-    out.fused_observations = len(fused)
-
     # ORIENT — goal tree over the confirmed findings + the planner over the run world-model.
     tree, leaf_to_finding = _build_goal_tree(findings)
     baselines = _leaf_baselines(tree)   # fixed per-run priors; every advice re-weight recomputes from these
@@ -454,8 +455,9 @@ def run_autonomous_cycle(
 
     if not findings:
         out.notes.append("no confirmed findings — nothing to drive this cycle")
+        # still exercise the OBSERVE (WS-B) + reasoning (WS-F) seams so they are live on an empty run
+        out.fused_observations += len(_fuse_sensors(world, slug, ctx))
         out.world_nodes_after = world.node_count if world is not None else 0
-        # still exercise the WS-F reasoning hook so the seam is live even on an empty run
         out.reasoning_advice = _reason_step(world, findings, ctx)
         return out
 
@@ -467,12 +469,19 @@ def run_autonomous_cycle(
 
     cycles = max(1, int(max_cycles))
     for c in range(1, cycles + 1):
+        # OBSERVE — re-run the WS-B sensor fusion EACH cycle, folding fresh observations into the
+        # SAME world-model the planner reasons over BEFORE this cycle's selection. Idempotent: the
+        # fusion's stable obs_ids mean re-fusing the same offline producers never inflates belief.
+        cycle_fused = len(_fuse_sensors(world, slug, ctx))
+        out.fused_observations += cycle_fused
+
         leaf = _select(tree, world, objectives, source)
         if leaf is None:
             out.notes.append(f"cycle {c}: no open action remaining")
             break
         step = AutonomyStep(cycle=c, picked_leaf_id=leaf.id, picked_label=leaf.label,
-                            picked_surface=leaf.surface, picked_bug_class=leaf.bug_class)
+                            picked_surface=leaf.surface, picked_bug_class=leaf.bug_class,
+                            fused_observations=cycle_fused)
         finding = leaf_to_finding.get(leaf.id)
 
         # ACT — drive the picked action as a GATED tool call.

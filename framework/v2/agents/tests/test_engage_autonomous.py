@@ -413,3 +413,34 @@ def test_reasoning_advice_reweight_is_bounded_and_deterministic(monkeypatch: pyt
         return [(s.picked_bug_class, s.reoriented_to, s.advice_reweighted) for s in out.cycles]
 
     assert run() == run(), "advice re-weighting made the cycle non-deterministic"
+
+
+# ---------------------------------------------------------------------------
+# (8) I-D.2 — fuse_sensors (OBSERVE) runs EVERY cycle and enriches the shared world.
+# ---------------------------------------------------------------------------
+
+
+def test_fuse_sensors_runs_every_cycle(monkeypatch: pytest.MonkeyPatch):
+    """The WS-B ``fuse_sensors`` hook is invoked once per OODA cycle (not once per run), so fresh
+    observations enrich the SAME world-model the planner reasons over before each selection."""
+    fusion = types.ModuleType("framework.v2.engage_fusion")
+    calls = {"n": 0, "worlds": []}
+
+    def _fuse(world, slug, ctx):
+        calls["n"] += 1
+        calls["worlds"].append(world)
+        return ["obs-a", "obs-b"]
+
+    fusion.fuse_sensors = _fuse  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "framework.v2.engage_fusion", fusion)
+
+    world = _greedy_world(["https://t.invalid/a", "https://t.invalid/b"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.6),
+                                       _finding("sqli", "https://t.invalid/b", 0.5)])
+    out = run_autonomous_cycle(result, slug="alpha", max_cycles=2, prompt_callback=_deny)
+
+    assert len(out.cycles) == 2, "expected two driven cycles"
+    assert calls["n"] == 2, "fuse_sensors did not run once per cycle"
+    assert all(w is world for w in calls["worlds"]), "fusion enriched a different world than the planner's"
+    assert all(s.fused_observations == 2 for s in out.cycles)
+    assert out.fused_observations == 4
