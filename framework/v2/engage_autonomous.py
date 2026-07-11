@@ -330,6 +330,18 @@ def run_autonomous_cycle(
 
     sink = _spine_sink(blackboard, slug)
 
+    # PRODUCER UNIFICATION (WS-B) — the fused SENSOR leads also reach the unified report, as
+    # LEADS. A raw sensor observation carries no oracle_context, so the report grader renders it a
+    # lead, never a fact (prove-don't-guess preserved). Spine-gated + opt-in autonomous path →
+    # the default gate never reaches this, so it stays byte-identical. Best-effort.
+    if sink is not None and fused:
+        try:
+            from .intel.project import observation_to_finding_payload
+            for obs in fused:
+                sink.finding_event(observation_to_finding_payload(obs))
+        except Exception:
+            pass
+
     if not findings:
         out.notes.append("no confirmed findings — nothing to drive this cycle")
         out.world_nodes_after = world.node_count if world is not None else 0

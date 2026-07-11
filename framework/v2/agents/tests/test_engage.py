@@ -423,12 +423,18 @@ def test_engage_spine_mirrors_findings_onto_the_immutable_stream(
     )
     assert result.report.active_findings, "engage confirmed nothing"
 
-    # every confirmed finding is mirrored as a finding event, index-for-index
+    # every confirmed finding is mirrored as a finding event, AND (producer unification) every
+    # passive finding is mirrored as a LEAD event — so the unified report composes all producers.
     finding_events = bb.read(engagement="alpha", kinds=["finding"])
-    assert len(finding_events) == len(result.report.active_findings)
-    # oracle authority preserved in the mirror: a re-grounded finding is 'confirmed'
+    assert len(finding_events) == len(result.report.active_findings) + len(result.report.passive_findings)
+    # oracle authority preserved in the mirror: a re-grounded active finding is 'confirmed'
     assert all(fe.payload["critique_status"] in ("confirmed", "llm_advisory") for fe in finding_events)
     assert any(fe.payload["verified_by_oracle"] for fe in finding_events)
+    # the passive producer rides along, honestly graded as a LEAD (never a fact).
+    passive_events = [fe for fe in finding_events if str(fe.payload["finding_slug"]).startswith("passive:")]
+    assert len(passive_events) == len(result.report.passive_findings)
+    assert all(not fe.payload["verified_by_oracle"] and fe.payload["oracle_context"] is None
+               for fe in passive_events)
     # scan progress observations + a summary decision also landed on the spine
     assert bb.read(engagement="alpha", kinds=["observation"])
     assert bb.read(engagement="alpha", kinds=["decision"])
