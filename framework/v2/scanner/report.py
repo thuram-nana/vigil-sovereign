@@ -58,6 +58,29 @@ _CLASS_META: dict[str, tuple[str, str, list[str]]] = {
     "request_smuggling": ("High", "Normalise/reject ambiguous Content-Length/Transfer-Encoding.", ["CWE-444"]),
 }
 
+# Per-CHECK-ID report metadata for code seeds whose report enrichment previously came
+# from a library JSON entry that has since been removed as a pure duplicate of the code
+# seed. Keyed by the finding's exact ``check_id`` (NOT its bug_class), so an entry here
+# can only ever affect the ONE check that owns that id — every other finding of the same
+# bug_class still falls through to ``_CLASS_META`` unchanged. It is consulted only when
+# ``lib.get(check_id)`` is None (the library entry is gone), so shipping it alongside a
+# still-present JSON is a silent no-op; it takes effect exactly when the JSON is deleted.
+# This lets a duplicate library entry be removed without altering the rendered
+# severity/remediation/references of the finding it used to annotate.
+#
+# ``ssrf-oob``: the ``SSRF_OOB`` code seed (``scanner.checks``) shares its id with the
+# removed ``scanner/library_entries/ssrf.json``. These are that JSON's EXACT
+# severity/remediation/references (CAPEC-664 included), so an out-of-band SSRF report is
+# byte-identical to when the JSON supplied them via ``lib.get("ssrf-oob")``. Pinned by
+# ``scanner/tests/test_report_check_meta.py`` and ``scanner/tests/test_library.py``.
+_CHECK_META: dict[str, tuple[str, str, list[str]]] = {
+    "ssrf-oob": (
+        "High",
+        "Do not let user input drive server-side fetches. Enforce an allowlist of permitted hosts/schemes, block requests to internal/link-local ranges and the cloud metadata endpoint, and disable unneeded URL schemes.",
+        ["CWE-918", "CAPEC-664"],
+    ),
+}
+
 _SEVERITY_RANK = {"Critical": 5, "High": 4, "Medium": 3, "Low": 2, "Info": 1, "Confirmed": 4}
 _SARIF_LEVEL = {"Critical": "error", "High": "error", "Medium": "warning", "Low": "note", "Info": "note"}
 
@@ -127,6 +150,11 @@ def _meta_for(check_id: str, bug_class: str, lib: dict[str, Any]) -> tuple[str, 
     entry = lib.get(check_id)
     if entry is not None:
         return entry.severity, entry.remediation or "", list(entry.references)
+    # A code seed whose id previously matched a (now-removed) library entry keeps that
+    # entry's exact metadata here — check_id-scoped so it only affects that one check.
+    if check_id in _CHECK_META:
+        sev, rem, refs = _CHECK_META[check_id]
+        return sev, rem, list(refs)
     if bug_class in _CLASS_META:
         sev, rem, refs = _CLASS_META[bug_class]
         return sev, rem, refs

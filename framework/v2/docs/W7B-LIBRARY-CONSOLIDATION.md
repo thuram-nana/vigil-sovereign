@@ -68,7 +68,11 @@ text — an **observable report change** on any `enable_oob=True` run (caught by
 behavior-preservation review; the gate never fires it because the gate runs OOB off, and
 no test asserts it, so the change would have been silent). Behavior-preservation is the
 hard constraint, so `ssrf-oob` stays until its report metadata is first migrated into
-`_CLASS_META` (or the code seed) under its own gated change. `command-injection-oob` /
+`_CLASS_META` (or the code seed) under its own gated change. **[UPDATE — Wave 7-F closeout:
+that migration is now DONE. The exact metadata moved into a new check-id-scoped
+`report._CHECK_META["ssrf-oob"]` (not `_CLASS_META`, so no other ssrf finding is affected),
+`ssrf.json` was removed, and the rendered OOB-SSRF report is byte-identical (CAPEC-664 + prose
+retained). See `WAVE7-DEBT-FINAL-DISPOSITION.md`.]** `command-injection-oob` /
 `blind-xxe-oob` have no such collision (their code seeds use ids `rce-oob` / `xxe-oob`),
 so `lib.get()` for the removed ids was always `None` — their removal changes no report.
 
