@@ -44,6 +44,13 @@ from .generate import (
     render_remediation,
     render_technical,
 )
+from .export import (
+    build_export_doc,
+    export_json,
+    export_sarif,
+    to_json,
+    to_sarif,
+)
 
 __all__ = [
     "GRADE_FACT",
@@ -64,4 +71,9 @@ __all__ = [
     "render_executive",
     "render_technical",
     "render_remediation",
+    "build_export_doc",
+    "to_json",
+    "to_sarif",
+    "export_json",
+    "export_sarif",
 ]
