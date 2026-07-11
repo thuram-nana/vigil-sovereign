@@ -448,6 +448,7 @@ def run_engagement(
     arsenal_race_targets: "tuple[tuple[str, int], ...]" = (),
     enable_sso: bool = False,
     enable_graphql_dos: bool = False,
+    use_library: bool = False,
     priors: object = None,
     transfer_archetype: str | None = None,
     prompt_callback: PromptCallback | None = None,
@@ -580,6 +581,7 @@ def run_engagement(
             arsenal_race_targets=arsenal_race_targets,
             enable_sso=enable_sso,
             enable_graphql_dos=enable_graphql_dos,
+            use_library=use_library,
             priors=priors,
             progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
         ).run(seed_url)
@@ -771,6 +773,11 @@ def main(argv: list[str]) -> int:
                              "via the predicate oracle; cost / introspection-off signals are honest "
                              "leads. One bounded probe per check through the gated executor (it "
                              "demonstrates a missing guard, it does not flood). Off by default.")
+    parser.add_argument("--library", action="store_true",
+                        help="Fingerprint the target from the crawl and also run the declarative check "
+                             "LIBRARY (scanner.library) whose applicability predicate matches the "
+                             "detected stack. Oracle-anchored exactly like the built-ins; scoped so a "
+                             "stack-specific payload never fires off-stack. Off by default.")
     parser.add_argument("--recon", action="store_true",
                         help="Run the Intelligence Engine alongside the scan: resolve an "
                              "asset inventory into the shared world-model and produce a "
@@ -853,6 +860,7 @@ def main(argv: list[str]) -> int:
             enable_arsenal=args.arsenal,
             enable_sso=args.sso,
             enable_graphql_dos=args.graphql_dos,
+            use_library=args.library,
             enable_defender=args.defender,
             defender_ruleset=args.defender_ruleset,
             defender_sigma_dir=args.defender_sigma,

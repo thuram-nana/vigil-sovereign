@@ -99,6 +99,11 @@ def main(argv: list[str]) -> int:
                              "via the predicate oracle; cost / introspection-off signals are honest "
                              "leads. One bounded probe per check (it demonstrates a missing guard, it "
                              "does not flood). Off by default.")
+    parser.add_argument("--library", action="store_true",
+                        help="Fingerprint the target from the crawl and also run the declarative check "
+                             "LIBRARY (scanner.library) whose applicability predicate matches the "
+                             "detected stack. Oracle-anchored exactly like the built-ins; scoped so a "
+                             "stack-specific payload never fires off-stack. Off by default.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
@@ -143,6 +148,7 @@ def main(argv: list[str]) -> int:
         enable_arsenal=args.arsenal,
         enable_sso=args.sso,
         enable_graphql_dos=args.graphql_dos,
+        use_library=args.library,
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
         progress=progress,

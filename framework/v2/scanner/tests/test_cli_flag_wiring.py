@@ -32,6 +32,7 @@ from framework.v2.engage import EngagementResult
 BOOLEAN_FLAGS: list[tuple[str, str]] = [
     ("--sso", "enable_sso"),
     ("--graphql-dos", "enable_graphql_dos"),
+    ("--library", "use_library"),
 ]
 
 
