@@ -122,11 +122,16 @@ offensive‑security operator. OBSIDIAN is not a script runner — it reasons in
 per‑technique references). This is the human‑driven, judgment‑heavy face: you and OBSIDIAN work a
 target together, and OBSIDIAN documents everything with discipline.
 
-**The engine (`framework/v2/`) — executable, deterministic machinery.** Roughly 300 Python modules
-(with ~200 test files) that make the discipline mechanical: the oracles, the event spine, the
+**The engine (`framework/v2/`) — executable, deterministic machinery.** Roughly 360 Python modules
+(with ~250 test files) that make the discipline mechanical: the oracles, the event spine, the
 world‑model, the veracity firewall, the calibrated learning core, the OSINT engine, and the safety
 stack. Where OBSIDIAN *reasons about* whether something is a bug, the engine *proves* it. You invoke
 the engine through one CLI: `python3 -m framework.v2 <subcommand>`.
+
+There is also a **defensive dual — AEGIS** (`framework/v2/aegis/`, the `aegis` subcommand): the same
+prove‑don't‑guess core pointed *inward* at the operator's own app as an embeddable AI‑attack‑detection
+library. It is deliberately isolated (lazily imported, never touched by `scan`/`engage`/`benchmark`),
+defensive‑only, and covered in §9.15 and §13.
 
 The two faces share the same doctrine. The exact same prove‑don't‑guess rules that bind OBSIDIAN's
 reasoning are the rules the engine enforces in code — and, as we'll see, the engine quotes that
@@ -183,7 +188,7 @@ consistently, and backed by verifiable proof.
           reasons over / │ correlates                        │ drives (gated) sensors
                          │                                   ▼
                  BAYESIAN WORLD-MODEL  ◄───────────  ORACLE / PROOF ENGINE
-                 (typed graph; every node/edge         (11 oracle KINDS / 12 functions;
+                 (typed graph; every node/edge         (15 offensive oracle KINDS;
                   carries a Beta probability +          re-verifies every claim → mints a
                   a provenance pointer; a               re-runnable certificate; only a
                   refutation channel lowers             fired oracle CONFIRMS)
@@ -416,7 +421,7 @@ crucible/
 │   ├── templates/                # charter, threat-model, attack-tree, finding, chain, reports
 │   ├── scripts/ · tools/ · wordlists/
 │   │
-│   └── v2/                       # THE ENGINE (~300 source modules, ~200 test files)
+│   └── v2/                       # THE ENGINE (~360 source modules, ~250 test files)
 │       ├── __main__.py           # the CLI dispatch table (the contract)
 │       ├── engage.py             # the authorized, fully-gated end-to-end runner
 │       ├── agents/               # event spine + coordinator + specialist agents + nervous system
@@ -428,8 +433,11 @@ crucible/
 │       ├── memory/               # MLS: SQLite + embeddings + priors + recall
 │       ├── planner/              # ACP goal-tree campaign planner (built; not default-wired)
 │       ├── intel/               # OSINT recon engine (collectors → observations → beliefs)
-│       ├── scanner/              # the web audit engine + 167-check library + browser + arsenal
+│       ├── scanner/              # the web audit engine + 172-check library + browser + arsenal
 │       ├── intruder/             # autonomous Burp-Intruder-style fuzzer (built; not default-wired)
+│       ├── repeater/             # gated intercepting repeater (authorized web testing; opt-in)
+│       ├── sensors/              # W2-W5 sensor/producer framework: Nmap, tshark, Nuclei/ZAP/Burp,
+│       │                         #   cloud-IAM/CSPM, SBOM/SCA (built; NOT default-wired into engage/scan)
 │       ├── kernel/               # URK: cognitive prose → typed LLM callables + sovereignty tiers
 │       ├── knowledge/            # attack-graph technique operators
 │       ├── evidence/             # signed, tamper-evident certificate bundles
@@ -751,7 +759,7 @@ judge. This is that something — and it is built so it can never emit a finding
 - **The default arsenal** (both `scan` and `engage`): 11 built‑in checks + 5 request‑level checks
   (CORS, Host‑header, JWT `alg:none`, GraphQL introspection, GraphQL field suggestions), plus static
   DOM‑XSS *candidate* detection — all oracle‑adjudicated.
-- **The data‑driven check library** (`scanner/library.py` + `scanner/library_entries/*.json`) — **167
+- **The data‑driven check library** (`scanner/library.py` + `scanner/library_entries/*.json`) — **172
   checks expressed as DATA**, not code. Each entry carries a payload, an `applies_when` fingerprint
   predicate, its insertion kinds, and an oracle spec; loading *validates every file* (a typo, a bad
   predicate, or a duplicate id is a **load‑time error**, never a silent no‑op). Distribution by class:
