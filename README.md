@@ -126,8 +126,8 @@ offensive‑security operator. OBSIDIAN is not a script runner — it reasons in
 per‑technique references). This is the human‑driven, judgment‑heavy face: you and OBSIDIAN work a
 target together, and OBSIDIAN documents everything with discipline.
 
-**The engine (`framework/v2/`) — executable, deterministic machinery.** Roughly 360 Python modules
-(with ~250 test files) that make the discipline mechanical: the oracles, the event spine, the
+**The engine (`framework/v2/`) — executable, deterministic machinery.** Roughly 380 Python source
+modules (with ~270 test files) that make the discipline mechanical: the oracles, the event spine, the
 world‑model, the veracity firewall, the calibrated learning core, the OSINT engine, and the safety
 stack. Where OBSIDIAN *reasons about* whether something is a bug, the engine *proves* it. You invoke
 the engine through one CLI: `python3 -m framework.v2 <subcommand>`.
@@ -425,23 +425,32 @@ crucible/
 │   ├── templates/                # charter, threat-model, attack-tree, finding, chain, reports
 │   ├── scripts/ · tools/ · wordlists/
 │   │
-│   └── v2/                       # THE ENGINE (~360 source modules, ~250 test files)
-│       ├── __main__.py           # the CLI dispatch table (the contract)
+│   └── v2/                       # THE ENGINE (~380 source modules, ~270 test files)
+│       ├── __main__.py           # the CLI dispatch table (the contract — all 25 subcommands)
 │       ├── engage.py             # the authorized, fully-gated end-to-end runner
+│       ├── engage_autonomous.py  # the opt-in `--autonomous` OODA loop (planner + gated tools)
+│       ├── engage_fusion.py      # `--autonomous` sensor→world-model fusion seam
+│       ├── engage_reasoning.py   # `--autonomous` advisory LLM reasoning hook
 │       ├── agents/               # event spine + coordinator + specialist agents + nervous system
+│       │                         #   + http_executor (6-gate) + tier3_validation (entitlement-gated)
 │       ├── verify/               # deterministic oracles + offline re-verifier + OOB collaborator
 │       ├── worldmodel/           # the unified Bayesian evidence graph + attack-path search
 │       ├── veracity/             # the anti-hallucination firewall (re-execution)
 │       ├── confidence/           # the Scientific Confidence Engine (SCE)
 │       ├── calibration/          # reward bus, ledger, isotonic calibration, conformal, meta-monitor
 │       ├── memory/               # MLS: SQLite + embeddings + priors + recall
-│       ├── planner/              # ACP goal-tree campaign planner (built; not default-wired)
+│       ├── planner/              # ACP goal-tree campaign planner (runs under `engage --autonomous` only)
 │       ├── intel/               # OSINT recon engine (collectors → observations → beliefs)
 │       ├── scanner/              # the web audit engine + 172-check library + browser + arsenal
+│       │                         #   + opt-in packs: bizlogic, sso, graphql, access_control, nuclei_compile
 │       ├── intruder/             # autonomous Burp-Intruder-style fuzzer (built; not default-wired)
 │       ├── repeater/             # gated intercepting repeater (authorized web testing; opt-in)
 │       ├── sensors/              # W2-W5 sensor/producer framework: Nmap, tshark, Nuclei/ZAP/Burp,
-│       │                         #   cloud-IAM/CSPM, SBOM/SCA (built; NOT default-wired into engage/scan)
+│       │                         #   cloud-IAM/CSPM, SBOM/SCA, k8s_runtime, fuzz/ASan (NOT default-wired)
+│       ├── aegis/                # AEGIS — the defensive dual (lazy-imported; off the offensive path)
+│       ├── report/               # deterministic exec/technical/remediation reports + SARIF/JSON export
+│       ├── imports/              # third-party tool export → re-verifiable leads
+│       ├── mcp/ · api/ · plugins/ # platform seams: MCP tool-server, loopback gated API, capability catalog
 │       ├── kernel/               # URK: cognitive prose → typed LLM callables + sovereignty tiers
 │       ├── knowledge/            # attack-graph technique operators
 │       ├── evidence/             # signed, tamper-evident certificate bundles
@@ -943,11 +952,12 @@ nervous system turns them into code that runs against the event spine — while 
 
 **Wiring status (honest).** In the default `engage --spine` loop *today*: the spine mirror of
 findings/refusals, the per‑finding spine `reward` event, and the veracity firewall over findings. The
-multi‑critic panel, the reflection agent, cognitive refusal, the `credit_outcome` fan‑out, the
-meta‑monitor, the MAO coordinator, and the ACP planner are **additive primitives / schedulable agents you
-opt into** — unit‑tested and addable to a coordinator, but not scheduled in the default loop. Their
-*doctrine* is nonetheless already live in every reasoning call, because it is injected into every LLM
-prompt (§9.11). Wiring them advisory‑only into `engage --spine` is Wave 1.1 (see §12).
+**ACP goal‑tree planner** and the advisory **kernel reasoning** step now run under `engage --autonomous`
+(§9.17) — but *only* there; the default loop does not drive them. The multi‑critic panel, the reflection
+agent, cognitive refusal, the `credit_outcome` fan‑out, the meta‑monitor, and the MAO coordinator remain
+**additive primitives / schedulable agents you opt into** — unit‑tested and addable to a coordinator, but
+not scheduled in the default `engage --spine` loop. Their *doctrine* is nonetheless already live in every
+reasoning call, because it is injected into every LLM prompt (§9.11).
 
 ### 9.9 Memory and priors (MLS) (`memory/`)
 
@@ -1417,7 +1427,7 @@ CRUCIBLE holds *itself* to prove‑don't‑guess.
   positive, a newly‑missed finding, or a precision drop. It needs no Docker and no external tools, so it
   runs anywhere. `make bench-corpus` extends this to a dockerized multi‑app corpus with neutral
   OWASP‑Benchmark ground truth.
-- **`make test`** — the full engine suite: **~200 test files** across ~300 source modules, almost all
+- **`make test`** — the full engine suite: **~270 test files** across ~380 source modules, almost all
   deterministic and offline (only a couple of opt‑in live‑LLM / live‑HTTP integration tests touch a
   network or a model).
 - **`python3 -m framework.v2 verify <report.json>`** — *anyone* can re‑verify a saved engagement offline:
