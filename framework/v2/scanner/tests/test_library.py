@@ -106,9 +106,21 @@ def test_seed_has_the_named_minimum_entries() -> None:
     assert by_id["m2-ssti-jinja2"].oracle.kind == "evaluation"
     assert by_id["h1-lfi-etc-passwd"].oracle.kind == "content"
     assert by_id["m2-errsqli-single-quote"].oracle.kind == "error_signature"
+    # The bare-callback OOB seeds blind-xxe-oob / command-injection-oob were exact behavioural
+    # duplicates of the code seeds XXE_OOB / RCE_OOB in scanner.checks.DEFAULT_CHECKS (same bug_class
+    # + same payload) AND their library ids never collide with a code-seed id (xxe-oob / rce-oob), so
+    # nothing looks them up — they were removed, the code seeds are the single source of truth.
+    # ssrf-oob is KEPT: it shares its id with the SSRF_OOB code seed, and scanner.report._meta_for
+    # looks up report references/remediation by check_id, so this library entry supplies the richer
+    # SSRF report metadata (CAPEC-664 + prose). Removing it would silently change OOB-SSRF reports.
     assert by_id["ssrf-oob"].oracle.kind == "oob"
-    assert by_id["blind-xxe-oob"].oracle.kind == "oob"
-    assert by_id["command-injection-oob"].oracle.kind == "oob"
+    # ssrf-oob's id collides with the SSRF_OOB code seed, so scanner.report._meta_for supplies these
+    # report references via lib.get("ssrf-oob"); pin them so removing the entry can't silently drop
+    # CAPEC-664 from an OOB-SSRF report (the Wave-7 behavior-preservation review's finding).
+    assert by_id["ssrf-oob"].references == ["CWE-918", "CAPEC-664"]
+    assert by_id["m2-inj-ssrf-http-scheme"].oracle.kind == "oob"
+    assert by_id["m2-inj-xxe-external-dtd"].oracle.kind == "oob"
+    assert by_id["m2-inj-cmdi-pipe-curl"].oracle.kind == "oob"
     assert by_id["time-based-sqli"].oracle.kind == "timing"
     # the two fingerprint-gated exemplars
     assert by_id["wp-author-sqli"].applies_when == {"tech": "wordpress"}
@@ -253,7 +265,7 @@ def test_compile_reflection_yields_marker_reflection_check() -> None:
 
 
 def test_compile_oob_yields_oob_check() -> None:
-    check = compile_entry(_entry("ssrf-oob"))
+    check = compile_entry(_entry("m2-inj-ssrf-http-scheme"))
     assert isinstance(check, OOBCheck)
     assert isinstance(check, Check)
     assert getattr(check, "wants_oob", False) is True
