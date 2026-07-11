@@ -516,30 +516,37 @@ runs offline (with reasoning quality bounded accordingly).
 
 ## 8. The CLI surface
 
-The dispatch table in `framework/v2/__main__.py` **is** the contract — every subcommand appears there
-and takes `--help`.
+The dispatch table in `framework/v2/__main__.py` **is** the contract — all **25** subcommands appear
+there and each delegates to its own arg parser. (Because the top‑level dispatcher owns `-h/--help`,
+read a subcommand's flags from its module, not `<sub> --help`; the tables below are the flag surface.)
 
 | Subcommand | What it does | Key verbs / flags |
 |---|---|---|
 | `status` | Environment summary: resolved paths, reachable LLM backends, and the **governance state** — sovereignty tier (and whether it's *sealed*) plus whether capability entitlement is *enforced* or the box is running *UNGOVERNED*. | — |
 | `intake` | **UTI** — turn a URL into a scaffolded `targets/<slug>/`. Passive, SSRF‑guarded, ethics‑gated. | `run`, `authorize`, `fingerprint` |
-| `scan` | **Loopback‑only** quick web scan with a grounded export. Refuses non‑loopback hosts (use `engage` for those). | `--format {text,json,sarif,html}`, `--strict-evidence`, `--targeted`, `--domxss`, `--browser-xss`, `--spa`, `--reverifiable-out`, `--progress-log` |
-| `engage` | **Authorized remote** end‑to‑end runner (the full data‑flow of §5.1). Every request passes the 6‑gate chain. | `--recon`, `--spine`, `--waf-adaptive`, `--grammar-fuzz N`, `--browser-xss`, `--spa`, `--oob-relay-url`, `--no-chaining`, request/page budgets |
+| `scan` | **Loopback‑only** quick web scan with a grounded export. Refuses non‑loopback hosts (use `engage` for those). | `--format {text,json,sarif,html}`, `--strict-evidence`, `--targeted`, `--domxss`, `--browser-xss`, `--spa`, `--arsenal`, `--reverifiable-out`, `--progress-log`, `--bandit-file` |
+| `engage` | **Authorized remote** end‑to‑end runner (the full data‑flow of §5.1). Every request passes the 6‑gate chain. | `--recon`, `--spine`, `--waf-adaptive`, `--grammar-fuzz N`, `--arsenal`, `--browser-xss`, `--spa`, `--domxss`, `--oob-relay-url`, `--no-chaining`, `--transfer-archetype NAME`, `--defender`, **`--autonomous`** / `--autonomous-cycles N` / `--autonomous-budget N`, request/page budgets |
 | `verify` | Offline re‑verification of a saved report — re‑runs each finding's retained oracle certificate; exit 0 iff every one reproduces and matches its claim. | `<report.json>` |
 | `evidence` | Build / sign / verify tamper‑evident evidence bundles. | `keygen`, `certify`, `verify` |
+| `report` | Deterministically assemble the executive / technical / remediation reports from the blackboard (or a JSON doc), or **export** machine formats. | `<slug>`, `--from-json`, `--format {markdown,json,sarif}`, `--only`, `--stdout`, `--out` |
 | `collaborator` | Run the self‑hostable out‑of‑band (OOB) relay that unlocks blind‑class confirmation on remote targets. | `serve` |
 | `intel` | Run OSINT into the shared world‑model. Offline by default; live sources are a gated opt‑in. | `ingest [--live]`, `ingest-cloud`, `ingest-sbom`, `resolve`, `plan`, `predict`, `timeline`, `delta`, `yield` |
+| `imports` | Import a third‑party tool export (Nuclei / ZAP / Burp / sqlmap / generic) as **provenance‑tagged leads** the oracles later re‑verify. Dry by default; `--persist` writes them to the intel store. | `<file>`, `--format`, `--source-tool`, `--slug`, `--persist` |
 | `memory` | Query the cross‑engagement memory / priors (MLS). | `status`, `seed`, `similar`, `wins`, `payloads`, `priors`, `postmortem` |
 | `kernel` | Invoke one cognitive binding as a typed callable. | `hypothesize`, `critique`, `pivot`, `decide`, `opsec`, `threat-model`, `backend` |
 | `benchmark` | Precision/recall benchmark; `make gate` uses this as a regression gate. | `--gate`, `--update-baseline`, `--corpus`, `--no-incumbents` |
 | `eval` | Score / regression‑check runs against the benchmark corpus. | `score`, `regress`, `show` |
 | `authority` | Kill‑switch + engagement‑authority control. | `status`, `halt --reason`, `clear --by`, `authorize` |
 | `entitlement` | Capability‑entitlement status / verification. | `status`, `capabilities`, `verify` |
+| `capabilities` | Enumerate CRUCIBLE's **unified capability catalog** (CLI subcommands, sensors, oracles, tools) — read‑only, deterministic; the machine‑readable surface an MCP/API/SDK consumer discovers. | `--json`, `--kind`, `--no-commands` |
 | `improve` | **SIL** — *authorise* (never apply) a self‑improvement proposal. | `review`, `horizon`, `show` |
 | `analysis` | **DAA** — offline static / taint analysis + an autonomous source‑review loop. | `scan`, `index`, `analyzers`, `review` |
 | `defender` | **DEL** — purple‑team detection modeling / self‑detection scoring. | `score`, `annotate`, `rules` |
 | `socialdefense` | Score an inbound message for phishing / social‑engineering indicators. | `assess` |
 | `console` | Read‑only, loopback‑only operator UI (live progress; safe actions only). | `--open` |
+| `api` | **Loopback, gated external API** — a read core (enumerate/read the run) plus gated actions through the *same* fail‑closed chain as a local action. Optional bearer / `X-Relay-Key` auth. | `--port`, `--host` (loopback only) |
+| `mcp` | **MCP tool‑server seam** — EXPOSE CRUCIBLE's charter‑bound gated capabilities as MCP tools, or CONSUME external MCP tools. | `serve --slug`, `list --slug` |
+| `aegis` | **AEGIS** — the *defensive* dual: prove‑don't‑guess AI‑attack detection over one telemetry envelope (see §9.18). Lazy‑imported; never on the scan/engage path. | `detect <envelope.json>`, `demo` |
 
 ---
 
