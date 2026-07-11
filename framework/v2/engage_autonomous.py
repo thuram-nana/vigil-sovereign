@@ -126,6 +126,7 @@ class AutonomyStep:
     reoriented_to: str = ""       # the next action the planner selected after the update
     advice_reweighted: int = 0    # open leaves the RE-ORIENT reasoning advice re-weighted this cycle
     fused_observations: int = 0   # WS-B sensor observations folded into the world THIS cycle (OBSERVE)
+    coordinator_events: int = 0   # events the wired advisory agents posted when the Coordinator ticked
 
 
 @dataclass
@@ -140,6 +141,11 @@ class AutonomyResult:
     reasoning_advice: Any = None       # object returned by the WS-F reason_step hook (or None)
     advice_reweighted: int = 0         # total open leaves the WS-F advice re-weighted (all cycles)
     planner_constructed: bool = False  # a real Planner was constructed over the run world-model
+    planner_driven: bool = False       # the Planner's Coordinator was TICKED in-loop (agents ran), not inert
+    agents_wired: list[str] = field(default_factory=list)  # advisory agents on the Coordinator
+    coordinator_events: int = 0        # total events the wired agents posted across all ticks
+    critic_verdicts: int = 0           # critic_verdict events the multi-critic panel posted (advisory)
+    reflections: int = 0               # reflection events the in-loop reflection posted (re-rank/defer)
     planner_source: str | None = None  # the foothold node the planner reasons from
     objectives: list[str] = field(default_factory=list)
     world_nodes_before: int = 0
@@ -335,12 +341,37 @@ def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None)
     return moved
 
 
+def _advisory_agents(blackboard: Any, slug: str) -> list:
+    """The deterministic, ADVISORY nervous-system agents wired onto the Coordinator so they RUN
+    inside the loop (not as post-hoc telemetry): the multi-critic panel (re-grounding / provenance
+    / calibration lenses) and the in-loop reflection (dead-thread / stall re-orient). Both are
+    deterministic (no LLM, no egress) and advisory — a critic can only endorse/object/abstain and
+    reflection only re-ranks/defers; NEITHER promotes a finding or overrides an oracle (the type
+    system enforces the critic side). Best-effort: an import failure yields fewer agents, never
+    sinks construction. The LLM-backed ``CritiqueAgent`` is deliberately NOT wired here to keep the
+    in-loop nervous system deterministic and network-free (a documented next slice)."""
+    agents: list = []
+    try:
+        from .agents.critics import MultiCriticAgent
+        agents.append(MultiCriticAgent(blackboard, slug))
+    except Exception:
+        pass
+    try:
+        from .agents.reflection import ReflectionAgent
+        agents.append(ReflectionAgent(blackboard, slug))
+    except Exception:
+        pass
+    return agents
+
+
 def _construct_planner(world: "WorldModel | None", slug: str, tree: Any, objectives: list,
                        source: str | None, request_budget: int, blackboard: Any) -> Any:
-    """Construct the real ``Planner`` over the run world-model — the substrate the multi-cycle
-    roadmap loop (``planner.run``) will drive. Needs a blackboard (its event substrate); when none
-    is available it is skipped (None) and the cycle still runs on the shared tree selection, which is
-    byte-for-byte what the planner itself would select. Best-effort — never raises."""
+    """Construct the real ``Planner`` over the run world-model AND give its Coordinator the real
+    advisory agents (:func:`_advisory_agents`) — so the Coordinator, once TICKED in-loop, drives
+    the nervous system LIVE instead of being constructed-inert with ``agents=[]``. Needs a
+    blackboard (its event substrate); when none is available it is skipped (None) and the cycle
+    still runs on the shared tree selection, which is byte-for-byte what the planner itself would
+    select. Best-effort — never raises."""
     if blackboard is None:
         return None
     try:
@@ -351,7 +382,8 @@ def _construct_planner(world: "WorldModel | None", slug: str, tree: Any, objecti
             blackboard.engagement_id(slug)
         except Exception:
             pass
-        coord = Coordinator(blackboard=blackboard, engagement_slug=slug, agents=[])
+        coord = Coordinator(blackboard=blackboard, engagement_slug=slug,
+                            agents=_advisory_agents(blackboard, slug))
         budget = Budget(request_max=max(1, int(request_budget)))
         return Planner(
             blackboard=blackboard, coordinator=coord, engagement_slug=slug,
@@ -408,6 +440,113 @@ def _fold_observation(world: "WorldModel | None", surface: str, verdict: str) ->
 
 
 # ---------------------------------------------------------------------------
+# DRIVE — tick the constructed Coordinator so the wired advisory agents RUN IN-LOOP.
+#
+# These mirror the loop's authoritative facts + its own reasoning trace onto the event spine and
+# then TICK the Coordinator, so the multi-critic panel and the reflection agent run INSIDE each
+# OODA cycle (the nervous system runs live, not as post-hoc telemetry). All ADVISORY: the critics
+# only endorse/object/abstain and reflection only re-ranks/defers — none promotes a finding or
+# touches an oracle verdict. Best-effort throughout; only reached when a blackboard is supplied.
+# ---------------------------------------------------------------------------
+
+
+def _finding_payload(f: object) -> dict:
+    """A FindingPayload-shaped mirror of a confirmed AuditFinding — enough for the wired critic
+    panel to review it in-loop. It mirrors an ALREADY oracle-confirmed fact (telemetry); it does
+    NOT re-confirm one. Provenance is honest: ``verified_by_oracle`` tracks the presence of the
+    retained ``oracle_context``, and ``critique_status`` stays ``pending`` (the critics advise; a
+    verdict never promotes)."""
+    bug_class = str(getattr(f, "bug_class", "") or "")
+    surface = _finding_surface(f) or str(getattr(f, "param", "") or "") or "(surface)"
+    oc = getattr(f, "oracle_context", None)
+    conf = getattr(f, "confidence", None)
+    try:
+        conf = None if conf is None else min(1.0, max(0.0, float(conf)))
+    except (TypeError, ValueError):
+        conf = None
+    return {
+        "finding_slug": (f"{bug_class}:{getattr(f, 'insertion_point', '')}"[:120]) or bug_class or "finding",
+        "title": (f"{bug_class} at {getattr(f, 'param', '')}".strip() or bug_class or "finding"),
+        "severity": "High",
+        "bug_class": bug_class or "unknown",
+        "surface": str(surface),
+        "summary": str(getattr(f, "rationale", "") or f"{bug_class} finding"),
+        "critique_status": "pending",
+        "oracle_context": oc,
+        "verified_by_oracle": bool(oc),
+        "confidence": conf,
+        "oracle_kind": (str(getattr(f, "confirmed_by", "") or "") or None),
+        "oracle_rationale": str(getattr(f, "rationale", "") or ""),
+    }
+
+
+def _mirror_findings_to_spine(sink: Any, findings: list) -> int:
+    """Mirror the ALREADY oracle-confirmed findings onto the spine as ``finding`` events so the
+    wired critic panel has material to review IN-LOOP. Telemetry over authoritative facts — it
+    neither promotes nor demotes; the critics only advise over them. Best-effort. Returns count."""
+    if sink is None:
+        return 0
+    n = 0
+    for f in findings:
+        try:
+            if sink.finding_event(_finding_payload(f)) is not None:
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _post_leaf_hypothesis(blackboard: Any, slug: str, leaf: Any, cycle: int) -> None:
+    """Mirror THIS cycle's picked action onto the spine as a ``hypothesis`` event — the honest
+    reasoning trace the reflection agent re-orients over. Best-effort; never raises."""
+    if blackboard is None:
+        return
+    try:
+        blackboard.post(
+            engagement=slug, kind="hypothesis", agent_name="autonomy",
+            payload={
+                "handle": f"AUTO-H{cycle:03d}",
+                "surface": str(getattr(leaf, "surface", "") or "(surface)"),
+                "bug_class": str(getattr(leaf, "bug_class", "") or "unknown"),
+                "given": "an oracle-confirmed finding sits on this surface",
+                "if_action": "re-execute the finding's retained oracle certificate",
+                "then_observation": "the oracle either re-fires (grounded) or does not",
+                "because_model": "prove-by-re-execution over the retained proof",
+                "refute_on": "the retained oracle certificate no longer re-grounds",
+                "cheap_test": "reverify_finding (Tier-1, no egress)",
+                "confidence": min(1.0, max(0.0, float(getattr(leaf, "prior_p_success", 0.5) or 0.5))),
+                "status": "open",
+            })
+    except Exception:
+        pass
+
+
+def _drive_coordinator(planner: Any, *, max_ticks: int = 4) -> int:
+    """TICK the constructed Coordinator so its wired advisory agents RUN this cycle — this is what
+    makes the planner DRIVEN (its nervous system runs in-loop) rather than constructed-inert.
+    Returns the events the agents posted. Best-effort — a tick failure never sinks the cycle. The
+    Coordinator, per FORGE §3.4, cannot suppress a critic objection; it only orders + budgets."""
+    coord = getattr(planner, "coord", None)
+    if coord is None:
+        return 0
+    try:
+        report = coord.run_until_quiet(max_ticks=max(1, int(max_ticks)))
+        return int(getattr(report, "total_events", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _count_kind(blackboard: Any, slug: str, kind: str) -> int:
+    """Count spine events of ``kind`` for the engagement — best-effort (0 on any trouble)."""
+    if blackboard is None:
+        return 0
+    try:
+        return int(blackboard.count(engagement=slug, kind=kind))
+    except Exception:
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # the cycle
 # ---------------------------------------------------------------------------
 
@@ -450,6 +589,8 @@ def run_autonomous_cycle(
     out.planner_source = source
     planner = _construct_planner(world, slug, tree, objectives, source, request_budget, blackboard)
     out.planner_constructed = planner is not None
+    if planner is not None:
+        out.agents_wired = [getattr(a, "name", "agent") for a in getattr(planner.coord, "agents", [])]
 
     sink = _spine_sink(blackboard, slug)
 
@@ -467,6 +608,11 @@ def run_autonomous_cycle(
     out.reasoning_advice = advice
     out.advice_reweighted += _reprioritise(tree, baselines, advice=advice)
 
+    # DRIVE (setup) — mirror the ALREADY oracle-confirmed findings onto the spine so the wired
+    # advisory critic panel has material to review when the Coordinator ticks in-loop. This is
+    # telemetry over authoritative facts; it neither promotes nor demotes any finding.
+    _mirror_findings_to_spine(sink, findings)
+
     cycles = max(1, int(max_cycles))
     for c in range(1, cycles + 1):
         # OBSERVE — re-run the WS-B sensor fusion EACH cycle, folding fresh observations into the
@@ -483,6 +629,10 @@ def run_autonomous_cycle(
                             picked_surface=leaf.surface, picked_bug_class=leaf.bug_class,
                             fused_observations=cycle_fused)
         finding = leaf_to_finding.get(leaf.id)
+
+        # DRIVE — mirror THIS cycle's picked action onto the spine as a hypothesis (the honest
+        # reasoning trace the in-loop reflection agent re-orients over).
+        _post_leaf_hypothesis(blackboard, slug, leaf, c)
 
         # ACT — drive the picked action as a GATED tool call.
         tree.mark_status(leaf.id, "claimed")
@@ -517,8 +667,20 @@ def run_autonomous_cycle(
         out.advice_reweighted += step.advice_reweighted
         nxt = _select(tree, world, objectives, source)
         step.reoriented_to = nxt.label if nxt is not None else "(no more actions)"
+
+        # DRIVE — tick the constructed Coordinator so its wired advisory agents (the multi-critic
+        # panel + the reflection agent) RUN this cycle over the mirrored facts + reasoning trace.
+        # This is what makes the planner DRIVEN (its nervous system runs in-loop) rather than
+        # constructed-inert. Advisory only: a critic never confirms, reflection only re-ranks/defers;
+        # the oracle stays the sole authority for any promotion.
+        if planner is not None:
+            step.coordinator_events = _drive_coordinator(planner)
+            out.coordinator_events += step.coordinator_events
+            out.planner_driven = True
         out.cycles.append(step)
 
+    out.critic_verdicts = _count_kind(blackboard, slug, "critic_verdict")
+    out.reflections = _count_kind(blackboard, slug, "reflection")
     out.world_nodes_after = world.node_count if world is not None else 0
     return out
 
@@ -542,8 +704,13 @@ def render_summary(out: AutonomyResult) -> list[str]:
     src = out.planner_source or "(none)"
     lines.append(
         f"  autonomous OODA   : planner over world-model "
-        f"(constructed={out.planner_constructed}, source={src}, "
+        f"(constructed={out.planner_constructed}, driven={out.planner_driven}, source={src}, "
         f"objectives={','.join(out.objectives) or 'none'})")
+    if out.agents_wired:
+        lines.append(
+            f"    nervous system  : agents={','.join(out.agents_wired)}; "
+            f"{out.coordinator_events} in-loop event(s) "
+            f"({out.critic_verdicts} critic verdict(s), {out.reflections} reflection(s)) — advisory")
     if out.fused_observations:
         lines.append(f"    fused sensors   : {out.fused_observations} observation(s) (WS-B)")
     for s in out.cycles:

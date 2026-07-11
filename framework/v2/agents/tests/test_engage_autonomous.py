@@ -444,3 +444,63 @@ def test_fuse_sensors_runs_every_cycle(monkeypatch: pytest.MonkeyPatch):
     assert all(w is world for w in calls["worlds"]), "fusion enriched a different world than the planner's"
     assert all(s.fused_observations == 2 for s in out.cycles)
     assert out.fused_observations == 4
+
+
+# ---------------------------------------------------------------------------
+# (9) I-D.3 — the constructed Planner is now DRIVEN: its Coordinator ticks the
+#     real advisory agents (multi-critic panel + reflection) INSIDE each cycle.
+# ---------------------------------------------------------------------------
+
+
+def test_planner_is_driven_advisory_agents_run_in_loop(tmp_path: Path):
+    """The Coordinator is no longer constructed-inert (``agents=[]``): it carries the real
+    multi-critic + reflection agents and is TICKED each cycle, so the nervous system runs IN-LOOP.
+    Everything stays advisory — a critic never confirms, reflection only re-ranks; the authoritative
+    report is untouched and only a fired oracle can promote a finding."""
+    from framework.v2.agents.blackboard import open_blackboard
+
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    try:
+        world = _pathaware_world()
+        result = _synthetic_result(world, [
+            _finding("idor", "https://t.invalid/on-path", 0.9),
+            _finding("xss", "https://t.invalid/off-path", 0.5)])
+        before = [(f.bug_class, f.confidence, f.confirmed_by) for f in result.report.active_findings]
+
+        out = run_autonomous_cycle(result, slug="alpha", max_cycles=2, blackboard=bb, prompt_callback=_deny)
+
+        # the Planner is DRIVEN (its Coordinator ticked the wired agents), not constructed-inert.
+        assert out.planner_constructed is True
+        assert out.planner_driven is True, "the Coordinator was constructed but never ticked in-loop"
+        assert "multi-critic" in out.agents_wired and "reflection" in out.agents_wired
+        assert out.coordinator_events > 0
+        # BOTH advisory agents actually ran and posted their events this run.
+        assert out.critic_verdicts > 0, "the multi-critic panel did not run in-loop"
+        assert out.reflections > 0, "the reflection agent did not run in-loop"
+
+        # ADVISORY-ONLY: the authoritative report is untouched by anything the agents did.
+        after = [(f.bug_class, f.confidence, f.confirmed_by) for f in result.report.active_findings]
+        assert before == after, "an in-loop agent mutated the authoritative report"
+
+        # a critic verdict can NEVER be 'confirm' — only a fired deterministic oracle confirms.
+        verdicts = bb.read(engagement="alpha", kinds=["critic_verdict"])
+        assert verdicts and all(
+            v.payload["verdict"] in ("endorse", "object", "abstain") for v in verdicts)
+        # the mirrored findings are never PROMOTED by a critic (critique_status stays 'pending').
+        fevents = bb.read(engagement="alpha", kinds=["finding"])
+        assert fevents and all(f.payload["critique_status"] == "pending" for f in fevents)
+    finally:
+        bb.close()
+
+
+def test_planner_constructed_inert_without_blackboard():
+    """Without a blackboard there is no event substrate, so the Planner is not constructed and the
+    cycle runs on the shared tree selection (byte-for-byte what the planner would select) — the
+    nervous-system driving is cleanly skipped, never errored."""
+    world = _pathaware_world()
+    result = _synthetic_result(world, [_finding("idor", "https://t.invalid/on-path", 0.9)])
+    out = run_autonomous_cycle(result, slug="alpha", prompt_callback=_deny)
+    assert out.planner_constructed is False
+    assert out.planner_driven is False
+    assert out.agents_wired == [] and out.coordinator_events == 0
+    assert out.cycles and out.cycles[0].gated is True   # the cycle still ran + gated the tool call
