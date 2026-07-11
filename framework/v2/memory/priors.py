@@ -224,6 +224,118 @@ def _lexical_embedder():
     return LexicalEmbedder()
 
 
+# Aliases that select the OPTIONAL semantic embedder when a caller opts in via
+# CRUCIBLE_EMBEDDER (see memory.embed.get_embedder). 'auto' is included: it means
+# "semantic if importable" — which is still an explicit opt-in, not the default.
+_SEMANTIC_PREFS = frozenset({"sentence-transformers", "st", "semantic", "auto"})
+
+
+def _transfer_embedder(embedder=None):
+    """Resolve the embedder used for transfer similarity.
+
+    Precedence:
+      1. An EXPLICIT ``embedder`` argument always wins (tests / callers that pin one).
+      2. OPT-IN semantic path: when ``CRUCIBLE_EMBEDDER`` names a semantic backend AND
+         ``common.capabilities.has_semantic()`` reports it importable, use the env-selected
+         ``get_embedder()`` (the sentence-transformers model). This ENRICHES neighbour
+         similarity beyond lexical overlap.
+      3. Otherwise (the DEFAULT, and whenever the semantic dep is ABSENT), the pinned
+         deterministic ``LexicalEmbedder``.
+
+    So the default and replayed paths — and the regression gate, which never sets the flag
+    — are byte-identical, and requesting semantics on a box without the dep degrades
+    cleanly to lexical rather than raising."""
+    if embedder is not None:
+        return embedder
+    import os as _os
+
+    from ..common.capabilities import has_semantic
+
+    pref = _os.environ.get("CRUCIBLE_EMBEDDER", "").strip().lower()
+    if pref in _SEMANTIC_PREFS and has_semantic():
+        try:
+            from .embed import get_embedder
+            emb = get_embedder()
+            # get_embedder() may itself degrade 'auto' to lexical; accept whatever it
+            # returns — a lexical result here is exactly the deterministic default.
+            return emb
+        except Exception:
+            pass  # any backend failure degrades to the deterministic default
+    return _lexical_embedder()
+
+
+# ---------------------------------------------------------------------------
+# Fleet pooling helpers (opt-in cross-engagement source).
+#
+# A ``fleet`` argument (a ``memory.fleet.FleetPriors``) makes the transfer math read
+# ``local store ∪ fleet`` instead of the local store alone: the exact prior and every
+# neighbour's counts become the INTEGER SUM of the local and pooled recorded counts
+# (exact, order-independent), and the neighbour archetype / (bug_class, surface) key sets
+# are unioned. When ``fleet is None`` these reduce EXACTLY to the store-only values, so
+# the default path is byte-identical. Nothing here fabricates — a pooled count is a sum of
+# recorded counts, and it still flows through the same similarity discount + effective-
+# attempts honesty gate below.
+# ---------------------------------------------------------------------------
+
+
+def _pooled_exact(store, fleet, archetype: str, bug_class: str, surface_pattern: str):
+    """The (archetype, bug_class, surface) prior pooling the local store with ``fleet``.
+    ``fleet is None`` -> the local prior unchanged (byte-identical)."""
+    local = get_prior(store, archetype, bug_class, surface_pattern)
+    if fleet is None:
+        return local
+    fp = fleet.get_prior(archetype, bug_class, surface_pattern)
+    if fp is None:
+        return local
+    if local is None:
+        return fp
+    return Prior(
+        archetype=archetype, bug_class=bug_class, surface_pattern=surface_pattern or "",
+        successes=local.successes + fp.successes,   # int + int, exact
+        attempts=local.attempts + fp.attempts,
+        last_updated=max(local.last_updated, fp.last_updated or ""),
+    )
+
+
+def _pooled_archetypes(store, fleet) -> list[str]:
+    """Distinct archetypes across the local store and ``fleet``, sorted."""
+    names = set(distinct_archetypes(store))
+    if fleet is not None:
+        names.update(fleet.distinct_archetypes())
+    return sorted(names)
+
+
+def _pooled_class_surface(store, fleet) -> list[tuple[str, str]]:
+    """Distinct (bug_class, surface_pattern) across the local store and ``fleet``, sorted."""
+    rows = store.fetchall(
+        "SELECT DISTINCT bug_class, surface_pattern FROM archetype_priors "
+        "ORDER BY bug_class, surface_pattern"
+    )
+    keys = {(r["bug_class"], r["surface_pattern"] or "") for r in rows}
+    if fleet is not None:
+        keys.update(fleet.class_surface_keys())
+    return sorted(keys)
+
+
+# Sentinel: default ``fleet`` means "resolve from the environment" (opt-in via
+# CRUCIBLE_FLEET, else None). An explicit ``None`` disables fleet; an explicit
+# ``FleetPriors`` is used as-is.
+_FLEET_AUTO = object()
+
+
+def _resolve_fleet(fleet):
+    """Map the ``fleet`` sentinel to a concrete source. ``_FLEET_AUTO`` -> the env-loaded
+    fleet (``None`` unless ``CRUCIBLE_FLEET`` is set, so the default path is unchanged);
+    anything else (``None`` or a ``FleetPriors``) is returned verbatim."""
+    if fleet is _FLEET_AUTO:
+        try:
+            from .fleet import load_fleet_from_env
+            return load_fleet_from_env()
+        except Exception:
+            return None
+    return fleet
+
+
 def get_prior_smoothed(
     store: Store,
     archetype: str,
@@ -236,6 +348,7 @@ def get_prior_smoothed(
     sim_threshold: float = _TRANSFER_SIM_THRESHOLD,
     max_neighbors: int = _TRANSFER_MAX_NEIGHBORS,
     transfer_weight: float = _TRANSFER_WEIGHT,
+    fleet=_FLEET_AUTO,
 ) -> SmoothedPrior | None:
     """Cross-engagement prior for ``(archetype, bug_class, surface_pattern)``, smoothed
     by TRANSFER from similar archetypes.
@@ -248,14 +361,22 @@ def get_prior_smoothed(
     optionally maps an archetype name to a richer descriptor to embed). Returns ``None``
     only when there is neither a local prior nor a similar neighbour — never a fabricated
     value. Deterministic: the pinned LexicalEmbedder, neighbours sorted by name, and a
-    canonical (sorted) summation make the blended float reproducible."""
-    emb = embedder or _lexical_embedder()
+    canonical (sorted) summation make the blended float reproducible.
+
+    ``fleet`` (opt-in cross-engagement/FLEET source) pools recorded counts from OTHER
+    stores/shards INTO both the exact prior and each neighbour before the same discount +
+    gate. Default resolves from ``CRUCIBLE_FLEET`` (``None`` unless set), so the default
+    path is unchanged; pass an explicit ``FleetPriors`` to force it or ``None`` to disable.
+    ``embedder`` unset selects the deterministic lexical embedder unless the OPT-IN
+    semantic backend is requested and importable (see ``_transfer_embedder``)."""
+    fleet = _resolve_fleet(fleet)
+    emb = _transfer_embedder(embedder)
 
     def _text(a: str) -> str:
         return archetype_text(a) if archetype_text is not None else a
 
     q_vec = emb.embed(_text(archetype))
-    exact = get_prior(store, archetype, bug_class, surface_pattern)
+    exact = _pooled_exact(store, fleet, archetype, bug_class, surface_pattern)
     if exact is not None and exact.attempts >= exact_min_attempts:
         return SmoothedPrior(
             archetype=archetype, bug_class=bug_class, surface_pattern=surface_pattern or "",
@@ -266,10 +387,10 @@ def get_prior_smoothed(
     from .embed import cosine
 
     neighbours: list[tuple[str, float, Prior]] = []
-    for other in distinct_archetypes(store):
+    for other in _pooled_archetypes(store, fleet):
         if other == archetype:
             continue
-        nb = get_prior(store, other, bug_class, surface_pattern)
+        nb = _pooled_exact(store, fleet, other, bug_class, surface_pattern)
         if nb is None or nb.attempts <= 0:
             continue
         sim = cosine(q_vec, emb.embed(_text(other)))
@@ -305,6 +426,7 @@ def smoothed_priors_for(
     embedder=None,
     archetype_text=None,
     min_effective_attempts: float = _TRANSFER_MIN_EFFECTIVE_ATTEMPTS,
+    fleet=_FLEET_AUTO,
     **kw,
 ) -> list[SmoothedPrior]:
     """The evidence-sufficient smoothed priors for ``archetype`` across every
@@ -312,17 +434,20 @@ def smoothed_priors_for(
     that warm-starts a run's check-ordering bandit (feed it to ``WebScanCampaign(priors=
     …)``). A smoothed prior that does not clear the effective-attempts floor is DROPPED
     (its arm stays uniform), so transfer only ever adds evidence the data supports.
-    Deterministic order (by bug_class, surface_pattern)."""
-    emb = embedder or _lexical_embedder()
-    rows = store.fetchall(
-        "SELECT DISTINCT bug_class, surface_pattern FROM archetype_priors "
-        "ORDER BY bug_class, surface_pattern"
-    )
+    Deterministic order (by bug_class, surface_pattern).
+
+    ``fleet`` (opt-in) pools recorded counts from other engagements/stores into the same
+    gated transfer math — it enlarges the ``(bug_class, surface_pattern)`` key set with
+    fleet-only classes and adds pooled evidence per key, but the effective-attempts floor
+    still drops anything the pooled data does not support. Default resolves from
+    ``CRUCIBLE_FLEET`` (``None`` unless set), so the default path is byte-identical."""
+    fleet = _resolve_fleet(fleet)
+    emb = _transfer_embedder(embedder)
     out: list[SmoothedPrior] = []
-    for r in rows:
+    for bug_class, surface_pattern in _pooled_class_surface(store, fleet):
         sm = get_prior_smoothed(
-            store, archetype, r["bug_class"], r["surface_pattern"] or "",
-            embedder=emb, archetype_text=archetype_text, **kw,
+            store, archetype, bug_class, surface_pattern,
+            embedder=emb, archetype_text=archetype_text, fleet=fleet, **kw,
         )
         if sm is not None and sm.evidence_sufficient(min_effective_attempts):
             out.append(sm)
