@@ -95,8 +95,8 @@ def test_every_new_check_is_registered() -> None:
 
 
 def test_registry_size_grew() -> None:
-    # 6 original + 33 new
-    assert len(PASSIVE_CHECKS) == 39
+    # 6 original + 33 M5 + 4 Workstream-C client-side = 43
+    assert len(PASSIVE_CHECKS) == 43
 
 
 # ---------------------------------------------------------------------------

@@ -821,6 +821,138 @@ def check_insecure_redirect(resp: Response) -> list[PassiveFinding]:
 
 
 # ---------------------------------------------------------------------------
+# client-side — postMessage, CSRF-token-absent forms, framable sensitive pages
+#
+# These read the delivered HTML/JS for browser trust-boundary defects. JS cannot
+# be parsed from a regex, so the checks are honest about what they can prove: a
+# ``postMessage(data, '*')`` wildcard target is literally in the code -> Firm; a
+# ``message`` listener whose nearby code never mentions ``.origin`` is only a
+# windowed text heuristic -> Tentative; a POST form with no anti-CSRF token may
+# still be covered by a SameSite cookie or a framework filter -> Tentative. The
+# framable-sensitive-page check combines a structural header fact (no
+# X-Frame-Options DENY/SAMEORIGIN and no CSP ``frame-ancestors``) with a
+# sensitive element actually present in the body -> Firm. None of these send a
+# request; they only read bytes already collected. Clickjacking via a *missing*
+# X-Frame-Options is handled by :func:`check_security_headers`, and a *weak* XFO
+# value by :func:`check_x_frame_options_weak`; the checks here are net-new
+# angles, not duplicates.
+# ---------------------------------------------------------------------------
+
+# ``.postMessage(<arg>, '*')`` — the second argument is a literal wildcard target
+# origin. The first argument is bounded so an unrelated later ``, '*')`` in the
+# body cannot be bridged into a false match.
+_POSTMESSAGE_WILDCARD = re.compile(r"\.postMessage\s*\(.{0,400}?,\s*['\"]\*['\"]\s*\)", re.I | re.S)
+
+
+def check_postmessage_wildcard_target(resp: Response) -> list[PassiveFinding]:
+    """A ``.postMessage(data, '*')`` call broadcasts the message to whatever
+    origin currently occupies the target window — an active attacker who frames
+    or opens the page can receive it. The wildcard target literal is in the code
+    -> Firm."""
+    m = _POSTMESSAGE_WILDCARD.search(resp.body)
+    if m:
+        return [_f("postmessage-wildcard-target",
+                   "postMessage sent to a wildcard ('*') target origin (broadcasts to any origin)",
+                   "Medium", "Firm", resp.url, _snippet(resp.body, m.start(), m.end()))]
+    return []
+
+
+# a ``message`` event handler registration; the handler body follows it.
+_MSG_LISTENER = re.compile(r"addEventListener\s*\(\s*['\"]message['\"]|\bonmessage\s*=", re.I)
+
+
+def check_postmessage_listener_no_origin(resp: Response) -> list[PassiveFinding]:
+    """A ``message`` event handler that never consults ``event.origin`` acts on
+    messages from *any* origin — a cross-origin injection / DOM-XSS foothold.
+    JS is not parseable from a regex; the check can only scan a text window after
+    the handler for a ``.origin`` reference, so it is honestly -> Tentative (a
+    handler defined elsewhere, or destructured origin, is a false positive)."""
+    body = resp.body
+    for m in _MSG_LISTENER.finditer(body):
+        window = body[m.start(): m.start() + 500]
+        if not re.search(r"\.origin\b", window, re.I):
+            return [_f("postmessage-listener-no-origin-check",
+                       "postMessage 'message' listener with no event.origin validation nearby",
+                       "Medium", "Tentative", resp.url,
+                       _snippet(body, m.start(), m.end()))]
+    return []
+
+
+_FORM_BLOCK = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.I | re.S)
+_FORM_METHOD = re.compile(r"\bmethod\s*=\s*['\"]?\s*(\w+)", re.I)
+_FORM_ACTION = re.compile(r"\baction\s*=\s*['\"]?([^'\"\s>]+)", re.I)
+# a hidden-ish input whose name carries a recognised anti-CSRF token marker.
+_CSRF_TOKEN_INPUT = re.compile(
+    r"<input\b[^>]*\bname\s*=\s*['\"]?[^'\">]*"
+    r"(?:csrfmiddlewaretoken|__requestverificationtoken|authenticity_token|csrf|xsrf|_token|nonce)",
+    re.I)
+
+
+def _is_off_origin(action: str, page_host: str) -> bool:
+    """True when a form ``action`` targets a host different from the page's.
+    Relative actions are same-origin (False). Used to skip forms that POST to a
+    clearly foreign site — those are not this page's CSRF surface."""
+    a = action.strip()
+    if a.startswith("//"):
+        host = a[2:].split("/")[0].lower()
+    elif re.match(r"https?://", a, re.I):
+        host = urlsplit(a).netloc.lower()
+    else:
+        return False  # relative / same-document -> same origin
+    return bool(host) and bool(page_host) and host != page_host
+
+
+def check_csrf_token_absent_form(resp: Response) -> list[PassiveFinding]:
+    """A state-changing ``method=post`` form that carries no anti-CSRF hidden
+    token. A missing ``method`` defaults to GET and is skipped; a form posting to
+    a clearly off-origin action is skipped. Genuinely -> Tentative: a
+    SameSite=Lax/Strict session cookie or a framework-level filter may already
+    defeat cross-site submission even with no visible token."""
+    page_host = urlsplit(resp.url).netloc.lower()
+    for m in _FORM_BLOCK.finditer(resp.body):
+        attrs, inner = m.group(1), m.group(2)
+        method_m = _FORM_METHOD.search(attrs)
+        if not method_m or method_m.group(1).lower() != "post":
+            continue  # missing method -> GET; only POST forms change state here
+        action_m = _FORM_ACTION.search(attrs)
+        if action_m and _is_off_origin(action_m.group(1), page_host):
+            continue  # posts to a foreign site: not this origin's CSRF surface
+        if _CSRF_TOKEN_INPUT.search(inner):
+            continue  # an anti-CSRF token input is present
+        return [_f("csrf-token-absent-form",
+                   "State-changing POST form with no anti-CSRF token field",
+                   "Medium", "Tentative", resp.url, ("<form" + attrs + ">")[:140])]
+    return []
+
+
+def check_clickjacking_sensitive_framable(resp: Response) -> list[PassiveFinding]:
+    """A page that carries a sensitive/state-changing element — a
+    ``type=password`` input or a POST form — while being framable, i.e. it sets
+    NEITHER ``X-Frame-Options: DENY/SAMEORIGIN`` NOR a CSP ``frame-ancestors``
+    directive. An attacker can frame it for a UI-redress (clickjacking) attack.
+    Higher-signal than the generic missing-XFO note because a sensitive element
+    is actually present -> Firm, Medium."""
+    if not _is_htmlish(resp):
+        return []
+    body = resp.body
+    has_password = bool(re.search(r"<input\b[^>]*\btype\s*=\s*['\"]?password", body, re.I))
+    has_post_form = bool(re.search(r"<form\b[^>]*\bmethod\s*=\s*['\"]?\s*post", body, re.I))
+    if not (has_password or has_post_form):
+        return []
+    xfo = resp.header("x-frame-options")
+    xfo_protects = xfo is not None and xfo.strip().upper() in ("DENY", "SAMEORIGIN")
+    csp = (resp.header("content-security-policy") or "").lower()
+    fa_protects = "frame-ancestors" in csp
+    if xfo_protects or fa_protects:
+        return []
+    element = "a password field" if has_password else "a POST form"
+    return [_f("clickjacking-sensitive-form-framable",
+               "Sensitive page is framable (no X-Frame-Options DENY/SAMEORIGIN, no CSP frame-ancestors)",
+               "Medium", "Firm", resp.url,
+               f"{element} present and the page permits framing")]
+
+
+# ---------------------------------------------------------------------------
 # registry + runner
 # ---------------------------------------------------------------------------
 
@@ -865,6 +997,11 @@ PASSIVE_CHECKS = (
     check_charset_missing,
     check_wsdl_disclosure,
     check_insecure_redirect,
+    # --- Workstream C: client-side passive checks (postMessage/CSRF/clickjacking) ---
+    check_postmessage_wildcard_target,
+    check_postmessage_listener_no_origin,
+    check_csrf_token_absent_form,
+    check_clickjacking_sensitive_framable,
 )
 
 
