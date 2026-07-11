@@ -84,8 +84,12 @@ def main(argv: list[str]) -> int:
                         help="Output directory (default: targets/<slug>/reports/ in slug mode).")
     parser.add_argument("--stdout", action="store_true",
                         help="Print the reports to stdout instead of writing files.")
+    parser.add_argument("--format", choices=("markdown", "json", "sarif"), default="markdown",
+                        help="Output format. 'markdown' (default) writes the three operator "
+                             "documents; 'json'/'sarif' emit ONE machine export (findings + "
+                             "certificates + provenance) for a dashboard or CI ingest.")
     parser.add_argument("--only", choices=sorted(_DOC_FILENAMES),
-                        help="Render only one document.")
+                        help="Render only one document (markdown format only).")
     parser.add_argument("--target", metavar="NAME",
                         help="Target name for the headers (default: the slug, or 'engagement').")
     parser.add_argument("--window-start", metavar="DATE")
@@ -125,6 +129,32 @@ def main(argv: list[str]) -> int:
         status=args.status,
         generated_at=args.timestamp,
     )
+
+    # machine export (json | sarif): ONE document, same graded-findings input as the
+    # markdown docs. Additive; the default 'markdown' path below is unchanged.
+    if args.format in ("json", "sarif"):
+        from .export import export_json, export_sarif
+        try:
+            body = (export_json(findings, meta) if args.format == "json"
+                    else export_sarif(findings, meta))
+        except ValidationError as e:
+            print(f"error: invalid finding data: {e}")
+            return 2
+        if args.stdout:
+            print(body)
+            return 0
+        if args.out:
+            out_dir = Path(args.out)
+        elif args.slug:
+            out_dir = paths.target_dir(args.slug) / "reports"
+        else:
+            print("error: --from-json needs --out DIR (or use --stdout)")
+            return 2
+        fp = out_dir / f"report.{args.format}"
+        paths.secure_write(fp, body)
+        print(f"report: rendered {args.format} export from {len(findings)} finding(s):")
+        print(f"  {fp}")
+        return 0
 
     try:
         docs = generate_reports(findings, meta)
