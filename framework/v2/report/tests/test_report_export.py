@@ -137,3 +137,32 @@ def test_no_wallclock_on_default_path() -> None:
 def test_build_doc_matches_json() -> None:
     graded = _graded()
     assert json.loads(to_json(graded)) == build_export_doc(graded)
+
+
+# ---------------------------------------------------------------------------
+# ONE SARIF dialect: `scan` and `report` agree on schema/version/tool identity
+# ---------------------------------------------------------------------------
+
+
+def test_scan_and_report_sarif_share_one_dialect() -> None:
+    # `scan --format sarif` (scanner.report over a ScanReport) and `report --format sarif`
+    # (report.export over graded findings) MUST emit the same SARIF dialect: identical
+    # $schema, version, and tool-driver identity, both routed through the shared envelope.
+    from framework.v2.scanner.campaign import ScanReport
+    from framework.v2.scanner.report import to_sarif as scan_to_sarif
+
+    report_doc = json.loads(to_sarif(_graded(), ReportMeta(target="acme")))
+    scan_doc = json.loads(scan_to_sarif(ScanReport(
+        target="http://127.0.0.1:8000/", pages_crawled=0, requests_audited=0,
+        active_findings=[], passive_findings=[], discovered_endpoints=[])))
+
+    for doc in (report_doc, scan_doc):
+        assert doc["$schema"].endswith("sarif-2.1.0.json")
+        assert doc["version"] == "2.1.0"
+        assert isinstance(doc["runs"], list) and len(doc["runs"]) == 1
+    # the two producers are byte-for-byte the same identity (no drift possible)
+    r_driver = report_doc["runs"][0]["tool"]["driver"]
+    s_driver = scan_doc["runs"][0]["tool"]["driver"]
+    assert r_driver["name"] == s_driver["name"] == "CRUCIBLE"
+    assert r_driver["informationUri"] == s_driver["informationUri"]
+    assert report_doc["$schema"] == scan_doc["$schema"]

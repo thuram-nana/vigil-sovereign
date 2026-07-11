@@ -202,12 +202,41 @@ def to_json(graded: list[GradedFinding], meta: ReportMeta | None = None,
                       sort_keys=False, ensure_ascii=False)
 
 
+def sarif_document(rules: Iterable[dict], results: Iterable[dict],
+                   *, run_properties: dict | None = None) -> dict:
+    """The ONE SARIF 2.1.0 dialect every CRUCIBLE export speaks — the single source of
+    truth for the ``$schema`` id, the ``version``, and the tool-driver identity
+    (``name`` / ``informationUri``), plus the run/tool envelope shape. Both the ``report``
+    exporter (over graded :class:`GradedFinding`s) and the ``scan`` exporter
+    (``scanner.report`` over a ``ScanReport``) build their OWN ``rules`` + ``results`` —
+    their finding shapes genuinely differ (a graded ``Finding`` carries a slug/certificate/
+    oracle-kind; a scan ``AuditFinding`` carries kind/confirmed_by/reVerifiable) — and pour
+    them into THIS envelope, so ``scan --format sarif`` and ``report --format sarif`` emit
+    the SAME dialect from the SAME producer and can never drift apart. ``run_properties``
+    (a run-level ``properties`` block) is emitted between the tool and the results only when
+    supplied. Pure + deterministic."""
+    run: dict = {"tool": {"driver": {
+        "name": _TOOL_NAME,
+        "informationUri": _TOOL_URI,
+        "rules": list(rules),
+    }}}
+    if run_properties is not None:
+        run["properties"] = run_properties
+    run["results"] = list(results)
+    return {
+        "$schema": _SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [run],
+    }
+
+
 def to_sarif(graded: list[GradedFinding], meta: ReportMeta | None = None) -> str:
     """SARIF 2.1.0 — one rule per bug class, one result per finding. A proven fact is
     levelled by its severity; an unproven lead is capped at ``note`` and tagged
     ``grounding=lead``. Each result's properties carry the finding's grounding, its
     confirming oracle + calibrated confidence, and (for a fact) its certificate digest,
-    so CI ingest sees the proof, not just the claim."""
+    so CI ingest sees the proof, not just the claim. The SARIF envelope + tool identity
+    come from the shared :func:`sarif_document` dialect (also used by ``scan``)."""
     meta = meta or ReportMeta()
     doc = build_export_doc(graded, meta)
     rules: dict[str, dict] = {}
@@ -239,19 +268,10 @@ def to_sarif(graded: list[GradedFinding], meta: ReportMeta | None = None) -> str
                 "severity": f.severity,
             },
         })
-    sarif = {
-        "$schema": _SARIF_SCHEMA,
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": _TOOL_NAME,
-                "informationUri": _TOOL_URI,
-                "rules": list(rules.values()),
-            }},
-            "properties": {"target": doc["target"], "summary": doc["summary"]},
-            "results": results,
-        }],
-    }
+    sarif = sarif_document(
+        rules.values(), results,
+        run_properties={"target": doc["target"], "summary": doc["summary"]},
+    )
     return json.dumps(sarif, indent=2, sort_keys=False, ensure_ascii=False)
 
 
