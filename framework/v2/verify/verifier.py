@@ -103,6 +103,14 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "prompt_injection": (OracleKind.PROMPT_INJECTION,),
     "system_prompt_disclosure": (OracleKind.SYSTEM_PROMPT_DISCLOSURE,),
     "automated_access": (OracleKind.AUTOMATED_ACCESS,),
+    # SSO / SAML / OIDC (scanner.sso) — testing the operator's OWN SP/RP integration.
+    # Each proves an unauthorized/forged SSO artifact was ACCEPTED via the predicate
+    # (achieved-state) oracle over raw statuses/redirects — never an AEGIS oracle, so
+    # the unknown-class fallback and `make gate` are unchanged (additive rows only).
+    "saml_signature_wrapping": (OracleKind.ACHIEVED_STATE,),
+    "saml_assertion_tampering": (OracleKind.ACHIEVED_STATE,),
+    "oidc_redirect_uri": (OracleKind.ACHIEVED_STATE,),
+    "oidc_idtoken_forgery": (OracleKind.ACHIEVED_STATE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -183,6 +191,19 @@ _ALIASES: dict[str, str] = {
     "honeypot_hit": "automated_access",
     "honeypot_fetch": "automated_access",
     "bot_access": "automated_access",
+    # SSO / SAML / OIDC spelling variants (scanner.sso) fold onto the canonical classes.
+    "xsw": "saml_signature_wrapping",
+    "saml_xsw": "saml_signature_wrapping",
+    "signature_wrapping": "saml_signature_wrapping",
+    "xml_signature_wrapping": "saml_signature_wrapping",
+    "saml_tampering": "saml_assertion_tampering",
+    "saml_assertion_forgery": "saml_assertion_tampering",
+    "saml_signature_bypass": "saml_assertion_tampering",
+    "redirect_uri_validation": "oidc_redirect_uri",
+    "oidc_open_redirect": "oidc_redirect_uri",
+    "id_token_forgery": "oidc_idtoken_forgery",
+    "idtoken_forgery": "oidc_idtoken_forgery",
+    "oidc_idtoken_acceptance": "oidc_idtoken_forgery",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the

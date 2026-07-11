@@ -47,6 +47,7 @@ from .insertion import HttpRequest, InsertionKind
 from .jwt import JwtNoneCheck
 from .learning import ContextualBandit
 from .progress import ProgressSink
+from .sso import SSO_REQUEST_CHECKS
 from .library import LibraryEntry, load_library, select_entries, split_checks
 from .passive import PassiveFinding
 from .targeting import select_checks
@@ -163,6 +164,7 @@ class WebScanCampaign:
         arsenal_authz: "Callable[[str], bool] | None" = None,
         arsenal_race_targets: "tuple[tuple[str, int], ...]" = (),
         arsenal_max_probes: int = 64,
+        enable_sso: bool = False,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -188,6 +190,13 @@ class WebScanCampaign:
         self._priors = priors
         # Request-level checks run once per host (CORS/host-header/JWT/GraphQL).
         self.request_checks = request_checks
+        # Opt-in SSO / SAML / OIDC arsenal (scanner.sso). Default OFF → the default
+        # request-check roster is byte-for-byte unchanged (0 SSO requests). When on,
+        # the SSO checks are APPENDED to the per-host request checks; each returns
+        # None (sending nothing) unless the request actually carries an SSO artifact
+        # (a SAMLResponse / id_token / redirect_uri), and confirms only via the
+        # achieved-state oracle — tests the operator's OWN SP/RP, never the IdP.
+        self._sso_request_checks = SSO_REQUEST_CHECKS if enable_sso else ()
         self.insertion_kinds = insertion_kinds
         self.max_pages = max_pages
         self.max_depth = max_depth
@@ -750,6 +759,7 @@ class WebScanCampaign:
                     host = urlsplit(req.url).netloc
                     point_request_checks = (
                         tuple(self.request_checks) + library_request_checks
+                        + tuple(self._sso_request_checks)
                         if host not in seen_hosts else ())
                     seen_hosts.add(host)
                     new_findings = engine.audit(

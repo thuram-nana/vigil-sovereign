@@ -75,6 +75,7 @@ from . import (
     sequencer,
     smuggling,
     spa_crawler,
+    sso,
     websocket,
 )
 from .report import build_report, render, to_html, to_json, to_sarif
@@ -118,6 +119,17 @@ from .insertion import (
     RequestTemplate,
 )
 from .jwt import JwtNoneCheck
+from .sso import (
+    OidcIdTokenCheck,
+    OidcRedirectUriCheck,
+    SamlAssertionTamperingCheck,
+    SamlSignatureWrappingCheck,
+    SsoLead,
+    SSO_REQUEST_CHECKS,
+    analyze_authorize_request,
+    analyze_saml_response,
+    safe_parse_xml,
+)
 
 __all__ = [
     # insertion
@@ -142,6 +154,17 @@ __all__ = [
     "GraphQLIntrospectionCheck",
     "GraphQLSuggestionsCheck",
     "graphql",
+    # SSO / SAML / OIDC (opt-in; not in the default roster)
+    "sso",
+    "SamlSignatureWrappingCheck",
+    "SamlAssertionTamperingCheck",
+    "OidcRedirectUriCheck",
+    "OidcIdTokenCheck",
+    "SsoLead",
+    "SSO_REQUEST_CHECKS",
+    "analyze_authorize_request",
+    "analyze_saml_response",
+    "safe_parse_xml",
     "smuggling",
     "domxss",
     "DomXssCandidate",
