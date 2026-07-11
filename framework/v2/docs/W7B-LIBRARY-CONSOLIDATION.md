@@ -48,16 +48,31 @@ a functionally-identical check survives (no coverage lost).
 
 ## Shipped (provably byte-identical + coverage-preserving)
 
-Removed the three **legacy OOB JSON mirrors of `DEFAULT_CHECKS`** — the clearest case
-of "same check defined in both code and data":
+Removed **two** legacy OOB JSON mirrors of `DEFAULT_CHECKS` — the clearest case of
+"same check defined in both code and data", where the JSON id ALSO never collides with
+a code-seed id (so nothing looks the JSON entry up):
 
 | removed JSON (id)                         | code seed it duplicated              | payload |
 |-------------------------------------------|--------------------------------------|---------|
-| `ssrf.json` (`ssrf-oob`)                  | `SSRF_OOB` (`ssrf`)                   | `{callback}` |
-| `command_injection.json` (`command-injection-oob`) | `RCE_OOB` (`command_injection`) | `;curl {callback};` |
-| `blind_xxe.json` (`blind-xxe-oob`)        | `XXE_OOB` (`blind_xxe`)              | `<?xml …><!ENTITY x SYSTEM "{callback}">…` |
+| `command_injection.json` (`command-injection-oob`) | `RCE_OOB` (`rce-oob`, class `command_injection`) | `;curl {callback};` |
+| `blind_xxe.json` (`blind-xxe-oob`)        | `XXE_OOB` (`xxe-oob`, class `blind_xxe`)          | `<?xml …><!ENTITY x SYSTEM "{callback}">…` |
 
-Why safe:
+**`ssrf.json` (`ssrf-oob`) was NOT removed — DEFERRED.** It duplicates the `SSRF_OOB`
+code seed's *detection*, but unlike the other two its id `ssrf-oob` is **identical** to
+the code seed's id, and `scanner/report.py::_meta_for` looks up a finding's report
+`references`/`remediation` by `check_id` (`lib.get(check_id)`). So this library entry is
+the source of the SSRF-OOB report metadata (`references: [CWE-918, CAPEC-664]` + its
+remediation prose). Removing it would make `lib.get("ssrf-oob")` return `None` and fall
+back to `report._CLASS_META["ssrf"]`, which drops `CAPEC-664` and changes the remediation
+text — an **observable report change** on any `enable_oob=True` run (caught by the Wave-7
+behavior-preservation review; the gate never fires it because the gate runs OOB off, and
+no test asserts it, so the change would have been silent). Behavior-preservation is the
+hard constraint, so `ssrf-oob` stays until its report metadata is first migrated into
+`_CLASS_META` (or the code seed) under its own gated change. `command-injection-oob` /
+`blind-xxe-oob` have no such collision (their code seeds use ids `rce-oob` / `xxe-oob`),
+so `lib.get()` for the removed ids was always `None` — their removal changes no report.
+
+Why the two removals are safe:
 
 * **Gate byte-identical** — all three are `oob` (0 requests on the gate). Their bug
   classes stay represented (by the code seeds + 49 remaining library OOB entries), so
@@ -69,11 +84,12 @@ Why safe:
   *and* an empty `checks=()` (the only `checks=()` call sites are request-check unit
   tests). The richer per-scheme / per-vector OOB library entries (`m2-inj-ssrf-*`,
   `m3-blind-*`, `m2-inj-cmdi-*`, `m2-inj-xxe-*`, …) are untouched.
-* **Tests** — `test_library.py::test_seed_has_the_named_minimum_entries` and
-  `test_compile_oob_yields_oob_check` were repointed from the removed bare-callback
-  ids to surviving richer OOB entries (`m2-inj-ssrf-http-scheme`,
-  `m2-inj-xxe-external-dtd`, `m2-inj-cmdi-pipe-curl`); intent (library ships OOB
-  entries per class; an oob entry compiles to an `OOBCheck`) is preserved. The
+* **Tests** — `test_library.py::test_seed_has_the_named_minimum_entries` keeps asserting
+  `ssrf-oob` (still shipped) and adds the surviving richer OOB entries
+  (`m2-inj-ssrf-http-scheme`, `m2-inj-xxe-external-dtd`, `m2-inj-cmdi-pipe-curl`) in place
+  of the two removed bare-callback ids; `test_compile_oob_yields_oob_check` was repointed
+  to `m2-inj-ssrf-http-scheme`. Intent (library ships OOB entries per class; an oob entry
+  compiles to an `OOBCheck`) is preserved. The
   campaign-integration tests self-adjust (they recompute expectations from
   `load_library()`), so they needed no change.
 

@@ -1,0 +1,15 @@
+{
+  "id": "ssrf-oob",
+  "bug_class": "ssrf",
+  "title": "Server-side request forgery (out-of-band)",
+  "severity": "High",
+  "applies_when": {"always": true},
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "{callback}"
+  },
+  "references": ["CWE-918", "CAPEC-664"],
+  "remediation": "Do not let user input drive server-side fetches. Enforce an allowlist of permitted hosts/schemes, block requests to internal/link-local ranges and the cloud metadata endpoint, and disable unneeded URL schemes.",
+  "payload_family": "callback-fetch"
+}
