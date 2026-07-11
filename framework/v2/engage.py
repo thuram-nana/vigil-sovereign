@@ -447,6 +447,7 @@ def run_engagement(
     enable_arsenal: bool = False,
     arsenal_race_targets: "tuple[tuple[str, int], ...]" = (),
     enable_sso: bool = False,
+    enable_graphql_dos: bool = False,
     priors: object = None,
     transfer_archetype: str | None = None,
     prompt_callback: PromptCallback | None = None,
@@ -578,6 +579,7 @@ def run_engagement(
             arsenal_authz=arsenal_authz,
             arsenal_race_targets=arsenal_race_targets,
             enable_sso=enable_sso,
+            enable_graphql_dos=enable_graphql_dos,
             priors=priors,
             progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
         ).run(seed_url)
@@ -763,6 +765,12 @@ def main(argv: list[str]) -> int:
                              "operator's OWN SP/RP: each fires only when a request actually carries an "
                              "SSO artifact (SAMLResponse/id_token/redirect_uri) and confirms via the "
                              "achieved-state oracle. Off by default (0 SSO requests); never the IdP.")
+    parser.add_argument("--graphql-dos", action="store_true",
+                        help="Also run the GraphQL DoS/abuse pass (scanner.graphql) against each "
+                             "discovered /graphql endpoint: depth/alias/batching amplifications confirm "
+                             "via the predicate oracle; cost / introspection-off signals are honest "
+                             "leads. One bounded probe per check through the gated executor (it "
+                             "demonstrates a missing guard, it does not flood). Off by default.")
     parser.add_argument("--recon", action="store_true",
                         help="Run the Intelligence Engine alongside the scan: resolve an "
                              "asset inventory into the shared world-model and produce a "
@@ -844,6 +852,7 @@ def main(argv: list[str]) -> int:
             grammar_fuzz=args.grammar_fuzz,
             enable_arsenal=args.arsenal,
             enable_sso=args.sso,
+            enable_graphql_dos=args.graphql_dos,
             enable_defender=args.defender,
             defender_ruleset=args.defender_ruleset,
             defender_sigma_dir=args.defender_sigma,

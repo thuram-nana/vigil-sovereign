@@ -31,6 +31,7 @@ from framework.v2.engage import EngagementResult
 # OFF by default and, when set, flips exactly one campaign kwarg to True.
 BOOLEAN_FLAGS: list[tuple[str, str]] = [
     ("--sso", "enable_sso"),
+    ("--graphql-dos", "enable_graphql_dos"),
 ]
 
 

@@ -93,6 +93,12 @@ def main(argv: list[str]) -> int:
                              "operator's OWN SP/RP: each fires only when a request actually carries an "
                              "SSO artifact (SAMLResponse/id_token/redirect_uri) and confirms via the "
                              "achieved-state oracle. Off by default (0 SSO requests); never the IdP.")
+    parser.add_argument("--graphql-dos", action="store_true",
+                        help="Also run the GraphQL DoS/abuse pass (scanner.graphql) against each "
+                             "discovered /graphql endpoint: depth/alias/batching amplifications confirm "
+                             "via the predicate oracle; cost / introspection-off signals are honest "
+                             "leads. One bounded probe per check (it demonstrates a missing guard, it "
+                             "does not flood). Off by default.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
@@ -136,6 +142,7 @@ def main(argv: list[str]) -> int:
         enable_spa_crawl=args.spa,
         enable_arsenal=args.arsenal,
         enable_sso=args.sso,
+        enable_graphql_dos=args.graphql_dos,
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
         progress=progress,
