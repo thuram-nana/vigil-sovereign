@@ -131,13 +131,26 @@ def test_initialize_advertises_a_tools_capability() -> None:
 def test_tools_list_exposes_only_the_safe_allowlist() -> None:
     resp = MCPServer(slug="alpha").handle(_rpc("tools/list"))
     names = {t["name"] for t in resp["result"]["tools"]}
-    assert names == {"reverify_finding", "declared_service"}
-    # the active/offensive sensors and the LOCAL-FILE importers are NOT advertised
+    assert names == {"reverify_finding", "declared_service", "sbom_vuln"}
+    # the active/offensive sensors and the egress importers are NOT advertised
     assert not ({"nmap", "nuclei_web", "nuclei_import", "tshark_flow", "burp_web"} & names)
     # every descriptor discloses that it is gated and its output is an observation
     for t in resp["result"]["tools"]:
         assert t["_meta"]["crucible"]["gated"] is True
         assert t["_meta"]["crucible"]["provenance"] == "observation"
+
+
+def test_widened_allowlist_exposes_sbom_but_active_tools_stay_refused() -> None:
+    # The deliberate widening: the passive, read-only SCA reader is now exposed; an ACTIVE sensor
+    # present in the same registry is NOT exposed and a call to it is REFUSED by the expose policy
+    # (before the invoker) — the property re-check (Tier-2 / active_recon) keeps it unreachable.
+    server = MCPServer(slug="alpha")
+    names = {t["name"] for t in server.handle(_rpc("tools/list"))["result"]["tools"]}
+    assert "sbom_vuln" in names and "nmap" not in names
+    resp = _call(server, "nmap", {"host": "10.0.0.5"})
+    result = resp["result"]
+    assert result["isError"] is True
+    assert result["_meta"]["crucible"]["gate"] == "expose-policy"
 
 
 # ---- a safe exposed call SUCCEEDS through the gate chain --------------------
@@ -290,7 +303,8 @@ def test_serve_stdio_roundtrips_newline_delimited_requests() -> None:
     serve_stdio(server, stdin=stdin, stdout=stdout)
     lines = [json.loads(x) for x in stdout.getvalue().splitlines() if x.strip()]
     assert [r["id"] for r in lines] == [1, 2]                 # exactly two responses (no notif reply)
-    assert {t["name"] for t in lines[1]["result"]["tools"]} == {"reverify_finding", "declared_service"}
+    assert {t["name"] for t in lines[1]["result"]["tools"]} == {"reverify_finding", "declared_service",
+                                                                "sbom_vuln"}
 
 
 def test_serve_stdio_rejects_an_oversize_line_and_resyncs() -> None:
