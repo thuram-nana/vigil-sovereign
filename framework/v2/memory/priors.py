@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from ..common.beta import beta_mean_from_counts
 from .store import Store
 
 
@@ -31,8 +32,9 @@ class Prior:
 
     @property
     def mean(self) -> float:
-        """Laplace-smoothed success rate."""
-        return (self.successes + 1) / (self.attempts + 2)
+        """Laplace-smoothed success rate — the shared count-form Beta(1,1)
+        posterior mean (see :func:`common.beta.beta_mean_from_counts`)."""
+        return beta_mean_from_counts(self.successes, self.attempts)
 
     @property
     def lower_bound(self) -> float:
@@ -190,8 +192,11 @@ class SmoothedPrior:
 
     @property
     def mean(self) -> float:
-        """Laplace-smoothed success rate over the effective counts."""
-        return (self.successes + 1) / (self.attempts + 2)
+        """Laplace-smoothed success rate over the effective (possibly fractional)
+        counts — the shared count-form Beta(1,1) posterior mean (see
+        :func:`common.beta.beta_mean_from_counts`, which keeps the ``attempts + 2``
+        denominator exact for fractional counts)."""
+        return beta_mean_from_counts(self.successes, self.attempts)
 
     def evidence_sufficient(
         self, min_effective_attempts: float = _TRANSFER_MIN_EFFECTIVE_ATTEMPTS,

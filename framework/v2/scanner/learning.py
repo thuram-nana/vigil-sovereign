@@ -66,6 +66,7 @@ from typing import Callable
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..common import paths
+from ..common.beta import beta_mean
 from ..common.errors import CrucibleError
 
 SCHEMA_VERSION = 1
@@ -133,8 +134,11 @@ class BetaPosterior(BaseModel):
 
     @property
     def mean(self) -> float:
-        """Posterior mean hit rate ``alpha / (alpha + beta)`` — the rank key."""
-        return self.alpha / (self.alpha + self.beta)
+        """Posterior mean hit rate ``alpha / (alpha + beta)`` — the rank key.
+        Computed by the shared :func:`common.beta.beta_mean` (identical
+        arithmetic), so this canonical form and ``memory.priors``' count form
+        stay one documented estimator."""
+        return beta_mean(self.alpha, self.beta)
 
     @property
     def observations(self) -> float:
