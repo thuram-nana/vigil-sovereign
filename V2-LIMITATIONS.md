@@ -12,6 +12,103 @@ add it here.
 
 ---
 
+## 0. RECONCILED to `main` @ 649b530 (2026-07-11) — read this before the older sections
+
+> The numbered sections below (§§ 1–27) were written across FORGE-PROTOCOL
+> Sessions 1–8 and the "Wave 1 (2026-07-02)" hardening — **before** the
+> *Unified Provable Autonomy* program (Waves 1–7) and the **AEGIS MVP** merged.
+> Their per-subsystem risk notes remain broadly accurate for the subsystems they
+> cover, but the *inventory* is stale. This section reconciles the honesty ledger
+> to the actual tree at **`main` @ `649b530` (2026-07-11)** and is authoritative
+> where it conflicts with the older text. Verify against code, not prose.
+
+**What is now merged to `main`** (all verified against the tree): Waves 1–7 of
+the Unified Provable Autonomy program and the AEGIS MVP. Concretely — the
+nervous system wired advisory-only into `engage --spine` (W1); the Universal
+Sensor/Producer framework + Nmap/tshark/web-scanner(Nuclei/ZAP/Burp)/cloud-IAM/
+SBOM sensors (W2–W5); the `service_reachability`, `tls_weakness`, `version_range`,
+and `policy_path` oracles (W2–W5); the in-house web arsenal + gated repeater
+(W4); threat-intel ingest + the defense/IR purple-team pass (W5); the plugin/
+capability registry, MCP tool-server (expose + consume), gated loopback API +
+external-tool importers, and report automation (W6); consolidation/hygiene (W7);
+and `aegis/` — the embeddable **defensive** AI-attack-detection library (three
+prove-don't-guess oracles). `verify.OracleKind` is now **18 members** (15
+offensive + 3 AEGIS defensive).
+
+**The gate is unchanged and byte-identical.** `python3 -m framework.v2 benchmark
+--gate --no-incumbents` → `crucible 9/0/0`, f1 `1.000`, 853 requests, 9 findings,
+**PASS**. It scores **9 single-class findings against one in-process benchmark
+app** — a false-positive/regression ruler, not a coverage claim. `make test`
+(the full offline suite, 248 test files) stays green.
+
+### The limitations that STILL hold at this commit (the honest core)
+
+1. **The autonomous planner/coordinator is DORMANT in production.** The ACP
+   `Planner` and MAO `Coordinator` are constructed **only in tests**; no
+   `python3 -m framework.v2` entrypoint drives them. `engage` runs the scanner
+   campaign + oracle confirmation + world-model chaining, **not** the goal-tree
+   planner. The at-scale, real-target, finding-discovering autonomous loop is
+   **not proven** — the one conservative real-target run (mrbeanpanel,
+   2026-05-05) emitted **0 findings**.
+2. **The reasoning nervous system runs ONLY under `engage --spine`, advisory-only.**
+   `_run_reasoning_pass` (`engage.py:371`) fires the multi-critic panel,
+   reflection, cognitive refusal, `credit_outcome` fan-out and meta-monitor
+   **iff** the spine is attached, and it can only mirror onto the spine and
+   re-rank/defer — it **never** promotes/demotes a finding or drops a surface;
+   the oracle stays the sole authority. Default `engage` (no `--spine`) and the
+   gate do not run it.
+3. **The Wave 2–5 sensors are NOT wired into the default `engage`/`scan` path.**
+   `engage.py`/`scanner/` contain zero `sensors` imports. Nmap, tshark, the
+   Nuclei/ZAP/Burp adapters, cloud/CSPM, and SBOM/SCA sensors are reachable only
+   via the `mcp`/`capabilities`(registry)/`imports`/`intel` subcommands or the
+   direct API. The `--arsenal` flag wires the scanner's **in-house** arsenal, not
+   the third-party sensor adapters. The one sensor `engage` can reach is the
+   defender log-source, and only behind the opt-in `--defender-log` flag.
+4. **`defender/gap_report.py` is wired only into the opt-in `--defender` pass**
+   (`_run_defender_pass`, `engage.py:247,635`) — not the default loop. (Earlier
+   text calling it "built but unwired" was an *under*-claim; it is wired, but
+   opt-in.)
+5. **The gate proves precision on a narrow surface.** 9 findings / 1 in-process
+   app. It cannot and does not demonstrate breadth, autonomy, or real-target
+   discovery.
+6. **~27–30 of 41 test skip-markers require an external live tool / headless
+   browser / live-LLM backend / live network** (nmap, tshark, nuclei, semgrep,
+   joern, docker+CVE images, Chromium/CDP, `CRUCIBLE_LIVE_*`, `claude`). They are
+   skipped in a stock offline environment; the offline suite is otherwise green.
+7. **Whole attack surfaces are ABSENT as v2 exploitation code** — present at most
+   as v1 markdown playbooks and/or passive fingerprint labels, never as active
+   capability: **mobile** (Android/iOS), **Kubernetes-runtime / container-escape**,
+   **microservices/service-mesh exploitation**, **SSO/SAML/OIDC exploitation**
+   (no assertion-forgery / golden-SAML / JWT-forge oracle), **post-exploitation /
+   lateral movement / persistence**, **data-exfiltration execution**, and
+   **incident-response pivot**.
+8. **No ML / numeric / SMT runtime.** Base deps: `pydantic, structlog, httpx,
+   requests, PyYAML, beautifulsoup4, Jinja2, cryptography` (+ `pytest-httpserver`,
+   test-only). No numpy/scipy/scikit-learn/torch/tensorflow/z3; the confidence/
+   calibration/SCE math is hand-rolled stdlib. `anthropic`,
+   `sentence-transformers`, and `semgrep` are **optional extras** with guarded
+   imports and graceful degradation — reasoning quality without a live LLM is
+   bounded (DryRun returns deterministic fixtures).
+9. **The doctrine exclusions are DELIBERATE, not missing features.**
+   Detection-evasion, C2 / persistence, full exploitation frameworks,
+   credential-attack suites, and identity-rotation are **excluded from the
+   reasoning engine by policy** (correlatable, not anti-defender — README §10).
+   AEGIS is defensive-only: default `mode="observe"` is read-only and it never
+   attacks.
+
+**Last reconciled:** `main` @ `649b530`, 2026-07-11 (this is Workstream **M —
+Documentation truth**; docs-only, no code change). Regenerate drifting counts
+from the tree.
+
+### In-flight (the 13-workstream program) — NOT shipped at this commit
+
+Workstreams A–L are landing **new opt-in capabilities** on separate branches off
+this same base. They are **in progress, not merged to `main`**; this ledger
+describes only `649b530`. When they land, re-reconcile this section and bump the
+"last reconciled" commit.
+
+---
+
 ## 1. Subsystem inventory — DAA/DEL/SIL now ship (this section was stale)
 
 **Corrected Wave 1 (2026-07-02).** This section previously stated that

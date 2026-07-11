@@ -21,6 +21,102 @@ as legitimate states of the work.
 
 ---
 
+## RECONCILED to `main` @ 649b530 (2026-07-11) — Waves 1–7 + AEGIS
+
+> **Read this first.** The Session-1..8 / "Wave 1 (2026-07-02)" tables further
+> down were written before the *Unified Provable Autonomy* program (Waves 1–7)
+> and the AEGIS MVP merged. They are retained below as **historical provenance**
+> and are **superseded by this section wherever they conflict.** This section is
+> the current-state ledger; verify it against the tree, not the prose below it.
+>
+> **Last reconciled:** `main` @ `649b530` (`graphify: refresh knowledge graph
+> for the AEGIS MVP`), 2026-07-11. Regenerate the counts from the tree — they
+> drift: `find framework/v2 -name 'test_*.py' | wc -l` (248),
+> `find framework/v2 -name '*.py' ! -name 'test_*.py' ! -path '*/tests/*' | wc -l` (362).
+
+**Gate (unchanged, byte-identical).** `python3 -m framework.v2 benchmark --gate
+--no-incumbents` → `crucible 9/0/0  precision/recall/f1 = 1.000/1.000/1.000`,
+853 requests, 9 findings, gate **PASS**. The gate exercises **9 single-class
+findings against one in-process benchmark app** — it is the false-positive/
+regression ruler, not a breadth claim.
+
+### What merged since the historical body below
+
+The two-column discipline still holds: **code-complete** = exists on disk, typed,
+tests green; **wired-state** = whether the default `engage`/`scan` path runs it,
+whether it is an opt-in flag, or whether it is *dormant* (constructed only in
+tests / reachable only via a non-default API).
+
+| Program | Path(s) | Code-complete | Wired-state (honest) |
+|---|---|---|---|
+| **W1 — AI reasoning core** (multi-critic panel, reflection, cognitive refusal, `credit_outcome` fan-out, meta-monitor; lookahead leaf-selection; cross-engagement transfer priors; agentic tool-use seam; self-consistency for no-oracle bindings) | `agents/`, `calibration/`, `confidence/`, `kernel/`, `planner/goal_tree.py` | yes | **Advisory-only, and only under `engage --spine`.** `_run_reasoning_pass` (`engage.py:371`) runs the nervous system *iff* the spine is attached; it mirrors findings/critic-verdicts/refusals/credit onto the spine and **never** mutates `report.active_findings` or an oracle verdict. `make gate` runs *without* `--spine`, so this path never executes in the gate → byte-identical. |
+| **W2 — Universal Sensor/Producer framework + Nmap + reachability oracle** | `sensors/{base,nmap}.py`, `verify` `SERVICE_REACHABILITY` | yes | Sensor framework + Nmap sensor **NOT default-wired** into `engage`/`scan` (grep: zero `sensors` refs in `engage.py`/`scanner/`); reachable only via `mcp`/`capabilities`(plugins registry)/direct API. The `service_reachability` oracle is in the default `_ALL_ORACLES` table but only fires if such an observation is produced. |
+| **W3 — TLS-weakness oracle + tshark sensor** | `sensors/tshark.py`, `verify` `TLS_WEAKNESS` | yes | Same: tshark sensor not default-wired; `tls_weakness` oracle present in the table. |
+| **W4 — web breadth** | `scanner/` in-house arsenal, `repeater/`, `sensors/web_scanner.py` (Nuclei/ZAP/Burp adapters), library-coverage fixes | yes | The **in-house** arsenal (content/JS discovery, request-smuggling, CSWSH) is opt-in via `engage/scan --arsenal`. The **third-party** Nuclei/ZAP/Burp adapters in `sensors/web_scanner.py` are **NOT** what `--arsenal` wires — they remain sensor-only (non-default). Gated intercepting repeater ships behind the signed authority. |
+| **W5 — cloud/IAM + SBOM/SCA + threat-intel + defense/IR** | `sensors/{cloud,sbom}.py`, `intel/from_threatintel.py`, `defender/{logsource,efficacy,gap_report}.py`, `verify` `VERSION_RANGE`+`POLICY_PATH` | yes | Cloud/SBOM sensors non-default (reachable via registry/`imports`/`intel`). Threat-intel via the `intel` subcommand. **`defender/gap_report.py` IS wired** — into engage's **opt-in `--defender` pass** (`_run_defender_pass`, `engage.py:247,635`), not the default loop. `version_range`/`policy_path` oracles are in the default table. |
+| **W6 — platformization** | `plugins/` (`capabilities`), `mcp/` (`mcp`), `api/` (`api`) + `imports/` (`imports`), `report/` (`report`) | yes | Each ships a real CLI subcommand (see the CLI table). MCP expose + consume, the loopback external API, external-tool importers, and prove-don't-guess report automation are all opt-in tools, not part of the default `engage` loop. |
+| **W7 — hygiene** | `common/beta.py`, `scanner/library_entries/`, `knowledge/` | yes | Consolidation only: unified the two Beta-mean learners on `common/beta.py`; removed duplicate OOB JSON mirrors; right-sized `quantum_era` (exact knapsack); docstring clarifications. Scan-path output frozen byte-identical. |
+| **AEGIS MVP — the defensive dual** | `aegis/` (+ 3 new oracle bodies in `verify/oracles.py`) | yes | Embeddable **defensive** AI-attack-detection library (`system_prompt_disclosure`, `prompt_injection`, `automated_access`). stdlib + pydantic only; **lazily imported** — nothing under `aegis/` is imported by `scan`/`engage`/`benchmark`/`__main__` until the `aegis` subcommand runs, so the gate stays byte-identical. Default `mode="observe"` is read-only. 9 test files. |
+
+**Oracle kinds (current).** `verify.OracleKind` now has **18 members**: the 15
+offensive kinds in the default fallback `_ALL_ORACLES` (`verifier.py:196`) —
+the original 11 plus `service_reachability`, `tls_weakness`, `version_range`,
+`policy_path` — and 3 AEGIS defensive kinds (`prompt_injection`,
+`system_prompt_disclosure`, `automated_access`) that are reachable **only** via
+their explicit `BUG_CLASS_ORACLES` rows, never the unknown-class fallback.
+
+**Check inventory (current).** Default interactive `scan`/`engage`: **11**
+built-in point checks (`scanner/checks.py:689`) + **5** request-level checks
+(`scanner/campaign.py:59`). The broader **172-entry** check library
+(`scanner/library_entries/*.json`, one JSON per check) is loaded only behind
+`use_library` (`campaign.py:149`), which `eval`/`benchmark` and the Ops-Console
+launch enable — not the default interactive path.
+
+**CLI surface (current).** 25 subcommands in `__main__.py::_DISPATCH`. Added
+since the historical body: `capabilities` (plugins registry), `aegis`, `report`,
+`mcp`, `api`, `imports` (plus `evidence`, `collaborator`, `console` from earlier
+programs).
+
+### Still honest to say — what is NOT built / NOT proven
+
+- **The autonomous planner/coordinator loop is dormant in production.** The ACP
+  `Planner` and MAO `Coordinator` are constructed **only in tests**; no
+  production entrypoint drives them (the one non-test import of the planner
+  package is the pure `expected_information_gain` scorer in `confidence/engine.py`,
+  not the orchestration). CRUCIBLE ships as a precision, prove-don't-guess scanner
+  with a genuine reasoning/OSINT/evidence spine — **not** an unattended
+  frontier-autonomy loop. The one real-target run to date (mrbeanpanel,
+  2026-05-05) emitted 0 findings; that has not changed.
+- **Whole attack surfaces are absent as v2 exploitation code** (they exist only
+  as v1 markdown playbooks and/or passive fingerprint labels): mobile
+  (Android/iOS), Kubernetes-runtime / container-escape, microservices/
+  service-mesh *exploitation*, SSO/SAML/OIDC *exploitation* (no assertion-forgery/
+  golden-SAML/JWT-forge oracle), post-exploitation/lateral/persistence, data-exfil
+  *execution*, and IR-pivot. The doctrine exclusions (detection-evasion, C2/
+  persistence, exploit frameworks, credential-attack suites, identity-rotation)
+  are **deliberate**, not gaps (see `V2-LIMITATIONS.md` and README §10).
+- **No ML / numeric / SMT runtime.** Base deps are `pydantic, structlog, httpx,
+  requests, PyYAML, beautifulsoup4, Jinja2, cryptography` (+ `pytest-httpserver`
+  test-only). No numpy/scipy/scikit-learn/torch/tensorflow/z3; the confidence/
+  calibration/SCE math is pure stdlib. `anthropic`, `sentence-transformers`,
+  `semgrep` are **optional extras** with guarded imports and graceful degradation.
+- **~27–30 of 41 test skip-markers gate on an external live tool / headless
+  browser / live-LLM backend / live network** (nmap, tshark, nuclei, semgrep,
+  joern, docker, Chromium/CDP, `CRUCIBLE_LIVE_*`, `claude`). The default offline
+  suite exercises everything else and is green.
+
+### In-flight (the 13-workstream program) — NOT shipped at this commit
+
+Workstreams A–L are landing **new opt-in capabilities** on separate branches off
+this same base (`649b530`). They are **in progress, not merged**, and this
+manifest deliberately describes only what is on `main`. Do not read the branch
+names as shipped features. (This file is Workstream **M — Documentation truth**;
+its only change is refreshing these ledgers.)
+
+---
+
+## Historical (Sessions 1–8 / Wave-1 2026-07-02) — retained for provenance, superseded above
+
 ## Wave 1 (2026-07-02) hardening
 
 A hardening wave landed two new modules plus targeted security fixes.
