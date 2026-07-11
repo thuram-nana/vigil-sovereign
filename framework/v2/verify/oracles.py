@@ -1175,11 +1175,15 @@ def credential_stuffing_oracle(
 
     families: list[dict[str, Any]] = []
     for source in order:
+        rows = by_source[source]
         allowlisted = source in allow
-        seen: set[str] = set()
 
-        def _sig_seq(_rows=by_source[source], _seen=seen):
-            # unseen-(account, source) SUCCESSES only; failures never yield a round.
+        # (a) The SEQUENTIAL decision: the SAME Wald SPRT boolean_inference uses, over the
+        #     unseen-(account, source) SUCCESS indicator stream — it stops early at the first
+        #     boundary. FAILURES never yield a round (a failed-only burst never crosses).
+        seen_sprt: set[str] = set()
+
+        def _sig_seq(_rows=rows, _seen=seen_sprt):
             for account, success in _rows:
                 if not success:
                     continue
@@ -1187,20 +1191,29 @@ def credential_stuffing_oracle(
                 _seen.add(account)
                 yield unseen
 
-        decided, llr, n_used, n_signal, upper, lower = _sprt_decision(
+        decided, llr, _n_used, _n_signal, upper, lower = _sprt_decision(
             _sig_seq(), alpha=alpha, beta=beta, p1=p1, p0=p0)
-        # p-value only matters for a source the SPRT actually confirmed (and never for an
-        # allowlisted one); a non-confirming source is honestly p=1.0 (sorts last in Holm) and
-        # cannot be promoted — this also keeps the tail computation bounded (n_used stays small
-        # when the SPRT crossed early).
-        if decided == "confirm" and not allowlisted:
-            pval = _binomial_upper_tail(n_signal, n_used, p0)
-        else:
-            pval = 1.0
+
+        # (b) The FAMILY-WISE evidence: a FIXED-sample binomial upper-tail p-value over the WHOLE
+        #     window (NOT the SPRT-truncated prefix) — so evidence STRENGTH scales with the breadth
+        #     of compromise (a 6-account run is stronger than a 4-account run even though the SPRT
+        #     halts at the same boundary). This is what Holm ranks across identities.
+        seen_full: set[str] = set()
+        n_success = 0
+        n_unseen = 0
+        for account, success in rows:
+            if not success:
+                continue
+            n_success += 1
+            if account not in seen_full:
+                n_unseen += 1
+                seen_full.add(account)
+        pval = 1.0 if allowlisted else _binomial_upper_tail(n_unseen, n_success, p0)
+
         families.append({
             "source": source, "decided": "allowlisted" if allowlisted else (decided or "inconclusive"),
-            "llr": round(llr, 4), "n_success": n_used, "n_unseen": n_signal,
-            "distinct_accounts": len(seen), "p_value": pval,
+            "llr": round(llr, 4), "n_success": n_success, "n_unseen": n_unseen,
+            "distinct_accounts": len(seen_full), "p_value": pval,
         })
 
     # Holm-Bonferroni across the distinct source identities (the multi-identity family-wise
