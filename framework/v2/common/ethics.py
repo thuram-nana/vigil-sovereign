@@ -13,6 +13,7 @@ EthicsViolation subclasses; callers must not silently catch them.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -120,6 +121,62 @@ def parse_scope(slug: str) -> list[str]:
     return hosts
 
 
+# ---------------------------------------------------------------------------
+# IPv6-correct hostname extraction
+# ---------------------------------------------------------------------------
+
+# The URL parser drops a BARE (unbracketed) IPv6 literal: urlparse reads the
+# authority ``fe80::1`` as host ``fe80`` (it splits the last colon as a port),
+# so an IPv6 target validated a DIFFERENT string than the address actually
+# dialled/scanned. The two helpers below normalise that: a bare IPv6 authority
+# is bracketed before urlparse. Everything else — hostnames, IPv4, and
+# already-bracketed IPv6 — is returned byte-identical, so the parse of every
+# pre-existing (non-bare-IPv6) input is exactly as it was.
+
+_URL_AUTHORITY_RE = re.compile(
+    r"^(?P<userinfo>[^@/?#]*@)?(?P<hostport>[^/?#]*)(?P<tail>[/?#].*)?$", re.DOTALL
+)
+
+
+def bracket_bare_ipv6(url: str) -> str:
+    """Return ``url`` with a bare (unbracketed) IPv6 authority wrapped in ``[]``
+    so ``urlparse`` extracts the host correctly; a no-op for every other input."""
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    m = _URL_AUTHORITY_RE.match(rest)
+    if m is None:
+        return url
+    hostport = m.group("hostport") or ""
+    if not hostport or hostport.startswith("["):
+        return url  # empty, or already bracketed — leave untouched
+    try:
+        if ipaddress.ip_address(hostport).version != 6:
+            return url  # IPv4 or (with a port present) not a bare literal
+    except ValueError:
+        return url  # a hostname or host:port — unchanged
+    return f"{scheme}://{m.group('userinfo') or ''}[{hostport}]{m.group('tail') or ''}"
+
+
+def extract_hostname(target_url: str) -> str | None:
+    """The hostname of a URL or bare host, correct for IPv6 literals (bracketed
+    or bare). For every non-bare-IPv6 input this equals ``urlparse(...).hostname``
+    exactly, so existing hostname/IPv4 behaviour is unchanged."""
+    raw = target_url if "://" in target_url else "https://" + target_url
+    return urlparse(bracket_bare_ipv6(raw)).hostname
+
+
+def _as_ipv6(value: str) -> ipaddress.IPv6Address | None:
+    """The canonical IPv6 address ``value`` denotes, else None (IPv4, a hostname,
+    or unparseable). Brackets are tolerated so a charter entry ``[fe80::1]`` and a
+    host ``fe80::1`` compare equal."""
+    try:
+        ip = ipaddress.ip_address(value.strip().strip("[]"))
+    except (ValueError, AttributeError):
+        return None
+    return ip if ip.version == 6 else None
+
+
 def host_matches_scope(host: str, scope_entries: list[str]) -> bool:
     """Match a hostname against scope entries.
 
@@ -127,10 +184,15 @@ def host_matches_scope(host: str, scope_entries: list[str]) -> bool:
       - literal match
       - wildcard prefix (`*.example.com` matches any subdomain of example.com,
         and the apex `example.com` itself).
+      - IPv6 literal match, compared canonically so ``fe80::1``, its expanded
+        form ``fe80:0:0:0:0:0:0:1``, and a bracketed charter entry ``[fe80::1]``
+        are all the same host (an IPv6 host matches only an IPv6 scope entry —
+        wildcard/string semantics do not apply to an IP literal).
     """
     h = host.lower().strip().rstrip(".")
     if not h:
         return False
+    h_v6 = _as_ipv6(h)
     for raw in scope_entries:
         e = raw.lower().strip().strip("`").rstrip(".")
         if not e:
@@ -138,6 +200,12 @@ def host_matches_scope(host: str, scope_entries: list[str]) -> bool:
         # tolerate "N/A" sentinels operators write when a row doesn't apply
         if e in {"n/a", "n\\/a", "none"}:
             continue
+        if h_v6 is not None:
+            # An IPv6 host is compared to IPv6 scope entries by canonical address.
+            e_v6 = _as_ipv6(e)
+            if e_v6 is not None and e_v6 == h_v6:
+                return True
+            continue  # never falls through to wildcard/string logic for an IP
         if e.startswith("*."):
             base = e[2:]  # "example.com"
             if h == base or h.endswith("." + base):
@@ -148,8 +216,7 @@ def host_matches_scope(host: str, scope_entries: list[str]) -> bool:
 
 
 def require_in_scope(slug: str, target_url: str) -> None:
-    parsed = urlparse(target_url if "://" in target_url else "https://" + target_url)
-    host = parsed.hostname
+    host = extract_hostname(target_url)
     if not host:
         raise OutOfScope(f"could not parse hostname from {target_url!r}")
     scope = parse_scope(slug)
@@ -199,8 +266,7 @@ def is_authorized_for_intake(target_url: str) -> bool:
     led = authorization_ledger()
     if not led.is_file():
         return False
-    parsed = urlparse(target_url if "://" in target_url else "https://" + target_url)
-    h = (parsed.hostname or "").lower().strip().rstrip(".")
+    h = (extract_hostname(target_url) or "").lower().strip().rstrip(".")
     if not h:
         return False
     for line in led.read_text(encoding="utf-8").splitlines():
