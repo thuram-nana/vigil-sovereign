@@ -602,10 +602,14 @@ the machinery to route, combine, and re‑run them.
 **Why it exists.** This is the embodiment of prove‑don't‑guess (§1, §3). It is the only place a claim
 becomes a fact.
 
-**How it works.** There are **11 oracle *kinds*** (the verdict types) backed by **12 oracle
-*functions*** (`ACHIEVED_STATE` is served by two functions — a state‑matcher and a declarative
-predicate evaluator). Each takes *already‑collected* observations and returns a signal with a
-calibrated confidence:
+**How it works.** The `OracleKind` enum holds **19 kinds** in all — **15 offensive** and **4
+defensive** (the AEGIS classes, §9.18). Of the offensive kinds, the **11 web/injection oracles**
+below are the confirmation authority for `scan`/`engage`; the other four (`SERVICE_REACHABILITY`,
+`TLS_WEAKNESS`, `VERSION_RANGE`, `POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). Every kind
+shares this one routing / combination / re‑execution machinery. The 11 below are backed by **12
+oracle *functions*** (`ACHIEVED_STATE` is served by two — a state‑matcher and a declarative predicate
+evaluator). Each takes *already‑collected* observations and returns a signal with a calibrated
+confidence:
 
 | Oracle kind | Fires when… | Typical bug class |
 |---|---|---|
@@ -770,8 +774,8 @@ judge. This is that something — and it is built so it can never emit a finding
   checks expressed as DATA**, not code. Each entry carries a payload, an `applies_when` fingerprint
   predicate, its insertion kinds, and an oracle spec; loading *validates every file* (a typo, a bad
   predicate, or a duplicate id is a **load‑time error**, never a silent no‑op). Distribution by class:
-  boolean_sqli 21, exposure 20, xss 18, command_injection 18, ssrf 14, deserialization 14,
-  time_based_sqli 11, ssti 11, blind_xxe 11, error_based_sqli 8, path_traversal 7, and more. Built‑in and
+  boolean_sqli 21, exposure 20, xss 18, command_injection 17, deserialization 14, ssrf 13,
+  ssti 11, time_based_sqli 11, blind_xxe 10, error_based_sqli 8, path_traversal 7, and more. Built‑in and
   library checks are adjudicated by the *same* oracles, so precision is identical. `[The library is
   exercised under the eval/benchmark harness (use_library=True); the default interactive scan/engage
   arsenal is the 11 + 5 built‑in checks above.]`
@@ -804,6 +808,21 @@ judge. This is that something — and it is built so it can never emit a finding
   genetic algorithm that must *still fire the same oracle*, probabilistic request‑grammar fuzzing
   (`--grammar-fuzz`), constraint/filter inference, post‑quantum/TLS crypto‑posture (`pqc_scan`), and
   eval‑gated check synthesis (*propose, never self‑apply*).
+- **The opt‑in coverage packs** `[built, unit‑tested, off the default loop — opt‑in per campaign]`, each
+  confirmed by the *same* oracle layer (a lead stays a lead until an oracle fires): **GraphQL** DoS
+  breadth (`scanner/graphql.py` — unbounded query *depth*, alias overloading, request batching, missing
+  cost limits, probed *minimally* — one bounded query each, never a flood), **business logic**
+  (`scanner/bizlogic.py` — drives an operator‑declared workflow state‑machine and reads the illegitimate
+  *post‑state* back, adjudicated by the achieved‑state predicate oracle — the one high‑yield class a
+  payload library cannot reach), **SSO / SAML / OIDC** (`scanner/sso.py` — forges/tampers an assertion or
+  `id_token` and observes *acceptance* vs. a rejected control; softer gaps like a missing `state`/`nonce`
+  stay leads), the **access‑control pack** (`scanner/access_control.py` — a two‑identity IDOR/BOLA/BFLA
+  cross‑read; **not** in `DEFAULT_CHECKS` because it structurally needs a second authenticated identity +
+  operator‑supplied object references), a **Nuclei‑template compiler** (`scanner/nuclei_compile.py` —
+  compiles a supported subset of a Nuclei YAML template into a native library entry whose match a CRUCIBLE
+  oracle *re‑verifies*, no nuclei binary needed), and **passive client‑side** tells (`scanner/passive.py` —
+  `postMessage` wildcard target / listener with no origin check, an anti‑CSRF‑token‑absent form, a framable
+  sensitive page — read from collected bytes, sends nothing).
 - **`intruder/`** — an autonomous Burp‑Intruder: attack types SNIPER / BATTERING_RAM / PITCHFORK /
   CLUSTER_BOMB, a lazy deterministic payload vocabulary, a Burp‑style payload‑processing pipeline, and
   robust‑statistics (median + median‑absolute‑deviation) outlier detection that replaces a human
@@ -941,6 +960,11 @@ engagement that produced it. `recall.py` ranks past engagements by cosine simila
 download; `sentence-transformers` is an optional upgrade for semantic neighbours). `priors.py` computes
 Laplace‑smoothed success rates with Wilson confidence bounds so future runs lean toward what actually paid
 off; `postmortem.py` folds a finished engagement's confirmed/refuted outcomes back into archetype priors.
+**Fleet transfer** (`memory/fleet.py`, opt‑in via `fleet=`/`CRUCIBLE_FLEET`) goes one level up: it pools
+priors and *de‑duplicated* calibration labels across many CRUCIBLE stores / portable shards into one view,
+feeding the *same* similarity‑weighted, discounted, effective‑attempts‑gated transfer math — it only ever
+*adds* recorded evidence, never invents a count, and an under‑evidenced blend is still withheld by the
+existing honesty gate. Off by default = byte‑identical.
 
 **Data in/out.** In: recorded engagement artifacts and outcomes. Out: similar past engagements, winning
 payloads, and per‑archetype priors.
@@ -1140,6 +1164,16 @@ not a crash.** The system preserves that it *chose not to act.*
   intake always work; everything else fails closed. **The default is permissive / UNGOVERNED** until a
   trust root is provisioned or `CRUCIBLE_ENTITLEMENT_ENFORCED` is set — and `status` surfaces this
   prominently so an operator can't be *unknowingly* ungoverned.
+- **Tier‑3 validation** (`agents/tier3_validation.py`) — the doctrine‑*maximum*, deliberately *narrowest*
+  slice, **entitlement‑gated OFF by default**. It does exactly one thing: prove an *already
+  oracle‑confirmed* finding is real by **re‑firing the minimal proof the oracle already fired on** (the
+  finding's retained `oracle_context`) — and only when a full fail‑closed gate stack, a localhost/authorized
+  target, and a human approving *that* action all say yes. It is **not** a generic exploit engine: it mints
+  no payloads, drives no weaponization, establishes no persistence, and does no lateral movement (those are
+  hard‑excluded per `AUTONOMY-CHARTER.md`). A proof that no longer re‑fires demotes to a refusal.
+- **IPv6‑aware scope** — the scope gate, egress guard, `common/ethics` charter matching, and the Nmap
+  sensor treat IPv6 literals/ranges (and `::1` loopback) the same as their v4 equivalents, so a v6 host is
+  scoped and gated identically, never an accidental blind spot.
 - **Sovereignty** (`kernel/sovereignty.py`) — the four‑tier LLM‑egress model (§9.11), the *data*
   counterpart to the *action* gates: it controls where your reasoning data may go.
 - **Egress guard** (`agents/egress_guard.py`) — the runtime transport that enforces the allowlist; recon
