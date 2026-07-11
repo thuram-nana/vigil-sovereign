@@ -1,9 +1,9 @@
 """
-scanner.quantum_era — quantum-AWARE crypto exposure + quantum-INSPIRED planning.
+scanner.quantum_era — quantum-AWARE crypto exposure + attack-path portfolio optimizer.
 
 Two honestly-named capabilities. **Neither runs, simulates, or requires a quantum
-computer.** The names "quantum-era" / "quantum-inspired" describe the *threat model*
-and the *metaheuristic*, not the hardware.
+computer.** The name "quantum-era" describes the *threat model* of capability (1), not
+the hardware.
 
 1. POST-QUANTUM CRYPTO EXPOSURE
    A pure classifier over TLS primitive names plus a live stdlib-``ssl`` probe.
@@ -27,20 +27,21 @@ and the *metaheuristic*, not the hardware.
    conclusion for the HNDL question ("is my traffic, as spoken by ordinary clients,
    harvestable?") and the report says so.
 
-2. QUANTUM-INSPIRED OPTIMIZER
+2. ATTACK-PATH PORTFOLIO OPTIMIZER
    ``anneal_path_portfolio`` selects a subset of attack paths maximising total value
-   under a detection-cost budget — a 0/1 knapsack — using SIMULATED ANNEALING, a
-   classical metaheuristic *inspired by* physical/quantum annealing. It is not quantum
-   annealing and needs no annealer hardware. Deterministic given a seeded
-   ``random.Random``. Duck-types ``.value`` / ``.detection_cost`` so it accepts
-   ``orchestrator.AttackPath`` (see ``value_of`` / ``cost_of`` to adapt).
+   under a detection-cost budget — a 0/1 knapsack — and returns the PROVABLE optimum via
+   a compact dominance-pruned dynamic program. The portfolios a campaign produces are
+   small (``best_paths`` caps at 8), so an exact solver is both simpler and strictly
+   stronger than the simulated-annealing heuristic this used to run; the function name is
+   retained for API compatibility. Fully deterministic. Duck-types
+   ``.value`` / ``.detection_cost`` so it accepts ``orchestrator.AttackPath`` (see
+   ``value_of`` / ``cost_of`` to adapt).
 
 Pure stdlib (+ optional ``cryptography`` for certificate parsing), deterministic.
 """
 
 from __future__ import annotations
 
-import math
 import re
 import socket
 import ssl
@@ -242,7 +243,7 @@ def pqc_scan(host: str, port: int = 443, *, timeout: float = 5.0) -> PqcReport |
 
 
 # ---------------------------------------------------------------------------
-# (2) quantum-inspired optimizer — simulated annealing over a path portfolio
+# (2) attack-path portfolio optimizer — exact 0/1 knapsack over a path portfolio
 # ---------------------------------------------------------------------------
 
 T = TypeVar("T")
@@ -250,7 +251,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class PortfolioSelection:
-    """The subset an annealing run chose, with its achieved value and cost."""
+    """The subset the optimizer chose, with its achieved value and cost."""
 
     chosen: tuple[T, ...]
     indices: tuple[int, ...]
@@ -287,25 +288,24 @@ def anneal_path_portfolio(
     restarts: int = 4,
 ) -> PortfolioSelection:
     """Select the subset of ``items`` maximising total value with total
-    ``detection_cost`` ≤ ``budget`` — a 0/1 knapsack — via SIMULATED ANNEALING.
+    ``detection_cost`` ≤ ``budget`` — a 0/1 knapsack — and return the PROVABLE optimum.
 
-    A classical, quantum-annealing-INSPIRED metaheuristic; no quantum hardware. State
-    is a bitmask over items; each step proposes a neighbour — a single-bit flip or a
-    1-for-1 swap (drop a chosen item, add an unchosen one; the swap move is what lets
-    the search rebalance a budget-saturated selection, knapsack's characteristic trap)
-    — and accepts it if it improves the penalised objective
-    ``value − λ·max(0, cost − budget)`` or, when worse, with Metropolis probability
-    ``exp(Δ/T)`` under a geometric cooling schedule. λ is
-    set above the total available value so any budget violation is strictly dominated
-    by any feasible selection, and the best FEASIBLE state seen is returned. ``restarts``
-    independent cooling runs (splitting the iteration budget) reduce the chance of a
-    poor local optimum. Fully determined by ``rng``; not guaranteed globally optimal on
-    large instances (it is a heuristic), but reliably optimal on the small path
-    portfolios a campaign produces.
+    Solved exactly by a dominance-pruned dynamic program. A Pareto frontier of feasible
+    ``(cost, value)`` states is carried across items; whenever one state reaches the
+    same-or-lower cost at the same-or-higher value as another, the dominated state is
+    dropped — loss-free, because every extension of a dominated state is itself dominated
+    by the same extension of its dominator (adding the same future items to both, and the
+    dominator having no less spare budget). The highest-value state in the final frontier
+    is the optimum; the pruning keeps, for each value level, the cheapest — hence
+    stealthiest — subset, giving a fully deterministic result. This replaces an earlier
+    simulated-annealing heuristic: for the small portfolios a campaign produces
+    (``best_paths`` caps at 8) the exact solver is both simpler and strictly stronger.
 
     ``value_of`` / ``cost_of`` default to duck-typed ``.value`` / ``.detection_cost`` so
     an ``orchestrator.AttackPath`` (which exposes ``.detection_cost``) can be used by
-    passing a ``value_of`` that maps a path to its impact score.
+    passing a ``value_of`` that maps a path to its impact score. ``rng`` and ``restarts``
+    are accepted for backward compatibility and no longer influence the (now exact)
+    result; ``iterations`` is likewise retained and still recorded on the selection.
     """
     pool = list(items)
     n = len(pool)
@@ -329,94 +329,41 @@ def anneal_path_portfolio(
     if n == 0:
         return _select([])
 
-    lam = sum(v for v in values if v > 0) + 1.0  # penalty per unit of budget overrun
+    tol = 1e-9
+    # State = (cost, value, chosen-indices). Indices accrue in ascending order, so each
+    # state's tuple is already in the canonical form ``_select`` produces.
+    State = tuple[float, float, tuple[int, ...]]
 
-    def energy(val: float, cost: float) -> float:
-        # minimise: lower is better. -value, plus penalty for any overrun.
-        return -val + lam * max(0.0, cost - budget)
+    def _prune(states: list[State]) -> list[State]:
+        # Keep only the Pareto staircase: sweep by ascending cost (ties: higher value
+        # first) and retain a state only if it beats the best value seen at any
+        # lower-or-equal cost.
+        kept: list[State] = []
+        best_val = float("-inf")
+        for state in sorted(states, key=lambda s: (s[0], -s[1])):
+            if state[1] > best_val + tol:
+                kept.append(state)
+                best_val = state[1]
+        return kept
 
-    # start empty (always feasible) so a feasible best exists from step 0.
-    best_mask = [False] * n
-    best_energy = energy(0.0, 0.0)
-    best_feasible_val = 0.0
+    # Start from the empty (always-feasible) selection so a feasible optimum exists even
+    # at budget 0.
+    frontier: list[State] = [(0.0, 0.0, ())]
+    for i in range(n):
+        ci, vi = costs[i], values[i]
+        extended = [
+            (c + ci, v + vi, idx + (i,))
+            for (c, v, idx) in frontier
+            if c + ci <= budget + tol
+        ]
+        if extended:
+            frontier = _prune(frontier + extended)
 
-    per_run = max(1, iterations // max(1, restarts))
-    t0 = max(1.0, max(values) if values else 1.0)
-    t_min = 1e-3
-    decay = (t_min / t0) ** (1.0 / max(1, per_run))
-
-    for _ in range(max(1, restarts)):
-        mask = [False] * n
-        cur_val = 0.0
-        cur_cost = 0.0
-        cur_energy = energy(cur_val, cur_cost)
-        temp = t0
-        for _ in range(per_run):
-            chosen = [i for i in range(n) if mask[i]]
-            unchosen = [i for i in range(n) if not mask[i]]
-            # ~half the moves are 1-for-1 swaps when both a chosen and an unchosen item
-            # exist; the rest are single-bit flips.
-            if chosen and unchosen and rng.random() < 0.5:
-                a = rng.choice(chosen)
-                b = rng.choice(unchosen)
-                nmask = mask.copy()
-                nmask[a] = False
-                nmask[b] = True
-                nval = cur_val - values[a] + values[b]
-                ncost = cur_cost - costs[a] + costs[b]
-            else:
-                j = rng.randrange(n)
-                take = not mask[j]
-                nmask = mask.copy()
-                nmask[j] = take
-                nval = cur_val + (values[j] if take else -values[j])
-                ncost = cur_cost + (costs[j] if take else -costs[j])
-            nenergy = energy(nval, ncost)
-            delta = nenergy - cur_energy  # <0 means improvement
-            if delta <= 0 or rng.random() < math.exp(-delta / temp):
-                mask = nmask
-                cur_val, cur_cost, cur_energy = nval, ncost, nenergy
-                if cur_energy < best_energy and cur_cost <= budget + 1e-9:
-                    best_energy = cur_energy
-                    best_mask = mask.copy()
-                    best_feasible_val = cur_val
-            temp *= decay
-
-        # local polish: greedily apply the best-improving move — a single bit flip OR a
-        # 1-for-1 swap (drop a chosen item, add an unchosen one) — until no feasible
-        # move improves value. Swaps let it escape the "full budget, wrong items" local
-        # optima that single flips alone cannot (knapsack's characteristic trap).
-        pmask = best_mask.copy()
-        pval = best_feasible_val
-        pcost = sum(costs[i] for i in range(n) if pmask[i])
-        improved = True
-        while improved:
-            improved = False
-            for j in range(n):  # single flips
-                take = not pmask[j]
-                nval = pval + (values[j] if take else -values[j])
-                ncost = pcost + (costs[j] if take else -costs[j])
-                if ncost <= budget + 1e-9 and nval > pval + 1e-12:
-                    pmask[j] = take
-                    pval, pcost = nval, ncost
-                    improved = True
-            chosen_now = [i for i in range(n) if pmask[i]]
-            unchosen_now = [i for i in range(n) if not pmask[i]]
-            for a in chosen_now:  # 1-for-1 swaps
-                for b in unchosen_now:
-                    nval = pval - values[a] + values[b]
-                    ncost = pcost - costs[a] + costs[b]
-                    if ncost <= budget + 1e-9 and nval > pval + 1e-12:
-                        pmask[a] = False
-                        pmask[b] = True
-                        pval, pcost = nval, ncost
-                        improved = True
-                        break
-                if improved:
-                    break
-        if pval > best_feasible_val + 1e-12:
-            best_feasible_val = pval
-            best_mask = pmask
-            best_energy = energy(pval, pcost)
-
-    return _select(best_mask)
+    # Optimum = highest feasible value; pruning left values strictly increasing along
+    # cost, so ``max`` is unambiguous and, on any residual tie, resolves to the cheapest
+    # (earliest) state.
+    _, _, best_idx = max(frontier, key=lambda s: s[1])
+    mask = [False] * n
+    for j in best_idx:
+        mask[j] = True
+    return _select(mask)

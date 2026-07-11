@@ -1,9 +1,9 @@
 """
-quantum_era — quantum-AWARE crypto exposure classifiers + quantum-INSPIRED
-simulated-annealing knapsack over an attack-path portfolio.
+quantum_era — quantum-AWARE crypto exposure classifiers + an exact 0/1-knapsack
+optimizer over an attack-path portfolio.
 
-The annealer test compares against an exhaustive brute-force optimum (n ≤ 15), so it
-proves the metaheuristic actually *reaches* the optimum rather than checking a fixture.
+The optimizer test compares against an independent exhaustive brute-force optimum, so it
+proves the solver actually *reaches* the optimum rather than checking a fixture.
 The pqc_scan test stands up a real local TLS server with a self-signed RSA certificate
 (generated at test time) and asserts the probe reports the classical KEX / RSA-signature
 exposure and harvest-now-decrypt-later risk.
