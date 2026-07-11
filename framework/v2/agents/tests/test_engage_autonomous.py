@@ -610,3 +610,91 @@ def test_smt_unknown_region_is_a_noop_without_z3():
     if not has_z3():
         assert out.smt_deprioritised == 0, "an UNKNOWN region must not deprioritise (honest no-op)"
         assert out.cycles[0].picked_bug_class == "big"   # greedy order unchanged
+
+
+# ---------------------------------------------------------------------------
+# (12) I-C x I-D RECONCILIATION — the WS-B fused SENSOR observations reach the
+#      unified report as LEADS on the spine, deduped by obs_id across cycles.
+#
+#      Regression guard: I-D refactored fusion into a per-cycle inline call and
+#      dropped the pre-loop `fused` list that I-C's producer-unification block
+#      referenced. The text-merge was clean but left a latent NameError on the
+#      exact --autonomous + spine path (sink present AND a non-empty fused list).
+#      This test drives precisely that path.
+# ---------------------------------------------------------------------------
+
+
+def test_fused_sensor_observations_reach_the_spine_as_leads_deduped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from framework.v2.agents.blackboard import open_blackboard
+    from framework.v2.intel.models import IntelSourceKind, Observation, SourceReliability
+    from framework.v2.intel.refs import EntityRef
+
+    def _obs(oid: str) -> Observation:
+        return Observation(
+            obs_id=oid, source="scoutsuite", source_kind=IntelSourceKind.CLOUD_POSTURE,
+            collector="cloud", subject=EntityRef(kind=NodeKind.HOST, key="10.0.0.5"),
+            attrs={"bug_class": "iam_overbroad_trust", "severity": "High"},
+            confidence=0.5, seq=1, evidence="role trusts *", source_reliability=SourceReliability())
+
+    # fuse_sensors returns the SAME two observations EVERY cycle (idempotent by obs_id) — so a
+    # naive per-cycle emit would post 4 finding events over 2 cycles; the dedup must collapse to 2.
+    fusion = types.ModuleType("framework.v2.engage_fusion")
+    fusion.fuse_sensors = lambda world, slug, ctx: [  # type: ignore[attr-defined]
+        _obs("cloud:iam:role-x"), _obs("cloud:iam:role-y")]
+    monkeypatch.setitem(sys.modules, "framework.v2.engage_fusion", fusion)
+
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    try:
+        world = _greedy_world(["https://t.invalid/a", "https://t.invalid/b"])
+        result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.6),
+                                           _finding("sqli", "https://t.invalid/b", 0.5)])
+        # sink is not None (blackboard) AND the fused list is non-empty → the exact path that
+        # regressed. Must NOT raise (the NameError guard) ...
+        out = run_autonomous_cycle(result, slug="alpha", max_cycles=2, blackboard=bb,
+                                   prompt_callback=_deny)
+        assert len(out.cycles) == 2 and out.fused_observations == 4  # 2 obs x 2 cycles counted
+
+        # ... and each fused observation reaches the spine as EXACTLY ONE lead finding event
+        # (deduped by obs_id across cycles: 2 distinct leads, not 4).
+        leads = [r for r in bb.read(engagement="alpha", kinds=["finding"])
+                 if str(r.payload.get("finding_slug", "")).startswith("lead:")]
+        slugs = {r.payload["finding_slug"] for r in leads}
+        assert slugs == {"lead:cloud:iam:role-x", "lead:cloud:iam:role-y"}, \
+            "fused sensor observations did not reach the spine as deduped leads"
+        assert len(leads) == 2, "a fused observation was emitted more than once (dedup broke)"
+        # PROVE-DON'T-GUESS: every fused lead is graded a LEAD, never a fact.
+        assert all(r.payload.get("verified_by_oracle") is False for r in leads)
+        assert all(r.payload.get("oracle_context") is None for r in leads)
+    finally:
+        bb.close()
+
+
+def test_fused_leads_on_the_no_findings_early_return_reach_the_spine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """The no-confirmed-findings early return also fuses sensors — its fused leads must reach the
+    spine too (the second call site of the reconciled _emit_fused_leads)."""
+    from framework.v2.agents.blackboard import open_blackboard
+    from framework.v2.intel.models import IntelSourceKind, Observation, SourceReliability
+    from framework.v2.intel.refs import EntityRef
+
+    fusion = types.ModuleType("framework.v2.engage_fusion")
+    fusion.fuse_sensors = lambda world, slug, ctx: [Observation(  # type: ignore[attr-defined]
+        obs_id="dns:acme", source="doh", source_kind=IntelSourceKind.DNS, collector="dns",
+        subject=EntityRef(kind=NodeKind.DOMAIN, key="acme.test"), seq=1,
+        source_reliability=SourceReliability())]
+    monkeypatch.setitem(sys.modules, "framework.v2.engage_fusion", fusion)
+
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    try:
+        world = _greedy_world(["https://t.invalid/a"])
+        result = _synthetic_result(world, [])   # NO confirmed findings → early return path
+        out = run_autonomous_cycle(result, slug="alpha", blackboard=bb, prompt_callback=_deny)
+        assert out.fused_observations == 1
+        leads = [r for r in bb.read(engagement="alpha", kinds=["finding"])
+                 if str(r.payload.get("finding_slug", "")).startswith("lead:")]
+        assert {r.payload["finding_slug"] for r in leads} == {"lead:dns:acme"}
+    finally:
+        bb.close()
