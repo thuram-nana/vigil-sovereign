@@ -59,6 +59,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     invocation — every sensor is still gated at ``run_sensor`` time, so registering the active Nmap
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
+    from .fuzz import FuzzHarnessSensor
     from .nmap import NmapServiceSensor
     from .sbom import SbomVulnSensor
     from .tshark import TsharkFlowSensor
@@ -86,6 +87,12 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     # time (kill-switch for the importer; ACTIVE_RECON + the egress allowlist for the live pull).
     registry.register(CloudPostureImportSensor())
     registry.register(CloudInventoryPullSensor())
+    # Fuzz/ASan robustness producer (Workstream D.1): drives a bounded fuzz against an operator-
+    # authorized LOCAL binary and feeds captured sanitizer output to the SANITIZER_SIGNAL oracle.
+    # Registration is not invocation — it is OFF by default (allowed_root=None refuses everything) and
+    # still gated at run_sensor time (EXPLOIT_EXECUTION + destructive-confirm + kill-switch), so
+    # registering it here cannot run a fuzz.
+    registry.register(FuzzHarnessSensor())
     return registry
 
 
