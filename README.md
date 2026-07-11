@@ -45,9 +45,13 @@ being built. Jargon is defined the first time it appears.
   - [9.13 Signed evidence bundles](#913-signed-evidence-bundles-evidence)
   - [9.14 The fail‑closed safety stack](#914-the-failclosed-safety-stack-the-6-gate-chain--authority--entitlement--sovereignty)
   - [9.15 Intake, analysis, defender, improve, socialdefense, console, eval, common](#915-the-remaining-subsystems)
+  - [9.16 The universal sensor / producer framework and live fusion](#916-the-universal-sensor--producer-framework-and-live-fusion-sensors)
+  - [9.17 The opt-in autonomous OODA loop and the reasoning hook](#917-the-opt-in-autonomous-ooda-loop-and-the-reasoning-hook-engage_autonomouspy-engage_reasoningpy)
+  - [9.18 AEGIS — the defensive dual](#918-aegis--the-defensive-dual-aegis)
+  - [9.19 Reporting, export, and the platform seams](#919-reporting-export-and-the-platform-seams-report-mcp-api-plugins-imports)
 - [10. The doctrine and posture, in depth](#10-the-doctrine-and-posture-in-depth)
 - [11. Testing and verification](#11-testing-and-verification)
-- [12. Roadmap / in progress](#12-roadmap--in-progress)
+- [12. Roadmap — what shipped and what's next](#12-roadmap--what-shipped-and-whats-next)
 - [13. Status and honesty](#13-status-and-honesty)
 - [14. Where this lives in the repo](#14-where-this-lives-in-the-repo)
 
@@ -122,16 +126,17 @@ offensive‑security operator. OBSIDIAN is not a script runner — it reasons in
 per‑technique references). This is the human‑driven, judgment‑heavy face: you and OBSIDIAN work a
 target together, and OBSIDIAN documents everything with discipline.
 
-**The engine (`framework/v2/`) — executable, deterministic machinery.** Roughly 360 Python modules
-(with ~250 test files) that make the discipline mechanical: the oracles, the event spine, the
+**The engine (`framework/v2/`) — executable, deterministic machinery.** Roughly 380 Python source
+modules (with ~270 test files) that make the discipline mechanical: the oracles, the event spine, the
 world‑model, the veracity firewall, the calibrated learning core, the OSINT engine, and the safety
 stack. Where OBSIDIAN *reasons about* whether something is a bug, the engine *proves* it. You invoke
 the engine through one CLI: `python3 -m framework.v2 <subcommand>`.
 
 There is also a **defensive dual — AEGIS** (`framework/v2/aegis/`, the `aegis` subcommand): the same
 prove‑don't‑guess core pointed *inward* at the operator's own app as an embeddable AI‑attack‑detection
-library. It is deliberately isolated (lazily imported, never touched by `scan`/`engage`/`benchmark`),
-defensive‑only, and covered in §9.15 and §13.
+library (prompt‑injection, system‑prompt‑disclosure, automated‑access, and credential‑stuffing/ATO). It is
+deliberately isolated (lazily imported, never touched by `scan`/`engage`/`benchmark`), defensive‑only, and
+covered in §9.18 and §13.
 
 The two faces share the same doctrine. The exact same prove‑don't‑guess rules that bind OBSIDIAN's
 reasoning are the rules the engine enforces in code — and, as we'll see, the engine quotes that
@@ -421,23 +426,32 @@ crucible/
 │   ├── templates/                # charter, threat-model, attack-tree, finding, chain, reports
 │   ├── scripts/ · tools/ · wordlists/
 │   │
-│   └── v2/                       # THE ENGINE (~360 source modules, ~250 test files)
-│       ├── __main__.py           # the CLI dispatch table (the contract)
+│   └── v2/                       # THE ENGINE (~380 source modules, ~270 test files)
+│       ├── __main__.py           # the CLI dispatch table (the contract — all 25 subcommands)
 │       ├── engage.py             # the authorized, fully-gated end-to-end runner
+│       ├── engage_autonomous.py  # the opt-in `--autonomous` OODA loop (planner + gated tools)
+│       ├── engage_fusion.py      # `--autonomous` sensor→world-model fusion seam
+│       ├── engage_reasoning.py   # `--autonomous` advisory LLM reasoning hook
 │       ├── agents/               # event spine + coordinator + specialist agents + nervous system
+│       │                         #   + http_executor (6-gate) + tier3_validation (entitlement-gated)
 │       ├── verify/               # deterministic oracles + offline re-verifier + OOB collaborator
 │       ├── worldmodel/           # the unified Bayesian evidence graph + attack-path search
 │       ├── veracity/             # the anti-hallucination firewall (re-execution)
 │       ├── confidence/           # the Scientific Confidence Engine (SCE)
 │       ├── calibration/          # reward bus, ledger, isotonic calibration, conformal, meta-monitor
 │       ├── memory/               # MLS: SQLite + embeddings + priors + recall
-│       ├── planner/              # ACP goal-tree campaign planner (built; not default-wired)
+│       ├── planner/              # ACP goal-tree campaign planner (runs under `engage --autonomous` only)
 │       ├── intel/               # OSINT recon engine (collectors → observations → beliefs)
 │       ├── scanner/              # the web audit engine + 172-check library + browser + arsenal
+│       │                         #   + opt-in packs: bizlogic, sso, graphql, access_control, nuclei_compile
 │       ├── intruder/             # autonomous Burp-Intruder-style fuzzer (built; not default-wired)
 │       ├── repeater/             # gated intercepting repeater (authorized web testing; opt-in)
 │       ├── sensors/              # W2-W5 sensor/producer framework: Nmap, tshark, Nuclei/ZAP/Burp,
-│       │                         #   cloud-IAM/CSPM, SBOM/SCA (built; NOT default-wired into engage/scan)
+│       │                         #   cloud-IAM/CSPM, SBOM/SCA, k8s_runtime, fuzz/ASan (NOT default-wired)
+│       ├── aegis/                # AEGIS — the defensive dual (lazy-imported; off the offensive path)
+│       ├── report/               # deterministic exec/technical/remediation reports + SARIF/JSON export
+│       ├── imports/              # third-party tool export → re-verifiable leads
+│       ├── mcp/ · api/ · plugins/ # platform seams: MCP tool-server, loopback gated API, capability catalog
 │       ├── kernel/               # URK: cognitive prose → typed LLM callables + sovereignty tiers
 │       ├── knowledge/            # attack-graph technique operators
 │       ├── evidence/             # signed, tamper-evident certificate bundles
@@ -516,30 +530,37 @@ runs offline (with reasoning quality bounded accordingly).
 
 ## 8. The CLI surface
 
-The dispatch table in `framework/v2/__main__.py` **is** the contract — every subcommand appears there
-and takes `--help`.
+The dispatch table in `framework/v2/__main__.py` **is** the contract — all **25** subcommands appear
+there and each delegates to its own arg parser. (Because the top‑level dispatcher owns `-h/--help`,
+read a subcommand's flags from its module, not `<sub> --help`; the tables below are the flag surface.)
 
 | Subcommand | What it does | Key verbs / flags |
 |---|---|---|
 | `status` | Environment summary: resolved paths, reachable LLM backends, and the **governance state** — sovereignty tier (and whether it's *sealed*) plus whether capability entitlement is *enforced* or the box is running *UNGOVERNED*. | — |
 | `intake` | **UTI** — turn a URL into a scaffolded `targets/<slug>/`. Passive, SSRF‑guarded, ethics‑gated. | `run`, `authorize`, `fingerprint` |
-| `scan` | **Loopback‑only** quick web scan with a grounded export. Refuses non‑loopback hosts (use `engage` for those). | `--format {text,json,sarif,html}`, `--strict-evidence`, `--targeted`, `--domxss`, `--browser-xss`, `--spa`, `--reverifiable-out`, `--progress-log` |
-| `engage` | **Authorized remote** end‑to‑end runner (the full data‑flow of §5.1). Every request passes the 6‑gate chain. | `--recon`, `--spine`, `--waf-adaptive`, `--grammar-fuzz N`, `--browser-xss`, `--spa`, `--oob-relay-url`, `--no-chaining`, request/page budgets |
+| `scan` | **Loopback‑only** quick web scan with a grounded export. Refuses non‑loopback hosts (use `engage` for those). | `--format {text,json,sarif,html}`, `--strict-evidence`, `--targeted`, `--domxss`, `--browser-xss`, `--spa`, `--arsenal`, `--reverifiable-out`, `--progress-log`, `--bandit-file` |
+| `engage` | **Authorized remote** end‑to‑end runner (the full data‑flow of §5.1). Every request passes the 6‑gate chain. | `--recon`, `--spine`, `--waf-adaptive`, `--grammar-fuzz N`, `--arsenal`, `--browser-xss`, `--spa`, `--domxss`, `--oob-relay-url`, `--no-chaining`, `--transfer-archetype NAME`, `--defender`, **`--autonomous`** / `--autonomous-cycles N` / `--autonomous-budget N`, request/page budgets |
 | `verify` | Offline re‑verification of a saved report — re‑runs each finding's retained oracle certificate; exit 0 iff every one reproduces and matches its claim. | `<report.json>` |
 | `evidence` | Build / sign / verify tamper‑evident evidence bundles. | `keygen`, `certify`, `verify` |
+| `report` | Deterministically assemble the executive / technical / remediation reports from the blackboard (or a JSON doc), or **export** machine formats. | `<slug>`, `--from-json`, `--format {markdown,json,sarif}`, `--only`, `--stdout`, `--out` |
 | `collaborator` | Run the self‑hostable out‑of‑band (OOB) relay that unlocks blind‑class confirmation on remote targets. | `serve` |
 | `intel` | Run OSINT into the shared world‑model. Offline by default; live sources are a gated opt‑in. | `ingest [--live]`, `ingest-cloud`, `ingest-sbom`, `resolve`, `plan`, `predict`, `timeline`, `delta`, `yield` |
+| `imports` | Import a third‑party tool export (Nuclei / ZAP / Burp / sqlmap / generic) as **provenance‑tagged leads** the oracles later re‑verify. Dry by default; `--persist` writes them to the intel store. | `<file>`, `--format`, `--source-tool`, `--slug`, `--persist` |
 | `memory` | Query the cross‑engagement memory / priors (MLS). | `status`, `seed`, `similar`, `wins`, `payloads`, `priors`, `postmortem` |
 | `kernel` | Invoke one cognitive binding as a typed callable. | `hypothesize`, `critique`, `pivot`, `decide`, `opsec`, `threat-model`, `backend` |
 | `benchmark` | Precision/recall benchmark; `make gate` uses this as a regression gate. | `--gate`, `--update-baseline`, `--corpus`, `--no-incumbents` |
 | `eval` | Score / regression‑check runs against the benchmark corpus. | `score`, `regress`, `show` |
 | `authority` | Kill‑switch + engagement‑authority control. | `status`, `halt --reason`, `clear --by`, `authorize` |
 | `entitlement` | Capability‑entitlement status / verification. | `status`, `capabilities`, `verify` |
+| `capabilities` | Enumerate CRUCIBLE's **unified capability catalog** (CLI subcommands, sensors, oracles, tools) — read‑only, deterministic; the machine‑readable surface an MCP/API/SDK consumer discovers. | `--json`, `--kind`, `--no-commands` |
 | `improve` | **SIL** — *authorise* (never apply) a self‑improvement proposal. | `review`, `horizon`, `show` |
 | `analysis` | **DAA** — offline static / taint analysis + an autonomous source‑review loop. | `scan`, `index`, `analyzers`, `review` |
 | `defender` | **DEL** — purple‑team detection modeling / self‑detection scoring. | `score`, `annotate`, `rules` |
 | `socialdefense` | Score an inbound message for phishing / social‑engineering indicators. | `assess` |
 | `console` | Read‑only, loopback‑only operator UI (live progress; safe actions only). | `--open` |
+| `api` | **Loopback, gated external API** — a read core (enumerate/read the run) plus gated actions through the *same* fail‑closed chain as a local action. Optional bearer / `X-Relay-Key` auth. | `--port`, `--host` (loopback only) |
+| `mcp` | **MCP tool‑server seam** — EXPOSE CRUCIBLE's charter‑bound gated capabilities as MCP tools, or CONSUME external MCP tools. | `serve --slug`, `list --slug` |
+| `aegis` | **AEGIS** — the *defensive* dual: prove‑don't‑guess AI‑attack detection over one telemetry envelope (see §9.18). Lazy‑imported; never on the scan/engage path. | `detect <envelope.json>`, `demo` |
 
 ---
 
@@ -595,10 +616,14 @@ the machinery to route, combine, and re‑run them.
 **Why it exists.** This is the embodiment of prove‑don't‑guess (§1, §3). It is the only place a claim
 becomes a fact.
 
-**How it works.** There are **11 oracle *kinds*** (the verdict types) backed by **12 oracle
-*functions*** (`ACHIEVED_STATE` is served by two functions — a state‑matcher and a declarative
-predicate evaluator). Each takes *already‑collected* observations and returns a signal with a
-calibrated confidence:
+**How it works.** The `OracleKind` enum holds **19 kinds** in all — **15 offensive** and **4
+defensive** (the AEGIS classes, §9.18). Of the offensive kinds, the **11 web/injection oracles**
+below are the confirmation authority for `scan`/`engage`; the other four (`SERVICE_REACHABILITY`,
+`TLS_WEAKNESS`, `VERSION_RANGE`, `POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). Every kind
+shares this one routing / combination / re‑execution machinery. The 11 below are backed by **12
+oracle *functions*** (`ACHIEVED_STATE` is served by two — a state‑matcher and a declarative predicate
+evaluator). Each takes *already‑collected* observations and returns a signal with a calibrated
+confidence:
 
 | Oracle kind | Fires when… | Typical bug class |
 |---|---|---|
@@ -763,8 +788,8 @@ judge. This is that something — and it is built so it can never emit a finding
   checks expressed as DATA**, not code. Each entry carries a payload, an `applies_when` fingerprint
   predicate, its insertion kinds, and an oracle spec; loading *validates every file* (a typo, a bad
   predicate, or a duplicate id is a **load‑time error**, never a silent no‑op). Distribution by class:
-  boolean_sqli 21, exposure 20, xss 18, command_injection 18, ssrf 14, deserialization 14,
-  time_based_sqli 11, ssti 11, blind_xxe 11, error_based_sqli 8, path_traversal 7, and more. Built‑in and
+  boolean_sqli 21, exposure 20, xss 18, command_injection 17, deserialization 14, ssrf 13,
+  ssti 11, time_based_sqli 11, blind_xxe 10, error_based_sqli 8, path_traversal 7, and more. Built‑in and
   library checks are adjudicated by the *same* oracles, so precision is identical. `[The library is
   exercised under the eval/benchmark harness (use_library=True); the default interactive scan/engage
   arsenal is the 11 + 5 built‑in checks above.]`
@@ -797,6 +822,21 @@ judge. This is that something — and it is built so it can never emit a finding
   genetic algorithm that must *still fire the same oracle*, probabilistic request‑grammar fuzzing
   (`--grammar-fuzz`), constraint/filter inference, post‑quantum/TLS crypto‑posture (`pqc_scan`), and
   eval‑gated check synthesis (*propose, never self‑apply*).
+- **The opt‑in coverage packs** `[built, unit‑tested, off the default loop — opt‑in per campaign]`, each
+  confirmed by the *same* oracle layer (a lead stays a lead until an oracle fires): **GraphQL** DoS
+  breadth (`scanner/graphql.py` — unbounded query *depth*, alias overloading, request batching, missing
+  cost limits, probed *minimally* — one bounded query each, never a flood), **business logic**
+  (`scanner/bizlogic.py` — drives an operator‑declared workflow state‑machine and reads the illegitimate
+  *post‑state* back, adjudicated by the achieved‑state predicate oracle — the one high‑yield class a
+  payload library cannot reach), **SSO / SAML / OIDC** (`scanner/sso.py` — forges/tampers an assertion or
+  `id_token` and observes *acceptance* vs. a rejected control; softer gaps like a missing `state`/`nonce`
+  stay leads), the **access‑control pack** (`scanner/access_control.py` — a two‑identity IDOR/BOLA/BFLA
+  cross‑read; **not** in `DEFAULT_CHECKS` because it structurally needs a second authenticated identity +
+  operator‑supplied object references), a **Nuclei‑template compiler** (`scanner/nuclei_compile.py` —
+  compiles a supported subset of a Nuclei YAML template into a native library entry whose match a CRUCIBLE
+  oracle *re‑verifies*, no nuclei binary needed), and **passive client‑side** tells (`scanner/passive.py` —
+  `postMessage` wildcard target / listener with no origin check, an anti‑CSRF‑token‑absent form, a framable
+  sensitive page — read from collected bytes, sends nothing).
 - **`intruder/`** — an autonomous Burp‑Intruder: attack types SNIPER / BATTERING_RAM / PITCHFORK /
   CLUSTER_BOMB, a lazy deterministic payload vocabulary, a Burp‑style payload‑processing pipeline, and
   robust‑statistics (median + median‑absolute‑deviation) outlier detection that replaces a human
@@ -913,11 +953,12 @@ nervous system turns them into code that runs against the event spine — while 
 
 **Wiring status (honest).** In the default `engage --spine` loop *today*: the spine mirror of
 findings/refusals, the per‑finding spine `reward` event, and the veracity firewall over findings. The
-multi‑critic panel, the reflection agent, cognitive refusal, the `credit_outcome` fan‑out, the
-meta‑monitor, the MAO coordinator, and the ACP planner are **additive primitives / schedulable agents you
-opt into** — unit‑tested and addable to a coordinator, but not scheduled in the default loop. Their
-*doctrine* is nonetheless already live in every reasoning call, because it is injected into every LLM
-prompt (§9.11). Wiring them advisory‑only into `engage --spine` is Wave 1.1 (see §12).
+**ACP goal‑tree planner** and the advisory **kernel reasoning** step now run under `engage --autonomous`
+(§9.17) — but *only* there; the default loop does not drive them. The multi‑critic panel, the reflection
+agent, cognitive refusal, the `credit_outcome` fan‑out, the meta‑monitor, and the MAO coordinator remain
+**additive primitives / schedulable agents you opt into** — unit‑tested and addable to a coordinator, but
+not scheduled in the default `engage --spine` loop. Their *doctrine* is nonetheless already live in every
+reasoning call, because it is injected into every LLM prompt (§9.11).
 
 ### 9.9 Memory and priors (MLS) (`memory/`)
 
@@ -934,6 +975,11 @@ engagement that produced it. `recall.py` ranks past engagements by cosine simila
 download; `sentence-transformers` is an optional upgrade for semantic neighbours). `priors.py` computes
 Laplace‑smoothed success rates with Wilson confidence bounds so future runs lean toward what actually paid
 off; `postmortem.py` folds a finished engagement's confirmed/refuted outcomes back into archetype priors.
+**Fleet transfer** (`memory/fleet.py`, opt‑in via `fleet=`/`CRUCIBLE_FLEET`) goes one level up: it pools
+priors and *de‑duplicated* calibration labels across many CRUCIBLE stores / portable shards into one view,
+feeding the *same* similarity‑weighted, discounted, effective‑attempts‑gated transfer math — it only ever
+*adds* recorded evidence, never invents a count, and an under‑evidenced blend is still withheld by the
+existing honesty gate. Off by default = byte‑identical.
 
 **Data in/out.** In: recorded engagement artifacts and outcomes. Out: similar past engagements, winning
 payloads, and per‑archetype priors.
@@ -1133,6 +1179,16 @@ not a crash.** The system preserves that it *chose not to act.*
   intake always work; everything else fails closed. **The default is permissive / UNGOVERNED** until a
   trust root is provisioned or `CRUCIBLE_ENTITLEMENT_ENFORCED` is set — and `status` surfaces this
   prominently so an operator can't be *unknowingly* ungoverned.
+- **Tier‑3 validation** (`agents/tier3_validation.py`) — the doctrine‑*maximum*, deliberately *narrowest*
+  slice, **entitlement‑gated OFF by default**. It does exactly one thing: prove an *already
+  oracle‑confirmed* finding is real by **re‑firing the minimal proof the oracle already fired on** (the
+  finding's retained `oracle_context`) — and only when a full fail‑closed gate stack, a localhost/authorized
+  target, and a human approving *that* action all say yes. It is **not** a generic exploit engine: it mints
+  no payloads, drives no weaponization, establishes no persistence, and does no lateral movement (those are
+  hard‑excluded per `AUTONOMY-CHARTER.md`). A proof that no longer re‑fires demotes to a refusal.
+- **IPv6‑aware scope** — the scope gate, egress guard, `common/ethics` charter matching, and the Nmap
+  sensor treat IPv6 literals/ranges (and `::1` loopback) the same as their v4 equivalents, so a v6 host is
+  scoped and gated identically, never an accidental blind spot.
 - **Sovereignty** (`kernel/sovereignty.py`) — the four‑tier LLM‑egress model (§9.11), the *data*
   counterpart to the *action* gates: it controls where your reasoning data may go.
 - **Egress guard** (`agents/egress_guard.py`) — the runtime transport that enforces the allowlist; recon
@@ -1152,6 +1208,142 @@ Self‑improvement (`improve/`, §9.15) is **authorise‑not‑apply**: it never
 | **console** | `console/` | A **read‑only, loopback‑only** operator UI (a stdlib HTTP server bound to `127.0.0.1` only, serving a self‑contained page + read‑only JSON endpoints + a live Server‑Sent‑Events log tail). It issues zero outbound calls. The only mutations are three *safe* actions (launch a gated loopback scan, re‑verify a saved run, trip the kill‑switch), guarded against DNS‑rebinding/CSRF. **Status: shipped.** |
 | **eval** | `eval/` | The **measurement spine** that keeps precision honest. It defines one normalized finding shape every tool speaks, scores precision/recall with a greedy one‑to‑one matcher that **includes safe controls a precise scanner must leave alone** (so an off‑manifest detection is a false positive *by construction*), persists runs, and turns a committed baseline into a **zero‑tolerance regression gate** (`make gate`). It loads neutral OWASP‑Benchmark ground truth and parses third‑party tool output (Nuclei/ZAP/sqlmap/Burp/Wapiti/Nikto) into the common shape so those tools can be scored — or admitted as attestations the oracles re‑verify. **Status: shipped.** |
 | **common** | `common/` | The shared spine: `paths` (root discovery, owner‑only file/dir creation, umask tightening), `ethics` (the three inviolable gates — signed charter, in‑scope host, authorized intake — whose violations *must* propagate), `redact` (mask secrets by key/segment/suffix, never a bare substring that could over‑redact), `errors` (the `CrucibleError` hierarchy), and `logging` (per‑engagement, redacted, structured JSON lines). **Status: shipped.** |
+
+### 9.16 The universal sensor / producer framework and live fusion (`sensors/`)
+
+**What it is.** A uniform, gated **sensor / producer** framework (the Wave 2-5 build): every external tool
+or file is a *fact producer* that normalizes its output into the one `Observation` model — plus the seam
+that folds those observations into a *live* engagement's world-model.
+
+**Why it exists.** Instrumentation is a solved problem (§4): CRUCIBLE integrates mature engines as
+interchangeable, gated sensors rather than reinventing them — and keeps prove-don't-guess across all of
+them. A sensor mints **leads**; only an oracle mints **facts**.
+
+**How it works.**
+- **Sensors** (`sensors/*.py`): **Nmap** (service/port discovery, single-host guard), **tshark** (packet
+  capture), a **web-scanner** adapter (drives Nuclei/ZAP as gated producers), **cloud-IAM/CSPM**, **SBOM/SCA**
+  (`sbom.py`), a **k8s-runtime** posture sensor (`k8s_runtime.py` — kube-bench JSON → CIS-control-failure
+  leads), a **log-source** sensor (offline operator logs), and the opt-in **fuzz/ASan** producer (`fuzz.py`).
+- Each runs through `sensors/pipeline.py::run_sensor` → the *same* fail-closed gate chain
+  (kill-switch / entitlement / scope / destructive / egress). A refused or failed sensor mints nothing.
+- **The sensor-fact oracles** (§9.2) that promote a sensor lead to a fact: `SERVICE_REACHABILITY` (a live
+  handshake), `TLS_WEAKNESS`, `VERSION_RANGE` (an SBOM package inside an advisory's affected range),
+  `POLICY_PATH` (a cloud-IAM reachable-policy path).
+- **The fuzz/ASan producer** is *robustness* testing, not weaponization: it drives a bounded fuzz against a
+  **localhost / operator-authorized binary that must resolve inside an operator-declared `allowed_root`**
+  (defaults to `None` → refuses everything until wired), captures the process's stdout+stderr, and hands it
+  to the existing `SANITIZER_SIGNAL` oracle so a real ASan/UBSan/panic/abort marker becomes a fact. It
+  refuses unless `authorized=True` — no implicit default fire.
+- **Live fusion** (`engage_fusion.py`) is the missing seam: given a run's world-model + slug it runs a small
+  allowlist of SAFE, OFFLINE sensors through the gated pipeline, folds their observations in as `intel:`
+  **leads**, and lets the oracles (e.g. version-range over SBOM advisories) re-verify **in-run** → `oracle:`
+  **facts**. Deterministic and idempotent (stable `obs_id`, caller-supplied `seq` — re-ingest never inflates
+  a belief).
+
+**Wiring status (honest).** The framework is **built, unit-tested, and NOT default-wired into
+`scan`/`engage`** — it runs standalone (`intel ingest-*`, `imports`, the sensor pipeline) and, for *fusion*,
+**only under `engage --autonomous`** (§9.17). Off by default = byte-identical.
+
+### 9.17 The opt-in autonomous OODA loop and the reasoning hook (`engage_autonomous.py`, `engage_reasoning.py`)
+
+**What it is.** The opt-in `engage --autonomous` cycle that finally *drives* the built-but-dormant planner +
+gated tool seam in a real run, plus the advisory LLM reasoning hook it can consult.
+
+**Why it exists.** `engage` is otherwise a fixed pipeline (crawl → audit → confirm → chain → score); the
+reasoning/planning/tool-driving machinery (`planner.Planner`, `agents.coordinator`,
+`agents.tools.invoke_tool`) was **built but never run** in an engagement. This wires *one* bounded OODA
+cycle over the authoritative scan result — only when the operator opts in.
+
+**How it works.** One cycle over the `EngagementResult` the scan already produced:
+- **OBSERVE** — the run's shared world-model (post-scan WEBAPP/ENDPOINT/finding nodes + the chained attack
+  facts) and the oracle-confirmed findings.
+- **ORIENT** — build a goal tree and construct the `Planner` over the run world-model (objectives =
+  crown-jewel node kinds); its world-aware selection **picks** the next action — a leaf on the highest-value
+  route to a crown jewel, not the greediest one.
+- **ACT** — drive that action as a **gated tool call** through `invoke_tool` (kill-switch → entitlement →
+  scope → destructive-confirm → egress). The first slice drives the SAFE built-in `reverify_finding` tool
+  (re-fire a finding's own retained certificate — deterministic, Tier-1, no egress). A tripped kill-switch
+  refuses it and the tool never runs.
+- **UPDATE** — fold the observation back into the world-model (annotate the finding's node with the live
+  re-grounding verdict) and update the goal tree.
+- **RE-ORIENT** — re-run the planner's selection over the now-updated tree/world; the pick changes, proving
+  the loop closed.
+- **The reasoning hook** (`engage_reasoning.py`) runs ONE bounded kernel step (reusing `hypothesize` /
+  `pivot` / `critique` + their self-consistency wrappers) and returns structured **advice** — which
+  surface / bug-class / hypothesis to prioritise, and lateral moves when a thread stalls. It carries **no
+  `confirmed` field by construction**; it never mutates a finding, the world-model, or an oracle verdict.
+  Sensor **fusion** (§9.16) composes in through the same fixed hook contract.
+
+**Wiring status (honest).** Everything here runs **only under `--autonomous`** (`--autonomous-cycles N`,
+`--autonomous-budget N`); the default `engage` path never imports it, so `make gate` and every replayed run
+stay **byte-identical**. This is the one place the ACP goal-tree planner actually runs — it is *not* in the
+default loop.
+
+### 9.18 AEGIS — the defensive dual (`aegis/`)
+
+**What it is.** The same prove-don't-guess core pointed *inward*: an embeddable library that detects
+**AI-application attacks** in an app the operator runs, over one telemetry envelope, returning an
+oracle-confirmed verdict with a re-runnable certificate.
+
+**Why it exists.** The offensive engine proves *offensive* facts; the defensive dual proves *defensive* ones
+— a detection you can trust and re-verify offline, not an LLM classifier's guess.
+
+**How it works.**
+- **The `detect()` pipeline** (`aegis/pipeline.py`): `boundary.ingest` (untrusted-input hardening + PII
+  redaction) → `sensors.normalize` (provenance-tagged Observations = a **lead**) → `actor_graph.observe`
+  (per-actor Beta belief) → `OracleVerifier.confirm` (a deterministic AEGIS oracle fires over retained
+  evidence) → `veracity.admit` (re-executes the ground bound to the class; can **only demote**) →
+  `confidence.assess_finding` (posterior vs. the MECE benign twin — the honest false-positive guard) → a
+  `Verdict`.
+- **Four attack classes / four defensive oracle kinds**: **prompt injection / jailbreak**
+  (`PROMPT_INJECTION`), **system-prompt disclosure** (`SYSTEM_PROMPT_DISCLOSURE` — proven by a planted
+  canary), **automated access** (`AUTOMATED_ACCESS` — a seeded honeypot hit proves *automation*, not merely
+  "scraping"), and **credential stuffing / account takeover** (`CREDENTIAL_STUFFING` — an SPRT + Holm oracle
+  over unseen-(actor,credential)-pair successes).
+- **Invariants** (enforced by the `Verdict` model validator): `decision == "confirmed"` ⇒ a re-runnable
+  certificate; `provenance == "grounded:…"` ⇒ an oracle fired **and** `admit()` re-admitted it as a fact.
+  Fully deterministic — same evidence → byte-identical verdict + certificate id.
+- **Additive by construction** (`aegis/registry.py`): AEGIS owns *no* private oracle set — it **appends**
+  kinds / routing rows / aliases to the ONE shared verifier/world-model vocabulary, so a hallucinated
+  AI-attack label is parse-rejected and no existing class's oracle set or verdict changes.
+- **Embedding it in a web app**: wire the middleware/guard (`aegis/middleware.py`, `aegis/guard.py`) to hand
+  each request's telemetry to `detect()`, or shell out to `aegis detect <envelope.json>`; `aegis demo` runs
+  the canary-disclosure flow end-to-end.
+
+**Wiring status (honest).** AEGIS is **defensive-only**, **lazy-imported**, and **never touched by
+`scan`/`engage`/`benchmark`** — the offensive gate path never imports it, so it cannot perturb `make gate`.
+Current scope: the four classes above (MVP).
+
+### 9.19 Reporting, export, and the platform seams (`report/`, `mcp/`, `api/`, `plugins/`, `imports/`)
+
+**What it is.** The seams that turn a run into deliverables and expose CRUCIBLE to other tools — all
+read-only or gated, none able to promote a claim the oracle refused.
+
+**How it works.**
+- **Report assembly + machine export** (`report/`). `report <slug>` deterministically assembles the three
+  operator documents (executive / technical / remediation) from the blackboard (or `--from-json`);
+  `report/export.py` adds two machine renderers — **SARIF 2.1.0** (CI code-scanning ingest) and structured
+  **JSON** — over the *same* graded-findings input, so a document and an export grade a finding identically.
+  Every exported finding states its `grounding` — `fact` (its retained proof re-fired at export), `demoted`
+  (recorded confirmed but no longer reproduces), or `lead` (no oracle signal). In SARIF, only a FACT is
+  levelled by its severity; a LEAD is capped at `note` and tagged `grounding=lead`, so a CI gate is never
+  *blocked* by an unproven lead yet still sees it.
+- **Third-party import** (`imports/`). `imports <file> --format nuclei|zap|burp|sqlmap|generic` parses a tool
+  export into provenance-tagged **leads** in the common shape; `--persist` writes them to the intel store. A
+  lead becomes a fact only when a CRUCIBLE oracle re-verifies it — the tool's own verdict is never trusted.
+- **MCP tool-server** (`mcp/`). `mcp serve --slug` exposes CRUCIBLE's charter-bound, gated capabilities as
+  MCP tools over stdio (and can *consume* external MCP tools); `mcp list --slug` prints what a given
+  engagement would expose without serving.
+- **Loopback gated API** (`api/`). A read core (enumerate/read the run) plus gated *actions* that pass the
+  **same** `invoke_tool` fail-closed chain as a local action — an unauthorized action is REFUSED over the API
+  exactly as it would be locally. Bound to loopback; **optional** bearer / `X-Relay-Key` auth (`api/authn.py`,
+  opt-in via `CRUCIBLE_API_KEY`, fail-closed so a misconfigured empty key never silently disables auth).
+- **Capability catalog** (`plugins/`). `capabilities [--json]` enumerates the unified catalog (subcommands,
+  sensors, oracles, tools) deterministically — the discovery surface an MCP/API/SDK consumer reads.
+
+**Wiring status (honest).** `report` and `imports` are shipped operator commands; `mcp` / `api` /
+`capabilities` are the platform seams (loopback/stdio, gated, read-or-gated-action). None is on the
+`scan`/`engage`/`benchmark` gate path.
 
 ---
 
@@ -1236,7 +1428,7 @@ CRUCIBLE holds *itself* to prove‑don't‑guess.
   positive, a newly‑missed finding, or a precision drop. It needs no Docker and no external tools, so it
   runs anywhere. `make bench-corpus` extends this to a dockerized multi‑app corpus with neutral
   OWASP‑Benchmark ground truth.
-- **`make test`** — the full engine suite: **~200 test files** across ~300 source modules, almost all
+- **`make test`** — the full engine suite: **~270 test files** across ~380 source modules, almost all
   deterministic and offline (only a couple of opt‑in live‑LLM / live‑HTTP integration tests touch a
   network or a model).
 - **`python3 -m framework.v2 verify <report.json>`** — *anyone* can re‑verify a saved engagement offline:
@@ -1251,12 +1443,14 @@ CRUCIBLE holds *itself* to prove‑don't‑guess.
 
 ---
 
-## 12. Roadmap / in progress
+## 12. Roadmap — what shipped and what's next
 
-> Everything in this section is **forward‑looking.** Nothing here is presented as a shipped capability;
-> where a piece exists as an unmerged branch or a built‑but‑unwired primitive, it says so.
+> **This section is now largely a record of what shipped.** The **seven‑wave program**, the **AEGIS**
+> defensive dual, and the **13‑workstream gap‑closure program (17 units)** are all **merged to `main`.**
+> What remains genuinely forward‑looking is called out as such below; nothing merged is dressed up as more
+> than its honest wiring status in §9 and §13 (much of it is powerful‑but‑opt‑in, off the default loop).
 
-**The thesis — the "Reasoning OS" sensor‑fusion split.** Divide the world into two layers and invest
+**The thesis — the "Reasoning OS" sensor‑fusion split (realized).** Divide the world into two layers and invest
 asymmetrically. **Layer 1 — instrumentation** (network discovery, packet capture, crawling, cloud
 inventory, static analysis) is a *solved* problem; CRUCIBLE **integrates** mature engines as
 interchangeable, gated **sensors** rather than reimplementing them. **Layer 2 — intelligence** (the
@@ -1279,40 +1473,66 @@ gate):
 - **Tier 2 — active, non‑destructive validation** (crafted requests that don't damage or persist; this is
   where the 12 oracle functions re‑verify each third‑party claim → fact): gate = **+ capability
   entitlement + throttle**.
-- **Tier 3 — high‑impact adversary simulation** (identity‑resilience exercises, controlled exploitation
-  validation): an **isolated authorized‑validation layer**, **per‑action operator approval + audit**,
-  never part of the routine loop. Full exploitation frameworks, credential‑attack suites, and C2 /
-  persistence stay **excluded from the reasoning engine** entirely.
+- **Tier 3 — high‑impact validation** (controlled exploitation *validation*, not weaponization): **realized**
+  as the **entitlement‑gated Tier‑3 validation layer** (`agents/tier3_validation.py`, §9.14) — OFF by
+  default, localhost/authorized only, per‑action operator approval, and it does exactly one thing: re‑fire
+  the minimal proof an oracle already fired on. Full exploitation frameworks, credential‑attack suites, and
+  C2 / persistence stay **excluded from the reasoning engine** entirely (§10).
 
-**The seven waves.**
+**The seven waves — all merged to `main`.**
 
 | Wave | Theme | Status |
 |---|---|---|
-| **1** | **The intelligence core** — build the brain first, so a superior operator drives every sensor | **in progress** |
-| 2 | Universal Sensor/Producer framework + a first reference integration (Nmap) + a service‑reachability oracle | planned |
-| 3 | Packet & network sensors (tshark/Zeek/Suricata) + TLS‑weakness / flow‑signature oracles | planned |
-| 4 | Web breadth — wire the built arsenal into the default run + integrate Nuclei/Burp/ZAP as re‑verified sensors | planned |
-| 5 | Cloud/IAM/SBOM/static/identity + threat‑intel (MISP/STIX/NVD) + wire `defender/gap_report.py` into `engage` | planned |
-| 6 | Platformization — a plugin registry, an MCP tool‑server (expose CRUCIBLE as tools *and* consume external tools), an external API, report automation | planned |
-| 7 | Consolidation / hygiene — unify the two Beta learners, de‑dup seed checks / fingerprint stacks, right‑size `quantum_era` | planned |
+| 1 | **The intelligence core** — the brain first (reasoning/autonomy core), so a superior operator drives every sensor | ✅ merged |
+| 2 | Universal Sensor/Producer framework + a first reference integration (Nmap) + a service‑reachability oracle | ✅ merged |
+| 3 | Packet & network sensors (tshark) + TLS‑weakness oracle | ✅ merged |
+| 4 | Web breadth — the advanced arsenal + new coverage packs reachable via `--arsenal`/flags (§9.5), Nuclei/Burp/ZAP integrated as re‑verified sensors | ✅ merged |
+| 5 | Cloud/IAM/SBOM/static + threat‑intel + the `defender/` DEL pass reachable via `engage --defender` | ✅ merged |
+| 6 | Platformization — capability registry, an MCP tool‑server (expose CRUCIBLE as tools *and* consume external tools), a loopback external API, report automation | ✅ merged |
+| 7 | Consolidation / hygiene | ✅ merged |
 
-**Wave 1 sub‑phases:**
-- **W1.1 — wire the nervous system into the default loop (advisory‑only).** Add the multi‑critic panel,
-  reflection agent, cognitive refusal, the `credit_outcome` learning fan‑out, and the meta‑monitor caution
-  to `engage --spine` **without** changing which surfaces run or the oracle verdict. *Status: implemented
-  on branch `w1.1-wire-nervous-system` (advisory‑only); **not yet merged to `main`** — the default loop on
-  `main` today does not schedule these primitives (see §13).*
-- **W1.2 — lookahead planning.** Replace the greedy goal‑tree leaf score with a deterministic,
-  budget‑bounded multi‑step planner (beam / MCTS‑lite over the belief graph + attack‑path value). Orders
-  effort, never gates. *Status: **in progress.***
-- **W1.3–W1.6** — cross‑engagement transfer (embedding‑smoothed priors), agentic tool‑use as the
-  sensor‑driving seam, self‑consistency for no‑oracle bindings, multi‑target campaigns. *Planned.*
+**Then the gap‑closure program (13 workstreams, 17 units) — merged.** On top of the seven waves:
+- **Opt‑in `engage --autonomous` OODA loop** (`engage_autonomous.py`) with the sensor‑fusion
+  (`engage_fusion.py`) and advisory‑reasoning (`engage_reasoning.py`) hooks — §9.16–9.17.
+- **Gated fuzz/ASan producer** (`sensors/fuzz.py`), the **access‑control** check pack
+  (`scanner/access_control.py`), and a **Nuclei‑template compiler** (`scanner/nuclei_compile.py`) — §9.5.
+- New coverage: **k8s‑runtime** posture, **client‑side** (CSRF / clickjacking / postMessage) passive tells,
+  **GraphQL** DoS breadth, **business logic** (`scanner/bizlogic.py`), and **SSO / SAML / OIDC**
+  (`scanner/sso.py`) — §9.5, §9.16.
+- **SARIF + JSON report export** (`report/export.py`) and **optional API authn** (`api/authn.py`) — §9.19.
+- **IPv6** scope + Nmap (§9.14); **cross‑engagement fleet transfer** (`memory/fleet.py`, §9.9); the
+  doctrine‑max **entitlement‑gated Tier‑3 validation layer** (`agents/tier3_validation.py`, §9.14, OFF by
+  default); and **optional heavy extras** (z3 / sentence‑transformers / numpy) that are **default‑absent**
+  and may only accelerate or enrich — never gate a surface or feed the oracle/SCE/calibration inputs
+  (`common/capabilities.py`).
+- **AEGIS** defensive dual — prompt‑injection / system‑prompt‑disclosure / automated‑access and now
+  **credential‑stuffing / ATO** (§9.18) — plus mock coverage for the live‑gated paths.
 
-**Shipped foundations this roadmap builds on** (already in `main`): the **anti‑hallucination veracity
-firewall** program (P0–P7), the **nervous‑system event‑spine** program (N0–N7), and the **speed /
-resilience / protection** hardening (X1–X6: determinism‑safe caching, data‑at‑rest owner‑only permissions
-+ secret redaction, indexed spine I/O + cursors, LLM backoff + in‑tier failover, opt‑in parallel recon,
-and runtime‑security hardening). These are framed here as done foundations, not roadmap items.
+**Earlier shipped foundations** (also in `main`): the **anti‑hallucination veracity firewall** program
+(P0–P7), the **nervous‑system event‑spine** program (N0–N7), and the **speed / resilience / protection**
+hardening (X1–X6: determinism‑safe caching, data‑at‑rest owner‑only permissions + secret redaction, indexed
+spine I/O + cursors, LLM backoff + in‑tier failover, opt‑in parallel recon, and runtime‑security hardening).
+
+**What is genuinely still ahead (honest — not shipped):**
+- Wire the opt‑in **nervous‑system primitives** (multi‑critic panel, reflection, cognitive refusal, the
+  `credit_outcome` fan‑out, the meta‑monitor) advisory‑only into the *default* `engage --spine` loop — they
+  are built and unit‑tested, but the default loop does not schedule them (§9.8).
+- Deeper **`--autonomous`**: multi‑step **lookahead** planning (beam / MCTS‑lite over the belief graph)
+  beyond today's one‑cycle slice; more (still‑gated) tools than the safe `reverify_finding` first slice;
+  multi‑target campaigns.
+- **Live** sensor fusion beyond the offline allowlist (an active service‑reachability handshake; live
+  TLS/version confirmation in‑run); a **k8s‑posture oracle** to promote k8s‑runtime *leads* to *facts*
+  (today they stop at leads).
+- **Absent by design / not built:** a **mobile runtime engine** (mobile is a *playbook* surface, not an
+  engine); **DNS‑only OOB** (HTTP‑only today); **semantic memory embeddings** by default (lexical default).
+- **Proving the at‑scale autonomous finding‑discovery loop** (see §13): the plumbing is verified against a
+  real target, but unattended frontier autonomy is *not* claimed.
+
+**Deliberate exclusions — not roadmap gaps.** Detection‑evasion, identity‑rotation, C2 / persistence, full
+exploitation frameworks, and credential‑attack *offense* are **excluded from the reasoning engine by
+doctrine** (§10), not pending work.
+
+**Last reconciled against the tree: `c7d9814` (2026‑07‑11).**
 
 ---
 
@@ -1333,30 +1553,44 @@ what ships versus what is experimental or dormant:
 - The append‑only event spine with cryptographic tamper‑evidence, and the `--spine` engagement mirror.
 - The benchmark + `make gate` regression spine; the OSINT intel engine (offline by default).
 
-**Experimental, opt‑in, or built‑but‑not‑default‑wired:**
-- The **167‑entry check library** is exercised under the eval/benchmark harness; the *default interactive*
-  scan uses the 11 + 5 built‑in checks (enable the library per‑campaign via `use_library`).
+**Shipped, but opt‑in / off the default loop (powerful — and honestly gated):**
+- The **172‑entry check library** is exercised under the eval/benchmark harness; the *default interactive*
+  scan/engage uses the 11 + 5 built‑in checks (enable the library per‑campaign via `use_library`).
+- The **`engage --autonomous` OODA loop**, its **sensor fusion**, and the advisory **kernel reasoning** hook
+  (§9.16–9.17). This is the one place the **ACP goal‑tree planner** (budget/pruner/watchdog/resume) actually
+  runs — the *default* `engage` loop drives the scanner campaign + orchestrator, **not** the planner. Off =
+  byte‑identical.
+- The **specialized scanner arsenal** (smuggling, race, WebSocket, discovery, sequencer, grammar‑fuzz,
+  WAF‑evasion, `pqc_scan`) and the **`intruder/`** package — reachable via `--arsenal` / flags, not the
+  default campaign — plus the **opt‑in coverage packs** (GraphQL DoS, business logic, SSO/SAML/OIDC, the
+  two‑identity access‑control pack, the Nuclei‑template compiler) — §9.5.
 - The **nervous‑system primitives** (multi‑critic panel, reflection, cognitive refusal, `credit_outcome`
   fan‑out, meta‑monitor) and the **MAO coordinator + specialist agents** are unit‑tested and schedulable
-  but **not scheduled in the default `engage` loop** — their *doctrine* is nonetheless live in every
-  reasoning call via the governance preamble. Wiring them advisory‑only into `engage --spine` is **W1.1**,
-  which exists on branch `w1.1-wire-nervous-system` and is **not yet merged to `main`.**
-- The **ACP goal‑tree planner** (budget/pruner/watchdog/resume) is built and tested but **not wired into a
-  default runner** — `engage` drives the scanner campaign + orchestrator, not the planner.
-- The **specialized scanner arsenal** (smuggling, race, WebSocket, discovery, sequencer, grammar‑fuzz,
-  WAF‑evasion, `pqc_scan`) and the **`intruder/`** package are built and unit‑tested but reachable only via
-  the public API / flags — not part of the default campaign.
-- `defender/gap_report.py` is **built but unwired** into `engage`. DAA taint is **Python‑only** and the
-  Semgrep/Joern adapters are optional. The remote browser path is **loopback‑only on `engage`**. OOB
-  confirmation is **HTTP‑only** (a DNS‑only interaction needs a DNS‑capable relay). Memory embeddings are
-  **lexical by default**. Capability entitlement is **permissive / UNGOVERNED** until a trust root is
-  provisioned.
+  but **not scheduled in the default `engage --spine` loop** — their *doctrine* is nonetheless live in every
+  reasoning call via the governance preamble (§9.8).
+- **AEGIS** (§9.18) — the defensive dual — is lazy‑imported, defensive‑only, and never on the offensive
+  gate path. The **entitlement‑gated Tier‑3 validation layer** (§9.14) is **OFF by default**; the gated
+  **fuzz/ASan producer** refuses until an operator wires an `allowed_root`; **fleet transfer** (§9.9) and
+  the **optional heavy extras** (z3 / sentence‑transformers / numpy) are opt‑in and **default‑absent**.
+- The **`defender/` DEL pass** (detection‑gap report + Sigma efficacy) runs via **`engage --defender`**
+  (opt‑in); the **`report` SARIF/JSON export**, the loopback **`api`** (optional bearer / `X‑Relay‑Key`
+  auth), the **`mcp`** tool‑server, and **`imports`** are shipped but off the scan/engage gate path.
+
+**Constraints and honest limits:**
+- DAA taint is **Python‑only** and the Semgrep/Joern adapters are optional. The remote browser path is
+  **loopback‑only on `engage`**. OOB confirmation is **HTTP‑only** (a DNS‑only interaction needs a
+  DNS‑capable relay). Memory embeddings are **lexical by default**. Capability entitlement is
+  **permissive / UNGOVERNED** until a trust root is provisioned.
 - **Reasoning quality without a live LLM backend is bounded** — DryRun returns deterministic fixtures. The
   scanner and oracles need no LLM; the reasoning kernel benefits from one.
+- **Absent by design:** a mobile *runtime* engine (mobile is a *playbook* surface, not an engine); k8s and
+  cloud posture sensors stop at **leads** until their promotion oracles land; and — deliberately, per §10 —
+  detection‑evasion / identity‑rotation / C2 / persistence are excluded from the reasoning engine.
 - **The at‑scale autonomous finding‑discovery loop is not proven.** The plumbing is verified against a real
   target, but the one conservative real‑target run to date emitted zero findings. CRUCIBLE today is a
-  precision, prove‑don't‑guess scanner with a genuine reasoning/OSINT/evidence spine — **not** an
-  unattended frontier‑autonomy loop, and this README does not claim it is.
+  precision, prove‑don't‑guess scanner with a genuine reasoning/OSINT/evidence spine (and an opt‑in,
+  one‑cycle autonomous loop) — **not** an unattended frontier‑autonomy loop, and this README does not claim
+  it is.
 
 **Posture, restated:** authorized owner‑testing only; correlatable, not stealthy; deliberately **not**
 anti‑defender. If an operator instruction conflicts with scope, destruction, evidence, or honesty,
