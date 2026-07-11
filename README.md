@@ -45,6 +45,10 @@ being built. Jargon is defined the first time it appears.
   - [9.13 Signed evidence bundles](#913-signed-evidence-bundles-evidence)
   - [9.14 The fail‑closed safety stack](#914-the-failclosed-safety-stack-the-6-gate-chain--authority--entitlement--sovereignty)
   - [9.15 Intake, analysis, defender, improve, socialdefense, console, eval, common](#915-the-remaining-subsystems)
+  - [9.16 The universal sensor / producer framework and live fusion](#916-the-universal-sensor--producer-framework-and-live-fusion-sensors)
+  - [9.17 The opt-in autonomous OODA loop and the reasoning hook](#917-the-opt-in-autonomous-ooda-loop-and-the-reasoning-hook-engage_autonomouspy)
+  - [9.18 AEGIS — the defensive dual](#918-aegis--the-defensive-dual-aegis)
+  - [9.19 Reporting, export, and the platform seams](#919-reporting-export-and-the-platform-seams-report-mcp-api-plugins-imports)
 - [10. The doctrine and posture, in depth](#10-the-doctrine-and-posture-in-depth)
 - [11. Testing and verification](#11-testing-and-verification)
 - [12. Roadmap / in progress](#12-roadmap--in-progress)
@@ -1193,6 +1197,142 @@ Self‑improvement (`improve/`, §9.15) is **authorise‑not‑apply**: it never
 | **console** | `console/` | A **read‑only, loopback‑only** operator UI (a stdlib HTTP server bound to `127.0.0.1` only, serving a self‑contained page + read‑only JSON endpoints + a live Server‑Sent‑Events log tail). It issues zero outbound calls. The only mutations are three *safe* actions (launch a gated loopback scan, re‑verify a saved run, trip the kill‑switch), guarded against DNS‑rebinding/CSRF. **Status: shipped.** |
 | **eval** | `eval/` | The **measurement spine** that keeps precision honest. It defines one normalized finding shape every tool speaks, scores precision/recall with a greedy one‑to‑one matcher that **includes safe controls a precise scanner must leave alone** (so an off‑manifest detection is a false positive *by construction*), persists runs, and turns a committed baseline into a **zero‑tolerance regression gate** (`make gate`). It loads neutral OWASP‑Benchmark ground truth and parses third‑party tool output (Nuclei/ZAP/sqlmap/Burp/Wapiti/Nikto) into the common shape so those tools can be scored — or admitted as attestations the oracles re‑verify. **Status: shipped.** |
 | **common** | `common/` | The shared spine: `paths` (root discovery, owner‑only file/dir creation, umask tightening), `ethics` (the three inviolable gates — signed charter, in‑scope host, authorized intake — whose violations *must* propagate), `redact` (mask secrets by key/segment/suffix, never a bare substring that could over‑redact), `errors` (the `CrucibleError` hierarchy), and `logging` (per‑engagement, redacted, structured JSON lines). **Status: shipped.** |
+
+### 9.16 The universal sensor / producer framework and live fusion (`sensors/`)
+
+**What it is.** A uniform, gated **sensor / producer** framework (the Wave 2-5 build): every external tool
+or file is a *fact producer* that normalizes its output into the one `Observation` model — plus the seam
+that folds those observations into a *live* engagement's world-model.
+
+**Why it exists.** Instrumentation is a solved problem (§4): CRUCIBLE integrates mature engines as
+interchangeable, gated sensors rather than reinventing them — and keeps prove-don't-guess across all of
+them. A sensor mints **leads**; only an oracle mints **facts**.
+
+**How it works.**
+- **Sensors** (`sensors/*.py`): **Nmap** (service/port discovery, single-host guard), **tshark** (packet
+  capture), a **web-scanner** adapter (drives Nuclei/ZAP as gated producers), **cloud-IAM/CSPM**, **SBOM/SCA**
+  (`sbom.py`), a **k8s-runtime** posture sensor (`k8s_runtime.py` — kube-bench JSON → CIS-control-failure
+  leads), a **log-source** sensor (offline operator logs), and the opt-in **fuzz/ASan** producer (`fuzz.py`).
+- Each runs through `sensors/pipeline.py::run_sensor` → the *same* fail-closed gate chain
+  (kill-switch / entitlement / scope / destructive / egress). A refused or failed sensor mints nothing.
+- **The sensor-fact oracles** (§9.2) that promote a sensor lead to a fact: `SERVICE_REACHABILITY` (a live
+  handshake), `TLS_WEAKNESS`, `VERSION_RANGE` (an SBOM package inside an advisory's affected range),
+  `POLICY_PATH` (a cloud-IAM reachable-policy path).
+- **The fuzz/ASan producer** is *robustness* testing, not weaponization: it drives a bounded fuzz against a
+  **localhost / operator-authorized binary that must resolve inside an operator-declared `allowed_root`**
+  (defaults to `None` → refuses everything until wired), captures the process's stdout+stderr, and hands it
+  to the existing `SANITIZER_SIGNAL` oracle so a real ASan/UBSan/panic/abort marker becomes a fact. It
+  refuses unless `authorized=True` — no implicit default fire.
+- **Live fusion** (`engage_fusion.py`) is the missing seam: given a run's world-model + slug it runs a small
+  allowlist of SAFE, OFFLINE sensors through the gated pipeline, folds their observations in as `intel:`
+  **leads**, and lets the oracles (e.g. version-range over SBOM advisories) re-verify **in-run** → `oracle:`
+  **facts**. Deterministic and idempotent (stable `obs_id`, caller-supplied `seq` — re-ingest never inflates
+  a belief).
+
+**Wiring status (honest).** The framework is **built, unit-tested, and NOT default-wired into
+`scan`/`engage`** — it runs standalone (`intel ingest-*`, `imports`, the sensor pipeline) and, for *fusion*,
+**only under `engage --autonomous`** (§9.17). Off by default = byte-identical.
+
+### 9.17 The opt-in autonomous OODA loop and the reasoning hook (`engage_autonomous.py`, `engage_reasoning.py`)
+
+**What it is.** The opt-in `engage --autonomous` cycle that finally *drives* the built-but-dormant planner +
+gated tool seam in a real run, plus the advisory LLM reasoning hook it can consult.
+
+**Why it exists.** `engage` is otherwise a fixed pipeline (crawl → audit → confirm → chain → score); the
+reasoning/planning/tool-driving machinery (`planner.Planner`, `agents.coordinator`,
+`agents.tools.invoke_tool`) was **built but never run** in an engagement. This wires *one* bounded OODA
+cycle over the authoritative scan result — only when the operator opts in.
+
+**How it works.** One cycle over the `EngagementResult` the scan already produced:
+- **OBSERVE** — the run's shared world-model (post-scan WEBAPP/ENDPOINT/finding nodes + the chained attack
+  facts) and the oracle-confirmed findings.
+- **ORIENT** — build a goal tree and construct the `Planner` over the run world-model (objectives =
+  crown-jewel node kinds); its world-aware selection **picks** the next action — a leaf on the highest-value
+  route to a crown jewel, not the greediest one.
+- **ACT** — drive that action as a **gated tool call** through `invoke_tool` (kill-switch → entitlement →
+  scope → destructive-confirm → egress). The first slice drives the SAFE built-in `reverify_finding` tool
+  (re-fire a finding's own retained certificate — deterministic, Tier-1, no egress). A tripped kill-switch
+  refuses it and the tool never runs.
+- **UPDATE** — fold the observation back into the world-model (annotate the finding's node with the live
+  re-grounding verdict) and update the goal tree.
+- **RE-ORIENT** — re-run the planner's selection over the now-updated tree/world; the pick changes, proving
+  the loop closed.
+- **The reasoning hook** (`engage_reasoning.py`) runs ONE bounded kernel step (reusing `hypothesize` /
+  `pivot` / `critique` + their self-consistency wrappers) and returns structured **advice** — which
+  surface / bug-class / hypothesis to prioritise, and lateral moves when a thread stalls. It carries **no
+  `confirmed` field by construction**; it never mutates a finding, the world-model, or an oracle verdict.
+  Sensor **fusion** (§9.16) composes in through the same fixed hook contract.
+
+**Wiring status (honest).** Everything here runs **only under `--autonomous`** (`--autonomous-cycles N`,
+`--autonomous-budget N`); the default `engage` path never imports it, so `make gate` and every replayed run
+stay **byte-identical**. This is the one place the ACP goal-tree planner actually runs — it is *not* in the
+default loop.
+
+### 9.18 AEGIS — the defensive dual (`aegis/`)
+
+**What it is.** The same prove-don't-guess core pointed *inward*: an embeddable library that detects
+**AI-application attacks** in an app the operator runs, over one telemetry envelope, returning an
+oracle-confirmed verdict with a re-runnable certificate.
+
+**Why it exists.** The offensive engine proves *offensive* facts; the defensive dual proves *defensive* ones
+— a detection you can trust and re-verify offline, not an LLM classifier's guess.
+
+**How it works.**
+- **The `detect()` pipeline** (`aegis/pipeline.py`): `boundary.ingest` (untrusted-input hardening + PII
+  redaction) → `sensors.normalize` (provenance-tagged Observations = a **lead**) → `actor_graph.observe`
+  (per-actor Beta belief) → `OracleVerifier.confirm` (a deterministic AEGIS oracle fires over retained
+  evidence) → `veracity.admit` (re-executes the ground bound to the class; can **only demote**) →
+  `confidence.assess_finding` (posterior vs. the MECE benign twin — the honest false-positive guard) → a
+  `Verdict`.
+- **Four attack classes / four defensive oracle kinds**: **prompt injection / jailbreak**
+  (`PROMPT_INJECTION`), **system-prompt disclosure** (`SYSTEM_PROMPT_DISCLOSURE` — proven by a planted
+  canary), **automated access** (`AUTOMATED_ACCESS` — a seeded honeypot hit proves *automation*, not merely
+  "scraping"), and **credential stuffing / account takeover** (`CREDENTIAL_STUFFING` — an SPRT + Holm oracle
+  over unseen-(actor,credential)-pair successes).
+- **Invariants** (enforced by the `Verdict` model validator): `decision == "confirmed"` ⇒ a re-runnable
+  certificate; `provenance == "grounded:…"` ⇒ an oracle fired **and** `admit()` re-admitted it as a fact.
+  Fully deterministic — same evidence → byte-identical verdict + certificate id.
+- **Additive by construction** (`aegis/registry.py`): AEGIS owns *no* private oracle set — it **appends**
+  kinds / routing rows / aliases to the ONE shared verifier/world-model vocabulary, so a hallucinated
+  AI-attack label is parse-rejected and no existing class's oracle set or verdict changes.
+- **Embedding it in a web app**: wire the middleware/guard (`aegis/middleware.py`, `aegis/guard.py`) to hand
+  each request's telemetry to `detect()`, or shell out to `aegis detect <envelope.json>`; `aegis demo` runs
+  the canary-disclosure flow end-to-end.
+
+**Wiring status (honest).** AEGIS is **defensive-only**, **lazy-imported**, and **never touched by
+`scan`/`engage`/`benchmark`** — the offensive gate path never imports it, so it cannot perturb `make gate`.
+Current scope: the four classes above (MVP).
+
+### 9.19 Reporting, export, and the platform seams (`report/`, `mcp/`, `api/`, `plugins/`, `imports/`)
+
+**What it is.** The seams that turn a run into deliverables and expose CRUCIBLE to other tools — all
+read-only or gated, none able to promote a claim the oracle refused.
+
+**How it works.**
+- **Report assembly + machine export** (`report/`). `report <slug>` deterministically assembles the three
+  operator documents (executive / technical / remediation) from the blackboard (or `--from-json`);
+  `report/export.py` adds two machine renderers — **SARIF 2.1.0** (CI code-scanning ingest) and structured
+  **JSON** — over the *same* graded-findings input, so a document and an export grade a finding identically.
+  Every exported finding states its `grounding` — `fact` (its retained proof re-fired at export), `demoted`
+  (recorded confirmed but no longer reproduces), or `lead` (no oracle signal). In SARIF, only a FACT is
+  levelled by its severity; a LEAD is capped at `note` and tagged `grounding=lead`, so a CI gate is never
+  *blocked* by an unproven lead yet still sees it.
+- **Third-party import** (`imports/`). `imports <file> --format nuclei|zap|burp|sqlmap|generic` parses a tool
+  export into provenance-tagged **leads** in the common shape; `--persist` writes them to the intel store. A
+  lead becomes a fact only when a CRUCIBLE oracle re-verifies it — the tool's own verdict is never trusted.
+- **MCP tool-server** (`mcp/`). `mcp serve --slug` exposes CRUCIBLE's charter-bound, gated capabilities as
+  MCP tools over stdio (and can *consume* external MCP tools); `mcp list --slug` prints what a given
+  engagement would expose without serving.
+- **Loopback gated API** (`api/`). A read core (enumerate/read the run) plus gated *actions* that pass the
+  **same** `invoke_tool` fail-closed chain as a local action — an unauthorized action is REFUSED over the API
+  exactly as it would be locally. Bound to loopback; **optional** bearer / `X-Relay-Key` auth (`api/authn.py`,
+  opt-in via `CRUCIBLE_API_KEY`, fail-closed so a misconfigured empty key never silently disables auth).
+- **Capability catalog** (`plugins/`). `capabilities [--json]` enumerates the unified catalog (subcommands,
+  sensors, oracles, tools) deterministically — the discovery surface an MCP/API/SDK consumer reads.
+
+**Wiring status (honest).** `report` and `imports` are shipped operator commands; `mcp` / `api` /
+`capabilities` are the platform seams (loopback/stdio, gated, read-or-gated-action). None is on the
+`scan`/`engage`/`benchmark` gate path.
 
 ---
 
