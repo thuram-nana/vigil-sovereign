@@ -313,7 +313,7 @@ def run_autonomous_cycle(
         ctx = ToolContext(slug=slug, world=world, prompt_callback=prompt_callback)
 
     out = AutonomyResult(engagement=result, slug=slug)
-    out.world_nodes_before = world.node_count() if world is not None else 0
+    out.world_nodes_before = world.node_count if world is not None else 0
     objectives = _objective_kinds()
     out.objectives = [getattr(k, "value", str(k)) for k in objectives]
 
@@ -332,7 +332,7 @@ def run_autonomous_cycle(
 
     if not findings:
         out.notes.append("no confirmed findings — nothing to drive this cycle")
-        out.world_nodes_after = world.node_count() if world is not None else 0
+        out.world_nodes_after = world.node_count if world is not None else 0
         # still exercise the WS-F reasoning hook so the seam is live even on an empty run
         out.reasoning_advice = _reason_step(world, findings, ctx)
         return out
@@ -377,7 +377,7 @@ def run_autonomous_cycle(
         step.reoriented_to = nxt.label if nxt is not None else "(no more actions)"
         out.cycles.append(step)
 
-    out.world_nodes_after = world.node_count() if world is not None else 0
+    out.world_nodes_after = world.node_count if world is not None else 0
     return out
 
 
