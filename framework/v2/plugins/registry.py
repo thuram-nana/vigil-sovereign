@@ -10,10 +10,12 @@ table (``__main__._DISPATCH``). Each is the source of truth for its own kind,
 and each is discovered — never re-typed — here.
 
 ``capability_registry()`` is the single, deterministic, READ-ONLY view over all
-of them: "what sensors / tools / oracles / operators / commands exist, what each
-produces, its gating tier / entitlement, its graceful-absent behaviour." It is
-the substrate a Wave-6 MCP server or HTTP API enumerates. It is the discovery
-surface the SDK's plugin authors publish into via :class:`PluginRegistry`.
+of them — sensors / tools / oracles / operators / **checks** (the scanner audit
+arsenal in ``scanner.checks`` + ``scanner.library``) / **aegis** (the AI-attack
+detection classes) / commands — with what each produces, its gating tier /
+entitlement, its graceful-absent behaviour. It is the substrate a Wave-6 MCP
+server or HTTP API enumerates. It is the discovery surface the SDK's plugin
+authors publish into via :class:`PluginRegistry`.
 
 Doctrine, by construction:
 
@@ -137,6 +139,8 @@ class CapabilityCatalog:
     tools: tuple[CapabilityDescriptor, ...] = ()
     oracles: tuple[CapabilityDescriptor, ...] = ()
     operators: tuple[CapabilityDescriptor, ...] = ()
+    checks: tuple[CapabilityDescriptor, ...] = ()
+    aegis: tuple[CapabilityDescriptor, ...] = ()
     commands: tuple[CapabilityDescriptor, ...] = ()
 
     def groups(self) -> tuple[tuple[str, tuple[CapabilityDescriptor, ...]], ...]:
@@ -146,6 +150,8 @@ class CapabilityCatalog:
             ("tools", self.tools),
             ("oracles", self.oracles),
             ("operators", self.operators),
+            ("checks", self.checks),
+            ("aegis", self.aegis),
             ("commands", self.commands),
         )
 
@@ -532,6 +538,76 @@ def _command_descriptors() -> tuple[CapabilityDescriptor, ...]:
         return ()
 
 
+def _check_descriptors() -> tuple[CapabilityDescriptor, ...]:
+    """Discover the scanner CHECK arsenal — the actual audit units ``scan`` runs — the same
+    read-only way oracles are inverted from a static map. Two sources, both introspected
+    (never run): the built-in seed checks (``scanner.checks.DEFAULT_CHECKS``) and the
+    declarative library (``scanner.library.load_library`` — one entry per ``*.json``). Each
+    descriptor names the check and the bug_class it ``produces`` (the class its oracle then
+    confirms). Read defensively: any failure of one source yields no rows for it, never a
+    crash — a library JSON quirk can't destabilise the catalog. A check is NOT invoked."""
+    out: list[CapabilityDescriptor] = []
+    seen: set[str] = set()
+    try:
+        from ..scanner.checks import DEFAULT_CHECKS
+
+        for chk in DEFAULT_CHECKS:
+            name = str(getattr(chk, "id", "") or "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(CapabilityDescriptor(
+                kind="check", name=name,
+                summary=_first_sentence(type(chk).__doc__),
+                produces=_str_tuple(getattr(chk, "bug_class", ())),
+                origin="builtin",
+            ))
+    except Exception:
+        pass
+    try:
+        from ..scanner.library import load_library
+
+        for entry in load_library():
+            name = str(getattr(entry, "id", "") or "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(CapabilityDescriptor(
+                kind="check", name=name,
+                summary=str(getattr(entry, "title", "") or ""),
+                produces=_str_tuple(getattr(entry, "bug_class", ())),
+                intel_refs=_str_tuple(getattr(entry, "references", ())),
+                origin="builtin",
+            ))
+    except Exception:
+        pass
+    return tuple(sorted(out, key=lambda d: d.sort_key))
+
+
+def _aegis_descriptors() -> tuple[CapabilityDescriptor, ...]:
+    """Discover the AEGIS detection classes — the AI-attack classes the (opt-in, defensive)
+    AEGIS layer detects, read out of ``aegis.registry.AEGIS_BUG_CLASS_ORACLES`` the same
+    read-only way the oracle catalog is inverted from its static map. Each descriptor names
+    the class and the ONE deterministic oracle (``provable_by``) that confirms it — AEGIS
+    owns no private oracle set, it only names classes onto the shared verifier. Read
+    defensively; nothing is run. This is DISCOVERY, not invocation."""
+    try:
+        from ..aegis.registry import AEGIS_BUG_CLASS_ORACLES
+
+        out: list[CapabilityDescriptor] = []
+        for cls, kind in AEGIS_BUG_CLASS_ORACLES.items():
+            oracle = str(getattr(kind, "value", kind) or "")
+            out.append(CapabilityDescriptor(
+                kind="aegis", name=str(cls),
+                summary=f"AI-attack class AEGIS detects; confirmed by the {oracle} oracle.",
+                provable_by=(oracle,) if oracle else (),
+                origin="builtin",
+            ))
+        return tuple(sorted(out, key=lambda d: d.sort_key))
+    except Exception:
+        return ()
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -576,6 +652,8 @@ def capability_registry(
     )
     oracles = _oracle_descriptors(plugins)
     operators = _operator_descriptors(plugins)
+    checks = _check_descriptors()
+    aegis = _aegis_descriptors()
     commands = _command_descriptors() if include_commands else ()
 
     return CapabilityCatalog(
@@ -583,5 +661,7 @@ def capability_registry(
         tools=tools,
         oracles=oracles,
         operators=operators,
+        checks=checks,
+        aegis=aegis,
         commands=commands,
     )

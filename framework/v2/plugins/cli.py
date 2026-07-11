@@ -30,6 +30,8 @@ _KIND_GROUP = {
     "tool": "tools",
     "oracle": "oracles",
     "operator": "operators",
+    "check": "checks",
+    "aegis": "aegis",
     "command": "commands",
 }
 
