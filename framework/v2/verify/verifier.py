@@ -103,6 +103,10 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "prompt_injection": (OracleKind.PROMPT_INJECTION,),
     "system_prompt_disclosure": (OracleKind.SYSTEM_PROMPT_DISCLOSURE,),
     "automated_access": (OracleKind.AUTOMATED_ACCESS,),
+    # credential_stuffing proves a source achieved SPRT-significant successful logins across many
+    # UNSEEN (account, source) pairs (ATO), Holm-controlled across identities. A failed-only burst
+    # (NAT/CGNAT bulk) yields no SPRT round and stays a LEAD — never confirmed.
+    "credential_stuffing": (OracleKind.CREDENTIAL_STUFFING,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -183,6 +187,15 @@ _ALIASES: dict[str, str] = {
     "honeypot_hit": "automated_access",
     "honeypot_fetch": "automated_access",
     "bot_access": "automated_access",
+    # credential-stuffing / account-takeover spelling variants (the SAME provable signature:
+    # one source achieving unseen-(account, source) successes across many accounts). Password
+    # spraying is the same detection (breadth of compromise from one source), so it folds here.
+    "account_takeover": "credential_stuffing",
+    "ato": "credential_stuffing",
+    "cred_stuffing": "credential_stuffing",
+    "credential_stuffing_attack": "credential_stuffing",
+    "credential_stuffing_ato": "credential_stuffing",
+    "password_spraying": "credential_stuffing",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -433,6 +446,14 @@ class OracleVerifier:
                 return oracles.honeypot_hit_oracle(
                     ctx["requested_path"], ctx["honeypot_paths"],
                     crawler_allowlisted=bool(ctx.get("crawler_allowlisted", False)),
+                )
+            return None
+        if kind is OracleKind.CREDENTIAL_STUFFING:
+            if "auth_events" in ctx:
+                return oracles.credential_stuffing_oracle(
+                    ctx["auth_events"], benign_sources=ctx.get("benign_sources"),
+                    **{k: ctx[f"credstuff_{k}"] for k in ("alpha", "beta", "p1", "p0", "fwer")
+                       if f"credstuff_{k}" in ctx},
                 )
             return None
         return None

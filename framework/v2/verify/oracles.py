@@ -468,6 +468,44 @@ def timing_oracle(
     )
 
 
+def _sprt_decision(
+    signals: Any,
+    *,
+    alpha: float,
+    beta: float,
+    p1: float,
+    p0: float,
+) -> tuple[str | None, float, int, int, float, float]:
+    """The Wald SEQUENTIAL PROBABILITY RATIO TEST core, factored out so more than one oracle can
+    share the SAME sequential test (``boolean_inference_oracle`` and ``credential_stuffing_oracle``).
+
+    ``signals`` is an ITERABLE of bools consumed LAZILY: the loop stops pulling from the iterable
+    at the first boundary, so a generator that computes each Bernoulli signal on demand does no
+    work past the decision (this keeps ``boolean_inference_oracle`` byte-identical to its old
+    inline loop — the same per-round work, in the same order, stopping at the same round).
+
+    Returns ``(decided, llr, n_used, n_signal, upper, lower)`` where ``decided`` is ``"confirm"``
+    (LLR >= log((1-beta)/alpha)), ``"refute"`` (LLR <= log(beta/(1-alpha))), or ``None`` (no
+    boundary reached — inconclusive, a non-fire, never a guess). Pure + deterministic."""
+    upper = math.log((1.0 - beta) / alpha)
+    lower = math.log(beta / (1.0 - alpha))
+    llr = 0.0
+    n_used = 0
+    n_signal = 0
+    decided: str | None = None
+    for sig in signals:
+        n_used += 1
+        n_signal += 1 if sig else 0
+        llr += math.log(p1 / p0) if sig else math.log((1.0 - p1) / (1.0 - p0))
+        if llr >= upper:
+            decided = "confirm"
+            break
+        if llr <= lower:
+            decided = "refute"
+            break
+    return decided, llr, n_used, n_signal, upper, lower
+
+
 def boolean_inference_oracle(
     probe_rounds: Any,
     *,
@@ -499,28 +537,16 @@ def boolean_inference_oracle(
     the last round is inconclusive (a non-fire — never a guess). ``probe_rounds``
     is ``[{"true": resp, "false_a": resp, "false_b": resp}, ...]``.
     """
-    rounds = list(probe_rounds or [])
-    upper = math.log((1.0 - beta) / alpha)
-    lower = math.log(beta / (1.0 - alpha))
-    llr = 0.0
-    signals = 0
-    decided: str | None = None
-    n_used = 0
-    for r in rounds:
-        if not isinstance(r, Mapping) or "true" not in r or "false_a" not in r or "false_b" not in r:
-            continue
-        n_used += 1
-        across = differential_response_oracle(r["false_a"], r["true"], discriminator).fired
-        within_same = not differential_response_oracle(r["false_a"], r["false_b"], discriminator).fired
-        signal = bool(across and within_same)
-        signals += 1 if signal else 0
-        llr += math.log(p1 / p0) if signal else math.log((1.0 - p1) / (1.0 - p0))
-        if llr >= upper:
-            decided = "confirm"
-            break
-        if llr <= lower:
-            decided = "refute"
-            break
+    def _round_signals():
+        for r in (probe_rounds or []):
+            if not isinstance(r, Mapping) or "true" not in r or "false_a" not in r or "false_b" not in r:
+                continue
+            across = differential_response_oracle(r["false_a"], r["true"], discriminator).fired
+            within_same = not differential_response_oracle(r["false_a"], r["false_b"], discriminator).fired
+            yield bool(across and within_same)
+
+    decided, llr, n_used, signals, upper, lower = _sprt_decision(
+        _round_signals(), alpha=alpha, beta=beta, p1=p1, p0=p0)
 
     observed = {
         "rounds_used": n_used, "signal_rounds": signals, "llr": llr,
@@ -1051,6 +1077,165 @@ def honeypot_hit_oracle(
         kind=OracleKind.AUTOMATED_ACCESS, fired=True, confidence=0.95,
         evidence=f"automated access confirmed: honeypot resource {path!r} (no human UI links it) was fetched",
         observed={"path": path, "matched": True})
+
+
+# --- credential stuffing / ATO (SPRT over unseen-(account, source) auth successes, Holm-controlled) ---
+
+# The SPRT default is deliberately LESS trigger-happy than the boolean-blind SPRT: a returning
+# user's first login from a new device is ONE unseen (account, source) success, so confirmation
+# needs a RUN of unseen-pair successes — a breadth of compromised accounts from ONE source that a
+# benign actor cannot produce. A source with only FAILED attempts produces ZERO SPRT rounds, so a
+# NAT/CGNAT failed-only burst (the MECE benign twin) can never confirm — it stays a LEAD upstream.
+_CREDSTUFF_ALPHA = 0.01          # per-family (per-source) SPRT type-I error
+_CREDSTUFF_BETA = 0.01           # per-family SPRT type-II error
+_CREDSTUFF_P1 = 0.8              # H1: unseen-pair-success rate of a stuffing source
+_CREDSTUFF_P0 = 0.2              # H0: benign returning-user unseen-pair-success rate
+_CREDSTUFF_FWER = 0.01           # family-wise error rate for the multi-identity Holm control
+_CREDSTUFF_MAX_EVENTS = 20000    # bounded replay (DoS-safe: linear over a length-capped log)
+_CREDSTUFF_EXACT_N = 400         # exact binomial tail up to this n; normal-approx (bounded) beyond
+
+
+def _binomial_upper_tail(k: int, n: int, p: float) -> float:
+    """P(X >= k) for X ~ Binomial(n, p) — the per-family p-value under H0 (unseen-pair successes
+    arise only at the benign rate ``p``). Exact stdlib integer binomials for small n; a bounded,
+    continuity-corrected normal approximation beyond ``_CREDSTUFF_EXACT_N`` so the computation
+    stays cheap and deterministic on a large (but SPRT-decided, hence realistically small) n."""
+    if n <= 0 or k <= 0:
+        return 1.0
+    if k > n:
+        return 0.0
+    p = min(1.0, max(0.0, p))
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    if n <= _CREDSTUFF_EXACT_N:
+        tail = sum(math.comb(n, i) * (p ** i) * ((1.0 - p) ** (n - i)) for i in range(k, n + 1))
+        return min(1.0, tail)
+    mu = n * p
+    sigma = math.sqrt(n * p * (1.0 - p))
+    if sigma <= 0.0:
+        return 1.0 if k <= mu else 0.0
+    z = (k - 0.5 - mu) / sigma
+    return max(0.0, min(1.0, 1.0 - _normal_cdf(z)))
+
+
+def credential_stuffing_oracle(
+    auth_events: Any,
+    *,
+    alpha: float = _CREDSTUFF_ALPHA,
+    beta: float = _CREDSTUFF_BETA,
+    p1: float = _CREDSTUFF_P1,
+    p0: float = _CREDSTUFF_P0,
+    fwer: float = _CREDSTUFF_FWER,
+    benign_sources: Any = None,
+) -> OracleSignal:
+    """Confirm a credential-stuffing / account-takeover CAMPAIGN by the SAME Wald SPRT
+    ``boolean_inference_oracle`` uses (``_sprt_decision``), run over each source's stream of
+    UNSEEN-``(account, source)`` auth SUCCESS outcomes, with a Holm-Bonferroni family-wise
+    correction across the distinct source identities.
+
+    ``auth_events`` is an ORDERED list of ``{"account", "source", "success"}``. Identifiers are
+    already keyed-HMAC pseudonyms (the oracle NEVER sees a raw username/IP). The oracle REPLAYS
+    the log deterministically — no wallclock, no rng, bounded to ``_CREDSTUFF_MAX_EVENTS``:
+
+      * Per source, a SUCCESS on an ``(account, source)`` pair not previously seen succeeding is
+        the attacker-signature Bernoulli signal (1); a repeat success on an already-owned pair is
+        a returning-user control (0). FAILURES produce NO SPRT round — so a failed-only burst (the
+        MECE benign twin: NAT/CGNAT bulk) yields zero rounds and can NEVER confirm here.
+      * The per-source SPRT CONFIRMS only when the log-likelihood ratio crosses ``log((1-beta)/
+        alpha)`` — one new-device login cannot cross it; a run of successes across many unseen
+        accounts does. A binomial upper-tail p-value under H0 is derived from the consumed counts.
+      * Across the distinct sources (the multiple identities probed at once), ``holm_correction``
+        controls the FAMILY-WISE false-positive rate: a source is CONFIRMED only when its SPRT
+        crossed AND it survives the family-wise correction at ``fwer`` — so monitoring thousands
+        of sources cannot manufacture a confirmation by multiplicity (a marginal single-source
+        SPRT hit that fails the family-wise control is honestly withheld).
+
+    ``benign_sources`` (optional) is an operator allowlist of known-good egress identities
+    (a documented NAT/CGNAT, an SSO gateway) whose successes REFUTE — they can never confirm,
+    mirroring the honeypot crawler allowlist (P1). Pure + deterministic."""
+    events = list(auth_events or [])[:_CREDSTUFF_MAX_EVENTS]
+    allow = {_coerce_text(s).strip() for s in (benign_sources or [])}
+
+    # group per source in arrival order (deterministic; a dict preserves insertion order).
+    by_source: dict[str, list[tuple[str, bool]]] = {}
+    order: list[str] = []
+    for ev in events:
+        if not isinstance(ev, Mapping):
+            continue
+        source = _coerce_text(ev.get("source")).strip()
+        account = _coerce_text(ev.get("account")).strip()
+        if not source or not account:
+            continue
+        if source not in by_source:
+            by_source[source] = []
+            order.append(source)
+        by_source[source].append((account, bool(ev.get("success", False))))
+
+    families: list[dict[str, Any]] = []
+    for source in order:
+        allowlisted = source in allow
+        seen: set[str] = set()
+
+        def _sig_seq(_rows=by_source[source], _seen=seen):
+            # unseen-(account, source) SUCCESSES only; failures never yield a round.
+            for account, success in _rows:
+                if not success:
+                    continue
+                unseen = account not in _seen
+                _seen.add(account)
+                yield unseen
+
+        decided, llr, n_used, n_signal, upper, lower = _sprt_decision(
+            _sig_seq(), alpha=alpha, beta=beta, p1=p1, p0=p0)
+        # p-value only matters for a source the SPRT actually confirmed (and never for an
+        # allowlisted one); a non-confirming source is honestly p=1.0 (sorts last in Holm) and
+        # cannot be promoted — this also keeps the tail computation bounded (n_used stays small
+        # when the SPRT crossed early).
+        if decided == "confirm" and not allowlisted:
+            pval = _binomial_upper_tail(n_signal, n_used, p0)
+        else:
+            pval = 1.0
+        families.append({
+            "source": source, "decided": "allowlisted" if allowlisted else (decided or "inconclusive"),
+            "llr": round(llr, 4), "n_success": n_used, "n_unseen": n_signal,
+            "distinct_accounts": len(seen), "p_value": pval,
+        })
+
+    # Holm-Bonferroni across the distinct source identities (the multi-identity family-wise
+    # control). A source confirms iff its SPRT crossed AND Holm rejects its p-value at `fwer`.
+    pvals = [f["p_value"] for f in families]
+    rejects = holm_correction(pvals, alpha=fwer) if pvals else []
+    confirmed = [
+        f for f, rej in zip(families, rejects)
+        if f["decided"] == "confirm" and rej
+    ]
+
+    observed = {"families": families, "confirmed_sources": [f["source"] for f in confirmed],
+                "n_families": len(families), "fwer": fwer}
+    if not confirmed:
+        # honest non-fire: name why (no SPRT crossing, or family-wise control withheld it).
+        crossed = [f for f in families if f["decided"] == "confirm"]
+        if crossed:
+            why = (f"{len(crossed)} source(s) crossed the SPRT but did NOT survive the Holm "
+                   f"family-wise control at fwer={fwer} over {len(families)} identities")
+        else:
+            why = "no source's unseen-pair successes crossed the SPRT boundary (failed-only / benign)"
+        return OracleSignal(
+            kind=OracleKind.CREDENTIAL_STUFFING, fired=False, confidence=0.0,
+            evidence=f"no credential stuffing confirmed: {why}", observed=observed)
+
+    confidence = min(0.99, 1.0 - fwer)
+    detail = "; ".join(
+        f"source {f['source']!r}: {f['n_unseen']} unseen-account successes over "
+        f"{f['distinct_accounts']} accounts (LLR={f['llr']:.2f}, p={f['p_value']:.2g})"
+        for f in confirmed)
+    return OracleSignal(
+        kind=OracleKind.CREDENTIAL_STUFFING, fired=True, confidence=confidence,
+        evidence=(f"credential stuffing / ATO confirmed for {len(confirmed)} source identity(ies) "
+                  f"(SPRT crossed + Holm family-wise control at fwer={fwer}): {detail}"),
+        observed=observed)
 
 
 # ---------------------------------------------------------------------------

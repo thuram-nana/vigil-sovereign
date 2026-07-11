@@ -247,6 +247,17 @@ class FindingContext(BaseModel):
     honeypot_paths: list[str] | None = None
     crawler_allowlisted: bool | None = None
 
+    # AEGIS credential_stuffing_oracle (SPRT over unseen-(account, source) auth SUCCESS outcomes,
+    # Holm-controlled across identities). The retained events carry ONLY {account, source, success}
+    # where account/source are keyed-HMAC pseudonyms — no raw username/IP enters the certificate.
+    auth_events: list[dict[str, Any]] | None = None
+    benign_sources: list[str] | None = None
+    credstuff_alpha: float | None = None
+    credstuff_beta: float | None = None
+    credstuff_p1: float | None = None
+    credstuff_p0: float | None = None
+    credstuff_fwer: float | None = None
+
     # version_range_oracle (a package version provably falls in an advisory's affected range)
     version_advisory: dict[str, Any] | None = None
     # policy_path_oracle (a real IAM grant path lets a principal reach a resource) — the retained raw
@@ -557,6 +568,38 @@ class FindingContext(BaseModel):
             crawler_allowlisted=bool(crawler_allowlisted),
         )
 
+    @classmethod
+    def from_auth_activity(
+        cls,
+        auth_events: Sequence[Mapping[str, Any]],
+        *,
+        benign_sources: Sequence[str] | None = None,
+        bug_class: str = "credential_stuffing",
+    ) -> "FindingContext":
+        """An ORDERED auth-outcome window (each ``{account, source, success}``, identifiers already
+        keyed-HMAC pseudonymised at the ingest boundary) for the credential-stuffing oracle.
+        Confirms ATO only when a source's UNSEEN-(account, source) SUCCESSES cross the SPRT AND
+        survive the Holm family-wise control across identities; a failed-only burst confirms
+        nothing (it yields no SPRT round).
+
+        Only the three structural fields are retained — a caller-supplied event that also carries a
+        raw username / IP / user-agent is NOT laundered into the certificate (the oracle reads only
+        these keys, so nothing else is evidence). ``benign_sources`` is the operator's known-good
+        egress allowlist (a documented NAT/CGNAT) whose successes REFUTE."""
+        retained = [
+            {"account": _coerce_text(e.get("account")),
+             "source": _coerce_text(e.get("source")),
+             "success": bool(e.get("success", False))}
+            for e in (auth_events or []) if isinstance(e, Mapping)
+        ]
+        return cls(
+            bug_class=bug_class,
+            auth_events=retained,
+            benign_sources=(
+                [_coerce_text(s) for s in benign_sources] if benign_sources is not None else None
+            ),
+        )
+
     # -- combination -------------------------------------------------------
 
     def merge(self, other: "FindingContext") -> "FindingContext":
@@ -644,4 +687,12 @@ class FindingContext(BaseModel):
             ctx["honeypot_paths"] = self.honeypot_paths
             if self.crawler_allowlisted is not None:
                 ctx["crawler_allowlisted"] = self.crawler_allowlisted
+        if self.auth_events is not None:
+            ctx["auth_events"] = self.auth_events
+            if self.benign_sources is not None:
+                ctx["benign_sources"] = self.benign_sources
+            for k in ("alpha", "beta", "p1", "p0", "fwer"):
+                v = getattr(self, f"credstuff_{k}")
+                if v is not None:
+                    ctx[f"credstuff_{k}"] = v
         return ctx

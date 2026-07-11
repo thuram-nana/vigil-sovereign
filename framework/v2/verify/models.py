@@ -56,6 +56,7 @@ class OracleKind(str, enum.Enum):
     PROMPT_INJECTION = "prompt_injection"             # an injected directive PROVABLY flipped a structurally-detectable LLM behavior (control-vs-treatment)
     SYSTEM_PROMPT_DISCLOSURE = "system_prompt_disclosure"  # a planted high-entropy canary sentinel appeared VERBATIM in the app's own LLM output
     AUTOMATED_ACCESS = "automated_access"             # a non-interactive client fetched a honeypot resource no human UI links (set-membership)
+    CREDENTIAL_STUFFING = "credential_stuffing"       # a source achieved SPRT-significant successful logins across many UNSEEN (account, source) pairs (ATO), Holm-controlled across identities
 
 
 class OracleProbe(BaseModel):
