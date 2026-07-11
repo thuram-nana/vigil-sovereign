@@ -209,8 +209,8 @@ class AutonomousCampaign:
         ]
 
         paths = self._extract_paths(world)
-        # quantum-inspired: pick the most valuable path set within the detection
-        # budget (simulated annealing over the 0/1 path-portfolio knapsack).
+        # pick the most valuable path set within the detection budget (exact 0/1
+        # knapsack over the path portfolio).
         portfolio: list[AttackPath] = []
         if paths:
             sel = anneal_path_portfolio(paths, budget=self.detection_budget, rng=random.Random(0))
