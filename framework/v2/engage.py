@@ -671,6 +671,42 @@ def _resolve_oob_relay_secret(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: object) -> object:
+    """Opt-in AUTONOMOUS OODA cycle over the authoritative engagement result. Additive and default-
+    OFF (runs only under ``--autonomous``), so the default engage path never imports this module and
+    stays byte-identical. Best-effort: the cycle is telemetry over the already-authoritative scan —
+    a failure here never changes the report, the findings, or the exit status. Returns the
+    ``engage_autonomous.AutonomyResult`` (or None on any error).
+
+    The A/B/F seam: ``run_autonomous_cycle`` optionally calls ``engage_fusion.fuse_sensors`` (WS-B)
+    and ``engage_reasoning.reason_step`` (WS-F), each with a graceful no-op fallback, so this works
+    standalone today and composes automatically when those land."""
+    try:
+        from .engage_autonomous import render_summary, run_autonomous_cycle
+    except Exception:
+        return None
+    try:
+        out = run_autonomous_cycle(
+            result, slug=args.slug,
+            max_cycles=max(1, int(getattr(args, "autonomous_cycles", 1))),
+            request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
+            prompt_callback=prompt_callback_from_args(args),
+            blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
+        )
+        for line in render_summary(out):
+            print(line)
+        return out
+    except Exception:
+        # the autonomous cycle is value-add telemetry; a failure never sinks the engagement
+        return None
+
+
+def prompt_callback_from_args(args: argparse.Namespace) -> PromptCallback | None:
+    """The operator-confirmation callback the autonomous cycle threads into destructive-confirm.
+    None → the invoker's default-deny (a destructive tool is refused unless explicitly approved)."""
+    return None
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 engage",
@@ -757,6 +793,18 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--defender-log-format", default="auto",
                         choices=["auto", "syslog", "cef", "evtx_json"],
                         help="Format of --defender-log (default: auto-detect).")
+    parser.add_argument("--autonomous", action="store_true",
+                        help="AUTONOMOUS OODA cycle (opt-in; off = byte-identical). After the "
+                             "authoritative scan, construct the Planner over the run world-model, "
+                             "pick the next action (a leaf on the highest-value route to a crown "
+                             "jewel), drive it as a GATED tool call (fail-closed: kill-switch/"
+                             "entitlement/scope/destructive/egress), fold the observation back into "
+                             "the world-model, and let the planner re-orient. Localhost/authorized "
+                             "only; never mutates a finding or an oracle verdict.")
+    parser.add_argument("--autonomous-cycles", type=int, default=1, metavar="N",
+                        help="Bounded number of OODA cycles for --autonomous (default 1).")
+    parser.add_argument("--autonomous-budget", type=int, default=8, metavar="N",
+                        help="Request budget the autonomous planner is constructed with (default 8).")
     args = parser.parse_args(argv)
 
     spine = None
@@ -865,4 +913,8 @@ def main(argv: list[str]) -> int:
             print(f"  ingested logs     : {defense.ingested_events} event(s); "
                   f"{len(defense.ingested.matched_rule_ids)} Sigma rule(s) fired "
                   f"(ATT&CK {defense.ingested.techniques_detected or 'none'})")
+    # Opt-in AUTONOMOUS OODA cycle (default OFF → this whole block is skipped and the engagement is
+    # byte-identical). It runs AFTER the authoritative scan/report is printed and never changes it.
+    if getattr(args, "autonomous", False):
+        _run_autonomous(args, result, spine)
     return 0
