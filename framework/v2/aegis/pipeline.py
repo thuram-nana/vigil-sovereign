@@ -97,7 +97,8 @@ def detect(
         observations = LLMInteractionSensor(config).observations(env, seq=env.seq)
     elif env.surface is Surface.REQUEST:
         observations = RequestTelemetrySensor(config).observations(
-            env, seq=env.seq, crawler_allowlisted=crawler_allowlisted)
+            env, seq=env.seq, crawler_allowlisted=crawler_allowlisted,
+            honeypot_paths=guard.honeypot_paths)
     actor_graph.observe_all(observations)
     contributing = [o.obs_id for o in observations]
 

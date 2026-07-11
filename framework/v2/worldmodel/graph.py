@@ -154,6 +154,22 @@ class WorldModel:
     def has_node(self, node_id: str) -> bool:
         return node_id in self._nodes
 
+    def remove_node(self, node_id: str) -> bool:
+        """Remove a node and every edge incident to it (both directions). Returns True if the
+        node existed. Additive/opt-in — used by bounded producers (e.g. AEGIS's per-actor
+        windowing) to evict an aged-out actor so the graph does not grow without bound; nothing
+        in the batch engagement path calls it, so existing behaviour is unchanged."""
+        if node_id not in self._nodes:
+            return False
+        for dst in list(self._out.get(node_id, {})):
+            self._in.get(dst, {}).pop(node_id, None)
+        for src in list(self._in.get(node_id, {})):
+            self._out.get(src, {}).pop(node_id, None)
+        self._out.pop(node_id, None)
+        self._in.pop(node_id, None)
+        self._nodes.pop(node_id, None)
+        return True
+
     def nodes_of_kind(self, kind: NodeKind) -> list[Node]:
         """All nodes of a kind, in deterministic (id-sorted) order."""
         return [n for _, n in sorted(self._nodes.items()) if n.kind == kind]

@@ -44,6 +44,48 @@ def _coerce_text(value: Any) -> str:
     return str(value)
 
 
+# The bounded window AEGIS retains around a disclosed canary (PR1 privacy contract): the
+# sentinel is kept VERBATIM (so the oracle re-fires offline) plus a small context margin,
+# and the rest of the model transcript is dropped — never the whole output.
+_DISCLOSURE_MARGIN = 32
+
+
+def _bounded_disclosure_span(canary: str, output: Any, *, margin: int = _DISCLOSURE_MARGIN) -> str:
+    """Retain ONLY a bounded window around the canary's occurrence — the sentinel kept
+    verbatim (the reverify contract needs it) plus ``margin`` chars of context each side. If
+    the canary is absent (the oracle would not fire) retain NOTHING, so a non-disclosing
+    transcript is never over-retained into a certificate. PR1: the class-1 certificate holds
+    the sentinel + a bounded redacted span, never the raw transcript / PII."""
+    c = _coerce_text(canary)
+    o = _coerce_text(output)
+    if not c:
+        return ""
+    idx = o.find(c)
+    if idx < 0:
+        return ""
+    start = max(0, idx - margin)
+    end = min(len(o), idx + len(c) + margin)
+    span = o[start:end]
+    if start > 0:
+        span = "..." + span
+    if end < len(o):
+        span = span + "..."
+    return span
+
+
+# The ONLY structural behavior fields the prompt-injection oracle reads; anything else a
+# caller puts in a behavior dict (e.g. a raw transcript) is dropped, never retained.
+_PI_BEHAVIOR_KEYS = ("tool", "refused", "boundary_token_echoed")
+
+
+def _pi_retained(obs: Any) -> dict[str, Any]:
+    """Keep ONLY the three structurally-detectable fields the prompt-injection oracle compares
+    — so a behavior dict that also carries raw prompt/response text is not laundered into the
+    retained certificate. JSON-safe + deterministic."""
+    src = dict(obs) if isinstance(obs, Mapping) else {}
+    return {k: src[k] for k in _PI_BEHAVIOR_KEYS if k in src}
+
+
 def _response_to_dict(value: Any, latency_ms: float | None = None) -> dict[str, Any]:
     """Normalise one observed HTTP response into `{status?, body, latency_ms?}`.
 
@@ -465,12 +507,13 @@ class FindingContext(BaseModel):
     ) -> "FindingContext":
         """A planted canary sentinel plus the app's own LLM output, for the system-prompt-
         disclosure oracle. Confirms the SECRET LEAKED (the sentinel appeared verbatim) — not
-        that an injection caused it. The retained plaintext (PR1) lets the certificate re-fire
-        offline; the caller redacts PII from ``llm_output`` at the ingest boundary first."""
+        that an injection caused it. PR1: we retain ONLY a bounded window around the canary
+        (sentinel kept verbatim so the certificate re-fires offline), NOT the whole model
+        output — so a transcript that also contains PII/credentials is not over-retained."""
         return cls(
             bug_class=bug_class,
             canary=_coerce_text(canary),
-            llm_output=_coerce_text(llm_output),
+            llm_output=_bounded_disclosure_span(canary, llm_output),
         )
 
     @classmethod
@@ -484,11 +527,15 @@ class FindingContext(BaseModel):
         """A clean control-turn behavior obs vs the attacker treatment-turn behavior obs, for
         the prompt-injection oracle. Each is a JSON-safe mapping over the structurally-
         detectable fields {tool, refused, boundary_token_echoed}. Confirms injection ONLY on a
-        provable behavior delta (never on markers alone)."""
+        provable behavior delta (never on markers alone).
+
+        Retains ONLY those three structural fields — a caller-supplied behavior dict that also
+        carries a raw prompt/response transcript is NOT retained into the certificate (privacy:
+        the oracle reads only these keys, so nothing else is evidence)."""
         return cls(
             bug_class=bug_class,
-            pi_control={str(k): v for k, v in dict(control or {}).items()},
-            pi_treatment={str(k): v for k, v in dict(treatment or {}).items()},
+            pi_control=_pi_retained(control),
+            pi_treatment=_pi_retained(treatment),
         )
 
     @classmethod

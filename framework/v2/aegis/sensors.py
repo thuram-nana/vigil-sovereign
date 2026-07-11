@@ -17,6 +17,8 @@ belief never inflates from input ordering.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..agents.tools import ToolContext, ToolResult
 from ..intel.models import (
     Credibility,
@@ -113,11 +115,16 @@ class RequestTelemetrySensor:
         crawler_allowlisted = bool(result.output.get("crawler_allowlisted", False))
         return self.observations(env, seq=seq, crawler_allowlisted=crawler_allowlisted)
 
-    def observations(self, env: TelemetryEnvelope, *, seq: int, crawler_allowlisted: bool = False) -> list[Observation]:
+    def observations(self, env: TelemetryEnvelope, *, seq: int, crawler_allowlisted: bool = False,
+                     honeypot_paths: Any = None) -> list[Observation]:
         if env.requested_path is None:
             return []
         subject = _actor_ref(env)
-        is_honeypot = env.requested_path in set(self._config.honeypot_paths)
+        # Single source of truth: when the caller (the pipeline) passes the guard's live
+        # honeypot set, use it — so the sensor's lead-tagging can never desync from the
+        # AUTOMATED_ACCESS oracle (which judges membership against the same guard set).
+        paths = set(honeypot_paths) if honeypot_paths is not None else set(self._config.honeypot_paths)
+        is_honeypot = env.requested_path in paths
         if is_honeypot and not crawler_allowlisted:
             return [_mint(subject, source_kind=IntelSourceKind.REQUEST_TELEMETRY, seq=seq,
                           claim="honeypot_fetch", confidence=0.6, polarity=Polarity.AFFIRMS,

@@ -56,4 +56,7 @@ class ActorGraph:
 
     def _evict(self) -> None:
         while len(self._counts) > self._max_actors:
-            self._counts.popitem(last=False)   # drop the least-recently-updated actor
+            actor_id, _ = self._counts.popitem(last=False)  # least-recently-updated actor
+            # Also drop the actor's node from the world-model, else the graph grows unbounded
+            # despite the LRU cap — the belief cache and the graph must evict together.
+            self.world.remove_node(actor_id)
