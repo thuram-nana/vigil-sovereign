@@ -107,6 +107,39 @@ def test_commands_group_includes_existing_and_new_subcommands() -> None:
     assert "capabilities" in names
 
 
+def test_checks_group_discovers_the_scanner_audit_arsenal() -> None:
+    # The catalog discovers the scanner CHECK arsenal (scanner.checks + scanner.library),
+    # read-only — the actual audit units `scan` runs, which the roster previously omitted.
+    cat = capability_registry(plugins=PluginRegistry())
+    by = {d.name: d for d in cat.checks}
+    assert by, "no checks discovered"
+    assert all(d.kind == "check" and d.origin == "builtin" for d in cat.checks)
+    # a built-in seed check (scanner.checks.DEFAULT_CHECKS) is present, naming its bug_class
+    seed = by["boolean-sqli"]
+    assert seed.produces == ("boolean_sqli",)
+    # a declarative library entry is discovered too (both sources are introspected)
+    from framework.v2.scanner.library import load_library
+    lib_ids = {e.id for e in load_library()}
+    assert lib_ids & set(by), "no library entries discovered as checks"
+    # discovery is not invocation: every check produces exactly a bug_class string
+    for d in cat.checks:
+        assert all(isinstance(p, str) for p in d.produces)
+
+
+def test_aegis_group_lists_the_ai_attack_detection_classes() -> None:
+    # The AEGIS detection classes are surfaced (they extend the shared verifier vocabulary),
+    # each naming the ONE oracle that confirms it — discovery only, never invocation.
+    from framework.v2.aegis.registry import AEGIS_BUG_CLASS_ORACLES
+
+    cat = capability_registry(plugins=PluginRegistry())
+    by = {d.name: d for d in cat.aegis}
+    assert set(by) == set(AEGIS_BUG_CLASS_ORACLES)
+    assert {"prompt_injection", "system_prompt_disclosure"} <= set(by)
+    assert all(d.kind == "aegis" for d in cat.aegis)
+    pi = by["prompt_injection"]
+    assert pi.provable_by == (AEGIS_BUG_CLASS_ORACLES["prompt_injection"].value,)
+
+
 # ---------------------------------------------------------------------------
 # Determinism
 # ---------------------------------------------------------------------------

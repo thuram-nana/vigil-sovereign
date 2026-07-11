@@ -76,9 +76,9 @@ def _registry_with_spy() -> tuple[ToolRegistry, _SpyHostTool]:
 
 
 @contextmanager
-def _running(registry=None, import_store_factory=None):
+def _running(registry=None, import_store_factory=None, api_key=None):
     httpd = server.serve(host="127.0.0.1", port=0, registry=registry,
-                         import_store_factory=import_store_factory)
+                         import_store_factory=import_store_factory, api_key=api_key)
     port = httpd.server_address[1]
     th = threading.Thread(target=httpd.serve_forever, daemon=True)
     th.start()
@@ -290,3 +290,63 @@ def test_destructive_tool_refused_on_api() -> None:
         assert st == 200 and body["refused"] is True
         assert body["gate"] == "destructive-confirm"
     assert dtool.ran is False
+
+
+# ---------------------------------------------------------------------------
+# OPTIONAL API-key hardening (api.authn) — stacked ON TOP of loopback + same-origin
+# ---------------------------------------------------------------------------
+
+
+def _get_status(url: str, *, headers=None) -> int:
+    req = urllib.request.Request(url, method="GET")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def test_api_key_refuses_absent_or_wrong_key_when_configured() -> None:
+    # With a key configured, EVERY request (read AND action) must present it — fail-closed.
+    with _running(api_key="s3cret") as base:
+        # GET: no key -> 401; wrong key -> 403; right key -> 200.
+        assert _get_status(base + "/status") == 401
+        assert _get_status(base + "/status", headers={"X-Relay-Key": "nope"}) == 403
+        assert _get_status(base + "/status", headers={"X-Relay-Key": "s3cret"}) == 200
+        # the key is also accepted as a standard bearer token.
+        assert _get_status(base + "/status", headers={"Authorization": "Bearer s3cret"}) == 200
+        # POST: no key -> 401 (before the same-origin/body handling); right key -> 200.
+        st, body = _post(base + "/tool/invoke", {"tool": "reverify_finding"},
+                         headers={"X-Relay-Key": "wrong"})
+        assert st == 403
+        st, _ = _post(base + "/tool/invoke", {"tool": "reverify_finding"}, csrf=False)
+        assert st == 401  # absent key is refused BEFORE the same-origin guard even fires
+        # a correct key still has to pass the existing same-origin (csrf) guard on top.
+        st, body = _post(base + "/tool/invoke",
+                         {"slug": "demo", "tool": "reverify_finding",
+                          "args": {"finding": {"bug_class": "xss", "oracle_context": None}}},
+                         headers={"Authorization": "Bearer s3cret"})
+        assert st == 200 and body["ok"] is True
+
+
+def test_api_key_is_noop_when_unset(monkeypatch) -> None:
+    # The default (no key configured, env unset) is UNCHANGED behaviour: reads and gated
+    # actions work with NO key header at all — the loopback + same-origin guards still apply.
+    monkeypatch.delenv("CRUCIBLE_API_KEY", raising=False)
+    with _running() as base:
+        assert _get_status(base + "/status") == 200
+        st, body = _post(base + "/tool/invoke",
+                         {"slug": "demo", "tool": "reverify_finding",
+                          "args": {"finding": {"bug_class": "xss", "oracle_context": None}}})
+        assert st == 200 and body["ok"] is True
+
+
+def test_api_key_loaded_from_env_when_not_passed(monkeypatch) -> None:
+    # serve(api_key=None) falls back to CRUCIBLE_API_KEY, so an operator can front the API
+    # behind a proxy purely via the environment.
+    monkeypatch.setenv("CRUCIBLE_API_KEY", "envkey")
+    with _running() as base:
+        assert _get_status(base + "/status") == 401
+        assert _get_status(base + "/status", headers={"X-Relay-Key": "envkey"}) == 200

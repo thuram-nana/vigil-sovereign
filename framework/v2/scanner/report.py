@@ -280,7 +280,19 @@ def to_json(report: ScanReport, *, attack_paths: list | None = None,
 
 def to_sarif(report: ScanReport, *, grounding: list | None = None,
              strict_evidence: bool = False) -> str:
-    """SARIF 2.1.0 — one rule per bug class, one result per finding."""
+    """SARIF 2.1.0 — one rule per bug class, one result per finding.
+
+    The SARIF envelope + tool-driver identity are delegated to the shared
+    :func:`report.export.sarif_document` dialect, so ``scan --format sarif`` and
+    ``report --format sarif`` emit the SAME dialect from the SAME producer (no drift in
+    ``$schema`` / version / tool identity). Only the rules + results are built here, over
+    the scan's OWN finding shape: a ``ScanReport`` result keeps its ``kind`` /
+    ``confirmedBy`` / ``reVerifiable`` / CWE-refs properties (which the graded ``report``
+    export does not carry), so full delegation over a single findings list is NOT possible
+    without dropping fields ``scan``'s consumers/tests depend on — the shared piece is the
+    dialect, not the finding schema."""
+    from ..report.export import sarif_document
+
     doc = build_report(report, grounding=grounding, strict_evidence=strict_evidence)
     rules: dict[str, dict] = {}
     results: list[dict] = []
@@ -305,18 +317,7 @@ def to_sarif(report: ScanReport, *, grounding: list | None = None,
                 "grounding": f.get("grounding", "unclassified"),
             },
         })
-    sarif = {
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "CRUCIBLE",
-                "informationUri": "https://github.com/Water-Hacker/PENTEST",
-                "rules": list(rules.values()),
-            }},
-            "results": results,
-        }],
-    }
+    sarif = sarif_document(rules.values(), results)
     return json.dumps(sarif, indent=2, ensure_ascii=False)
 
 
