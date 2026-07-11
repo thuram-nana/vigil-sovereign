@@ -54,6 +54,7 @@ _ALTERNATIVES: dict[str, tuple[str, str]] = {
     "prompt_injection": ("benign-edge-prompt", "a benign edge-case prompt quoting override text — behavior unchanged vs the control"),
     "system_prompt_disclosure": ("benign-instruction-echo", "the app/user benignly asked the model to repeat its instructions — leaked, but not attacker-caused"),
     "automated_access": ("benign-automation", "a link-unfurl bot / prefetch / uptime monitor fetched the resource — automated but not adversarial"),
+    "credential_stuffing": ("benign-nat-bulk", "many distinct users behind one NAT/CGNAT egress or an SSO gateway — a shared source with legitimate logins, not one attacker's dump replay"),
 }
 _GENERIC_ALT = ("benign", "a benign behaviour that resembles this bug class")
 

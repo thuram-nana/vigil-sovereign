@@ -39,6 +39,8 @@ from .guard import LLMGuard
 from .models import (
     ActorRef,
     AegisConfig,
+    AuthActivity,
+    AuthEvent,
     BeliefRef,
     CertRef,
     LLMInteraction,
@@ -55,6 +57,8 @@ __all__ = [
     "Verdict",
     "ActorRef",
     "LLMInteraction",
+    "AuthActivity",
+    "AuthEvent",
     "TelemetryEnvelope",
     "AegisConfig",
     "CertRef",
@@ -145,14 +149,25 @@ class Aegis:
     # -- passive detection (tier A) ---------------------------------------
     def observe(self, *, surface: Surface, actor: ActorRef, seq: int | None = None,
                 requested_path: str | None = None, llm: LLMInteraction | None = None,
+                auth: AuthActivity | None = None,
                 crawler_allowlisted: bool = False) -> Verdict:
         """Ingest one telemetry unit and return a Verdict. PASSIVE and read-only — the default
         ``observe`` mode never invokes a response Tool."""
         seq = self.next_seq() if seq is None else seq
         env = TelemetryEnvelope(surface=surface, actor=actor, seq=seq,
-                                requested_path=requested_path, llm=llm)
+                                requested_path=requested_path, llm=llm, auth=auth)
         return detect(env, config=self.config, guard=self.guard,
                       actor_graph=self.actor_graph, crawler_allowlisted=crawler_allowlisted)
+
+    # -- auth-outcome window (credential-stuffing / ATO) ------------------
+    def observe_auth(self, actor: ActorRef, events: "list[AuthEvent | dict[str, Any]]", *,
+                     benign_sources: list[str] | None = None, seq: int | None = None) -> Verdict:
+        """Ingest one actor's ORDERED auth-outcome window and return a Verdict. Confirms
+        ``credential_stuffing`` only when a source's UNSEEN-(account, source) SUCCESSES cross the
+        SPRT + Holm family-wise control; a failed-only burst stays a LEAD. PASSIVE / read-only."""
+        norm = [e if isinstance(e, AuthEvent) else AuthEvent.model_validate(e) for e in (events or [])]
+        auth = AuthActivity(events=norm, benign_sources=list(benign_sources or []))
+        return self.observe(surface=Surface.AUTH, actor=actor, seq=seq, auth=auth)
 
     # -- explicit LLM guard (tier B) --------------------------------------
     @contextmanager

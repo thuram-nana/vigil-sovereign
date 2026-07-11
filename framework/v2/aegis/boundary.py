@@ -30,7 +30,14 @@ import re
 import unicodedata
 from typing import Any
 
-from .models import ActorRef, AegisConfig, LLMInteraction, TelemetryEnvelope
+from .models import (
+    ActorRef,
+    AegisConfig,
+    AuthActivity,
+    AuthEvent,
+    LLMInteraction,
+    TelemetryEnvelope,
+)
 
 
 class BoundaryError(ValueError):
@@ -112,6 +119,17 @@ def redact_actor(actor: ActorRef, *, secret: str) -> ActorRef:
         session=hmac_id(actor.session, secret=secret),
         principal=hmac_id(actor.principal, secret=secret),
     )
+
+
+def pseudonymize_source(value: str, *, secret: str) -> str:
+    """Pseudonymise an auth-event source identifier (PR2): coarsen to its /24 (v4) / /48 (v6)
+    network then keyed-HMAC if it parses as an IP — so a NAT/CGNAT egress collapses to ONE
+    pseudonym (the benign twin's shared source) — else HMAC the raw token (a session/device id).
+    Empty in → empty out. Deterministic under the deployment key."""
+    if not value:
+        return ""
+    net = coarsen_ip(value)
+    return hmac_id(net, secret=secret) if net else hmac_id(value, secret=secret)
 
 
 # --- structural-override markers (LEAD signals; ReDoS-safe substring scan) --------------
@@ -230,4 +248,26 @@ def ingest(raw: Any, config: AegisConfig) -> TelemetryEnvelope:
         normalize_text(env.requested_path, max_chars=config.max_field_chars)
         if env.requested_path is not None else None
     )
-    return env.model_copy(update={"actor": actor, "llm": llm, "requested_path": requested_path})
+    # 5. AUTH surface — bound the window and pseudonymise every identifier. An empty source
+    #    defaults to the actor's own pseudonym (single-source window); a provided source is
+    #    coarsened+HMAC'd so a NAT/CGNAT egress collapses to one pseudonym. No raw PII survives.
+    auth = env.auth
+    if auth is not None:
+        default_source = actor.stable_key
+        red_events = []
+        for e in auth.events[: config.max_auth_events]:
+            acct_raw = normalize_text(e.account, max_chars=config.max_field_chars)
+            src_raw = normalize_text(e.source, max_chars=config.max_field_chars)
+            red_events.append(AuthEvent(
+                account=hmac_id(acct_raw, secret=config.deployment_secret) if acct_raw else "",
+                source=(pseudonymize_source(src_raw, secret=config.deployment_secret)
+                        if src_raw else default_source),
+                success=e.success,
+            ))
+        benign = [
+            pseudonymize_source(normalize_text(s, max_chars=config.max_field_chars),
+                                secret=config.deployment_secret)
+            for s in auth.benign_sources if s
+        ]
+        auth = AuthActivity(events=red_events, benign_sources=benign)
+    return env.model_copy(update={"actor": actor, "llm": llm, "requested_path": requested_path, "auth": auth})

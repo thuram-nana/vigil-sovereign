@@ -65,6 +65,8 @@ class IntelSourceKind(str, enum.Enum):
     # (system_prompt_disclosure / prompt_injection / automated_access) re-fires over retained evidence.
     REQUEST_TELEMETRY = "request_telemetry"  # in-request-path metadata (method/path/honeypot hit) — a LEAD
     LLM_INTERACTION = "llm_interaction"      # the app's own LLM I/O (prompt/output/canary/behavior) — a LEAD
+    AUTH_TELEMETRY = "auth_telemetry"        # auth-outcome events (account/source/success) — a LEAD; credential
+    #                                          stuffing is a FACT only when the credential_stuffing oracle re-fires
 
 
 _REL_W = {Reliability.A: 1.0, Reliability.B: 0.85, Reliability.C: 0.65,

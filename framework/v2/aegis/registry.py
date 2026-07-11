@@ -27,6 +27,7 @@ AEGIS_BUG_CLASS_ORACLES: dict[str, OracleKind] = {
     "prompt_injection": OracleKind.PROMPT_INJECTION,
     "system_prompt_disclosure": OracleKind.SYSTEM_PROMPT_DISCLOSURE,
     "automated_access": OracleKind.AUTOMATED_ACCESS,
+    "credential_stuffing": OracleKind.CREDENTIAL_STUFFING,
 }
 
 # Aliases folded onto the honest canonical classes (never their own confirmed class).
@@ -34,12 +35,14 @@ AEGIS_ALIASES: dict[str, str] = {
     "jailbreak": "prompt_injection",
     "system_prompt_leak": "system_prompt_disclosure",
     "automated_scraping": "automated_access",   # honeypot proves AUTOMATION, not "scraping" (P1)
+    "account_takeover": "credential_stuffing",  # the SAME provable signature (unseen-pair successes)
 }
 
 # The inbound telemetry source kinds (LEAD tier).
 AEGIS_SOURCE_KINDS: tuple[IntelSourceKind, ...] = (
     IntelSourceKind.REQUEST_TELEMETRY,
     IntelSourceKind.LLM_INTERACTION,
+    IntelSourceKind.AUTH_TELEMETRY,
 )
 
 
