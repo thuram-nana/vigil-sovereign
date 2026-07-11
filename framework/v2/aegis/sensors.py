@@ -138,3 +138,71 @@ class RequestTelemetrySensor:
         return [_mint(subject, source_kind=IntelSourceKind.REQUEST_TELEMETRY, seq=seq,
                       claim="request", confidence=0.15, polarity=Polarity.AFFIRMS,
                       evidence=f"request for {env.requested_path!r}")]
+
+
+class AuthTelemetrySensor:
+    """Normalises one auth-outcome window into per-actor observations (source_kind
+    ``auth_telemetry``). Passive: it inspects already-observed login outcomes; it never
+    authenticates anyone.
+
+    A breadth of UNSEEN-(account, source) SUCCESSES across many accounts RAISES belief (a LEAD —
+    the credential_stuffing oracle CONFIRMS). A failed-only burst stays a LEAD (it raises
+    suspicion but can never be confirmed — the NAT/CGNAT benign twin). A benign returning-user
+    window REFUTES. Allowlisted known-good egress sources are excluded (their successes REFUTE)."""
+
+    name = "aegis.auth_telemetry"
+
+    def __init__(self, config: AegisConfig) -> None:
+        self._config = config
+
+    def run(self, args: dict, ctx: ToolContext) -> ToolResult:
+        return ToolResult(ok=True, summary="aegis auth telemetry (passive)", output=dict(args or {}))
+
+    def normalize(self, result: ToolResult, ctx: ToolContext, *, seq: int) -> list[Observation]:
+        env = TelemetryEnvelope.model_validate(result.output.get("envelope"))
+        return self.observations(env, seq=seq)
+
+    def observations(self, env: TelemetryEnvelope, *, seq: int) -> list[Observation]:
+        if env.auth is None:
+            return []
+        subject = _actor_ref(env)
+        allow = set(env.auth.benign_sources)
+        # replay (bounded — the boundary already capped the window): count unseen-(account, source)
+        # successes and the fail/success mix over the NON-allowlisted sources. Deterministic.
+        seen: set[tuple[str, str]] = set()
+        unseen_success = 0
+        n_success = 0
+        n_failure = 0
+        for e in env.auth.events:
+            if e.source in allow:
+                continue
+            if e.success:
+                n_success += 1
+                key = (e.source, e.account)
+                if key not in seen:
+                    unseen_success += 1
+                    seen.add(key)
+            else:
+                n_failure += 1
+        out = [_mint(subject, source_kind=IntelSourceKind.AUTH_TELEMETRY, seq=seq,
+                     claim="auth_window", confidence=0.2, polarity=Polarity.AFFIRMS,
+                     evidence=f"auth window of {len(env.auth.events)} outcome(s)")]
+        if unseen_success >= 2:
+            # breadth of unseen-pair successes RAISES belief — a LEAD; only the oracle confirms.
+            out.append(_mint(subject, source_kind=IntelSourceKind.AUTH_TELEMETRY, seq=seq,
+                             claim="unseen_pair_successes", confidence=0.55, polarity=Polarity.AFFIRMS,
+                             evidence=f"{unseen_success} unseen-(account, source) successes across accounts",
+                             attrs={"unseen_success": unseen_success, "distinct": len(seen)}))
+        elif n_failure and not n_success:
+            # a failed-only burst is a LEAD (raises suspicion) but can NEVER be confirmed here
+            # (the oracle keys on successes) — the NAT/CGNAT benign twin.
+            out.append(_mint(subject, source_kind=IntelSourceKind.AUTH_TELEMETRY, seq=seq,
+                             claim="failed_burst", confidence=0.5, polarity=Polarity.AFFIRMS,
+                             evidence=f"{n_failure} failed logins, no successes — stays a LEAD (NAT/CGNAT twin)",
+                             attrs={"failures": n_failure}))
+        else:
+            # a returning-user window (repeat successes / few unseen pairs) REFUTES.
+            out.append(_mint(subject, source_kind=IntelSourceKind.AUTH_TELEMETRY, seq=seq,
+                             claim="benign_auth", confidence=0.5, polarity=Polarity.REFUTES,
+                             evidence="auth window consistent with returning users (benign)"))
+        return out

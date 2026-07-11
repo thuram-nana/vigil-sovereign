@@ -41,7 +41,7 @@ from .models import (
     TelemetryEnvelope,
     Verdict,
 )
-from .sensors import LLMInteractionSensor, RequestTelemetrySensor
+from .sensors import AuthTelemetrySensor, LLMInteractionSensor, RequestTelemetrySensor
 
 _LEAD_PRIOR = 0.4     # a structural-marker LEAD seeds the SCE weakly — the benign twin stays live
 _CLEAR_PRIOR = 0.05
@@ -70,6 +70,11 @@ def _candidates(env: TelemetryEnvelope, guard: LLMGuard, *, crawler_allowlisted:
     elif env.surface is Surface.REQUEST and env.requested_path is not None:
         out.append(("automated_access",
                     guard.honeypot_context(env.requested_path, crawler_allowlisted=crawler_allowlisted)))
+    elif env.surface is Surface.AUTH and env.auth is not None:
+        out.append(("credential_stuffing",
+                    FindingContext.from_auth_activity(
+                        [e.model_dump() for e in env.auth.events],
+                        benign_sources=env.auth.benign_sources)))
     return out
 
 
@@ -99,6 +104,8 @@ def detect(
         observations = RequestTelemetrySensor(config).observations(
             env, seq=env.seq, crawler_allowlisted=crawler_allowlisted,
             honeypot_paths=guard.honeypot_paths)
+    elif env.surface is Surface.AUTH:
+        observations = AuthTelemetrySensor(config).observations(env, seq=env.seq)
     actor_graph.observe_all(observations)
     contributing = [o.obs_id for o in observations]
 

@@ -39,7 +39,7 @@ class Surface(str, enum.Enum):
 
     LLM = "llm"            # the app's own LLM I/O (prompt-injection / system-prompt disclosure)
     REQUEST = "request"    # in-request-path metadata (the honeypot tripwire)
-    AUTH = "auth"          # roadmap: credential-stuffing (LEAD-only in the MVP)
+    AUTH = "auth"          # auth-outcome telemetry (credential-stuffing / ATO — SPRT + Holm confirmed)
     CONTENT = "content"    # roadmap: stored/indirect injection (LEAD-only in the MVP)
 
 
@@ -84,6 +84,32 @@ class LLMInteraction(BaseModel):
     treatment_behavior: dict[str, Any] | None = None
 
 
+class AuthEvent(BaseModel):
+    """One auth-attempt outcome. Identifiers are RAW at the edge and keyed-HMAC pseudonymised at
+    the ingest boundary (PR2) before they reach the world-model / a certificate — no raw
+    username or IP ever survives into the retained oracle evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account: str = Field(default="", description="Targeted account/username (raw at edge; HMAC'd after boundary).")
+    source: str = Field(default="", description="Credential source / origin (raw at edge; coarsened+HMAC'd after boundary). Empty → the actor.")
+    success: bool = Field(default=False, description="Whether the authentication attempt succeeded.")
+
+
+class AuthActivity(BaseModel):
+    """The AUTH-surface payload: an ORDERED window of the actor's recent auth outcomes (bounded at
+    the boundary), plus the operator's known-good egress allowlist. Credential stuffing / ATO is
+    confirmed only when a source's UNSEEN-(account, source) SUCCESSES cross the SPRT AND survive
+    the Holm family-wise control; a failed-only burst (NAT/CGNAT bulk) confirms nothing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    events: list[AuthEvent] = Field(default_factory=list, description="Ordered auth-outcome window.")
+    benign_sources: list[str] = Field(
+        default_factory=list,
+        description="Operator known-good egress identities (raw at edge; pseudonymised) whose successes REFUTE.")
+
+
 class TelemetryEnvelope(BaseModel):
     """The bounded, safe-parsed unit the SDK/HTTP boundary ingests. ``extra='forbid'`` means
     an unknown key is a parse rejection (fail-closed)."""
@@ -95,6 +121,7 @@ class TelemetryEnvelope(BaseModel):
     seq: int = Field(ge=0, description="Caller-supplied MONOTONIC sequence — never wallclock.")
     requested_path: str | None = Field(default=None, description="REQUEST surface: the fetched path.")
     llm: LLMInteraction | None = Field(default=None, description="LLM surface: the interaction.")
+    auth: AuthActivity | None = Field(default=None, description="AUTH surface: the auth-outcome window.")
 
 
 class BeliefRef(BaseModel):
@@ -199,6 +226,7 @@ class AegisConfig(BaseModel):
     max_envelope_bytes: int = Field(default=65536, gt=0)
     max_depth: int = Field(default=16, gt=0)
     max_field_chars: int = Field(default=8192, gt=0)
+    max_auth_events: int = Field(default=4096, gt=0, description="Bounded AUTH-window size (DoS-safe replay).")
     honeypot_paths: list[str] = Field(default_factory=list)
     crawler_allowlist: list[str] = Field(default_factory=list, description="Known-good crawler/monitor tokens whose fetches REFUTE.")
 
