@@ -111,7 +111,16 @@ from .websocket import CswshCheck, WsMessageInjectionCheck
 from .browser import find_browser, render_dom, scan_dom_xss
 from .browser_crawler import BrowserCrawler, browser_send
 from .domxss import DomXssCandidate, analyze_html, analyze_js
-from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
+from .graphql import (
+    GRAPHQL_DOS_CHECKS,
+    GraphQLAliasCheck,
+    GraphQLBatchingCheck,
+    GraphQLCostCheck,
+    GraphQLDepthCheck,
+    GraphQLDosResult,
+    GraphQLIntrospectionCheck,
+    GraphQLSuggestionsCheck,
+)
 from .insertion import (
     HttpRequest,
     InsertionKind,
@@ -153,6 +162,12 @@ __all__ = [
     "jwt",
     "GraphQLIntrospectionCheck",
     "GraphQLSuggestionsCheck",
+    "GraphQLDepthCheck",
+    "GraphQLAliasCheck",
+    "GraphQLBatchingCheck",
+    "GraphQLCostCheck",
+    "GraphQLDosResult",
+    "GRAPHQL_DOS_CHECKS",
     "graphql",
     # SSO / SAML / OIDC (opt-in; not in the default roster)
     "sso",

@@ -57,6 +57,17 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     "jwt": (OracleKind.ACHIEVED_STATE,),
     "graphql_introspection": (OracleKind.ACHIEVED_STATE,),
     "graphql_suggestions": (OracleKind.ACHIEVED_STATE,),
+    # GraphQL DoS / abuse surface (scanner.graphql, opt-in). Each is confirmed by the
+    # predicate oracle over the RAW amplified response — an unbounded-depth query that
+    # executed, N aliases that all resolved, an M-operation batch that ran — so it fires
+    # only when the guard is actually absent (the amplification came back), never on the
+    # mere presence of a /graphql path. (Query COST stays a LEAD in the scanner: a minimal
+    # probe being accepted cannot prove a cost limit is absent.) Routed to the SAME
+    # ACHIEVED_STATE kind as the other predicate checks, so _ALL_ORACLES is unchanged.
+    "graphql_depth_limit": (OracleKind.ACHIEVED_STATE,),
+    "graphql_alias_overloading": (OracleKind.ACHIEVED_STATE,),
+    "graphql_batching": (OracleKind.ACHIEVED_STATE,),
+    "graphql_cost": (OracleKind.ACHIEVED_STATE,),
     "request_smuggling": (OracleKind.DIFFERENTIAL_RESPONSE,),
     "dom_xss": (OracleKind.DOM_EXECUTION, OracleKind.SIDE_EFFECT),
     "cross_site_websocket_hijacking": (OracleKind.ACHIEVED_STATE,),
@@ -178,6 +189,20 @@ _ALIASES: dict[str, str] = {
     "deprecated_tls": "weak_tls",
     "ssl_weakness": "weak_tls",
     "weak_ssl": "weak_tls",
+    # GraphQL DoS/abuse spelling variants folded onto the canonical classes.
+    "graphql_depth": "graphql_depth_limit",
+    "graphql_query_depth": "graphql_depth_limit",
+    "graphql_deeply_nested_query": "graphql_depth_limit",
+    "graphql_unbounded_depth": "graphql_depth_limit",
+    "graphql_alias": "graphql_alias_overloading",
+    "graphql_alias_abuse": "graphql_alias_overloading",
+    "graphql_aliasing": "graphql_alias_overloading",
+    "graphql_batching_abuse": "graphql_batching",
+    "graphql_query_batching": "graphql_batching",
+    "graphql_batch": "graphql_batching",
+    "graphql_query_cost": "graphql_cost",
+    "graphql_complexity": "graphql_cost",
+    "graphql_resource_exhaustion": "graphql_cost",
     "vulnerable_component": "vulnerable_dependency",
     "known_vulnerable_dependency": "vulnerable_dependency",
     "outdated_dependency": "vulnerable_dependency",
