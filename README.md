@@ -46,7 +46,7 @@ being built. Jargon is defined the first time it appears.
   - [9.14 The fail‑closed safety stack](#914-the-failclosed-safety-stack-the-6-gate-chain--authority--entitlement--sovereignty)
   - [9.15 Intake, analysis, defender, improve, socialdefense, console, eval, common](#915-the-remaining-subsystems)
   - [9.16 The universal sensor / producer framework and live fusion](#916-the-universal-sensor--producer-framework-and-live-fusion-sensors)
-  - [9.17 The opt-in autonomous OODA loop and the reasoning hook](#917-the-opt-in-autonomous-ooda-loop-and-the-reasoning-hook-engage_autonomouspy)
+  - [9.17 The opt-in autonomous OODA loop and the reasoning hook](#917-the-opt-in-autonomous-ooda-loop-and-the-reasoning-hook-engage_autonomouspy-engage_reasoningpy)
   - [9.18 AEGIS — the defensive dual](#918-aegis--the-defensive-dual-aegis)
   - [9.19 Reporting, export, and the platform seams](#919-reporting-export-and-the-platform-seams-report-mcp-api-plugins-imports)
 - [10. The doctrine and posture, in depth](#10-the-doctrine-and-posture-in-depth)
