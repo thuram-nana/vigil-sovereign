@@ -59,6 +59,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     invocation — every sensor is still gated at ``run_sensor`` time, so registering the active Nmap
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
+    from .k8s_runtime import KubeBenchSensor
     from .nmap import NmapServiceSensor
     from .sbom import SbomVulnSensor
     from .tshark import TsharkFlowSensor
@@ -86,6 +87,10 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     # time (kill-switch for the importer; ACTIVE_RECON + the egress allowlist for the live pull).
     registry.register(CloudPostureImportSensor())
     registry.register(CloudInventoryPullSensor())
+    # K8s-runtime posture sensor: offline kube-bench --json importer (Tier-1). Registration is not
+    # invocation — still kill-switch-gated at run_sensor time. Mints CIS-control-failure LEADS only;
+    # a FUTURE k8s-posture oracle re-verifies them to facts (docs/coverage-mobile-k8s-roadmap.md).
+    registry.register(KubeBenchSensor())
     return registry
 
 
