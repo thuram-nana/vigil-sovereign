@@ -106,9 +106,14 @@ def test_seed_has_the_named_minimum_entries() -> None:
     assert by_id["m2-ssti-jinja2"].oracle.kind == "evaluation"
     assert by_id["h1-lfi-etc-passwd"].oracle.kind == "content"
     assert by_id["m2-errsqli-single-quote"].oracle.kind == "error_signature"
-    assert by_id["ssrf-oob"].oracle.kind == "oob"
-    assert by_id["blind-xxe-oob"].oracle.kind == "oob"
-    assert by_id["command-injection-oob"].oracle.kind == "oob"
+    # The bare-callback OOB seeds (ssrf-oob / blind-xxe-oob / command-injection-oob)
+    # were exact behavioural duplicates of the code seeds SSRF_OOB / XXE_OOB / RCE_OOB
+    # in scanner.checks.DEFAULT_CHECKS (same bug_class + same payload); the code seeds
+    # remain the single source of truth for those, so the library keeps only the RICHER
+    # per-scheme / per-vector OOB variants below (nothing bare-duplicating the code).
+    assert by_id["m2-inj-ssrf-http-scheme"].oracle.kind == "oob"
+    assert by_id["m2-inj-xxe-external-dtd"].oracle.kind == "oob"
+    assert by_id["m2-inj-cmdi-pipe-curl"].oracle.kind == "oob"
     assert by_id["time-based-sqli"].oracle.kind == "timing"
     # the two fingerprint-gated exemplars
     assert by_id["wp-author-sqli"].applies_when == {"tech": "wordpress"}
@@ -253,7 +258,7 @@ def test_compile_reflection_yields_marker_reflection_check() -> None:
 
 
 def test_compile_oob_yields_oob_check() -> None:
-    check = compile_entry(_entry("ssrf-oob"))
+    check = compile_entry(_entry("m2-inj-ssrf-http-scheme"))
     assert isinstance(check, OOBCheck)
     assert isinstance(check, Check)
     assert getattr(check, "wants_oob", False) is True
