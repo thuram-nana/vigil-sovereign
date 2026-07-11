@@ -58,16 +58,13 @@ SERVER_VERSION = "0.1.0"
 # never exposed until listed here), with ``invoke_tool``'s full gate chain re-checking every call:
 #   * reverify_finding — re-execute a finding's oracle certificate OFFLINE (read-only, no host, no path).
 #   * declared_service — normalise operator-declared host services (host-scoped, no side effect, no path).
-#   * sbom_vuln        — parse an OPERATOR-PROVIDED grype/osv SCA report into vulnerable-dependency
-#                        LEADS (passive: no network, no entitlement). It reads a local file PATH — a
-#                        deliberate, bounded exception to the "no path" rule, admissible because this
-#                        transport is on-host stdio (no network surface; the MCP client sits in the
-#                        operator's OWN host trust domain — the sovereignty model the API/console share)
-#                        AND it returns only PARSED SCA-advisory fields, not arbitrary raw file bytes.
-# ACTIVE / egress / exploit sensors (nmap, nuclei_*, zap_web, burp_web, cloud_pull, …) and importers
-# that would echo arbitrary local content are STILL NOT listed — the property re-check below
-# (Tier-1 / no-capability / non-destructive / no-egress) is defense-in-depth ON TOP of this allowlist.
-DEFAULT_EXPOSE_ALLOW = frozenset({"reverify_finding", "declared_service", "sbom_vuln"})
+# DELIBERATELY EXCLUDED even though passive: any tool that reads a caller-influenced local file PATH
+# (e.g. sbom_vuln / importers) is NOT exposed over MCP — the "no path" rule stays fail-closed, so the
+# MCP surface can never become a local-filesystem path-existence / partial-content oracle, regardless of
+# the on-host transport. ACTIVE / egress / exploit sensors (nmap, nuclei_*, zap_web, burp_web, cloud_pull,
+# …) are likewise NOT listed — the property re-check below (Tier-1 / no-capability / non-destructive /
+# no-egress) is defense-in-depth ON TOP of this allowlist.
+DEFAULT_EXPOSE_ALLOW = frozenset({"reverify_finding", "declared_service"})
 
 
 class ExposePolicy:
@@ -106,8 +103,8 @@ def default_exposed_registry() -> ToolRegistry:
     """A registry over CRUCIBLE's capability surface: the safe built-in tools (``reverify_finding``)
     plus the built-in sensors. Registration is NOT exposure — the active sensors (Nmap/Nuclei/…) are
     present but the default :class:`ExposePolicy` hides them and refuses a call to them; only the
-    Tier-1, entitlement-free, no-egress, read-only producers on the allowlist
-    (``reverify_finding``, ``declared_service``, ``sbom_vuln``) are reachable over MCP. Even those
+    Tier-1, entitlement-free, no-egress, read-only, no-local-path producers on the allowlist
+    (``reverify_finding``, ``declared_service``) are reachable over MCP. Even those
     are still gated by ``invoke_tool`` on every call."""
     from ..agents.tools.builtin import register_builtin_tools
     from ..sensors.builtin import register_builtin_sensors
