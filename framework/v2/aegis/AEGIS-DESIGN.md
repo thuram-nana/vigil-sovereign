@@ -21,6 +21,7 @@ certificate — everything else is roadmap (LEAD-only or deferred):
 | **System-prompt disclosure** | a planted high-entropy canary appears VERBATIM in the app's own LLM output | `system_prompt_disclosure` | retains sentinel + redacted span (PR1) |
 | **Prompt injection** | an injected directive PROVABLY flipped a structurally-detectable behavior vs a clean control | `prompt_injection` | retains the (control, treatment) behavior pair |
 | **Automated access** | a non-interactive client fetched a seeded honeypot resource no human UI links | `automated_access` | retains the requested path + honeypot set |
+| **Credential stuffing / ATO** | a source's UNSEEN-`(account, source)` auth SUCCESSES cross the Wald SPRT AND survive a Holm-Bonferroni family-wise control across identities | `credential_stuffing` | retains the ordered auth-outcome window (keyed-HMAC pseudonyms) |
 
 A structural-override marker with no canary / no behavior delta stays a **LEAD**
 (`decision="lead"`). "No oracle fired and signals below band" is **`decision="clear"`** —
@@ -98,7 +99,12 @@ bare boolean.
 
 ## 6. Roadmap (NOT built)
 
-Credential-stuffing (SPRT), stored/indirect injection (RAG), model extraction, phishing/UGC,
+*Credential-stuffing / ATO is now BUILT* (the `credential_stuffing` oracle: a Wald SPRT over each
+source's unseen-`(account, source)` auth successes + a Holm-Bonferroni family-wise control across
+identities; the `AuthTelemetrySensor` + `Surface.AUTH`; the MECE benign twin is NAT/CGNAT bulk —
+a failed-only burst yields no SPRT round and stays a LEAD). Still roadmap:
+
+Stored/indirect injection (RAG), model extraction, phishing/UGC,
 synthetic identity — each rides the same pipeline adding at most one sensor + one oracle.
 Classes 7 (human-mimic bots), single-input evasion, and membership-inference remain **LEAD-only,
 permanently** — shipping them as verdicts would be the "AI detects AI" hype the doctrine forbids.
