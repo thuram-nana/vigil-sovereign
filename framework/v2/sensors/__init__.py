@@ -27,6 +27,7 @@ from .cloud import (
     normalize_cloud_export,
 )
 from .k8s_runtime import KubeBenchSensor, kube_bench_observations, parse_kube_bench
+from .fuzz import FuzzHarnessSensor, confirm_crash, default_fuzz_cases
 from .nmap import NmapServiceSensor, parse_nmap_xml
 from .pipeline import run_sensor
 from .sbom import SbomVulnSensor, parse_sca_report, sca_observations
@@ -49,6 +50,8 @@ __all__ = [
     "run_sensor",
     "DeclaredServiceSensor", "default_registry", "register_builtin_sensors",
     "NmapServiceSensor", "parse_nmap_xml",
+    # Workstream D.1 — gated fuzz/ASan robustness producer
+    "FuzzHarnessSensor", "confirm_crash", "default_fuzz_cases",
     "TsharkFlowSensor", "parse_tshark_fields",
     # Wave 4a — web-scanner sensors
     "NucleiWebSensor", "NucleiTemplateSensor", "NucleiResultsImportSensor",

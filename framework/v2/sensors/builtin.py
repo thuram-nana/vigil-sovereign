@@ -60,6 +60,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
     from .k8s_runtime import KubeBenchSensor
+    from .fuzz import FuzzHarnessSensor
     from .nmap import NmapServiceSensor
     from .sbom import SbomVulnSensor
     from .tshark import TsharkFlowSensor
@@ -91,6 +92,12 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     # invocation — still kill-switch-gated at run_sensor time. Mints CIS-control-failure LEADS only;
     # a FUTURE k8s-posture oracle re-verifies them to facts (docs/coverage-mobile-k8s-roadmap.md).
     registry.register(KubeBenchSensor())
+    # Fuzz/ASan robustness producer (Workstream D.1): drives a bounded fuzz against an operator-
+    # authorized LOCAL binary and feeds captured sanitizer output to the SANITIZER_SIGNAL oracle.
+    # Registration is not invocation — it is OFF by default (allowed_root=None refuses everything) and
+    # still gated at run_sensor time (EXPLOIT_EXECUTION + destructive-confirm + kill-switch), so
+    # registering it here cannot run a fuzz.
+    registry.register(FuzzHarnessSensor())
     return registry
 
 
