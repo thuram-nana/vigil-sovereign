@@ -23,8 +23,12 @@ One cycle, over the AUTHORITATIVE ``EngagementResult`` the scan already produced
     kill-switch REFUSES it and the tool never runs.
   * UPDATE   — fold the tool's observation back into the world-model (annotate the finding's node
     with the live re-grounding verdict) and update the goal tree (leaf succeeded / failed).
-  * RE-ORIENT— re-run the planner's selection over the now-updated tree/world; the pick changes,
-    proving the loop closed.
+  * RE-ORIENT— run the WS-F reasoning step and FEED ITS ADVICE BACK INTO SELECTION: the advice's
+    focus/hypotheses re-weight the matching open leaves' priors (bounded, always recomputed from a
+    fixed per-run baseline — no compounding), so the reasoning genuinely CHANGES which action the
+    planner selects next. Then re-run the planner's selection over the now-updated tree/world; the
+    pick changes, proving the loop closed. Advisory only — re-weighting orders effort, it NEVER
+    promotes a finding, removes a leaf, or feeds an oracle/SCE/calibration input.
 
 The A/B/F interface contract (so WS-B and WS-F compose WITHOUT editing engage.py). Each hook is
 imported with a graceful ImportError/attribute fallback to a no-op, so ``--autonomous`` works
@@ -116,6 +120,7 @@ class AutonomyStep:
     verdict: str = ""             # the tool's observation (e.g. reverify grounding verdict)
     folded_node: str = ""         # world-model node id the observation was folded onto ("" if none)
     reoriented_to: str = ""       # the next action the planner selected after the update
+    advice_reweighted: int = 0    # open leaves the RE-ORIENT reasoning advice re-weighted this cycle
 
 
 @dataclass
@@ -128,6 +133,7 @@ class AutonomyResult:
     cycles: list[AutonomyStep] = field(default_factory=list)
     fused_observations: int = 0        # count returned by the WS-B fuse_sensors hook
     reasoning_advice: Any = None       # object returned by the WS-F reason_step hook (or None)
+    advice_reweighted: int = 0         # total open leaves the WS-F advice re-weighted (all cycles)
     planner_constructed: bool = False  # a real Planner was constructed over the run world-model
     planner_source: str | None = None  # the foothold node the planner reasons from
     objectives: list[str] = field(default_factory=list)
@@ -207,6 +213,121 @@ def _select(tree: Any, world: "WorldModel | None", objectives: list, source: str
             return tree.best_open_leaf()
         except Exception:
             return None
+
+
+# ---------------------------------------------------------------------------
+# RE-ORIENT — feed the WS-F reasoning advice back into leaf selection.
+#
+# The advice re-WEIGHTS matching open leaves' priors so the reasoning genuinely
+# changes the next pick. It is ADVISORY ONLY: it orders effort (re-ranks), never
+# removes a leaf (coverage doctrine), never promotes a finding, and never feeds
+# an oracle / SCE / calibration input. Every re-weight is recomputed from a fixed
+# per-run BASELINE, so it is idempotent and cannot compound across cycles —
+# keeping the cycle deterministic (a pure function of advice + baseline).
+# ---------------------------------------------------------------------------
+
+_ADVICE_CAP = 0.99        # priors are lifted toward, but never to, certainty (search weight only)
+_ADVICE_STRENGTH = 0.9    # rank-0 (focus) lift fraction toward the cap; decays as 1/(rank+1)
+
+
+def _duck(obj: Any, key: str, default: Any = None) -> Any:
+    """Read ``key`` from a mapping OR an attribute of an object, defensively (advice may be a
+    ``ReasoningAdvice``, a plain dict, or an unrelated object)."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _norm(s: Any) -> str:
+    return str(s or "").strip().casefold()
+
+
+def _surface_is_concrete(sf: str) -> bool:
+    """A surface is concrete enough to match a specific leaf only when it is non-empty and not the
+    kernel's DryRun placeholder. DryRun advice carries an ``(unspecified surface)`` — so under the
+    deterministic DryRun backend the advice re-weight is a safe no-op (advice quality is bounded
+    there, exactly as engage_reasoning documents); a live backend / concrete advice reorders."""
+    n = _norm(sf)
+    return bool(n) and "unspecified" not in n
+
+
+def _advice_targets(advice: Any) -> list[tuple[str, str]]:
+    """The advice's ordered (bug_class, surface) targets — its top focus first, then its ranked
+    hypotheses — as normalised pairs. Duck-typed over ``ReasoningAdvice`` / dict / anything; a
+    non-advice object (e.g. a plain telemetry dict with no focus/hypotheses) yields ``[]``, so the
+    re-weight cleanly no-ops. ``pivots`` are lateral-move suggestions (not leaf-addressable), so
+    they are carried as advice telemetry only, not used to re-weight in this slice."""
+    raw: list[Any] = []
+    focus = _duck(advice, "focus")
+    if isinstance(focus, dict):
+        raw.append(focus)
+    hyps = _duck(advice, "hypotheses") or ()
+    try:
+        for h in hyps:
+            if isinstance(h, dict):
+                raw.append(h)
+    except TypeError:
+        pass
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for t in raw:
+        bc = _norm(t.get("bug_class"))
+        sf = str(t.get("surface", "") or "")
+        if not bc:
+            continue
+        key = (bc, _norm(sf))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((bc, sf))
+    return out
+
+
+def _leaf_baselines(tree: Any) -> dict[int, float]:
+    """Snapshot each open leaf's ORIGINAL prior once, so every re-weight is recomputed from this
+    fixed baseline (idempotent, non-compounding, deterministic)."""
+    out: dict[int, float] = {}
+    for leaf in tree.open_leaves():
+        out[leaf.id] = float(leaf.prior_p_success)
+    return out
+
+
+def _advice_rank(node: Any, targets: list[tuple[str, str]]) -> int | None:
+    """The rank of the first advice target that matches ``node``: a leaf matches a target when its
+    bug_class matches AND the target names a CONCRETE surface equal to the leaf's. Returns None when
+    no target matches (the leaf keeps its baseline prior)."""
+    lbc = _norm(node.bug_class)
+    lsf = _norm(node.surface)
+    for rank, (bc, sf) in enumerate(targets):
+        if bc == lbc and _surface_is_concrete(sf) and _norm(sf) == lsf:
+            return rank
+    return None
+
+
+def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None) -> int:
+    """Recompute each open leaf's prior FROM its baseline and lift the advice-matched leaves toward
+    the cap (rank-0 focus most, decaying by 1/(rank+1)). Returns the count of leaves actually moved.
+
+    Bounded and idempotent (always from baseline). Never touches a resolved/pruned leaf and never
+    removes one — it only re-orders the OPEN frontier, so no attack surface is gated out."""
+    targets = _advice_targets(advice)
+    moved = 0
+    for lid, base in baselines.items():
+        node = tree.nodes.get(lid)
+        if node is None or node.status not in ("open", "claimed"):
+            continue
+        new_prior = base
+        rank = _advice_rank(node, targets) if targets else None
+        if rank is not None:
+            lift = _ADVICE_STRENGTH / (rank + 1)
+            new_prior = base + (_ADVICE_CAP - base) * lift
+        new_prior = min(_ADVICE_CAP, max(0.0, new_prior))
+        if abs(new_prior - float(node.prior_p_success)) > 1e-12:
+            moved += 1
+        node.prior_p_success = new_prior
+    return moved
 
 
 def _construct_planner(world: "WorldModel | None", slug: str, tree: Any, objectives: list,
@@ -323,6 +444,7 @@ def run_autonomous_cycle(
 
     # ORIENT — goal tree over the confirmed findings + the planner over the run world-model.
     tree, leaf_to_finding = _build_goal_tree(findings)
+    baselines = _leaf_baselines(tree)   # fixed per-run priors; every advice re-weight recomputes from these
     source = _foothold(world)
     out.planner_source = source
     planner = _construct_planner(world, slug, tree, objectives, source, request_budget, blackboard)
@@ -336,6 +458,12 @@ def run_autonomous_cycle(
         # still exercise the WS-F reasoning hook so the seam is live even on an empty run
         out.reasoning_advice = _reason_step(world, findings, ctx)
         return out
+
+    # ORIENT (reasoning) — run the WS-F step ONCE up front and feed its advice into the FIRST
+    # selection, so reasoning drives the opening pick, not only the re-orient.
+    advice = _reason_step(world, findings, ctx)
+    out.reasoning_advice = advice
+    out.advice_reweighted += _reprioritise(tree, baselines, advice=advice)
 
     cycles = max(1, int(max_cycles))
     for c in range(1, cycles + 1):
@@ -371,8 +499,13 @@ def run_autonomous_cycle(
             tree.mark_status(leaf.id, "succeeded" if grounded else "failed",
                              reason="" if grounded else "reverify did not re-ground")
 
-        # RE-ORIENT — the WS-F reasoning hook, then re-select over the updated tree/world.
-        out.reasoning_advice = _reason_step(world, findings, ctx)
+        # RE-ORIENT — run the WS-F reasoning hook, FEED its advice back into the tree (re-weight the
+        # matching open leaves' priors), THEN re-select. This is what closes the loop: the reasoning
+        # advice changes which leaf the planner picks next.
+        advice = _reason_step(world, findings, ctx)
+        out.reasoning_advice = advice
+        step.advice_reweighted = _reprioritise(tree, baselines, advice=advice)
+        out.advice_reweighted += step.advice_reweighted
         nxt = _select(tree, world, objectives, source)
         step.reoriented_to = nxt.label if nxt is not None else "(no more actions)"
         out.cycles.append(step)
@@ -415,5 +548,7 @@ def render_summary(out: AutonomyResult) -> list[str]:
     for n in out.notes:
         lines.append(f"    note            : {n}")
     if out.reasoning_advice is not None:
-        lines.append("    reasoning advice: present (WS-F)")
+        rw = (f", re-weighted {out.advice_reweighted} leaf/leaves into selection"
+              if out.advice_reweighted else " (no leaf re-weighted this run)")
+        lines.append(f"    reasoning advice: present (WS-F){rw}")
     return lines

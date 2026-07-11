@@ -339,3 +339,77 @@ def test_planner_is_constructed_over_world_when_blackboard_present(tmp_path: Pat
         assert out.cycles and out.cycles[0].gated is True
     finally:
         bb.close()
+
+
+# ---------------------------------------------------------------------------
+# (7) I-D.1 — reason_step advice is FED BACK INTO selection: it re-weights the
+#     open frontier so the reasoning actually CHANGES the next selected action.
+# ---------------------------------------------------------------------------
+
+
+def _greedy_world(surfaces: list[str]) -> WorldModel:
+    """Endpoints only, NO crown jewel reachable → selection degrades to plain greedy
+    (prior*value/cost). The reasoning-advice re-weight is then the only thing that can reorder."""
+    w = WorldModel()
+    for i, sf in enumerate(surfaces):
+        w.add_node(Node(id=f"ep{i}", kind=NodeKind.ENDPOINT, attrs={"url": sf},
+                        provenance="obs-1", confidence=1.0, first_seen=0, last_seen=0))
+    return w
+
+
+def test_reasoning_advice_reorders_the_next_selected_action(monkeypatch: pytest.MonkeyPatch):
+    """The reasoning advice PROVABLY changes the next selected action. Greedy selection picks the
+    higher-prior finding; concrete advice focusing the lower-prior one re-weights it to the top of
+    the open frontier, so the planner picks IT instead — advisory, the oracle stays authoritative."""
+    from framework.v2 import engage_reasoning as reasoning_mod
+    from framework.v2.engage_reasoning import ReasoningAdvice
+
+    on = "https://t.invalid/on-path"
+    off = "https://t.invalid/off-path"
+
+    def build_result() -> EngagementResult:
+        world = _greedy_world([off, on])
+        # greedy prefers xss (prior 0.6) over idor (prior 0.3)
+        return _synthetic_result(world, [_finding("xss", off, 0.6), _finding("idor", on, 0.3)])
+
+    # CONTROL: default DryRun advice carries an "(unspecified surface)" focus → no concrete match →
+    # nothing is re-weighted, so greedy selection stands and picks xss.
+    control = run_autonomous_cycle(build_result(), slug="alpha", prompt_callback=_deny)
+    assert control.cycles and control.cycles[0].picked_bug_class == "xss"
+    assert control.advice_reweighted == 0, "DryRun (unspecified-surface) advice must not re-weight"
+
+    # TREATMENT: advice focuses the LOWER-prior idor@on-path with a CONCRETE surface → it is
+    # re-weighted above xss and is now selected first. This is the loop closing.
+    advice = ReasoningAdvice(
+        next_focus="test idor on /on-path", abstain=False, is_dryrun=False,
+        focus={"id": "H-1", "surface": on, "bug_class": "idor", "cheap_test": "swap id",
+               "confidence": 0.3, "oracle_provable": True})
+    monkeypatch.setattr(reasoning_mod, "reason_step", lambda world, findings, ctx: advice)
+    treated = run_autonomous_cycle(build_result(), slug="alpha", prompt_callback=_deny)
+    assert treated.cycles and treated.cycles[0].picked_bug_class == "idor", \
+        "reasoning advice did not change the selected action"
+    assert treated.advice_reweighted >= 1
+    # ADVISORY-ONLY: the authoritative report is untouched — no finding promoted, no verdict changed.
+    assert {f.bug_class for f in treated.engagement.report.active_findings} == {"xss", "idor"}
+
+
+def test_reasoning_advice_reweight_is_bounded_and_deterministic(monkeypatch: pytest.MonkeyPatch):
+    """The advice re-weight is recomputed from a fixed baseline each cycle (idempotent, bounded by
+    the cap) so two identical runs are byte-identical, and the prior never reaches certainty."""
+    from framework.v2 import engage_reasoning as reasoning_mod
+    from framework.v2.engage_reasoning import ReasoningAdvice
+
+    on = "https://t.invalid/on-path"
+    advice = ReasoningAdvice(next_focus="x", abstain=False, is_dryrun=False,
+                             focus={"surface": on, "bug_class": "idor", "confidence": 0.3,
+                                    "cheap_test": "", "oracle_provable": True})
+    monkeypatch.setattr(reasoning_mod, "reason_step", lambda w, f, c: advice)
+
+    def run():
+        world = _greedy_world([on, "https://t.invalid/off-path"])
+        result = _synthetic_result(world, [_finding("xss", "https://t.invalid/off-path", 0.6),
+                                           _finding("idor", on, 0.3)])
+        out = run_autonomous_cycle(result, slug="alpha", max_cycles=3, prompt_callback=_deny)
+        return [(s.picked_bug_class, s.reoriented_to, s.advice_reweighted) for s in out.cycles]
+
+    assert run() == run(), "advice re-weighting made the cycle non-deterministic"
