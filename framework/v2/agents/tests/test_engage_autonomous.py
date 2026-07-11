@@ -556,3 +556,57 @@ def test_meta_monitor_caution_orders_effort_never_gates():
         "meta caution gated a surface"
     # ADVISORY-ONLY: the authoritative findings are untouched.
     assert {f.bug_class for f in treated.engagement.report.active_findings} == {"aaa", "bbb", "ccc"}
+
+
+# ---------------------------------------------------------------------------
+# (11) I-D.5 — SMT feasibility deprioritises a PROVABLY-infeasible region; never gates;
+#      degrades to a no-op when the domain is too large and z3 is absent.
+# ---------------------------------------------------------------------------
+
+
+def test_smt_infeasible_region_is_deprioritised_never_gated():
+    """A leaf whose bounded parameter region is provably infeasible is deprioritised below a
+    feasible sibling before selection — but it stays selectable (covered later); the SMT layer only
+    ORDERS effort, it never gates a surface and never refutes/promotes a finding (only an oracle does)."""
+    urls = ["https://t.invalid/feas", "https://t.invalid/infeas"]
+
+    def build_result() -> EngagementResult:
+        world = _greedy_world(urls)
+        return _synthetic_result(world, [_finding("feasible", urls[0], 0.4),
+                                         _finding("infeasible", urls[1], 0.6)])
+
+    # x in [0,10] AND x >= 20 has NO assignment — decided exactly by the dep-free bounded enumerator
+    # (no z3 needed for this small domain).
+    regions = {"infeasible": {"variables": {"x": (0, 10)},
+                              "constraints": [{"coeffs": {"x": 1}, "op": ">=", "rhs": 20}]}}
+
+    # CONTROL: no regions → greedy leads with the higher prior (the infeasible leaf, 0.6).
+    control = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=2, prompt_callback=_deny)
+    assert control.smt_deprioritised == 0
+    assert control.cycles[0].picked_bug_class == "infeasible"
+
+    # TREATMENT: the provably-dead region deprioritises that leaf; effort now leads with feasible.
+    treated = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=2,
+                                   smt_regions=regions, prompt_callback=_deny)
+    assert treated.smt_deprioritised == 1
+    assert treated.cycles[0].picked_bug_class == "feasible", "smt did not deprioritise the infeasible region"
+    # NEVER GATES: the infeasible surface is still covered across the run (just later).
+    assert {s.picked_bug_class for s in treated.cycles} == {"feasible", "infeasible"}
+
+
+def test_smt_unknown_region_is_a_noop_without_z3():
+    """A domain too large to enumerate with z3 absent is UNKNOWN — an honest no-op: the leaf is NOT
+    deprioritised (never a guess), so greedy order is unchanged."""
+    from framework.v2.analysis.smt import has_z3
+
+    urls = ["https://t.invalid/big", "https://t.invalid/small"]
+    world = _greedy_world(urls)
+    result = _synthetic_result(world, [_finding("big", urls[0], 0.6), _finding("small", urls[1], 0.4)])
+    # 2_000_001 assignments > DEFAULT_MAX_ENUM (1e6): enum refuses, and with no z3 the verdict is UNKNOWN.
+    regions = {"big": {"variables": {"x": (0, 2_000_000)},
+                       "constraints": [{"coeffs": {"x": 1}, "op": ">=", "rhs": 3_000_000}]}}
+    out = run_autonomous_cycle(result, slug="alpha", max_cycles=2, smt_regions=regions, prompt_callback=_deny)
+
+    if not has_z3():
+        assert out.smt_deprioritised == 0, "an UNKNOWN region must not deprioritise (honest no-op)"
+        assert out.cycles[0].picked_bug_class == "big"   # greedy order unchanged

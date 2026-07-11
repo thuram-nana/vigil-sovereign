@@ -152,6 +152,7 @@ class AutonomyResult:
     critic_verdicts: int = 0           # critic_verdict events the multi-critic panel posted (advisory)
     reflections: int = 0               # reflection events the in-loop reflection posted (re-rank/defer)
     meta_recommend: str = ""           # learner-health recommend (ok / gather_evidence / trust_confidence_less)
+    smt_deprioritised: int = 0         # open leaves whose parameter region is PROVABLY infeasible (advisory)
     planner_source: str | None = None  # the foothold node the planner reasons from
     objectives: list[str] = field(default_factory=list)
     world_nodes_before: int = 0
@@ -325,10 +326,13 @@ def _advice_rank(node: Any, targets: list[tuple[str, str]]) -> int | None:
 
 
 def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None,
-                  meta_caution: float = 0.0) -> int:
+                  meta_caution: float = 0.0, smt_infeasible: "set[int] | None" = None) -> int:
     """Recompute each open leaf's prior FROM its baseline and apply the active advisory re-weighters,
     then return the count of leaves actually moved. In order:
 
+      * SMT infeasibility (I-D.5) — a leaf whose bounded parameter region is PROVABLY infeasible is
+        deprioritised to the floor (probing it can satisfy no constraint). Advisory: it degrades to
+        a no-op when the region is unknown/absent, and the leaf stays selectable (never gated).
       * meta_monitor CAUTION (I-D.4) — when the learners are unhealthy, deprioritise the most
         BORDERLINE (nearest-coin-flip) leaves so effort orders toward more-decisive leads and
         abstains more on uncertain ones. Caution-only: it can only lower a prior toward the floor,
@@ -340,12 +344,14 @@ def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None,
     touches a resolved/pruned leaf and never removes one — it only re-orders the OPEN frontier."""
     targets = _advice_targets(advice)
     caution = min(1.0, max(0.0, float(meta_caution)))
+    infeasible = smt_infeasible or set()
     moved = 0
     for lid, base in baselines.items():
         node = tree.nodes.get(lid)
         if node is None or node.status not in ("open", "claimed"):
             continue
-        p = base
+        # smt: a provably-infeasible parameter region starts at the floor (deprioritised).
+        p = _PRIOR_FLOOR if lid in infeasible else base
         # meta caution: borderline = 1 at prior 0.5 (max uncertainty), 0 at prior in {0, 1}.
         if caution > 0.0:
             borderline = 1.0 - abs(2.0 * base - 1.0)
@@ -360,6 +366,88 @@ def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None,
             moved += 1
         node.prior_p_success = p
     return moved
+
+
+# ---------------------------------------------------------------------------
+# I-D.5 — SMT feasibility as a LEAD-PRUNING advisor (deprioritise dead regions).
+#
+# analysis.smt.is_feasible answers "does ANY integer assignment satisfy this bounded linear
+# constraint system?" A leaf whose parameter region is PROVABLY infeasible cannot fire, so we
+# deprioritise it before selection. Advisory only: an infeasible verdict never refutes/promotes a
+# finding (only an oracle does), the leaf stays selectable (never gated), and the analyzer degrades
+# to a clean no-op when z3 is absent and the domain is too large to enumerate (UNKNOWN, not a guess).
+# ``smt_regions`` maps a leaf's bug_class OR surface -> {"variables": {name: (lo, hi)},
+# "constraints": [LinearConstraint | {"coeffs", "op", "rhs"}]}.
+# ---------------------------------------------------------------------------
+
+
+def _coerce_bounds(variables: Any) -> "dict[str, tuple[int, int]] | None":
+    if not isinstance(variables, dict) or not variables:
+        return None
+    out: dict[str, tuple[int, int]] = {}
+    for name, b in variables.items():
+        try:
+            lo, hi = b
+            out[str(name)] = (int(lo), int(hi))
+        except Exception:
+            return None
+    return out
+
+
+def _coerce_constraints(raw: Any, linear: Any) -> "list | None":
+    cons: list = []
+    for c in (raw or []):
+        try:
+            if isinstance(c, dict):
+                cons.append(linear(c.get("coeffs", {}) or {}, str(c.get("op")), int(c.get("rhs", 0))))
+            else:
+                cons.append(c)   # already a LinearConstraint
+        except Exception:
+            return None
+    return cons
+
+
+def _region_infeasible(region: Any) -> bool:
+    """True only when ``analysis.smt`` PROVES the region has no satisfying assignment. Anything else
+    — feasible, UNKNOWN (domain too large + no z3), malformed, or an import error — returns False
+    (no deprioritisation). Advisory + fail-open (never deprioritise on doubt)."""
+    if not isinstance(region, dict):
+        return False
+    try:
+        from .analysis.smt import is_feasible, linear
+    except Exception:
+        return False
+    variables = _coerce_bounds(region.get("variables"))
+    if variables is None:
+        return False
+    constraints = _coerce_constraints(region.get("constraints"), linear)
+    if constraints is None:
+        return False
+    try:
+        return bool(is_feasible(variables, constraints).is_infeasible)
+    except Exception:
+        return False
+
+
+def _smt_region_for(leaf: Any, smt_regions: dict) -> Any:
+    """The region declared for this leaf, keyed by its bug_class first, then its surface."""
+    for key in (str(getattr(leaf, "bug_class", "") or ""), str(getattr(leaf, "surface", "") or "")):
+        if key and key in smt_regions:
+            return smt_regions[key]
+    return None
+
+
+def _smt_infeasible_leaves(tree: Any, smt_regions: Any) -> "set[int]":
+    """The ids of OPEN leaves whose declared parameter region is provably infeasible. Empty when no
+    regions are supplied or none is provably dead. Pure and read-only; best-effort."""
+    if not isinstance(smt_regions, dict) or not smt_regions:
+        return set()
+    out: set[int] = set()
+    for leaf in tree.open_leaves():
+        region = _smt_region_for(leaf, smt_regions)
+        if region is not None and _region_infeasible(region):
+            out.add(leaf.id)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +715,7 @@ def run_autonomous_cycle(
     blackboard: Any = None,
     ctx: Any = None,
     outcome_ledger: Any = None,
+    smt_regions: Any = None,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -676,11 +765,20 @@ def run_autonomous_cycle(
     if meta_caution > 0.0:
         out.notes.append(f"meta-monitor: {out.meta_recommend} → caution ordering (no surface gated)")
 
+    # ORIENT (SMT) — deprioritise leaves whose bounded parameter region is PROVABLY infeasible. The
+    # region set is fixed for the run, so it is computed once. Advisory: it degrades to a no-op
+    # without z3 on large domains and never gates a surface.
+    smt_infeasible = _smt_infeasible_leaves(tree, smt_regions)
+    out.smt_deprioritised = len(smt_infeasible)
+    if smt_infeasible:
+        out.notes.append(f"smt: {len(smt_infeasible)} provably-infeasible region(s) deprioritised (not gated)")
+
     # ORIENT (reasoning) — run the WS-F step ONCE up front and feed its advice into the FIRST
     # selection, so reasoning drives the opening pick, not only the re-orient.
     advice = _reason_step(world, findings, ctx)
     out.reasoning_advice = advice
-    out.advice_reweighted += _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution)
+    out.advice_reweighted += _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution,
+                                           smt_infeasible=smt_infeasible)
 
     # DRIVE (setup) — mirror the ALREADY oracle-confirmed findings onto the spine so the wired
     # advisory critic panel has material to review when the Coordinator ticks in-loop. This is
@@ -737,7 +835,8 @@ def run_autonomous_cycle(
         # advice changes which leaf the planner picks next.
         advice = _reason_step(world, findings, ctx)
         out.reasoning_advice = advice
-        step.advice_reweighted = _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution)
+        step.advice_reweighted = _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution,
+                                               smt_infeasible=smt_infeasible)
         out.advice_reweighted += step.advice_reweighted
         nxt = _select(tree, world, objectives, source)
         step.reoriented_to = nxt.label if nxt is not None else "(no more actions)"
@@ -787,6 +886,9 @@ def render_summary(out: AutonomyResult) -> list[str]:
             f"({out.critic_verdicts} critic verdict(s), {out.reflections} reflection(s)) — advisory")
     if out.meta_recommend and out.meta_recommend != "ok":
         lines.append(f"    learner health  : {out.meta_recommend} → caution ordering (no surface gated)")
+    if out.smt_deprioritised:
+        lines.append(f"    smt pruning     : {out.smt_deprioritised} provably-infeasible region(s) "
+                     f"deprioritised (advisory; not gated)")
     if out.fused_observations:
         lines.append(f"    fused sensors   : {out.fused_observations} observation(s) (WS-B)")
     for s in out.cycles:
