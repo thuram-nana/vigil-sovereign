@@ -118,6 +118,14 @@ def _capabilities(argv: list[str]) -> int:
     return plugins_cli.main(argv)
 
 
+def _aegis(argv: list[str]) -> int:
+    # AEGIS (the DEFENSIVE dual). LAZY import — nothing under aegis/ is imported until this
+    # subcommand actually runs, so the scan/engage/benchmark gate path never touches it and
+    # `make gate` stays byte-identical.
+    from .aegis import cli as aegis_cli
+    return aegis_cli.main(argv)
+
+
 def _evidence(argv: list[str]) -> int:
     from .evidence import cli as evidence_cli
     return evidence_cli.main(argv)
@@ -201,6 +209,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "engage": _engage,
     "verify": _verify,
     "capabilities": _capabilities,
+    "aegis": _aegis,
     "evidence": _evidence,
     "report": _report,
     "collaborator": _collaborator,

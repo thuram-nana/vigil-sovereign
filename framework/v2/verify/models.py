@@ -50,6 +50,12 @@ class OracleKind(str, enum.Enum):
     TLS_WEAKNESS = "tls_weakness"                     # a real TLS handshake negotiated a weak protocol/cipher
     VERSION_RANGE = "version_range"                   # a package version provably falls in an advisory's affected range
     POLICY_PATH = "policy_path"                       # a real IAM grant path lets a principal reach a resource
+    # AEGIS (the DEFENSIVE dual — prove-don't-guess pointed inward at the operator's OWN app).
+    # These are ADDITIVE appends; they reach the verifier ONLY via their explicit
+    # BUG_CLASS_ORACLES rows, never via the frozen unknown-class fallback (verifier._ALL_ORACLES).
+    PROMPT_INJECTION = "prompt_injection"             # an injected directive PROVABLY flipped a structurally-detectable LLM behavior (control-vs-treatment)
+    SYSTEM_PROMPT_DISCLOSURE = "system_prompt_disclosure"  # a planted high-entropy canary sentinel appeared VERBATIM in the app's own LLM output
+    AUTOMATED_ACCESS = "automated_access"             # a non-interactive client fetched a honeypot resource no human UI links (set-membership)
 
 
 class OracleProbe(BaseModel):

@@ -37,8 +37,20 @@ def test_oracles_for_known_class() -> None:
 
 
 def test_oracles_for_unknown_class_falls_back_to_all() -> None:
+    # G1 (AEGIS): the unknown-class fallback is FROZEN to the pre-AEGIS oracle set
+    # (`_ALL_ORACLES`), NOT `tuple(OracleKind)`. Additive AEGIS oracle kinds are opt-in by
+    # bug_class and must NEVER run on an arbitrary unknown finding — that is what keeps
+    # `make gate` byte-identical when the shared OracleKind enum grows.
+    from framework.v2.verify.verifier import _ALL_ORACLES
     v = OracleVerifier()
-    assert set(v.oracles_for("some-novel-bug")) == set(OracleKind)
+    fb = set(v.oracles_for("some-novel-bug"))
+    assert fb == set(_ALL_ORACLES)
+    # every pre-existing oracle is still in the catch-all ...
+    assert OracleKind.DIFFERENTIAL_RESPONSE in fb and OracleKind.OOB_CALLBACK in fb
+    # ... but the AEGIS oracles are excluded (they only run on explicit AEGIS bug_classes).
+    assert OracleKind.PROMPT_INJECTION not in fb
+    assert OracleKind.SYSTEM_PROMPT_DISCLOSURE not in fb
+    assert OracleKind.AUTOMATED_ACCESS not in fb
 
 
 def test_every_mapping_value_is_valid() -> None:

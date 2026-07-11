@@ -33,11 +33,14 @@ from .oob import OOBHit, OOBReceiver
 from .oracles import (
     achieved_state_oracle,
     differential_response_oracle,
+    honeypot_hit_oracle,
     oob_callback_oracle,
     policy_path_oracle,
+    prompt_injection_oracle,
     sanitizer_signal_oracle,
     service_reachability_oracle,
     side_effect_oracle,
+    system_prompt_disclosure_oracle,
     tls_weakness_oracle,
     version_range_oracle,
 )
@@ -77,6 +80,10 @@ __all__ = [
     "tls_weakness_oracle",
     "version_range_oracle",
     "policy_path_oracle",
+    # AEGIS (defensive dual) oracles
+    "system_prompt_disclosure_oracle",
+    "prompt_injection_oracle",
+    "honeypot_hit_oracle",
     # reachability
     "capture_handshake",
     "confirm_reachable",
