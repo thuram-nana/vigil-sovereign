@@ -42,7 +42,7 @@ from .domxss import DomXssCandidate, analyze_html
 from .engine import AuditEngine, AuditFinding
 from .fingerprint import Fingerprint, fingerprint
 from .grammar import generate as grammar_generate, infer_grammar
-from .graphql import GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
+from .graphql import GRAPHQL_DOS_CHECKS, GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import HttpRequest, InsertionKind
 from .jwt import JwtNoneCheck
 from .learning import ContextualBandit
@@ -105,6 +105,12 @@ class ScanReport(BaseModel):
     # Human-readable capability/reference leads the arsenal surfaced (an offered
     # h2c upgrade, mined ws:// endpoints, mined API refs) — context, not findings.
     arsenal_leads: list[str] = Field(default_factory=list)
+    # Provenance-tagged GraphQL DoS/abuse leads (opt-in `enable_graphql_dos`): the
+    # cost-limit and depth-when-introspection-off signals that are honestly LEADS,
+    # not oracle-confirmed. The DoS checks' CONFIRMED findings (unbounded depth,
+    # alias overloading, batching) land in active_findings like any other; these are
+    # the strictly-separated leads. Empty on every default (dos-off) run.
+    graphql_leads: list[str] = Field(default_factory=list)
 
     @property
     def total_findings(self) -> int:
@@ -163,6 +169,7 @@ class WebScanCampaign:
         arsenal_authz: "Callable[[str], bool] | None" = None,
         arsenal_race_targets: "tuple[tuple[str, int], ...]" = (),
         arsenal_max_probes: int = 64,
+        enable_graphql_dos: bool = False,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -264,6 +271,15 @@ class WebScanCampaign:
         self.arsenal_race_targets = tuple(arsenal_race_targets)
         # Bound the content-discovery probe count so an arsenal pass stays cheap.
         self.arsenal_max_probes = arsenal_max_probes
+        # Opt-in GraphQL DoS/abuse pass (default OFF → the default scan, and the gate,
+        # are byte-for-byte unchanged). When on, an ADDITIVE post-audit pass probes each
+        # discovered GraphQL endpoint minimally (one bounded query per check: depth,
+        # alias, batching, cost) through the gated `send`. Confirmed amplifications
+        # (unbounded depth / alias overloading / batching) join active_findings with a
+        # predicate-oracle certificate; the honest LEADS (cost, depth-when-introspection-
+        # off) populate `graphql_leads`. Minimal by doctrine — it demonstrates the
+        # absent guard, it does not flood.
+        self.enable_graphql_dos = enable_graphql_dos
 
     def _resolve_bandit(self) -> ContextualBandit:
         """The explicit bandit, else a warm-start from the persisted file if one
@@ -672,6 +688,76 @@ class WebScanCampaign:
         active.extend(self._race_findings(seed_url))
         return active, paths, secrets, leads
 
+    # ---------------------------------------------------------------------
+    # opt-in GraphQL DoS/abuse pass (enable_graphql_dos) — additive, gated,
+    # oracle-anchored for the confirmable classes, LEADs for the rest
+    # ---------------------------------------------------------------------
+
+    _GRAPHQL_PATH = re.compile(r"/graph(?:ql|iql|ql-explorer|ql-playground)/?$", re.I)
+
+    def _graphql_endpoints(self, seed_url: str, crawl) -> list[str]:
+        """The distinct GraphQL-looking endpoint URLs the crawl (and the seed)
+        touched — path ends in ``/graphql`` (or a known variant). Deduped by
+        scheme+host+path, scope-filtered, bounded. No candidates → the DoS pass
+        simply does not run (a non-GraphQL app is never probed)."""
+        out: list[str] = []
+        seen: set[str] = set()
+        urls = [seed_url] + [r.url for r in crawl.requests]
+        for u in urls:
+            sp = urlsplit(u)
+            if not self._GRAPHQL_PATH.search(sp.path or ""):
+                continue
+            key = f"{sp.scheme}://{sp.netloc}{sp.path}"
+            if key in seen:
+                continue
+            if self.scope is not None and not self.scope.in_scope(u):
+                continue
+            seen.add(key)
+            out.append(key)
+            if len(out) >= 8:
+                break
+        return out
+
+    def _graphql_dos_pass(self, seed_url: str, crawl) -> tuple[list[AuditFinding], list[str]]:
+        """Probe each discovered GraphQL endpoint for the DoS/abuse surface. A
+        confirmed amplification (a fired predicate oracle) becomes an AuditFinding
+        with a re-verifiable certificate; an honest signal that is not a proof
+        (cost, or depth when introspection is off) becomes a provenance-tagged
+        lead. Each probe is one bounded request through the gated ``send`` — a
+        failing check never sinks the pass."""
+        from ..verify.confirmation import confirm_finding
+
+        findings: list[AuditFinding] = []
+        leads: list[str] = []
+        for endpoint in self._graphql_endpoints(seed_url, crawl):
+            template = RequestTemplate(HttpRequest(method="POST", url=endpoint))
+            for check in GRAPHQL_DOS_CHECKS:
+                try:
+                    result = check.probe_dos(template, self._send)
+                except Exception:
+                    continue
+                if result.lead:
+                    leads.append(f"graphql-dos {check.id} @ {endpoint}: {result.lead}")
+                if result.context is None:
+                    continue
+                confirmed = confirm_finding(
+                    {"bug_class": check.bug_class,
+                     "title": f"{check.bug_class} at {endpoint}",
+                     "severity": "High", "surface": endpoint,
+                     "summary": f"{check.id} amplification accepted ({result.reason})"},
+                    result.context)
+                if confirmed is None:
+                    continue
+                kind = confirmed.confirmed_by
+                findings.append(AuditFinding(
+                    check_id=check.id, bug_class=check.bug_class,
+                    insertion_point=f"request:{check.id}", param="(request)",
+                    endpoint=endpoint, confidence=confirmed.confidence,
+                    confirmed_by=kind.value if hasattr(kind, "value") else str(kind),
+                    rationale=confirmed.rationale,
+                    oracle_context=result.context.model_dump(mode="json")))
+        return findings, leads
+
     def run(self, seed_url: str) -> ScanReport:
         started = time.monotonic()
         if self._progress is not None:
@@ -791,6 +877,14 @@ class WebScanCampaign:
                 a_findings, discovered_paths, js_secrets, arsenal_leads = self._arsenal_pass(
                     seed_url, crawl, spa_endpoints)
                 active.extend(a_findings)
+
+            # Opt-in GraphQL DoS/abuse pass (default OFF → skipped, run byte-identical).
+            # Additive: confirmed amplifications join active_findings; honest leads
+            # (cost / depth-when-introspection-off) populate the separate list below.
+            graphql_leads: list[str] = []
+            if self.enable_graphql_dos:
+                gql_findings, graphql_leads = self._graphql_dos_pass(seed_url, crawl)
+                active.extend(gql_findings)
         finally:
             if browser is not None:
                 browser.stop()
@@ -813,6 +907,7 @@ class WebScanCampaign:
             discovered_paths=discovered_paths,
             js_secrets=js_secrets,
             arsenal_leads=arsenal_leads,
+            graphql_leads=graphql_leads,
             fingerprint=fp,
             library_checks_run=library_checks_run,
         )
