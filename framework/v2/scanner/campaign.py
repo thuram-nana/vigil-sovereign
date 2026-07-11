@@ -43,7 +43,7 @@ from .engine import AuditEngine, AuditFinding
 from .fingerprint import Fingerprint, fingerprint
 from .grammar import generate as grammar_generate, infer_grammar
 from .graphql import GRAPHQL_DOS_CHECKS, GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
-from .insertion import HttpRequest, InsertionKind
+from .insertion import HttpRequest, InsertionKind, RequestTemplate
 from .jwt import JwtNoneCheck
 from .learning import ContextualBandit
 from .progress import ProgressSink
