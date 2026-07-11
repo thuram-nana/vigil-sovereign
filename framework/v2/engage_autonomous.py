@@ -11,7 +11,11 @@ touches anything here, so it stays byte-identical.
 One cycle, over the AUTHORITATIVE ``EngagementResult`` the scan already produced:
 
   * OBSERVE  — the run's shared ``WorldModel`` (post-scan: WEBAPP/ENDPOINT/finding nodes + the
-    chained attack facts) and the oracle-confirmed findings.
+    chained attack facts) and the oracle-confirmed findings, RE-OBSERVED at the top of EVERY cycle:
+    the WS-B ``fuse_sensors`` hook runs each cycle and folds its (SAFE, offline) sensor observations
+    into the SAME world-model the planner reasons over, so fresh observations enrich the next pick.
+    (The first-slice allowlist stays the safe offline producers; extending it to the active sensors
+    is a documented ``engage_fusion`` roadmap item, not this slice.)
   * ORIENT   — build a goal tree over the confirmed findings and construct the ``Planner`` over the
     run world-model (objectives = crown-jewel node kinds, source = the attacker foothold). The
     planner's world-aware selection PICKS the next action (a leaf on the highest-value route to a
@@ -23,8 +27,12 @@ One cycle, over the AUTHORITATIVE ``EngagementResult`` the scan already produced
     kill-switch REFUSES it and the tool never runs.
   * UPDATE   — fold the tool's observation back into the world-model (annotate the finding's node
     with the live re-grounding verdict) and update the goal tree (leaf succeeded / failed).
-  * RE-ORIENT— re-run the planner's selection over the now-updated tree/world; the pick changes,
-    proving the loop closed.
+  * RE-ORIENT— run the WS-F reasoning step and FEED ITS ADVICE BACK INTO SELECTION: the advice's
+    focus/hypotheses re-weight the matching open leaves' priors (bounded, always recomputed from a
+    fixed per-run baseline — no compounding), so the reasoning genuinely CHANGES which action the
+    planner selects next. Then re-run the planner's selection over the now-updated tree/world; the
+    pick changes, proving the loop closed. Advisory only — re-weighting orders effort, it NEVER
+    promotes a finding, removes a leaf, or feeds an oracle/SCE/calibration input.
 
 The A/B/F interface contract (so WS-B and WS-F compose WITHOUT editing engage.py). Each hook is
 imported with a graceful ImportError/attribute fallback to a no-op, so ``--autonomous`` works
@@ -43,8 +51,13 @@ Doctrine, by construction:
     gate chain. Preflight (in ``engage.run_engagement``) already refused an out-of-scope / kill-
     switched engagement before this cycle can run; each tool call is re-gated regardless.
   * DETERMINISM. Selection (``goal_tree.best_open_leaf_pathaware`` over ``pathsearch.best_paths``),
-    the gated invoke, and the fold are pure functions of ``(result, world, tree)`` — no wallclock,
-    no rng. Running the cycle twice over the same result yields the same step sequence.
+    the gated invoke, the reasoning-advice / meta-caution re-weight (recomputed from a fixed
+    baseline), and the fold are pure functions of ``(result, world, tree, advice, ledger)`` — no
+    wallclock, no rng. Running the cycle twice over the same inputs yields the same step sequence.
+  * CAUTION-ONLY LEARNING. The learner-health meta-monitor (``calibration.meta_monitor``) may only
+    ORDER effort (deprioritise borderline leaves when the calibrator/bands are untrustworthy); it
+    never gates a surface, never promotes a finding, and never feeds the deterministic oracle/SCE/
+    calibration inputs (coverage doctrine). Every open leaf stays selectable.
   * ADDITIVE + DEFAULT-OFF. Nothing here runs unless ``engage --autonomous`` is passed.
 """
 
@@ -77,6 +90,28 @@ def _fuse_sensors(world: "WorldModel | None", slug: str, ctx: Any) -> list:
         return list(out) if out else []
     except Exception:
         return []
+
+
+def _emit_fused_leads(sink: Any, observations: list, emitted_ids: set) -> None:
+    """PRODUCER UNIFICATION (I-C) — the WS-B fused SENSOR observations also reach the unified report,
+    as LEADS. A raw sensor observation carries no ``oracle_context``, so the report grader renders it
+    a lead, never a fact (prove-don't-guess preserved). Fusion is idempotent across cycles (stable
+    ``obs_id``), so ``emitted_ids`` dedups: each observation becomes at most one finding event.
+    Spine-gated (no sink → no-op) + only reached on the opt-in ``--autonomous`` path, so the default
+    gate never touches this. Best-effort, total: it can never sink the cycle."""
+    if sink is None or not observations:
+        return
+    try:
+        from .intel.project import observation_to_finding_payload
+        for obs in observations:
+            oid = getattr(obs, "obs_id", None)
+            if oid is not None and oid in emitted_ids:
+                continue
+            sink.finding_event(observation_to_finding_payload(obs))
+            if oid is not None:
+                emitted_ids.add(oid)
+    except Exception:
+        pass
 
 
 def _reason_step(world: "WorldModel | None", findings: list, ctx: Any) -> Any:
@@ -116,6 +151,9 @@ class AutonomyStep:
     verdict: str = ""             # the tool's observation (e.g. reverify grounding verdict)
     folded_node: str = ""         # world-model node id the observation was folded onto ("" if none)
     reoriented_to: str = ""       # the next action the planner selected after the update
+    advice_reweighted: int = 0    # open leaves the RE-ORIENT reasoning advice re-weighted this cycle
+    fused_observations: int = 0   # WS-B sensor observations folded into the world THIS cycle (OBSERVE)
+    coordinator_events: int = 0   # events the wired advisory agents posted when the Coordinator ticked
 
 
 @dataclass
@@ -128,7 +166,15 @@ class AutonomyResult:
     cycles: list[AutonomyStep] = field(default_factory=list)
     fused_observations: int = 0        # count returned by the WS-B fuse_sensors hook
     reasoning_advice: Any = None       # object returned by the WS-F reason_step hook (or None)
+    advice_reweighted: int = 0         # total open leaves the WS-F advice re-weighted (all cycles)
     planner_constructed: bool = False  # a real Planner was constructed over the run world-model
+    planner_driven: bool = False       # the Planner's Coordinator was TICKED in-loop (agents ran), not inert
+    agents_wired: list[str] = field(default_factory=list)  # advisory agents on the Coordinator
+    coordinator_events: int = 0        # total events the wired agents posted across all ticks
+    critic_verdicts: int = 0           # critic_verdict events the multi-critic panel posted (advisory)
+    reflections: int = 0               # reflection events the in-loop reflection posted (re-rank/defer)
+    meta_recommend: str = ""           # learner-health recommend (ok / gather_evidence / trust_confidence_less)
+    smt_deprioritised: int = 0         # open leaves whose parameter region is PROVABLY infeasible (advisory)
     planner_source: str | None = None  # the foothold node the planner reasons from
     objectives: list[str] = field(default_factory=list)
     world_nodes_before: int = 0
@@ -209,12 +255,298 @@ def _select(tree: Any, world: "WorldModel | None", objectives: list, source: str
             return None
 
 
+# ---------------------------------------------------------------------------
+# RE-ORIENT — feed the WS-F reasoning advice back into leaf selection.
+#
+# The advice re-WEIGHTS matching open leaves' priors so the reasoning genuinely
+# changes the next pick. It is ADVISORY ONLY: it orders effort (re-ranks), never
+# removes a leaf (coverage doctrine), never promotes a finding, and never feeds
+# an oracle / SCE / calibration input. Every re-weight is recomputed from a fixed
+# per-run BASELINE, so it is idempotent and cannot compound across cycles —
+# keeping the cycle deterministic (a pure function of advice + baseline).
+# ---------------------------------------------------------------------------
+
+_ADVICE_CAP = 0.99        # priors are lifted toward, but never to, certainty (search weight only)
+_ADVICE_STRENGTH = 0.9    # rank-0 (focus) lift fraction toward the cap; decays as 1/(rank+1)
+_PRIOR_FLOOR = 1e-6       # a re-weighted prior never reaches 0 → the leaf stays selectable (never gated)
+
+
+def _duck(obj: Any, key: str, default: Any = None) -> Any:
+    """Read ``key`` from a mapping OR an attribute of an object, defensively (advice may be a
+    ``ReasoningAdvice``, a plain dict, or an unrelated object)."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _norm(s: Any) -> str:
+    return str(s or "").strip().casefold()
+
+
+def _surface_is_concrete(sf: str) -> bool:
+    """A surface is concrete enough to match a specific leaf only when it is non-empty and not the
+    kernel's DryRun placeholder. DryRun advice carries an ``(unspecified surface)`` — so under the
+    deterministic DryRun backend the advice re-weight is a safe no-op (advice quality is bounded
+    there, exactly as engage_reasoning documents); a live backend / concrete advice reorders."""
+    n = _norm(sf)
+    return bool(n) and "unspecified" not in n
+
+
+def _advice_targets(advice: Any) -> list[tuple[str, str]]:
+    """The advice's ordered (bug_class, surface) targets — its top focus first, then its ranked
+    hypotheses — as normalised pairs. Duck-typed over ``ReasoningAdvice`` / dict / anything; a
+    non-advice object (e.g. a plain telemetry dict with no focus/hypotheses) yields ``[]``, so the
+    re-weight cleanly no-ops. ``pivots`` are lateral-move suggestions (not leaf-addressable), so
+    they are carried as advice telemetry only, not used to re-weight in this slice."""
+    raw: list[Any] = []
+    focus = _duck(advice, "focus")
+    if isinstance(focus, dict):
+        raw.append(focus)
+    hyps = _duck(advice, "hypotheses") or ()
+    try:
+        for h in hyps:
+            if isinstance(h, dict):
+                raw.append(h)
+    except TypeError:
+        pass
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for t in raw:
+        bc = _norm(t.get("bug_class"))
+        sf = str(t.get("surface", "") or "")
+        if not bc:
+            continue
+        key = (bc, _norm(sf))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((bc, sf))
+    return out
+
+
+def _leaf_baselines(tree: Any) -> dict[int, float]:
+    """Snapshot each open leaf's ORIGINAL prior once, so every re-weight is recomputed from this
+    fixed baseline (idempotent, non-compounding, deterministic)."""
+    out: dict[int, float] = {}
+    for leaf in tree.open_leaves():
+        out[leaf.id] = float(leaf.prior_p_success)
+    return out
+
+
+def _advice_rank(node: Any, targets: list[tuple[str, str]]) -> int | None:
+    """The rank of the first advice target that matches ``node``: a leaf matches a target when its
+    bug_class matches AND the target names a CONCRETE surface equal to the leaf's. Returns None when
+    no target matches (the leaf keeps its baseline prior)."""
+    lbc = _norm(node.bug_class)
+    lsf = _norm(node.surface)
+    for rank, (bc, sf) in enumerate(targets):
+        if bc == lbc and _surface_is_concrete(sf) and _norm(sf) == lsf:
+            return rank
+    return None
+
+
+def _reprioritise(tree: Any, baselines: dict[int, float], *, advice: Any = None,
+                  meta_caution: float = 0.0, smt_infeasible: "set[int] | None" = None) -> int:
+    """Recompute each open leaf's prior FROM its baseline and apply the active advisory re-weighters,
+    then return the count of leaves actually moved. In order:
+
+      * SMT infeasibility (I-D.5) — a leaf whose bounded parameter region is PROVABLY infeasible is
+        deprioritised to the floor (probing it can satisfy no constraint). Advisory: it degrades to
+        a no-op when the region is unknown/absent, and the leaf stays selectable (never gated).
+      * meta_monitor CAUTION (I-D.4) — when the learners are unhealthy, deprioritise the most
+        BORDERLINE (nearest-coin-flip) leaves so effort orders toward more-decisive leads and
+        abstains more on uncertain ones. Caution-only: it can only lower a prior toward the floor,
+        never below it (the leaf stays selectable — no surface is gated).
+      * reasoning ADVICE (I-D.1) — lift an advice-matched leaf toward the cap (rank-0 focus most,
+        decaying by 1/(rank+1)).
+
+    Bounded and idempotent (always recomputed from the fixed baseline → no compounding). Never
+    touches a resolved/pruned leaf and never removes one — it only re-orders the OPEN frontier."""
+    targets = _advice_targets(advice)
+    caution = min(1.0, max(0.0, float(meta_caution)))
+    infeasible = smt_infeasible or set()
+    moved = 0
+    for lid, base in baselines.items():
+        node = tree.nodes.get(lid)
+        if node is None or node.status not in ("open", "claimed"):
+            continue
+        # smt: a provably-infeasible parameter region starts at the floor (deprioritised).
+        p = _PRIOR_FLOOR if lid in infeasible else base
+        # meta caution: borderline = 1 at prior 0.5 (max uncertainty), 0 at prior in {0, 1}.
+        if caution > 0.0:
+            borderline = 1.0 - abs(2.0 * base - 1.0)
+            p = p * (1.0 - caution * borderline)
+        # reasoning advice: lift the matched leaf from its (possibly cautioned) prior toward the cap.
+        rank = _advice_rank(node, targets) if targets else None
+        if rank is not None:
+            lift = _ADVICE_STRENGTH / (rank + 1)
+            p = p + (_ADVICE_CAP - p) * lift
+        p = min(_ADVICE_CAP, max(_PRIOR_FLOOR, p))
+        if abs(p - float(node.prior_p_success)) > 1e-12:
+            moved += 1
+        node.prior_p_success = p
+    return moved
+
+
+# ---------------------------------------------------------------------------
+# I-D.5 — SMT feasibility as a LEAD-PRUNING advisor (deprioritise dead regions).
+#
+# analysis.smt.is_feasible answers "does ANY integer assignment satisfy this bounded linear
+# constraint system?" A leaf whose parameter region is PROVABLY infeasible cannot fire, so we
+# deprioritise it before selection. Advisory only: an infeasible verdict never refutes/promotes a
+# finding (only an oracle does), the leaf stays selectable (never gated), and the analyzer degrades
+# to a clean no-op when z3 is absent and the domain is too large to enumerate (UNKNOWN, not a guess).
+# ``smt_regions`` maps a leaf's bug_class OR surface -> {"variables": {name: (lo, hi)},
+# "constraints": [LinearConstraint | {"coeffs", "op", "rhs"}]}.
+# ---------------------------------------------------------------------------
+
+
+def _coerce_bounds(variables: Any) -> "dict[str, tuple[int, int]] | None":
+    if not isinstance(variables, dict) or not variables:
+        return None
+    out: dict[str, tuple[int, int]] = {}
+    for name, b in variables.items():
+        try:
+            lo, hi = b
+            out[str(name)] = (int(lo), int(hi))
+        except Exception:
+            return None
+    return out
+
+
+def _coerce_constraints(raw: Any, linear: Any) -> "list | None":
+    cons: list = []
+    for c in (raw or []):
+        try:
+            if isinstance(c, dict):
+                cons.append(linear(c.get("coeffs", {}) or {}, str(c.get("op")), int(c.get("rhs", 0))))
+            else:
+                cons.append(c)   # already a LinearConstraint
+        except Exception:
+            return None
+    return cons
+
+
+def _region_infeasible(region: Any) -> bool:
+    """True only when ``analysis.smt`` PROVES the region has no satisfying assignment. Anything else
+    — feasible, UNKNOWN (domain too large + no z3), malformed, or an import error — returns False
+    (no deprioritisation). Advisory + fail-open (never deprioritise on doubt)."""
+    if not isinstance(region, dict):
+        return False
+    try:
+        from .analysis.smt import is_feasible, linear
+    except Exception:
+        return False
+    variables = _coerce_bounds(region.get("variables"))
+    if variables is None:
+        return False
+    constraints = _coerce_constraints(region.get("constraints"), linear)
+    if constraints is None:
+        return False
+    try:
+        return bool(is_feasible(variables, constraints).is_infeasible)
+    except Exception:
+        return False
+
+
+def _smt_region_for(leaf: Any, smt_regions: dict) -> Any:
+    """The region declared for this leaf, keyed by its bug_class first, then its surface."""
+    for key in (str(getattr(leaf, "bug_class", "") or ""), str(getattr(leaf, "surface", "") or "")):
+        if key and key in smt_regions:
+            return smt_regions[key]
+    return None
+
+
+def _smt_infeasible_leaves(tree: Any, smt_regions: Any) -> "set[int]":
+    """The ids of OPEN leaves whose declared parameter region is provably infeasible. Empty when no
+    regions are supplied or none is provably dead. Pure and read-only; best-effort."""
+    if not isinstance(smt_regions, dict) or not smt_regions:
+        return set()
+    out: set[int] = set()
+    for leaf in tree.open_leaves():
+        region = _smt_region_for(leaf, smt_regions)
+        if region is not None and _region_infeasible(region):
+            out.add(leaf.id)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# I-D.4 — consult the learner-health meta-monitor to modulate effort (CAUTION-ONLY).
+#
+# assess_learner_health(ledger) diagnoses whether the learners (calibrator / conformal bands) are
+# trustworthy. Its recommend can only make the loop MORE cautious — never more confident, never
+# gate a surface, never promote. We map it to a caution STRENGTH fed into _reprioritise, which
+# deprioritises borderline leaves (orders effort), leaving every surface selectable.
+# ---------------------------------------------------------------------------
+
+_META_CAUTION = {"ok": 0.0, "gather_evidence": 0.5, "trust_confidence_less": 0.7}
+
+
+def _load_ledger(slug: str) -> Any:
+    """Best-effort load of the operator's OutcomeLedger at ``targets/<slug>/outcomes.json`` — so a
+    real engagement's accumulated labels modulate caution with zero wiring. Missing/malformed → None
+    (no modulation). Never raises."""
+    if not slug:
+        return None
+    try:
+        from .calibration.ledger import OutcomeLedger
+        from .common.paths import target_dir
+        path = target_dir(slug) / "outcomes.json"
+        if not path.is_file():
+            return None
+        return OutcomeLedger.load(path)
+    except Exception:
+        return None
+
+
+def _meta_caution(slug: str, ledger: Any) -> tuple[str, float]:
+    """Consult the meta-monitor over an OutcomeLedger and return ``(recommend, caution_strength)``.
+    CAUTION-ONLY: the strength can only deprioritise borderline leaves (order effort), never gate a
+    surface or promote a finding. No ledger / any error → ``("", 0.0)`` (no modulation). Pure."""
+    if ledger is None:
+        return ("", 0.0)
+    try:
+        from .calibration.meta_monitor import assess_learner_health
+        sig = assess_learner_health(ledger)
+        rec = str(getattr(sig, "recommend", "") or "")
+        return (rec, _META_CAUTION.get(rec, 0.0))
+    except Exception:
+        return ("", 0.0)
+
+
+def _advisory_agents(blackboard: Any, slug: str) -> list:
+    """The deterministic, ADVISORY nervous-system agents wired onto the Coordinator so they RUN
+    inside the loop (not as post-hoc telemetry): the multi-critic panel (re-grounding / provenance
+    / calibration lenses) and the in-loop reflection (dead-thread / stall re-orient). Both are
+    deterministic (no LLM, no egress) and advisory — a critic can only endorse/object/abstain and
+    reflection only re-ranks/defers; NEITHER promotes a finding or overrides an oracle (the type
+    system enforces the critic side). Best-effort: an import failure yields fewer agents, never
+    sinks construction. The LLM-backed ``CritiqueAgent`` is deliberately NOT wired here to keep the
+    in-loop nervous system deterministic and network-free (a documented next slice)."""
+    agents: list = []
+    try:
+        from .agents.critics import MultiCriticAgent
+        agents.append(MultiCriticAgent(blackboard, slug))
+    except Exception:
+        pass
+    try:
+        from .agents.reflection import ReflectionAgent
+        agents.append(ReflectionAgent(blackboard, slug))
+    except Exception:
+        pass
+    return agents
+
+
 def _construct_planner(world: "WorldModel | None", slug: str, tree: Any, objectives: list,
                        source: str | None, request_budget: int, blackboard: Any) -> Any:
-    """Construct the real ``Planner`` over the run world-model — the substrate the multi-cycle
-    roadmap loop (``planner.run``) will drive. Needs a blackboard (its event substrate); when none
-    is available it is skipped (None) and the cycle still runs on the shared tree selection, which is
-    byte-for-byte what the planner itself would select. Best-effort — never raises."""
+    """Construct the real ``Planner`` over the run world-model AND give its Coordinator the real
+    advisory agents (:func:`_advisory_agents`) — so the Coordinator, once TICKED in-loop, drives
+    the nervous system LIVE instead of being constructed-inert with ``agents=[]``. Needs a
+    blackboard (its event substrate); when none is available it is skipped (None) and the cycle
+    still runs on the shared tree selection, which is byte-for-byte what the planner itself would
+    select. Best-effort — never raises."""
     if blackboard is None:
         return None
     try:
@@ -225,7 +557,8 @@ def _construct_planner(world: "WorldModel | None", slug: str, tree: Any, objecti
             blackboard.engagement_id(slug)
         except Exception:
             pass
-        coord = Coordinator(blackboard=blackboard, engagement_slug=slug, agents=[])
+        coord = Coordinator(blackboard=blackboard, engagement_slug=slug,
+                            agents=_advisory_agents(blackboard, slug))
         budget = Budget(request_max=max(1, int(request_budget)))
         return Planner(
             blackboard=blackboard, coordinator=coord, engagement_slug=slug,
@@ -282,6 +615,113 @@ def _fold_observation(world: "WorldModel | None", surface: str, verdict: str) ->
 
 
 # ---------------------------------------------------------------------------
+# DRIVE — tick the constructed Coordinator so the wired advisory agents RUN IN-LOOP.
+#
+# These mirror the loop's authoritative facts + its own reasoning trace onto the event spine and
+# then TICK the Coordinator, so the multi-critic panel and the reflection agent run INSIDE each
+# OODA cycle (the nervous system runs live, not as post-hoc telemetry). All ADVISORY: the critics
+# only endorse/object/abstain and reflection only re-ranks/defers — none promotes a finding or
+# touches an oracle verdict. Best-effort throughout; only reached when a blackboard is supplied.
+# ---------------------------------------------------------------------------
+
+
+def _finding_payload(f: object) -> dict:
+    """A FindingPayload-shaped mirror of a confirmed AuditFinding — enough for the wired critic
+    panel to review it in-loop. It mirrors an ALREADY oracle-confirmed fact (telemetry); it does
+    NOT re-confirm one. Provenance is honest: ``verified_by_oracle`` tracks the presence of the
+    retained ``oracle_context``, and ``critique_status`` stays ``pending`` (the critics advise; a
+    verdict never promotes)."""
+    bug_class = str(getattr(f, "bug_class", "") or "")
+    surface = _finding_surface(f) or str(getattr(f, "param", "") or "") or "(surface)"
+    oc = getattr(f, "oracle_context", None)
+    conf = getattr(f, "confidence", None)
+    try:
+        conf = None if conf is None else min(1.0, max(0.0, float(conf)))
+    except (TypeError, ValueError):
+        conf = None
+    return {
+        "finding_slug": (f"{bug_class}:{getattr(f, 'insertion_point', '')}"[:120]) or bug_class or "finding",
+        "title": (f"{bug_class} at {getattr(f, 'param', '')}".strip() or bug_class or "finding"),
+        "severity": "High",
+        "bug_class": bug_class or "unknown",
+        "surface": str(surface),
+        "summary": str(getattr(f, "rationale", "") or f"{bug_class} finding"),
+        "critique_status": "pending",
+        "oracle_context": oc,
+        "verified_by_oracle": bool(oc),
+        "confidence": conf,
+        "oracle_kind": (str(getattr(f, "confirmed_by", "") or "") or None),
+        "oracle_rationale": str(getattr(f, "rationale", "") or ""),
+    }
+
+
+def _mirror_findings_to_spine(sink: Any, findings: list) -> int:
+    """Mirror the ALREADY oracle-confirmed findings onto the spine as ``finding`` events so the
+    wired critic panel has material to review IN-LOOP. Telemetry over authoritative facts — it
+    neither promotes nor demotes; the critics only advise over them. Best-effort. Returns count."""
+    if sink is None:
+        return 0
+    n = 0
+    for f in findings:
+        try:
+            if sink.finding_event(_finding_payload(f)) is not None:
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _post_leaf_hypothesis(blackboard: Any, slug: str, leaf: Any, cycle: int) -> None:
+    """Mirror THIS cycle's picked action onto the spine as a ``hypothesis`` event — the honest
+    reasoning trace the reflection agent re-orients over. Best-effort; never raises."""
+    if blackboard is None:
+        return
+    try:
+        blackboard.post(
+            engagement=slug, kind="hypothesis", agent_name="autonomy",
+            payload={
+                "handle": f"AUTO-H{cycle:03d}",
+                "surface": str(getattr(leaf, "surface", "") or "(surface)"),
+                "bug_class": str(getattr(leaf, "bug_class", "") or "unknown"),
+                "given": "an oracle-confirmed finding sits on this surface",
+                "if_action": "re-execute the finding's retained oracle certificate",
+                "then_observation": "the oracle either re-fires (grounded) or does not",
+                "because_model": "prove-by-re-execution over the retained proof",
+                "refute_on": "the retained oracle certificate no longer re-grounds",
+                "cheap_test": "reverify_finding (Tier-1, no egress)",
+                "confidence": min(1.0, max(0.0, float(getattr(leaf, "prior_p_success", 0.5) or 0.5))),
+                "status": "open",
+            })
+    except Exception:
+        pass
+
+
+def _drive_coordinator(planner: Any, *, max_ticks: int = 4) -> int:
+    """TICK the constructed Coordinator so its wired advisory agents RUN this cycle — this is what
+    makes the planner DRIVEN (its nervous system runs in-loop) rather than constructed-inert.
+    Returns the events the agents posted. Best-effort — a tick failure never sinks the cycle. The
+    Coordinator, per FORGE §3.4, cannot suppress a critic objection; it only orders + budgets."""
+    coord = getattr(planner, "coord", None)
+    if coord is None:
+        return 0
+    try:
+        report = coord.run_until_quiet(max_ticks=max(1, int(max_ticks)))
+        return int(getattr(report, "total_events", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _count_kind(blackboard: Any, slug: str, kind: str) -> int:
+    """Count spine events of ``kind`` for the engagement — best-effort (0 on any trouble)."""
+    if blackboard is None:
+        return 0
+    try:
+        return int(blackboard.count(engagement=slug, kind=kind))
+    except Exception:
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # the cycle
 # ---------------------------------------------------------------------------
 
@@ -296,6 +736,8 @@ def run_autonomous_cycle(
     registry: Any = None,
     blackboard: Any = None,
     ctx: Any = None,
+    outcome_ledger: Any = None,
+    smt_regions: Any = None,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -317,47 +759,79 @@ def run_autonomous_cycle(
     objectives = _objective_kinds()
     out.objectives = [getattr(k, "value", str(k)) for k in objectives]
 
-    # OBSERVE — WS-B sensor fusion first, so the planner reasons over the enriched world.
-    fused = _fuse_sensors(world, slug, ctx)
-    out.fused_observations = len(fused)
-
     # ORIENT — goal tree over the confirmed findings + the planner over the run world-model.
     tree, leaf_to_finding = _build_goal_tree(findings)
+    baselines = _leaf_baselines(tree)   # fixed per-run priors; every advice re-weight recomputes from these
     source = _foothold(world)
     out.planner_source = source
     planner = _construct_planner(world, slug, tree, objectives, source, request_budget, blackboard)
     out.planner_constructed = planner is not None
+    if planner is not None:
+        out.agents_wired = [getattr(a, "name", "agent") for a in getattr(planner.coord, "agents", [])]
 
     sink = _spine_sink(blackboard, slug)
-
-    # PRODUCER UNIFICATION (WS-B) — the fused SENSOR leads also reach the unified report, as
-    # LEADS. A raw sensor observation carries no oracle_context, so the report grader renders it a
-    # lead, never a fact (prove-don't-guess preserved). Spine-gated + opt-in autonomous path →
-    # the default gate never reaches this, so it stays byte-identical. Best-effort.
-    if sink is not None and fused:
-        try:
-            from .intel.project import observation_to_finding_payload
-            for obs in fused:
-                sink.finding_event(observation_to_finding_payload(obs))
-        except Exception:
-            pass
+    emitted_lead_ids: set = set()   # I-C dedup — a fused observation emits at most one lead event
 
     if not findings:
         out.notes.append("no confirmed findings — nothing to drive this cycle")
+        # still exercise the OBSERVE (WS-B) + reasoning (WS-F) seams so they are live on an empty run
+        empty_obs = _fuse_sensors(world, slug, ctx)
+        out.fused_observations += len(empty_obs)
+        _emit_fused_leads(sink, empty_obs, emitted_lead_ids)   # I-C: fused leads reach the report
         out.world_nodes_after = world.node_count if world is not None else 0
-        # still exercise the WS-F reasoning hook so the seam is live even on an empty run
         out.reasoning_advice = _reason_step(world, findings, ctx)
         return out
 
+    # ORIENT (learner health) — consult the meta-monitor over the outcome ledger (explicit arg, else
+    # the operator's targets/<slug>/outcomes.json). CAUTION-ONLY: it orders effort (deprioritises
+    # borderline leaves), never gates a surface or promotes a finding. No ledger → no modulation.
+    ledger = outcome_ledger if outcome_ledger is not None else _load_ledger(slug)
+    out.meta_recommend, meta_caution = _meta_caution(slug, ledger)
+    if meta_caution > 0.0:
+        out.notes.append(f"meta-monitor: {out.meta_recommend} → caution ordering (no surface gated)")
+
+    # ORIENT (SMT) — deprioritise leaves whose bounded parameter region is PROVABLY infeasible. The
+    # region set is fixed for the run, so it is computed once. Advisory: it degrades to a no-op
+    # without z3 on large domains and never gates a surface.
+    smt_infeasible = _smt_infeasible_leaves(tree, smt_regions)
+    out.smt_deprioritised = len(smt_infeasible)
+    if smt_infeasible:
+        out.notes.append(f"smt: {len(smt_infeasible)} provably-infeasible region(s) deprioritised (not gated)")
+
+    # ORIENT (reasoning) — run the WS-F step ONCE up front and feed its advice into the FIRST
+    # selection, so reasoning drives the opening pick, not only the re-orient.
+    advice = _reason_step(world, findings, ctx)
+    out.reasoning_advice = advice
+    out.advice_reweighted += _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution,
+                                           smt_infeasible=smt_infeasible)
+
+    # DRIVE (setup) — mirror the ALREADY oracle-confirmed findings onto the spine so the wired
+    # advisory critic panel has material to review when the Coordinator ticks in-loop. This is
+    # telemetry over authoritative facts; it neither promotes nor demotes any finding.
+    _mirror_findings_to_spine(sink, findings)
+
     cycles = max(1, int(max_cycles))
     for c in range(1, cycles + 1):
+        # OBSERVE — re-run the WS-B sensor fusion EACH cycle, folding fresh observations into the
+        # SAME world-model the planner reasons over BEFORE this cycle's selection. Idempotent: the
+        # fusion's stable obs_ids mean re-fusing the same offline producers never inflates belief.
+        cycle_obs = _fuse_sensors(world, slug, ctx)
+        cycle_fused = len(cycle_obs)
+        out.fused_observations += cycle_fused
+        _emit_fused_leads(sink, cycle_obs, emitted_lead_ids)   # I-C: fused leads reach the report
+
         leaf = _select(tree, world, objectives, source)
         if leaf is None:
             out.notes.append(f"cycle {c}: no open action remaining")
             break
         step = AutonomyStep(cycle=c, picked_leaf_id=leaf.id, picked_label=leaf.label,
-                            picked_surface=leaf.surface, picked_bug_class=leaf.bug_class)
+                            picked_surface=leaf.surface, picked_bug_class=leaf.bug_class,
+                            fused_observations=cycle_fused)
         finding = leaf_to_finding.get(leaf.id)
+
+        # DRIVE — mirror THIS cycle's picked action onto the spine as a hypothesis (the honest
+        # reasoning trace the in-loop reflection agent re-orients over).
+        _post_leaf_hypothesis(blackboard, slug, leaf, c)
 
         # ACT — drive the picked action as a GATED tool call.
         tree.mark_status(leaf.id, "claimed")
@@ -383,12 +857,30 @@ def run_autonomous_cycle(
             tree.mark_status(leaf.id, "succeeded" if grounded else "failed",
                              reason="" if grounded else "reverify did not re-ground")
 
-        # RE-ORIENT — the WS-F reasoning hook, then re-select over the updated tree/world.
-        out.reasoning_advice = _reason_step(world, findings, ctx)
+        # RE-ORIENT — run the WS-F reasoning hook, FEED its advice back into the tree (re-weight the
+        # matching open leaves' priors), THEN re-select. This is what closes the loop: the reasoning
+        # advice changes which leaf the planner picks next.
+        advice = _reason_step(world, findings, ctx)
+        out.reasoning_advice = advice
+        step.advice_reweighted = _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution,
+                                               smt_infeasible=smt_infeasible)
+        out.advice_reweighted += step.advice_reweighted
         nxt = _select(tree, world, objectives, source)
         step.reoriented_to = nxt.label if nxt is not None else "(no more actions)"
+
+        # DRIVE — tick the constructed Coordinator so its wired advisory agents (the multi-critic
+        # panel + the reflection agent) RUN this cycle over the mirrored facts + reasoning trace.
+        # This is what makes the planner DRIVEN (its nervous system runs in-loop) rather than
+        # constructed-inert. Advisory only: a critic never confirms, reflection only re-ranks/defers;
+        # the oracle stays the sole authority for any promotion.
+        if planner is not None:
+            step.coordinator_events = _drive_coordinator(planner)
+            out.coordinator_events += step.coordinator_events
+            out.planner_driven = True
         out.cycles.append(step)
 
+    out.critic_verdicts = _count_kind(blackboard, slug, "critic_verdict")
+    out.reflections = _count_kind(blackboard, slug, "reflection")
     out.world_nodes_after = world.node_count if world is not None else 0
     return out
 
@@ -412,8 +904,18 @@ def render_summary(out: AutonomyResult) -> list[str]:
     src = out.planner_source or "(none)"
     lines.append(
         f"  autonomous OODA   : planner over world-model "
-        f"(constructed={out.planner_constructed}, source={src}, "
+        f"(constructed={out.planner_constructed}, driven={out.planner_driven}, source={src}, "
         f"objectives={','.join(out.objectives) or 'none'})")
+    if out.agents_wired:
+        lines.append(
+            f"    nervous system  : agents={','.join(out.agents_wired)}; "
+            f"{out.coordinator_events} in-loop event(s) "
+            f"({out.critic_verdicts} critic verdict(s), {out.reflections} reflection(s)) — advisory")
+    if out.meta_recommend and out.meta_recommend != "ok":
+        lines.append(f"    learner health  : {out.meta_recommend} → caution ordering (no surface gated)")
+    if out.smt_deprioritised:
+        lines.append(f"    smt pruning     : {out.smt_deprioritised} provably-infeasible region(s) "
+                     f"deprioritised (advisory; not gated)")
     if out.fused_observations:
         lines.append(f"    fused sensors   : {out.fused_observations} observation(s) (WS-B)")
     for s in out.cycles:
@@ -427,5 +929,7 @@ def render_summary(out: AutonomyResult) -> list[str]:
     for n in out.notes:
         lines.append(f"    note            : {n}")
     if out.reasoning_advice is not None:
-        lines.append("    reasoning advice: present (WS-F)")
+        rw = (f", re-weighted {out.advice_reweighted} leaf/leaves into selection"
+              if out.advice_reweighted else " (no leaf re-weighted this run)")
+        lines.append(f"    reasoning advice: present (WS-F){rw}")
     return lines

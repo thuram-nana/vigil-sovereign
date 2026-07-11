@@ -339,3 +339,274 @@ def test_planner_is_constructed_over_world_when_blackboard_present(tmp_path: Pat
         assert out.cycles and out.cycles[0].gated is True
     finally:
         bb.close()
+
+
+# ---------------------------------------------------------------------------
+# (7) I-D.1 — reason_step advice is FED BACK INTO selection: it re-weights the
+#     open frontier so the reasoning actually CHANGES the next selected action.
+# ---------------------------------------------------------------------------
+
+
+def _greedy_world(surfaces: list[str]) -> WorldModel:
+    """Endpoints only, NO crown jewel reachable → selection degrades to plain greedy
+    (prior*value/cost). The reasoning-advice re-weight is then the only thing that can reorder."""
+    w = WorldModel()
+    for i, sf in enumerate(surfaces):
+        w.add_node(Node(id=f"ep{i}", kind=NodeKind.ENDPOINT, attrs={"url": sf},
+                        provenance="obs-1", confidence=1.0, first_seen=0, last_seen=0))
+    return w
+
+
+def test_reasoning_advice_reorders_the_next_selected_action(monkeypatch: pytest.MonkeyPatch):
+    """The reasoning advice PROVABLY changes the next selected action. Greedy selection picks the
+    higher-prior finding; concrete advice focusing the lower-prior one re-weights it to the top of
+    the open frontier, so the planner picks IT instead — advisory, the oracle stays authoritative."""
+    from framework.v2 import engage_reasoning as reasoning_mod
+    from framework.v2.engage_reasoning import ReasoningAdvice
+
+    on = "https://t.invalid/on-path"
+    off = "https://t.invalid/off-path"
+
+    def build_result() -> EngagementResult:
+        world = _greedy_world([off, on])
+        # greedy prefers xss (prior 0.6) over idor (prior 0.3)
+        return _synthetic_result(world, [_finding("xss", off, 0.6), _finding("idor", on, 0.3)])
+
+    # CONTROL: default DryRun advice carries an "(unspecified surface)" focus → no concrete match →
+    # nothing is re-weighted, so greedy selection stands and picks xss.
+    control = run_autonomous_cycle(build_result(), slug="alpha", prompt_callback=_deny)
+    assert control.cycles and control.cycles[0].picked_bug_class == "xss"
+    assert control.advice_reweighted == 0, "DryRun (unspecified-surface) advice must not re-weight"
+
+    # TREATMENT: advice focuses the LOWER-prior idor@on-path with a CONCRETE surface → it is
+    # re-weighted above xss and is now selected first. This is the loop closing.
+    advice = ReasoningAdvice(
+        next_focus="test idor on /on-path", abstain=False, is_dryrun=False,
+        focus={"id": "H-1", "surface": on, "bug_class": "idor", "cheap_test": "swap id",
+               "confidence": 0.3, "oracle_provable": True})
+    monkeypatch.setattr(reasoning_mod, "reason_step", lambda world, findings, ctx: advice)
+    treated = run_autonomous_cycle(build_result(), slug="alpha", prompt_callback=_deny)
+    assert treated.cycles and treated.cycles[0].picked_bug_class == "idor", \
+        "reasoning advice did not change the selected action"
+    assert treated.advice_reweighted >= 1
+    # ADVISORY-ONLY: the authoritative report is untouched — no finding promoted, no verdict changed.
+    assert {f.bug_class for f in treated.engagement.report.active_findings} == {"xss", "idor"}
+
+
+def test_reasoning_advice_reweight_is_bounded_and_deterministic(monkeypatch: pytest.MonkeyPatch):
+    """The advice re-weight is recomputed from a fixed baseline each cycle (idempotent, bounded by
+    the cap) so two identical runs are byte-identical, and the prior never reaches certainty."""
+    from framework.v2 import engage_reasoning as reasoning_mod
+    from framework.v2.engage_reasoning import ReasoningAdvice
+
+    on = "https://t.invalid/on-path"
+    advice = ReasoningAdvice(next_focus="x", abstain=False, is_dryrun=False,
+                             focus={"surface": on, "bug_class": "idor", "confidence": 0.3,
+                                    "cheap_test": "", "oracle_provable": True})
+    monkeypatch.setattr(reasoning_mod, "reason_step", lambda w, f, c: advice)
+
+    def run():
+        world = _greedy_world([on, "https://t.invalid/off-path"])
+        result = _synthetic_result(world, [_finding("xss", "https://t.invalid/off-path", 0.6),
+                                           _finding("idor", on, 0.3)])
+        out = run_autonomous_cycle(result, slug="alpha", max_cycles=3, prompt_callback=_deny)
+        return [(s.picked_bug_class, s.reoriented_to, s.advice_reweighted) for s in out.cycles]
+
+    assert run() == run(), "advice re-weighting made the cycle non-deterministic"
+
+
+# ---------------------------------------------------------------------------
+# (8) I-D.2 — fuse_sensors (OBSERVE) runs EVERY cycle and enriches the shared world.
+# ---------------------------------------------------------------------------
+
+
+def test_fuse_sensors_runs_every_cycle(monkeypatch: pytest.MonkeyPatch):
+    """The WS-B ``fuse_sensors`` hook is invoked once per OODA cycle (not once per run), so fresh
+    observations enrich the SAME world-model the planner reasons over before each selection."""
+    fusion = types.ModuleType("framework.v2.engage_fusion")
+    calls = {"n": 0, "worlds": []}
+
+    def _fuse(world, slug, ctx):
+        calls["n"] += 1
+        calls["worlds"].append(world)
+        return ["obs-a", "obs-b"]
+
+    fusion.fuse_sensors = _fuse  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "framework.v2.engage_fusion", fusion)
+
+    world = _greedy_world(["https://t.invalid/a", "https://t.invalid/b"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.6),
+                                       _finding("sqli", "https://t.invalid/b", 0.5)])
+    out = run_autonomous_cycle(result, slug="alpha", max_cycles=2, prompt_callback=_deny)
+
+    assert len(out.cycles) == 2, "expected two driven cycles"
+    assert calls["n"] == 2, "fuse_sensors did not run once per cycle"
+    assert all(w is world for w in calls["worlds"]), "fusion enriched a different world than the planner's"
+    assert all(s.fused_observations == 2 for s in out.cycles)
+    assert out.fused_observations == 4
+
+
+# ---------------------------------------------------------------------------
+# (9) I-D.3 — the constructed Planner is now DRIVEN: its Coordinator ticks the
+#     real advisory agents (multi-critic panel + reflection) INSIDE each cycle.
+# ---------------------------------------------------------------------------
+
+
+def test_planner_is_driven_advisory_agents_run_in_loop(tmp_path: Path):
+    """The Coordinator is no longer constructed-inert (``agents=[]``): it carries the real
+    multi-critic + reflection agents and is TICKED each cycle, so the nervous system runs IN-LOOP.
+    Everything stays advisory — a critic never confirms, reflection only re-ranks; the authoritative
+    report is untouched and only a fired oracle can promote a finding."""
+    from framework.v2.agents.blackboard import open_blackboard
+
+    bb = open_blackboard(db_path=tmp_path / "bb.sqlite")
+    try:
+        world = _pathaware_world()
+        result = _synthetic_result(world, [
+            _finding("idor", "https://t.invalid/on-path", 0.9),
+            _finding("xss", "https://t.invalid/off-path", 0.5)])
+        before = [(f.bug_class, f.confidence, f.confirmed_by) for f in result.report.active_findings]
+
+        out = run_autonomous_cycle(result, slug="alpha", max_cycles=2, blackboard=bb, prompt_callback=_deny)
+
+        # the Planner is DRIVEN (its Coordinator ticked the wired agents), not constructed-inert.
+        assert out.planner_constructed is True
+        assert out.planner_driven is True, "the Coordinator was constructed but never ticked in-loop"
+        assert "multi-critic" in out.agents_wired and "reflection" in out.agents_wired
+        assert out.coordinator_events > 0
+        # BOTH advisory agents actually ran and posted their events this run.
+        assert out.critic_verdicts > 0, "the multi-critic panel did not run in-loop"
+        assert out.reflections > 0, "the reflection agent did not run in-loop"
+
+        # ADVISORY-ONLY: the authoritative report is untouched by anything the agents did.
+        after = [(f.bug_class, f.confidence, f.confirmed_by) for f in result.report.active_findings]
+        assert before == after, "an in-loop agent mutated the authoritative report"
+
+        # a critic verdict can NEVER be 'confirm' — only a fired deterministic oracle confirms.
+        verdicts = bb.read(engagement="alpha", kinds=["critic_verdict"])
+        assert verdicts and all(
+            v.payload["verdict"] in ("endorse", "object", "abstain") for v in verdicts)
+        # the mirrored findings are never PROMOTED by a critic (critique_status stays 'pending').
+        fevents = bb.read(engagement="alpha", kinds=["finding"])
+        assert fevents and all(f.payload["critique_status"] == "pending" for f in fevents)
+    finally:
+        bb.close()
+
+
+def test_planner_constructed_inert_without_blackboard():
+    """Without a blackboard there is no event substrate, so the Planner is not constructed and the
+    cycle runs on the shared tree selection (byte-for-byte what the planner would select) — the
+    nervous-system driving is cleanly skipped, never errored."""
+    world = _pathaware_world()
+    result = _synthetic_result(world, [_finding("idor", "https://t.invalid/on-path", 0.9)])
+    out = run_autonomous_cycle(result, slug="alpha", prompt_callback=_deny)
+    assert out.planner_constructed is False
+    assert out.planner_driven is False
+    assert out.agents_wired == [] and out.coordinator_events == 0
+    assert out.cycles and out.cycles[0].gated is True   # the cycle still ran + gated the tool call
+
+
+# ---------------------------------------------------------------------------
+# (10) I-D.4 — the learner-health meta-monitor ORDERS effort (caution-only), never gates.
+# ---------------------------------------------------------------------------
+
+
+def _miscalibrated_ledger(n: int = 10):
+    """A ledger of high-scored findings that all turned out false — materially miscalibrated, so
+    assess_learner_health recommends 'trust_confidence_less' (be more cautious)."""
+    from framework.v2.calibration.ledger import OutcomeLedger
+    from framework.v2.calibration.models import Outcome, OutcomeLabel, Prediction
+
+    led = OutcomeLedger()
+    for i in range(n):
+        fid = f"f{i}"
+        led.add_prediction(Prediction(finding_id=fid, raw_score=0.9, feature_hash="h",
+                                      model_version="v1", oracle_confirmed=True), seq=i)
+        led.record_outcome(Outcome(finding_id=fid, label=OutcomeLabel.FALSE_POSITIVE), seq=1000 + i)
+    return led
+
+
+def test_meta_monitor_caution_orders_effort_never_gates():
+    """When the learners are unhealthy the meta-monitor deprioritises the MOST borderline leaf so
+    effort leads with a more-decisive lead — but EVERY surface stays covered across the run
+    (order effort, never gate a surface). Only a fired oracle can promote; meta never does."""
+    urls = ["https://t.invalid/a", "https://t.invalid/b", "https://t.invalid/c"]
+
+    def build_result() -> EngagementResult:
+        world = _greedy_world(urls)
+        return _synthetic_result(world, [
+            _finding("aaa", urls[0], 0.50),   # most borderline (nearest coin-flip)
+            _finding("bbb", urls[1], 0.45),
+            _finding("ccc", urls[2], 0.40)])  # most decisive
+
+    # CONTROL: no ledger → no caution → greedy leads with the highest prior (the coin-flip aaa).
+    control = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=3, prompt_callback=_deny)
+    assert control.meta_recommend == ""
+    assert control.cycles[0].picked_bug_class == "aaa"
+    assert {s.picked_bug_class for s in control.cycles} == {"aaa", "bbb", "ccc"}
+
+    # TREATMENT: a miscalibrated ledger → 'trust_confidence_less' → caution deprioritises the most
+    # borderline leaf, so effort now LEADS with the more-decisive ccc.
+    treated = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=3,
+                                   outcome_ledger=_miscalibrated_ledger(), prompt_callback=_deny)
+    assert treated.meta_recommend == "trust_confidence_less"
+    assert treated.cycles[0].picked_bug_class == "ccc", "meta caution did not re-order effort"
+    # NEVER GATES: all three surfaces are still covered across the run (coverage doctrine).
+    assert {s.picked_bug_class for s in treated.cycles} == {"aaa", "bbb", "ccc"}, \
+        "meta caution gated a surface"
+    # ADVISORY-ONLY: the authoritative findings are untouched.
+    assert {f.bug_class for f in treated.engagement.report.active_findings} == {"aaa", "bbb", "ccc"}
+
+
+# ---------------------------------------------------------------------------
+# (11) I-D.5 — SMT feasibility deprioritises a PROVABLY-infeasible region; never gates;
+#      degrades to a no-op when the domain is too large and z3 is absent.
+# ---------------------------------------------------------------------------
+
+
+def test_smt_infeasible_region_is_deprioritised_never_gated():
+    """A leaf whose bounded parameter region is provably infeasible is deprioritised below a
+    feasible sibling before selection — but it stays selectable (covered later); the SMT layer only
+    ORDERS effort, it never gates a surface and never refutes/promotes a finding (only an oracle does)."""
+    urls = ["https://t.invalid/feas", "https://t.invalid/infeas"]
+
+    def build_result() -> EngagementResult:
+        world = _greedy_world(urls)
+        return _synthetic_result(world, [_finding("feasible", urls[0], 0.4),
+                                         _finding("infeasible", urls[1], 0.6)])
+
+    # x in [0,10] AND x >= 20 has NO assignment — decided exactly by the dep-free bounded enumerator
+    # (no z3 needed for this small domain).
+    regions = {"infeasible": {"variables": {"x": (0, 10)},
+                              "constraints": [{"coeffs": {"x": 1}, "op": ">=", "rhs": 20}]}}
+
+    # CONTROL: no regions → greedy leads with the higher prior (the infeasible leaf, 0.6).
+    control = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=2, prompt_callback=_deny)
+    assert control.smt_deprioritised == 0
+    assert control.cycles[0].picked_bug_class == "infeasible"
+
+    # TREATMENT: the provably-dead region deprioritises that leaf; effort now leads with feasible.
+    treated = run_autonomous_cycle(build_result(), slug="alpha", max_cycles=2,
+                                   smt_regions=regions, prompt_callback=_deny)
+    assert treated.smt_deprioritised == 1
+    assert treated.cycles[0].picked_bug_class == "feasible", "smt did not deprioritise the infeasible region"
+    # NEVER GATES: the infeasible surface is still covered across the run (just later).
+    assert {s.picked_bug_class for s in treated.cycles} == {"feasible", "infeasible"}
+
+
+def test_smt_unknown_region_is_a_noop_without_z3():
+    """A domain too large to enumerate with z3 absent is UNKNOWN — an honest no-op: the leaf is NOT
+    deprioritised (never a guess), so greedy order is unchanged."""
+    from framework.v2.analysis.smt import has_z3
+
+    urls = ["https://t.invalid/big", "https://t.invalid/small"]
+    world = _greedy_world(urls)
+    result = _synthetic_result(world, [_finding("big", urls[0], 0.6), _finding("small", urls[1], 0.4)])
+    # 2_000_001 assignments > DEFAULT_MAX_ENUM (1e6): enum refuses, and with no z3 the verdict is UNKNOWN.
+    regions = {"big": {"variables": {"x": (0, 2_000_000)},
+                       "constraints": [{"coeffs": {"x": 1}, "op": ">=", "rhs": 3_000_000}]}}
+    out = run_autonomous_cycle(result, slug="alpha", max_cycles=2, smt_regions=regions, prompt_callback=_deny)
+
+    if not has_z3():
+        assert out.smt_deprioritised == 0, "an UNKNOWN region must not deprioritise (honest no-op)"
+        assert out.cycles[0].picked_bug_class == "big"   # greedy order unchanged
