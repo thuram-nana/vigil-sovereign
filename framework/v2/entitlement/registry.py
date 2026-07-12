@@ -35,6 +35,11 @@ REQUIRED_TIER: dict[Capability, CapabilityTier] = {
     # standard
     Capability.ACTIVE_RECON: CapabilityTier.STANDARD,
     Capability.AUTONOMOUS_PLANNING: CapabilityTier.STANDARD,
+    # defensive — AEGIS Gateway active enforcement (blocking a PROVEN attack on the operator's own
+    # app). STANDARD, not offensive: it attacks no one, but active blocking is a deliberate,
+    # higher-impact action than read-only observe, so a GOVERNED deployment gates it (an ungoverned
+    # one permits it, flagged, like every non-baseline capability).
+    Capability.AEGIS_RESPOND: CapabilityTier.STANDARD,
     # offensive
     Capability.EXPLOIT_EXECUTION: CapabilityTier.OFFENSIVE,
     Capability.DEEP_STATIC_ANALYSIS: CapabilityTier.OFFENSIVE,

@@ -51,6 +51,9 @@ class Capability(str, enum.Enum):
     DEEP_STATIC_ANALYSIS = "deep_static_analysis"  # DAA white-box arsenal
     DEFENDER_TELEMETRY = "defender_telemetry"  # DEL self-detection scoring
 
+    # --- defensive (AEGIS runtime protection) --------------------------
+    AEGIS_RESPOND = "aegis_respond"            # AEGIS Gateway ACTIVE enforcement (block a proven attack)
+
     # --- advanced (most dangerous; entitlement-locked) -----------------
     FULL_CHAIN_EXPLOITATION = "full_chain_exploitation"  # multi-bug chaining
     DEFENDER_EVASION = "defender_evasion"      # DEL evasion (human-authored)

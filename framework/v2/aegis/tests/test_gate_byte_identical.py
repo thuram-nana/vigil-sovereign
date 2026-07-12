@@ -16,9 +16,12 @@ from framework.v2.verify.models import OracleKind
 from framework.v2.verify.verifier import BUG_CLASS_ORACLES, OracleVerifier, known_bug_classes
 
 _AEGIS_KINDS = {OracleKind.PROMPT_INJECTION, OracleKind.SYSTEM_PROMPT_DISCLOSURE,
-                OracleKind.AUTOMATED_ACCESS, OracleKind.CREDENTIAL_STUFFING}
+                OracleKind.AUTOMATED_ACCESS, OracleKind.CREDENTIAL_STUFFING,
+                # the request-side parse-proof kinds (the inline gateway) are defensive AEGIS
+                # members too — reachable only via their explicit rows, never the fallback.
+                OracleKind.SQL_INJECTION_BREAKOUT, OracleKind.COMMAND_INJECTION_BREAKOUT}
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                  "credential_stuffing"}
+                  "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",
                   "system_prompt_leak", "system_prompt_exfiltration", "canary_disclosure",
                   "automated_scraping", "honeypot_hit", "honeypot_fetch", "bot_access",
@@ -27,7 +30,8 @@ _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injectio
 
 
 def test_all_oracles_fallback_is_frozen_to_pre_aegis_members():
-    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 19).
+    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 21 — the
+    # 4 AEGIS telemetry kinds + the 2 request-side parse-proof kinds are all excluded).
     assert len(V._ALL_ORACLES) == 15
     assert set(V._ALL_ORACLES) == set(OracleKind) - _AEGIS_KINDS
     # and it is NOT derived from the enum (that would have grown it past 15).
