@@ -1624,3 +1624,22 @@ them to understand the system — they are for when you want to modify or audit 
   `SECURITY.md`, `Makefile`.
 - **Deeper design notes (optional):** `framework/v2/docs/` (architecture, operator guide, benchmark
   methodology, check‑authoring), and the honest limitations ledger `V2-LIMITATIONS.md`.
+
+## 15. License
+
+CRUCIBLE is **dual-licensed: GNU AGPL-3.0 or a Commercial License** — see [`LICENSING.md`](./LICENSING.md).
+
+- **Open source — [AGPL-3.0](./LICENSE):** free to use, run, study, modify, and redistribute. Because
+  the AGPL is a network-copyleft license, **if you modify CRUCIBLE and let others interact with it over
+  a network, you must release your modified source under the AGPL-3.0** (AGPL §13, *Remote Network
+  Interaction*).
+- **Commercial:** if you want to keep modifications private, embed CRUCIBLE in a proprietary product or
+  hosted service without the AGPL obligations, or need warranty/indemnity/support, purchase a
+  commercial license. Contact **satoshinakamotobull@gmail.com** (subject: `CRUCIBLE commercial license`).
+
+If you have not signed a commercial agreement, your use is governed by the AGPL-3.0. Contributions are
+accepted under AGPL-3.0 plus a grant allowing commercial relicensing so dual-licensing remains possible
+(see [`LICENSING.md`](./LICENSING.md#contributions)). This summary is not legal advice; the binding
+terms are the [`LICENSE`](./LICENSE) file and any signed commercial agreement.
+
+`SPDX-License-Identifier: AGPL-3.0-or-later`
