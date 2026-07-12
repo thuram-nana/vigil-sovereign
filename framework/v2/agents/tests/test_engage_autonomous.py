@@ -698,3 +698,122 @@ def test_fused_leads_on_the_no_findings_early_return_reach_the_spine(
         assert {r.payload["finding_slug"] for r in leads} == {"lead:dns:acme"}
     finally:
         bb.close()
+
+
+# ---------------------------------------------------------------------------
+# (13) LEARN — the autonomous OODA loop feeds its confirm/refute outcomes back into
+#      the persistent OutcomeLedger, closing the learning loop the meta-monitor reads.
+#      Before this, the flagship/autonomous loop confirmed/refuted findings but fed NO
+#      persistent learner (`_meta_caution` always read a ledger no run ever wrote).
+# ---------------------------------------------------------------------------
+
+
+class _FakeReverify:
+    """A controllable reverify ToolResult: ``is_fact`` drives the confirm/refute the loop learns."""
+
+    def __init__(self, is_fact: bool, *, refused: bool = False):
+        self.output = {"is_fact": is_fact, "verdict": "grounded" if is_fact else "not-grounded"}
+        self.refused = refused
+        self.ok = True
+        self.gate = ""
+        self.summary = self.output["verdict"]
+
+
+def _written_ledger(slug: str):
+    from framework.v2.calibration.ledger import OutcomeLedger
+    return OutcomeLedger.load(_paths.target_dir(slug) / "outcomes.json")
+
+
+def test_autonomous_confirmed_outcome_is_written_and_persisted(isolated_engagement, monkeypatch):
+    isolated_engagement("alpha", "127.0.0.1")
+    monkeypatch.setattr(auto_mod, "_drive_reverify",
+                        lambda finding, registry, ctx, sink: _FakeReverify(is_fact=True))
+    world = _greedy_world(["https://t.invalid/a"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", persist_learning=True, prompt_callback=_deny)
+
+    assert out.outcomes_credited == 1
+    assert out.learner_persisted is True
+    assert out.cycles[0].learned is True
+    led = _written_ledger("alpha")
+    assert len(led) == 1
+    pred = led.predictions()[0]
+    assert pred.oracle_confirmed is True
+    assert pred.finding_id == "xss:query:xss"            # bug_class:insertion_point (spine slug convention)
+    assert pred.model_version == "autonomous-reverify-v1"
+
+
+def test_single_oracle_reverify_is_disputed_never_a_fact(isolated_engagement, monkeypatch):
+    """PROVE-DON'T-GUESS: a single-oracle confirm is DISPUTED (excluded from every calibrator fit),
+    never auto-EXPLOITABLE. The loop can never train its learner on an un-corroborated 'fact'."""
+    from framework.v2.calibration.models import OutcomeLabel
+
+    isolated_engagement("alpha", "127.0.0.1")
+    monkeypatch.setattr(auto_mod, "_drive_reverify",
+                        lambda finding, registry, ctx, sink: _FakeReverify(is_fact=True))
+    world = _greedy_world(["https://t.invalid/a"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.8)])
+    run_autonomous_cycle(result, slug="alpha", persist_learning=True, prompt_callback=_deny)
+
+    (pred, outcome), = _written_ledger("alpha").pairs()
+    assert outcome.label is OutcomeLabel.DISPUTED         # one oracle kind -> not cross-corroborated
+
+
+def test_ledger_dedup_across_runs_no_double_count(isolated_engagement, monkeypatch):
+    """A second autonomous run over the same finding does NOT double-count — the persisted ledger's
+    append-only guard dedups the stable finding id and credit_outcome swallows the no-op."""
+    isolated_engagement("alpha", "127.0.0.1")
+    monkeypatch.setattr(auto_mod, "_drive_reverify",
+                        lambda finding, registry, ctx, sink: _FakeReverify(is_fact=True))
+    world = _greedy_world(["https://t.invalid/a"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.8)])
+    out1 = run_autonomous_cycle(result, slug="alpha", persist_learning=True, prompt_callback=_deny)
+    assert out1.outcomes_credited == 1
+
+    world2 = _greedy_world(["https://t.invalid/a"])
+    result2 = _synthetic_result(world2, [_finding("xss", "https://t.invalid/a", 0.8)])
+    out2 = run_autonomous_cycle(result2, slug="alpha", persist_learning=True, prompt_callback=_deny)
+    assert out2.outcomes_credited == 0                    # deduped, not re-counted
+    assert len(_written_ledger("alpha")) == 1
+
+
+def test_persist_learning_false_writes_no_ledger_file(isolated_engagement, monkeypatch):
+    """persist_learning=False preserves the pre-LEARN read-only behaviour: nothing written to disk."""
+    isolated_engagement("alpha", "127.0.0.1")
+    monkeypatch.setattr(auto_mod, "_drive_reverify",
+                        lambda finding, registry, ctx, sink: _FakeReverify(is_fact=True))
+    world = _greedy_world(["https://t.invalid/a"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", persist_learning=False, prompt_callback=_deny)
+
+    assert out.outcomes_credited == 0 and out.learner_persisted is False
+    assert not (_paths.target_dir("alpha") / "outcomes.json").is_file()
+
+
+def test_fail_closed_refusal_is_not_credited(isolated_engagement, monkeypatch):
+    """A fail-closed gate refusal is NOT a refutation — it must never be written as an outcome."""
+    isolated_engagement("alpha", "127.0.0.1")
+    monkeypatch.setattr(auto_mod, "_drive_reverify",
+                        lambda finding, registry, ctx, sink: _FakeReverify(is_fact=False, refused=True))
+    world = _greedy_world(["https://t.invalid/a"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", persist_learning=True, prompt_callback=_deny)
+
+    assert out.outcomes_credited == 0
+    assert not (_paths.target_dir("alpha") / "outcomes.json").is_file()
+
+
+def test_learning_closes_the_loop_meta_monitor_reads_what_the_loop_wrote(isolated_engagement, monkeypatch):
+    """The closure end-to-end: run 1 WRITES the ledger; `_load_ledger` (what `_meta_caution` reads at
+    the START of every run) now returns a non-empty ledger the LOOP ITSELF produced."""
+    isolated_engagement("alpha", "127.0.0.1")
+    monkeypatch.setattr(auto_mod, "_drive_reverify",
+                        lambda finding, registry, ctx, sink: _FakeReverify(is_fact=True))
+    world = _greedy_world(["https://t.invalid/a", "https://t.invalid/b"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/a", 0.8),
+                                       _finding("sqli", "https://t.invalid/b", 0.7)])
+    out1 = run_autonomous_cycle(result, slug="alpha", max_cycles=2, persist_learning=True, prompt_callback=_deny)
+    assert out1.outcomes_credited >= 1 and out1.learner_persisted
+
+    loaded = auto_mod._load_ledger("alpha")               # exactly the read `_meta_caution` performs
+    assert loaded is not None and len(loaded) == out1.outcomes_credited

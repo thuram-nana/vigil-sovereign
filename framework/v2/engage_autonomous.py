@@ -154,6 +154,7 @@ class AutonomyStep:
     advice_reweighted: int = 0    # open leaves the RE-ORIENT reasoning advice re-weighted this cycle
     fused_observations: int = 0   # WS-B sensor observations folded into the world THIS cycle (OBSERVE)
     coordinator_events: int = 0   # events the wired advisory agents posted when the Coordinator ticked
+    learned: bool = False         # this cycle's confirm/refute outcome was written to the OutcomeLedger
 
 
 @dataclass
@@ -179,6 +180,8 @@ class AutonomyResult:
     objectives: list[str] = field(default_factory=list)
     world_nodes_before: int = 0
     world_nodes_after: int = 0
+    outcomes_credited: int = 0         # LEARN — confirm/refute outcomes written to the persistent OutcomeLedger
+    learner_persisted: bool = False    # LEARN — the enriched ledger was saved to targets/<slug>/outcomes.json
     notes: list[str] = field(default_factory=list)
 
 
@@ -516,6 +519,107 @@ def _meta_caution(slug: str, ledger: Any) -> tuple[str, float]:
         return ("", 0.0)
 
 
+# ---------------------------------------------------------------------------
+# LEARN — feed the loop's confirm/refute outcomes into the persistent learner.
+#
+# This CLOSES the learning loop: historically the flagship/autonomous loop confirmed or refuted
+# findings but fed NO persistent learner, so `_meta_caution` (above) always read a ledger that no run
+# ever wrote. Now the autonomous OODA loop is the first real writer of the OutcomeLedger it already
+# reads — so the learner improves from real runs, across runs.
+#
+# Honesty (prove-don't-guess): the reward bus's label is NON-CIRCULAR — `credit_outcome` resolves
+# EXPLOITABLE only on >= 2 distinct corroborating oracle kinds, else DISPUTED (excluded from every
+# calibrator fit). A single-oracle autonomous reverify therefore trains the learner as DISPUTED, never
+# as a fact. Determinism: the id/feature-hash are pure functions of the finding (no wallclock/rng).
+# Gate: `run_autonomous_cycle` runs ONLY under `--autonomous`, never on the byte-identical benchmark
+# path, so every write here is off the gate. Best-effort/total throughout: a learner write can never
+# sink the loop.
+# ---------------------------------------------------------------------------
+
+_LEARN_MODEL_VERSION = "autonomous-reverify-v1"   # attribution tag on the ledger Prediction
+
+
+def _finding_ledger_id(finding: Any) -> str:
+    """Stable ledger id for an AuditFinding — the SAME slug convention `engage._spine_finding_payload`
+    uses (``bug_class:insertion_point``), so ledger keys line up with the spine's finding events. It is
+    stable across runs, so the ledger's append-only guard dedups a re-credited finding (no double
+    count) and `credit_outcome` swallows the resulting no-op cleanly."""
+    bc = str(getattr(finding, "bug_class", "") or "")
+    ip = str(getattr(finding, "insertion_point", "") or "")
+    return (f"{bc}:{ip}"[:120]) or bc or "finding"
+
+
+def _feature_hash(finding: Any) -> str:
+    """A deterministic, attributable hash of the finding's identifying features (no wallclock/rng), so
+    the Prediction is reproducible across runs."""
+    import hashlib
+    parts = [str(getattr(finding, a, "") or "")
+             for a in ("check_id", "bug_class", "insertion_point", "param", "endpoint")]
+    return hashlib.sha256("|".join(parts).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _credit_finding_outcome(ledger: Any, finding: Any, leaf: Any, grounded: bool,
+                            sink: Any, seq: int) -> bool:
+    """Fan ONE autonomous confirm/refute outcome into the persistent OutcomeLedger (+ a spine reward
+    event). Returns True iff the ledger recorded a NEW entry (so the caller knows to persist + count).
+    A re-credited finding (same stable id) is refused by the ledger's append-only guard and swallowed
+    by `credit_outcome` → returns False, never double-counts. Best-effort/total: never raises."""
+    try:
+        from .calibration.models import Prediction
+        from .calibration.reward_bus import credit_outcome
+    except Exception:
+        return False
+    try:
+        conf = float(getattr(finding, "confidence", 0.0) or 0.0)
+        conf = min(1.0, max(0.0, conf))
+        pred = Prediction(
+            finding_id=_finding_ledger_id(finding),
+            raw_score=conf,
+            feature_hash=_feature_hash(finding),
+            model_version=_LEARN_MODEL_VERSION,
+            oracle_confirmed=bool(grounded))
+        sig = credit_outcome(
+            oracle_fired=bool(grounded),
+            distinct_confirming_kinds=_distinct_confirming_kinds(finding),
+            seq=seq,
+            ledger=ledger, prediction=pred,
+            spine_sink=sink,
+            arm=str(getattr(leaf, "bug_class", "") or getattr(finding, "bug_class", "") or ""),
+            bug_class=str(getattr(finding, "bug_class", "") or ""))
+        return "ledger" in sig.updated
+    except Exception:
+        return False
+
+
+def _distinct_confirming_kinds(finding: Any) -> int:
+    """How many DISTINCT oracle kinds independently confirmed this finding — the reward-bus
+    corroboration signal (the non-circular bar for an autonomous EXPLOITABLE label is >= 2). Mirrors
+    `engage._distinct_confirming_kinds`: a retained corroboration set when present, else 1 for a
+    single-oracle confirmation, else 0. A single-oracle reverify is honestly ONE kind → DISPUTED."""
+    for attr in ("corroborating_kinds", "confirmed_by_kinds", "confirmations"):
+        kinds = getattr(finding, attr, None)
+        if kinds:
+            try:
+                return max(1, len({str(k) for k in kinds}))
+            except Exception:
+                return 1
+    return 1 if getattr(finding, "confirmed_by", None) else 0
+
+
+def _persist_ledger(ledger: Any, slug: str) -> bool:
+    """Best-effort persist of the OutcomeLedger to ``targets/<slug>/outcomes.json`` (owner-only via
+    `OutcomeLedger.save`/`secure_write`). The NEXT autonomous run's `_load_ledger` reads it back → the
+    learning loop closes ACROSS runs. Never raises."""
+    if not slug or ledger is None:
+        return False
+    try:
+        from .common.paths import target_dir
+        ledger.save(target_dir(slug) / "outcomes.json")
+        return True
+    except Exception:
+        return False
+
+
 def _advisory_agents(blackboard: Any, slug: str) -> list:
     """The deterministic, ADVISORY nervous-system agents wired onto the Coordinator so they RUN
     inside the loop (not as post-hoc telemetry): the multi-critic panel (re-grounding / provenance
@@ -738,6 +842,7 @@ def run_autonomous_cycle(
     ctx: Any = None,
     outcome_ledger: Any = None,
     smt_regions: Any = None,
+    persist_learning: bool = False,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -789,6 +894,21 @@ def run_autonomous_cycle(
     out.meta_recommend, meta_caution = _meta_caution(slug, ledger)
     if meta_caution > 0.0:
         out.notes.append(f"meta-monitor: {out.meta_recommend} → caution ordering (no surface gated)")
+
+    # LEARN (setup) — the loop will WRITE this run's confirm/refute outcomes into the ledger. A missing
+    # ledger is CREATED (else the FIRST autonomous run could never bootstrap learning). We OWN
+    # persistence only when we created/loaded it here (not a caller-passed ledger — the caller owns
+    # that) AND `persist_learning`. We credit outcomes whenever they'll be durable somewhere (we
+    # persist, or the caller does); otherwise we stay read-only (the pre-LEARN behaviour).
+    learn_owned = persist_learning and outcome_ledger is None
+    if ledger is None and learn_owned:
+        from .calibration.ledger import OutcomeLedger
+        ledger = OutcomeLedger()
+    # Credit ONLY a ledger we own (created/loaded here under persist_learning). A caller-passed
+    # `outcome_ledger` is READ-ONLY input to the meta-monitor — never mutated (some callers pass a
+    # crafted ledger purely to drive caution ordering and must see it unchanged).
+    learn_active = learn_owned and ledger is not None
+    learn_credits = 0
 
     # ORIENT (SMT) — deprioritise leaves whose bounded parameter region is PROVABLY infeasible. The
     # region set is fixed for the run, so it is computed once. Advisory: it degrades to a no-op
@@ -856,6 +976,15 @@ def run_autonomous_cycle(
                 world, leaf.surface, step.verdict or ("fact" if grounded else "not-grounded"))
             tree.mark_status(leaf.id, "succeeded" if grounded else "failed",
                              reason="" if grounded else "reverify did not re-ground")
+            # LEARN — feed THIS confirm/refute back into the persistent OutcomeLedger. This is the loop
+            # closure: the outcome the meta-monitor read at the START of this run is now written by the
+            # run itself, so the NEXT run's `_meta_caution` reads richer ground truth. A fail-closed
+            # refusal is excluded (handled in the `if step.refused` branch above — it is not a
+            # refutation). Non-circular + off-gate + best-effort (see the LEARN helpers).
+            if learn_active and finding is not None:
+                if _credit_finding_outcome(ledger, finding, leaf, grounded, sink, learn_credits):
+                    learn_credits += 1
+                    step.learned = True
 
         # RE-ORIENT — run the WS-F reasoning hook, FEED its advice back into the tree (re-weight the
         # matching open leaves' priors), THEN re-select. This is what closes the loop: the reasoning
@@ -882,6 +1011,15 @@ def run_autonomous_cycle(
     out.critic_verdicts = _count_kind(blackboard, slug, "critic_verdict")
     out.reflections = _count_kind(blackboard, slug, "reflection")
     out.world_nodes_after = world.node_count if world is not None else 0
+
+    # LEARN (persist) — write the enriched ledger back so the NEXT run's meta-monitor reads it. Only
+    # when WE own persistence (created/loaded here, not caller-passed) and we actually credited
+    # something. A caller-passed ledger is left for the caller to persist. Best-effort.
+    out.outcomes_credited = learn_credits
+    if learn_owned and learn_credits > 0:
+        out.learner_persisted = _persist_ledger(ledger, slug)
+        if out.learner_persisted:
+            out.notes.append(f"learned: {learn_credits} outcome(s) written to the outcome ledger")
     return out
 
 

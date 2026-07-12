@@ -752,6 +752,10 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
             request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
             prompt_callback=prompt_callback_from_args(args),
             blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
+            # LEARN — opt in (default OFF) to writing this run's confirm/refute outcomes to the
+            # operator's targets/<slug>/outcomes.json, closing the learning loop the meta-monitor
+            # reads next run. Explicit because it mutates the operator's target dir.
+            persist_learning=bool(getattr(args, "learn", False)),
         )
         for line in render_summary(out):
             print(line)
@@ -896,6 +900,12 @@ def main(argv: list[str]) -> int:
                         help="Bounded number of OODA cycles for --autonomous (default 1).")
     parser.add_argument("--autonomous-budget", type=int, default=8, metavar="N",
                         help="Request budget the autonomous planner is constructed with (default 8).")
+    parser.add_argument("--learn", action="store_true",
+                        help="LEARN (opt-in; requires --autonomous): write this run's confirm/refute "
+                             "outcomes to targets/<slug>/outcomes.json, closing the learning loop the "
+                             "meta-monitor reads next run. Off by default (it mutates the target dir). "
+                             "Labels stay non-circular: a single-oracle reverify is DISPUTED, never a "
+                             "fact.")
     args = parser.parse_args(argv)
 
     if args.access_control and not args.ac_ref:
