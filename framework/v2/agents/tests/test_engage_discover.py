@@ -12,7 +12,10 @@ The doctrine this slice must not violate, asserted here:
   * fully GATED + fail-closed — the probe rides the full invoke_tool chain, so an out-of-scope
     endpoint or a tripped kill-switch REFUSES it and mints nothing;
   * default OFF is byte-identical — no probe-leaf is seeded and nothing is discovered;
-  * the authoritative ScanReport is left UNTOUCHED (discovered facts land on the AutonomyResult).
+  * W-F3: on the opt-in discover path the discovered facts are then FOLDED into the authoritative
+    ScanReport.active_findings — deterministically (stable sort) and deduped — so the same engagement
+    replays to the same report; every folded finding keeps its oracle_context (prove-don't-guess). The
+    fold is unreachable from the byte-identical benchmark/gate and the default engage path.
 
 Loopback-only (pytest_httpserver / urllib to 127.0.0.1); nothing leaves the test host.
 """
@@ -22,6 +25,7 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pytest_httpserver import HTTPServer
@@ -30,7 +34,7 @@ from werkzeug.wrappers import Response
 from framework.v2.common import paths as _paths
 from framework.v2.authority.killswitch import KillSwitch
 from framework.v2.engage import EngagementResult
-from framework.v2.engage_autonomous import run_autonomous_cycle
+from framework.v2.engage_autonomous import _fold_discovered_into_report, run_autonomous_cycle
 from framework.v2.scanner.campaign import ScanReport
 from framework.v2.scanner.engine import AuditFinding
 from framework.v2.worldmodel import Node, NodeKind, WorldModel
@@ -133,6 +137,15 @@ def _result(world: WorldModel, findings: list) -> EngagementResult:
         report=ScanReport(target="http://127.0.0.1/", active_findings=findings), world=world)
 
 
+def _mk_finding(bug_class: str, insertion_point: str, endpoint: str, *, oracle: bool = True) -> AuditFinding:
+    """A minimal oracle-confirmed AuditFinding for the fold unit tests. ``oracle=False`` drops the
+    oracle_context so the prove-don't-guess guard rejects it."""
+    return AuditFinding(
+        check_id="c", bug_class=bug_class, insertion_point=insertion_point, param="p",
+        endpoint=endpoint, confidence=0.9, confirmed_by="reflection_context",
+        oracle_context=({"marker": "m", "bug_class": bug_class} if oracle else None))
+
+
 # ---------------------------------------------------------------------------
 # THE PROOF — an unexplored ENDPOINT lead → probe_surface → oracle FIRES → a
 # NEW oracle-confirmed finding minted that was NOT in the seed set.
@@ -171,12 +184,17 @@ def test_discovery_mints_a_new_finding_from_an_unexplored_endpoint(
     assert minted.oracle_context is not None, "a minted finding must carry its retained oracle proof"
     assert minted.confirmed_by, "the minted finding names no oracle kind"
 
-    # NOT in the seed set — this is genuinely NEW, not a re-report of a confirmed finding
-    seed_ids = {(f.bug_class, f.insertion_point, f.endpoint) for f in result.report.active_findings}
-    assert (minted.bug_class, minted.insertion_point, minted.endpoint) not in seed_ids
-
-    # the authoritative ScanReport is left UNTOUCHED (conservative boundary)
-    assert list(result.report.active_findings) == [], "discovery mutated the authoritative report"
+    # W-F3: the discovered finding is now FOLDED into the authoritative report (the honest next slice
+    # WS-C deferred). The seed set was EMPTY, so this is genuinely NEW — not a re-report of a seed.
+    assert out.findings_folded == 1
+    folded = list(result.report.active_findings)
+    assert len(folded) == 1, "the discovered finding was not folded into the authoritative report"
+    ff = folded[0]
+    assert (ff.bug_class, ff.insertion_point, ff.endpoint) == \
+           (minted.bug_class, minted.insertion_point, minted.endpoint)
+    assert ff.oracle_context is not None, "the folded finding lost its oracle proof (prove-don't-guess)"
+    # the fold splices the SAME oracle-confirmed finding discovery minted (no fabrication)
+    assert ff.model_dump() == minted.model_dump()
 
 
 def test_discovery_off_mints_nothing_byte_identical(
@@ -373,3 +391,115 @@ def test_discovery_is_deterministic(isolated_engagement, httpserver: HTTPServer)
                 [(s.is_probe, s.tool, s.discovered_findings) for s in out.cycles])
 
     assert run() == run(), "the discovery cycle is not deterministic"
+
+
+# ---------------------------------------------------------------------------
+# W-F3 — the FOLD: discovered findings are spliced into the authoritative report,
+# deterministically + deduped, and ONLY on the opt-in discover path.
+# ---------------------------------------------------------------------------
+
+
+def test_fold_is_replay_deterministic(isolated_engagement, httpserver: HTTPServer):
+    """The whole discover cycle over the SAME live app + world replays to the SAME authoritative
+    report — the folded active_findings are byte-for-byte identical across two runs (stable sort,
+    deterministic minted evidence). This is the replay-determinism guarantee the fold must not break."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+
+    def run_report() -> list:
+        result = _result(_endpoint_world(url), [])
+        run_autonomous_cycle(result, slug="disco", enable_discover=True,
+                             discover_send=_loopback_send(), prompt_callback=_deny)
+        return [f.model_dump() for f in result.report.active_findings]
+
+    r1 = run_report()
+    r2 = run_report()
+    assert len(r1) == 1 and r1[0]["oracle_context"] is not None
+    assert r1 == r2, "the folded report is not replay-deterministic"
+
+
+def test_fold_dedup_does_not_double_count():
+    """_fold_discovered_into_report DEDUPS a discovered finding that duplicates an EXISTING seed
+    finding — total_findings / by_severity() never double-count. A genuinely-new discovered finding
+    is appended; intra-set duplicates collapse; and the splice is in the stable
+    (bug_class, endpoint, insertion_point) order regardless of the dumps' input order."""
+    seed = _mk_finding("xss", "query:q", "http://127.0.0.1/a")
+    report = ScanReport(target="http://127.0.0.1/", active_findings=[seed])
+
+    dup = _mk_finding("xss", "query:q", "http://127.0.0.1/a")   # SAME key as the seed
+    new = _mk_finding("sqli", "query:id", "http://127.0.0.1/b")
+    new_again = _mk_finding("sqli", "query:id", "http://127.0.0.1/b")  # intra-set dup of `new`
+
+    folded = _fold_discovered_into_report(
+        SimpleNamespace(report=report),
+        [dup.model_dump(), new.model_dump(), new_again.model_dump()],
+    )
+    assert folded == 1, "only the genuinely-new finding should fold in (dup + intra-dup dropped)"
+    assert report.total_findings == 2, "the seed was double-counted"
+    assert report.by_severity()["Confirmed"] == 2
+    keys = [(f.bug_class, f.insertion_point, f.endpoint) for f in report.active_findings]
+    assert keys == [
+        ("xss", "query:q", "http://127.0.0.1/a"),     # the seed, untouched, still first
+        ("sqli", "query:id", "http://127.0.0.1/b"),   # the one new finding, appended
+    ]
+
+
+def test_fold_splices_in_stable_sorted_order():
+    """The discovered set is spliced in a STABLE (bug_class, endpoint, insertion_point) order,
+    independent of the order the dumps arrive in — so the replayed report is order-stable."""
+    report = ScanReport(target="t", active_findings=[])
+    a = _mk_finding("xss", "query:z", "http://127.0.0.1/z")
+    b = _mk_finding("sqli", "query:a", "http://127.0.0.1/a")
+    c = _mk_finding("xss", "query:a", "http://127.0.0.1/a")
+    # scrambled input order
+    _fold_discovered_into_report(SimpleNamespace(report=report),
+                                 [a.model_dump(), b.model_dump(), c.model_dump()])
+    got = [(f.bug_class, f.endpoint, f.insertion_point) for f in report.active_findings]
+    assert got == [
+        ("sqli", "http://127.0.0.1/a", "query:a"),
+        ("xss", "http://127.0.0.1/a", "query:a"),
+        ("xss", "http://127.0.0.1/z", "query:z"),
+    ], "the fold did not splice in the stable sorted order"
+
+
+def test_fold_rejects_unconfirmed_finding():
+    """PROVE-DON'T-GUESS: a discovered dump WITHOUT an oracle_context is never spliced — the fold
+    keeps active_findings a prove-don't-guess set."""
+    report = ScanReport(target="t", active_findings=[])
+    unconfirmed = _mk_finding("xss", "query:q", "http://127.0.0.1/u", oracle=False)
+    folded = _fold_discovered_into_report(SimpleNamespace(report=report), [unconfirmed.model_dump()])
+    assert folded == 0
+    assert list(report.active_findings) == []
+
+
+def test_fold_off_report_byte_identical_and_unreachable_from_gate(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """BYTE-IDENTICAL: with discovery OFF (the default) the fold never runs, so a report that already
+    carries a seed finding is left byte-for-byte unchanged (no splice, no re-order, no dedup pass).
+    And the fold lives inside run_autonomous_cycle, which the byte-identical benchmark/gate path NEVER
+    calls — pinned here so the fold stays structurally unreachable from the gate."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+
+    seed = _mk_finding("xss", "query:q", url)
+    result = _result(_endpoint_world(url), [seed])
+    before = [f.model_dump() for f in result.report.active_findings]
+    out = run_autonomous_cycle(result, slug="disco", prompt_callback=_deny)  # enable_discover default OFF
+    after = [f.model_dump() for f in result.report.active_findings]
+    assert out.findings_folded == 0
+    assert out.discover_enabled is False
+    assert before == after, "discovery-off mutated the authoritative report"
+
+    # PIN — the fold host (run_autonomous_cycle) and the fold itself are absent from the benchmark
+    # gate module the `benchmark --gate` path runs (it drives WebScanCampaign directly, never the
+    # autonomous cycle), so the fold can never touch the byte-identical benchmark path.
+    import framework.v2.eval.benchmark_run as _bench
+    bench_src = Path(_bench.__file__).read_text(encoding="utf-8")
+    assert "run_autonomous_cycle" not in bench_src
+    assert "_fold_discovered_into_report" not in bench_src
+    assert "engage_autonomous" not in bench_src

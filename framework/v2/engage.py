@@ -1294,7 +1294,10 @@ def main(argv: list[str]) -> int:
               f"{result.fused_facts} oracle-promoted fact(s) "
               f"(from targets/{args.slug}/fusion.json; leads stay leads, oracles prove facts)")
     # Opt-in AUTONOMOUS OODA cycle (default OFF → this whole block is skipped and the engagement is
-    # byte-identical). It runs AFTER the authoritative scan/report is printed and never changes it.
+    # byte-identical). It runs AFTER the authoritative scan/report has already been PRINTED. Under
+    # --autonomous-discover it folds newly-discovered oracle-confirmed findings into the IN-MEMORY
+    # result.report.active_findings (deterministic + deduped, for downstream consumers / the spine);
+    # the already-printed report and the byte-identical default/benchmark path are unaffected.
     if getattr(args, "autonomous", False):
         _run_autonomous(args, result, spine)
     return 0
