@@ -26,10 +26,15 @@ _AEGIS_KINDS = {OracleKind.PROMPT_INJECTION, OracleKind.SYSTEM_PROMPT_DISCLOSURE
 # add no new kind here.)
 _WS3_KINDS = {OracleKind.K8S_POSTURE}
 _WS3_CLASSES = {"k8s_misconfiguration"}
+# Workstream-B (SSO/JWT structural-forgery oracle) additive kind/class: SAME frozen-fallback discipline
+# — a NEW OracleKind kept OUT of _ALL_ORACLES, reachable ONLY via its `jwt_forgeable` BUG_CLASS_ORACLES
+# row (keyed on a `jwt_token` ctx field no benchmark/scan finding carries).
+_WSB_KINDS = {OracleKind.SSO_ASSERTION_FORGERY}
+_WSB_CLASSES = {"jwt_forgeable"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
-_EXCLUDED_KINDS = _AEGIS_KINDS | _WS3_KINDS
+_EXCLUDED_KINDS = _AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",
@@ -40,9 +45,9 @@ _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injectio
 
 
 def test_all_oracles_fallback_is_frozen_to_pre_aegis_members():
-    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 22 — the
-    # 4 AEGIS telemetry kinds + the 2 request-side parse-proof kinds + the WS-3 k8s-posture kind are
-    # all excluded).
+    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 23 — the
+    # 4 AEGIS telemetry kinds + the 2 request-side parse-proof kinds + the WS-3 k8s-posture kind + the
+    # WS-B sso-assertion-forgery kind are all excluded).
     assert len(V._ALL_ORACLES) == 15
     assert set(V._ALL_ORACLES) == set(OracleKind) - _EXCLUDED_KINDS
     # and it is NOT derived from the enum (that would have grown it past 15).

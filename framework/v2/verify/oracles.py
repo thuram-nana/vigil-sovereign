@@ -2156,7 +2156,12 @@ _WEAK_HS_SECRETS: tuple[str, ...] = (
 )
 
 _JWT_HMAC_HASH = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
-_JWT_SEG_CAP = 8192          # bound each captured segment (DoS-safe over an untrusted token)
+_JWT_SEG_CAP = 8192          # bound the header segment fed to the base64/JSON decoder (DoS-safe)
+# Bound the HMAC SIGNING INPUT (`header.payload`) on the fire path too. A real JWT signing input is
+# small (a few KB); anything past this is not a plausible token, so we decline to spend HMAC work on
+# it (non-fire, stays a lead) rather than run HMAC over an attacker-sized buffer once per candidate
+# key. This makes the "DoS-safe over an untrusted token" property enforced by code, not just claimed.
+_JWT_SIGNING_INPUT_CAP = 65536
 
 
 def _jwt_b64url_decode(seg: str) -> bytes:
@@ -2207,6 +2212,14 @@ def jwt_forgery_oracle(token: Any, *, candidate_keys: Sequence[str | bytes] = ()
     #     secret is a PUBLIC key, it is the RS256->HS256 confusion (public material => anyone forges).
     if alg.upper() in _JWT_HMAC_HASH:
         hasher = _JWT_HMAC_HASH[alg.upper()]
+        # bound the HMAC signing input before spending work per candidate key (DoS-safe on an
+        # attacker-sized token — an oversized "token" is not a real JWT, so we stay a lead).
+        if len(parts[0]) + 1 + len(parts[1]) > _JWT_SIGNING_INPUT_CAP:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=(f"{alg} signing input exceeds {_JWT_SIGNING_INPUT_CAP} bytes — not a plausible "
+                          f"JWT; declining the HMAC recompute (stays a lead)"),
+                observed={"alg": alg, "signing_input_len": len(parts[0]) + 1 + len(parts[1])})
         signing_input = f"{parts[0]}.{parts[1]}".encode("ascii", "ignore")
         target_sig = parts[2]
         for cand in (*candidate_keys, *_WEAK_HS_SECRETS):
