@@ -859,6 +859,11 @@ def main(argv: list[str]) -> int:
                         help="Request budget the autonomous planner is constructed with (default 8).")
     args = parser.parse_args(argv)
 
+    if args.access_control and not args.ac_ref:
+        print("note: --access-control set but no --ac-ref supplied; the access-control pack "
+              "needs operator victim references (bug_class:ref_param:victim_ref) and runs no "
+              "checks without them.")
+
     spine = None
     if args.spine:
         try:

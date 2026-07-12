@@ -228,6 +228,20 @@ def test_engage_cli_maps_access_control_args(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["access_control_victim_headers"] == ("Cookie: session=bob",)
 
 
+def test_engage_cli_notes_access_control_without_refs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        engage_mod, "run_engagement",
+        lambda slug, seed_url, **kwargs: EngagementResult(report=ScanReport(target=seed_url)))
+    engage_mod.main(["acme", "http://127.0.0.1/", "--access-control"])
+    out = capsys.readouterr().out
+    assert "no --ac-ref" in out    # the documented no-op is surfaced, not silent
+    # with a ref supplied, no such note
+    engage_mod.main(["acme", "http://127.0.0.1/", "--access-control", "--ac-ref", "idor:id:2"])
+    assert "no --ac-ref" not in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # functional: the flag genuinely enables oracle-confirmed access-control checks
 # ---------------------------------------------------------------------------
