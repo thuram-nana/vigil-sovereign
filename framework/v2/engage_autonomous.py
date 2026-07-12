@@ -204,6 +204,7 @@ class AutonomyResult:
     probes_refused: int = 0            # probe_surface calls a fail-closed gate declined (kill-switch / scope)
     discovered_findings: list = field(default_factory=list)  # serialised NEW AuditFindings (oracle_context kept)
     discovered_count: int = 0          # NEW oracle-confirmed findings discovery minted this run
+    findings_folded: int = 0           # W-F3 — discovered findings SPLICED into the authoritative report
     notes: list[str] = field(default_factory=list)
 
 
@@ -852,6 +853,56 @@ def _record_discovered(out: "AutonomyResult", sink: Any, dumps: list, emitted: s
     return n
 
 
+def _fold_discovered_into_report(engagement: Any, dumps: list) -> int:
+    """W-F3 — FOLD the discovery cycle's NEW oracle-confirmed findings into the authoritative
+    :class:`scanner.campaign.ScanReport`'s ``active_findings`` (the prove-don't-guess boundary WS-C
+    deliberately left untouched). This is the honest "next slice" WS-C deferred.
+
+    DETERMINISTIC + idempotent: each discovered dump is validated back into an ``AuditFinding``, the
+    surviving set is SORTED by a stable key ``(bug_class, endpoint, insertion_point)``, and DEDUPED
+    against BOTH the existing ``active_findings`` AND intra-set (same ``(bug_class, insertion_point,
+    endpoint)`` identity ``_record_discovered`` uses) — so the same engagement replays to the same
+    report and a re-fold never double-counts ``total_findings``/``by_severity()``.
+
+    PROVE-DON'T-GUESS preserved: only a finding that carries a retained ``oracle_context`` (a
+    deterministic oracle DID fire over evidence a real target produced) is spliced — no unconfirmed
+    finding is ever added, so ``active_findings`` stays a prove-don't-guess set. Best-effort/total: any
+    trouble folds nothing and returns what was folded so far. Returns the count folded.
+
+    Reachability: called ONLY on the opt-in autonomous-discover path (``run_autonomous_cycle`` with a
+    discovery send), which the byte-identical benchmark/gate NEVER runs — so the fold is structurally
+    unreachable from the gate and the default ``engage`` path is unchanged."""
+    n = 0
+    try:
+        report = getattr(engagement, "report", None)
+        active = getattr(report, "active_findings", None) if report is not None else None
+        if active is None:
+            return 0
+        from .scanner.engine import AuditFinding
+        seen = {(str(f.bug_class), str(f.insertion_point), str(f.endpoint)) for f in active}
+        validated: list = []
+        for d in dumps or []:
+            try:
+                f = AuditFinding.model_validate(d)
+            except Exception:
+                continue
+            if getattr(f, "oracle_context", None) is None:
+                continue   # prove-don't-guess: never splice an UNCONFIRMED finding
+            validated.append(f)
+        # Stable order independent of planner/probe timing → replay-deterministic splice.
+        validated.sort(key=lambda f: (str(f.bug_class), str(f.endpoint), str(f.insertion_point)))
+        for f in validated:
+            key = (str(f.bug_class), str(f.insertion_point), str(f.endpoint))
+            if key in seen:
+                continue        # already a seed finding (or an intra-set dup) — never double-count
+            seen.add(key)
+            active.append(f)
+            n += 1
+    except Exception:
+        return n
+    return n
+
+
 def _fold_observation(world: "WorldModel | None", surface: str, verdict: str) -> str:
     """Fold the tool's observation back into the world-model: annotate the finding's node (resolved
     from its surface) with the live re-grounding verdict, in place (attrs is a mutable bag) so belief
@@ -1140,10 +1191,17 @@ def run_autonomous_cycle(
     over that unexplored endpoint, which runs ONE existing scanner check (``discover_check``, default
     REFLECTED_XSS) and mints a NEW oracle-confirmed finding — recorded on ``out.discovered_findings``
     — ONLY when that check's deterministic oracle FIRES. The oracle stays the sole authority: the
-    tool/planner never promotes on their own, and the authoritative ``ScanReport`` is left UNTOUCHED
-    (discovered facts are recorded on the AutonomyResult + emitted to the spine, not spliced into the
-    seed report — a deliberately conservative boundary; folding them into the authoritative report is
-    the honest next slice). Off, no probe-leaf is seeded and ``probe_surface`` is never constructed.
+    tool/planner never promotes on their own.
+
+    W-F3 — the discovered findings are then FOLDED into the authoritative ``ScanReport.active_findings``
+    (the honest next slice WS-C deferred): :func:`_fold_discovered_into_report` sorts the discovered
+    set by a stable key ``(bug_class, endpoint, insertion_point)`` and dedups against BOTH the existing
+    active_findings AND intra-set, so the same engagement replays to the SAME report and a re-fold
+    never double-counts. Every folded finding carries its retained ``oracle_context``, so
+    active_findings stays a prove-don't-guess set — no unconfirmed finding is spliced. The fold runs
+    ONLY on this opt-in discover path, so it is structurally unreachable from the byte-identical
+    benchmark/gate. Off, no probe-leaf is seeded, ``probe_surface`` is never constructed, and the
+    authoritative report is left byte-identical.
 
     Localhost/authorized-only: the enclosing ``engage.run_engagement`` preflight already refused an
     out-of-scope / kill-switched engagement before this runs, and every tool call is re-gated by
@@ -1389,6 +1447,16 @@ def run_autonomous_cycle(
         out.learner_persisted = _persist_ledger(ledger, slug)
         if out.learner_persisted:
             out.notes.append(f"learned: {learn_credits} outcome(s) written to the outcome ledger")
+
+    # W-F3 — FOLD the DISCOVERED findings into the authoritative report. Opt-in discover path ONLY
+    # (`discover_active`), so structurally unreachable from the byte-identical benchmark/gate and the
+    # default engage path. Deterministic + deduped (see `_fold_discovered_into_report`); every folded
+    # finding carries its oracle_context, so active_findings stays a prove-don't-guess set.
+    if discover_active and out.discovered_findings:
+        out.findings_folded = _fold_discovered_into_report(result, out.discovered_findings)
+        if out.findings_folded:
+            out.notes.append(
+                f"folded {out.findings_folded} discovered finding(s) into the authoritative report")
     return out
 
 
@@ -1431,7 +1499,7 @@ def render_summary(out: AutonomyResult) -> list[str]:
         lines.append(
             f"    discovery       : {out.probe_leaves_seeded} probe-leaf/leaves (unexplored ENDPOINTs); "
             f"{out.probes_driven} probed, {out.probes_refused} refused → {out.discovered_count} NEW "
-            f"oracle-confirmed finding(s) minted")
+            f"oracle-confirmed finding(s) minted ({out.findings_folded} folded into the report)")
     if out.reachability_driven:
         if out.reachability_refused:
             lines.append(f"    reachability    : {out.reachability_tool} on "
