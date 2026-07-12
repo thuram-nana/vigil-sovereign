@@ -85,7 +85,10 @@ def _cmd_demo(_args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str] | None = None) -> int:
+    # argv is None only when invoked as a console-script entry point (`aegis ...`);
+    # argparse then reads sys.argv[1:] itself. Existing callers (`__main__._aegis`)
+    # always pass an explicit list, so behaviour on that path is unchanged.
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 aegis",
         description="AEGIS — the defensive dual: prove-don't-guess AI-attack detection (MVP).")

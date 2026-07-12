@@ -1,0 +1,82 @@
+# Repo-root build configuration for CRUCIBLE.
+#
+# WHY THIS FILE EXISTS (packaging note, NW-2):
+#   The importable module is `framework.v2`, whose top-level package is `framework/`
+#   (repo root, with a 0-byte `framework/__init__.py`). The pre-existing
+#   `framework/v2/pyproject.toml` sits *inside* `framework/v2/` and therefore cannot
+#   see the `framework` parent namespace, so a wheel built from it would NOT deliver
+#   an importable `framework.v2`. This root pyproject is built from the directory that
+#   can see `framework/`, so `pip install .` / a built wheel delivers `framework.v2`
+#   as an importable package and `python3 -m framework.v2 <subcommand>` works from a
+#   clean-venv install.
+#
+#   The nested `framework/v2/pyproject.toml` is intentionally left in place: it carries
+#   the `[tool.mypy]` / `[tool.pytest.ini_options]` config (whose paths are relative to
+#   framework/v2/) and reference metadata. THIS file is the authoritative *buildable*
+#   one; it mirrors that file's runtime deps and optional extras so both agree.
+#
+#   This is PACKAGING only — it changes no runtime behaviour and is off the gate path.
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crucible"
+version = "2.0.0a1"
+description = "CRUCIBLE — authorized, prove-don't-guess offensive-security platform (v1 canon + v2 engine, incl. the AEGIS defensive dual)"
+requires-python = ">=3.11"
+authors = [{name = "OBSIDIAN-FORGE"}]
+# Dual-licensed: GNU AGPL-3.0-or-later OR a Commercial License. See ./LICENSE and ./LICENSING.md.
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "LICENSING.md"]
+readme = "README.md"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+]
+
+# Kept byte-for-byte in sync with framework/v2/pyproject.toml.
+dependencies = [
+  "pydantic>=2.10,<3",
+  "structlog>=25.0,<26",
+  "httpx>=0.28,<1",
+  "requests>=2.32,<3",
+  "PyYAML>=6,<7",
+  "beautifulsoup4>=4.12,<5",
+  "Jinja2>=3.1,<4",
+  "cryptography>=42,<50",
+  "packaging>=23",
+]
+
+# OPTIONAL, feature-flagged extras (mirror of framework/v2/pyproject.toml). None are
+# hard deps: every import is try/except-guarded with a pure-Python/stdlib fallback,
+# and the default (extras-absent) path is byte-identical + deterministic.
+[project.optional-dependencies]
+anthropic   = ["anthropic>=0.40,<1"]
+embeddings  = ["sentence-transformers>=2,<6"]
+analysis    = ["semgrep>=1.100"]
+smt         = ["z3-solver>=4.12,<5"]
+numerics    = ["numpy>=1.26,<3"]
+dev         = ["pytest>=8,<11", "mypy>=1.10,<2"]
+
+# Console entry points. `python3 -m framework.v2 <subcommand>` keeps working exactly
+# as before; these are additive ergonomic shortcuts a defender can type directly.
+#   crucible <subcommand>   ==  python3 -m framework.v2 <subcommand>
+#   aegis <subcommand>      ==  python3 -m framework.v2 aegis <subcommand>
+[project.scripts]
+crucible = "framework.v2.__main__:main"
+aegis = "framework.v2.aegis.cli:main"
+
+# Package discovery: ship the importable Python tree only. `find` returns just
+# directories that carry an __init__.py, so the prose dirs (framework/playbooks,
+# framework/cognitive, …) and the eval corpus_apps fixtures (no __init__.py) are
+# excluded automatically; test packages are excluded explicitly. Non-.py data files
+# (JSON scanner library, templates, wordlists) are NOT bundled — the runtime that
+# needs import + `status` + the AEGIS surface is pure Python; data-dependent
+# subcommands still expect the source tree (see the NW-2 caveat in the return note).
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["framework*"]
+exclude = ["*.tests", "*.tests.*"]
+namespaces = false
