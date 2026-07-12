@@ -89,6 +89,13 @@ class EngagementResult:
     # ATT&CK), and Sigma evaluated over any operator-supplied OFFLINE logs. Derived purely from the
     # oracle-confirmed findings (prove-don't-guess); it NEVER changes the scan or an oracle verdict.
     defense: object = None
+    # OPT-IN sensor fusion (``--fuse-sensors``, default OFF → these stay 0 and the engagement is
+    # byte-identical). Counts of the offline sensor LEADS folded into ``world`` and the promotions the
+    # deterministic oracles confirmed from the sensors' OWN retained evidence (k8s-posture / policy-path
+    # / gated reachability). The world-model carries them; under ``--spine`` the leads also reach the
+    # report (graded as leads). Fusion NEVER changes report.active_findings or any oracle verdict.
+    fused_leads: int = 0
+    fused_facts: int = 0
 
 
 def _no_send(request: object) -> dict:  # pragma: no cover - chaining never sends
@@ -462,6 +469,48 @@ def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
         pass
 
 
+def _run_fusion(world: "WorldModel", slug: str, *, seq_base: int, sink) -> tuple[int, int]:
+    """Opt-in (``--fuse-sensors``) sensor fusion over the run world-model. Folds the operator's declared
+    OFFLINE sensor LEADS (``targets/<slug>/fusion.json``: declared_service / sbom_vuln / kube_bench /
+    cloud_import) into ``world`` through the GATED pipeline, and lets the deterministic promotion oracles
+    re-fire over each sensor's OWN retained evidence (version-range / k8s-posture / policy-path, plus the
+    opt-in GATED reachability handshake). Returns ``(leads_folded, facts_promoted)``.
+
+    Additive + default-OFF: nothing calls this unless ``--fuse-sensors`` is set, so the default engage
+    path (and ``make gate``, which never sets it) is byte-identical. Best-effort — a fusion failure
+    never sinks the engagement. Under ``--spine`` the folded LEADS also reach the report (graded as
+    leads, never facts). The promotions are oracle-grounded FACTS in ``world`` (``oracle:`` provenance)."""
+    try:
+        from .engage_fusion import fuse_sensors
+    except Exception:
+        return (0, 0)
+    from types import SimpleNamespace
+
+    def _oracle_nodes() -> set:
+        try:
+            return {n.id for n in world.all_nodes() if str(getattr(n, "provenance", "")).startswith("oracle:")}
+        except Exception:
+            return set()
+
+    before = _oracle_nodes()
+    # ctx carries the fusion clock base (so fusion's seq continues after the run) + the spine sink; it
+    # carries NO explicit plan, so fuse_sensors resolves the operator's targets/<slug>/fusion.json.
+    ctx = SimpleNamespace(base_seq=seq_base, sink=sink)
+    try:
+        minted = fuse_sensors(world, slug, ctx)
+    except Exception:
+        return (0, 0)
+    facts = len(_oracle_nodes() - before)
+    # Under --spine, mirror the folded LEADS onto the unified report (graded as leads, never facts).
+    if sink is not None and minted:
+        try:
+            from .engage_autonomous import _emit_fused_leads
+            _emit_fused_leads(sink, minted, set())
+        except Exception:
+            pass
+    return (len(minted), facts)
+
+
 def run_engagement(
     slug: str,
     seed_url: str,
@@ -502,6 +551,7 @@ def run_engagement(
     defender_sigma_dir: str | None = None,
     defender_log: str | None = None,
     defender_log_format: str | None = None,
+    fuse_sensors: bool = False,
 ) -> EngagementResult:
     """Run one authorized engagement end to end and return an
     :class:`EngagementResult` — the oracle-confirmed :class:`ScanReport` plus the
@@ -686,6 +736,19 @@ def run_engagement(
         result.grounding = _assess_grounding(report, world)
     except Exception:
         pass
+    # OPT-IN sensor fusion (``fuse_sensors``, default OFF → this whole block is skipped and the
+    # engagement — and ``make gate`` — is byte-identical). Fold the operator's declared OFFLINE sensor
+    # LEADS into the SHARED world-model and let the deterministic promotion oracles re-fire over each
+    # sensor's OWN retained evidence. Runs AFTER chaining/grounding so it folds onto the final world;
+    # the fusion clock continues after the run's high-water so time never inverts. Best-effort — a
+    # fusion failure never sinks the engagement, and it NEVER changes a finding or an oracle verdict.
+    if fuse_sensors:
+        try:
+            fusion_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
+            result.fused_leads, result.fused_facts = _run_fusion(
+                world, slug, seq_base=fusion_base, sink=sink)
+        except Exception:
+            pass
     # DEFENSIVE / purple-team pass (opt-in ``enable_defender``, default OFF → this whole block is
     # skipped and the engagement is byte-identical). It reasons over the confirmed findings to tell
     # the blue team where their detection coverage has holes: candidate Sigma rules for the misses,
@@ -888,6 +951,16 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--defender-log-format", default="auto",
                         choices=["auto", "syslog", "cef", "evtx_json"],
                         help="Format of --defender-log (default: auto-detect).")
+    parser.add_argument("--fuse-sensors", action="store_true",
+                        help="Fold the operator's declared OFFLINE sensor LEADS "
+                             "(targets/<slug>/fusion.json: declared_service/sbom_vuln/kube_bench/"
+                             "cloud_import) into the run world-model, and let the deterministic "
+                             "promotion oracles re-fire over each sensor's OWN retained evidence "
+                             "(version-range / k8s-posture / policy-path; plus an OPT-IN, GATED live "
+                             "reachability handshake for a declared_service task with "
+                             "confirm_reachable). Each sensor is still gated at run time (kill-switch/"
+                             "entitlement/scope/egress); a LEAD becomes a FACT only when an oracle "
+                             "confirms it. Off by default (0 sensors) = byte-identical.")
     parser.add_argument("--autonomous", action="store_true",
                         help="AUTONOMOUS OODA cycle (opt-in; off = byte-identical). After the "
                              "authoritative scan, construct the Planner over the run world-model, "
@@ -953,6 +1026,7 @@ def main(argv: list[str]) -> int:
             defender_sigma_dir=args.defender_sigma,
             defender_log=args.defender_log,
             defender_log_format=args.defender_log_format,
+            fuse_sensors=args.fuse_sensors,
         )
     except EngagementRefused as e:
         print(f"engagement refused: {e}")
@@ -1025,6 +1099,11 @@ def main(argv: list[str]) -> int:
             print(f"  ingested logs     : {defense.ingested_events} event(s); "
                   f"{len(defense.ingested.matched_rule_ids)} Sigma rule(s) fired "
                   f"(ATT&CK {defense.ingested.techniques_detected or 'none'})")
+    # Opt-in sensor fusion summary (default OFF → not printed; the engagement is byte-identical).
+    if getattr(args, "fuse_sensors", False):
+        print(f"  fused sensors     : {result.fused_leads} lead(s) folded, "
+              f"{result.fused_facts} oracle-promoted fact(s) "
+              f"(from targets/{args.slug}/fusion.json; leads stay leads, oracles prove facts)")
     # Opt-in AUTONOMOUS OODA cycle (default OFF → this whole block is skipped and the engagement is
     # byte-identical). It runs AFTER the authoritative scan/report is printed and never changes it.
     if getattr(args, "autonomous", False):
