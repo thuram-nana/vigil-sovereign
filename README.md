@@ -1635,7 +1635,8 @@ CRUCIBLE is **dual-licensed: GNU AGPL-3.0 or a Commercial License** — see [`LI
   Interaction*).
 - **Commercial:** if you want to keep modifications private, embed CRUCIBLE in a proprietary product or
   hosted service without the AGPL obligations, or need warranty/indemnity/support, purchase a
-  commercial license. Contact **satoshinakamotobull@gmail.com** (subject: `CRUCIBLE commercial license`).
+  commercial license. Contact **licensing@thuramnana.com** / **https://thuramnana.com** (subject:
+  `CRUCIBLE commercial license`).
 
 If you have not signed a commercial agreement, your use is governed by the AGPL-3.0. Contributions are
 accepted under AGPL-3.0 plus a grant allowing commercial relicensing so dual-licensing remains possible
