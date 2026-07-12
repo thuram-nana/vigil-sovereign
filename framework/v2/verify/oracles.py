@@ -1922,6 +1922,182 @@ def k8s_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Cloud / CSPM posture — promote a retained cloud-posture LEAD to a FACT over its ACHIEVED STATE
+# (Wave-F1). The achieved-state SIBLING of ``k8s_posture_oracle``.
+#
+# ``sensors.cloud`` mints three posture LEADS (``GROUNDING_INTEL``): ``public_exposure`` and
+# ``excessive_privilege`` are already promoted to FACTs by the EXISTING POLICY_PATH oracle
+# (``sensors.cloud.confirm_cloud_posture_facts`` re-derives a grant PATH over the whole policy GRAPH). The
+# third — ``misconfiguration`` (encryption-at-rest disabled) — is explicitly ``oracle_provable=False``
+# there: "no reachability oracle proves it, so it stays an honest LEAD". THIS oracle fills exactly that
+# gap: it promotes a retained cloud control to a FACT over the control's ACHIEVED STATE ALONE (a
+# single-record membership/parse-proof, NO graph traversal, NO live cloud call) — mirroring how
+# ``k8s_posture_oracle`` re-derives a concrete insecure setting over ONE retained kube-bench control
+# rather than trusting the scanner's say-so.
+#
+# A control fires ONLY on an EXPLICIT insecure achieved-state flag a compliant control cannot exhibit;
+# the rule tuple order is fixed so the verdict is deterministic (same evidence -> same signal). An
+# EXPLICIT compliant/pass status, secure flags (encryption on, not public, no wildcard principal), or
+# only ABSENT/unknown flags all correctly do NOT fire — near-zero false positives by construction.
+_CLOUD_STR_CAP = 4096
+_CLOUD_MAX_PRINCIPALS = 4096
+
+# A CSPM tool's own PASS/compliant verdict is respected: if the retained control records one of these,
+# the oracle never fires (a compliant control is not promoted, mirroring how k8s requires a hard FAIL).
+_CLOUD_COMPLIANT_STATUSES = frozenset({
+    "pass", "passed", "ok", "compliant", "pass_manual", "info", "informational", "not_applicable",
+    "na", "n/a", "skipped", "manual",
+})
+# Principals that denote "anyone" — an anonymous / wildcard grantee is a public-trust achieved state by
+# definition (mirrors ``sensors.cloud._ANON_PRINCIPALS`` so the two agree on what "public" means).
+_CLOUD_ANON_PRINCIPALS = frozenset({
+    "*", "allusers", "anonymous", "public", "everyone", "authenticatedusers", "allauthenticatedusers",
+    "principal:*", "arn:aws:iam::*:root", "**",
+})
+
+
+def _cloud_tri_bool(value: Any) -> bool | None:
+    """Coerce a retained flag to True / False / None (unknown). A bool passes through; a string is
+    read for an unambiguous enabled/disabled token; anything else (incl. absent) is UNKNOWN (None) — so
+    an ABSENT or un-parseable flag can never be mistaken for an EXPLICIT insecure setting (near-zero-FP)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int,)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes", "on", "enabled", "enable"):
+            return True
+        if v in ("false", "0", "no", "off", "disabled", "disable"):
+            return False
+    return None
+
+
+def _cloud_norm_principal(p: Any) -> str:
+    return _coerce_text(p)[:_CLOUD_STR_CAP].strip().lower().replace("-", "").replace("_", "")
+
+
+def _cloud_is_anon_principal(p: Any) -> bool:
+    norm = _cloud_norm_principal(p)
+    return norm in {a.replace("-", "").replace("_", "") for a in _CLOUD_ANON_PRINCIPALS}
+
+
+def _cloud_achieved_state(control: Mapping[str, Any]) -> dict[str, Any]:
+    """The achieved-state view the rules judge. Accepts a nested ``achieved_state`` sub-dict OR a flat
+    resource record (``sensors.cloud`` resources carry public/sensitive/encrypted/grants at top level).
+    Principals are gathered from an explicit ``principals`` list AND from ``grants[].principal`` so a
+    ScoutSuite/Prowler-shaped or a native inventory record are both judged the same way."""
+    src = control.get("achieved_state") if isinstance(control.get("achieved_state"), Mapping) else control
+    principals: list[str] = []
+    raw_principals = src.get("principals")
+    if isinstance(raw_principals, (list, tuple)):
+        principals.extend(_coerce_text(p) for p in raw_principals[:_CLOUD_MAX_PRINCIPALS])
+    grants = src.get("grants")
+    if isinstance(grants, (list, tuple)):
+        for g in grants[:_CLOUD_MAX_PRINCIPALS]:
+            if isinstance(g, Mapping) and g.get("principal") is not None:
+                principals.append(_coerce_text(g.get("principal")))
+    return {
+        "encrypted": _cloud_tri_bool(src.get("encrypted")),
+        "public": _cloud_tri_bool(src.get("public")),
+        "sensitive": _cloud_tri_bool(src.get("sensitive")),
+        "principals": principals,
+    }
+
+
+def cloud_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a retained cloud/CSPM posture control PROVABLY carries an insecure ACHIEVED STATE — the
+    membership/parse-proof that promotes a ``sensors.cloud`` posture LEAD to a FACT over the control's
+    achieved state ALONE (offline, ZERO cloud calls). The achieved-state sibling of ``k8s_posture_oracle``:
+    a CSPM tool's "public / mis-configured" is a third-party heuristic; this oracle re-derives the insecure
+    state over the RETAINED control so the scanner's verdict is never rubber-stamped and a benign posture
+    is never confirmed.
+
+    ``observed_control`` is the JSON-safe retained control (a nested ``achieved_state`` sub-dict, or a flat
+    ``sensors.cloud`` resource record)::
+
+        {"control_id": "s3-encryption-at-rest"?, "resource_id": "acme-secrets"?, "status": "FAIL"?,
+         "provider": "aws"?, "achieved_state": {"encrypted": false, "public": false, "sensitive": true,
+                                                "principals": ["arn:aws:iam::123:role/app"]}}
+        # or flat: {"id": "acme-secrets", "encrypted": false, "sensitive": true, "public": false,
+        #           "grants": [{"principal": "*", "access": "read"}]}
+
+    Fires (0.9) only when an EXPLICIT insecure achieved-state flag holds (fixed rule order):
+      1. ``encryption_at_rest_disabled`` — ``encrypted`` explicitly ``false`` AND the resource is
+         ``sensitive`` (the exact ``cloud_posture_leads`` ``misconfiguration`` condition — the lead the
+         POLICY_PATH oracle STRUCTURALLY cannot prove, now provable as an achieved STATE);
+      2. ``public_exposure`` — ``public`` explicitly ``true`` (an achieved public-access state);
+      3. ``wildcard_principal`` — a wildcard/anonymous principal (``*`` / ``AllUsers`` / ``anonymous`` / …)
+         literally named in the retained resource policy (``principals`` or ``grants[].principal``).
+
+    Does NOT fire (stays an honest LEAD) when: the control records an EXPLICIT compliant/pass status; the
+    flags show the SECURE setting (``encrypted`` true, ``public`` false, no wildcard principal); or every
+    relevant flag is ABSENT/unknown (unknown is never an insecure fact). Malformed / non-mapping evidence
+    -> non-fire (never raises). Pure + deterministic, so the same verdict re-verifies offline from the
+    retained context. GROUNDING is procedural exactly as for every oracle: the control MUST be the
+    sensor's RETAINED cloud evidence, never a re-run of a live cloud call laundered as a fact."""
+    if not isinstance(observed_control, Mapping):
+        return OracleSignal(kind=OracleKind.CLOUD_POSTURE, fired=False, confidence=0.0,
+                            evidence="no cloud posture control evidence")
+    ctl = observed_control
+    rid = _coerce_text(ctl.get("resource_id") or ctl.get("id"))[:_CLOUD_STR_CAP].strip()
+    cid = _coerce_text(ctl.get("control_id") or ctl.get("check_id"))[:_CLOUD_STR_CAP].strip()
+    status = _coerce_text(ctl.get("status")).strip().lower()
+    label = rid or cid or "?"
+
+    # Respect an EXPLICIT compliant verdict — a control the CSPM tool passed is never promoted.
+    if status in _CLOUD_COMPLIANT_STATUSES:
+        return OracleSignal(
+            kind=OracleKind.CLOUD_POSTURE, fired=False, confidence=0.0,
+            evidence=(f"cloud control {label} records a compliant status {status!r} — not an insecure "
+                      f"achieved state (stays a lead)"),
+            observed={"resource_id": rid, "control_id": cid, "status": status})
+
+    state = _cloud_achieved_state(ctl)
+    encrypted, public, sensitive = state["encrypted"], state["public"], state["sensitive"]
+    anon = [p for p in state["principals"] if _cloud_is_anon_principal(p)]
+
+    # Rule 1 — encryption-at-rest DISABLED on a sensitive datastore (the misconfiguration lead the
+    # policy-path oracle cannot prove; provable here as an achieved STATE). EXPLICIT false + sensitive.
+    if encrypted is False and sensitive is True:
+        return OracleSignal(
+            kind=OracleKind.CLOUD_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"cloud posture fact: sensitive resource {label} has encryption-at-rest DISABLED "
+                      f"(achieved state: encrypted=false, sensitive=true) — the un-reachability-provable "
+                      f"misconfiguration lead, promoted over the retained achieved state"),
+            observed={"resource_id": rid, "control_id": cid, "rule": "encryption_at_rest_disabled",
+                      "reason": "insecure_achieved_state", "encrypted": False, "sensitive": True})
+
+    # Rule 2 — an achieved PUBLIC-EXPOSURE flag (explicitly public).
+    if public is True:
+        return OracleSignal(
+            kind=OracleKind.CLOUD_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"cloud posture fact: resource {label} is PUBLICLY EXPOSED "
+                      f"(achieved state: public=true) — promoted over the retained achieved state"),
+            observed={"resource_id": rid, "control_id": cid, "rule": "public_exposure",
+                      "reason": "insecure_achieved_state", "public": True})
+
+    # Rule 3 — a wildcard/anonymous principal literally named in the retained resource policy.
+    if anon:
+        who = anon[0]
+        return OracleSignal(
+            kind=OracleKind.CLOUD_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"cloud posture fact: resource {label} grants a WILDCARD/anonymous principal "
+                      f"{who!r} (achieved state: an anonymous grantee is named in the retained policy) — "
+                      f"promoted over the retained achieved state"),
+            observed={"resource_id": rid, "control_id": cid, "rule": "wildcard_principal",
+                      "reason": "insecure_achieved_state", "principal": who})
+
+    return OracleSignal(
+        kind=OracleKind.CLOUD_POSTURE, fired=False, confidence=0.0,
+        evidence=(f"cloud control {label} carries no EXPLICIT insecure achieved-state flag "
+                  f"(encryption on / not public / no wildcard principal, or flags absent) — not provably "
+                  f"an insecure state (stays a lead)"),
+        observed={"resource_id": rid, "control_id": cid, "status": status,
+                  "encrypted": encrypted, "public": public, "sensitive": sensitive})
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They
