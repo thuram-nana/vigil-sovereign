@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Callable
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from ..verify.adapter import FindingContext
 from ..verify.confirmation import confirm_finding
@@ -37,6 +37,20 @@ _REQUEST_PAYLOAD_CLASSES = ("sqli_attempt", "command_injection_attempt")
 _MAX_VALUES = 256
 _MAX_VALUE_CHARS = 8192
 _MAX_BODY_BYTES = 2_000_000
+
+# CURATED header injection surface (lowercased). A BOUNDED allowlist of free-text, user-controlled
+# request headers that are realistic SQL/command-injection vectors — deliberately NOT every header.
+# Structured / hop-by-hop / negotiation / credential headers (host, content-type, content-length,
+# accept*, authorization, cookie [parsed separately], connection, ...) are EXCLUDED: they add noise
+# without a realistic injection story. The parse-proof oracles are near-zero-FP by construction — a
+# `User-Agent: python-requests/2.25.1` or `Mozilla/5.0 (X11; Linux x86_64)` carries no SQL string-
+# literal break-out and no shell command+argument construct (the cmdi oracle skips segment[0] and
+# `tool/version` slashes), so a normal UA / XFF / Referer never trips. Bounded → DoS-safe.
+_INSPECT_HEADERS = frozenset({
+    "user-agent", "referer", "referrer", "x-forwarded-for", "x-forwarded-host", "x-forwarded-server",
+    "x-real-ip", "x-original-url", "x-rewrite-url", "x-http-method-override", "forwarded",
+    "true-client-ip", "client-ip", "x-client-ip", "from", "x-api-version",
+})
 
 
 def _json_leaves(obj: Any, prefix: str, add: Callable[[str, str], None], depth: int = 0) -> None:
@@ -54,10 +68,33 @@ def _json_leaves(obj: Any, prefix: str, add: Callable[[str, str], None], depth: 
         add(prefix or "body", obj)
 
 
+def _header_cookie_values(headers: list[tuple[str, str]], add: Callable[[str, str], None]) -> None:
+    """Feed DECODED Cookie values (``cookie:<name>``) and the CURATED header allowlist
+    (``header:<name>``) to ``add``. Values are percent-decoded so an encoded injection is visible;
+    decoding only reveals structure the near-zero-FP oracles already judge, it cannot add an FP.
+    Total (never raises); bounded (``add`` caps count + length)."""
+    for hk, hv in (headers or []):
+        name = str(hk).lower()
+        val = str(hv)
+        try:
+            if name == "cookie":
+                # RFC 6265 cookie-string: `a=1; b=2`. Each value is a distinct injection point.
+                for pair in val.split(";"):
+                    if "=" in pair:
+                        cname, _, cval = pair.partition("=")
+                        add(f"cookie:{cname.strip()}", unquote(cval.strip()))
+            elif name in _INSPECT_HEADERS:
+                add(f"header:{name}", unquote(val))
+        except Exception:
+            continue
+
+
 def candidate_values(path: str, headers: list[tuple[str, str]], body: str | None) -> list[tuple[str, str]]:
-    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params and
-    urlencoded / JSON body values. Bounded and total (a malformed body is skipped, never raised).
-    Header/cookie surfaces are a documented roadmap; the classic injection surface is query+body."""
+    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params,
+    urlencoded / JSON body values, decoded Cookie values (``cookie:<name>``), and a bounded, curated
+    set of free-text request headers (``header:<name>``, see ``_INSPECT_HEADERS``). Query/body come
+    first (the most common vectors); header/cookie last. Bounded and total (a malformed body is
+    skipped, never raised)."""
     out: list[tuple[str, str]] = []
 
     def add(name: str, val: Any) -> None:
@@ -84,6 +121,9 @@ def candidate_values(path: str, headers: list[tuple[str, str]], body: str | None
                     add(k, v)
         except Exception:
             pass
+
+    # header/cookie injection surface (curated + bounded), inspected AFTER query/body.
+    _header_cookie_values(headers, add)
     return out[:_MAX_VALUES]
 
 
