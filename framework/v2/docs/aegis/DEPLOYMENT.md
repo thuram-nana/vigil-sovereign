@@ -32,9 +32,10 @@ real users and is exactly what every WAF does badly. AEGIS blocks what it can *p
 | `xss` (reflected) | a request value reflected **verbatim** whose executable token reached a live executable HTML context (an HTML‑encoded reflection is **not** blocked) | the app's response |
 | `ssti` | a request value carried a template-wrapped arithmetic expression (`{{7*7}}`, `${7*7}`, `#{7*7}`, `<%= 7*7 %>`, `*{7*7}`, `@(7*7)`) that the server **evaluated** — the ≥2-digit result appears at a digit boundary and the raw template is gone (a **reflected** template is **not** blocked) | the app's response |
 | `path_traversal` | a request value walked the path toward a sensitive file (a real `../`-style traversal indicator) **and** a strict `/etc/passwd`-signature line surfaced in the response — and the value is **not** merely reflected verbatim (a docs/search page echoing `/etc/passwd` is **not** blocked) | the app's response |
+| `xxe` (in-band file disclosure) | the request body **declared an external entity** (`<!DOCTYPE … <!ENTITY … SYSTEM "file:///etc/passwd">`) **and** a strict `/etc/passwd`-signature line surfaced in the response — and the declaring body is **not** reflected verbatim (a docs page that ships a DTD example **and** echoes `/etc/passwd` is **not** blocked). Proved by the same `SIDE_EFFECT` oracle over the leaked line, seen from the response. **Only in-band file disclosure blocks; blind/OOB XXE stays a lead.** | the app's response |
 
 The two request-side classes prove a **structured attack attempt**; the four response-side classes
-(`xss`, `ssti`, `path_traversal`) prove **exploitation** — the app actually reflected the payload,
+(`xss`, `ssti`, `path_traversal`, `xxe`) prove **exploitation** — the app actually reflected the payload,
 evaluated the expression, or leaked the file. The oracles are deliberately conservative — a benign
 apostrophe (`O'Brien`), a comparison (`id > 1000`), a tool string (`python-requests/2.28.1`), delimited
 data (`Name \| Age`), a pasted SQL query, a coincidental `49` beside a reflected `{{ 7 * 7 }}`, a page
@@ -54,12 +55,14 @@ A hard block is **never** belief-driven (prove-don't-guess: only a fired oracle'
 and it is gated behind the `AEGIS_RESPOND` entitlement. A legitimate user caught in a burst simply
 retries.
 
-Roadmap (not yet on the block path): **SSRF** and **XXE** — these need **out-of-band** confirmation (a
-callback proving the server made the request / resolved the entity), which a single inline response
-cannot supply, so today they raise per-actor belief as **leads** and the OOB-hook is the documented
-block path. **Error-based SQLi** likewise needs a differential/OOB confirmation (a single inline
-response cannot prove a datastore error was *caused* by the payload rather than merely displayed near
-it), so it too stays off the block path.
+Roadmap (not yet on the block path): **all SSRF** and **blind / out-of-band XXE** — these need
+**out-of-band** confirmation (a callback proving the server made the request / resolved the entity to a
+resource whose content never returns inline), which a single inline response cannot supply, so today
+they raise per-actor belief as **leads** and the OOB-hook is the documented block path. (Only **in-band
+file-disclosure XXE**, where the leaked file content surfaces in the app's own response, is provable
+inline — it is on the block path above.) **Error-based SQLi** likewise needs a differential/OOB
+confirmation (a single inline response cannot prove a datastore error was *caused* by the payload
+rather than merely displayed near it), so it too stays off the block path.
 
 ## Three ways to add it
 
