@@ -1,6 +1,6 @@
 # CRUCIBLE — Licensing
 
-**Copyright © 2026 Water-Hacker (the “Licensor”). All rights reserved.**
+**Copyright © 2026 Junior Thuram Nana (the “Licensor”). All rights reserved.**
 
 CRUCIBLE is **dual-licensed**. You may use it under **either**:
 
