@@ -66,13 +66,13 @@ license instead. The revenue funds continued development.
 Contact the Licensor:
 
 - **Web:** https://thuramnana.com
-- **Email:** licensing@thuramnana.com
+- **Email:** thuram@thuramnana.com
 - **Subject:** `CRUCIBLE commercial license`
 - Please include: your company, the product/use case, deployment model (internal / SaaS / distributed),
   and expected scale.
 
 *(Maintainer: confirm the copyright holder line reflects your legal name/entity, and that
-`licensing@thuramnana.com` is a monitored mailbox, before relying on this for commercial sales.)*
+`thuram@thuramnana.com` is a monitored mailbox, before relying on this for commercial sales.)*
 
 ---
 
