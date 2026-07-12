@@ -178,6 +178,7 @@ class AutonomyResult:
     smt_deprioritised: int = 0         # open leaves whose parameter region is PROVABLY infeasible (advisory)
     planner_source: str | None = None  # the foothold node the planner reasons from
     objectives: list[str] = field(default_factory=list)
+    lookahead_depth: int = 1           # 1 = one-step greedy; >= 2 = bounded multi-step lookahead (W2.2b)
     world_nodes_before: int = 0
     world_nodes_after: int = 0
     outcomes_credited: int = 0         # LEARN — confirm/refute outcomes written to the persistent OutcomeLedger
@@ -244,11 +245,33 @@ def _foothold(world: "WorldModel | None") -> str | None:
     return None
 
 
-def _select(tree: Any, world: "WorldModel | None", objectives: list, source: str | None) -> Any:
-    """Pick the next action: the planner's world-aware leaf selection (highest-value route to a
-    crown jewel), degrading VERBATIM to greedy ``prior*value/cost`` when the world/objectives/
-    foothold are absent or no crown jewel is reachable. Deterministic and read-only on the world."""
+def _select(tree: Any, world: "WorldModel | None", objectives: list, source: str | None,
+            *, lookahead_depth: int = 1, budget: int | None = None) -> Any:
+    """Pick the next action.
+
+    ``lookahead_depth <= 1`` (the default): the ONE-STEP world-aware greedy pick — the planner's
+    ``best_open_leaf_pathaware`` (highest-value route to a crown jewel), degrading VERBATIM to
+    greedy ``prior*value/cost`` when the world/objectives/foothold are absent or no crown jewel is
+    reachable. Byte-identical to the pre-lookahead behaviour (so the existing autonomous tests and
+    the greedy default are unchanged).
+
+    ``lookahead_depth >= 2`` (opt-in, W2.2b): MULTI-STEP lookahead — ``best_open_leaf_lookahead``
+    chooses the budget-feasible PLAN (a set of ``<= depth`` open leaves whose request cost fits
+    ``budget``) whose value — the sum of the leaves' path-boosted scores PLUS a bonus for every
+    crown-jewel route it COMPLETES — is greatest, then returns that plan's highest-value first step
+    to execute now (receding horizon). Because the route bonus is earned only by a plan that
+    includes ALL of a route's leaves, a tight budget makes lookahead DROP the single highest-scoring
+    (off-path) leaf to finish an affordable route — a genuinely non-myopic pick. It degrades
+    VERBATIM to the greedy pick above when there is no world / objective / reachable crown jewel /
+    affordable plan, so ``lookahead_depth >= 2`` with none of those set is still the greedy pick.
+
+    DETERMINISTIC: both selectors are pure functions of the (fixed-baseline) tree + world (no
+    wallclock, no rng); ties break on ascending leaf id. Read-only on the world."""
     try:
+        if lookahead_depth >= 2:
+            return tree.best_open_leaf_lookahead(
+                world=world, objective_kinds=objectives or None, source=source,
+                depth=lookahead_depth, budget_requests=budget)
         return tree.best_open_leaf_pathaware(
             world=world, objective_kinds=objectives or None, source=source)
     except Exception:
@@ -843,15 +866,25 @@ def run_autonomous_cycle(
     outcome_ledger: Any = None,
     smt_regions: Any = None,
     persist_learning: bool = False,
+    lookahead_depth: int = 1,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
     confirmed findings + world-model, drives a gated tool, and folds its observation back.
 
+    ``lookahead_depth`` (default 1, W2.2b): 1 keeps the ONE-STEP greedy selection (byte-identical to
+    the pre-lookahead behaviour, so the existing tests are unchanged); ``>= 2`` switches selection
+    to bounded MULTI-STEP lookahead (see :func:`_select`) — the pick that begins the best plan
+    (``<= depth`` leaves, cost fitting ``request_budget``) toward a crown jewel, still gated, still
+    deterministic. Lookahead only re-ranks WHICH open leaf runs next; it never promotes a finding or
+    changes the authoritative report.
+
     Localhost/authorized-only: the enclosing ``engage.run_engagement`` preflight already refused an
     out-of-scope / kill-switched engagement before this runs, and every tool call is re-gated by
     ``invoke_tool`` regardless. Deterministic and best-effort throughout."""
     from .agents.tools import ToolContext
+
+    lookahead_depth = max(1, int(lookahead_depth))
 
     world = getattr(result, "world", None)
     findings = list(getattr(getattr(result, "report", None), "active_findings", []) or [])
@@ -860,6 +893,7 @@ def run_autonomous_cycle(
         ctx = ToolContext(slug=slug, world=world, prompt_callback=prompt_callback)
 
     out = AutonomyResult(engagement=result, slug=slug)
+    out.lookahead_depth = lookahead_depth
     out.world_nodes_before = world.node_count if world is not None else 0
     objectives = _objective_kinds()
     out.objectives = [getattr(k, "value", str(k)) for k in objectives]
@@ -940,7 +974,8 @@ def run_autonomous_cycle(
         out.fused_observations += cycle_fused
         _emit_fused_leads(sink, cycle_obs, emitted_lead_ids)   # I-C: fused leads reach the report
 
-        leaf = _select(tree, world, objectives, source)
+        leaf = _select(tree, world, objectives, source,
+                       lookahead_depth=lookahead_depth, budget=request_budget)
         if leaf is None:
             out.notes.append(f"cycle {c}: no open action remaining")
             break
@@ -994,7 +1029,8 @@ def run_autonomous_cycle(
         step.advice_reweighted = _reprioritise(tree, baselines, advice=advice, meta_caution=meta_caution,
                                                smt_infeasible=smt_infeasible)
         out.advice_reweighted += step.advice_reweighted
-        nxt = _select(tree, world, objectives, source)
+        nxt = _select(tree, world, objectives, source,
+                      lookahead_depth=lookahead_depth, budget=request_budget)
         step.reoriented_to = nxt.label if nxt is not None else "(no more actions)"
 
         # DRIVE — tick the constructed Coordinator so its wired advisory agents (the multi-critic
@@ -1040,10 +1076,12 @@ def render_summary(out: AutonomyResult) -> list[str]:
     no print side effects and stays a pure library call)."""
     lines: list[str] = []
     src = out.planner_source or "(none)"
+    sel = (f"lookahead depth-{out.lookahead_depth}" if out.lookahead_depth >= 2
+           else "one-step greedy")
     lines.append(
         f"  autonomous OODA   : planner over world-model "
         f"(constructed={out.planner_constructed}, driven={out.planner_driven}, source={src}, "
-        f"objectives={','.join(out.objectives) or 'none'})")
+        f"objectives={','.join(out.objectives) or 'none'}, select={sel})")
     if out.agents_wired:
         lines.append(
             f"    nervous system  : agents={','.join(out.agents_wired)}; "

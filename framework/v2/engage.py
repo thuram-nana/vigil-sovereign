@@ -790,6 +790,10 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
             max_cycles=max(1, int(getattr(args, "autonomous_cycles", 1))),
             request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
             prompt_callback=prompt_callback_from_args(args),
+            # W2.2b — opt-in bounded MULTI-STEP lookahead (default depth-1 = greedy, so the existing
+            # autonomous behaviour is byte-identical). --autonomous-lookahead switches selection to
+            # depth-2 lookahead toward the crown-jewel objectives (still gated, still deterministic).
+            lookahead_depth=(2 if getattr(args, "autonomous_lookahead", False) else 1),
             blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
             # LEARN — opt in (default OFF) to writing this run's confirm/refute outcomes to the
             # operator's targets/<slug>/outcomes.json, closing the learning loop the meta-monitor
@@ -939,6 +943,14 @@ def main(argv: list[str]) -> int:
                         help="Bounded number of OODA cycles for --autonomous (default 1).")
     parser.add_argument("--autonomous-budget", type=int, default=8, metavar="N",
                         help="Request budget the autonomous planner is constructed with (default 8).")
+    parser.add_argument("--autonomous-lookahead", action="store_true",
+                        help="Use bounded MULTI-STEP lookahead (depth-2) for --autonomous action "
+                             "selection instead of one-step greedy (default off = byte-identical). "
+                             "Lookahead picks the action that begins the best budget-feasible plan "
+                             "toward a crown-jewel objective — committing a tight budget to COMPLETING "
+                             "an affordable attack route rather than chasing the single highest-scoring "
+                             "off-route leaf. Still gated, still deterministic; it only re-ranks which "
+                             "open leaf runs next and never promotes a finding.")
     parser.add_argument("--learn", action="store_true",
                         help="LEARN (opt-in; requires --autonomous): write this run's confirm/refute "
                              "outcomes to targets/<slug>/outcomes.json, closing the learning loop the "
