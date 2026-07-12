@@ -273,6 +273,13 @@ class FindingContext(BaseModel):
     # k8s_posture_oracle (a kube-bench CIS control FAILED with a concrete observed insecure setting) —
     # the RETAINED control evidence (sensors.k8s_runtime) the parse-proof judges
     k8s_control: dict[str, Any] | None = None
+    # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
+    # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
+    # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
+    # baseline is always tried too). No benchmark/scan/engage finding carries jwt_token, so appending
+    # this leaves the gate byte-identical.
+    jwt_token: str | None = None
+    jwt_candidate_keys: list[str] | None = None
 
     # -- builders ----------------------------------------------------------
 
@@ -457,6 +464,33 @@ class FindingContext(BaseModel):
         retained = {k: _coerce_text(src.get(k)) for k in (
             "check_id", "status", "actual_value", "description", "section", "benchmark") if src.get(k)}
         return cls(bug_class=bug_class, k8s_control=retained)
+
+    @classmethod
+    def from_jwt_token(
+        cls,
+        token: str,
+        *,
+        candidate_keys: Sequence[str | bytes] = (),
+        bug_class: str = "jwt_forgeable",
+    ) -> "FindingContext":
+        """A captured JWT plus the candidate secrets / RSA public keys to test it against, for the
+        jwt-forgery oracle (Workstream-B). Confirms STRUCTURAL FORGEABILITY — judged on the token
+        ALONE, offline, ZERO forged traffic — ONLY on a re-runnable proof: ``alg=none``/``None``, an HS*
+        signature recomputable from a candidate/weak key, or an RS256->HS256 confusion (the HS* signature
+        verifies with a supplied RSA public key as the HMAC secret). A normal RS256 token with an unknown
+        key, or an HS* token whose secret is not recoverable, does NOT confirm (near-zero-FP).
+
+        The token + candidate keys are JSON-safe, so a confirmed forgery re-verifies OFFLINE from its
+        certificate (``verify.reverify``) — re-run the pure oracle over the retained token, get the same
+        verdict. Candidate keys are coerced to text (a PEM public key is a string); an empty list is
+        valid (the oracle still tries its weak-secret baseline and the ``alg=none`` proof)."""
+        keys = [k.decode("utf-8", "replace") if isinstance(k, bytes) else _coerce_text(k)
+                for k in (candidate_keys or ())]
+        return cls(
+            bug_class=bug_class,
+            jwt_token=_coerce_text(token),
+            jwt_candidate_keys=keys or None,
+        )
 
     @classmethod
     def from_process_output(
@@ -724,6 +758,10 @@ class FindingContext(BaseModel):
             ctx["policy"] = self.policy
         if self.k8s_control is not None:
             ctx["k8s_control"] = self.k8s_control
+        if self.jwt_token is not None:
+            ctx["jwt_token"] = self.jwt_token
+            if self.jwt_candidate_keys is not None:
+                ctx["jwt_candidate_keys"] = self.jwt_candidate_keys
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary
