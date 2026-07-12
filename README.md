@@ -635,12 +635,15 @@ the machinery to route, combine, and re‑run them.
 **Why it exists.** This is the embodiment of prove‑don't‑guess (§1, §3). It is the only place a claim
 becomes a fact.
 
-**How it works.** The `OracleKind` enum holds **23 kinds** in all — the **15 offensive** oracles
-that form the frozen benchmark authority, **plus 8 additive kinds held OUT of the frozen
+**How it works.** The `OracleKind` enum holds **24 kinds** in all — the **15 offensive** oracles
+that form the frozen benchmark authority, **plus 9 additive kinds held OUT of the frozen
 `_ALL_ORACLES`** so the gate stays byte-identical: **6 defensive** (the AEGIS classes — 4 detection +
-the 2 gateway request-side block oracles, §9.18), **1** `K8S_POSTURE` sensor-fusion kind, and **1**
+the 2 gateway request-side block oracles, §9.18), **1** `K8S_POSTURE` sensor-fusion kind, **1**
 `SSO_ASSERTION_FORGERY` (an offline JWT structural-forgery oracle — `alg=none` / recomputable-HS256 /
-RS256→HS256 confusion, keyed on a `jwt_token` context no benchmark finding carries). Of the
+RS256→HS256 confusion, keyed on a `jwt_token` context no benchmark finding carries), and **1**
+`SAML_STRUCTURAL_FORGERY` (its SAML sibling — an offline structural-forgery oracle firing on
+no-signature / a `ds:Reference` that does not cover the consumed assertion / a signature-wrapping
+shape, keyed on a `saml_xml` context). Of the
 15 offensive kinds, the **11 web/injection oracles** below are the confirmation authority for
 `scan`/`engage`; the other four (`SERVICE_REACHABILITY`, `TLS_WEAKNESS`, `VERSION_RANGE`,
 `POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). The AEGIS gateway's response-side SSTI and

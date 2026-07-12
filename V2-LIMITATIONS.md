@@ -35,12 +35,17 @@ and `aegis/` — the embeddable **defensive** AI-attack-detection library + the
 inline **provable firewall** (request-side SQLi/cmd-injection block oracles,
 response-side XSS/SSTI/path-traversal confirmation reusing the existing
 `EVALUATION`/`SIDE_EFFECT` oracles, and a per-actor graduated challenge/throttle).
-`verify.OracleKind` is now **23 members**: the **15** frozen offensive oracles
-(the benchmark set, unchanged) **+ 8 additive members held OUT of the frozen
+`verify.OracleKind` is now **24 members**: the **15** frozen offensive oracles
+(the benchmark set, unchanged) **+ 9 additive members held OUT of the frozen
 `_ALL_ORACLES`** (4 AEGIS detection, 2 AEGIS gateway request-side block oracles,
 1 `K8S_POSTURE` sensor-fusion, 1 `SSO_ASSERTION_FORGERY` offline JWT structural-
-forgery oracle) — each fires only on a context key no benchmark finding carries,
-which is *why* the gate stays byte-identical. AEGIS emits **in-band XXE as a lead,
+forgery oracle, 1 `SAML_STRUCTURAL_FORGERY` offline SAML structural-forgery oracle)
+— each fires only on a context key no benchmark finding carries, which is *why* the
+gate stays byte-identical. AEGIS is also now **pip-installable + Docker-shippable**
+(a repo-root `pyproject.toml` delivers an importable `framework.v2` + `crucible`/
+`aegis` console scripts; `framework/v2/aegis/Dockerfile` runs the observe-default
+gateway), and `engage --fuse-sensors` **auto-activates** when a `targets/<slug>/
+fusion.json` manifest is present (default path byte-identical when it is absent). AEGIS emits **in-band XXE as a lead,
 never an inline block** — the adversarial review proved a single inline exchange
 cannot soundly confirm it (a reflected `/etc/passwd` example on a paste/docs page
 would false-positive), so it joins blind XXE and all SSRF as belief-raising leads.
