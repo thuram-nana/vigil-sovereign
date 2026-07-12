@@ -2326,18 +2326,30 @@ def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> Oracl
 _NOSQL_OPERATORS: frozenset[str] = frozenset({
     "ne", "eq", "gt", "gte", "lt", "lte", "in", "nin",     # comparison
     "or", "and", "nor", "not",                              # logical
-    "exists", "type",                                      # element
-    "where", "regex", "expr", "mod", "text", "jsonschema",  # evaluation
+    "exists",                                              # element
+    "where", "expr", "mod", "text", "jsonschema",          # evaluation
     "all", "elemmatch", "size",                            # array
 })
+# DELIBERATELY EXCLUDED from the BLOCK allowlist (a review proved they false-positive as a hard block):
+#   * `$type`  — also the .NET/System.Text.Json/Newtonsoft polymorphic type-discriminator key
+#     (`{"$type":"Ns.Class, Asm"}`), extremely common benign JSON.
+#   * `$regex` — also the legacy MongoDB Extended-JSON v1 serialization of a BSON regex VALUE
+#     (`{"$regex":"pat","$options":"i"}`, bson.json_util legacy dumps) AND the shape a legitimate
+#     regex-search API accepts. Dual-use → not offline-provable as an ATTEMPT without FPs, so it is
+#     NOT a block (a $regex injection stays a lead at most). Near-zero-FP wins over coverage here.
 # Longest-first alternation so a prefix operator (`gt`) cannot pre-empt its extension (`gte`); the
 # key-segment lookahead below also guards this, but ordering keeps the match unambiguous.
 _NOSQL_OP_ALT = "|".join(sorted(_NOSQL_OPERATORS, key=len, reverse=True))
-# A `$operator` that is a WHOLE key SEGMENT of a parameter name: preceded by start-of-string, `.`, or
-# `[`, and followed (lookahead) by end-of-string, `.`, or `]`. So `user[$ne]`, `q[$gt]`, `a[b][$regex]`,
-# `user.$ne`, and a bare `$where` match; `pass$word`, `cost$negate`, and `$5.00` do NOT (the `$` is
-# mid-segment, not a delimited key). Fixed alternation over a length-bounded name → non-backtracking.
-_NOSQL_PARAM_OP_RE = re.compile(r"(?i)(?:^|[.\[])\$(" + _NOSQL_OP_ALT + r")(?=$|[.\]])")
+# A `$operator` that is a WHOLE BRACKET key segment of a parameter name: preceded by start-of-string or
+# `[`, and followed (lookahead) by end-of-string or `]`. So `user[$ne]`, `q[$gt]`, `a[b][$in]`, and a
+# bare `$where` match; `pass$word`, `cost$negate`, and `$5.00` do NOT. DOT delimiting is deliberately
+# NOT accepted: a JSON body is flattened to dotted param names (`a.b.c`), so a benign body with a literal
+# key like `{"a":{"b.$ne":1}}` would flatten to `a.b.$ne` and a dot-segment rule would FALSE-fire on it
+# (the review's flatten FP). Real JSON operator-KEY injection (`{"user":{"$ne":1}}`) is proven instead by
+# the whole-body scan (`_nosql_operator_key`, which reads the ACTUAL parsed keys) — so dropping the dot
+# form loses only the rarer dot-notation QUERY-STRING variant while eliminating the flatten false positive.
+# Fixed alternation over a length-bounded name → non-backtracking.
+_NOSQL_PARAM_OP_RE = re.compile(r"(?i)(?:^|\[)\$(" + _NOSQL_OP_ALT + r")(?=$|\])")
 _NOSQL_JSON_CAP = 65536      # bound the JSON parse input on the value path (DoS-safe on adversarial input)
 _NOSQL_SCAN_DEPTH = 32       # bound the recursion over a parsed JSON value (stack-safe)
 
@@ -2378,13 +2390,14 @@ def _nosql_operator_key_in_json_text(text: str) -> str:
 
 def nosql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
     """Fire iff a request carries a MongoDB QUERY OPERATOR injected as a KEY where a SCALAR was expected —
-    either (1) the PARAM NAME has a `$operator` as a whole bracket/dot key segment (`user[$ne]`, `q[$gt]`,
-    `user.$ne`, `$where`), which the framework nests into `{user:{$ne:…}}`; or (2) the VALUE parses to
+    either (1) the PARAM NAME has a `$operator` as a whole BRACKET key segment (`user[$ne]`, `q[$gt]`,
+    `a[b][$in]`, `$where`), which the framework nests into `{user:{$ne:…}}`; or (2) the VALUE parses to
     JSON with a `$operator` object KEY (`{"$ne":null}`). Proves a STRUCTURED NoSQL operator-injection
     ATTEMPT, never exploitation. Near-zero-FP: the token must be a KNOWN query operator (curated allowlist
-    — the EJSON/JSON-Schema/DBRef `$`-keys are excluded) AND a KEY, so a price `$5.00`, `$net`, an email,
-    a regex `^admin$`, a mid-word `$` (`pass$word`), an operator as a string VALUE (`["$ne"]`), and a plain
-    scalar all stay inert. Pure/deterministic; bounded; ReDoS-safe."""
+    — the EJSON/JSON-Schema/DBRef `$`-keys AND the dual-use `$type`/`$regex` are excluded, since they are
+    also legitimate .NET type-discriminators / EJSON regex data) AND a KEY, so a price `$5.00`, `$net`, an
+    email, a regex `^admin$`, a mid-word `$` (`pass$word`), an operator as a string VALUE (`["$ne"]`), and
+    a plain scalar all stay inert. Pure/deterministic; bounded; ReDoS-safe."""
     kind = OracleKind.NOSQL_INJECTION_BREAKOUT
     text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
     name = param if isinstance(param, str) else str(param if param is not None else "")

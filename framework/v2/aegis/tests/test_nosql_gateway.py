@@ -62,12 +62,30 @@ def test_json_body_array_operator_is_blocked():
     assert v is not None and v.attack_class == "nosql_injection_attempt"
 
 
-def test_json_body_string_leaf_operator_gets_a_precise_path():
-    # {"user":{"$ne":"admin"}} — the string leaf DOES surface as candidate `user.$ne`, so the precise
-    # per-value path wins over the whole-body scan.
+def test_json_body_string_leaf_operator_is_blocked_via_body_scan():
+    # {"user":{"$ne":"admin"}} — the string leaf flattens to candidate `user.$ne`, but PATH 1 is now
+    # BRACKET-only (a dotted param no longer fires — that killed the {"a":{"b.$ne":1}} flatten FP), so the
+    # block comes from the whole-body scan (step 2b), which reads the ACTUAL parsed `$ne` key.
     v = _req(path="/login", headers=_JSON, body='{"user":{"$ne":"admin"}}')
     assert v is not None and v.attack_class == "nosql_injection_attempt"
-    assert v.contributing == ["user.$ne"]
+    assert v.contributing == ["body"]
+
+
+def test_json_body_with_literal_dotted_key_is_forwarded_not_blocked():
+    # REGRESSION (review flatten FP): a benign body whose LITERAL key contains a '.$op' segment
+    # ({"a":{"b.$ne":"hello"}}) flattens to candidate `a.b.$ne`; the bracket-only PATH 1 must NOT fire,
+    # and the whole-body scan sees the real key `b.$ne` (not `$ne`) → forwarded, never blocked.
+    v = _req(path="/save", headers=_JSON, body='{"a":{"b.$ne":"hello"}}')
+    assert v is None or v.attack_class != "nosql_injection_attempt"
+
+
+def test_legacy_ejson_regex_and_dotnet_type_bodies_are_forwarded():
+    # REGRESSION: $regex (legacy-EJSON regex / regex-search) and $type (.NET type-discriminator) are
+    # dual-use and were dropped from the block allowlist — benign bodies carrying them must forward.
+    for body in ('{"savedSearch":{"$regex":"^admin","$options":"i"}}',
+                 '{"$type":"MyApp.User, MyApp"}'):
+        v = _req(path="/save", headers=_JSON, body=body)
+        assert v is None or v.attack_class != "nosql_injection_attempt", body
 
 
 # --------------------------------------------------------------------------- near-zero-FP: forwarded

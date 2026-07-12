@@ -36,12 +36,12 @@ _NOSQL_ATTACKS = [
     ("user[$ne]", "1"),                     # bracket-nested operator key (qs/PHP/Express -> {user:{$ne:..}})
     ("q[$gt]", "0"),
     ("filter[$where]", "sleep(1000)"),
-    ("a[b][$regex]", "^adm"),               # deeply-nested bracket path
-    ("user.$ne", "admin"),                  # dotted key path (a JSON string-leaf path)
+    ("a[b][$in]", "1"),                     # deeply-nested bracket path (an unambiguous operator)
+    ("filter[$nin]", "x"),                  # bracket path (replaces the dropped dot-notation form)
     ("$where", "this.a==this.b"),           # a bare top-level operator key
     ("username", '{"$ne": null}'),          # the classic value-as-JSON auth-bypass blob
     ("password", '{"$gt": ""}'),
-    ("user", '{"$regex": "^admin"}'),
+    ("search", '{"$where": "1"}'),
     ("q", '{"age": {"$gt": 18}}'),          # operator nested inside a JSON value
     ("ids", '{"$in": [1, 2, 3]}'),
     ("cond", '{"$or": [{"a": 1}, {"b": 2}]}'),
@@ -66,6 +66,11 @@ _NOSQL_BENIGN = [
     ("n", '{"$numberLong": "42"}'),         # EJSON number wrapper
     ("meta", '{"$schema": "http://json-schema.org/draft-07/schema#"}'),  # JSON-Schema meta key
     ("ref", '{"$ref": "#/defs/User"}'),     # JSON-Schema / DBRef key
+    # DUAL-USE $-keys deliberately dropped from the BLOCK allowlist (review FPs) — MUST stay inert:
+    ("savedSearch", '{"$regex": "^admin", "$options": "i"}'),  # legacy-EJSON regex value / regex-search body
+    ("rx", '{"$regex": "foo.*bar"}'),        # $regex as a body key (dual-use with EJSON v1 regex)
+    ("obj", '{"$type": "MyApp.User, MyApp"}'),  # .NET/System.Text.Json polymorphic type-discriminator
+    ("a", '{"b.$ne": "hello"}'),             # a LITERAL dotted key (the flatten edge) — not an operator key
     ("id", "12345"), ("q", "hello world"),  # plain scalars
     ("price", "$100 or $200"),              # prose with $ amounts
     ("json", "{not valid json $ne"),        # malformed -> no parse -> inert
