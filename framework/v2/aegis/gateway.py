@@ -29,7 +29,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ..common.logging import get_logger
-from .inspect import inspect_request
+from .inspect import inspect_request, inspect_response
 from .models import AegisConfig, Verdict
 
 _log = get_logger("aegis.gateway")
@@ -188,34 +188,36 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             pq += "?" + p.query
         return self.settings.upstream_base + pq
 
-    def _relay_upstream(self, method: str, body: bytes) -> bool:
-        """Forward to the upstream via httpx and relay the response. Returns True if a response was
-        relayed, False on an upstream/transport error (caller then sends a 502). Never blocks."""
+    def _forward(self, method: str, body: bytes) -> tuple[int, list[tuple[str, str]], bytes] | None:
+        """Forward to the operator's upstream via httpx and CAPTURE the response ``(status, headers,
+        content)``. Returns None on an upstream/transport error (caller sends a 502). Does not write
+        to the client — the caller inspects the response, then relays or blocks."""
         try:
             import httpx
         except Exception:
-            return False
+            return None
         url = self._forward_url(self.path)
         fwd_headers = [(k, v) for k, v in self._request_headers() if k.lower() not in _HOP_BY_HOP]
         fwd_headers.append(("Host", self.settings.upstream_netloc))
         fwd_headers.append(("X-Forwarded-For", self.client_address[0] if self.client_address else ""))
         try:
             with httpx.Client(follow_redirects=False, timeout=_FORWARD_TIMEOUT_S) as client:
-                resp = client.request(method, url, headers=fwd_headers,
-                                      content=body or None)
+                resp = client.request(method, url, headers=fwd_headers, content=body or None)
                 content = resp.content[:_MAX_RESPONSE_BYTES]
         except Exception:
-            return False
-        self.send_response(resp.status_code)
-        for k, v in resp.headers.items():
-            if k.lower() in _HOP_BY_HOP:
-                continue
-            self.send_header(k, v)
+            return None
+        return resp.status_code, list(resp.headers.items()), content
+
+    def _relay(self, status: int, headers: list[tuple[str, str]], content: bytes) -> None:
+        """Send a captured upstream response to the client, stripping hop-by-hop headers."""
+        self.send_response(status)
+        for k, v in headers:
+            if k.lower() not in _HOP_BY_HOP:
+                self.send_header(k, v)
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(content)
-        return True
 
     def _send_bad_gateway(self) -> None:
         body = b'{"error":"bad_gateway","by":"aegis-gateway"}'
@@ -246,15 +248,42 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             verdict = None
         self._emit(verdict)
 
-        # (2) ENFORCE — block ONLY on a confirmed verdict whose action is "block" (D1). Anything else
-        #     forwards (fail-open). observe mode never sets action="block".
-        if verdict is not None and verdict.decision == "confirmed" and verdict.action == "block":
-            self._send_block(verdict)
+        # (2) ENFORCE (request-side) — block ONLY on a confirmed verdict whose action is "block" (D1).
+        #     Anything else forwards (fail-open). observe mode never sets action="block".
+        if self._is_block(verdict):
+            self._send_block(verdict)  # type: ignore[arg-type]
             return
 
-        # (3) FORWARD to the operator's upstream and relay (response-side inspection lands in G4).
-        if not self._relay_upstream(method, body):
+        # (3) FORWARD to the operator's upstream and CAPTURE the response.
+        captured = self._forward(method, body)
+        if captured is None:
             self._send_bad_gateway()
+            return
+        status, resp_headers, content = captured
+
+        # (4) RESPONSE-SIDE inspection — the app's own answer can PROVE exploitation (reflected XSS /
+        #     error-based SQLi). Pure, fail-open: any error => rverdict None => relay untouched.
+        rverdict: Verdict | None = None
+        try:
+            rverdict = inspect_response(
+                self.path, self._request_headers(),
+                body.decode("utf-8", "replace") if body else None,
+                content.decode("utf-8", "replace") if content else None,
+                enforce=settings.enforce,
+            )
+        except Exception:
+            rverdict = None
+        self._emit(rverdict)
+
+        # (5) ENFORCE (response-side) — withhold a response that PROVES exploitation; else relay.
+        if self._is_block(rverdict):
+            self._send_block(rverdict)  # type: ignore[arg-type]
+            return
+        self._relay(status, resp_headers, content)
+
+    @staticmethod
+    def _is_block(verdict: Verdict | None) -> bool:
+        return verdict is not None and verdict.decision == "confirmed" and verdict.action == "block"
 
 
 def serve_gateway(upstream: str, *, config: AegisConfig, host: str = "127.0.0.1", port: int = 8080,
