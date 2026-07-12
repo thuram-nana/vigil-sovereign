@@ -41,7 +41,10 @@ WIRED (Workstream-3) — the dormant OFFLINE producers now fuse alongside their 
     control (3a).
   * ``cloud_import`` (``CloudPostureImportSensor``): IAM topology + posture LEADS whose privilege PATHS
     become FACTS when the policy-path oracle (``sensors.cloud.confirm_cloud_posture_facts``) re-derives
-    them over the retained graph — no live cloud calls (3b).
+    them over the retained graph, and whose ACHIEVED-STATE misconfiguration LEAD (encryption-at-rest
+    disabled on a sensitive datastore) becomes a FACT when the cloud-posture oracle
+    (``verify.cloud_posture.confirm_cloud_posture``) re-derives it over the retained achieved state — no
+    live cloud calls (3b).
   * ``declared_service`` 'open' LEADS become reachability FACTS ONLY via an OPT-IN, GATED live handshake
     (``verify.reachability``: ACTIVE_RECON + charter scope, fail-closed) — never on the default path (3c).
 
@@ -343,10 +346,13 @@ def _reverify_k8s(world: Any, res: Any, *, seq: int) -> int:
 
 
 def _reverify_cloud(world: Any, res: Any, *, seq: int) -> int:
-    """3b promotion: the EXISTING policy-path oracle re-derives each oracle-provable cloud posture LEAD
-    (public exposure / over-broad trust) over the RETAINED policy graph — NO live cloud calls. Each
-    confirmed grant path is projected as an oracle-grounded FACT on the SAME cloud-resource node the
-    topology minter created; the un-provable misconfiguration lead stays an honest LEAD."""
+    """3b promotion: TWO cloud oracles re-fire over the RETAINED export — NO live cloud calls. The
+    EXISTING policy-path oracle re-derives each REACHABILITY-provable posture LEAD (public exposure /
+    over-broad trust) over the retained policy graph; the cloud-posture oracle re-derives each
+    ACHIEVED-STATE MISCONFIGURATION LEAD (encryption-at-rest disabled on a sensitive datastore — the lead
+    the policy-path oracle STRUCTURALLY cannot prove) over the retained achieved state. Each confirmed
+    weakness is projected as an oracle-grounded FACT on the SAME cloud-resource node the topology minter
+    created; a benign/compliant control stays an honest LEAD."""
     try:
         import json as _json
 
@@ -375,6 +381,63 @@ def _reverify_cloud(world: Any, res: Any, *, seq: int) -> int:
                       f"resource {resource!r} via a real IAM grant path"),
             seq=seq, detail={"principal": f.get("principal"), "access": f.get("access") or None,
                              "lead_class": f.get("lead_class")})
+        promoted += 1
+    # The un-reachability-provable MISCONFIGURATION lead (encryption-at-rest disabled on a sensitive
+    # datastore) — promoted over the RETAINED achieved state by the cloud-posture oracle, offline.
+    promoted += _reverify_cloud_misconfig(world, inventory, seq=seq)
+    return promoted
+
+
+def _reverify_cloud_misconfig(world: Any, inventory: dict, *, seq: int) -> int:
+    """cloud-posture oracle over each retained MISCONFIGURATION lead: a sensitive datastore with
+    encryption-at-rest DISABLED — the exact ``cloud_posture_leads`` ``misconfiguration`` condition
+    (``sensitive`` and ``encrypted is False``), the lead the policy-path oracle STRUCTURALLY cannot
+    prove (no reachability path proves an at-rest-encryption gap). Mirrors that lead condition-for-
+    condition so exactly the leads the sensor minted are re-verified here, then judges each with the
+    deterministic ``confirm_cloud_posture`` seam (``FindingContext.from_cloud_control`` -> the
+    ``cloud_posture_oracle``). On a FIRED signal the achieved-state weakness is projected as an
+    oracle-grounded FACT on the SAME resource node the topology minter created; a compliant/unknown
+    control is NOT confirmed (it stays an honest LEAD). Pure re-derivation over the already-parsed
+    inventory — NO live cloud call. Best-effort + deterministic; idempotent (stable finding id)."""
+    try:
+        from .intel.from_cloud import _resource as _resource_ref
+        from .verify.cloud_posture import confirm_cloud_posture
+    except Exception:
+        return 0
+    promoted = 0
+    seen: set = set()
+    for r in inventory.get("resources", []) or []:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        # mirror cloud_posture_leads' `misconfiguration` lead condition exactly — only the leads the
+        # sensor actually minted are re-verified (never a laundered live re-derivation).
+        if not (bool(r.get("sensitive")) and r.get("encrypted") is False):
+            continue
+        rid = str(r["id"])
+        if rid in seen:
+            continue
+        seen.add(rid)
+        try:
+            result = confirm_cloud_posture(r)            # the cloud-posture oracle must FIRE
+        except Exception:
+            continue
+        # Promote ONLY when the ENCRYPTION-AT-REST rule specifically fired. The oracle also fires on
+        # public_exposure / wildcard_principal, but those are promoted by the policy-path seam — so
+        # accepting a bare `.confirmed` here would DOUBLE-count them AND mislabel a public/wildcard fact
+        # as `encryption_at_rest_disabled` with a fabricated "encrypted=false, sensitive=true" achieved
+        # state (the review's mislabel FP). Gate on the actual fired proof, not the aggregate verdict.
+        if not (result.confirmed and any(
+                getattr(s, "fired", False)
+                and (getattr(s, "observed", None) or {}).get("rule") == "encryption_at_rest_disabled"
+                for s in (result.signals or []))):
+            continue
+        subject = _resource_ref(rid, str(r.get("kind") or ""))
+        _project_oracle_fact(
+            world, subject, oracle_kind="cloud_posture", bug_class="cloud_misconfiguration",
+            evidence=(f"cloud posture fact: sensitive resource {rid} has encryption-at-rest DISABLED "
+                      f"(achieved state: encrypted=false, sensitive=true) — the un-reachability-provable "
+                      f"misconfiguration lead, promoted over the retained achieved state"),
+            seq=seq, detail={"resource_id": rid, "rule": "encryption_at_rest_disabled"})
         promoted += 1
     return promoted
 
@@ -436,7 +499,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
 
       * sbom_vuln       -> version-range oracle over SBOM advisories
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
-      * cloud_import    -> policy-path oracle over each oracle-provable posture lead (3b)
+      * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
+                           oracle over each achieved-state misconfiguration lead (3b)
       * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c)
     """
     if not getattr(res, "ok", False):
