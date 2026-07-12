@@ -31,9 +31,15 @@ and `policy_path` oracles (W2–W5); the in-house web arsenal + gated repeater
 (W4); threat-intel ingest + the defense/IR purple-team pass (W5); the plugin/
 capability registry, MCP tool-server (expose + consume), gated loopback API +
 external-tool importers, and report automation (W6); consolidation/hygiene (W7);
-and `aegis/` — the embeddable **defensive** AI-attack-detection library (three
-prove-don't-guess oracles). `verify.OracleKind` is now **18 members** (15
-offensive + 3 AEGIS defensive).
+and `aegis/` — the embeddable **defensive** AI-attack-detection library + the
+inline **provable firewall** (request-side SQLi/cmd-injection block oracles,
+response-side XSS/SSTI/path-traversal confirmation reusing the existing
+`EVALUATION`/`SIDE_EFFECT` oracles, and a per-actor graduated challenge/throttle).
+`verify.OracleKind` is now **22 members**: the **15** frozen offensive oracles
+(the benchmark set, unchanged) **+ 7 additive members held OUT of the frozen
+`_ALL_ORACLES`** (4 AEGIS detection, 2 AEGIS gateway request-side block oracles,
+1 `K8S_POSTURE` sensor-fusion) — each fires only on a context key no benchmark
+finding carries, which is *why* the gate stays byte-identical.
 
 **The gate is unchanged and byte-identical.** `python3 -m framework.v2 benchmark
 --gate --no-incumbents` → `crucible 9/0/0`, f1 `1.000`, 853 requests, 9 findings,
@@ -43,13 +49,19 @@ app** — a false-positive/regression ruler, not a coverage claim. `make test`
 
 ### The limitations that STILL hold at this commit (the honest core)
 
-1. **The autonomous planner/coordinator is DORMANT in production.** The ACP
-   `Planner` and MAO `Coordinator` are constructed **only in tests**; no
-   `python3 -m framework.v2` entrypoint drives them. `engage` runs the scanner
-   campaign + oracle confirmation + world-model chaining, **not** the goal-tree
-   planner. The at-scale, real-target, finding-discovering autonomous loop is
-   **not proven** — the one conservative real-target run (mrbeanpanel,
-   2026-05-05) emitted **0 findings**.
+1. **The autonomous planner is now REACHABLE but still not an at-scale loop.**
+   Two opt-in entrypoints now drive the planner (previously it was constructed
+   only in tests): `python3 -m framework.v2 plan <slug>` projects the planner's
+   crown-jewel routes + next action (greedy AND depth-2 lookahead) over a prior
+   `engage --spine` engagement's world-model — a **read-only projection that
+   sends no traffic and drives no tools**; and `engage --autonomous-lookahead`
+   runs a bounded depth-2 beam (over the goal-tree/belief graph) driving only the
+   gated `reverify_finding` / `service_reachability` tools. Default `engage`
+   still runs the scanner campaign + oracle confirmation + world-model chaining,
+   **not** the goal-tree planner. The at-scale, real-target, finding-discovering
+   autonomous loop is **still not proven** — the one conservative real-target run
+   (mrbeanpanel, 2026-05-05) emitted **0 findings**, and the lookahead ships as a
+   reviewed depth-2 first slice, not proven frontier autonomy.
 2. **The reasoning nervous system runs ONLY under `engage --spine`, advisory-only.**
    `_run_reasoning_pass` (`engage.py:371`) fires the multi-critic panel,
    reflection, cognitive refusal, `credit_outcome` fan-out and meta-monitor
@@ -57,13 +69,19 @@ app** — a false-positive/regression ruler, not a coverage claim. `make test`
    re-rank/defer — it **never** promotes/demotes a finding or drops a surface;
    the oracle stays the sole authority. Default `engage` (no `--spine`) and the
    gate do not run it.
-3. **The Wave 2–5 sensors are NOT wired into the default `engage`/`scan` path.**
-   `engage.py`/`scanner/` contain zero `sensors` imports. Nmap, tshark, the
-   Nuclei/ZAP/Burp adapters, cloud/CSPM, and SBOM/SCA sensors are reachable only
-   via the `mcp`/`capabilities`(registry)/`imports`/`intel` subcommands or the
-   direct API. The `--arsenal` flag wires the scanner's **in-house** arsenal, not
-   the third-party sensor adapters. The one sensor `engage` can reach is the
-   defender log-source, and only behind the opt-in `--defender-log` flag.
+3. **The Wave 2–5 sensors are NOT wired into the DEFAULT `engage`/`scan` path —
+   only behind an opt-in flag.** The default path still imports zero `sensors`
+   (the gate stays byte-identical). An opt-in `engage --fuse-sensors` flag now
+   folds the offline sensor **leads** into the run world-model and promotes those
+   its oracles can honestly confirm — the new `verify.k8s_posture` oracle turns a
+   retained kube-bench control into a `k8s_misconfiguration` **FACT** (read-only;
+   never drives kubectl / touches the API server), and the Wave-2 reachability
+   oracle can confirm a `declared_service` open port via a gated, scope-checked
+   handshake. Absent the flag, sensors remain reachable only via the
+   `mcp`/`capabilities`(registry)/`imports`/`intel` subcommands or the direct
+   API. The `--arsenal` flag wires the scanner's **in-house** arsenal, not the
+   third-party sensor adapters. The one sensor the *default* `engage` reaches is
+   the defender log-source, behind the opt-in `--defender-log` flag.
 4. **`defender/gap_report.py` is wired only into the opt-in `--defender` pass**
    (`_run_defender_pass`, `engage.py:247,635`) — not the default loop. (Earlier
    text calling it "built but unwired" was an *under*-claim; it is wired, but
@@ -96,9 +114,11 @@ app** — a false-positive/regression ruler, not a coverage claim. `make test`
    AEGIS is defensive-only: default `mode="observe"` is read-only and it never
    attacks.
 
-**Last reconciled:** `main` @ `649b530`, 2026-07-11 (this is Workstream **M —
-Documentation truth**; docs-only, no code change). Regenerate drifting counts
-from the tree.
+**Last reconciled:** `main` @ `<pending>`, 2026-07-12 (reconciled after the
+3-workstream program — AEGIS depth, autonomy-loop first slices, opt-in sensor
+fusion — landed as **reviewed, opt-in, gate-byte-identical** slices; items 1–3
+updated to reflect the new opt-in reach). Regenerate drifting counts from the
+tree.
 
 ### In-flight (the 13-workstream program) — NOT shipped at this commit
 

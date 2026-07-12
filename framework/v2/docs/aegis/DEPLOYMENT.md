@@ -30,18 +30,36 @@ real users and is exactly what every WAF does badly. AEGIS blocks what it can *p
 | `command_injection_attempt` | a dangerous command invoked with a shell argument, inside a substitution (`$(cat /etc/passwd)`) or after a real separator (`; cat /etc/passwd`, `\| nc <ip>`) | the request alone |
 | `automated_access` | a fetch of a seeded honeypot path no human UI links | the request alone |
 | `xss` (reflected) | a request value reflected **verbatim** whose executable token reached a live executable HTML context (an HTML‑encoded reflection is **not** blocked) | the app's response |
+| `ssti` | a request value carried a template-wrapped arithmetic expression (`{{7*7}}`, `${7*7}`, `#{7*7}`, `<%= 7*7 %>`, `*{7*7}`, `@(7*7)`) that the server **evaluated** — the ≥2-digit result appears at a digit boundary and the raw template is gone (a **reflected** template is **not** blocked) | the app's response |
+| `path_traversal` | a request value walked the path toward a sensitive file (a real `../`-style traversal indicator) **and** a strict `/etc/passwd`-signature line surfaced in the response — and the value is **not** merely reflected verbatim (a docs/search page echoing `/etc/passwd` is **not** blocked) | the app's response |
 
-Request-side classes prove a **structured attack attempt**; the reflected‑XSS class proves
-**exploitation**. The oracles are deliberately conservative — a benign apostrophe (`O'Brien`), a
-comparison (`id > 1000`), a tool string (`python-requests/2.28.1`), delimited data (`Name \| Age`), a
-pasted SQL query, or a prose em-dash never trip a block. **Note for code-accepting apps** (paste bins,
-dev Q&A, bug trackers): user content that *is* attack syntax (a shared `$(cat ...)` snippet, a pasted
-injection payload) will be flagged — run such apps in `observe` and review before enforcing.
+The two request-side classes prove a **structured attack attempt**; the four response-side classes
+(`xss`, `ssti`, `path_traversal`) prove **exploitation** — the app actually reflected the payload,
+evaluated the expression, or leaked the file. The oracles are deliberately conservative — a benign
+apostrophe (`O'Brien`), a comparison (`id > 1000`), a tool string (`python-requests/2.28.1`), delimited
+data (`Name \| Age`), a pasted SQL query, a coincidental `49` beside a reflected `{{ 7 * 7 }}`, a page
+that documents `/etc/passwd`, or a prose em-dash never trip a block. Request-side oracles inspect the
+query string **and** header/cookie values (bounded to a safe surface). **Note for code-accepting apps**
+(paste bins, dev Q&A, bug trackers): user content that *is* attack syntax (a shared `$(cat ...)`
+snippet, a pasted injection payload) will be flagged — run such apps in `observe` and review before
+enforcing.
 
-Roadmap (not yet built): **error-based SQLi** (needs a differential/OOB confirmation — a single inline
+**Graduated challenge / throttle (per-actor belief, entitlement-gated).** Beyond the proof-backed
+blocks, an actor that *sustains* suspicious-but-unproven behavior — repeated SSRF/XXE-shaped leads, or
+repeated confirmed attacks — earns a **soft, retryable** response short of a block: first `challenge`,
+then (higher sustained belief) `throttle` (both HTTP 429). This rides the per-actor Beta belief's
+**lower** credible bound *and* mean, so it needs genuinely sustained, suspicion-dominant evidence — a
+single hit, or one lead amid benign traffic, never escalates, and a benign actor is never even tracked.
+A hard block is **never** belief-driven (prove-don't-guess: only a fired oracle's certificate blocks),
+and it is gated behind the `AEGIS_RESPOND` entitlement. A legitimate user caught in a burst simply
+retries.
+
+Roadmap (not yet on the block path): **SSRF** and **XXE** — these need **out-of-band** confirmation (a
+callback proving the server made the request / resolved the entity), which a single inline response
+cannot supply, so today they raise per-actor belief as **leads** and the OOB-hook is the documented
+block path. **Error-based SQLi** likewise needs a differential/OOB confirmation (a single inline
 response cannot prove a datastore error was *caused* by the payload rather than merely displayed near
-it, so it is off the block path today), SSTI, SSRF, path-traversal, XXE, and graduated
-challenge/throttle on sustained per-actor belief.
+it), so it too stays off the block path.
 
 ## Three ways to add it
 

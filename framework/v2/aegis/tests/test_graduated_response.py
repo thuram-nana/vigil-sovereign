@@ -121,6 +121,30 @@ def test_already_tracked_actor_decays_on_benign_requests():
     assert g.belief("session:d").mean < high   # belief decayed (recovery)
 
 
+def test_one_lead_amid_sustained_benign_never_escalates():
+    # Regression for the review's false positive: a single lead followed by a long run of BENIGN
+    # requests must NEVER escalate. The 0.7-refute benign decay drives the mean down (~0.38) and the
+    # CHALLENGE_MEAN gate keeps a mostly-benign actor below the escalation floor — belt AND suspenders.
+    g = ActorGraph()
+    feed_and_score(g, "nat", _v("lead"), seq=0)
+    actions = [graduated_action(feed_and_score(g, "nat", None, seq=i)) for i in range(1, 41)]
+    assert all(a is None for a in actions)
+    # even a 50/50 lead/benign actor (mean tops out at 0.5) stays below the challenge floor.
+    g2 = ActorGraph()
+    fifty = [graduated_action(feed_and_score(g2, "even", _v("lead") if i % 2 == 0 else None, seq=i))
+             for i in range(24)]
+    assert all(a is None for a in fifty)
+
+
+def test_leads_only_ever_challenge_never_throttle():
+    # Doctrine: lead volume alone can reach `challenge` but the belief mean asymptotes below
+    # THROTTLE_MEAN, so leads NEVER reach the harder `throttle` — only repeated CONFIRMED attacks do.
+    g = ActorGraph()
+    actions = {graduated_action(feed_and_score(g, "flood", _v("lead"), seq=i)) for i in range(300)}
+    assert "throttle" not in actions
+    assert "challenge" in actions
+
+
 # --------------------------------------------------------------------------- end-to-end gateway
 
 class _Echo(http.server.BaseHTTPRequestHandler):

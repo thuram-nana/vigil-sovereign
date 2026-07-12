@@ -42,16 +42,33 @@ _GATEWAY_RELIABILITY = SourceReliability(reliability=Reliability.C, credibility=
 # THROTTLE faster. Because THROTTLE_LCB > CHALLENGE_LCB, challenge always precedes throttle.
 CHALLENGE_LCB = 0.40
 THROTTLE_LCB = 0.50
+# Escalation ALSO requires the belief MEAN to show that suspicion DOMINATES the actor's history — not
+# just a collapsed-variance LCB. Without this, a single lead pinned the mean just above 0.5 while
+# sustained BENIGN traffic shrank the variance and lifted the LCB past the threshold, challenging a
+# benign actor (the review's false positive). The gates are calibrated against the MEASURED belief
+# curve so they sit strictly BETWEEN the benign and suspicious populations:
+#   * CHALLENGE_MEAN = 0.55 — a benign-dominant actor tops out at mean 0.500 (the exactly-50/50
+#     lead/benign case; any benign-MAJORITY actor is strictly below it, and the 0.7-refute benign
+#     decay drives the review's "1 lead amid benign" FP down to ~0.38). A genuinely suspicious actor
+#     starts at 0.578 (3 sustained leads). 0.55 separates them with margin on the benign side.
+#   * THROTTLE_MEAN = 0.66 — a pure-lead actor's mean ASYMPTOTES at ~0.63 (never reaches it however
+#     many leads), so leads only ever reach `challenge`; only repeated CONFIRMED attacks (mean climbs
+#     past ~0.69) reach the harder `throttle`. This keeps throttle structurally reserved for proof-
+#     backed sustained abuse, not lead volume.
+CHALLENGE_MEAN = 0.55
+THROTTLE_MEAN = 0.66
 # "sustained, not one hit": a floor on APPLIED observations before ANY escalation, on top of the LCB
 # (whose variance term already penalises thin evidence).
 MIN_SUSTAINED_OBS = 3
 
 # Per-verdict belief signal (polarity, confidence). A confirmed attack is the strongest affirming
-# signal; a lead is moderate; anything else (a benign / None request) is a refute that lets an
-# already-tracked actor's belief decay (recovery). Untracked benign actors are never given a node.
+# signal; a lead is moderate; a benign / None request is a genuine REFUTE (confidence > 0.5 so it is
+# beta-dominant) that DECAYS an already-tracked actor's belief toward benign (recovery) — a neutral
+# 0.5 never decayed it, so a NAT/shared-IP actor stayed locked (the review's no-recovery finding).
+# Untracked benign actors are never given a node.
 _CONFIRMED_SIGNAL = (Polarity.AFFIRMS, 0.9)
 _LEAD_SIGNAL = (Polarity.AFFIRMS, 0.7)
-_BENIGN_SIGNAL = (Polarity.REFUTES, 0.5)
+_BENIGN_SIGNAL = (Polarity.REFUTES, 0.7)
 
 
 def _verdict_signal(verdict: Verdict | None) -> tuple[tuple[Polarity, float], str]:
@@ -93,8 +110,8 @@ def graduated_action(belief: BeliefRef | None) -> str | None:
     (high variance → low LCB) can never escalate."""
     if belief is None or belief.n_observations < MIN_SUSTAINED_OBS:
         return None
-    if belief.lcb >= THROTTLE_LCB:
+    if belief.mean >= THROTTLE_MEAN and belief.lcb >= THROTTLE_LCB:
         return "throttle"
-    if belief.lcb >= CHALLENGE_LCB:
+    if belief.mean >= CHALLENGE_MEAN and belief.lcb >= CHALLENGE_LCB:
         return "challenge"
     return None

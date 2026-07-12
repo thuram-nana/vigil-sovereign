@@ -2076,7 +2076,14 @@ def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> Oracl
     for m in _SHELL_SUBST_RE.finditer(text):
         body = m.group(1) or m.group(2) or ""
         cmd = _SHELL_CMD_RE.search(body)
-        if cmd and (_SHELL_ARG_RE.search(body) or re.match(r"\s+\S", body[cmd.end():])):
+        if not cmd:
+            continue
+        after = body[cmd.end():]
+        # a command immediately followed by `=` is a key=value / assignment / URL query param
+        # (`id=https://...`), NOT a command invocation — the review's header/cookie false positive.
+        if after[:1] == "=":
+            continue
+        if _SHELL_ARG_RE.search(after) or re.match(r"\s+\S", after):
             return OracleSignal(
                 kind=kind, fired=True, confidence=0.9,
                 evidence=(f"shell command substitution invokes {cmd.group(1)!r} with an argument — "
@@ -2088,7 +2095,14 @@ def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> Oracl
     for seg in re.split(r"[;|&\n\r]", text)[1:]:
         seg = seg.strip()
         cmd = _SHELL_CMD_AT_START_RE.match(seg)
-        if cmd and _SHELL_ARG_RE.search(seg[cmd.end():]):
+        if not cmd:
+            continue
+        after = seg[cmd.end():]
+        # `id=https://cdn/...` (a `&`-split URL query param in a Referer/cookie) is a key=value, NOT a
+        # command invocation — the review's header/cookie command-injection false positive.
+        if after[:1] == "=":
+            continue
+        if _SHELL_ARG_RE.search(after):
             return OracleSignal(
                 kind=kind, fired=True, confidence=0.9,
                 evidence=(f"a command separator chains to {cmd.group(1)!r} with an argument — "

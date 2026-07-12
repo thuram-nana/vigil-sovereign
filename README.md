@@ -616,11 +616,15 @@ the machinery to route, combine, and re‑run them.
 **Why it exists.** This is the embodiment of prove‑don't‑guess (§1, §3). It is the only place a claim
 becomes a fact.
 
-**How it works.** The `OracleKind` enum holds **19 kinds** in all — **15 offensive** and **4
-defensive** (the AEGIS classes, §9.18). Of the offensive kinds, the **11 web/injection oracles**
-below are the confirmation authority for `scan`/`engage`; the other four (`SERVICE_REACHABILITY`,
-`TLS_WEAKNESS`, `VERSION_RANGE`, `POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). Every kind
-shares this one routing / combination / re‑execution machinery. The 11 below are backed by **12
+**How it works.** The `OracleKind` enum holds **22 kinds** in all — the **15 offensive** oracles
+that form the frozen benchmark authority, **plus 7 additive kinds held OUT of the frozen
+`_ALL_ORACLES`** so the gate stays byte-identical: **6 defensive** (the AEGIS classes — 4 detection +
+the 2 gateway request-side block oracles, §9.18) and **1** `K8S_POSTURE` sensor-fusion kind. Of the
+15 offensive kinds, the **11 web/injection oracles** below are the confirmation authority for
+`scan`/`engage`; the other four (`SERVICE_REACHABILITY`, `TLS_WEAKNESS`, `VERSION_RANGE`,
+`POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). The AEGIS gateway's response-side SSTI and
+path-traversal blocks add **no** new kind — they reuse `EVALUATION` and `SIDE_EFFECT` below. Every
+kind shares this one routing / combination / re‑execution machinery. The 11 below are backed by **12
 oracle *functions*** (`ACHIEVED_STATE` is served by two — a state‑matcher and a declarative predicate
 evaluator). Each takes *already‑collected* observations and returns a signal with a calibrated
 confidence:

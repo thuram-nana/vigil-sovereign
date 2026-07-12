@@ -310,8 +310,12 @@ def _ssti_candidates(value: str) -> list[tuple[str, str]]:
             result = a * b if op == "*" else a + b
             if result < _SSTI_MIN_RESULT:
                 continue
-            inner = f"{m.group(1)}{op}{m.group(3)}"
-            pair = (inner, str(result))
+            # the VERBATIM template as sent (e.g. `{{ 7 * 7 }}`) — a reflected copy in the response
+            # carries it intact regardless of operand spacing, so the oracle's `raw in body` guard
+            # correctly reads a reflection as "not evaluated". Reconstructing without spacing (`7*7`)
+            # broke that guard (the review's spaced-verbatim-reflection false positive).
+            raw = m.group(0)
+            pair = (raw, str(result))
             if pair not in out:
                 out.append(pair)
             if len(out) >= 8:
@@ -327,9 +331,11 @@ def _ssti_candidates(value: str) -> list[tuple[str, str]]:
 # a benign HTML page essentially never carries. ``side_effect_oracle`` then confirms the exact matched
 # line reached the response. A benign request never even enters this path (the request value must
 # carry a `../`-style traversal indicator toward a sensitive file), so a benign input cannot trigger it.
+# Require an actual TRAVERSAL sequence (`../`, `..\`, or an encoded form). A bare absolute path like
+# `/etc/passwd` is DELIBERATELY not a trigger — it is ordinary search/data on Linux-docs / paste /
+# Q&A sites, and treating it as a traversal indicator was a review false positive.
 _TRAVERSAL_REQ_RE = re.compile(
-    r"(?i)(?:\.\.[\\/]|%2e%2e(?:[\\/]|%2f|%5c)|/etc/(?:passwd|shadow)\b|\\windows\\win\.ini\b"
-    r"|%2fetc%2fpasswd)")
+    r"(?i)(?:\.\.[\\/]|%2e%2e(?:%2f|%5c|[\\/])|\.\.%2f|\.\.%5c|%252e%252e)")
 # A leaked /etc/passwd root line: `root:x:0:0:root:/root:/bin/bash`. Per-line, strictly shaped, with
 # bounded negated char-classes (non-backtracking → ReDoS-safe). Requires root at uid 0 gid 0.
 _PASSWD_ROOT_RE = re.compile(
@@ -377,8 +383,13 @@ def inspect_response(
     # reflection — a `{{7*7}}` echoed verbatim or HTML-encoded still carries the raw `7*7`, so it does
     # NOT fire. Only a genuine server-side evaluation blocks (near-zero FP).
     for param, value in values:
-        for inner, expected in _ssti_candidates(value):
-            fc = FindingContext.from_evaluation(inner, expected, sink, bug_class="ssti")
+        for raw, expected in _ssti_candidates(value):
+            # the evaluated result must appear as a STANDALONE number in the response, not a
+            # coincidental substring of a larger number (`2010` must not satisfy the `10` result —
+            # the review's coincidental-digit false positive).
+            if not re.search(r"(?<!\d)" + re.escape(expected) + r"(?!\d)", sink):
+                continue
+            fc = FindingContext.from_evaluation(raw, expected, sink, bug_class="ssti")
             confirmed = confirm_finding({"bug_class": "ssti"}, context=fc, verifier=verifier)
             if confirmed is not None:
                 return _payload_verdict("ssti", param, confirmed, fc, enforce=enforce)
@@ -392,6 +403,12 @@ def inspect_response(
     if _PASSWD_ROOT_RE.search(sink):
         for param, value in values:
             if not _TRAVERSAL_REQ_RE.search(value):
+                continue
+            # if the traversal value is REFLECTED VERBATIM in the response, this is a reflecting
+            # docs/search/paste page echoing the query (a passwd example shown as CONTENT), not a file
+            # the app read from disk — the review's documentation false positive. A real LFI returns
+            # the file CONTENTS, not the request path; require the value NOT to be echoed.
+            if value in sink:
                 continue
             m = _PASSWD_ROOT_RE.search(sink)
             marker = m.group(0).strip()

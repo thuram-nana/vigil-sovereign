@@ -12,7 +12,9 @@ It is a PURE projection: it loads persisted state, reasons over the graph, and p
 traffic and drives NO tools (no ``invoke_tool``, no gated capability, no HTTP) — so it is safe to
 run any time, on any engagement, with zero impact. It reuses the ORIENT helpers from
 ``engage_autonomous`` (``_build_goal_tree`` / ``_foothold`` / ``_objective_kinds`` / ``_select``),
-so the projected plan matches exactly what the autonomous loop would select over the same state.
+so the projected plan matches what the autonomous loop would select over the same state AT THE
+DEFAULT request budget (``_PLAN_LOOKAHEAD_BUDGET``); a run with a non-default ``--autonomous-budget``
+can trade off differently, and the depth-2 line is labelled with the budget it assumes.
 """
 
 from __future__ import annotations
@@ -23,6 +25,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from .common.errors import CrucibleError
+
+# The request budget the depth-2 lookahead projection assumes — the SAME default the autonomous loop
+# uses (``engage --autonomous-budget`` default). A run with a non-default budget can trade off
+# differently; the projection labels this so it never overstates the match.
+_PLAN_LOOKAHEAD_BUDGET = 8
 
 
 def _load_plan_input(slug: str) -> dict:
@@ -60,7 +67,9 @@ def _findings_from(doc: dict) -> list:
             insertion_point=str(f.get("insertion_point", "") or ""),
             param=str(f.get("param", "") or ""),
             endpoint=str(f.get("endpoint", "") or ""),
-            confidence=float(f.get("confidence", 0.5) or 0.5),
+            # None-aware default: a valid 0.0 confidence must NOT become 0.5 (`0.0 or 0.5 == 0.5`),
+            # which would change the leaf's goal-tree prior and the projected ordering.
+            confidence=float(f["confidence"]) if isinstance(f.get("confidence"), (int, float)) else 0.5,
             # a marker only — the projection never re-executes a certificate.
             oracle_context=({"present": True} if f.get("has_oracle_context") else None)))
     return out
@@ -114,9 +123,10 @@ def _render(slug: str, doc: dict) -> list[str]:
         lines.append("  crown-jewel routes: 0 (no reachable crown jewel — planner orders greedily)")
 
     greedy = _select(tree, world, objectives, source)
-    look = _select(tree, world, objectives, source, lookahead_depth=2, budget=8)
+    look = _select(tree, world, objectives, source, lookahead_depth=2, budget=_PLAN_LOOKAHEAD_BUDGET)
     lines.append(f"  next action       : greedy         → {greedy.label if greedy else '(none)'}")
-    lines.append(f"                      lookahead d-2  → {look.label if look else '(none)'}")
+    lines.append(f"                      lookahead d-2  → {look.label if look else '(none)'}"
+                 f"  (assumes budget {_PLAN_LOOKAHEAD_BUDGET}; a non-default --autonomous-budget may differ)")
 
     ordered = sorted(open_leaves, key=lambda l: (-l.score(), l.id))
     if ordered:
