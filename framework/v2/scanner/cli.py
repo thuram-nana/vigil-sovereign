@@ -88,6 +88,37 @@ def main(argv: list[str]) -> int:
                         help="Run the advanced web arsenal after the audit: content/JS "
                              "discovery leads, HTTP request-smuggling detection, and CSWSH "
                              "(all loopback here; smuggling/CSWSH findings stay oracle-confirmed).")
+    parser.add_argument("--sso", action="store_true",
+                        help="Also run the SSO/SAML/OIDC request checks (scanner.sso) against the "
+                             "operator's OWN SP/RP: each fires only when a request actually carries an "
+                             "SSO artifact (SAMLResponse/id_token/redirect_uri) and confirms via the "
+                             "achieved-state oracle. Off by default (0 SSO requests); never the IdP.")
+    parser.add_argument("--graphql-dos", action="store_true",
+                        help="Also run the GraphQL DoS/abuse pass (scanner.graphql) against each "
+                             "discovered /graphql endpoint: depth/alias/batching amplifications confirm "
+                             "via the predicate oracle; cost / introspection-off signals are honest "
+                             "leads. One bounded probe per check (it demonstrates a missing guard, it "
+                             "does not flood). Off by default.")
+    parser.add_argument("--library", action="store_true",
+                        help="Fingerprint the target from the crawl and also run the declarative check "
+                             "LIBRARY (scanner.library) whose applicability predicate matches the "
+                             "detected stack. Oracle-anchored exactly like the built-ins; scoped so a "
+                             "stack-specific payload never fires off-stack. Off by default.")
+    parser.add_argument("--access-control", action="store_true",
+                        help="Enable the two-identity access-control pack (scanner.access_control: "
+                             "idor/bola/bfla/authorization/privilege_escalation/mass_assignment). It "
+                             "needs OPERATOR input — a victim identity and object references — supplied "
+                             "with --ac-ref (repeatable) and, for an authenticated victim, "
+                             "--ac-victim-header. Confirms via the achieved-state oracle (a 403 never "
+                             "fires). With no --ac-ref it runs nothing (documented no-op). Off by default.")
+    parser.add_argument("--ac-ref", action="append", default=None, metavar="BUGCLASS:PARAM:VICTIMREF",
+                        help="An access-control cross-read target, e.g. 'idor:id:42' (the attacker, "
+                             "acting on point PARAM, tries to read the victim's object VICTIMREF). "
+                             "Repeatable. Requires --access-control. VICTIMREF may contain ':'.")
+    parser.add_argument("--ac-victim-header", action="append", default=None, metavar="NAME: VALUE",
+                        help="A header that authenticates the VICTIM identity (the ground truth a "
+                             "cross-read is compared against), e.g. 'Cookie: session=BOB'. Repeatable; "
+                             "replaces the attacker's same-named header on the victim probe.")
     parser.add_argument("--bandit-file", default=None,
                         help="Persist/warm-start the self-learning check-ordering bandit here.")
     parser.add_argument("--bandit-context", default="default",
@@ -119,6 +150,20 @@ def main(argv: list[str]) -> int:
         from .progress import JsonlSink
         progress = JsonlSink(args.progress_log)
 
+    # Opt-in access-control pack: build the operator's two-identity config from the CLI
+    # refs/victim-headers (victim requests ride the same loopback send, re-authenticated).
+    # No --ac-ref => config is None => the pack is a documented no-op (we say so).
+    access_control_config = None
+    if args.access_control:
+        from .access_control import config_from_cli
+        access_control_config = config_from_cli(
+            loopback_send, args.ac_victim_header or (), args.ac_ref or (),
+            on_warn=lambda m: print(f"warning: {m}"))
+        if access_control_config is None:
+            print("note: --access-control set but no valid --ac-ref supplied; the access-control "
+                  "pack needs operator victim references (bug_class:ref_param:victim_ref) and runs "
+                  "no checks without them.")
+
     report = WebScanCampaign(
         loopback_send,
         max_pages=args.max_pages,
@@ -130,6 +175,11 @@ def main(argv: list[str]) -> int:
         enable_browser_xss=args.browser_xss,
         enable_spa_crawl=args.spa,
         enable_arsenal=args.arsenal,
+        enable_sso=args.sso,
+        enable_graphql_dos=args.graphql_dos,
+        use_library=args.library,
+        enable_access_control=args.access_control,
+        access_control_config=access_control_config,
         bandit_path=args.bandit_file,
         bandit_context=args.bandit_context,
         progress=progress,

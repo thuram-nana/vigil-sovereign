@@ -41,6 +41,7 @@ from .discovery import DiscoveredPath, JsSecret
 from .domxss import DomXssCandidate, analyze_html
 from .engine import AuditEngine, AuditFinding
 from .fingerprint import Fingerprint, fingerprint
+from .access_control import AccessControlConfig, build_access_control_checks
 from .grammar import generate as grammar_generate, infer_grammar
 from .graphql import GRAPHQL_DOS_CHECKS, GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import HttpRequest, InsertionKind, RequestTemplate
@@ -172,6 +173,8 @@ class WebScanCampaign:
         arsenal_max_probes: int = 64,
         enable_sso: bool = False,
         enable_graphql_dos: bool = False,
+        enable_access_control: bool = False,
+        access_control_config: AccessControlConfig | None = None,
     ) -> None:
         self._send = send
         self.scope = scope
@@ -289,6 +292,17 @@ class WebScanCampaign:
         # off) populate `graphql_leads`. Minimal by doctrine — it demonstrates the
         # absent guard, it does not flood.
         self.enable_graphql_dos = enable_graphql_dos
+        # Opt-in access-control pack (default OFF -> the default check roster, and the gate,
+        # are byte-for-byte unchanged). Broken access control is a fundamentally TWO-IDENTITY
+        # experiment (act as the attacker, compare against what a DIFFERENT identity legitimately
+        # sees), so it needs an operator-supplied ``AccessControlConfig`` -- a second authenticated
+        # send + the object/endpoint references to cross-read; there is no safe autodiscovery. When
+        # enabled AND configured, the seeded checks (scanner.access_control) are APPENDED to the
+        # per-point roster and confirm via the SAME achieved-state oracle as IdorCheck (a 403 /
+        # unchanged object fails the predicate -- never a false positive). Enabled but unconfigured
+        # (``config is None``) builds nothing: an explicit, documented no-op, never a guess.
+        self.enable_access_control = enable_access_control
+        self._access_control_config = access_control_config
 
     def _resolve_bandit(self) -> ContextualBandit:
         """The explicit bandit, else a warm-start from the persisted file if one
@@ -804,6 +818,16 @@ class WebScanCampaign:
                 library_request_checks = tuple(request_lib)
                 library_checks_run = len(point_lib) + len(request_lib)
                 active_checks = tuple(self.checks) + tuple(point_lib)
+
+            # Opt-in access-control pack (default OFF -> unchanged). When enabled AND
+            # configured it APPENDS the operator-seeded two-identity checks to the per-point
+            # roster; each fires only on its reference point and confirms via the achieved-
+            # state oracle, so a correctly-authorised endpoint is never a false positive.
+            # Enabled-but-unconfigured builds nothing (a documented no-op).
+            if self.enable_access_control:
+                ac_checks = build_access_control_checks(self._access_control_config, enabled=True)
+                if ac_checks:
+                    active_checks = tuple(active_checks) + tuple(ac_checks)
 
             # SPA-discovered in-scope GET endpoints join the audit surface.
             all_requests = list(crawl.requests) + extra_requests

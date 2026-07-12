@@ -41,6 +41,7 @@ from .worldmodel.graph import WorldModel
 if TYPE_CHECKING:  # intel types are only referenced in annotations on the default path
     from .intel.predict import AssetHypothesis
     from .intel.resolve import Entity
+    from .scanner.access_control import AccessControlConfig
 
 
 class EngagementRefused(RuntimeError):
@@ -485,6 +486,13 @@ def run_engagement(
     grammar_fuzz: int = 0,
     enable_arsenal: bool = False,
     arsenal_race_targets: "tuple[tuple[str, int], ...]" = (),
+    enable_sso: bool = False,
+    enable_graphql_dos: bool = False,
+    use_library: bool = False,
+    enable_access_control: bool = False,
+    access_control_config: "AccessControlConfig | None" = None,
+    access_control_victim_headers: "tuple[str, ...]" = (),
+    access_control_refs: "tuple[str, ...]" = (),
     priors: object = None,
     transfer_archetype: str | None = None,
     prompt_callback: PromptCallback | None = None,
@@ -595,6 +603,14 @@ def run_engagement(
         request_budget=request_budget,
         prompt_callback=prompt_callback or stdin_prompt_with_timeout,
     )
+    # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
+    # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
+    # identity's requests still pass the full safety stack. No refs => None (documented no-op).
+    ac_config = access_control_config
+    if enable_access_control and ac_config is None and access_control_refs:
+        from .scanner.access_control import config_from_cli
+        ac_config = config_from_cli(
+            ex.gated_fetch, access_control_victim_headers, access_control_refs)
     try:
         report = WebScanCampaign(
             ex.gated_fetch,
@@ -615,6 +631,11 @@ def run_engagement(
             enable_arsenal=enable_arsenal,
             arsenal_authz=arsenal_authz,
             arsenal_race_targets=arsenal_race_targets,
+            enable_sso=enable_sso,
+            enable_graphql_dos=enable_graphql_dos,
+            use_library=use_library,
+            enable_access_control=enable_access_control,
+            access_control_config=ac_config,
             priors=priors,
             progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
         ).run(seed_url)
@@ -795,6 +816,37 @@ def main(argv: list[str]) -> int:
                              "are host-gated through the full authority/scope/kill-switch chain "
                              "(fail-closed); every finding stays oracle-confirmed. Off = "
                              "byte-identical. The destructive race engine is NOT auto-run.")
+    parser.add_argument("--sso", action="store_true",
+                        help="Also run the SSO/SAML/OIDC request checks (scanner.sso) against the "
+                             "operator's OWN SP/RP: each fires only when a request actually carries an "
+                             "SSO artifact (SAMLResponse/id_token/redirect_uri) and confirms via the "
+                             "achieved-state oracle. Off by default (0 SSO requests); never the IdP.")
+    parser.add_argument("--graphql-dos", action="store_true",
+                        help="Also run the GraphQL DoS/abuse pass (scanner.graphql) against each "
+                             "discovered /graphql endpoint: depth/alias/batching amplifications confirm "
+                             "via the predicate oracle; cost / introspection-off signals are honest "
+                             "leads. One bounded probe per check through the gated executor (it "
+                             "demonstrates a missing guard, it does not flood). Off by default.")
+    parser.add_argument("--library", action="store_true",
+                        help="Fingerprint the target from the crawl and also run the declarative check "
+                             "LIBRARY (scanner.library) whose applicability predicate matches the "
+                             "detected stack. Oracle-anchored exactly like the built-ins; scoped so a "
+                             "stack-specific payload never fires off-stack. Off by default.")
+    parser.add_argument("--access-control", action="store_true",
+                        help="Enable the two-identity access-control pack (scanner.access_control: "
+                             "idor/bola/bfla/authorization/privilege_escalation/mass_assignment). It "
+                             "needs OPERATOR input — a victim identity and object references — supplied "
+                             "with --ac-ref (repeatable) and, for an authenticated victim, "
+                             "--ac-victim-header. The victim identity rides the SAME gated executor. "
+                             "Confirms via the achieved-state oracle (a 403 never fires); with no "
+                             "--ac-ref it runs nothing (documented no-op). Off by default.")
+    parser.add_argument("--ac-ref", action="append", default=None, metavar="BUGCLASS:PARAM:VICTIMREF",
+                        help="An access-control cross-read target, e.g. 'idor:id:42'. Repeatable. "
+                             "Requires --access-control. VICTIMREF may contain ':'.")
+    parser.add_argument("--ac-victim-header", action="append", default=None, metavar="NAME: VALUE",
+                        help="A header authenticating the VICTIM identity (the ground truth), e.g. "
+                             "'Cookie: session=BOB'. Repeatable; replaces the same-named header on "
+                             "the victim probe.")
     parser.add_argument("--recon", action="store_true",
                         help="Run the Intelligence Engine alongside the scan: resolve an "
                              "asset inventory into the shared world-model and produce a "
@@ -846,6 +898,11 @@ def main(argv: list[str]) -> int:
                         help="Request budget the autonomous planner is constructed with (default 8).")
     args = parser.parse_args(argv)
 
+    if args.access_control and not args.ac_ref:
+        print("note: --access-control set but no --ac-ref supplied; the access-control pack "
+              "needs operator victim references (bug_class:ref_param:victim_ref) and runs no "
+              "checks without them.")
+
     spine = None
     if args.spine:
         try:
@@ -875,6 +932,12 @@ def main(argv: list[str]) -> int:
             waf_adaptive=args.waf_adaptive,
             grammar_fuzz=args.grammar_fuzz,
             enable_arsenal=args.arsenal,
+            enable_sso=args.sso,
+            enable_graphql_dos=args.graphql_dos,
+            use_library=args.library,
+            enable_access_control=args.access_control,
+            access_control_victim_headers=tuple(args.ac_victim_header or ()),
+            access_control_refs=tuple(args.ac_ref or ()),
             enable_defender=args.defender,
             defender_ruleset=args.defender_ruleset,
             defender_sigma_dir=args.defender_sigma,
