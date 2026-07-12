@@ -24,13 +24,17 @@ read-only ``observe``.
 
 from __future__ import annotations
 
+import itertools
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from ..common.logging import get_logger
+from .actor_graph import ActorGraph
 from .inspect import inspect_request, inspect_response
-from .models import AegisConfig, Verdict
+from .models import AegisConfig, BeliefRef, Verdict
+from .response_policy import feed_and_score, graduated_action
 
 _log = get_logger("aegis.gateway")
 
@@ -72,6 +76,13 @@ class GatewaySettings:
         self.slug = slug or "aegis-gateway"
         self.on_verdict = on_verdict
         self._enforce_authorized = self._authorize_enforce()
+        # G5 — the inline per-actor Beta belief graph + a monotonic sequence for its observations, and
+        # a lock (the server is threaded, so belief updates must be serialised). ``actor_last_class``
+        # remembers each tracked actor's most recent affirming class to label a graduated response.
+        self.actor_graph = ActorGraph()
+        self._belief_seq = itertools.count(1)
+        self._belief_lock = threading.Lock()
+        self.actor_last_class: dict[str, str] = {}
 
     def _authorize_enforce(self) -> bool:
         """Entitlement check, once. Only meaningful when mode==enforce; a denied grant downgrades to
@@ -170,6 +181,72 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
                 self.settings.on_verdict(verdict)
             except Exception:
                 pass
+
+    # -- G5: graduated challenge/throttle on the per-actor Beta belief -----
+
+    def _actor_key(self) -> str:
+        """The actor this request is attributed to — the client IP (stable + correlatable, per the
+        doctrine). Total: an unknown peer folds to a shared ``anon`` bucket."""
+        return (self.client_address[0] if self.client_address else "") or "anon"
+
+    def _note_belief(self, verdict: Verdict | None) -> BeliefRef | None:
+        """Fold this request's verdict into the actor's Beta belief and return it. Called EXACTLY ONCE
+        per request (with its strongest verdict). Serialised (the server is threaded); total (a belief
+        error must never break the request path)."""
+        try:
+            key = self._actor_key()
+            with self.settings._belief_lock:
+                belief = feed_and_score(self.settings.actor_graph, key, verdict,
+                                        seq=next(self.settings._belief_seq))
+                if verdict is not None and verdict.decision in ("confirmed", "lead"):
+                    self.settings.actor_last_class[f"session:{key}"] = verdict.attack_class
+            return belief
+        except Exception:
+            return None
+
+    def _current_belief(self) -> BeliefRef | None:
+        """The actor's belief accumulated from PRIOR requests (read-only; does NOT record this
+        request). The graduated decision rides on this, so a request is never judged on its own
+        contribution — 'sustained' means an established history."""
+        try:
+            with self.settings._belief_lock:
+                return self.settings.actor_graph.belief(f"session:{self._actor_key()}")
+        except Exception:
+            return None
+
+    def _graduated_verdict(self, action: str, current: Verdict | None) -> Verdict:
+        """A lead Verdict carrying the graduated ``action`` (challenge/throttle) — for the on_verdict
+        telemetry sink. It is a LEAD (no certificate): belief NEVER mints a certificate. Its
+        attack_class names the actor's dominant suspicious class (honest attribution)."""
+        cls = current.attack_class if (current is not None and current.decision == "lead") else None
+        cls = cls or self.settings.actor_last_class.get(f"session:{self._actor_key()}") or "automated_access"
+        return Verdict(decision="lead", attack_class=cls, confidence=0.0, certificate=None,
+                       provenance=f"intel:aegis:belief:{action}", action=action, contributing=[])
+
+    def _send_graduated(self, action: str, current: Verdict | None) -> None:
+        """Send an availability-first 429 for a belief-driven ``challenge``/``throttle`` — NOT a block
+        (no certificate, retryable). Emits the graduated verdict for telemetry and audits it."""
+        retry_after = 30 if action == "throttle" else 5
+        try:
+            _log.info("aegis.gateway.graduated", slug=self.settings.slug, action=action,
+                      client=self._actor_key(), method=self.command)
+        except Exception:
+            pass
+        self._emit(self._graduated_verdict(action, current))
+        body = (
+            b'{"aegis":"' + action.encode() + b'","by":"aegis-gateway","reason":"sustained per-actor '
+            b'suspicion crossed a belief threshold; this is an availability-first challenge/throttle, '
+            b'NOT a proven block (no certificate) - retry after the interval"}'
+        )
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Aegis-Action", action)
+        self.send_header("Retry-After", str(retry_after))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _send_block(self, verdict: Verdict) -> None:
         """403 with the certificate id — the honest, auditable block. The cert is re-runnable offline
@@ -318,10 +395,24 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         self._emit(verdict)
 
         # (2) ENFORCE (request-side) — block ONLY on a confirmed verdict whose action is "block" (D1).
+        #     A PROVABLE block always wins over a belief-driven challenge (prove-don't-guess).
         #     Anything else forwards (fail-open). observe mode never sets action="block".
         if self._is_block(verdict):
+            self._note_belief(verdict)   # a confirmed attack strongly raises the actor's belief (single feed)
             self._send_block(verdict)  # type: ignore[arg-type]
             return
+
+        # (2b) G5 — a graduated challenge/throttle on SUSTAINED per-actor suspicion, riding on the
+        #      belief accumulated from PRIOR requests (this request never counts toward its own
+        #      escalation). NEVER a hard block on belief alone (prove-don't-guess) — only under enforce
+        #      + entitlement, availability-first (a soft, retryable 429). observe mode never acts. This
+        #      request's own verdict is recorded once, below, so challenge can graduate to throttle.
+        if settings.enforce:
+            action = graduated_action(self._current_belief())
+            if action is not None:
+                self._note_belief(verdict)   # record this request (single feed) so belief keeps accruing
+                self._send_graduated(action, verdict)
+                return
 
         # (3) FORWARD the FULL body to the operator's upstream and CAPTURE the response.
         captured = self._forward(method, body)
@@ -343,7 +434,10 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             rverdict = None
         self._emit(rverdict)
 
-        # (5) ENFORCE (response-side) — withhold a response that PROVES exploitation; else relay.
+        # (5) Record this request's belief ONCE, with its strongest verdict (a response-proven attack
+        #     dominates a request-side lead/benign), then either withhold a response that PROVES
+        #     exploitation (response-side block) or relay.
+        self._note_belief(rverdict if self._is_block(rverdict) else verdict)
         if self._is_block(rverdict):
             self._send_block(rverdict)  # type: ignore[arg-type]
             return

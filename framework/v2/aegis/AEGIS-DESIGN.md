@@ -108,3 +108,41 @@ Stored/indirect injection (RAG), model extraction, phishing/UGC,
 synthetic identity — each rides the same pipeline adding at most one sensor + one oracle.
 Classes 7 (human-mimic bots), single-input evasion, and membership-inference remain **LEAD-only,
 permanently** — shipping them as verdicts would be the "AI detects AI" hype the doctrine forbids.
+
+## 7. Product depth — the inline provable firewall (W1, as built)
+
+The `aegis/gateway.py` reverse-proxy gained more web-attack coverage, every block still riding on a
+fired oracle + a re-runnable certificate (D1); everything unprovable inline stays a LEAD or a
+graduated soft response, never a hard block.
+
+**Shipped as a BLOCK (response-side proof, `inspect_response`).**
+- **SSTI** — a template-wrapped pure-arithmetic payload (`{{7*7}}`, `${7*7}`, `<%=..%>`, `#{..}`,
+  `*{..}`, `@(..)`) confirmed via `evaluation_oracle`: the response carries the COMPUTED result while
+  the raw expression is GONE. A reflected/HTML-encoded template (raw survives) never fires; a
+  non-arithmetic `{{var}}` is not a candidate; a 1-digit result is skipped. Near-zero FP.
+- **Path traversal / LFI** — a request value that walks the path toward a sensitive file, confirmed
+  via `side_effect_oracle` when a strict anchored `/etc/passwd` root-line (uid/gid 0, 7 colon fields)
+  surfaces. Bounded retained snippet → small certificate.
+
+**Shipped as a LEAD (honest — confirmation is out-of-band), `inspect_request`.**
+- **SSRF** — a value that is an internal / link-local / cloud-metadata-host URL or a dangerous
+  non-HTTP scheme (`file`/`gopher`/`dict`/…).
+- **XXE** — a request body whose DOCTYPE declares a `SYSTEM`/`PUBLIC` external entity.
+- **Roadmap** to promote these to a proven BLOCK: the OOB block-path — reuse `verify/oob.py`'s
+  `OOB_CALLBACK` oracle (mint a per-request correlation token, plant it in the payload, confirm on an
+  inbound hit against the token). Deliberately NOT forced inline: a single response cannot prove the
+  app dereferenced the resource near-zero-FP. A LEAD that can't be a near-zero-FP block is a success.
+
+**Graduated challenge/throttle on per-actor belief (G5, `aegis/response_policy.py`).** The gateway's
+inline `ActorGraph` accumulates a per-actor Beta belief; when its lower credible bound crosses a
+SUSTAINED threshold (challenge at `lcb≥0.40`, throttle at `lcb≥0.50`, both needing `≥3` observations),
+a sustained-suspicious actor gets an availability-first, retryable `challenge` then `throttle` (HTTP
+429) — NEVER a hard block on belief alone (a fired oracle's certificate is the only thing that
+blocks). Gated by enforce + `AEGIS_RESPOND`; observe only tracks. Provable blocks always win over a
+belief-driven challenge; belief is fed exactly once per request with its strongest verdict.
+
+**Header/cookie injection surface.** `candidate_values` also yields decoded Cookie values and a
+bounded, curated allowlist of free-text request headers (`user-agent`, `referer`, `x-forwarded-*`,
+…), so the request-side parse-proof oracles (`sqli_attempt`/`command_injection_attempt`) cover
+header/cookie injection. Structured/hop-by-hop/credential headers are excluded; the near-zero-FP
+oracles keep a normal `User-Agent` / `python-requests/2.25.1` / XFF IP list from tripping.

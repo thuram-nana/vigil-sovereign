@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Callable
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from ..verify.adapter import FindingContext
 from ..verify.confirmation import confirm_finding
@@ -37,6 +37,20 @@ _REQUEST_PAYLOAD_CLASSES = ("sqli_attempt", "command_injection_attempt")
 _MAX_VALUES = 256
 _MAX_VALUE_CHARS = 8192
 _MAX_BODY_BYTES = 2_000_000
+
+# CURATED header injection surface (lowercased). A BOUNDED allowlist of free-text, user-controlled
+# request headers that are realistic SQL/command-injection vectors — deliberately NOT every header.
+# Structured / hop-by-hop / negotiation / credential headers (host, content-type, content-length,
+# accept*, authorization, cookie [parsed separately], connection, ...) are EXCLUDED: they add noise
+# without a realistic injection story. The parse-proof oracles are near-zero-FP by construction — a
+# `User-Agent: python-requests/2.25.1` or `Mozilla/5.0 (X11; Linux x86_64)` carries no SQL string-
+# literal break-out and no shell command+argument construct (the cmdi oracle skips segment[0] and
+# `tool/version` slashes), so a normal UA / XFF / Referer never trips. Bounded → DoS-safe.
+_INSPECT_HEADERS = frozenset({
+    "user-agent", "referer", "referrer", "x-forwarded-for", "x-forwarded-host", "x-forwarded-server",
+    "x-real-ip", "x-original-url", "x-rewrite-url", "x-http-method-override", "forwarded",
+    "true-client-ip", "client-ip", "x-client-ip", "from", "x-api-version",
+})
 
 
 def _json_leaves(obj: Any, prefix: str, add: Callable[[str, str], None], depth: int = 0) -> None:
@@ -54,10 +68,33 @@ def _json_leaves(obj: Any, prefix: str, add: Callable[[str, str], None], depth: 
         add(prefix or "body", obj)
 
 
+def _header_cookie_values(headers: list[tuple[str, str]], add: Callable[[str, str], None]) -> None:
+    """Feed DECODED Cookie values (``cookie:<name>``) and the CURATED header allowlist
+    (``header:<name>``) to ``add``. Values are percent-decoded so an encoded injection is visible;
+    decoding only reveals structure the near-zero-FP oracles already judge, it cannot add an FP.
+    Total (never raises); bounded (``add`` caps count + length)."""
+    for hk, hv in (headers or []):
+        name = str(hk).lower()
+        val = str(hv)
+        try:
+            if name == "cookie":
+                # RFC 6265 cookie-string: `a=1; b=2`. Each value is a distinct injection point.
+                for pair in val.split(";"):
+                    if "=" in pair:
+                        cname, _, cval = pair.partition("=")
+                        add(f"cookie:{cname.strip()}", unquote(cval.strip()))
+            elif name in _INSPECT_HEADERS:
+                add(f"header:{name}", unquote(val))
+        except Exception:
+            continue
+
+
 def candidate_values(path: str, headers: list[tuple[str, str]], body: str | None) -> list[tuple[str, str]]:
-    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params and
-    urlencoded / JSON body values. Bounded and total (a malformed body is skipped, never raised).
-    Header/cookie surfaces are a documented roadmap; the classic injection surface is query+body."""
+    """``(param_name, DECODED value)`` pairs from the request's injection surfaces — query params,
+    urlencoded / JSON body values, decoded Cookie values (``cookie:<name>``), and a bounded, curated
+    set of free-text request headers (``header:<name>``, see ``_INSPECT_HEADERS``). Query/body come
+    first (the most common vectors); header/cookie last. Bounded and total (a malformed body is
+    skipped, never raised)."""
     out: list[tuple[str, str]] = []
 
     def add(name: str, val: Any) -> None:
@@ -84,6 +121,9 @@ def candidate_values(path: str, headers: list[tuple[str, str]], body: str | None
                     add(k, v)
         except Exception:
             pass
+
+    # header/cookie injection surface (curated + bounded), inspected AFTER query/body.
+    _header_cookie_values(headers, add)
     return out[:_MAX_VALUES]
 
 
@@ -103,6 +143,60 @@ def _payload_verdict(bug_class: str, param: str, confirmed: Any, fc: FindingCont
     )
 
 
+def _lead_verdict(bug_class: str, param: str, evidence: str) -> Verdict:
+    """A LEAD verdict — belief-raising + logged, NEVER a block. A lead carries NO certificate
+    (the ``Verdict`` model enforces certificate IFF confirmed) and its ``action`` stays ``observe``
+    (read-only), so the gateway forwards the request untouched. This is the HONEST verdict for a
+    class whose confirmation needs out-of-band evidence a single inline response cannot supply."""
+    return Verdict(
+        decision="lead",
+        attack_class=bug_class,
+        confidence=0.0,
+        certificate=None,
+        provenance=f"intel:aegis:{bug_class}",
+        action="observe",
+        contributing=[param] if param else [],
+    )
+
+
+# --- SSRF / XXE — request-side LEADS (NOT blocks) --------------------------------------------------
+#
+# HONEST SCOPE: server-side request forgery and XML external-entity injection are confirmed by an
+# OUT-OF-BAND (callback) interaction — a request the app makes to an attacker-controlled collector.
+# A single INLINE request/response cannot prove that near-zero-FP (a value that LOOKS like an
+# internal-host URL, or an XML doctype that DECLARES an external entity, does not prove the app
+# actually dereferenced it). So AEGIS emits these as LEADS: they raise the per-actor belief and are
+# logged, but they NEVER block. The out-of-band block-path (reuse ``verify/oob.py``'s OOB_CALLBACK
+# oracle: mint a per-request correlation token, plant it in the payload, and confirm on an inbound
+# hit) is the roadmap to promote these to a proven block — it is deliberately NOT forced here.
+#
+# SSRF lead: a candidate value that is a URL toward an internal / link-local / cloud-metadata host,
+# or uses a dangerous non-HTTP scheme (file/gopher/dict/...). XXE lead: a request body that declares
+# an EXTERNAL ENTITY (SYSTEM/PUBLIC) inside a DOCTYPE. Both signatures a benign client rarely sends.
+_SSRF_SCHEME_RE = re.compile(r"(?i)\b(?:file|gopher|dict|ftp|tftp|ldap|jar|netdoc|expect)://")
+_SSRF_INTERNAL_HOST_RE = re.compile(
+    r"(?i)(?:^|//|@|\bhost=|\burl=)(?:"
+    r"169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|"       # cloud metadata
+    r"localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|\[?::1\]?|"          # loopback
+    r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|"               # RFC1918
+    r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r")")
+# XXE: an external-entity declaration inside a DOCTYPE. Bounded, negated char-classes → ReDoS-safe.
+_XXE_RE = re.compile(
+    r"(?is)<!DOCTYPE\b[^\[>]{0,200}\[[^\]]{0,4000}?<!ENTITY\b[^>]{0,200}?\b(?:SYSTEM|PUBLIC)\b")
+
+
+def _ssrf_lead_param(values: list[tuple[str, str]]) -> str | None:
+    """The first request value that looks like an SSRF probe (internal/metadata-host URL or a
+    dangerous non-HTTP scheme), or None. Belief-raising only — never a block."""
+    for param, value in values:
+        if _SSRF_SCHEME_RE.search(value):
+            return param
+        if "://" in value and _SSRF_INTERNAL_HOST_RE.search(value):
+            return param
+    return None
+
+
 def inspect_request(
     method: str,
     path: str,
@@ -116,10 +210,13 @@ def inspect_request(
 ) -> Verdict | None:
     """Run the REQUEST-SIDE oracles over one incoming request. Returns a CONFIRMED ``Verdict`` (with a
     re-runnable ``CertRef``) for the FIRST proven attack — a honeypot tripwire or a structured
-    injection attempt — or ``None`` when nothing is proven (the gateway then forwards + inspects the
-    response). Pure/deterministic; total (never raises). ``enforce`` sets the confirmed verdict's
-    ``action`` to ``block`` (D1); otherwise it is ``observe`` (read-only)."""
+    injection attempt — a LEAD ``Verdict`` (belief-raising, never a block) for an SSRF/XXE probe whose
+    confirmation needs out-of-band evidence, or ``None`` when nothing is seen (the gateway then
+    forwards + inspects the response). A CONFIRMED block ALWAYS takes priority over a lead.
+    Pure/deterministic; total (never raises). ``enforce`` sets the confirmed verdict's ``action`` to
+    ``block`` (D1); otherwise it is ``observe`` (read-only). A lead is always ``observe``."""
     verifier = verifier or OracleVerifier()
+    values = candidate_values(path, headers, body)
 
     # (1) honeypot tripwire — a fetch of a seeded path no human UI links proves AUTOMATED access.
     hp = [p for p in (honeypot_paths or []) if p]
@@ -131,12 +228,20 @@ def inspect_request(
             return _payload_verdict("automated_access", req_path, confirmed, fc, enforce=enforce)
 
     # (2) request-payload parse-proof — each decoded value vs the SQLi / command-injection oracles.
-    for param, value in candidate_values(path, headers, body):
+    for param, value in values:
         for bug_class in _REQUEST_PAYLOAD_CLASSES:
             fc = FindingContext.from_request_payload(value, bug_class=bug_class, param=param)
             confirmed = confirm_finding({"bug_class": bug_class}, context=fc, verifier=verifier)
             if confirmed is not None:
                 return _payload_verdict(bug_class, param, confirmed, fc, enforce=enforce)
+
+    # (3) SSRF / XXE LEADS — belief-raising, NEVER a block (their confirmation is out-of-band; see the
+    #     _lead_verdict / SSRF-XXE note above). Only reached when nothing above proved a block.
+    ssrf_param = _ssrf_lead_param(values)
+    if ssrf_param is not None:
+        return _lead_verdict("ssrf", ssrf_param, "internal/metadata-host URL or dangerous scheme")
+    if body and _XXE_RE.search(body):
+        return _lead_verdict("xxe", "body", "DOCTYPE declares an external (SYSTEM/PUBLIC) entity")
 
     return None
 
@@ -171,6 +276,67 @@ def _xss_markers(value: str) -> list[str]:
     return seen
 
 
+# --- SSTI (server-side template / expression-language injection) — response-side proof ------------
+#
+# The confirmable signature is EVALUATION, not reflection: the request value carries a template
+# wrapper around a PURE ARITHMETIC expression (`{{7*7}}`, `${7*7}`), and the app's OWN response shows
+# the COMPUTED result (`49`) while the raw expression is GONE. ``evaluation_oracle`` proves exactly
+# that (result present AND raw absent), so a reflected-but-unevaluated payload — the app echoed
+# `{{7*7}}` verbatim, or HTML-encoded it — never fires (near-zero FP). We only recognise a wrapper
+# around a PURE arithmetic body, so `{{ user.name }}` / `${price}` (no arithmetic) are not even
+# candidates. The regexes are fixed-structure with bounded `\d{1,6}` operands — non-backtracking
+# (ReDoS-safe). A 1-digit result (`{{1*1}}`) is skipped: too coincidental a token to confirm on.
+_SSTI_ARITH = r"(\d{1,6})\s*([*+])\s*(\d{1,6})"
+_SSTI_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\{\{\s*" + _SSTI_ARITH + r"\s*\}\}"),   # Jinja2/Twig/Nunjucks/Angular  {{7*7}}
+    re.compile(r"\$\{\s*" + _SSTI_ARITH + r"\s*\}"),      # JSP-EL/Freemarker/Thymeleaf/JS ${7*7}
+    re.compile(r"#\{\s*" + _SSTI_ARITH + r"\s*\}"),       # Ruby / JSF-EL                  #{7*7}
+    re.compile(r"<%=\s*" + _SSTI_ARITH + r"\s*%>"),       # ERB / JSP                      <%= 7*7 %>
+    re.compile(r"\*\{\s*" + _SSTI_ARITH + r"\s*\}"),       # Thymeleaf selection            *{7*7}
+    re.compile(r"@\(\s*" + _SSTI_ARITH + r"\s*\)"),       # Razor                          @(7*7)
+)
+_SSTI_MIN_RESULT = 10   # require a >= 2-digit result so a coincidental single digit cannot confirm
+
+
+def _ssti_candidates(value: str) -> list[tuple[str, str]]:
+    """``(inner_expr, expected_result)`` pairs for each template-wrapped PURE-arithmetic payload in
+    ``value`` — e.g. ``("7*7", "49")``. ``inner_expr`` is passed as the oracle's ``raw`` so BOTH a
+    full-payload reflection (`{{7*7}}` contains `7*7`) and a bare-inner reflection are caught as
+    'reflected, not evaluated'. Bounded + deduped; deterministic."""
+    out: list[tuple[str, str]] = []
+    for rx in _SSTI_PATTERNS:
+        for m in rx.finditer(value):
+            a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+            result = a * b if op == "*" else a + b
+            if result < _SSTI_MIN_RESULT:
+                continue
+            inner = f"{m.group(1)}{op}{m.group(3)}"
+            pair = (inner, str(result))
+            if pair not in out:
+                out.append(pair)
+            if len(out) >= 8:
+                return out
+    return out
+
+
+# --- Path traversal / local file read — response-side proof ---------------------------------------
+#
+# The confirmable signature is a distinctive FILESYSTEM artifact surfacing in the response after a
+# request value walked the path toward a sensitive absolute file. The near-zero-FP anchor is a strict
+# `/etc/passwd` root-line signature — the canonical 7-colon-field shape with root at uid/gid 0, which
+# a benign HTML page essentially never carries. ``side_effect_oracle`` then confirms the exact matched
+# line reached the response. A benign request never even enters this path (the request value must
+# carry a `../`-style traversal indicator toward a sensitive file), so a benign input cannot trigger it.
+_TRAVERSAL_REQ_RE = re.compile(
+    r"(?i)(?:\.\.[\\/]|%2e%2e(?:[\\/]|%2f|%5c)|/etc/(?:passwd|shadow)\b|\\windows\\win\.ini\b"
+    r"|%2fetc%2fpasswd)")
+# A leaked /etc/passwd root line: `root:x:0:0:root:/root:/bin/bash`. Per-line, strictly shaped, with
+# bounded negated char-classes (non-backtracking → ReDoS-safe). Requires root at uid 0 gid 0.
+_PASSWD_ROOT_RE = re.compile(
+    r"(?m)^root:[^:\r\n]{0,64}:0:0:[^:\r\n]{0,120}:[^:\r\n]{0,120}:[^\s:]{0,64}$")
+_TRAVERSAL_MARGIN = 48   # bounded window retained around the matched signature (small certificate)
+
+
 def inspect_response(
     path: str,
     headers: list[tuple[str, str]],
@@ -182,10 +348,10 @@ def inspect_response(
 ) -> Verdict | None:
     """Run the RESPONSE-SIDE effect oracles over the (request, PROXIED-response) pair. Returns a
     CONFIRMED ``Verdict`` (with a re-runnable ``CertRef``) when the app's own answer PROVES
-    exploitation — a request value reflected into an executable HTML context (reflected XSS), or a
-    datastore error a quote-bearing value provoked (error-based SQLi) — else ``None`` (the gateway
-    then relays the response untouched). Pure/deterministic; total. ``enforce`` sets the confirmed
-    action to ``block``."""
+    exploitation — a request value reflected into an executable HTML context (reflected XSS), a
+    template expression the server EVALUATED (SSTI), or a `/etc/passwd` signature a traversal payload
+    surfaced (path traversal) — else ``None`` (the gateway then relays the response untouched).
+    Pure/deterministic; total. ``enforce`` sets the confirmed action to ``block``."""
     if not response_body:
         return None
     sink = response_body[:_MAX_RESPONSE_CHARS]
@@ -204,6 +370,37 @@ def inspect_response(
             confirmed = confirm_finding({"bug_class": "xss"}, context=fc, verifier=verifier)
             if confirmed is not None:
                 return _payload_verdict("xss", param, confirmed, fc, enforce=enforce)
+
+    # SSTI — a request value carried a template-wrapped arithmetic expression the server EVALUATED:
+    # the response shows the computed result while the raw expression is GONE. ``evaluation_oracle``
+    # (control-vs-treatment discipline: result present, raw absent) is what separates evaluation from
+    # reflection — a `{{7*7}}` echoed verbatim or HTML-encoded still carries the raw `7*7`, so it does
+    # NOT fire. Only a genuine server-side evaluation blocks (near-zero FP).
+    for param, value in values:
+        for inner, expected in _ssti_candidates(value):
+            fc = FindingContext.from_evaluation(inner, expected, sink, bug_class="ssti")
+            confirmed = confirm_finding({"bug_class": "ssti"}, context=fc, verifier=verifier)
+            if confirmed is not None:
+                return _payload_verdict("ssti", param, confirmed, fc, enforce=enforce)
+
+    # Path traversal / LFI — a request value walked the path toward a sensitive file AND a strict
+    # `/etc/passwd` root-line signature surfaced in the response. ``side_effect_oracle`` confirms the
+    # exact matched line reached the response; the request-side traversal gate + the strict, anchored
+    # signature keep it near-zero FP (a benign request never enters this path, and a benign page
+    # essentially never carries a uid/gid-0 root passwd line). The retained sink is a bounded window
+    # around the match, so the certificate stays small.
+    if _PASSWD_ROOT_RE.search(sink):
+        for param, value in values:
+            if not _TRAVERSAL_REQ_RE.search(value):
+                continue
+            m = _PASSWD_ROOT_RE.search(sink)
+            marker = m.group(0).strip()
+            start = max(0, m.start() - _TRAVERSAL_MARGIN)
+            snippet = sink[start:m.end() + _TRAVERSAL_MARGIN]
+            fc = FindingContext.from_side_effect(marker, snippet, bug_class="path_traversal")
+            confirmed = confirm_finding({"bug_class": "path_traversal"}, context=fc, verifier=verifier)
+            if confirmed is not None:
+                return _payload_verdict("path_traversal", param, confirmed, fc, enforce=enforce)
 
     # NOTE — error-based SQLi is DELIBERATELY not confirmed inline. Without a control/baseline response
     # (a differential the offensive engine has but a live proxy does not), a datastore-error signature
