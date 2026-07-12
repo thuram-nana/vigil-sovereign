@@ -2098,6 +2098,169 @@ def cloud_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Service-mesh posture — promote a retained mesh-config LEAD to a FACT over its ACHIEVED STATE
+# (Wave-G3). The MESH twin of ``k8s_posture_oracle`` / ``cloud_posture_oracle``.
+#
+# A mesh linter / config export reports "PeerAuthentication is PERMISSIVE" or "this AuthorizationPolicy
+# allows everyone". That is a THIRD-PARTY LEAD — a `fact` only when a deterministic oracle proves a
+# CONCRETE insecure ACHIEVED STATE over the RETAINED mesh config. This oracle re-derives the weakness over
+# ONE retained control (a single-record membership/parse-proof, NO kubectl, NO mesh API, NO graph
+# traversal, NO ATTACK) — mirroring how ``cloud_posture_oracle`` judges one retained cloud control.
+#
+# A control fires ONLY on an EXPLICIT insecure achieved-state a HARDENED mesh cannot exhibit; the rule
+# order is fixed so the verdict is deterministic (same evidence -> same signal). A STRICT PeerAuthentication,
+# a scoped/deny AuthorizationPolicy, an ALLOW policy with no rules (deny-all), an authenticated Linkerd
+# inbound policy, or only ABSENT/unknown fields all correctly do NOT fire — near-zero false positives by
+# construction. Malformed / non-mapping evidence -> non-fire (never raises).
+_MESH_STR_CAP = 4096
+_MESH_MAX_RULES = 4096
+
+# Istio PeerAuthentication effective mTLS modes that ACCEPT plaintext transport (a STRICT mesh cannot
+# exhibit these). UNSET/absent is NOT here — an absent mode inherits a parent and is never promoted.
+_MESH_PERMISSIVE_MTLS = frozenset({"permissive", "disable"})
+# Linkerd server ``default-inbound-policy`` values that admit any (even unmeshed / unauthenticated) client.
+_MESH_UNAUTH_INBOUND = frozenset({"all-unauthenticated", "all_unauthenticated"})
+# Principals that denote "anyone" in an Istio AuthorizationPolicy ``from.source`` clause.
+_MESH_ANON_PRINCIPALS = frozenset({"*"})
+# A linter/validator's own PASS/compliant verdict is respected: the oracle never promotes a passing control
+# (mirrors how k8s requires a hard FAIL and cloud respects an explicit compliant status).
+_MESH_COMPLIANT_STATUSES = frozenset({
+    "pass", "passed", "ok", "compliant", "info", "informational", "not_applicable",
+    "na", "n/a", "skipped", "manual",
+})
+
+
+def _mesh_authz_allows_all(action: Any, rules: Any) -> tuple[bool, str]:
+    """True iff an Istio AuthorizationPolicy provably admits EVERY caller. Fires only when ``action`` is
+    ``ALLOW`` (or unset — Istio's default action is ALLOW) AND a rule matches everyone: an EMPTY catch-all
+    rule (no ``from`` / ``to`` / ``when`` — matches every request) or a ``*`` wildcard principal named in a
+    ``from.source.principals`` / ``requestPrincipals`` clause. An ALLOW policy with NO rules is DENY-all
+    (secure -> no fire); a ``DENY`` / ``CUSTOM`` / ``AUDIT`` action is never an allow-all grant. A rule that
+    restricts by ``to`` (path/method) but omits ``from`` is deliberately NOT treated as allow-all — an
+    operator publishing a public endpoint is a design choice, not a near-zero-FP-provable misconfig."""
+    act = _coerce_text(action).strip().upper() or "ALLOW"   # Istio default action is ALLOW
+    if act != "ALLOW":
+        return (False, "")
+    if not isinstance(rules, (list, tuple)):
+        return (False, "")
+    for rule in list(rules)[:_MESH_MAX_RULES]:
+        if not isinstance(rule, Mapping):
+            continue
+        froms, tos, whens = rule.get("from"), rule.get("to"), rule.get("when")
+        # an entirely empty rule matches EVERY request (any source, any operation) -> allow-all.
+        if not froms and not tos and not whens:
+            return (True, "empty_catch_all_rule")
+        # a `*` wildcard principal literally named in a from.source clause -> all principals.
+        if isinstance(froms, (list, tuple)):
+            for f in froms:
+                if not isinstance(f, Mapping):
+                    continue
+                src = f.get("source")
+                if not isinstance(src, Mapping):
+                    continue
+                for key in ("principals", "requestPrincipals", "request_principals"):
+                    vals = src.get(key)
+                    if isinstance(vals, (list, tuple)) and any(
+                            _coerce_text(v).strip() in _MESH_ANON_PRINCIPALS for v in vals):
+                        return (True, "wildcard_principal")
+    return (False, "")
+
+
+def mesh_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a retained service-mesh posture control PROVABLY carries an insecure ACHIEVED STATE — the
+    membership/parse-proof that promotes a mesh-config LEAD to a FACT over the control's achieved state
+    ALONE (offline, ZERO mesh/kubectl calls, NO attack). The MESH twin of ``cloud_posture_oracle``: a mesh
+    linter's "permissive / allows everyone" is a third-party heuristic; this oracle re-derives the insecure
+    state over the RETAINED control so the scanner's verdict is never rubber-stamped and a hardened mesh is
+    never confirmed.
+
+    ``observed_control`` is the JSON-safe retained control (``verify.mesh_posture.ingest_mesh_config``
+    mints it from an Istio / Linkerd manifest)::
+
+        {"resource_kind": "PeerAuthentication", "name": "default", "namespace": "istio-system",
+         "scope": "mesh", "mtls_mode": "PERMISSIVE"}
+        {"resource_kind": "AuthorizationPolicy", "name": "ns-allow", "namespace": "prod",
+         "scope": "namespace", "action": "ALLOW", "rules": [{}]}
+        {"resource_kind": "Server", "name": "web", "namespace": "prod",
+         "default_inbound_policy": "all-unauthenticated"}   # Linkerd
+
+    Fires (0.9) only when an EXPLICIT insecure achieved-state holds (fixed rule order):
+      1. ``permissive_mtls`` — an Istio PeerAuthentication whose effective ``mtls_mode`` is ``PERMISSIVE``
+         or ``DISABLE`` (plaintext transport is accepted — a STRICT-mTLS mesh cannot exhibit this);
+      2. ``authz_allow_all`` — an Istio AuthorizationPolicy (``action: ALLOW`` or unset) that provably
+         admits EVERY caller: an empty catch-all rule, or a ``*`` wildcard principal named in a from-clause;
+      3. ``linkerd_unauthenticated`` — a Linkerd server whose ``default_inbound_policy`` is
+         ``all-unauthenticated`` (any client, even unmeshed / unauthenticated, may connect).
+
+    Does NOT fire (stays an honest LEAD) when: the control records an EXPLICIT compliant/pass status; the
+    achieved state is hardened (STRICT mTLS, a scoped or DENY policy, an ALLOW policy with no rules =
+    deny-all, an authenticated Linkerd policy); or the relevant field is ABSENT/unknown (an absent mTLS
+    mode inherits a parent and is never promoted). Malformed / non-mapping evidence -> non-fire (never
+    raises). Pure + deterministic, so the same verdict re-verifies offline from the retained context.
+    GROUNDING is procedural exactly as for every oracle: the control MUST be the RETAINED mesh evidence,
+    never a re-run of a live mesh call laundered as a fact."""
+    if not isinstance(observed_control, Mapping):
+        return OracleSignal(kind=OracleKind.MESH_POSTURE, fired=False, confidence=0.0,
+                            evidence="no service-mesh control evidence")
+    ctl = observed_control
+    kind = _coerce_text(ctl.get("resource_kind") or ctl.get("kind"))[:_MESH_STR_CAP].strip()
+    name = _coerce_text(ctl.get("name"))[:_MESH_STR_CAP].strip()
+    ns = _coerce_text(ctl.get("namespace"))[:_MESH_STR_CAP].strip()
+    scope = _coerce_text(ctl.get("scope"))[:_MESH_STR_CAP].strip().lower()
+    status = _coerce_text(ctl.get("status")).strip().lower()
+    label = name or kind or "?"
+
+    # Respect an EXPLICIT compliant verdict — a control a linter passed is never promoted.
+    if status in _MESH_COMPLIANT_STATUSES:
+        return OracleSignal(
+            kind=OracleKind.MESH_POSTURE, fired=False, confidence=0.0,
+            evidence=(f"mesh control {label} records a compliant status {status!r} — not an insecure "
+                      f"achieved state (stays a lead)"),
+            observed={"name": name, "namespace": ns, "status": status})
+
+    # Rule 1 — Istio PeerAuthentication effective mTLS mode is PERMISSIVE / DISABLE (plaintext accepted).
+    mtls_mode = _coerce_text(ctl.get("mtls_mode")).strip().lower()
+    if mtls_mode in _MESH_PERMISSIVE_MTLS:
+        return OracleSignal(
+            kind=OracleKind.MESH_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"service-mesh posture fact: PeerAuthentication {label} (scope {scope or '?'}) sets "
+                      f"mTLS mode {mtls_mode.upper()} — plaintext transport is ACCEPTED (a STRICT-mTLS "
+                      f"mesh cannot), promoted over the retained mesh config"),
+            observed={"name": name, "namespace": ns, "scope": scope, "rule": "permissive_mtls",
+                      "mtls_mode": mtls_mode.upper(), "reason": "insecure_achieved_state"})
+
+    # Rule 2 — Istio AuthorizationPolicy (action ALLOW / unset) that provably admits every caller.
+    allows_all, why = _mesh_authz_allows_all(ctl.get("action"), ctl.get("rules"))
+    if allows_all:
+        return OracleSignal(
+            kind=OracleKind.MESH_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"service-mesh posture fact: AuthorizationPolicy {label} (scope {scope or '?'}) with "
+                      f"action ALLOW admits EVERY caller ({why}) — no principal is required, promoted over "
+                      f"the retained mesh config"),
+            observed={"name": name, "namespace": ns, "scope": scope, "rule": "authz_allow_all",
+                      "detail": why, "reason": "insecure_achieved_state"})
+
+    # Rule 3 — Linkerd server default-inbound-policy is all-unauthenticated (any client may connect).
+    inbound = _coerce_text(ctl.get("default_inbound_policy") or ctl.get("inbound_policy")).strip().lower()
+    if inbound in _MESH_UNAUTH_INBOUND:
+        return OracleSignal(
+            kind=OracleKind.MESH_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"service-mesh posture fact: Linkerd server {label} default-inbound-policy is "
+                      f"'all-unauthenticated' — any client (even unmeshed / unauthenticated) may connect, "
+                      f"promoted over the retained mesh config"),
+            observed={"name": name, "namespace": ns, "rule": "linkerd_unauthenticated",
+                      "inbound_policy": inbound, "reason": "insecure_achieved_state"})
+
+    return OracleSignal(
+        kind=OracleKind.MESH_POSTURE, fired=False, confidence=0.0,
+        evidence=(f"mesh control {label} carries no EXPLICIT permissive-mTLS / allow-all-authz / "
+                  f"unauthenticated-inbound achieved state (STRICT mTLS / scoped or deny policy / "
+                  f"authenticated inbound, or fields absent) — not provably an insecure state (stays a lead)"),
+        observed={"name": name, "namespace": ns, "kind": kind, "scope": scope, "status": status,
+                  "mtls_mode": mtls_mode, "inbound_policy": inbound})
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They

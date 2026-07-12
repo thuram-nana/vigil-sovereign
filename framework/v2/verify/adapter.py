@@ -279,6 +279,12 @@ class FindingContext(BaseModel):
     # achieved-state ALONE, offline. No benchmark/scan/engage finding carries cloud_control, so appending
     # this leaves the gate byte-identical.
     cloud_control: dict[str, Any] | None = None
+    # mesh_posture_oracle (Wave-G3: a retained service-mesh posture control whose ACHIEVED STATE literally
+    # carries an insecure fact — permissive/disabled mTLS, an allow-all AuthorizationPolicy, or an
+    # unauthenticated Linkerd inbound policy) — the RETAINED mesh-config evidence the membership/parse-proof
+    # judges over its achieved-state ALONE, offline, ZERO mesh/kubectl calls. No benchmark/scan/engage
+    # finding carries mesh_control, so appending this leaves the gate byte-identical.
+    mesh_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -522,6 +528,65 @@ class FindingContext(BaseModel):
             if src.get(k) not in (None, ""):
                 retained[k] = _coerce_text(src.get(k))
         return cls(bug_class=bug_class, cloud_control=retained)
+
+    @classmethod
+    def from_mesh_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "mesh_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED service-mesh posture control (``verify.mesh_posture.ingest_mesh_config``), for the
+        mesh-posture oracle (Wave-G3 — the MESH twin of ``from_cloud_control``). The retained evidence that
+        turns a mesh-config LEAD into a FACT: the oracle re-derives the weakness (permissive/disabled mTLS,
+        an allow-all AuthorizationPolicy, or an unauthenticated Linkerd inbound policy) over the control's
+        ACHIEVED STATE alone — offline, ZERO mesh/kubectl calls, NO attack — so a mesh linter's
+        "permissive / allows everyone" is confirmed a FACT only by the actual insecure state, never the
+        scanner's say-so.
+
+        Only the structural fields the oracle judges are retained into a canonical shape (``resource_kind``,
+        ``name``, ``namespace``, ``scope``, ``status``, and — per resource kind — ``mtls_mode`` /
+        ``action`` + a canonicalized ``rules`` list / ``default_inbound_policy``). AuthorizationPolicy rules
+        are reduced to the from-source principals plus a presence marker for ``to`` / ``when`` (so the
+        empty-catch-all vs. scoped distinction is preserved but verbose scanner prose is never laundered
+        into the certificate). JSON-safe + deterministic (re-verifies offline)."""
+        src = dict(control or {})
+        retained: dict[str, Any] = {}
+        rk = src.get("resource_kind") or src.get("kind")
+        if rk not in (None, ""):
+            retained["resource_kind"] = _coerce_text(rk)
+        for k in ("name", "namespace", "scope", "status", "mtls_mode", "action"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        inbound = src.get("default_inbound_policy") or src.get("inbound_policy")
+        if inbound not in (None, ""):
+            retained["default_inbound_policy"] = _coerce_text(inbound)
+        rules = src.get("rules")
+        if isinstance(rules, (list, tuple)):
+            canon: list[dict[str, Any]] = []
+            for rule in rules:
+                if not isinstance(rule, Mapping):
+                    continue
+                out: dict[str, Any] = {}
+                froms = rule.get("from")
+                if isinstance(froms, (list, tuple)) and froms:
+                    canon_from: list[dict[str, Any]] = []
+                    for f in froms:
+                        if isinstance(f, Mapping) and isinstance(f.get("source"), Mapping):
+                            fsrc = f["source"]
+                            s: dict[str, Any] = {}
+                            for key in ("principals", "requestPrincipals", "request_principals"):
+                                vals = fsrc.get(key)
+                                if isinstance(vals, (list, tuple)):
+                                    s[key] = [_coerce_text(v) for v in vals]
+                            canon_from.append({"source": s} if s else {})
+                        else:
+                            canon_from.append({})
+                    out["from"] = canon_from
+                if rule.get("to"):
+                    out["to"] = [{}]      # presence marker: a path/method restriction exists (not catch-all)
+                if rule.get("when"):
+                    out["when"] = [{}]    # presence marker: a condition exists (not catch-all)
+                canon.append(out)
+            retained["rules"] = canon
+        return cls(bug_class=bug_class, mesh_control=retained)
 
     @classmethod
     def from_jwt_token(
@@ -840,6 +905,8 @@ class FindingContext(BaseModel):
             ctx["k8s_control"] = self.k8s_control
         if self.cloud_control is not None:
             ctx["cloud_control"] = self.cloud_control
+        if self.mesh_control is not None:
+            ctx["mesh_control"] = self.mesh_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

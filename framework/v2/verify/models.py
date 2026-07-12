@@ -118,6 +118,23 @@ class OracleKind(str, enum.Enum):
     # path over the whole policy GRAPH in ``confirm_cloud_posture_facts``): this is the single-control
     # achieved-STATE membership lens — a parse-proof over ONE retained control record, no graph traversal.
     CLOUD_POSTURE = "cloud_posture"
+    # Wave-G3 service-mesh posture — the MESH twin of K8S_POSTURE / CLOUD_POSTURE (the offline promotion of
+    # a RETAINED service-mesh-config LEAD, ``verify.mesh_posture.ingest_mesh_config``). Like the AEGIS /
+    # K8S_POSTURE / CLOUD_POSTURE / JWT / SAML members above, this is an ADDITIVE append reachable ONLY via
+    # its explicit BUG_CLASS_ORACLES row (keyed on the `mesh_control` ctx field NO benchmark/scan/engage
+    # finding carries), never via the frozen unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY
+    # 15). MESH_POSTURE promotes a retained mesh-config control to a FACT — judged over the control's
+    # RETAINED achieved-state ALONE, offline, ZERO mesh/kubectl calls — ONLY on a deterministic membership/
+    # parse-proof that a HARDENED mesh cannot exhibit: (a) an Istio PeerAuthentication whose effective
+    # ``mtls.mode`` is ``PERMISSIVE`` or ``DISABLE`` (plaintext is accepted — a STRICT-mTLS mesh cannot);
+    # (b) an Istio AuthorizationPolicy with ``action: ALLOW`` whose rules provably admit EVERY caller (an
+    # empty catch-all rule, or a ``*`` wildcard principal named in ``from.source.principals``); or (c) a
+    # Linkerd server whose ``default-inbound-policy`` is ``all-unauthenticated`` (any client, unmeshed and
+    # unauthenticated, may connect). A STRICT PeerAuthentication, a scoped/deny AuthorizationPolicy, an
+    # ALLOW policy with no rules (deny-all), an authenticated Linkerd policy, or a control with only
+    # ABSENT/unknown fields do NOT fire (near-zero-FP). NO live mesh call is ever made; a service-mesh
+    # ATTACK is never performed — this is a pure re-derivation over already-ingested config.
+    MESH_POSTURE = "mesh_posture"
 
 
 class OracleProbe(BaseModel):
