@@ -1,0 +1,26 @@
+# Keep the AEGIS gateway build context lean (it is built from the repo root).
+# Only applies to docker builds whose context is the repo root — i.e. the AEGIS
+# Dockerfile; the corpus-fixture Dockerfiles use their own local contexts.
+.git
+.gitignore
+graphify-out/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+sdist/
+wheels/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+node_modules/
+# Engagement data + local operator state (never belongs in a shipped image).
+targets/
+# Stray root artifacts not needed to build the package.
+*.html
+benchmark-report.md
