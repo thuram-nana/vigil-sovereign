@@ -2289,6 +2289,39 @@ def jwt_forgery_oracle(token: Any, *, candidate_keys: Sequence[str | bytes] = ()
 # ---------------------------------------------------------------------------
 
 
+# A ds:Reference/@URI of the form `#xpointer(id('X'))` — a spec-legal same-document XML-Signature
+# reference (xmldsig-core 4.4.3) that selects element X by id, EQUIVALENT to the bare `#X` shorthand.
+_SAML_XPTR_ID_RE = re.compile(r"^xpointer\(\s*id\(\s*(['\"])(?P<id>.+?)\1\s*\)\s*\)$")
+# a whole-document XPointer `#xpointer(/)` — equivalent to URI="" (the enveloped whole-doc reference).
+_SAML_XPTR_ROOT_RE = re.compile(r"^xpointer\(\s*/\s*\)$")
+# a plain bare-name reference `#NCName` (no parens / slashes / xpointer) we can resolve to an id.
+_SAML_BARENAME_RE = re.compile(r"^[A-Za-z_][\w.\-]*$")
+
+
+def _saml_resolve_ref(uri: str) -> tuple[str, str | None]:
+    """Resolve a ds:Reference/@URI to ('whole', None) | ('id', <name>) | ('unknown', None).
+
+    Only same-document forms whose covered id/scope is UNAMBIGUOUS from the URI STRING are resolved:
+    URI="" and `#xpointer(/)` (whole document), `#NCName` and `#xpointer(id('NCName'))` (that id).
+    Everything else — a URI-less/transform-selected reference, an XPath/full-XPointer expression, a
+    cross-document URI — is 'unknown': the oracle then REFUSES to assert a coverage mismatch on it
+    (near-zero-FP; c14n/transform semantics are deliberately out of scope, so a reference we cannot
+    resolve is NOT evidence the signature fails to cover the consumed element)."""
+    if uri == "":
+        return ("whole", None)
+    if not uri.startswith("#"):
+        return ("unknown", None)
+    frag = uri[1:].strip()
+    if _SAML_XPTR_ROOT_RE.match(frag):
+        return ("whole", None)
+    m = _SAML_XPTR_ID_RE.match(frag)
+    if m:
+        return ("id", m.group("id"))
+    if _SAML_BARENAME_RE.match(frag):
+        return ("id", frag)
+    return ("unknown", None)
+
+
 def saml_forgery_oracle(xml: Any) -> OracleSignal:
     """Fire (SAML_STRUCTURAL_FORGERY) iff the captured SAML Response ``xml`` exhibits a coarse, c14n-free
     STRUCTURAL forgery invariant a validly signed assertion cannot: (a) the assertion carrying the
@@ -2380,17 +2413,23 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
 
     # Signatures exist — determine whether ANY covers the consumed assertion or one of its ancestors.
     referenced_ids: set[str] = set()
-    whole_doc_sig = False  # a ds:Reference URI="" is an enveloped signature over the WHOLE document
+    whole_doc_sig = False       # a ds:Reference URI="" / #xpointer(/) covers the WHOLE document
+    unadjudicable_ref = False   # a reference we cannot resolve to a bare id/whole-doc (URI-less +
+                                # transform-selected, XPath, full XPointer): its coverage is UNKNOWN, so
+                                # we must NOT treat it as a mismatch (the review's XPointer/URI-less FP).
     for sig in signatures:
         for ref in sig.iter(f"{DS}Reference"):
             uri = ref.get("URI")
             if uri is None:
+                unadjudicable_ref = True   # URI-less: selects nodes via Transforms — not string-decidable
                 continue
-            uri = uri.strip()
-            if uri == "":
+            kind_ref, rid = _saml_resolve_ref(uri.strip())
+            if kind_ref == "whole":
                 whole_doc_sig = True
+            elif kind_ref == "id":
+                referenced_ids.add(rid)
             else:
-                referenced_ids.add(uri[1:] if uri.startswith("#") else uri)
+                unadjudicable_ref = True
 
     consumed_chain_ids: set[str] = set()
     if consumed_id:
@@ -2420,7 +2459,9 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
     consumed_has_own_sig = any(True for _ in consumed_assertion.iter(f"{DS}Signature"))
 
     # ---- invariant (c): signature-wrapping shape (the dual of wrap_assertion_xsw) ------------------
-    if len(assertions) >= 2 and not consumed_has_own_sig and (referenced_ids & other_ids):
+    # Only when the reference set is FULLY resolvable — an unadjudicable (transform/xpath) reference
+    # could be the one that actually covers the consumed assertion, so we refuse to assert wrapping.
+    if len(assertions) >= 2 and not consumed_has_own_sig and not unadjudicable_ref and (referenced_ids & other_ids):
         signed_siblings = sorted(referenced_ids & other_ids)
         return OracleSignal(
             kind=kind, fired=True, confidence=0.95,
@@ -2433,7 +2474,11 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
                       "signed_sibling_ids": signed_siblings})
 
     # ---- invariant (b): ds:Reference/@URI does not cover the consumed element ----------------------
-    if consumed_chain_ids and referenced_ids:
+    # Fire ONLY when EVERY reference resolved to a bare id/whole-doc form (nothing unadjudicable) and
+    # none of them covers the consumed chain. An unresolvable reference (transform/xpath) means the
+    # coverage picture is incomplete — we cannot PROVE a mismatch, so we refuse (the review's FP: a
+    # validly-signed assertion using `#xpointer(id('X'))` / `#xpointer(/)` / a URI-less transform ref).
+    if consumed_chain_ids and referenced_ids and not unadjudicable_ref:
         return OracleSignal(
             kind=kind, fired=True, confidence=0.9,
             evidence=(f"ds:Reference/@URI covers {sorted(referenced_ids)} but the consumed assertion and "
@@ -2443,12 +2488,15 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
                       "consumed_chain_ids": sorted(consumed_chain_ids),
                       "referenced_ids": sorted(referenced_ids)})
 
-    # Signatures present but too little structure to PROVE a mismatch (no by-id references, or the
-    # consumed assertion has no id to compare) — refuse rather than guess (near-zero-FP).
+    # Signatures present but coverage is not string-decidable — no by-id references, the consumed
+    # assertion has no id to compare, OR at least one reference is a transform/xpath/full-XPointer form
+    # this oracle deliberately does not parse (c14n out of scope). Refuse rather than guess (near-zero-FP).
     return OracleSignal(
         kind=kind, fired=False, confidence=0.0,
         evidence=("no c14n-free structural forgery invariant holds (signatures present but no provable "
-                  "reference mismatch / wrapping shape) — inconclusive, stays a lead"),
+                  "reference mismatch / wrapping shape" +
+                  ("; a transform/xpath/URI-less reference is present whose coverage this oracle does not "
+                   "adjudicate" if unadjudicable_ref else "") + ") — inconclusive, stays a lead"),
         observed={"assertions": len(assertions), "signatures": len(signatures),
                   "consumed_assertion_id": consumed_id, "referenced_ids": sorted(referenced_ids),
-                  "whole_doc_sig": whole_doc_sig})
+                  "whole_doc_sig": whole_doc_sig, "unadjudicable_ref": unadjudicable_ref})

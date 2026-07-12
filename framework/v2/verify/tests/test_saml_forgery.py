@@ -112,6 +112,45 @@ def test_does_not_fire_on_response_level_signature_covering_the_assertion() -> N
     assert not saml_forgery_oracle(xml).fired
 
 
+def _assertion_raw_ref(aid: str, nameid: str, refs: str) -> str:
+    """A signed saml:Assertion whose ds:SignedInfo carries the RAW ``refs`` markup (arbitrary
+    ds:Reference forms) — for the spec-legal same-document reference variants the bare-#id helper
+    can't express."""
+    return (f'<saml:Assertion ID="{aid}"><saml:Subject><saml:NameID>{nameid}</saml:NameID>'
+            f'</saml:Subject><ds:Signature><ds:SignedInfo>{refs}</ds:SignedInfo>'
+            f'<ds:SignatureValue>QUFB</ds:SignatureValue></ds:Signature>'
+            f'<saml:Conditions/></saml:Assertion>')
+
+
+def test_does_not_fire_on_xpointer_id_reference() -> None:
+    # regression [review HIGH]: `#xpointer(id('_a1'))` is a spec-legal same-document reference that
+    # selects the SAME element as the bare `#_a1` shorthand — it COVERS the consumed assertion, so a
+    # validly-signed assertion using it must NOT be flagged as forgeable.
+    xml = _response(_assertion_raw_ref("_a1", "alice@corp.test",
+                                       '<ds:Reference URI="#xpointer(id(&apos;_a1&apos;))"></ds:Reference>'))
+    assert not saml_forgery_oracle(xml).fired
+
+
+def test_does_not_fire_on_whole_document_xpointer() -> None:
+    # regression: `#xpointer(/)` selects the whole document (equivalent to URI="") — whole-doc coverage.
+    xml = _response(_assertion_raw_ref("_a1", "alice@corp.test",
+                                       '<ds:Reference URI="#xpointer(/)"></ds:Reference>'))
+    assert not saml_forgery_oracle(xml).fired
+
+
+def test_does_not_fire_on_transform_selected_uriless_reference() -> None:
+    # regression: a URI-less ds:Reference selects nodes via its Transforms (coverage not string-decidable),
+    # plus a #_ki reference to a KeyInfo Object. The oracle must REFUSE to assert a mismatch rather than
+    # read the transform-covered assertion as unsigned.
+    refs = ('<ds:Reference><ds:Transforms><ds:Transform '
+            'Algorithm="http://www.w3.org/TR/1999/REC-xpath-19991116"/></ds:Transforms></ds:Reference>'
+            '<ds:Reference URI="#_ki"></ds:Reference>')
+    xml = _response(_assertion_raw_ref("_a1", "alice@corp.test", refs))
+    sig = saml_forgery_oracle(xml)
+    assert not sig.fired
+    assert sig.observed.get("unadjudicable_ref") is True
+
+
 def test_does_not_fire_on_benign_saml_metadata_doc() -> None:
     md = ('<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" '
           'entityID="urn:example:sp"><md:SPSSODescriptor '
