@@ -111,7 +111,7 @@ class ProbeSurfaceTool:
         try:
             from ...scanner.checks import REFLECTED_XSS
             from ...scanner.engine import AuditEngine
-            from ...scanner.insertion import HttpRequest
+            from ...scanner.insertion import HttpRequest, InsertionKind
         except Exception as e:
             return ToolResult(ok=False, note=f"probe_surface could not load the scanner check to wrap: {e}")
         check = self._check if self._check is not None else REFLECTED_XSS
@@ -120,7 +120,12 @@ class ProbeSurfaceTool:
             headers=[("User-Agent", "OBSIDIAN/1.0 (authorized owner-test)")])
         try:
             engine = AuditEngine(self._send, max_requests=self._max_requests)
-            findings = engine.audit(request, checks=(check,))
+            # Target the endpoint lead's QUERY-VALUE parameters — the canonical reflected-parameter
+            # surface a URL lead exposes. Scoping the probe to the values (not path segments / param
+            # names) keeps it precise and bounded: it never rewrites the path, so it cannot trip a
+            # server's own not-found/error page, and it confirms only a real parameter reflection.
+            findings = engine.audit(request, checks=(check,),
+                                    insertion_kinds=(InsertionKind.QUERY_VALUE,))
         except Exception as e:
             return ToolResult(ok=False, note=f"probe error: {e}")
         minted = bool(findings)
