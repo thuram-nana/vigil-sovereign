@@ -829,6 +829,10 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
             # autonomous behaviour is byte-identical). --autonomous-lookahead switches selection to
             # depth-2 lookahead toward the crown-jewel objectives (still gated, still deterministic).
             lookahead_depth=(2 if getattr(args, "autonomous_lookahead", False) else 1),
+            # W2.2d — opt-in SECOND gated tool: a `declared_service` reachability re-check driven
+            # through the full fail-closed invoke_tool chain, folding a LEAD into the world-model.
+            # Default off → byte-identical; localhost/authorized-only (an out-of-scope host refuses).
+            enable_reachability=bool(getattr(args, "autonomous_reachability", False)),
             blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
             # LEARN — opt in (default OFF) to writing this run's confirm/refute outcomes to the
             # operator's targets/<slug>/outcomes.json, closing the learning loop the meta-monitor
@@ -978,6 +982,14 @@ def main(argv: list[str]) -> int:
                         help="Bounded number of OODA cycles for --autonomous (default 1).")
     parser.add_argument("--autonomous-budget", type=int, default=8, metavar="N",
                         help="Request budget the autonomous planner is constructed with (default 8).")
+    parser.add_argument("--autonomous-reachability", action="store_true",
+                        help="Let the --autonomous loop also drive a gated `declared_service` "
+                             "reachability re-check of the engagement host (a SECOND gated tool "
+                             "beyond reverify_finding). It runs through the FULL fail-closed chain "
+                             "(kill-switch/entitlement/scope/destructive/egress) — an out-of-scope "
+                             "host or a tripped kill-switch REFUSES it — and folds its output into "
+                             "the world-model as intel-tier LEADS, never facts (only an oracle "
+                             "promotes). Off by default (byte-identical).")
     parser.add_argument("--autonomous-lookahead", action="store_true",
                         help="Use bounded MULTI-STEP lookahead (depth-2) for --autonomous action "
                              "selection instead of one-step greedy (default off = byte-identical). "

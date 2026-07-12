@@ -183,6 +183,14 @@ class AutonomyResult:
     world_nodes_after: int = 0
     outcomes_credited: int = 0         # LEARN — confirm/refute outcomes written to the persistent OutcomeLedger
     learner_persisted: bool = False    # LEARN — the enriched ledger was saved to targets/<slug>/outcomes.json
+    # W2.2d — the SECOND gated autonomous tool: a `declared_service` reachability re-check driven
+    # through the FULL invoke_tool gate chain, folding a LEAD observation into the world-model.
+    reachability_driven: bool = False  # the reachability re-check was attempted (opt-in)
+    reachability_tool: str = ""        # the gated tool driven ("declared_service")
+    reachability_host: str = ""        # the host the re-check acted on (scope-gated)
+    reachability_refused: bool = False # a fail-closed gate declined it (kill-switch / out-of-scope)
+    reachability_gate: str = ""        # which gate refused (when refused)
+    reachability_applied: int = 0      # world-model observations the re-check folded as LEADS (never facts)
     notes: list[str] = field(default_factory=list)
 
 
@@ -742,6 +750,110 @@ def _fold_observation(world: "WorldModel | None", surface: str, verdict: str) ->
 
 
 # ---------------------------------------------------------------------------
+# W2.2d — a SECOND gated autonomous tool: a `declared_service` reachability re-check.
+#
+# Beyond `reverify_finding`, the loop can drive a gated `declared_service` re-check of the
+# engagement host derived from the confirmed findings. It runs through the SAME fail-closed chain
+# (via sensors.pipeline.run_sensor -> agents.tools.invoke_tool: kill-switch -> entitlement -> scope
+# -> destructive -> egress), so a tripped kill-switch OR an out-of-scope host REFUSES it and it
+# mints nothing. When it runs it folds its output into the world-model as intel-tier OBSERVATIONS
+# (GROUNDING_INTEL) — LEADS, never facts: a Sensor never writes a Finding, and only a deterministic
+# oracle can later promote an observation. Deterministic: the (host, services) are derived from the
+# findings in a fixed order and projected at a seq computed from the world's own clock (no rng).
+# ---------------------------------------------------------------------------
+
+
+def _reachability_registry() -> Any:
+    """A registry carrying the SAFE Tier-1 no-egress ``declared_service`` sensor. Built on demand so
+    the default autonomous path (reachability off) never imports the sensor stack."""
+    from .agents.tools.base import ToolRegistry
+    from .sensors.builtin import DeclaredServiceSensor
+    reg = ToolRegistry()
+    reg.register(DeclaredServiceSensor())
+    return reg
+
+
+def _reachability_target(findings: list) -> "tuple[str, list[dict]] | None":
+    """Derive the (host, services) to re-check from the confirmed findings' endpoints, DETERMIN-
+    ISTICALLY (findings scanned in a fixed sorted order; the first parseable host wins). The
+    service is the endpoint's own scheme/port — the re-check asks 'is the host CRUCIBLE already
+    reached still declared reachable on this service?'. None when no finding carries a host."""
+    from urllib.parse import urlsplit
+    for f in sorted(findings, key=lambda f: (str(getattr(f, "endpoint", "") or ""),
+                                             str(getattr(f, "bug_class", "") or ""))):
+        ep = str(getattr(f, "endpoint", "") or "")
+        if not ep:
+            continue
+        parts = urlsplit(ep)
+        host = parts.hostname
+        if not host:
+            continue
+        scheme = (parts.scheme or "http").lower()
+        try:
+            port = parts.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            port = 443 if scheme == "https" else 80
+        return host, [{"port": int(port), "protocol": "tcp", "service": scheme, "state": "open"}]
+    return None
+
+
+def _drive_reachability(world: "WorldModel | None", findings: list, ctx: Any, sink: Any,
+                        slug: str, out: "AutonomyResult") -> None:
+    """Drive the gated ``declared_service`` reachability re-check ONCE for the engagement host and
+    fold its observations into the run world-model as LEADS. Records telemetry on ``out``. Fully
+    gated + fail-closed via ``run_sensor``; best-effort/total — it never sinks the cycle and never
+    mints a fact. A refusal (kill-switch / out-of-scope) folds nothing and is recorded as such."""
+    out.reachability_driven = True
+    out.reachability_tool = "declared_service"
+    target = _reachability_target(findings)
+    if target is None:
+        out.notes.append("reachability: no finding carried a host to re-check (skipped)")
+        return
+    host, services = target
+    out.reachability_host = host
+    try:
+        from .intel.ingest import IntelIngest
+        from .sensors.pipeline import run_sensor
+    except Exception:
+        return
+    try:
+        ingest = IntelIngest(world if world is not None else _new_world(),
+                             engagement_slug=slug)
+        # a seq strictly above the world's clock so folding a lead never inverts monotonic time.
+        seq = _world_seq(world)
+        sr = run_sensor(_reachability_registry(), "declared_service",
+                        {"host": host, "services": services}, ctx, ingest=ingest, seq=seq, sink=sink)
+        res = getattr(sr, "result", None)
+        out.reachability_refused = bool(getattr(res, "refused", False))
+        out.reachability_gate = str(getattr(res, "gate", "") or "")
+        out.reachability_applied = int(getattr(sr, "applied", 0) or 0)
+        if out.reachability_refused:
+            out.notes.append(f"reachability: re-check REFUSED at gate {out.reachability_gate!r} "
+                             f"(fail-closed) — folded nothing")
+        else:
+            out.notes.append(f"reachability: re-check on {host} folded {out.reachability_applied} "
+                             f"lead observation(s) (intel-tier; never a fact)")
+    except Exception:
+        pass
+
+
+def _new_world() -> Any:
+    from .worldmodel.graph import WorldModel
+    return WorldModel()
+
+
+def _world_seq(world: "WorldModel | None") -> int:
+    """A monotonic seq strictly above the world's current clock (so a folded observation never
+    inverts time). Deterministic — a pure function of the world's node clocks (no wallclock/rng)."""
+    if world is None:
+        return 1
+    try:
+        return max((int(getattr(n, "last_seen", 0) or 0) for n in world.all_nodes()), default=0) + 1
+    except Exception:
+        return 1
+
+
+# ---------------------------------------------------------------------------
 # DRIVE — tick the constructed Coordinator so the wired advisory agents RUN IN-LOOP.
 #
 # These mirror the loop's authoritative facts + its own reasoning trace onto the event spine and
@@ -867,6 +979,7 @@ def run_autonomous_cycle(
     smt_regions: Any = None,
     persist_learning: bool = False,
     lookahead_depth: int = 1,
+    enable_reachability: bool = False,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1044,6 +1157,12 @@ def run_autonomous_cycle(
             out.planner_driven = True
         out.cycles.append(step)
 
+    # W2.2d — the SECOND gated autonomous tool (opt-in). Drive a `declared_service` reachability
+    # re-check of the engagement host through the FULL fail-closed gate chain and fold its output
+    # into the world-model as intel-tier LEADS (never facts). Default off → byte-identical.
+    if enable_reachability:
+        _drive_reachability(world, findings, ctx, sink, slug, out)
+
     out.critic_verdicts = _count_kind(blackboard, slug, "critic_verdict")
     out.reflections = _count_kind(blackboard, slug, "reflection")
     out.world_nodes_after = world.node_count if world is not None else 0
@@ -1094,6 +1213,15 @@ def render_summary(out: AutonomyResult) -> list[str]:
                      f"deprioritised (advisory; not gated)")
     if out.fused_observations:
         lines.append(f"    fused sensors   : {out.fused_observations} observation(s) (WS-B)")
+    if out.reachability_driven:
+        if out.reachability_refused:
+            lines.append(f"    reachability    : {out.reachability_tool} on "
+                         f"{out.reachability_host or '(no host)'} REFUSED @ gate "
+                         f"{out.reachability_gate} (fail-closed)")
+        else:
+            lines.append(f"    reachability    : {out.reachability_tool} on "
+                         f"{out.reachability_host or '(no host)'} → folded "
+                         f"{out.reachability_applied} lead(s) (intel-tier; never a fact)")
     for s in out.cycles:
         if s.refused:
             lines.append(f"    [cycle {s.cycle}] picked {s.picked_label} → {s.tool} "

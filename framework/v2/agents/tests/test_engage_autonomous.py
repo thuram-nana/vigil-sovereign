@@ -914,3 +914,85 @@ def test_lookahead_without_crownjewel_degrades_to_greedy():
                                                   list(findings)),
                                 slug="alpha", request_budget=2, lookahead_depth=2, prompt_callback=_deny)
     assert greedy.cycles[0].picked_bug_class == look.cycles[0].picked_bug_class == "xss"
+
+
+# ---------------------------------------------------------------------------
+# (15) W2.2d — the SECOND gated autonomous tool: a `declared_service` reachability
+#      re-check driven through the FULL invoke_tool gate chain. It folds a LEAD into
+#      the world-model (never a fact), and a tripped kill-switch / out-of-scope host
+#      REFUSES it (fail-closed). Default off → byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def test_reachability_default_off_is_byte_identical():
+    """Without enable_reachability the second tool never runs — no telemetry, no extra world nodes."""
+    world = _greedy_world(["http://10.0.0.5/x"])
+    result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+    before = world.node_count
+    out = run_autonomous_cycle(result, slug="alpha", prompt_callback=_deny)
+    assert out.reachability_driven is False
+    assert out.reachability_applied == 0
+    assert world.node_count == before  # the reverify tool folds attrs only; reachability added nothing
+
+
+def test_reachability_recheck_is_gated_and_folds_a_lead(isolated_engagement):
+    """In-scope: the gated `declared_service` re-check RUNS through invoke_tool and folds intel-tier
+    LEADS (a HOST + SERVICE) into the world-model — never a fact (no oracle_context; intel tier)."""
+    isolated_engagement("alpha", "10.0.0.5")   # the re-check host is in charter scope
+    world = _greedy_world(["http://10.0.0.5/x"])
+    result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+
+    assert out.reachability_driven is True
+    assert out.reachability_tool == "declared_service"
+    assert out.reachability_host == "10.0.0.5"
+    assert out.reachability_refused is False and out.reachability_gate == ""
+    assert out.reachability_applied >= 1, "the gated re-check folded no lead observation"
+    # the fold is a real LEAD in the world-model (a declared HOST), never a Finding/fact.
+    assert world.has_node("host:10.0.0.5")
+    # ADVISORY-ONLY: the authoritative report is untouched by the second tool.
+    assert {f.bug_class for f in result.report.active_findings} == {"xss"}
+
+
+def test_reachability_recheck_refused_out_of_scope(isolated_engagement):
+    """Fail-closed: a re-check host NOT on the charter is REFUSED at the scope gate and folds nothing
+    (only 127.0.0.1 is in scope here; the finding host is t.invalid)."""
+    isolated_engagement("alpha", "127.0.0.1")
+    world = _greedy_world(["https://t.invalid/x"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/x", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+
+    assert out.reachability_driven is True
+    assert out.reachability_host == "t.invalid"
+    assert out.reachability_refused is True
+    assert out.reachability_gate == "scope"
+    assert out.reachability_applied == 0
+    assert not world.has_node("domain:t.invalid") and not world.has_node("host:t.invalid")
+
+
+def test_reachability_recheck_refused_by_tripped_killswitch(tmp_path: Path, monkeypatch):
+    """A tripped kill-switch REFUSES the second tool before it runs (the same fail-closed chain as
+    reverify_finding) — it folds nothing."""
+    monkeypatch.setattr(_paths, "killswitch_path", lambda s: tmp_path / f"{s}.halt")
+    KillSwitch("alpha").trip("operator stop")
+    world = _greedy_world(["http://10.0.0.5/x"])
+    result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+
+    assert out.reachability_driven is True
+    assert out.reachability_refused is True
+    assert out.reachability_gate == "kill-switch"
+    assert out.reachability_applied == 0
+
+
+def test_reachability_recheck_is_deterministic(isolated_engagement):
+    isolated_engagement("alpha", "10.0.0.5")
+
+    def run():
+        world = _greedy_world(["http://10.0.0.5/x"])
+        result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+        out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+        return (out.reachability_host, out.reachability_refused, out.reachability_gate,
+                out.reachability_applied)
+
+    assert run() == run(), "the gated reachability re-check is not deterministic"
