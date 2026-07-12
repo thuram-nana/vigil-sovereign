@@ -44,17 +44,19 @@ AEGIS ships inside CRUCIBLE and runs locally (loopback) — no cloud, no telemet
 |-------|-----------|-----------|
 | `sqli_attempt` | the value provably breaks out of a SQL string literal into query structure, anchored at the break-out (a self-tautology `OR 1=1` / `UNION SELECT` / a full stacked statement `; DROP TABLE`) | the request alone |
 | `command_injection_attempt` | a dangerous command invoked with a shell argument, inside a substitution (`$(cat /etc/passwd)`) or after a real separator (`; cat /etc/passwd`, `\| nc <ip>`) | the request alone |
+| `nosql_injection_attempt` | a **known** MongoDB query operator (`$ne`/`$gt`/`$where`/`$regex`/`$in`/`$or`…) injected as a **key** where a scalar was expected — a bracket/dot param name (`user[$ne]=1`, `q[$gt]=0`, `user.$ne`) or a JSON-object value/body (`{"$ne":null}`, `{"user":{"$in":[1,2]}}`). The EJSON/JSON-Schema/DBRef `$`-keys (`$oid`, `$date`, `$schema`, `$ref`) and a `$`-prefixed **value** (`$5.00`, `["$ne"]`) are **not** blocked | the request alone |
 | `automated_access` | a fetch of a seeded honeypot path no human UI links | the request alone |
 | `xss` (reflected) | a request value reflected **verbatim** whose executable token reached a live executable HTML context (an HTML‑encoded reflection is **not** blocked) | the app's response |
 | `ssti` | a request value carried a template-wrapped arithmetic expression (`{{7*7}}`, `${7*7}`, `#{7*7}`, `<%= 7*7 %>`, `*{7*7}`, `@(7*7)`) that the server **evaluated** — the ≥2-digit result appears at a digit boundary and the raw template is gone (a **reflected** template is **not** blocked) | the app's response |
 | `path_traversal` | a request value walked the path toward a sensitive file (a real `../`-style traversal indicator) **and** a strict `/etc/passwd`-signature line surfaced in the response — and the value is **not** merely reflected verbatim (a docs/search page echoing `/etc/passwd` is **not** blocked) | the app's response |
 
-The two request-side classes prove a **structured attack attempt**; the three response-side classes
+The three request-side classes prove a **structured attack attempt**; the three response-side classes
 (`xss`, `ssti`, `path_traversal`) prove **exploitation** — the app actually reflected the payload,
 evaluated the expression, or leaked the file. The oracles are deliberately conservative — a benign
 apostrophe (`O'Brien`), a comparison (`id > 1000`), a tool string (`python-requests/2.28.1`), delimited
-data (`Name \| Age`), a pasted SQL query, a coincidental `49` beside a reflected `{{ 7 * 7 }}`, a page
-that documents `/etc/passwd`, or a prose em-dash never trip a block. Request-side oracles inspect the
+data (`Name \| Age`), a pasted SQL query, a price `$5.00`, a Mongo-export `{"$oid": …}` / `{"$date": …}`
+body, an operator named as a data **value** (`["$ne"]`), a coincidental `49` beside a reflected
+`{{ 7 * 7 }}`, a page that documents `/etc/passwd`, or a prose em-dash never trip a block. Request-side oracles inspect the
 query string **and** header/cookie values (bounded to a safe surface). **Note for code-accepting apps**
 (paste bins, dev Q&A, bug trackers): user content that *is* attack syntax (a shared `$(cat ...)`
 snippet, a pasted injection payload) will be flagged — run such apps in `observe` and review before

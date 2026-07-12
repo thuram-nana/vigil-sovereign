@@ -41,10 +41,16 @@ _WSB_CLASSES = {"jwt_forgeable"}
 # ctx no benchmark/scan finding carries).
 _NW1_KINDS = {OracleKind.SAML_STRUCTURAL_FORGERY}
 _NW1_CLASSES = {"saml_structural_forgery"}
+# Wave-G2 (request-side NoSQL operator-injection break-out oracle) additive kind/class: SAME
+# frozen-fallback discipline — a NEW OracleKind kept OUT of _ALL_ORACLES, reachable ONLY via its
+# `nosql_injection_attempt` BUG_CLASS_ORACLES row (keyed on the SAME `request_payload` ctx field the
+# sqli/cmdi request-side parse-proof oracles use, which no benchmark/scan finding carries).
+_G2_KINDS = {OracleKind.NOSQL_INJECTION_BREAKOUT}
+_G2_CLASSES = {"nosql_injection_attempt"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
-_EXCLUDED_KINDS = _AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
+_EXCLUDED_KINDS = _AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS | _G2_KINDS
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",
@@ -55,10 +61,10 @@ _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injectio
 
 
 def test_all_oracles_fallback_is_frozen_to_pre_aegis_members():
-    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 25 — the
-    # 4 AEGIS telemetry kinds + the 2 request-side parse-proof kinds + the WS-3 k8s-posture kind + the
-    # WS-B sso-assertion-forgery kind + the NW-1 saml-structural-forgery kind + the Wave-F1 cloud-posture
-    # kind are all excluded).
+    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 26 — the
+    # 4 AEGIS telemetry kinds + the 3 request-side parse-proof kinds (sqli/cmdi/nosql) + the WS-3
+    # k8s-posture kind + the WS-B sso-assertion-forgery kind + the NW-1 saml-structural-forgery kind +
+    # the Wave-F1 cloud-posture kind are all excluded).
     assert len(V._ALL_ORACLES) == 15
     assert set(V._ALL_ORACLES) == set(OracleKind) - _EXCLUDED_KINDS
     # and it is NOT derived from the enum (that would have grown it past 15).

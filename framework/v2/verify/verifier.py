@@ -144,6 +144,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # leaves the unknown-class fallback and `make gate` byte-identical.
     "sqli_attempt": (OracleKind.SQL_INJECTION_BREAKOUT,),
     "command_injection_attempt": (OracleKind.COMMAND_INJECTION_BREAKOUT,),
+    # Wave-G2 NoSQL (MongoDB-style) operator injection — the request-side sibling of the two above. A
+    # request value/param PROVABLY injects a MongoDB query operator as a KEY where a scalar was expected
+    # (`user[$ne]=1`, `{"user":{"$ne":null}}`, `q[$gt]=0`, `$where`) — judged on the REQUEST ALONE. Proves
+    # a STRUCTURED NoSQL operator-injection ATTEMPT (re-runnable), NOT exploitation (an app that coerces
+    # the param to a string is still safe; the response-side oracles prove exploitation). This NEW
+    # OracleKind is reachable ONLY via this row — it is NOT in the frozen _ALL_ORACLES fallback — and fires
+    # only when the ctx carries `request_payload` (the SAME key sqli_attempt uses), which no
+    # benchmark/scan/engage finding does. So appending it leaves the unknown-class fallback and `make gate`
+    # byte-identical.
+    "nosql_injection_attempt": (OracleKind.NOSQL_INJECTION_BREAKOUT,),
     # Workstream-3 (dormant-sensor promotion): a kube-bench CIS-control-failure LEAD
     # (sensors.k8s_runtime) becomes a FACT only when the k8s-posture oracle re-derives a CONCRETE
     # insecure setting over the RETAINED control (a hard FAIL whose observed value literally carries a
@@ -375,6 +385,17 @@ _ALIASES: dict[str, str] = {
     "saml_offline_forgery": "saml_structural_forgery",
     "saml_unsigned_assertion": "saml_structural_forgery",
     "saml_reference_mismatch": "saml_structural_forgery",
+    # Wave-G2 NoSQL operator-injection ATTEMPT spelling variants fold onto the single canonical class.
+    # NOTE: the LIVE `nosqli` class (and its `no_sqli`/`nosql_injection` aliases — response-side
+    # boolean/differential/error proofs) is deliberately NOT aliased here: a request-side operator-as-key
+    # ATTEMPT (a parse-proof on the request alone) and a live NoSQLi (proven on the app's response) are
+    # distinct proofs and stay distinct classes, exactly as `sqli_attempt` is distinct from `sqli`.
+    "nosqli_attempt": "nosql_injection_attempt",
+    "nosql_operator_injection": "nosql_injection_attempt",
+    "nosql_breakout": "nosql_injection_attempt",
+    "mongo_injection_attempt": "nosql_injection_attempt",
+    "mongodb_injection_attempt": "nosql_injection_attempt",
+    "mongodb_operator_injection": "nosql_injection_attempt",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -645,6 +666,11 @@ class OracleVerifier:
         if kind is OracleKind.COMMAND_INJECTION_BREAKOUT:
             if "request_payload" in ctx:
                 return oracles.command_injection_breakout_oracle(
+                    ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+            return None
+        if kind is OracleKind.NOSQL_INJECTION_BREAKOUT:
+            if "request_payload" in ctx:
+                return oracles.nosql_injection_breakout_oracle(
                     ctx["request_payload"], param=str(ctx.get("payload_param", "")))
             return None
         # -- Workstream-3 k8s posture — fire ONLY when the ctx carries `k8s_control` (a retained

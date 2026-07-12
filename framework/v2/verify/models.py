@@ -63,6 +63,20 @@ class OracleKind(str, enum.Enum):
     # BUG_CLASS_ORACLES rows (keyed on `request_payload`), never the frozen _ALL_ORACLES fallback.
     SQL_INJECTION_BREAKOUT = "sql_injection_breakout"        # a value provably closes a SQL string literal and introduces query STRUCTURE (tautology / UNION SELECT / stacked keyword)
     COMMAND_INJECTION_BREAKOUT = "command_injection_breakout"  # a value contains an unambiguous shell command-execution construct ($(cmd) / `cmd` / separator + known command)
+    # Wave-G2 NoSQL (MongoDB-style) operator injection — the request-side sibling of the two above. Like
+    # them, this is an ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the
+    # SAME `request_payload` ctx field no benchmark/scan/engage finding carries), never via the frozen
+    # unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15). NOSQL_INJECTION_BREAKOUT proves a
+    # STRUCTURED NoSQL operator-injection ATTEMPT (a payload provably injects MongoDB QUERY-OPERATOR
+    # STRUCTURE), NOT that the app is exploited — a $-prefixed KNOWN query operator (`$ne`/`$gt`/`$where`/
+    # `$regex`/`$in`/`$or`…) appearing as a KEY where a scalar was expected: (a) as a bracket/dot key
+    # SEGMENT of the parameter NAME (`user[$ne]`, `q[$gt]`, `user.$ne`, a bare `$where`) — the framework
+    # nests it into `{user:{$ne:…}}`; or (b) as an object KEY when the VALUE parses to JSON (`{"$ne":null}`,
+    # `{"$gt":""}`). Near-zero-FP by STRUCTURE: the token must be a KNOWN query/logical operator (a curated
+    # allowlist — NOT the EJSON/JSON-Schema/JSON-LD `$oid`/`$date`/`$schema`/`$ref` keys that legitimately
+    # appear in bodies) AND a KEY. A price `$5.00`, `$net`, an email, a regex `^admin$`, a mid-word `$`
+    # (`pass$word`), an operator as a string VALUE (`["$ne"]`), or a plain scalar do NOT fire.
+    NOSQL_INJECTION_BREAKOUT = "nosql_injection_breakout"
     # Workstream-3 posture (the DORMANT-sensor promotions). Like the AEGIS members above, this is an
     # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the `k8s_control`
     # ctx field no benchmark/scan/engage finding carries), never via the frozen unknown-class fallback

@@ -2463,6 +2463,137 @@ def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> Oracl
 
 
 # ---------------------------------------------------------------------------
+# Wave-G2 NoSQL (MongoDB-style) operator-injection break-out oracle (the NOSQL_INJECTION_BREAKOUT kind).
+#
+# The request-side sibling of the SQL/command break-out oracles: it judges a single decoded request
+# value AND its parameter NAME on the REQUEST ALONE, and fires ONLY on a deterministic parse-proof that
+# a MongoDB QUERY OPERATOR was injected as a KEY where the app declared a SCALAR. A fire proves a
+# STRUCTURED NoSQL operator-injection ATTEMPT (a benign user never sends operator-as-key structure), NOT
+# that the app is exploited — an app that coerces the param to a string is still safe. Two re-runnable
+# proofs, each near-zero-FP:
+#   (1) the PARAM NAME carries a `$operator` as a whole bracket/dot KEY SEGMENT — `user[$ne]`, `q[$gt]`,
+#       `a[b][$regex]`, `user.$ne`, or a bare `$where`. The qs/PHP/Express body-parser nests this into
+#       `{user: {$ne: <value>}}`, so a query operator lands where a scalar param was declared.
+#   (2) the VALUE parses to JSON and a `$operator` appears as an object KEY — `{"$ne":null}`, `{"$gt":""}`
+#       (the classic `username={"$ne":1}` auth-bypass blob).
+# Near-zero-FP by STRUCTURE, not signature:
+#   * the token must be a KNOWN QUERY/logical operator (the curated allowlist below). The EJSON /
+#     JSON-Schema / JSON-LD / DBRef `$`-keys (`$oid`, `$date`, `$numberLong`, `$binary`, `$schema`,
+#     `$ref`, `$id`, `$comment`, ...) legitimately appear in bodies and are DELIBERATELY excluded — a
+#     benign export/schema body never fires.
+#   * it must be a KEY. A `$`-prefixed STRING VALUE (`["$ne"]`, `{"note":"use $ne"}`), a price `$5.00`,
+#     `$net`, an email, a regex `^admin$`, a mid-word `$` (`pass$word`), or a plain scalar never fires.
+# Pure/deterministic (no wallclock/rng/io); bounded; ReDoS-safe (fixed alternation, non-backtracking).
+# ---------------------------------------------------------------------------
+
+# The curated set of MongoDB QUERY / logical / evaluation / element / array operators whose appearance as
+# an object KEY is an unambiguous injection signal. Stored WITHOUT the `$`, lowercased for a (?i) match.
+# EJSON type-wrappers, JSON-Schema (`$schema`), JSON-LD, and DBRef (`$ref`/`$id`) keys are intentionally
+# ABSENT — they are legitimate body content and including them would manufacture false positives.
+_NOSQL_OPERATORS: frozenset[str] = frozenset({
+    "ne", "eq", "gt", "gte", "lt", "lte", "in", "nin",     # comparison
+    "or", "and", "nor", "not",                              # logical
+    "exists",                                              # element
+    "where", "expr", "mod", "text", "jsonschema",          # evaluation
+    "all", "elemmatch", "size",                            # array
+})
+# DELIBERATELY EXCLUDED from the BLOCK allowlist (a review proved they false-positive as a hard block):
+#   * `$type`  — also the .NET/System.Text.Json/Newtonsoft polymorphic type-discriminator key
+#     (`{"$type":"Ns.Class, Asm"}`), extremely common benign JSON.
+#   * `$regex` — also the legacy MongoDB Extended-JSON v1 serialization of a BSON regex VALUE
+#     (`{"$regex":"pat","$options":"i"}`, bson.json_util legacy dumps) AND the shape a legitimate
+#     regex-search API accepts. Dual-use → not offline-provable as an ATTEMPT without FPs, so it is
+#     NOT a block (a $regex injection stays a lead at most). Near-zero-FP wins over coverage here.
+# Longest-first alternation so a prefix operator (`gt`) cannot pre-empt its extension (`gte`); the
+# key-segment lookahead below also guards this, but ordering keeps the match unambiguous.
+_NOSQL_OP_ALT = "|".join(sorted(_NOSQL_OPERATORS, key=len, reverse=True))
+# A `$operator` that is a WHOLE BRACKET key segment of a parameter name: preceded by start-of-string or
+# `[`, and followed (lookahead) by end-of-string or `]`. So `user[$ne]`, `q[$gt]`, `a[b][$in]`, and a
+# bare `$where` match; `pass$word`, `cost$negate`, and `$5.00` do NOT. DOT delimiting is deliberately
+# NOT accepted: a JSON body is flattened to dotted param names (`a.b.c`), so a benign body with a literal
+# key like `{"a":{"b.$ne":1}}` would flatten to `a.b.$ne` and a dot-segment rule would FALSE-fire on it
+# (the review's flatten FP). Real JSON operator-KEY injection (`{"user":{"$ne":1}}`) is proven instead by
+# the whole-body scan (`_nosql_operator_key`, which reads the ACTUAL parsed keys) — so dropping the dot
+# form loses only the rarer dot-notation QUERY-STRING variant while eliminating the flatten false positive.
+# Fixed alternation over a length-bounded name → non-backtracking.
+_NOSQL_PARAM_OP_RE = re.compile(r"(?i)(?:^|\[)\$(" + _NOSQL_OP_ALT + r")(?=$|\])")
+_NOSQL_JSON_CAP = 65536      # bound the JSON parse input on the value path (DoS-safe on adversarial input)
+_NOSQL_SCAN_DEPTH = 32       # bound the recursion over a parsed JSON value (stack-safe)
+
+
+def _nosql_operator_key(obj: Any, depth: int = 0) -> str:
+    """The first KNOWN MongoDB operator appearing as an object KEY anywhere in a parsed JSON `obj` (to a
+    bounded depth), returned WITH its `$` (e.g. ``"$ne"``), or "". Only a KEY counts — an operator as a
+    string VALUE or a list element is inert (that is ordinary data / documentation, not query structure)."""
+    if depth > _NOSQL_SCAN_DEPTH:
+        return ""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str) and k[:1] == "$" and k[1:].lower() in _NOSQL_OPERATORS:
+                return "$" + k[1:].lower()
+            hit = _nosql_operator_key(v, depth + 1)
+            if hit:
+                return hit
+    elif isinstance(obj, list):
+        for v in obj[:256]:                                 # bounded fan-out
+            hit = _nosql_operator_key(v, depth + 1)
+            if hit:
+                return hit
+    return ""
+
+
+def _nosql_operator_key_in_json_text(text: str) -> str:
+    """Parse ``text`` as JSON (only when it looks like a container) and return the first operator-as-key,
+    or "". A non-JSON value (a price, an email, a scalar) parses to nothing here and stays inert."""
+    s = text.strip()
+    if s[:1] not in ("{", "[") or len(s) > _NOSQL_JSON_CAP:
+        return ""
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError, RecursionError):
+        return ""
+    return _nosql_operator_key(obj)
+
+
+def nosql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff a request carries a MongoDB QUERY OPERATOR injected as a KEY where a SCALAR was expected —
+    either (1) the PARAM NAME has a `$operator` as a whole BRACKET key segment (`user[$ne]`, `q[$gt]`,
+    `a[b][$in]`, `$where`), which the framework nests into `{user:{$ne:…}}`; or (2) the VALUE parses to
+    JSON with a `$operator` object KEY (`{"$ne":null}`). Proves a STRUCTURED NoSQL operator-injection
+    ATTEMPT, never exploitation. Near-zero-FP: the token must be a KNOWN query operator (curated allowlist
+    — the EJSON/JSON-Schema/DBRef `$`-keys AND the dual-use `$type`/`$regex` are excluded, since they are
+    also legitimate .NET type-discriminators / EJSON regex data) AND a KEY, so a price `$5.00`, `$net`, an
+    email, a regex `^admin$`, a mid-word `$` (`pass$word`), an operator as a string VALUE (`["$ne"]`), and
+    a plain scalar all stay inert. Pure/deterministic; bounded; ReDoS-safe."""
+    kind = OracleKind.NOSQL_INJECTION_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    name = param if isinstance(param, str) else str(param if param is not None else "")
+    # (1) the PARAM NAME injects an operator as a nested bracket/dot KEY -> a query operator lands where a
+    #     scalar param was declared. The strongest proof: it is proven by the request's own key structure.
+    m = _NOSQL_PARAM_OP_RE.search(name)
+    if m:
+        op = "$" + m.group(1).lower()
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"parameter {name!r} injects the MongoDB query operator {op!r} as a nested key where "
+                      f"a scalar was expected — a structured NoSQL operator-injection attempt"),
+            observed={"param": name, "operator": op, "vector": "operator_as_param_key", "break_out": True})
+    # (2) the VALUE is a JSON object literal whose KEY is a known operator (`username={"$ne":null}`).
+    op = _nosql_operator_key_in_json_text(text)
+    if op:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"value parses to JSON carrying the MongoDB query operator {op!r} as an object key "
+                      f"where a scalar was expected — a structured NoSQL operator-injection attempt"),
+            observed={"param": name, "operator": op, "vector": "operator_as_json_key", "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("no NoSQL operator-injection structure (a $-prefixed KNOWN query operator as a KEY where "
+                  "a scalar was expected); a $ in text/a price/an operator-shaped string value is inert"),
+        observed={"param": name})
+
+
+# ---------------------------------------------------------------------------
 # Workstream-B SSO/JWT structural-forgery oracle (the SSO_ASSERTION_FORGERY kind).
 #
 # Judged on a captured JWT ALONE — offline, deterministic, ZERO forged traffic to any target. It
