@@ -258,6 +258,13 @@ class FindingContext(BaseModel):
     credstuff_p0: float | None = None
     credstuff_fwer: float | None = None
 
+    # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway) — a single
+    # DECODED request-parameter value, judged on the REQUEST ALONE. request_payload is the value;
+    # payload_param names the insertion point (rides on the certificate). Proves a STRUCTURED
+    # INJECTION ATTEMPT (SQL string-literal break-out / shell command construct), never exploitation.
+    request_payload: str | None = None
+    payload_param: str | None = None
+
     # version_range_oracle (a package version provably falls in an advisory's affected range)
     version_advisory: dict[str, Any] | None = None
     # policy_path_oracle (a real IAM grant path lets a principal reach a resource) — the retained raw
@@ -569,6 +576,25 @@ class FindingContext(BaseModel):
         )
 
     @classmethod
+    def from_request_payload(
+        cls,
+        payload: str,
+        *,
+        bug_class: str,
+        param: str = "",
+    ) -> "FindingContext":
+        """A single DECODED request-parameter value, for the AEGIS request-side parse-proof oracles
+        (``sqli_attempt`` -> SQL string-literal break-out; ``command_injection_attempt`` -> shell
+        command-execution construct). Judged on the REQUEST ALONE — proves a STRUCTURED INJECTION
+        ATTEMPT, never exploitation. The value must already be percent-/entity-decoded by the caller
+        (the gateway decodes at the insertion point)."""
+        return cls(
+            bug_class=bug_class,
+            request_payload=_coerce_text(payload),
+            payload_param=_coerce_text(param),
+        )
+
+    @classmethod
     def from_auth_activity(
         cls,
         auth_events: Sequence[Mapping[str, Any]],
@@ -687,6 +713,10 @@ class FindingContext(BaseModel):
             ctx["honeypot_paths"] = self.honeypot_paths
             if self.crawler_allowlisted is not None:
                 ctx["crawler_allowlisted"] = self.crawler_allowlisted
+        if self.request_payload is not None:
+            ctx["request_payload"] = self.request_payload
+            if self.payload_param is not None:
+                ctx["payload_param"] = self.payload_param
         if self.auth_events is not None:
             ctx["auth_events"] = self.auth_events
             if self.benign_sources is not None:

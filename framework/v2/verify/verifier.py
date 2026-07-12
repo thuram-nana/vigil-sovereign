@@ -134,6 +134,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # UNSEEN (account, source) pairs (ATO), Holm-controlled across identities. A failed-only burst
     # (NAT/CGNAT bulk) yields no SPRT round and stays a LEAD — never confirmed.
     "credential_stuffing": (OracleKind.CREDENTIAL_STUFFING,),
+    # AEGIS request-side PARSE-PROOF (the inline "provable firewall" gateway). A request-parameter
+    # value PROVABLY breaks out of a SQL string literal into query structure, or contains an
+    # unambiguous shell command-execution construct — judged on the REQUEST ALONE. Proves a
+    # STRUCTURED INJECTION ATTEMPT (re-runnable), NOT exploitation (an app that parameterises is still
+    # safe; the response-side oracles prove exploitation). These NEW OracleKind members are reachable
+    # ONLY via these rows — they are NOT in the frozen _ALL_ORACLES fallback — and fire only when the
+    # ctx carries `request_payload`, which no benchmark/scan/engage finding does. So appending them
+    # leaves the unknown-class fallback and `make gate` byte-identical.
+    "sqli_attempt": (OracleKind.SQL_INJECTION_BREAKOUT,),
+    "command_injection_attempt": (OracleKind.COMMAND_INJECTION_BREAKOUT,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -516,6 +526,18 @@ class OracleVerifier:
                     **{k: ctx[f"credstuff_{k}"] for k in ("alpha", "beta", "p1", "p0", "fwer")
                        if f"credstuff_{k}" in ctx},
                 )
+            return None
+        # -- AEGIS request-side parse-proof — fire ONLY when the ctx carries `request_payload`; no
+        #    benchmark/scan/engage finding does, so these are inert on the gate path.
+        if kind is OracleKind.SQL_INJECTION_BREAKOUT:
+            if "request_payload" in ctx:
+                return oracles.sql_injection_breakout_oracle(
+                    ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+            return None
+        if kind is OracleKind.COMMAND_INJECTION_BREAKOUT:
+            if "request_payload" in ctx:
+                return oracles.command_injection_breakout_oracle(
+                    ctx["request_payload"], param=str(ctx.get("payload_param", "")))
             return None
         return None
 

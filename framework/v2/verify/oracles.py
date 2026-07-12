@@ -1807,3 +1807,154 @@ def policy_path_oracle(observed_policy: Any) -> OracleSignal:
         observed={"principal": start, "resource": target, "requested_access": requested,
                   "grant_holder": holder, "granted_access": granted, "path": path_steps,
                   "hops": len(path_steps) - 1})
+
+
+# ---------------------------------------------------------------------------
+# AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
+#
+# These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They
+# fire ONLY on a deterministic PARSE-PROOF that the value breaks grammar — mirroring how
+# reflection_context_oracle PARSES to prove an executable context rather than substring-matching. A
+# fire proves a STRUCTURED INJECTION ATTEMPT (a benign user never sends grammar-breaking SQL/shell),
+# NOT that the app is exploited — an app that parameterises is still safe, and the response-side
+# oracles (differential/error_signature/reflection_context) are what prove exploitation. The bar is
+# deliberately TIGHT for near-zero false positives: raw payload signatures / lone metacharacters stay
+# a LEAD (belief-raising), never a fire. Pure and deterministic (no wallclock/rng); ReDoS-safe
+# (fixed-alternation, non-backtracking regexes over a length-capped value).
+# ---------------------------------------------------------------------------
+
+# Structured SQL tokens that, appearing in QUERY context after a string-literal break-out, prove the
+# value altered the query grammar. Word-boundaried so `ORdinary`/`ANDes` never match.
+_SQL_STRUCT_WORDS = ("UNION", "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER")
+_SQL_BOOL_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])(OR|AND)(?![A-Za-z0-9_])")
+# Two operands compared for equality, quotes OPTIONAL and independent — an injection tautology
+# deliberately leaves the closing quote DANGLING (`OR '1'='1` -> the app's trailing quote closes it),
+# so requiring a matched closing quote would miss the classic payloads. Operand VALUES are compared
+# in code (group 1 vs group 2), so the quotes are only delimiters here.
+_SQL_SELFCMP_RE = re.compile(r"""(?i)^\(?\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
+_SQL_TRUTHY_NUM_RE = re.compile(r"^\(?\s*([0-9]+)\b")
+
+
+def _word_present(haystack_upper: str, word: str) -> bool:
+    """Word-boundaried membership of an already-uppercased token in an uppercased string."""
+    return re.search(r"(?<![A-Z0-9_])" + re.escape(word) + r"(?![A-Z0-9_])", haystack_upper) is not None
+
+
+def _sql_breakout_tail(text: str, quote: str) -> str | None:
+    """Walking from INSIDE a `quote`-delimited SQL string literal (the injection point is
+    `... WHERE x=<quote>PAYLOAD<quote>`), return the QUERY-context tail after the first UNESCAPED
+    closing quote, or None if the literal is never closed. Honours `''` doubling and `\\` escapes so a
+    legitimately-escaped apostrophe stays inside the literal."""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            i += 2                                  # backslash-escaped char stays in the literal
+            continue
+        if c == quote:
+            if i + 1 < n and text[i + 1] == quote:
+                i += 2                              # doubled quote ('' or "") = an escaped quote
+                continue
+            return text[i + 1:]                     # unescaped closing quote -> query-context tail
+        i += 1
+    return None                                     # literal never closed -> no break-out
+
+
+def _sql_structure_after(tail: str) -> str:
+    """The SQL structure PROVEN present in a query-context tail, or "" — restricted to near-zero-FP
+    proofs: a UNION SELECT, a stacked `;` + statement keyword, or a boolean tautology (`OR 1=1`,
+    `OR 'a'='a'`, `OR 1`). Lone comments / bare `;` are deliberately NOT proofs (benign text has
+    them) — they remain LEADs upstream, never a block."""
+    if not tail:
+        return ""
+    up = tail.upper()
+    if _word_present(up, "UNION") and _word_present(up, "SELECT"):
+        return "UNION SELECT"
+    if ";" in tail:
+        after = tail.split(";", 1)[1].upper()
+        for kw in _SQL_STRUCT_WORDS:
+            if _word_present(after, kw):
+                return f"; stacked {kw}"
+    for m in _SQL_BOOL_RE.finditer(tail):
+        rest = tail[m.end():].lstrip()
+        cmp = _SQL_SELFCMP_RE.match(rest)
+        if cmp and cmp.group(1).lower() == cmp.group(2).lower():
+            return f"{m.group(1).upper()} tautology ({cmp.group(1)}={cmp.group(2)})"
+        num = _SQL_TRUTHY_NUM_RE.match(rest)
+        if num and int(num.group(1)) != 0:
+            return f"{m.group(1).upper()} truthy-constant ({num.group(1)})"
+    return ""
+
+
+def sql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload`, placed inside a SQL string literal, PROVABLY closes it and introduces query
+    STRUCTURE (UNION SELECT / stacked statement / boolean tautology). Proves a structured SQL
+    injection ATTEMPT — never exploitation. A value with no unescaped quote cannot break out of a
+    string literal and never fires, so ordinary apostrophe-bearing input (`O'Brien`, `it's fine`) is
+    safe. Pure/deterministic."""
+    kind = OracleKind.SQL_INJECTION_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    if len(text) < 3 or ("'" not in text and '"' not in text):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no string-literal break-out (no quote to close the literal)",
+                            observed={"param": param})
+    for quote in ("'", '"'):
+        tail = _sql_breakout_tail(text, quote)
+        if tail is None:
+            continue
+        struct = _sql_structure_after(tail)
+        if struct:
+            return OracleSignal(
+                kind=kind, fired=True, confidence=0.92,
+                evidence=(f"payload closes a {quote} SQL string literal and introduces query "
+                          f"structure ({struct}) — a structured SQL injection attempt"),
+                observed={"param": param, "quote": quote, "structure": struct, "break_out": True})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence="quote present but no SQL structure follows the break-out (inert, e.g. an apostrophe in text)",
+        observed={"param": param})
+
+
+# Clearly-dangerous command binaries; a separator/substitution putting one in command position is an
+# unambiguous OS-command-execution construct. Curated to exclude ambiguous common words.
+_SHELL_CMDS = ("cat", "id", "whoami", "uname", "nc", "ncat", "netcat", "curl", "wget", "bash", "sh",
+               "zsh", "ksh", "powershell", "pwsh", "nslookup", "dig", "cmd", "python", "python3",
+               "perl", "ruby", "php", "chmod", "chown", "mkfifo", "telnet", "socat", "base64", "xxd",
+               "hostname", "ifconfig", "wget", "certutil", "sleep")
+_CMD_ALT = "|".join(sorted(set(_SHELL_CMDS), key=len, reverse=True))
+# A command SUBSTITUTION wrapping a known command: $(cmd ...) or `cmd ...`
+_SHELL_SUBST_CMD_RE = re.compile(r"(?i)(?:\$\(|`)\s*(" + _CMD_ALT + r")(?![A-Za-z0-9_])")
+# A command SEPARATOR (;  |  ||  &  &&  newline) immediately followed by a known command
+_SHELL_SEP_CMD_RE = re.compile(r"(?i)(?:;|\||&|\n|\r)\s*(" + _CMD_ALT + r")(?![A-Za-z0-9_])")
+
+
+def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
+    """Fire iff `payload` contains an unambiguous shell command-execution construct — a command
+    SUBSTITUTION (`$(cmd...)` / `` `cmd...` ``) or a command SEPARATOR (`;` `|` `&` newline)
+    immediately followed by a known command binary. Proves a structured OS-command-injection ATTEMPT,
+    never exploitation. Conservative for near-zero FP: `Tom & Jerry` and `a; b` do NOT fire (`Jerry`/
+    `b` are not commands); `; cat /etc/passwd`, `$(id)`, `` `whoami` `` DO. Pure/deterministic."""
+    kind = OracleKind.COMMAND_INJECTION_BREAKOUT
+    text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
+    if len(text) < 3:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="too short to carry a command-execution construct",
+                            observed={"param": param})
+    m = _SHELL_SUBST_CMD_RE.search(text)
+    if m:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"payload contains a shell command substitution invoking {m.group(1)!r} — "
+                      f"a structured OS command injection attempt"),
+            observed={"param": param, "construct": "substitution", "command": m.group(1).lower()})
+    m = _SHELL_SEP_CMD_RE.search(text)
+    if m:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"payload chains a command separator to a known command {m.group(1)!r} — "
+                      f"a structured OS command injection attempt"),
+            observed={"param": param, "construct": "separator+command", "command": m.group(1).lower()})
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence="no unambiguous command-execution construct (lone metacharacters are not a proof)",
+        observed={"param": param})

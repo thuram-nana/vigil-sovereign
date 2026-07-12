@@ -57,6 +57,12 @@ class OracleKind(str, enum.Enum):
     SYSTEM_PROMPT_DISCLOSURE = "system_prompt_disclosure"  # a planted high-entropy canary sentinel appeared VERBATIM in the app's own LLM output
     AUTOMATED_ACCESS = "automated_access"             # a non-interactive client fetched a honeypot resource no human UI links (set-membership)
     CREDENTIAL_STUFFING = "credential_stuffing"       # a source achieved SPRT-significant successful logins across many UNSEEN (account, source) pairs (ATO), Holm-controlled across identities
+    # AEGIS request-side PARSE-PROOF (the inline "provable firewall" gateway) — judged on the REQUEST
+    # ALONE (no app response). Each proves a STRUCTURED INJECTION ATTEMPT (a payload provably breaks
+    # grammar), NOT that the app is exploited. Additive appends reachable ONLY via their explicit
+    # BUG_CLASS_ORACLES rows (keyed on `request_payload`), never the frozen _ALL_ORACLES fallback.
+    SQL_INJECTION_BREAKOUT = "sql_injection_breakout"        # a value provably closes a SQL string literal and introduces query STRUCTURE (tautology / UNION SELECT / stacked keyword)
+    COMMAND_INJECTION_BREAKOUT = "command_injection_breakout"  # a value contains an unambiguous shell command-execution construct ($(cmd) / `cmd` / separator + known command)
 
 
 class OracleProbe(BaseModel):
