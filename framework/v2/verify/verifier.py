@@ -153,6 +153,17 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # `make gate` byte-identical. (Cloud/CSPM public-exposure & over-broad-trust promotions reuse the
     # existing POLICY_PATH rows above; live reachability reuses `service_reachable` — no new rows.)
     "k8s_misconfiguration": (OracleKind.K8S_POSTURE,),
+    # Wave-F1 (cloud/CSPM achieved-state promotion): a retained cloud-posture LEAD (sensors.cloud)
+    # becomes a FACT only when the cloud-posture oracle re-derives a CONCRETE insecure ACHIEVED STATE over
+    # the RETAINED control (encryption-at-rest disabled on a sensitive datastore, an explicit
+    # public-exposure flag, or a wildcard/anonymous principal named in the retained policy). Like the k8s
+    # row, this NEW OracleKind is reachable ONLY via this row — it is NOT in the frozen _ALL_ORACLES
+    # fallback — and fires only when the ctx carries `cloud_control`, which no benchmark/scan/engage
+    # finding does. So appending it leaves the unknown-class fallback and `make gate` byte-identical.
+    # COMPLEMENTARY to the POLICY_PATH rows above: those prove a reachability PATH over the policy GRAPH
+    # (public_exposure / excessive_privilege); this proves the achieved STATE a reachability path cannot
+    # (principally the misconfiguration / encryption-at-rest-disabled lead) over a single control record.
+    "cloud_misconfiguration": (OracleKind.CLOUD_POSTURE,),
     # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
     # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
     # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
@@ -302,6 +313,22 @@ _ALIASES: dict[str, str] = {
     "cis_k8s_fail": "k8s_misconfiguration",
     "kube_bench_fail": "k8s_misconfiguration",
     "insecure_k8s_setting": "k8s_misconfiguration",
+    # cloud/CSPM achieved-state posture spelling variants (a cloud-posture control an oracle proves via a
+    # concrete insecure achieved state) fold onto the single canonical class. NOTE: the reachability-PATH
+    # cloud classes (privilege_path / excessive_privilege, POLICY_PATH) are deliberately NOT aliased here
+    # — achieved-STATE membership and reachability-PATH are distinct proofs and stay distinct classes.
+    "cloud_posture": "cloud_misconfiguration",
+    "cloud_misconfig": "cloud_misconfiguration",
+    "cspm_finding": "cloud_misconfiguration",
+    "cspm_misconfiguration": "cloud_misconfiguration",
+    "cloud_security_misconfiguration": "cloud_misconfiguration",
+    "public_bucket": "cloud_misconfiguration",
+    "public_s3_bucket": "cloud_misconfiguration",
+    "public_storage": "cloud_misconfiguration",
+    "unencrypted_at_rest": "cloud_misconfiguration",
+    "encryption_at_rest_disabled": "cloud_misconfiguration",
+    "wildcard_principal": "cloud_misconfiguration",
+    "anonymous_grant": "cloud_misconfiguration",
     "k8s_insecure_setting": "k8s_misconfiguration",
     # JWT structural-forgery spelling variants fold onto the single canonical class. NOTE: the existing
     # `jwt` class (alg:none ACCEPTANCE, ACHIEVED_STATE) is deliberately NOT aliased here — forgeability
@@ -604,6 +631,12 @@ class OracleVerifier:
         if kind is OracleKind.K8S_POSTURE:
             if "k8s_control" in ctx:
                 return oracles.k8s_posture_oracle(ctx["k8s_control"])
+            return None
+        # -- Wave-F1 cloud/CSPM posture — fire ONLY when the ctx carries `cloud_control` (a retained cloud
+        #    posture control); no benchmark/scan/engage finding does, so it is inert on the gate path.
+        if kind is OracleKind.CLOUD_POSTURE:
+            if "cloud_control" in ctx:
+                return oracles.cloud_posture_oracle(ctx["cloud_control"])
             return None
         # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
         #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.

@@ -477,6 +477,53 @@ class FindingContext(BaseModel):
         return cls(bug_class=bug_class, k8s_control=retained)
 
     @classmethod
+    def from_cloud_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "cloud_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED cloud/CSPM posture control (``sensors.cloud``), for the cloud-posture oracle (Wave-F1
+        — the achieved-state SIBLING of ``from_k8s_posture``). The retained evidence that turns a
+        cloud-posture LEAD into a FACT: the oracle re-derives the weakness (encryption-at-rest disabled on
+        a sensitive datastore, an explicit public-exposure flag, or a wildcard/anonymous principal named
+        in the retained policy) over the control's ACHIEVED STATE alone — offline, ZERO cloud calls — so a
+        CSPM tool's "public / mis-configured" is confirmed a FACT only by the actual insecure state, never
+        the scanner's say-so.
+
+        Accepts either a nested ``achieved_state`` sub-dict or a flat ``sensors.cloud`` resource record
+        (``{id, public?, sensitive?, encrypted?, grants?}``). Only the structural fields the oracle judges
+        are retained into a canonical shape — a caller-supplied control that also carries verbose scanner
+        prose or full grant objects is reduced to {resource_id, control_id, status, provider,
+        achieved_state:{encrypted, public, sensitive, principals}}, so nothing else is laundered into the
+        certificate. JSON-safe + deterministic (re-verifies offline)."""
+        src = dict(control or {})
+        inner = src.get("achieved_state") if isinstance(src.get("achieved_state"), Mapping) else src
+        state: dict[str, Any] = {}
+        for flag in ("encrypted", "public", "sensitive"):
+            if inner.get(flag) is not None:
+                state[flag] = inner.get(flag)          # bool/str kept as-is; the oracle tri-bools it
+        principals: list[str] = []
+        raw = inner.get("principals")
+        if isinstance(raw, (list, tuple)):
+            principals.extend(_coerce_text(p) for p in raw if p is not None)
+        grants = inner.get("grants")
+        if isinstance(grants, (list, tuple)):
+            principals.extend(
+                _coerce_text(g.get("principal")) for g in grants
+                if isinstance(g, Mapping) and g.get("principal") is not None)
+        if principals:
+            state["principals"] = principals
+        retained: dict[str, Any] = {"achieved_state": state}
+        rid = src.get("resource_id") or src.get("id")
+        cid = src.get("control_id") or src.get("check_id")
+        if rid not in (None, ""):
+            retained["resource_id"] = _coerce_text(rid)
+        if cid not in (None, ""):
+            retained["control_id"] = _coerce_text(cid)
+        for k in ("status", "provider"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        return cls(bug_class=bug_class, cloud_control=retained)
+
+    @classmethod
     def from_jwt_token(
         cls,
         token: str,
@@ -791,6 +838,8 @@ class FindingContext(BaseModel):
             ctx["policy"] = self.policy
         if self.k8s_control is not None:
             ctx["k8s_control"] = self.k8s_control
+        if self.cloud_control is not None:
+            ctx["cloud_control"] = self.cloud_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:
