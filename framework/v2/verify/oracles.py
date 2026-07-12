@@ -2427,6 +2427,16 @@ def jwt_forgery_oracle(token: Any, *, candidate_keys: Sequence[str | bytes] = ()
 
     # A normal RS256/ES256/... token (an asymmetric signature, never an HMAC) — forging it needs the
     # PRIVATE key, which the token alone cannot yield. Correctly NOT a structural-forgery proof.
+    #
+    # DELIBERATELY NOT a fire path: an EMBEDDED verification key (a `jwk` or `x5c` header whose key
+    # verifies the token). It is tempting to call that "self-signed, forgeable" (RFC 8725 §3.5), but an
+    # adversarial review proved it is NOT offline-provable as a forgery: a legitimate CA-chained `x5c`
+    # (the RFC 7515 §4.1.6 norm — the leaf IS the cert whose key signed the JWS) verifies identically to
+    # a self-signed one, and legitimate flows embed a self-verifying `jwk` by design (DPoP proofs,
+    # SIOP id_tokens). Whether the relying party WRONGLY trusts the embedded key over a proper trust
+    # anchor is unknowable from the token alone — so firing here would false-positive on real Azure/
+    # enterprise/DPoP tokens. It is a belief-raising RISK INDICATOR at most (a future AEGIS lead), never
+    # a confirmed FACT. (`jku`/`x5u` URL-fetch headers are likewise leads — an offline oracle can't fetch.)
     return OracleSignal(
         kind=kind, fired=False, confidence=0.0,
         evidence=(f"alg={alg or '?'!r}: an asymmetric signature requires the private key to forge — not "
