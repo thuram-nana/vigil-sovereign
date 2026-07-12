@@ -22,6 +22,22 @@ every decision.
 If you need "block everything that looks suspicious," AEGIS is the wrong tool — that posture breaks
 real users and is exactly what every WAF does badly. AEGIS blocks what it can *prove*.
 
+## Install
+
+AEGIS ships inside CRUCIBLE and runs locally (loopback) — no cloud, no telemetry, no external calls.
+
+- **pip.** From the repo root, `pip install .` delivers the importable `framework.v2` package plus two
+  console entry points: `aegis` (== `python3 -m framework.v2 aegis`) and `crucible`. No install is
+  required to try it from a source checkout — the `python3 -m framework.v2 aegis …` form works as-is.
+- **Docker sidecar.** [`framework/v2/aegis/Dockerfile`](../../aegis/Dockerfile) packages the gateway on
+  `python:3.11-slim` (non-root, `ENTRYPOINT python3 -m framework.v2 aegis gateway`, default
+  `CMD --mode observe`). Build it from the **repo root** so the context sees `pyproject.toml` + `framework/`:
+  `docker build -f framework/v2/aegis/Dockerfile -t aegis-gateway .`
+- **Five-minute walkthrough.** [`framework/v2/aegis/QUICKSTART.md`](../../aegis/QUICKSTART.md) takes you
+  from `aegis demo` (offline, prints a confirmed verdict + a re-runnable certificate), to an observe-mode
+  gateway in front of the bundled demo target (`python3 -m framework.v2.aegis.demo_app`) or your own app,
+  to flipping `--mode enforce` once you have confirmed zero false positives.
+
 ## What it blocks today (each with a re-runnable certificate)
 
 | Class | Proved by | Seen from |
