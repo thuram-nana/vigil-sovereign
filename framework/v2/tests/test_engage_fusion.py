@@ -381,6 +381,95 @@ def test_cloud_benign_posture_promotes_nothing(tmp_path: Path) -> None:
     assert not any(n.id.startswith("finding:policy_path:") for n in world.all_nodes())
 
 
+# ---- 3b (G1): cloud_misconfiguration LEAD -> cloud-posture FACT (no live cloud) ---
+
+# a sensitive datastore with encryption-at-rest DISABLED — the achieved-state misconfiguration lead the
+# policy-path oracle STRUCTURALLY cannot prove (no reachability path proves an at-rest-encryption gap).
+_CLOUD_UNENCRYPTED = """
+{"provider": "aws",
+ "resources": [{"id": "s3/secrets", "kind": "datastore", "sensitive": true, "encrypted": false}]}
+"""
+
+# a sensitive datastore that IS encrypted at rest — a compliant control, no lead, no fact.
+_CLOUD_ENCRYPTED = """
+{"provider": "aws",
+ "resources": [{"id": "s3/secure", "kind": "datastore", "sensitive": true, "encrypted": true}]}
+"""
+
+# the SAME sensitive datastore is BOTH over-privileged (excessive_privilege -> policy-path) AND
+# unencrypted-at-rest (misconfiguration -> cloud-posture); a second sensitive resource is compliant.
+_CLOUD_MIXED = """
+{"provider": "aws",
+ "principals": [{"id": "role/admin"}],
+ "resources": [
+   {"id": "s3/customer-data", "kind": "datastore", "sensitive": true, "encrypted": false,
+    "grants": [{"principal": "role/admin", "access": "admin"}]},
+   {"id": "s3/logs", "kind": "datastore", "sensitive": true, "encrypted": true}
+ ]}
+"""
+
+
+def test_cloud_unencrypted_sensitive_lead_is_promoted_by_the_cloud_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_UNENCRYPTED)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "cloud_import", "args": {"inventory_file": inv}}))
+    # the misconfiguration lead folded in on the datastore node as an intel-grounded LEAD
+    assert any(o.subject.node_id == "datastore:s3/secrets" for o in minted)
+    assert world.get_node("datastore:s3/secrets").grounding == GROUNDING_INTEL
+    # the cloud-posture oracle re-fired in-run over the retained achieved state: a FINDING + EVIDENCES
+    # edge is oracle-GROUNDED, attached to the SAME resource node the topology minter created
+    finding = world.get_node("finding:cloud_posture:s3/secrets")
+    assert finding is not None and finding.grounding == GROUNDING_GROUNDED
+    assert finding.provenance.startswith("oracle:")
+    edge = world.get_edge("finding:cloud_posture:s3/secrets", "datastore:s3/secrets", EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+    # the un-reachability-provable lead is NOT a policy-path fact (that oracle cannot prove it)
+    assert not world.has_node("finding:policy_path:s3/secrets")
+
+
+def test_cloud_encrypted_sensitive_control_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    # A compliant control (encryption ON) mints no misconfiguration lead and the cloud-posture oracle
+    # REFUSES — so no fact enters. Nothing is promoted without the oracle firing.
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_ENCRYPTED)
+    fuse_sensors(world, "alpha", _ctx({"sensor": "cloud_import", "args": {"inventory_file": inv}}))
+    assert not world.has_node("finding:cloud_posture:s3/secure")
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+def test_cloud_misconfig_promotion_is_additive_and_leaves_the_policy_path_leads_unchanged(
+        tmp_path: Path) -> None:
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_MIXED)
+    fuse_sensors(world, "alpha", _ctx({"sensor": "cloud_import", "args": {"inventory_file": inv}}))
+    # the non-misconfiguration lead is UNCHANGED: the excessive-privilege grant path is still a
+    # policy-path FACT on the datastore node (the G1 wiring did not disturb it)
+    over = world.get_node("finding:policy_path:s3/customer-data")
+    assert over is not None and over.grounding == GROUNDING_GROUNDED
+    assert world.get_edge("finding:policy_path:s3/customer-data",
+                          "datastore:s3/customer-data", EdgeKind.EVIDENCES) is not None
+    # ADDITIVELY, the achieved-state misconfiguration is now ALSO a cloud-posture FACT on the SAME node
+    misc = world.get_node("finding:cloud_posture:s3/customer-data")
+    assert misc is not None and misc.grounding == GROUNDING_GROUNDED
+    assert world.get_edge("finding:cloud_posture:s3/customer-data",
+                          "datastore:s3/customer-data", EdgeKind.EVIDENCES) is not None
+    # the compliant (encrypted) sensitive resource is never a misconfiguration fact
+    assert not world.has_node("finding:cloud_posture:s3/logs")
+
+
+def test_cloud_misconfig_promotion_is_idempotent(tmp_path: Path) -> None:
+    # re-running fusion over the same world re-asserts the SAME cloud-posture fact node — a stable
+    # finding id, never a duplicate/phantom (pure over the caller seq, claim-keyed).
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_UNENCRYPTED)
+    plan = _ctx({"sensor": "cloud_import", "args": {"inventory_file": inv}})
+    fuse_sensors(world, "alpha", plan)
+    ids = {n.id for n in world.all_nodes()}
+    assert "finding:cloud_posture:s3/secrets" in ids
+    fuse_sensors(world, "alpha", plan)
+    assert {n.id for n in world.all_nodes()} == ids
+
+
 # ---- 3c: declared_service 'open' LEAD -> reachability FACT (opt-in, gated) ---
 
 
