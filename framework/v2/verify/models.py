@@ -63,6 +63,16 @@ class OracleKind(str, enum.Enum):
     # BUG_CLASS_ORACLES rows (keyed on `request_payload`), never the frozen _ALL_ORACLES fallback.
     SQL_INJECTION_BREAKOUT = "sql_injection_breakout"        # a value provably closes a SQL string literal and introduces query STRUCTURE (tautology / UNION SELECT / stacked keyword)
     COMMAND_INJECTION_BREAKOUT = "command_injection_breakout"  # a value contains an unambiguous shell command-execution construct ($(cmd) / `cmd` / separator + known command)
+    # Workstream-3 posture (the DORMANT-sensor promotions). Like the AEGIS members above, this is an
+    # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the `k8s_control`
+    # ctx field no benchmark/scan/engage finding carries), never via the frozen unknown-class fallback
+    # (verifier._ALL_ORACLES). K8S_POSTURE promotes a kube-bench CIS-control-failure LEAD to a FACT only
+    # when the RETAINED control evidence proves a CONCRETE insecure setting — a FAILED control whose
+    # observed value literally carries a dangerous flag (a benign/passing control never fires). (The
+    # cloud/CSPM public-exposure & over-broad-trust promotions reuse the EXISTING POLICY_PATH oracle
+    # over the retained policy graph, and live service-reachability the EXISTING SERVICE_REACHABILITY
+    # oracle over a gated handshake — so neither adds a new kind.)
+    K8S_POSTURE = "k8s_posture"                       # a kube-bench CIS control FAILED with a concrete observed insecure setting (membership/parse-proof over the retained control)
 
 
 class OracleProbe(BaseModel):

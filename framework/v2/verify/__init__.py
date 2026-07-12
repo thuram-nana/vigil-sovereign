@@ -30,10 +30,12 @@ from .models import (
     VerificationResult,
 )
 from .oob import OOBHit, OOBReceiver
+from .k8s_posture import confirm_k8s_posture, k8s_posture_context
 from .oracles import (
     achieved_state_oracle,
     differential_response_oracle,
     honeypot_hit_oracle,
+    k8s_posture_oracle,
     oob_callback_oracle,
     policy_path_oracle,
     prompt_injection_oracle,
@@ -80,6 +82,7 @@ __all__ = [
     "tls_weakness_oracle",
     "version_range_oracle",
     "policy_path_oracle",
+    "k8s_posture_oracle",
     # AEGIS (defensive dual) oracles
     "system_prompt_disclosure_oracle",
     "prompt_injection_oracle",
@@ -101,6 +104,9 @@ __all__ = [
     "privilege_path_query",
     "policy_path_context",
     "confirm_privilege_path",
+    # k8s posture (kube-bench CIS-control-failure promotion)
+    "confirm_k8s_posture",
+    "k8s_posture_context",
     # oob
     "OOBReceiver",
     "OOBHit",

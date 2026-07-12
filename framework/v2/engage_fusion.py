@@ -18,10 +18,12 @@ graceful fallback when this module is absent), so the signature is fixed and loa
 Doctrine, by construction:
   * PROVE-DON'T-GUESS. A sensor mints OBSERVATIONS, never facts. They enter the world-model as
     ``GROUNDING_INTEL`` LEADS (the ``intel:`` provenance tier). A LEAD becomes a FACT only when a
-    deterministic oracle re-fires over the sensor's OWN retained evidence — here the version-range
-    oracle over SBOM advisories, written back with ``oracle:`` provenance (``GROUNDING_GROUNDED``).
-    Nothing else promotes a claim. ``declared_service`` 'open' stays a LEAD until a live
-    service-reachability handshake oracle confirms it (roadmap).
+    deterministic oracle re-fires over the sensor's OWN retained evidence — the version-range oracle
+    over SBOM advisories, the k8s-posture oracle over each retained kube-bench control (WS-3a), and the
+    policy-path oracle over each oracle-provable cloud posture lead (WS-3b) — written back with
+    ``oracle:`` provenance (``GROUNDING_GROUNDED``). Nothing else promotes a claim. A ``declared_service``
+    'open' LEAD stays a LEAD unless the OPT-IN, GATED live service-reachability handshake confirms it
+    (WS-3c: only through the fail-closed capture, never on the default path).
   * GATED, FAIL-CLOSED. Every sensor runs through ``sensors.pipeline.run_sensor`` ->
     ``agents.tools.invoke_tool``'s chain (kill-switch / entitlement / scope / destructive / egress).
     A refused/failed sensor mints nothing. The first slice's allowlist is OFFLINE-only producers
@@ -33,14 +35,20 @@ Doctrine, by construction:
     module; only WS-A's opt-in autonomous loop calls ``fuse_sensors``. The gate benchmark is
     therefore byte-identical.
 
-ROADMAP — fusing the ACTIVE sensors into the loop (slice 2+):
-  * ``nmap`` (``NmapServiceSensor``): ACTIVE_RECON entitlement + charter scope + the service-
-    reachability handshake oracle (``verify.reachability``) to promote 'open' LEADS to FACTS in-run.
+WIRED (Workstream-3) — the dormant OFFLINE producers now fuse alongside their promotion oracle:
+  * ``kube_bench`` (``KubeBenchSensor``): CIS-control-failure LEADS whose CONCRETE insecure settings
+    become FACTS when the k8s-posture oracle (``verify.k8s_posture``) re-derives them over the retained
+    control (3a).
+  * ``cloud_import`` (``CloudPostureImportSensor``): IAM topology + posture LEADS whose privilege PATHS
+    become FACTS when the policy-path oracle (``sensors.cloud.confirm_cloud_posture_facts``) re-derives
+    them over the retained graph — no live cloud calls (3b).
+  * ``declared_service`` 'open' LEADS become reachability FACTS ONLY via an OPT-IN, GATED live handshake
+    (``verify.reachability``: ACTIVE_RECON + charter scope, fail-closed) — never on the default path (3c).
+
+ROADMAP — the remaining ACTIVE sensors:
+  * ``nmap`` (``NmapServiceSensor``): the SAME reachability handshake oracle over a real scan's 'open'.
   * ``nuclei`` / ``zap`` / ``burp`` (``web_scanner``): gated web LEADS re-verified by the matching
     CRUCIBLE oracle (``sensors.confirm_web_lead`` -> the bug-class oracle) before promotion.
-  * ``cloud`` (``CloudInventoryPullSensor`` / posture import): IAM topology LEADS whose privilege
-    PATHS become FACTS only when the policy-path oracle (``confirm_cloud_privilege_path``) re-derives
-    them over the retained graph.
   * ``tshark`` packet flows, once a capture is supplied.
   These add to ``_SAFE_SENSORS`` only alongside their promotion oracle, and each stays gated at
   ``run_sensor`` time; the fusion loop itself does not change.
@@ -62,11 +70,14 @@ from .sensors.pipeline import run_sensor
 from .sensors.sbom import SbomVulnSensor
 from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 
-# The SAFE, OFFLINE sensor allowlist for the first fusion slice: producers that need no live
-# external binary and no egress (Tier-1, no entitlement). An active/live sensor task is dropped
-# in _resolve_tasks (roadmap) rather than invoked — the gate chain would refuse it anyway, but the
-# allowlist keeps the first slice's behaviour predictable and its imports minimal.
-_SAFE_SENSORS = ("declared_service", "sbom_vuln")
+# The SAFE, OFFLINE sensor allowlist: producers that need no live external binary and no egress
+# (Tier-1, no entitlement). An active/live sensor task is dropped in _resolve_tasks rather than
+# invoked — the gate chain would refuse it anyway, but the allowlist keeps behaviour predictable.
+# Workstream-3 wires the dormant OFFLINE producers (kube_bench, cloud_import) in alongside their
+# promotion oracle (k8s-posture, policy-path) — each still gated at run_sensor time. (declared_service
+# stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
+# _reverify_reachability — which fires only through the fail-closed capture, never by default.)
+_SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -158,12 +169,18 @@ def _resolve_tasks(slug: str, ctx: Any) -> list[FusionTask]:
 
 
 def _fusion_registry() -> ToolRegistry:
-    """A registry holding ONLY the first-slice safe/offline sensors. Registration is not
-    invocation (each is still gated at ``run_sensor`` time), but keeping the registry minimal
-    keeps the fusion path's scope and imports tight — active sensors are added with slice 2."""
+    """A registry holding ONLY the safe/offline fusion sensors. Registration is not invocation (each is
+    still gated at ``run_sensor`` time), but keeping the registry minimal keeps the fusion path's scope
+    and imports tight. Workstream-3 adds the offline kube-bench + cloud-posture importers alongside
+    their promotion oracles."""
+    from .sensors.cloud import CloudPostureImportSensor
+    from .sensors.k8s_runtime import KubeBenchSensor
+
     reg = ToolRegistry()
     reg.register(DeclaredServiceSensor())
     reg.register(SbomVulnSensor())
+    reg.register(KubeBenchSensor())          # offline kube-bench --json ingest (Tier-1)
+    reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
     return reg
 
 
@@ -241,14 +258,35 @@ def _project_vuln_fact(world: Any, adv: dict, *, seq: int) -> None:
         provenance=prov, confidence=_ORACLE_FACT_CONFIDENCE, first_seen=seq, last_seen=seq))
 
 
-def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int) -> int:
-    """Let the existing oracles re-fire over the sensor's OWN retained evidence, in-run. The only
-    offline-firing oracle in the first slice is the version-range oracle over SBOM advisories: a
-    confirmed advisory writes an oracle-grounded vuln fact; the sensor's LEADS are untouched.
-    Returns the number of facts promoted. Best-effort and deterministic — advisories are re-verified
-    in report order, and the oracle is a pure function of the retained advisory."""
-    if task.sensor != "sbom_vuln" or not getattr(res, "ok", False):
-        return 0
+def _project_oracle_fact(world: Any, subject: EntityRef, *, oracle_kind: str, bug_class: str,
+                         evidence: str, seq: int, detail: dict | None = None) -> None:
+    """Write an oracle-grounded FACT about ``subject`` (a sensor lead): a ``FINDING`` node + an
+    ``EVIDENCES`` edge (finding -> subject), both ``oracle:<kind>`` provenance so the world-model's
+    ``classify_provenance`` grounds them (``GROUNDING_GROUNDED``). The subject node stays whatever tier
+    the sensor minted it at (a LEAD); the EVIDENCES edge is the grounded fact attached to it — exactly
+    the shape ``_project_vuln_fact`` uses for the version-range promotion. Idempotent (stable ids), pure
+    over ``seq``. The GENERIC WS-3 promotion projector (k8s-posture / policy-path / reachability)."""
+    prov = f"oracle:{oracle_kind}"
+    finding = EntityRef(kind=NodeKind.FINDING, key=f"{oracle_kind}:{subject.key}")
+    attrs: dict = {"bug_class": bug_class, "confirmed_by": oracle_kind, "evidence": (evidence or "")[:400]}
+    if detail:
+        attrs.update({k: v for k, v in detail.items() if v is not None})
+    world.add_node(Node(
+        id=finding.node_id, kind=NodeKind.FINDING, attrs=attrs,
+        provenance=prov, confidence=_ORACLE_FACT_CONFIDENCE, first_seen=seq, last_seen=seq))
+    if not world.has_node(subject.node_id):
+        # defensive: the sensor lead usually already minted the subject; mint an intel-grounded
+        # fallback so the grounded edge never dangles (subject stays a lead; the edge is the fact).
+        world.add_node(Node(
+            id=subject.node_id, kind=subject.kind, attrs={},
+            provenance=f"intel:fusion:{subject.node_id}", confidence=0.6, first_seen=seq, last_seen=seq))
+    world.add_edge(Edge(
+        src=finding.node_id, dst=subject.node_id, kind=EdgeKind.EVIDENCES, attrs={},
+        provenance=prov, confidence=_ORACLE_FACT_CONFIDENCE, first_seen=seq, last_seen=seq))
+
+
+def _reverify_sbom(world: Any, res: Any, *, seq: int) -> int:
+    """version-range oracle over SBOM advisories -> an oracle-grounded vuln fact per confirmed advisory."""
     try:
         from .verify import confirm_vulnerable_dependency
     except Exception:
@@ -269,6 +307,149 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int) -> int:
             _project_vuln_fact(world, adv, seq=seq)
             promoted += 1
     return promoted
+
+
+def _reverify_k8s(world: Any, res: Any, *, seq: int) -> int:
+    """3a promotion: the k8s-posture oracle over each RETAINED kube-bench control. A control that hard-
+    FAILED with a concrete observed insecure setting is promoted to an oracle-grounded FACT on its
+    CONTROL node; a passing/benign control (or a FAIL with no proof) is left an honest LEAD."""
+    try:
+        from .verify.k8s_posture import confirm_k8s_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_k8s_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"cis-k8s:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="k8s_posture", bug_class="k8s_misconfiguration",
+            evidence=f"kube-bench CIS control {check_id} FAILED with a concrete observed insecure setting",
+            seq=seq, detail={"check_id": check_id, "status": str(c.get("status") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_cloud(world: Any, res: Any, *, seq: int) -> int:
+    """3b promotion: the EXISTING policy-path oracle re-derives each oracle-provable cloud posture LEAD
+    (public exposure / over-broad trust) over the RETAINED policy graph — NO live cloud calls. Each
+    confirmed grant path is projected as an oracle-grounded FACT on the SAME cloud-resource node the
+    topology minter created; the un-provable misconfiguration lead stays an honest LEAD."""
+    try:
+        import json as _json
+
+        from .intel.from_cloud import _resource as _resource_ref
+        from .sensors.cloud import confirm_cloud_posture_facts, normalize_cloud_export
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    text, fmt = output.get("export"), output.get("format", "auto")
+    if not isinstance(text, str) or not text.strip():
+        return 0
+    try:
+        inventory = normalize_cloud_export(_json.loads(text), fmt if isinstance(fmt, str) else "auto")
+        facts = confirm_cloud_posture_facts(inventory)
+    except Exception:
+        return 0
+    promoted = 0
+    for f in facts:
+        resource = str(f.get("resource") or "")
+        if not resource:
+            continue
+        subject = _resource_ref(resource, str(f.get("resource_kind") or ""))
+        _project_oracle_fact(
+            world, subject, oracle_kind="policy_path", bug_class="privilege_path",
+            evidence=(f"cloud {f.get('lead_class')} confirmed: principal {f.get('principal')!r} reaches "
+                      f"resource {resource!r} via a real IAM grant path"),
+            seq=seq, detail={"principal": f.get("principal"), "access": f.get("access") or None,
+                             "lead_class": f.get("lead_class")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_reachability(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str,
+                           connect: Any = None) -> int:
+    """3c promotion (OPT-IN, GATED, LIVE): confirm a declared_service 'open' LEAD with a REAL transport
+    handshake. Fires ONLY when the task explicitly opts in (``args['confirm_reachable']`` truthy) AND the
+    live connect passes the fail-closed gate (``verify.reachability.capture_handshake``: kill-switch ->
+    single-host -> ACTIVE_RECON entitlement -> charter scope). A refused/failed handshake promotes
+    NOTHING (the lead stays a lead). Never on the default/gate path — only under the opt-in fusion flag
+    AND an explicit per-task opt-in. ``connect`` is injectable so the path is testable offline."""
+    if not (isinstance(task.args, dict) and task.args.get("confirm_reachable")):
+        return 0
+    try:
+        from .intel.from_scan import host_ref
+        from .intel.refs import canonicalize
+        from .verify.reachability import capture_handshake, confirm_reachable
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    host = output.get("host")
+    services = output.get("services")
+    if not isinstance(host, str) or not host or not isinstance(services, list):
+        return 0
+    host_key = host_ref(host).key
+    promoted = 0
+    for svc in services:
+        if not isinstance(svc, dict) or svc.get("port") is None:
+            continue
+        if str(svc.get("state", "open")).lower() != "open":
+            continue
+        proto = str(svc.get("protocol") or "tcp").lower()
+        try:
+            port = int(svc["port"])
+        except (TypeError, ValueError):
+            continue
+        try:
+            hs = capture_handshake(host, port, slug=slug, protocol=proto, connect=connect)
+            if not confirm_reachable(hs).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = canonicalize(NodeKind.SERVICE, f"{host_key}:{port}/{proto}")
+        _project_oracle_fact(
+            world, subject, oracle_kind="service_reachability", bug_class="service_reachable",
+            evidence=f"{proto} handshake reproduced to {host}:{port} — 'open' LEAD confirmed reachable",
+            seq=seq, detail={"host": host, "port": port, "protocol": proto})
+        promoted += 1
+    return promoted
+
+
+def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "",
+              connect: Any = None) -> int:
+    """Let the existing oracles re-fire over the sensor's OWN retained evidence, in-run — the LEAD ->
+    FACT bridge. Each promotion is a deterministic oracle over the sensor's retained evidence; the
+    sensor's LEADS are untouched. Returns the number of facts promoted. Best-effort and deterministic.
+    A refused/failed sensor promotes nothing.
+
+      * sbom_vuln       -> version-range oracle over SBOM advisories
+      * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
+      * cloud_import    -> policy-path oracle over each oracle-provable posture lead (3b)
+      * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c)
+    """
+    if not getattr(res, "ok", False):
+        return 0
+    if task.sensor == "sbom_vuln":
+        return _reverify_sbom(world, res, seq=seq)
+    if task.sensor == "kube_bench":
+        return _reverify_k8s(world, res, seq=seq)
+    if task.sensor == "cloud_import":
+        return _reverify_cloud(world, res, seq=seq)
+    if task.sensor == "declared_service":
+        return _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
+    return 0
 
 
 # ---- the hook WS-A calls -----------------------------------------------------
@@ -297,6 +478,9 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     ingest = IntelIngest(world, engagement_slug=slug or "")
     sink = _sink_of(ctx)
     base = _base_seq(world, ctx)
+    # Injectable connector for the OPT-IN, GATED live reachability handshake (3c) — None => the real
+    # bounded socket connect (still fail-closed inside capture_handshake). Tests pass a fake connect.
+    reach_connect = getattr(ctx, "reach_connect", None)
 
     minted: list[Observation] = []
     for i, task in enumerate(tasks):
@@ -307,5 +491,6 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
         except Exception:
             continue   # a sensor blowing up never sinks the whole fusion pass
         minted.extend(res.observations)
-        _reverify(world, task, res, seq=seq)   # LEAD -> FACT, where an oracle re-fires
+        # LEAD -> FACT, where an oracle re-fires over the sensor's OWN retained evidence.
+        _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect)
     return minted

@@ -20,6 +20,16 @@ _AEGIS_KINDS = {OracleKind.PROMPT_INJECTION, OracleKind.SYSTEM_PROMPT_DISCLOSURE
                 # the request-side parse-proof kinds (the inline gateway) are defensive AEGIS
                 # members too — reachable only via their explicit rows, never the fallback.
                 OracleKind.SQL_INJECTION_BREAKOUT, OracleKind.COMMAND_INJECTION_BREAKOUT}
+# Workstream-3 (dormant-sensor promotion) additive kinds/classes: the SAME frozen-fallback discipline
+# as the AEGIS members — a NEW OracleKind kept OUT of _ALL_ORACLES, reachable ONLY via its explicit
+# BUG_CLASS_ORACLES row. (The cloud/CSPM & reachability promotions reuse EXISTING oracle kinds, so they
+# add no new kind here.)
+_WS3_KINDS = {OracleKind.K8S_POSTURE}
+_WS3_CLASSES = {"k8s_misconfiguration"}
+# every additive kind that must stay out of the frozen unknown-class fallback.
+_EXCLUDED_KINDS = _AEGIS_KINDS | _WS3_KINDS
+_EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",
@@ -30,10 +40,11 @@ _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injectio
 
 
 def test_all_oracles_fallback_is_frozen_to_pre_aegis_members():
-    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 21 — the
-    # 4 AEGIS telemetry kinds + the 2 request-side parse-proof kinds are all excluded).
+    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 22 — the
+    # 4 AEGIS telemetry kinds + the 2 request-side parse-proof kinds + the WS-3 k8s-posture kind are
+    # all excluded).
     assert len(V._ALL_ORACLES) == 15
-    assert set(V._ALL_ORACLES) == set(OracleKind) - _AEGIS_KINDS
+    assert set(V._ALL_ORACLES) == set(OracleKind) - _EXCLUDED_KINDS
     # and it is NOT derived from the enum (that would have grown it past 15).
     assert set(V._ALL_ORACLES) != set(OracleKind)
 
@@ -43,18 +54,19 @@ def test_unknown_class_fallback_excludes_aegis_oracles():
     import framework.v2.aegis  # noqa: F401  (exercises the additive import)
     fallback = OracleVerifier().oracles_for("some_unknown_class_that_maps_to_nothing")
     assert fallback == V._ALL_ORACLES
-    for kind in _AEGIS_KINDS:
+    for kind in _EXCLUDED_KINDS:
         assert kind not in fallback
 
 
 def test_preexisting_classes_map_to_unchanged_oracle_sets():
-    # every non-AEGIS class still resolves to exactly its BUG_CLASS_ORACLES row.
+    # every non-additive class still resolves to exactly its BUG_CLASS_ORACLES row, and no pre-existing
+    # class's oracle set intersects the additive-excluded kinds.
     ver = OracleVerifier()
     for bug_class, expected in BUG_CLASS_ORACLES.items():
-        if bug_class in _AEGIS_CLASSES:
+        if bug_class in _EXCLUDED_CLASSES:
             continue
         assert ver.oracles_for(bug_class) == expected
-        assert not (set(expected) & _AEGIS_KINDS)
+        assert not (set(expected) & _EXCLUDED_KINDS)
 
 
 def test_known_bug_classes_grew_by_exactly_the_aegis_vocabulary():

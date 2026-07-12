@@ -10,9 +10,13 @@ method-for-method: it ingests an operator-supplied JSON report (OFFLINE — Tier
 control) and mints one CONTROL observation per failed/warned check, carrying JSON-safe evidence
 ({check_id, description, status, section, remediation}) so a later oracle can re-derive the weakness.
 
-This slice STOPS at LEADs. It creates NO oracle and confirms NOTHING; the roadmap
-(``docs/coverage-mobile-k8s-roadmap.md``) describes the FUTURE k8s-posture oracle that would promote
-these leads to facts, mirroring how ``verify.version.confirm_vulnerable_dependency`` promotes SBOM leads.
+The SENSOR STOPS at LEADs — it mints OBSERVATIONS, never facts, and confirms NOTHING itself. The
+PROMOTION now exists as a deterministic oracle: ``verify.k8s_posture.confirm_k8s_posture`` re-derives a
+CONCRETE insecure setting over the RETAINED control (a hard FAIL whose observed ``actual_value`` literally
+carries a dangerous flag) and only then a lead becomes a FACT — mirroring how
+``verify.version.confirm_vulnerable_dependency`` promotes SBOM leads. A passing/benign control never
+confirms. (The opt-in ``engage --fuse-sensors`` path folds these leads + the oracle promotions into the
+run world-model; the sensor is never trusted, the oracle proves.)
 
 Doctrine, by construction:
   * PROVE-DON'T-GUESS. The scanner's FAIL/WARN is a LEAD; the observation is ``GROUNDING_INTEL``, never a
@@ -102,6 +106,14 @@ def parse_kube_bench(text: str) -> list[dict]:
                     remediation = str(res.get("remediation") or "").strip()
                     if remediation:
                         lead["remediation"] = remediation
+                    # The CONCRETE observed value kube-bench recorded (e.g. the actual apiserver/kubelet
+                    # command line or config value). Retained so the k8s-posture oracle
+                    # (verify.k8s_posture) can re-derive a proven insecure setting from it — the sensor
+                    # still STOPS at a lead; the oracle promotes it. Absent value => the lead has no
+                    # concrete proof and stays a lead (the oracle will not fire on it).
+                    actual_value = str(res.get("actual_value") or "").strip()
+                    if actual_value:
+                        lead["actual_value"] = actual_value
                     out.append(lead)
     return out
 
@@ -142,6 +154,8 @@ def kube_bench_observations(controls: list[dict], *, seq: int, source: str = "ku
                 "description": c.get("description") or None,
                 "section": c.get("section") or None,
                 "remediation": c.get("remediation") or None,
+                # the concrete observed value the k8s-posture oracle re-derives a weakness from
+                "actual_value": c.get("actual_value") or None,
                 "benchmark": "cis-kubernetes",
             }.items() if v},
             source_reliability=_KUBE_BENCH_RELIABILITY,
@@ -152,8 +166,9 @@ def kube_bench_observations(controls: list[dict], *, seq: int, source: str = "ku
 class KubeBenchSensor:
     """Ingest an operator-provided kube-bench ``--json`` report and mint CIS-control-failure LEADS. args:
     ``{"report": "/path/to/kube-bench.json"}``. Passive (Tier-1): reads a local file, no network, no
-    device/cluster control, no entitlement. The leads STOP here; a FUTURE k8s-posture oracle re-verifies
-    them to facts (see ``docs/coverage-mobile-k8s-roadmap.md``). Mirrors ``SbomVulnSensor``."""
+    device/cluster control, no entitlement. The leads STOP here; the k8s-posture oracle
+    (``verify.k8s_posture``) re-verifies a lead to a FACT only when the retained control proves a
+    concrete insecure setting. Mirrors ``SbomVulnSensor``."""
 
     name = "kube_bench"
     tier = "T1"
@@ -183,7 +198,7 @@ class KubeBenchSensor:
         return kube_bench_observations(controls, seq=seq, source="kube_bench")
 
     def controls(self, result: ToolResult) -> list[dict]:
-        """The failed/warned CIS-control evidence a FUTURE k8s-posture oracle would re-verify."""
+        """The failed/warned CIS-control evidence the k8s-posture oracle (verify.k8s_posture) re-verifies."""
         out = result.output or {}
         c = out.get("controls")
         return c if isinstance(c, list) else []

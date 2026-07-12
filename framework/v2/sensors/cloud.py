@@ -349,6 +349,53 @@ def confirm_cloud_privilege_path(inventory: dict, principal: str, resource: str,
     return confirm_privilege_path(graph, principal, resource, access, verifier=verifier)  # type: ignore[arg-type]
 
 
+def confirm_cloud_posture_facts(inventory: dict, *, verifier: object = None) -> list[dict]:
+    """Promote the ORACLE-PROVABLE cloud posture LEADS (public exposure / over-broad trust) to FACTS by
+    re-deriving each grant PATH over the RETAINED policy graph with the policy-path oracle — NO live cloud
+    calls, a pure re-derivation over the operator's own retained export (normalisation is idempotent).
+
+    Mirrors ``cloud_posture_leads`` condition-for-condition, so exactly the leads the sensor minted are
+    the ones re-verified here: a PUBLIC-EXPOSURE lead is confirmed iff the anonymous principal has a real
+    grant path to the resource; an EXCESSIVE-PRIVILEGE lead iff the named grantee's write/admin grant path
+    dominates. Returns the confirmed facts (each ``{principal, resource, access, lead_class}``, ids
+    canonicalised to the graph's keys); a benign posture returns ``[]`` (nothing fired). The un-oracle-
+    provable ``misconfiguration`` lead (unencrypted-at-rest) is deliberately NOT here — no reachability
+    oracle proves it, so it stays an honest LEAD."""
+    inv = normalize_cloud_export(inventory)   # idempotent; re-express public=true as an anonymous grant
+    graph = build_policy_graph(inv)
+    facts: list[dict] = []
+    seen: set = set()
+
+    def _confirm(principal: str, resource: str, access: str, lead_class: str, kind_hint: str) -> None:
+        key = (lead_class, _norm(principal), _norm(resource), _norm(access))
+        if key in seen:
+            return
+        seen.add(key)
+        res = confirm_privilege_path(graph, principal, resource, access, verifier=verifier)  # type: ignore[arg-type]
+        if getattr(res, "confirmed", False):
+            facts.append({"principal": _norm(principal), "resource": _norm(resource),
+                          "access": _norm(access), "lead_class": lead_class,
+                          # the raw kind hint so a caller can attach a grounded fact to the SAME resource
+                          # node the topology minter created (datastore vs cloud_resource)
+                          "resource_kind": str(kind_hint or "")})
+
+    for r in inv.get("resources", []) or []:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        rid = r["id"]
+        kind_hint = r.get("kind", "")
+        grants = [g for g in (r.get("grants") or []) if isinstance(g, dict)]
+        anon = [g for g in grants if _is_anon(g.get("principal"))]
+        if bool(r.get("public")) or anon:
+            who = anon[0].get("principal") if anon else "*"
+            _confirm(who, rid, "", "public_exposure", kind_hint)
+        over = [g for g in grants if _is_write_admin(g.get("access")) and not _is_anon(g.get("principal"))]
+        if over and bool(r.get("sensitive")):
+            g0 = over[0]
+            _confirm(g0.get("principal"), rid, g0.get("access") or "", "excessive_privilege", kind_hint)
+    return facts
+
+
 # ---------------------------------------------------------------------------
 # the sensors
 # ---------------------------------------------------------------------------

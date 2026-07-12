@@ -16,6 +16,7 @@ All traffic is loopback pytest-httpserver; nothing leaves the test host.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -553,3 +554,68 @@ def test_engage_cognitive_refusal_is_not_inert():
     class _G(_F):
         oracle_context = None
     assert epistemic_refusal(_scanner_verification_claim(_G()), world=None) is None
+
+
+# ---- WS-3d: the opt-in `--fuse-sensors` flag --------------------------------
+
+# an offline kube-bench report whose control 1.2.1 hard-FAILED with a concrete insecure setting.
+_KB_FUSE = """
+{"Controls": [
+  {"id": "1", "text": "Master", "tests": [
+    {"section": "1.2", "desc": "API Server", "results": [
+      {"test_number": "1.2.1", "test_desc": "Ensure --anonymous-auth is false", "status": "FAIL",
+       "actual_value": "kube-apiserver --anonymous-auth=true --profiling=false",
+       "remediation": "set --anonymous-auth=false"}
+    ]}
+  ]}
+]}
+"""
+
+
+def _write_fusion_manifest(target_dir: Path, tmp_path: Path) -> None:
+    kb = tmp_path / "kube-bench.json"
+    kb.write_text(_KB_FUSE, encoding="utf-8")
+    (target_dir / "fusion.json").write_text(
+        json.dumps([{"sensor": "kube_bench", "args": {"report": str(kb)}}]), encoding="utf-8")
+
+
+def test_engage_fuse_sensors_folds_offline_leads_and_promotes_facts(
+    isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
+):
+    port = httpserver.port
+    td = isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+    _write_fusion_manifest(td, tmp_path)
+
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny, fuse_sensors=True)
+
+    # the offline kube-bench LEAD folded into the SHARED run world-model, and the k8s-posture oracle
+    # promoted the proven insecure control to an oracle-grounded FACT (LEAD stays a lead; oracle proves).
+    assert result.fused_leads >= 1 and result.fused_facts >= 1
+    assert result.world.has_node("control:cis-k8s:1.2.1")                   # the LEAD
+    assert result.world.has_node("finding:k8s_posture:cis-k8s:1.2.1")       # the FACT
+    # fusion NEVER changes the authoritative scan findings
+    assert all(f.bug_class != "k8s_misconfiguration" for f in result.report.active_findings)
+
+
+def test_engage_fuse_sensors_default_off_is_byte_identical(
+    isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
+):
+    port = httpserver.port
+    td = isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+    _write_fusion_manifest(td, tmp_path)
+
+    # default OFF: even with a fusion manifest present on disk, NO fusion runs — the world carries no
+    # sensor leads/facts and the counts stay 0 (the default engage path is untouched).
+    result = run_engagement(
+        "alpha", f"http://127.0.0.1:{port}/",
+        max_pages=5, enable_oob=False, prompt_callback=_deny)   # fuse_sensors defaults False
+
+    assert result.fused_leads == 0 and result.fused_facts == 0
+    assert not result.world.has_node("control:cis-k8s:1.2.1")
+    assert not result.world.has_node("finding:k8s_posture:cis-k8s:1.2.1")

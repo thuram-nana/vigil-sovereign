@@ -1810,6 +1810,113 @@ def policy_path_oracle(observed_policy: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# K8s posture — a kube-bench CIS control FAILED with a concrete observed insecure setting
+# ---------------------------------------------------------------------------
+#
+# Workstream-3: promote a kube-bench CIS-control-failure LEAD (sensors.k8s_runtime) to a FACT. A
+# scanner FAIL is a THIRD-PARTY heuristic say-so; this oracle does NOT trust it — it RE-DERIVES the
+# weakness over the RETAINED control evidence: a control is a proven insecure setting only when it hard-
+# FAILED (WARN is a manual-review advisory, not a proof) AND its OBSERVED value literally carries a
+# dangerous flag (a parse-proof over `actual_value`, mirroring how reflection_context_oracle PARSES to
+# prove an executable context rather than substring-matching). A PASSING control never fires (status !=
+# FAIL), a FAIL whose observed value shows the SECURE setting never fires (no rule matches), and a FAIL
+# with no captured value stays a LEAD (no concrete proof) — near-zero false positives by construction.
+#
+# Each rule is a (rule_id, compiled regex over the observed flag value, human label). The separator
+# `[=:\s]+` matches the kube-bench renderings `--flag=value` / `--flag value` / `--flag: value`. The
+# regexes are fixed-alternation and non-backtracking over a LENGTH-CAPPED value (ReDoS-safe), and the
+# tuple order is fixed so the verdict is deterministic (same evidence -> same signal, re-runnable
+# offline from the certificate exactly like every oracle above).
+_K8S_VALUE_CAP = 8192
+
+_INSECURE_SETTING_RULES: tuple[tuple[str, "re.Pattern[str]", str], ...] = (
+    ("anonymous_auth_enabled", re.compile(r"(?i)--anonymous-auth[=:\s]+true\b"),
+     "--anonymous-auth is enabled (unauthenticated API/kubelet access)"),
+    ("authz_mode_always_allow", re.compile(r"(?i)--authorization-mode[=:\s]+\S*alwaysallow"),
+     "--authorization-mode includes AlwaysAllow (authorization disabled)"),
+    ("insecure_port_open", re.compile(r"(?i)--insecure-port[=:\s]+0*[1-9]\d*"),
+     "--insecure-port is a non-zero port (unauthenticated plaintext API)"),
+    ("kubelet_read_only_port", re.compile(r"(?i)--read-only-port[=:\s]+0*[1-9]\d*"),
+     "kubelet --read-only-port is a non-zero port (unauthenticated read API)"),
+    ("basic_auth_file", re.compile(r"(?i)--basic-auth-file[=:\s]+\S+"),
+     "--basic-auth-file is set (static-password basic auth)"),
+    ("token_auth_file", re.compile(r"(?i)--token-auth-file[=:\s]+\S+"),
+     "--token-auth-file is set (static-token auth)"),
+    ("etcd_no_client_cert_auth", re.compile(r"(?i)--client-cert-auth[=:\s]+false\b"),
+     "etcd --client-cert-auth is false (no client-certificate authentication)"),
+    ("profiling_enabled", re.compile(r"(?i)--profiling[=:\s]+true\b"),
+     "--profiling is enabled (debug endpoints exposed)"),
+)
+
+
+def k8s_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a kube-bench CIS control PROVABLY carries a concrete insecure setting — the membership/
+    parse-proof that promotes ``sensors.k8s_runtime``'s CIS-control-FAILURE LEAD to a FACT. A kube-bench
+    FAIL is a third-party CIS-checker's say-so; this oracle re-derives the weakness over the RETAINED
+    control so the scanner's verdict is never rubber-stamped and a benign posture is never confirmed.
+
+    ``observed_control`` is the JSON-safe evidence the sensor retained (``sensors.k8s_runtime`` carries
+    it in the control lead)::
+
+        {"check_id": "1.2.1", "status": "FAIL", "actual_value": "... --anonymous-auth=true ...",
+         "description": str?, "section": str?, "benchmark": "cis-kubernetes"?}
+
+    Fires (0.9) only when ALL hold:
+      1. ``status`` is a hard ``FAIL`` — a WARN is a manual-review advisory, not a proof, so it stays a
+         LEAD (WARN/PASS/INFO never fire);
+      2. the retained ``actual_value`` is present AND one of ``_INSECURE_SETTING_RULES`` matches it — the
+         concrete observed value literally carries a dangerous flag (``--anonymous-auth=true``,
+         ``--authorization-mode=…AlwaysAllow``, a non-zero ``--insecure-port``, a static auth file, …).
+
+    A PASSING control (``status`` != FAIL), a FAIL whose observed value shows the SECURE setting (no rule
+    matches — e.g. ``--anonymous-auth=false``), and a FAIL with no captured value all correctly do NOT
+    fire — a control the oracle cannot PROVE insecure stays an honest LEAD. Pure + deterministic, so the
+    same verdict re-verifies offline from the retained context. GROUNDING is procedural exactly as for
+    every oracle: the control MUST be the sensor's RETAINED kube-bench evidence, never a re-run of the
+    tool laundered as a fact."""
+    if not isinstance(observed_control, Mapping):
+        return OracleSignal(kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+                            evidence="no kube-bench control evidence")
+    ctl = observed_control
+    check_id = _coerce_text(ctl.get("check_id")).strip()
+    status = _coerce_text(ctl.get("status")).strip().upper()
+    actual = _coerce_text(ctl.get("actual_value"))[:_K8S_VALUE_CAP]
+
+    if status != "FAIL":
+        return OracleSignal(
+            kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+            evidence=(f"control {check_id or '?'} status {status or '?'} is not a hard FAIL — "
+                      f"not a proven insecure setting (stays a lead)"),
+            observed={"check_id": check_id, "status": status})
+    if not actual.strip():
+        return OracleSignal(
+            kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+            evidence=(f"control {check_id or '?'} FAILED but retained no concrete observed value to "
+                      f"adjudicate — stays a lead (no near-zero-FP proof)"),
+            observed={"check_id": check_id, "status": status})
+
+    for rule_id, pattern, label in _INSECURE_SETTING_RULES:
+        m = pattern.search(actual)
+        if m is None:
+            continue
+        hit = m.group(0).strip()
+        start = max(0, m.start() - 16)
+        snippet = actual[start:m.end() + 16]
+        return OracleSignal(
+            kind=OracleKind.K8S_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"kube-bench control {check_id or '?'} FAILED with a concrete insecure setting: "
+                      f"{label} (observed {hit!r}): ...{snippet}..."),
+            observed={"check_id": check_id, "status": status, "rule": rule_id,
+                      "matched": hit, "reason": "insecure_setting_observed"})
+
+    return OracleSignal(
+        kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+        evidence=(f"control {check_id or '?'} FAILED but its observed value carries no recognised "
+                  f"dangerous flag — not provably an insecure setting (stays a lead)"),
+        observed={"check_id": check_id, "status": status})
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They
