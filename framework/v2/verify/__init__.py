@@ -32,6 +32,12 @@ from .models import (
 from .oob import OOBHit, OOBReceiver
 from .k8s_posture import confirm_k8s_posture, k8s_posture_context
 from .cloud_posture import confirm_cloud_posture, cloud_posture_context
+from .mesh_posture import (
+    confirm_mesh_posture,
+    mesh_posture_context,
+    ingest_mesh_config,
+    confirm_mesh_config,
+)
 from .jwt_forgery import confirm_jwt_forgery, jwt_forgery_context
 from .saml_forgery import confirm_saml_forgery, saml_forgery_context
 from .oracles import (
@@ -41,6 +47,7 @@ from .oracles import (
     jwt_forgery_oracle,
     cloud_posture_oracle,
     k8s_posture_oracle,
+    mesh_posture_oracle,
     oob_callback_oracle,
     policy_path_oracle,
     prompt_injection_oracle,
@@ -90,6 +97,7 @@ __all__ = [
     "policy_path_oracle",
     "k8s_posture_oracle",
     "cloud_posture_oracle",
+    "mesh_posture_oracle",
     "jwt_forgery_oracle",
     "saml_forgery_oracle",
     # AEGIS (defensive dual) oracles
@@ -119,6 +127,11 @@ __all__ = [
     # cloud/CSPM posture (achieved-state promotion; Wave-F1)
     "confirm_cloud_posture",
     "cloud_posture_context",
+    # service-mesh posture (achieved-state promotion + minimal offline ingestion; Wave-G3)
+    "confirm_mesh_posture",
+    "mesh_posture_context",
+    "ingest_mesh_config",
+    "confirm_mesh_config",
     # SSO/JWT structural-forgery (Workstream-B)
     "confirm_jwt_forgery",
     "jwt_forgery_context",
