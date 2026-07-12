@@ -817,3 +817,182 @@ def test_learning_closes_the_loop_meta_monitor_reads_what_the_loop_wrote(isolate
 
     loaded = auto_mod._load_ledger("alpha")               # exactly the read `_meta_caution` performs
     assert loaded is not None and len(loaded) == out1.outcomes_credited
+
+
+# ---------------------------------------------------------------------------
+# (14) W2.2b — bounded MULTI-STEP lookahead (depth-2) selection. Default off
+#      (depth-1 greedy) so every test above stays byte-identical; when enabled it
+#      commits a tight budget to COMPLETING a crown-jewel route rather than chasing
+#      the single highest-scoring off-route leaf — a pick greedy never makes.
+# ---------------------------------------------------------------------------
+
+
+def _twohop_route_world() -> WorldModel:
+    """attacker:self -> ep_on -> db(DATASTORE) is a TWO-hop crown-jewel route (completing it needs
+    the leaves on BOTH ep_on AND db); ep_off is an endpoint no crown-jewel route touches. Mirrors
+    planner.tests.test_lookahead's fixture through the autonomous helpers."""
+    w = WorldModel()
+
+    def node(nid: str, kind: NodeKind, **attrs: object) -> None:
+        w.add_node(Node(id=nid, kind=kind, attrs=attrs,
+                        provenance="obs-1", confidence=1.0, first_seen=0, last_seen=0))
+
+    def edge(src: str, dst: str) -> None:
+        w.add_edge(Edge(src=src, dst=dst, kind=EdgeKind.REACHABLE_FROM,
+                        provenance="obs-1", confidence=0.9, first_seen=0, last_seen=0))
+
+    node(_ATTACKER, NodeKind.PRINCIPAL, role="attacker")
+    node("ep_on", NodeKind.ENDPOINT, url="https://t.invalid/on-path")
+    node("db", NodeKind.DATASTORE, url="https://t.invalid/db")
+    node("ep_off", NodeKind.ENDPOINT, url="https://t.invalid/off-path")
+    edge(_ATTACKER, "ep_on")
+    edge("ep_on", "db")
+    return w
+
+
+def _twohop_result() -> EngagementResult:
+    # two LOW-prior on-route leaves (on ep_on and on db) whose confirmation TOGETHER completes the
+    # route, and one HIGH-prior OFF-route leaf both greedy and myopic-path-aware prefer.
+    return _synthetic_result(_twohop_route_world(), [
+        _finding("xss", "https://t.invalid/off-path", 0.9),   # greedy/pathaware winner (off-route)
+        _finding("idor", "https://t.invalid/on-path", 0.3),   # on-route (mid hop)
+        _finding("leak", "https://t.invalid/db", 0.3)])       # on-route (the crown jewel itself)
+
+
+def test_lookahead_default_off_is_greedy_and_byte_identical():
+    """Default depth-1 selection is the one-step greedy/path-aware pick — the off-route high-prior
+    leaf — byte-identical to the pre-lookahead behaviour."""
+    out = run_autonomous_cycle(_twohop_result(), slug="alpha", request_budget=2, prompt_callback=_deny)
+    assert out.lookahead_depth == 1
+    assert out.cycles and out.cycles[0].picked_bug_class == "xss", \
+        "greedy default should chase the high-prior off-route leaf"
+
+
+def test_lookahead_depth2_commits_budget_to_completing_the_route():
+    """With --autonomous-lookahead (depth-2) and a budget that fits exactly the two-leaf route, the
+    planner DROPS the high-prior off-route leaf and commits to COMPLETING the crown-jewel route —
+    executing that plan's highest-value step (the leaf on the datastore) first. A pick neither the
+    greedy nor the myopic path-aware selector makes."""
+    treated = run_autonomous_cycle(_twohop_result(), slug="alpha", request_budget=2,
+                                   lookahead_depth=2, prompt_callback=_deny)
+    assert treated.lookahead_depth == 2
+    assert treated.cycles
+    first = treated.cycles[0].picked_bug_class
+    assert first != "xss", "lookahead squandered the budget on the off-route leaf"
+    assert first in ("idor", "leak"), "lookahead did not commit to the crown-jewel route"
+    assert first == "leak", "lookahead did not execute the route's highest-value (crown-jewel) step"
+    # ADVISORY-ONLY: the authoritative findings are untouched — lookahead only re-ranks effort.
+    assert {f.bug_class for f in treated.engagement.report.active_findings} == {"xss", "idor", "leak"}
+
+
+def test_lookahead_still_gates_the_tool_call():
+    """Lookahead only changes SELECTION; the picked action is still driven as a fail-closed GATED
+    tool call (an out-of-scope host here refuses it — the tool never runs unauthorized)."""
+    out = run_autonomous_cycle(_twohop_result(), slug="alpha", request_budget=2,
+                               lookahead_depth=2, prompt_callback=_deny)
+    step = out.cycles[0]
+    assert step.gated is True and step.tool == "reverify_finding"
+
+
+def test_lookahead_selection_is_deterministic():
+    def run():
+        out = run_autonomous_cycle(_twohop_result(), slug="alpha", max_cycles=3,
+                                   request_budget=2, lookahead_depth=2, prompt_callback=_deny)
+        return [(s.picked_bug_class, s.reoriented_to) for s in out.cycles]
+
+    assert run() == run(), "lookahead selection is not deterministic"
+
+
+def test_lookahead_without_crownjewel_degrades_to_greedy():
+    """With no reachable crown jewel, depth-2 lookahead degrades VERBATIM to the greedy pick, so it
+    is byte-identical to depth-1 there (the receding-horizon selector's documented fallback)."""
+    world = _greedy_world(["https://t.invalid/a", "https://t.invalid/b"])
+    findings = [_finding("xss", "https://t.invalid/a", 0.6), _finding("sqli", "https://t.invalid/b", 0.5)]
+    greedy = run_autonomous_cycle(_synthetic_result(world, list(findings)), slug="alpha",
+                                  request_budget=2, prompt_callback=_deny)
+    look = run_autonomous_cycle(_synthetic_result(_greedy_world(["https://t.invalid/a", "https://t.invalid/b"]),
+                                                  list(findings)),
+                                slug="alpha", request_budget=2, lookahead_depth=2, prompt_callback=_deny)
+    assert greedy.cycles[0].picked_bug_class == look.cycles[0].picked_bug_class == "xss"
+
+
+# ---------------------------------------------------------------------------
+# (15) W2.2d — the SECOND gated autonomous tool: a `declared_service` reachability
+#      re-check driven through the FULL invoke_tool gate chain. It folds a LEAD into
+#      the world-model (never a fact), and a tripped kill-switch / out-of-scope host
+#      REFUSES it (fail-closed). Default off → byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def test_reachability_default_off_is_byte_identical():
+    """Without enable_reachability the second tool never runs — no telemetry, no extra world nodes."""
+    world = _greedy_world(["http://10.0.0.5/x"])
+    result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+    before = world.node_count
+    out = run_autonomous_cycle(result, slug="alpha", prompt_callback=_deny)
+    assert out.reachability_driven is False
+    assert out.reachability_applied == 0
+    assert world.node_count == before  # the reverify tool folds attrs only; reachability added nothing
+
+
+def test_reachability_recheck_is_gated_and_folds_a_lead(isolated_engagement):
+    """In-scope: the gated `declared_service` re-check RUNS through invoke_tool and folds intel-tier
+    LEADS (a HOST + SERVICE) into the world-model — never a fact (no oracle_context; intel tier)."""
+    isolated_engagement("alpha", "10.0.0.5")   # the re-check host is in charter scope
+    world = _greedy_world(["http://10.0.0.5/x"])
+    result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+
+    assert out.reachability_driven is True
+    assert out.reachability_tool == "declared_service"
+    assert out.reachability_host == "10.0.0.5"
+    assert out.reachability_refused is False and out.reachability_gate == ""
+    assert out.reachability_applied >= 1, "the gated re-check folded no lead observation"
+    # the fold is a real LEAD in the world-model (a declared HOST), never a Finding/fact.
+    assert world.has_node("host:10.0.0.5")
+    # ADVISORY-ONLY: the authoritative report is untouched by the second tool.
+    assert {f.bug_class for f in result.report.active_findings} == {"xss"}
+
+
+def test_reachability_recheck_refused_out_of_scope(isolated_engagement):
+    """Fail-closed: a re-check host NOT on the charter is REFUSED at the scope gate and folds nothing
+    (only 127.0.0.1 is in scope here; the finding host is t.invalid)."""
+    isolated_engagement("alpha", "127.0.0.1")
+    world = _greedy_world(["https://t.invalid/x"])
+    result = _synthetic_result(world, [_finding("xss", "https://t.invalid/x", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+
+    assert out.reachability_driven is True
+    assert out.reachability_host == "t.invalid"
+    assert out.reachability_refused is True
+    assert out.reachability_gate == "scope"
+    assert out.reachability_applied == 0
+    assert not world.has_node("domain:t.invalid") and not world.has_node("host:t.invalid")
+
+
+def test_reachability_recheck_refused_by_tripped_killswitch(tmp_path: Path, monkeypatch):
+    """A tripped kill-switch REFUSES the second tool before it runs (the same fail-closed chain as
+    reverify_finding) — it folds nothing."""
+    monkeypatch.setattr(_paths, "killswitch_path", lambda s: tmp_path / f"{s}.halt")
+    KillSwitch("alpha").trip("operator stop")
+    world = _greedy_world(["http://10.0.0.5/x"])
+    result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+    out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+
+    assert out.reachability_driven is True
+    assert out.reachability_refused is True
+    assert out.reachability_gate == "kill-switch"
+    assert out.reachability_applied == 0
+
+
+def test_reachability_recheck_is_deterministic(isolated_engagement):
+    isolated_engagement("alpha", "10.0.0.5")
+
+    def run():
+        world = _greedy_world(["http://10.0.0.5/x"])
+        result = _synthetic_result(world, [_finding("xss", "http://10.0.0.5/x", 0.8)])
+        out = run_autonomous_cycle(result, slug="alpha", enable_reachability=True, prompt_callback=_deny)
+        return (out.reachability_host, out.reachability_refused, out.reachability_gate,
+                out.reachability_applied)
+
+    assert run() == run(), "the gated reachability re-check is not deterministic"
