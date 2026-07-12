@@ -11,6 +11,7 @@ Request-side coverage (fires on the request ALONE, no app response needed):
   * honeypot tripwire     -> automated_access                (a fetch of a seeded path no UI links)
   * parse-proof SQLi       -> sqli_attempt                    (string-literal break-out into structure)
   * parse-proof cmd-inject -> command_injection_attempt       (shell command-execution construct)
+  * parse-proof NoSQLi     -> nosql_injection_attempt         (MongoDB operator injected as a KEY)
 
 Honest scope: a request-side confirmation proves a STRUCTURED INJECTION ATTEMPT, never that the app is
 exploited — the response-side oracles (G4) prove exploitation. Everything below a fired oracle stays a
@@ -29,8 +30,17 @@ from ..verify.confirmation import confirm_finding
 from ..verify.verifier import OracleVerifier
 from .models import CertRef, Verdict
 
-# The request-side parse-proof classes checked over each request-parameter value.
-_REQUEST_PAYLOAD_CLASSES = ("sqli_attempt", "command_injection_attempt")
+# The request-side parse-proof classes checked over each request-parameter (name, value) pair. NoSQL is
+# last so a value that also trips SQLi/cmdi keeps its existing (first-match) verdict — appending is purely
+# additive to the existing behaviour. The nosql oracle proves an operator injected as a KEY, from either
+# the bracket/dot param NAME (`user[$ne]`) or a JSON-object VALUE (`{"$ne":null}`).
+_REQUEST_PAYLOAD_CLASSES = ("sqli_attempt", "command_injection_attempt", "nosql_injection_attempt")
+
+# A JSON request body worth a whole-body NoSQL operator-structure scan (see `inspect_request` step 2b):
+# the string-leaf candidate walk (`candidate_values`) cannot surface `{"user":{"$ne":null}}` (the operator
+# value is null / a number / an array, so no string leaf carries the `$ne` key path). Bounded to match the
+# oracle's own JSON parse cap so the scan and the certificate stay small (a larger body simply won't fire).
+_MAX_NOSQL_BODY_CHARS = 65536
 
 # DoS-safe bounds: cap how many insertion points we inspect and how long each value can be before any
 # oracle work (the oracle regexes are non-backtracking, but bounding the input is defence in depth).
@@ -204,6 +214,19 @@ def _ssrf_lead_param(values: list[tuple[str, str]]) -> str | None:
     return None
 
 
+def _json_nosql_body(headers: list[tuple[str, str]], body: str | None) -> str | None:
+    """The raw body IFF it is a JSON request body worth a whole-body NoSQL operator-structure scan — a
+    ``application/json`` content-type and within the parse bound. The nosql oracle walks the parsed
+    structure for a KNOWN operator as a KEY (`{"user":{"$ne":null}}`), which the string-leaf candidate
+    walk cannot surface. Returns None otherwise (total; never raises)."""
+    if not body or len(body) > _MAX_NOSQL_BODY_CHARS:
+        return None
+    for hk, hv in (headers or []):
+        if str(hk).lower() == "content-type" and "application/json" in str(hv).lower():
+            return body
+    return None
+
+
 def inspect_request(
     method: str,
     path: str,
@@ -241,6 +264,19 @@ def inspect_request(
             confirmed = confirm_finding({"bug_class": bug_class}, context=fc, verifier=verifier)
             if confirmed is not None:
                 return _payload_verdict(bug_class, param, confirmed, fc, enforce=enforce)
+
+    # (2b) NoSQL operator-as-key structure in a JSON BODY whose operator value is NON-string
+    #      (`{"user":{"$ne":null}}`, `{"user":{"$in":[1,2]}}`) — a structure the string-leaf candidate
+    #      walk above cannot surface (no string leaf carries the operator key path). Feed the whole JSON
+    #      body through the SAME nosql oracle (it walks the parsed structure for a KNOWN operator KEY) for a
+    #      re-runnable certificate. The per-value loop already handles bracket params, JSON-value blobs, and
+    #      string-leaf bodies with a PRECISE path (and runs first), so this only adds the non-string-leaf case.
+    jb = _json_nosql_body(headers, body)
+    if jb is not None:
+        fc = FindingContext.from_request_payload(jb, bug_class="nosql_injection_attempt", param="body")
+        confirmed = confirm_finding({"bug_class": "nosql_injection_attempt"}, context=fc, verifier=verifier)
+        if confirmed is not None:
+            return _payload_verdict("nosql_injection_attempt", "body", confirmed, fc, enforce=enforce)
 
     # (3) SSRF / XXE LEADS — belief-raising, NEVER a block (their confirmation is out-of-band; see the
     #     _lead_verdict / SSRF-XXE note above). Only reached when nothing above proved a block.
