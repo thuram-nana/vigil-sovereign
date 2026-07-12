@@ -26,14 +26,21 @@ real users and is exactly what every WAF does badly. AEGIS blocks what it can *p
 
 | Class | Proved by | Seen from |
 |-------|-----------|-----------|
-| `sqli_attempt` | the value provably breaks out of a SQL string literal into query structure (tautology / `UNION SELECT` / stacked keyword) | the request alone |
-| `command_injection_attempt` | an unambiguous shell command-execution construct (`$(cmd)`, `` `cmd` ``, separator + known command) | the request alone |
+| `sqli_attempt` | the value provably breaks out of a SQL string literal into query structure, anchored at the break-out (a self-tautology `OR 1=1` / `UNION SELECT` / a full stacked statement `; DROP TABLE`) | the request alone |
+| `command_injection_attempt` | a dangerous command invoked with a shell argument, inside a substitution (`$(cat /etc/passwd)`) or after a real separator (`; cat /etc/passwd`, `\| nc <ip>`) | the request alone |
 | `automated_access` | a fetch of a seeded honeypot path no human UI links | the request alone |
-| `xss` (reflected) | a payload's executable token reached a live executable HTML context in the response (an HTML‑encoded reflection is **not** blocked) | the app's response |
-| `error_based_sqli` | a datastore error the app leaked, linked to a quote-bearing request value | the app's response |
+| `xss` (reflected) | a request value reflected **verbatim** whose executable token reached a live executable HTML context (an HTML‑encoded reflection is **not** blocked) | the app's response |
 
-Request-side classes prove a **structured attack attempt**; response-side classes prove
-**exploitation**. Roadmap (not yet built): SSTI, SSRF, path-traversal, XXE, graduated
+Request-side classes prove a **structured attack attempt**; the reflected‑XSS class proves
+**exploitation**. The oracles are deliberately conservative — a benign apostrophe (`O'Brien`), a
+comparison (`id > 1000`), a tool string (`python-requests/2.28.1`), delimited data (`Name \| Age`), a
+pasted SQL query, or a prose em-dash never trip a block. **Note for code-accepting apps** (paste bins,
+dev Q&A, bug trackers): user content that *is* attack syntax (a shared `$(cat ...)` snippet, a pasted
+injection payload) will be flagged — run such apps in `observe` and review before enforcing.
+
+Roadmap (not yet built): **error-based SQLi** (needs a differential/OOB confirmation — a single inline
+response cannot prove a datastore error was *caused* by the payload rather than merely displayed near
+it, so it is off the block path today), SSTI, SSRF, path-traversal, XXE, and graduated
 challenge/throttle on sustained per-actor belief.
 
 ## Three ways to add it
