@@ -120,12 +120,17 @@ fusion — landed as **reviewed, opt-in, gate-byte-identical** slices; items 1�
 updated to reflect the new opt-in reach). Regenerate drifting counts from the
 tree.
 
-### In-flight (the 13-workstream program) — NOT shipped at this commit
+### The 13-workstream program — since LANDED (this section was stale)
 
-Workstreams A–L are landing **new opt-in capabilities** on separate branches off
-this same base. They are **in progress, not merged to `main`**; this ledger
-describes only `649b530`. When they land, re-reconcile this section and bump the
-"last reconciled" commit.
+**Superseded (2026-07-12).** This section previously read "In-flight … NOT shipped
+… not merged to `main`" and described only `649b530`. That is **358 commits stale**
+and now *under*-states reality — the exact honesty failure this ledger exists to
+prevent. Most of the 13-workstream opt-in capabilities have since merged to `main`
+(e.g. `framework/v2/sensors/fuzz.py`, the engage hooks, SARIF/authn, IPv6, client-
+side + k8s), followed by the AEGIS MVP + Gateway and the 3-workstream program
+(AEGIS depth · autonomy loop · sensor fusion). The honest-core items above are the
+current truth, reconciled at `aa89a49` (2026-07-12); consult `git log` for each
+program's merge commits rather than treating any single frozen SHA as "now".
 
 ---
 
