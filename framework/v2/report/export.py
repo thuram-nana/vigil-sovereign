@@ -42,7 +42,7 @@ from .priority import effort_size, prioritize, priority_score
 
 # Tool identity, shared with the scanner export so a CI consumer sees one producer.
 _TOOL_NAME = "CRUCIBLE"
-_TOOL_URI = "https://github.com/Water-Hacker/PENTEST"
+_TOOL_URI = "https://github.com/thuram-nana/PENTEST"
 _JSON_SCHEMA = "crucible.report/v1"
 _SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 
