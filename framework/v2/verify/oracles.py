@@ -2256,3 +2256,247 @@ def jwt_forgery_oracle(token: Any, *, candidate_keys: Sequence[str | bytes] = ()
         evidence=(f"alg={alg or '?'!r}: an asymmetric signature requires the private key to forge — not "
                   f"structurally forgeable from the token alone (stays a lead)"),
         observed={"alg": alg})
+
+
+# ---------------------------------------------------------------------------
+# Workstream NW-1 — the SAML structural-forgery oracle (the SAML_STRUCTURAL_FORGERY kind).
+#
+# The SSO SIBLING of jwt_forgery_oracle and the OFFLINE STRUCTURAL COMPLEMENT to the LIVE response-
+# differential SAML checks in scanner.sso (SamlSignatureWrappingCheck / SamlAssertionTamperingCheck):
+# those forge an artifact and observe ACCEPTANCE against a running SP; this judges a CAPTURED SAML
+# Response's own XML ALONE — offline, deterministic, ZERO forged traffic — and promotes it to
+# STRUCTURALLY-FORGEABLE only on a coarse, c14n-free STRUCTURAL invariant a VALIDLY SIGNED assertion
+# cannot exhibit. It is the dual of scanner.sso.wrap_assertion_xsw.
+#
+#   (a) unsigned assertion   — the saml:Assertion carrying the consumed NameID has ZERO ds:Signature
+#       anywhere in the message. An unsigned assertion needs no key, so anyone mints it.
+#   (b) reference mismatch   — every ds:Reference/@URI points at some id OTHER than the consumed
+#       assertion or any of its ancestors: the signature does NOT cover the consumed element, so its
+#       content is swappable while a valid-looking signature rides along.
+#   (c) signature-wrapping   — >1 saml:Assertion where the UNSIGNED consumed one supplies the identity
+#       while a ds:Signature references a DIFFERENT assertion (the exact dual of wrap_assertion_xsw:
+#       signed original kept verbatim, unsigned forged copy consumed).
+#
+# Near-zero-FP: a properly signed single assertion whose ds:Reference covers it (or an ancestor), a
+# SAML metadata / request doc with no consumed NameID, malformed/empty XML, and a DOCTYPE/ENTITY doc
+# (refused by the XXE-safe parser) all DO NOT fire. Full XML-DSig C14N/transform processing is
+# deliberately NOT attempted (it needs lxml/signxml, out of scope) — anything softer than these coarse
+# invariants stays a lead. Pure + deterministic (no clock/rng/io beyond the pure XXE-safe parse), so a
+# confirmed forgery re-verifies OFFLINE from its retained XML certificate.
+# NOTE: scanner.sso's XXE-safe parser + tree helpers are imported LAZILY inside the function — that
+# module imports verify.adapter, so a module-load `verify -> scanner` import would be a cycle. The
+# lazy import runs only when the oracle fires (never on the gate path), so no cycle and no gate drift.
+# ---------------------------------------------------------------------------
+
+
+# A ds:Reference/@URI of the form `#xpointer(id('X'))` — a spec-legal same-document XML-Signature
+# reference (xmldsig-core 4.4.3) that selects element X by id, EQUIVALENT to the bare `#X` shorthand.
+_SAML_XPTR_ID_RE = re.compile(r"^xpointer\(\s*id\(\s*(['\"])(?P<id>.+?)\1\s*\)\s*\)$")
+# a whole-document XPointer `#xpointer(/)` — equivalent to URI="" (the enveloped whole-doc reference).
+_SAML_XPTR_ROOT_RE = re.compile(r"^xpointer\(\s*/\s*\)$")
+# a plain bare-name reference `#NCName` (no parens / slashes / xpointer) we can resolve to an id.
+_SAML_BARENAME_RE = re.compile(r"^[A-Za-z_][\w.\-]*$")
+
+
+def _saml_resolve_ref(uri: str) -> tuple[str, str | None]:
+    """Resolve a ds:Reference/@URI to ('whole', None) | ('id', <name>) | ('unknown', None).
+
+    Only same-document forms whose covered id/scope is UNAMBIGUOUS from the URI STRING are resolved:
+    URI="" and `#xpointer(/)` (whole document), `#NCName` and `#xpointer(id('NCName'))` (that id).
+    Everything else — a URI-less/transform-selected reference, an XPath/full-XPointer expression, a
+    cross-document URI — is 'unknown': the oracle then REFUSES to assert a coverage mismatch on it
+    (near-zero-FP; c14n/transform semantics are deliberately out of scope, so a reference we cannot
+    resolve is NOT evidence the signature fails to cover the consumed element)."""
+    if uri == "":
+        return ("whole", None)
+    if not uri.startswith("#"):
+        return ("unknown", None)
+    frag = uri[1:].strip()
+    if _SAML_XPTR_ROOT_RE.match(frag):
+        return ("whole", None)
+    m = _SAML_XPTR_ID_RE.match(frag)
+    if m:
+        return ("id", m.group("id"))
+    if _SAML_BARENAME_RE.match(frag):
+        return ("id", frag)
+    return ("unknown", None)
+
+
+def saml_forgery_oracle(xml: Any) -> OracleSignal:
+    """Fire (SAML_STRUCTURAL_FORGERY) iff the captured SAML Response ``xml`` exhibits a coarse, c14n-free
+    STRUCTURAL forgery invariant a validly signed assertion cannot: (a) the assertion carrying the
+    consumed NameID has ZERO ds:Signature; (b) every ds:Reference/@URI points at an id OTHER than the
+    consumed assertion or an ancestor (the signature does not cover the consumed element); or (c) the
+    signature-wrapping shape (>1 assertion, the unsigned consumed one supplies the identity while a
+    signature references a DIFFERENT assertion — the dual of scanner.sso.wrap_assertion_xsw). A properly
+    signed single assertion, a doc with no consumed NameID, malformed/empty XML, and a DOCTYPE/ENTITY doc
+    (XXE-refused) all DO NOT fire (near-zero-FP). Pure + deterministic; re-verifies offline from the XML."""
+    kind = OracleKind.SAML_STRUCTURAL_FORGERY
+    # Lazy import (see the module-note above) — a parse error at import stays a non-fire, never a raise.
+    try:
+        from ..scanner.sso import (  # noqa: PLC0415 (intentional lazy import to avoid a cycle)
+            XxeBlocked,
+            _NS_ASSERT,
+            _NS_DS,
+            _parent_map,
+            safe_parse_xml,
+            saml_nameid,
+        )
+    except Exception:  # pragma: no cover - defensive; the helpers ship with the package
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="SAML parse helpers unavailable — cannot adjudicate")
+
+    text = xml if isinstance(xml, str) else _coerce_text(xml)
+    try:
+        # XXE-safe: refuses any DOCTYPE/ENTITY + bounds size; a malicious-entity doc never resolves.
+        root = safe_parse_xml(text)
+    except XxeBlocked as exc:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=f"XML refused by the XXE-safe parser ({exc}) — non-fire",
+                            observed={"parse": "refused"})
+    except Exception as exc:  # any other parse failure — never raise, stay a lead
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=f"XML not parseable ({type(exc).__name__}) — non-fire",
+                            observed={"parse": "error"})
+
+    ASSERT = f"{{{_NS_ASSERT}}}"
+    DS = f"{{{_NS_DS}}}"
+
+    # The consumed identity: scanner.sso.saml_nameid's first-NameID-with-text (what an SP that consumes
+    # the first assertion authenticates as). No consumed identity -> nothing to adjudicate (metadata /
+    # AuthnRequest / a doc with no NameID) -> non-fire.
+    nameid_text = saml_nameid(root)
+    if nameid_text is None:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no saml:NameID with text — no consumed SSO identity to adjudicate",
+                            observed={"reason": "no_nameid"})
+    consumed_nameid_el = next(
+        (el for el in root.iter(f"{ASSERT}NameID") if el.text == nameid_text), None)
+
+    pmap = _parent_map(root)
+
+    def _ancestors(el: Any):
+        cur = pmap.get(el)
+        while cur is not None:
+            yield cur
+            cur = pmap.get(cur)
+
+    # The saml:Assertion that ENCLOSES the consumed NameID (the consumed assertion). A NameID outside any
+    # Assertion (e.g. a bare LogoutRequest subject) is not an authentication assertion -> non-fire.
+    consumed_assertion = next(
+        (a for a in _ancestors(consumed_nameid_el) if a.tag == f"{ASSERT}Assertion"), None)
+    if consumed_assertion is None:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence="the consumed saml:NameID is not inside a saml:Assertion — not an authentication "
+                     "assertion (stays a lead)",
+            observed={"reason": "nameid_outside_assertion"})
+
+    assertions = list(root.iter(f"{ASSERT}Assertion"))
+    signatures = list(root.iter(f"{DS}Signature"))
+
+    def _id_of(el: Any) -> str | None:
+        return el.get("ID") or el.get("AssertionID") or el.get("ResponseID")
+
+    consumed_id = _id_of(consumed_assertion)
+
+    # ---- invariant (a): NO signature anywhere over the consumed assertion --------------------------
+    if not signatures:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"the saml:Assertion (ID={consumed_id!r}) carrying the consumed NameID has ZERO "
+                      f"ds:Signature in the whole message — an unsigned assertion is structurally "
+                      f"forgeable (anyone can mint it; re-verify: 0 ds:Signature over {len(assertions)} "
+                      f"assertion(s))"),
+            observed={"proof": "unsigned_assertion", "assertions": len(assertions),
+                      "signatures": 0, "consumed_assertion_id": consumed_id})
+
+    # Signatures exist — determine whether ANY covers the consumed assertion or one of its ancestors.
+    referenced_ids: set[str] = set()
+    whole_doc_sig = False       # a ds:Reference URI="" / #xpointer(/) covers the WHOLE document
+    unadjudicable_ref = False   # a reference we cannot resolve to a bare id/whole-doc (URI-less +
+                                # transform-selected, XPath, full XPointer): its coverage is UNKNOWN, so
+                                # we must NOT treat it as a mismatch (the review's XPointer/URI-less FP).
+    for sig in signatures:
+        for ref in sig.iter(f"{DS}Reference"):
+            uri = ref.get("URI")
+            if uri is None:
+                unadjudicable_ref = True   # URI-less: selects nodes via Transforms — not string-decidable
+                continue
+            kind_ref, rid = _saml_resolve_ref(uri.strip())
+            if kind_ref == "whole":
+                whole_doc_sig = True
+            elif kind_ref == "id":
+                referenced_ids.add(rid)
+            else:
+                unadjudicable_ref = True
+
+    consumed_chain_ids: set[str] = set()
+    if consumed_id:
+        consumed_chain_ids.add(consumed_id)
+    for anc in _ancestors(consumed_assertion):
+        aid = _id_of(anc)
+        if aid:
+            consumed_chain_ids.add(aid)
+
+    covered = whole_doc_sig or bool(referenced_ids & consumed_chain_ids)
+    if covered:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("a ds:Signature covers the consumed assertion (or an ancestor) — properly signed "
+                      "(stays a lead; c14n/transform validity is deliberately not asserted here)"),
+            observed={"assertions": len(assertions), "signatures": len(signatures),
+                      "consumed_assertion_id": consumed_id, "referenced_ids": sorted(referenced_ids),
+                      "whole_doc_sig": whole_doc_sig})
+
+    # NOT covered. Distinguish the wrapping shape (>1 assertion, a signed sibling) from a plain mismatch.
+    other_ids: set[str] = set()
+    for a in assertions:
+        if a is not consumed_assertion:
+            aid = _id_of(a)
+            if aid:
+                other_ids.add(aid)
+    consumed_has_own_sig = any(True for _ in consumed_assertion.iter(f"{DS}Signature"))
+
+    # ---- invariant (c): signature-wrapping shape (the dual of wrap_assertion_xsw) ------------------
+    # Only when the reference set is FULLY resolvable — an unadjudicable (transform/xpath) reference
+    # could be the one that actually covers the consumed assertion, so we refuse to assert wrapping.
+    if len(assertions) >= 2 and not consumed_has_own_sig and not unadjudicable_ref and (referenced_ids & other_ids):
+        signed_siblings = sorted(referenced_ids & other_ids)
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.95,
+            evidence=(f"signature-wrapping: {len(assertions)} saml:Assertion elements — the UNSIGNED one "
+                      f"(ID={consumed_id!r}) supplies the consumed NameID while a ds:Signature references "
+                      f"a DIFFERENT assertion {signed_siblings} — the signed element is not the consumed "
+                      f"one (re-verify: consumed id not in the signed Reference set)"),
+            observed={"proof": "signature_wrapping", "assertions": len(assertions),
+                      "consumed_assertion_id": consumed_id, "referenced_ids": sorted(referenced_ids),
+                      "signed_sibling_ids": signed_siblings})
+
+    # ---- invariant (b): ds:Reference/@URI does not cover the consumed element ----------------------
+    # Fire ONLY when EVERY reference resolved to a bare id/whole-doc form (nothing unadjudicable) and
+    # none of them covers the consumed chain. An unresolvable reference (transform/xpath) means the
+    # coverage picture is incomplete — we cannot PROVE a mismatch, so we refuse (the review's FP: a
+    # validly-signed assertion using `#xpointer(id('X'))` / `#xpointer(/)` / a URI-less transform ref).
+    if consumed_chain_ids and referenced_ids and not unadjudicable_ref:
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.9,
+            evidence=(f"ds:Reference/@URI covers {sorted(referenced_ids)} but the consumed assertion and "
+                      f"its ancestors are {sorted(consumed_chain_ids)} — DISJOINT, so no signature covers "
+                      f"the consumed element (re-verify: reference set and consumed chain do not intersect)"),
+            observed={"proof": "reference_mismatch", "assertions": len(assertions),
+                      "consumed_chain_ids": sorted(consumed_chain_ids),
+                      "referenced_ids": sorted(referenced_ids)})
+
+    # Signatures present but coverage is not string-decidable — no by-id references, the consumed
+    # assertion has no id to compare, OR at least one reference is a transform/xpath/full-XPointer form
+    # this oracle deliberately does not parse (c14n out of scope). Refuse rather than guess (near-zero-FP).
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("no c14n-free structural forgery invariant holds (signatures present but no provable "
+                  "reference mismatch / wrapping shape" +
+                  ("; a transform/xpath/URI-less reference is present whose coverage this oracle does not "
+                   "adjudicate" if unadjudicable_ref else "") + ") — inconclusive, stays a lead"),
+        observed={"assertions": len(assertions), "signatures": len(signatures),
+                  "consumed_assertion_id": consumed_id, "referenced_ids": sorted(referenced_ids),
+                  "whole_doc_sig": whole_doc_sig, "unadjudicable_ref": unadjudicable_ref})
