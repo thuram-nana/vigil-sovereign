@@ -103,6 +103,60 @@ def _payload_verdict(bug_class: str, param: str, confirmed: Any, fc: FindingCont
     )
 
 
+def _lead_verdict(bug_class: str, param: str, evidence: str) -> Verdict:
+    """A LEAD verdict — belief-raising + logged, NEVER a block. A lead carries NO certificate
+    (the ``Verdict`` model enforces certificate IFF confirmed) and its ``action`` stays ``observe``
+    (read-only), so the gateway forwards the request untouched. This is the HONEST verdict for a
+    class whose confirmation needs out-of-band evidence a single inline response cannot supply."""
+    return Verdict(
+        decision="lead",
+        attack_class=bug_class,
+        confidence=0.0,
+        certificate=None,
+        provenance=f"intel:aegis:{bug_class}",
+        action="observe",
+        contributing=[param] if param else [],
+    )
+
+
+# --- SSRF / XXE — request-side LEADS (NOT blocks) --------------------------------------------------
+#
+# HONEST SCOPE: server-side request forgery and XML external-entity injection are confirmed by an
+# OUT-OF-BAND (callback) interaction — a request the app makes to an attacker-controlled collector.
+# A single INLINE request/response cannot prove that near-zero-FP (a value that LOOKS like an
+# internal-host URL, or an XML doctype that DECLARES an external entity, does not prove the app
+# actually dereferenced it). So AEGIS emits these as LEADS: they raise the per-actor belief and are
+# logged, but they NEVER block. The out-of-band block-path (reuse ``verify/oob.py``'s OOB_CALLBACK
+# oracle: mint a per-request correlation token, plant it in the payload, and confirm on an inbound
+# hit) is the roadmap to promote these to a proven block — it is deliberately NOT forced here.
+#
+# SSRF lead: a candidate value that is a URL toward an internal / link-local / cloud-metadata host,
+# or uses a dangerous non-HTTP scheme (file/gopher/dict/...). XXE lead: a request body that declares
+# an EXTERNAL ENTITY (SYSTEM/PUBLIC) inside a DOCTYPE. Both signatures a benign client rarely sends.
+_SSRF_SCHEME_RE = re.compile(r"(?i)\b(?:file|gopher|dict|ftp|tftp|ldap|jar|netdoc|expect)://")
+_SSRF_INTERNAL_HOST_RE = re.compile(
+    r"(?i)(?:^|//|@|\bhost=|\burl=)(?:"
+    r"169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|"       # cloud metadata
+    r"localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|\[?::1\]?|"          # loopback
+    r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|"               # RFC1918
+    r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r")")
+# XXE: an external-entity declaration inside a DOCTYPE. Bounded, negated char-classes → ReDoS-safe.
+_XXE_RE = re.compile(
+    r"(?is)<!DOCTYPE\b[^\[>]{0,200}\[[^\]]{0,4000}?<!ENTITY\b[^>]{0,200}?\b(?:SYSTEM|PUBLIC)\b")
+
+
+def _ssrf_lead_param(values: list[tuple[str, str]]) -> str | None:
+    """The first request value that looks like an SSRF probe (internal/metadata-host URL or a
+    dangerous non-HTTP scheme), or None. Belief-raising only — never a block."""
+    for param, value in values:
+        if _SSRF_SCHEME_RE.search(value):
+            return param
+        if "://" in value and _SSRF_INTERNAL_HOST_RE.search(value):
+            return param
+    return None
+
+
 def inspect_request(
     method: str,
     path: str,
@@ -116,10 +170,13 @@ def inspect_request(
 ) -> Verdict | None:
     """Run the REQUEST-SIDE oracles over one incoming request. Returns a CONFIRMED ``Verdict`` (with a
     re-runnable ``CertRef``) for the FIRST proven attack — a honeypot tripwire or a structured
-    injection attempt — or ``None`` when nothing is proven (the gateway then forwards + inspects the
-    response). Pure/deterministic; total (never raises). ``enforce`` sets the confirmed verdict's
-    ``action`` to ``block`` (D1); otherwise it is ``observe`` (read-only)."""
+    injection attempt — a LEAD ``Verdict`` (belief-raising, never a block) for an SSRF/XXE probe whose
+    confirmation needs out-of-band evidence, or ``None`` when nothing is seen (the gateway then
+    forwards + inspects the response). A CONFIRMED block ALWAYS takes priority over a lead.
+    Pure/deterministic; total (never raises). ``enforce`` sets the confirmed verdict's ``action`` to
+    ``block`` (D1); otherwise it is ``observe`` (read-only). A lead is always ``observe``."""
     verifier = verifier or OracleVerifier()
+    values = candidate_values(path, headers, body)
 
     # (1) honeypot tripwire — a fetch of a seeded path no human UI links proves AUTOMATED access.
     hp = [p for p in (honeypot_paths or []) if p]
@@ -131,12 +188,20 @@ def inspect_request(
             return _payload_verdict("automated_access", req_path, confirmed, fc, enforce=enforce)
 
     # (2) request-payload parse-proof — each decoded value vs the SQLi / command-injection oracles.
-    for param, value in candidate_values(path, headers, body):
+    for param, value in values:
         for bug_class in _REQUEST_PAYLOAD_CLASSES:
             fc = FindingContext.from_request_payload(value, bug_class=bug_class, param=param)
             confirmed = confirm_finding({"bug_class": bug_class}, context=fc, verifier=verifier)
             if confirmed is not None:
                 return _payload_verdict(bug_class, param, confirmed, fc, enforce=enforce)
+
+    # (3) SSRF / XXE LEADS — belief-raising, NEVER a block (their confirmation is out-of-band; see the
+    #     _lead_verdict / SSRF-XXE note above). Only reached when nothing above proved a block.
+    ssrf_param = _ssrf_lead_param(values)
+    if ssrf_param is not None:
+        return _lead_verdict("ssrf", ssrf_param, "internal/metadata-host URL or dangerous scheme")
+    if body and _XXE_RE.search(body):
+        return _lead_verdict("xxe", "body", "DOCTYPE declares an external (SYSTEM/PUBLIC) entity")
 
     return None
 
