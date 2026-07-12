@@ -164,6 +164,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # (public_exposure / excessive_privilege); this proves the achieved STATE a reachability path cannot
     # (principally the misconfiguration / encryption-at-rest-disabled lead) over a single control record.
     "cloud_misconfiguration": (OracleKind.CLOUD_POSTURE,),
+    # Wave-G3 (service-mesh achieved-state promotion): a retained mesh-config LEAD
+    # (verify.mesh_posture.ingest_mesh_config) becomes a FACT only when the mesh-posture oracle re-derives a
+    # CONCRETE insecure ACHIEVED STATE over the RETAINED control (Istio PeerAuthentication with
+    # permissive/disabled mTLS, an ALLOW AuthorizationPolicy that admits every caller, or a Linkerd server
+    # whose default-inbound-policy is all-unauthenticated). Like the k8s/cloud rows, this NEW OracleKind is
+    # reachable ONLY via this row — it is NOT in the frozen _ALL_ORACLES fallback — and fires only when the
+    # ctx carries `mesh_control`, which no benchmark/scan/engage finding does. So appending it leaves the
+    # unknown-class fallback and `make gate` byte-identical. The MESH twin of the k8s/cloud achieved-state
+    # promotions — a single-control membership/parse-proof, offline, ZERO mesh/kubectl calls, NO attack.
+    "mesh_misconfiguration": (OracleKind.MESH_POSTURE,),
     # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
     # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
     # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
@@ -330,6 +340,17 @@ _ALIASES: dict[str, str] = {
     "wildcard_principal": "cloud_misconfiguration",
     "anonymous_grant": "cloud_misconfiguration",
     "k8s_insecure_setting": "k8s_misconfiguration",
+    # service-mesh achieved-state posture spelling variants (a mesh-config control an oracle proves via a
+    # concrete insecure achieved state) fold onto the single canonical class.
+    "mesh_posture": "mesh_misconfiguration",
+    "mesh_misconfig": "mesh_misconfiguration",
+    "service_mesh_misconfiguration": "mesh_misconfiguration",
+    "istio_misconfiguration": "mesh_misconfiguration",
+    "linkerd_misconfiguration": "mesh_misconfiguration",
+    "permissive_mtls": "mesh_misconfiguration",
+    "peer_authentication_permissive": "mesh_misconfiguration",
+    "authorization_policy_allow_all": "mesh_misconfiguration",
+    "mesh_unauthenticated_inbound": "mesh_misconfiguration",
     # JWT structural-forgery spelling variants fold onto the single canonical class. NOTE: the existing
     # `jwt` class (alg:none ACCEPTANCE, ACHIEVED_STATE) is deliberately NOT aliased here — forgeability
     # (offline, token-alone) and acceptance (live) are distinct proofs and stay distinct classes.
@@ -637,6 +658,12 @@ class OracleVerifier:
         if kind is OracleKind.CLOUD_POSTURE:
             if "cloud_control" in ctx:
                 return oracles.cloud_posture_oracle(ctx["cloud_control"])
+            return None
+        # -- Wave-G3 service-mesh posture — fire ONLY when the ctx carries `mesh_control` (a retained
+        #    service-mesh config control); no benchmark/scan/engage finding does, so it is inert on the gate.
+        if kind is OracleKind.MESH_POSTURE:
+            if "mesh_control" in ctx:
+                return oracles.mesh_posture_oracle(ctx["mesh_control"])
             return None
         # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
         #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.
