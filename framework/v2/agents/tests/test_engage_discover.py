@@ -303,6 +303,57 @@ def test_discovery_on_a_json_endpoint_mints_nothing(isolated_engagement, httpser
     assert out.discovered_count == 0                            # but the non-HTML reflection is inert
 
 
+def _reflect_no_ctype(request) -> Response:
+    """Reflects ``q`` verbatim but OMITS the Content-Type header entirely — a MIME-sniff-only
+    reflection. Minting a confirmed XSS FACT on that ambiguity is exactly the near-zero-FP overclaim
+    the gate must not make, so this must mint nothing."""
+    q = request.args.get("q", "")
+    r = Response('{"echo": "' + q + '"}', status=200)
+    r.headers.remove("Content-Type")
+    return r
+
+
+def test_discovery_missing_content_type_mints_nothing(isolated_engagement, httpserver: HTTPServer):
+    """A reflecting endpoint that omits Content-Type must NOT mint an XSS FACT — a missing type is not
+    affirmatively HTML, and a confirmed FACT via auto-discovery needs the higher bar."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/nctype").respond_with_handler(_reflect_no_ctype)
+
+    url = f"http://127.0.0.1:{port}/nctype?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.probes_driven == 1 and out.discovered_count == 0
+
+
+def _reflect_json_data_static_html_page(request) -> Response:
+    """A multi-param endpoint: the ``data`` param reflects the marker under application/json (inert),
+    while any other request returns a STATIC text/html page that does NOT reflect. Proves the gate keys
+    on the REFLECTING response's content-type — an unrelated param's HTML page must not license the
+    inert JSON reflection (the review's cross-contamination case)."""
+    data = request.args.get("data", "")
+    if "crucible" in data and "mark" in data:      # the data param carried the reflection marker
+        return Response('{"results": "' + data + '"}', status=200, mimetype="application/json")
+    return Response("<html><body>static page, no reflection</body></html>",
+                    status=200, mimetype="text/html")
+
+
+def test_discovery_multiparam_html_sibling_does_not_license_json_reflection(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/api").respond_with_handler(_reflect_json_data_static_html_page)
+
+    url = f"http://127.0.0.1:{port}/api?data=seed&page=1"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), prompt_callback=_deny)
+    # the JSON reflection is inert; the sibling static HTML page carries no marker → nothing minted.
+    assert out.probes_driven == 1 and out.discovered_count == 0
+
+
 # ---------------------------------------------------------------------------
 # determinism — same inputs → same discovery outcome
 # ---------------------------------------------------------------------------

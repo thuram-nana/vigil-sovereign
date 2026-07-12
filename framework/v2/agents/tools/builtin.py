@@ -8,9 +8,15 @@ observation over data CRUCIBLE already holds), require no entitlement, and reach
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .base import Tool, ToolContext, ToolRegistry, ToolResult
+
+# The reflection marker the wrapped reflection check plants — `crucible<slugified-point-id>mark`, where
+# the slug is alphanumeric (`scanner.checks._slugify`). Used by the discovery probe's content-type gate
+# to find WHICH response actually reflected the marker (so the gate keys on the reflecting response).
+_MARKER_RE = re.compile(r"crucible[A-Za-z0-9]*mark")
 
 # The entitlement capability an ACTIVE probe honestly declares ("active probing within scope").
 # Imported guardedly so the tool module never hard-couples on the entitlement package: on any import
@@ -118,14 +124,20 @@ class ProbeSurfaceTool:
         request = HttpRequest(
             method="GET", url=target.strip(),
             headers=[("User-Agent", "OBSIDIAN/1.0 (authorized owner-test)")])
-        # Record whether the probed endpoint ever served an HTML-ish response. A reflected marker is
-        # only EXECUTABLE (i.e. a real XSS finding) when the response is served as HTML — a JSON API or
-        # text/plain endpoint that echoes a query value reflects the marker inertly, which the review
-        # showed the underlying reflection check would otherwise mint as a false XSS FACT. We gate the
-        # XSS confirmation on the response Content-Type (mirroring scanner.passive._is_htmlish: text/html
-        # or a missing type, which a browser may MIME-sniff to HTML). Done here in the probe path so the
-        # shared reflection oracle / benchmark stay byte-identical.
-        saw_htmlish = {"v": False}
+        # Content-Type gate for the discovery probe's XSS confirmation (near-zero-FP). A reflected
+        # marker is only EXECUTABLE — a real XSS FACT — when it lands in a response served as HTML; a
+        # JSON API or text/plain endpoint that echoes a query value reflects the marker inertly, which
+        # the review showed the underlying reflection check would otherwise mint as a false XSS FACT.
+        # We record every (is_html, body) the probe saw and, for an XSS finding, require the REFLECTING
+        # response — the one that carries the marker — to be affirmatively `text/html`. This is precise
+        # (it ties the content-type to the response that actually reflected, so an UNRELATED param's
+        # HTML page cannot license a different param's inert JSON reflection) and it is STRICTER than
+        # scanner.passive._is_htmlish on purpose: a MISSING Content-Type does NOT count as HTML here,
+        # because minting a confirmed FACT via auto-discovery is a higher bar than a passive header
+        # lead (a MIME-sniff-only reflection stays unminted rather than false-asserting execution).
+        # Done in the probe path so the shared reflection oracle / benchmark stay byte-identical; the
+        # same latent gap in the shared oracle is a documented follow-up.
+        seen: list[tuple[bool, str]] = []   # (is_affirmatively_html, body) per response the probe saw
         _raw_send = self._send
 
         def _recording_send(req: Any):
@@ -137,8 +149,8 @@ class ProbeSurfaceTool:
                     if str(k).lower() == "content-type":
                         ctype = str(v).lower()
                         break
-                if "text/html" in ctype or ctype == "":
-                    saw_htmlish["v"] = True
+                body = resp.get("body", "") if isinstance(resp, dict) else ""
+                seen.append(("text/html" in ctype, body or ""))
             except Exception:
                 pass
             return resp
@@ -153,13 +165,17 @@ class ProbeSurfaceTool:
                                     insertion_kinds=(InsertionKind.QUERY_VALUE,))
         except Exception as e:
             return ToolResult(ok=False, note=f"probe error: {e}")
-        # near-zero-FP gate: an XSS-family reflection under a non-HTML content-type is not executable,
-        # so it is NOT a finding — drop it (the review's JSON/text false-XSS-FACT).
+        # near-zero-FP gate: mint an XSS-family finding only when the marker was REFLECTED INTO an
+        # affirmatively-HTML response. If the marker only ever came back under a non-HTML (or absent)
+        # content-type, the reflection is not executable — drop it (the review's JSON/text/no-header
+        # false-XSS-FACT, incl. the multi-param cross-contamination case).
         bug_lower = str(getattr(check, "bug_class", "")).lower()
         ct_gated = False
-        if findings and "xss" in bug_lower and not saw_htmlish["v"]:
-            findings = []
-            ct_gated = True
+        if findings and "xss" in bug_lower:
+            reflected_in_html = any(is_html and _MARKER_RE.search(body) for is_html, body in seen)
+            if not reflected_in_html:
+                findings = []
+                ct_gated = True
         minted = bool(findings)
         dumps: list = []
         for f in findings:
