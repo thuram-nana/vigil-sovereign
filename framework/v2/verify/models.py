@@ -85,6 +85,22 @@ class OracleKind(str, enum.Enum):
     # normal RS256 token with an unknown key, or an HS256 token whose secret is not recoverable, does NOT
     # fire (near-zero-FP). SAML XSW/c14n forgery is deliberately NOT attempted in this slice (JWT-only).
     SSO_ASSERTION_FORGERY = "sso_assertion_forgery"
+    # Workstream NW-1 — the SAML SIBLING of SSO_ASSERTION_FORGERY (the offline STRUCTURAL complement to
+    # the LIVE response-differential SAML checks in scanner.sso). Like the AEGIS / K8S_POSTURE / JWT
+    # members above, this is an ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row
+    # (keyed on the `saml_xml` ctx field NO benchmark/scan/engage finding carries), never via the frozen
+    # unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15). SAML_STRUCTURAL_FORGERY promotes a
+    # captured SAML Response to a STRUCTURALLY-FORGEABLE FACT — judged on the captured XML ALONE, offline,
+    # ZERO forged traffic, on the XXE-safe parse — ONLY on a coarse, c14n-free STRUCTURAL invariant a
+    # validly signed assertion cannot exhibit: (a) the assertion carrying the consumed NameID has ZERO
+    # ds:Signature anywhere (unsigned => anyone mints it); (b) every ds:Reference/@URI points at some id
+    # OTHER than the consumed assertion (or an ancestor) — the signature does not cover the consumed
+    # element; or (c) the signature-wrapping shape (>1 assertion, the unsigned consumed one supplies the
+    # identity while a signature references a DIFFERENT assertion — the dual of scanner.sso's
+    # wrap_assertion_xsw). A properly signed single assertion whose Reference covers it does NOT fire
+    # (near-zero-FP). Full XML-DSig C14N/transform processing is deliberately NOT attempted (needs
+    # lxml/signxml — out of scope); anything softer than these invariants stays an SsoLead.
+    SAML_STRUCTURAL_FORGERY = "saml_structural_forgery"
 
 
 class OracleProbe(BaseModel):
