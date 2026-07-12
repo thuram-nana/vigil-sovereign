@@ -83,6 +83,14 @@ def _engage(argv: list[str]) -> int:
     return engage_mod.main(argv)
 
 
+def _plan(argv: list[str]) -> int:
+    # READ-ONLY planner projection over a prior `engage --spine` engagement's world-model. LAZY
+    # import — nothing under plan/planner is imported until this subcommand runs, so the scan/engage/
+    # benchmark gate path never touches it. Sends no traffic, drives no tools.
+    from . import plan as plan_mod
+    return plan_mod.main(argv)
+
+
 def _collaborator(argv: list[str]) -> int:
     from .verify import collaborator_cli
     return collaborator_cli.main(argv)
@@ -207,6 +215,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "socialdefense": _socialdefense,
     "scan": _scan,
     "engage": _engage,
+    "plan": _plan,
     "verify": _verify,
     "capabilities": _capabilities,
     "aegis": _aegis,

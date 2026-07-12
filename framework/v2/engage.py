@@ -433,6 +433,37 @@ def _advise_learner_health(sink, slug) -> None:
         pass
 
 
+def _persist_plan_input(slug, report, world) -> None:
+    """W2.2c — persist a compact READ-ONLY projection input (the run world-model + the confirmed
+    findings' goal-tree seeds) so ``plan <slug>`` can reconstruct the planner's route/goal-tree over
+    this engagement OFFLINE. Written ONLY when a spine is attached (opt-in ``--spine``), so the
+    default engage path and the gate stay byte-identical. Owner-only on disk (``secure_write``, it
+    can hold intel/surface detail). Best-effort/total — a persist failure never sinks the run."""
+    try:
+        import json
+
+        from .common import paths as _paths
+        from .worldmodel import store as world_store
+
+        findings = [
+            {"bug_class": str(getattr(f, "bug_class", "") or ""),
+             "insertion_point": str(getattr(f, "insertion_point", "") or ""),
+             "param": str(getattr(f, "param", "") or ""),
+             "endpoint": str(getattr(f, "endpoint", "") or ""),
+             "confidence": float(getattr(f, "confidence", 0.0) or 0.0),
+             "has_oracle_context": bool(getattr(f, "oracle_context", None))}
+            for f in report.active_findings
+        ]
+        world_doc = (world_store.to_dict(world) if world is not None
+                     else {"schema_version": 1, "nodes": [], "edges": []})
+        doc = {"schema_version": 1, "target": report.target,
+               "findings": findings, "world": world_doc}
+        _paths.secure_write(_paths.target_dir(slug) / "plan-input.json",
+                            json.dumps(doc, indent=2, sort_keys=True))
+    except Exception:
+        pass
+
+
 def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
     """W1.1 — the nervous system, ADVISORY-ONLY, over the authoritative findings.
 
@@ -747,6 +778,10 @@ def run_engagement(
     # runs only when a spine is attached (so `make gate`, which uses no spine, is byte-identical).
     if sink is not None:
         _run_reasoning_pass(sink, spine, slug, report, result, world)
+        # W2.2c — persist a compact READ-ONLY projection input so `plan <slug>` can reconstruct the
+        # planner's route/goal-tree over this engagement offline. Spine-only (opt-in), so the default
+        # engage path and the gate stay byte-identical. Best-effort — never sinks the run.
+        _persist_plan_input(slug, report, world)
     return result
 
 
