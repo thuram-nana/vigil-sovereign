@@ -718,11 +718,12 @@ class FindingContext(BaseModel):
         bug_class: str,
         param: str = "",
     ) -> "FindingContext":
-        """A single DECODED request-parameter value, for the AEGIS request-side parse-proof oracles
-        (``sqli_attempt`` -> SQL string-literal break-out; ``command_injection_attempt`` -> shell
-        command-execution construct). Judged on the REQUEST ALONE — proves a STRUCTURED INJECTION
-        ATTEMPT, never exploitation. The value must already be percent-/entity-decoded by the caller
-        (the gateway decodes at the insertion point)."""
+        """A single DECODED request-parameter value (and its ``param`` NAME), for the AEGIS request-side
+        parse-proof oracles (``sqli_attempt`` -> SQL string-literal break-out; ``command_injection_attempt``
+        -> shell command-execution construct; ``nosql_injection_attempt`` -> a MongoDB query operator
+        injected as a KEY — from the param name ``user[$ne]`` or a JSON value ``{"$ne":null}``). Judged on
+        the REQUEST ALONE — proves a STRUCTURED INJECTION ATTEMPT, never exploitation. The value must
+        already be percent-/entity-decoded by the caller (the gateway decodes at the insertion point)."""
         return cls(
             bug_class=bug_class,
             request_payload=_coerce_text(payload),
