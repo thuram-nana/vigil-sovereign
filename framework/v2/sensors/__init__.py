@@ -23,6 +23,7 @@ from .cloud import (
     CloudPostureImportSensor,
     cloud_observations,
     cloud_posture_leads,
+    confirm_cloud_posture_facts,
     confirm_cloud_privilege_path,
     normalize_cloud_export,
 )
@@ -61,7 +62,7 @@ __all__ = [
     # Wave 5a — cloud / IAM / CSPM sensors
     "CloudPostureImportSensor", "CloudInventoryPullSensor",
     "cloud_observations", "cloud_posture_leads", "normalize_cloud_export",
-    "confirm_cloud_privilege_path",
+    "confirm_cloud_privilege_path", "confirm_cloud_posture_facts",
     # Workstream C — Kubernetes-runtime posture sensor (kube-bench offline ingest -> CIS leads)
     "KubeBenchSensor", "parse_kube_bench", "kube_bench_observations",
 ]
