@@ -153,6 +153,15 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # `make gate` byte-identical. (Cloud/CSPM public-exposure & over-broad-trust promotions reuse the
     # existing POLICY_PATH rows above; live reachability reuses `service_reachable` — no new rows.)
     "k8s_misconfiguration": (OracleKind.K8S_POSTURE,),
+    # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
+    # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
+    # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
+    # supplied RSA public key as the HMAC secret). Like the AEGIS / k8s rows, this NEW OracleKind is
+    # reachable ONLY via this row — it is NOT in the frozen _ALL_ORACLES fallback — and fires only when
+    # the ctx carries `jwt_token`, which no benchmark/scan/engage finding does. So appending it leaves
+    # the unknown-class fallback and `make gate` byte-identical. Distinct from the EXISTING `jwt` class
+    # (alg:none ACCEPTANCE proved live via ACHIEVED_STATE) — this proves FORGEABILITY offline, no traffic.
+    "jwt_forgeable": (OracleKind.SSO_ASSERTION_FORGERY,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -284,6 +293,20 @@ _ALIASES: dict[str, str] = {
     "kube_bench_fail": "k8s_misconfiguration",
     "insecure_k8s_setting": "k8s_misconfiguration",
     "k8s_insecure_setting": "k8s_misconfiguration",
+    # JWT structural-forgery spelling variants fold onto the single canonical class. NOTE: the existing
+    # `jwt` class (alg:none ACCEPTANCE, ACHIEVED_STATE) is deliberately NOT aliased here — forgeability
+    # (offline, token-alone) and acceptance (live) are distinct proofs and stay distinct classes.
+    "jwt_forgery": "jwt_forgeable",
+    "jwt_structural_forgery": "jwt_forgeable",
+    "jwt_alg_none": "jwt_forgeable",
+    "jwt_none_alg": "jwt_forgeable",
+    "jwt_algorithm_confusion": "jwt_forgeable",
+    "jwt_key_confusion": "jwt_forgeable",
+    "rs256_hs256_confusion": "jwt_forgeable",
+    "jwt_weak_secret": "jwt_forgeable",
+    "jwt_weak_key": "jwt_forgeable",
+    "jwt_signature_forgery": "jwt_forgeable",
+    "sso_assertion_forgery": "jwt_forgeable",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -561,6 +584,13 @@ class OracleVerifier:
         if kind is OracleKind.K8S_POSTURE:
             if "k8s_control" in ctx:
                 return oracles.k8s_posture_oracle(ctx["k8s_control"])
+            return None
+        # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
+        #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.
+        if kind is OracleKind.SSO_ASSERTION_FORGERY:
+            if "jwt_token" in ctx:
+                return oracles.jwt_forgery_oracle(
+                    ctx["jwt_token"], candidate_keys=ctx.get("jwt_candidate_keys", ()))
             return None
         return None
 

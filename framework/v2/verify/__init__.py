@@ -31,10 +31,12 @@ from .models import (
 )
 from .oob import OOBHit, OOBReceiver
 from .k8s_posture import confirm_k8s_posture, k8s_posture_context
+from .jwt_forgery import confirm_jwt_forgery, jwt_forgery_context
 from .oracles import (
     achieved_state_oracle,
     differential_response_oracle,
     honeypot_hit_oracle,
+    jwt_forgery_oracle,
     k8s_posture_oracle,
     oob_callback_oracle,
     policy_path_oracle,
@@ -83,6 +85,7 @@ __all__ = [
     "version_range_oracle",
     "policy_path_oracle",
     "k8s_posture_oracle",
+    "jwt_forgery_oracle",
     # AEGIS (defensive dual) oracles
     "system_prompt_disclosure_oracle",
     "prompt_injection_oracle",
@@ -107,6 +110,9 @@ __all__ = [
     # k8s posture (kube-bench CIS-control-failure promotion)
     "confirm_k8s_posture",
     "k8s_posture_context",
+    # SSO/JWT structural-forgery (Workstream-B)
+    "confirm_jwt_forgery",
+    "jwt_forgery_context",
     # oob
     "OOBReceiver",
     "OOBHit",

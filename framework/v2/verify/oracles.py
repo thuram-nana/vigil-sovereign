@@ -15,7 +15,12 @@ dimensions push confidence up, but no single weak dimension can dominate.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import difflib
+import hashlib
+import hmac
+import json
 import math
 import re
 from collections import Counter
@@ -2112,3 +2117,129 @@ def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> Oracl
         kind=kind, fired=False, confidence=0.0,
         evidence="no command-execution construct (a bare command name or lone metacharacter is not a proof)",
         observed={"param": param})
+
+
+# ---------------------------------------------------------------------------
+# Workstream-B SSO/JWT structural-forgery oracle (the SSO_ASSERTION_FORGERY kind).
+#
+# Judged on a captured JWT ALONE — offline, deterministic, ZERO forged traffic to any target. It
+# promotes a token to STRUCTURALLY-FORGEABLE (a FACT anyone can re-verify from the token + the retained
+# candidate keys) ONLY on a re-runnable proof, mirroring how the request-side parse-proof oracles judge
+# a payload without an app response:
+#
+#   (a) alg=none/None      — a valid such token carries an EMPTY signature and needs NO secret, so
+#       anyone can mint one with an arbitrary payload. Structural forgery by construction.
+#   (b) HS* weak/known key — the token's EXACT signature is RECOMPUTABLE by HMAC over `header.payload`
+#       with a supplied/weak candidate secret. An exact reproduction is a deterministic fact: whoever
+#       holds that secret forges arbitrary tokens.
+#   (c) RS256->HS256 confusion — the HS* signature reproduces with a supplied RSA/EC PUBLIC key (PEM)
+#       as the HMAC secret. The verification material is PUBLIC, so anyone holding the public key forges
+#       tokens a naive (algorithm-confusing) verifier accepts.
+#
+# Near-zero-FP: a normal RS256 token (an asymmetric signature, never an HMAC — the crack path is not
+# even attempted for it), an HS* token whose secret is not in the candidate/weak set, and a malformed
+# token all DO NOT fire. The proof is the token's OWN bytes + the retained candidate material, so a
+# confirmed forgery re-verifies OFFLINE from its certificate. Pure + deterministic (no clock/rng/io).
+# NOTE: the JWT primitives are re-implemented locally rather than imported from ``scanner.jwt`` — that
+# module imports ``verify.adapter``, so a ``verify -> scanner`` import would be a cycle. They mirror
+# ``scanner.jwt``'s codec/crack byte-for-byte.
+# ---------------------------------------------------------------------------
+
+# A small, curated set of the most notorious default/example HMAC secrets. A real random key never
+# collides with these, so trying them adds coverage with no FP cost — an exact HMAC reproduction is a
+# proof regardless of WHERE the secret came from (a weak key IS forgeable). Supplied ``candidate_keys``
+# are tried IN ADDITION to these.
+_WEAK_HS_SECRETS: tuple[str, ...] = (
+    "secret", "secretkey", "secret_key", "password", "changeme", "admin", "test", "jwt",
+    "jwtsecret", "jwt_secret", "jwt-secret", "key", "private", "your-256-bit-secret",
+    "your_jwt_secret", "supersecret", "s3cr3t", "1234567890", "qwerty", "0000000000000000",
+)
+
+_JWT_HMAC_HASH = {"HS256": hashlib.sha256, "HS384": hashlib.sha384, "HS512": hashlib.sha512}
+_JWT_SEG_CAP = 8192          # bound each captured segment (DoS-safe over an untrusted token)
+
+
+def _jwt_b64url_decode(seg: str) -> bytes:
+    """base64url-decode one JWT segment (padding restored). Raises on malformed input."""
+    return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+
+def _looks_like_public_key(candidate: str) -> bool:
+    """True iff the candidate is PEM public-key material (an RSA/EC public key). Used ONLY to LABEL a
+    confirmed HMAC reproduction as algorithm confusion vs a plain weak secret — never to gate firing."""
+    return "PUBLIC KEY" in candidate
+
+
+def jwt_forgery_oracle(token: Any, *, candidate_keys: Sequence[str | bytes] = ()) -> OracleSignal:
+    """Fire (SSO_ASSERTION_FORGERY) iff the captured JWT ``token`` is STRUCTURALLY FORGEABLE by a proof
+    re-runnable from the token alone: (a) ``alg=none``/``None``; (b) an HS* signature RECOMPUTABLE from a
+    supplied/weak candidate secret; or (c) an RS256->HS256 confusion (the HS* signature reproduces with a
+    supplied RSA/EC PUBLIC key as the HMAC secret). A normal RS256 token with an unknown key, an HS*
+    token whose secret is not recoverable, and a malformed token DO NOT fire (near-zero-FP). Pure +
+    deterministic — the verdict re-verifies offline from the token + retained candidate keys."""
+    kind = OracleKind.SSO_ASSERTION_FORGERY
+    text = token if isinstance(token, str) else _coerce_text(token)
+    parts = text.split(".")
+    if len(parts) != 3 or not parts[0] or not parts[1]:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="not a well-formed three-part JWT — nothing to adjudicate")
+    try:
+        header = json.loads(_jwt_b64url_decode(parts[0][:_JWT_SEG_CAP]))
+    except (ValueError, binascii.Error):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="JWT header is not valid base64url JSON — cannot adjudicate")
+    if not isinstance(header, Mapping):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="JWT header is not a JSON object — cannot adjudicate")
+    alg = _coerce_text(header.get("alg")).strip()
+
+    # (a) alg=none — a valid token needs NO secret; anyone can mint one. Structural forgery by
+    #     construction. (All case variants: none / None / NONE / nOnE.)
+    if alg.lower() == "none":
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.95,
+            evidence=(f"alg={alg!r}: the token is UNSIGNED — a valid token needs no secret, so anyone "
+                      f"can forge one with an arbitrary payload (re-verify: header.alg lowercases to 'none')"),
+            observed={"proof": "alg_none", "alg": alg, "header": dict(header)})
+
+    # (b)/(c) HS* — try to REPRODUCE the exact signature by HMAC over `header.payload`. An exact match
+    #     is a deterministic proof the token is forgeable by whoever holds that secret. If the matching
+    #     secret is a PUBLIC key, it is the RS256->HS256 confusion (public material => anyone forges).
+    if alg.upper() in _JWT_HMAC_HASH:
+        hasher = _JWT_HMAC_HASH[alg.upper()]
+        signing_input = f"{parts[0]}.{parts[1]}".encode("ascii", "ignore")
+        target_sig = parts[2]
+        for cand in (*candidate_keys, *_WEAK_HS_SECRETS):
+            secret = cand if isinstance(cand, bytes) else _coerce_text(cand).encode("utf-8")
+            recomputed = base64.urlsafe_b64encode(
+                hmac.new(secret, signing_input, hasher).digest()).rstrip(b"=").decode("ascii")
+            if hmac.compare_digest(recomputed, target_sig):
+                cand_text = cand.decode("utf-8", "replace") if isinstance(cand, bytes) else _coerce_text(cand)
+                if _looks_like_public_key(cand_text):
+                    return OracleSignal(
+                        kind=kind, fired=True, confidence=0.99,
+                        evidence=(f"RS256->HS256 algorithm confusion: the {alg} signature reproduces with "
+                                  f"the supplied RSA/EC PUBLIC key as the HMAC secret — public material "
+                                  f"anyone holds forges accepted tokens (re-verify: "
+                                  f"HMAC-{alg}(pubkey, header.payload) == signature)"),
+                        observed={"proof": "rs256_hs256_confusion", "alg": alg,
+                                  "hmac_key_is_public_key": True})
+                return OracleSignal(
+                    kind=kind, fired=True, confidence=0.99,
+                    evidence=(f"{alg} signature RECOMPUTABLE from a weak/known secret {cand_text!r} — the "
+                              f"exact HMAC reproduces, so whoever holds this secret forges arbitrary "
+                              f"tokens (re-verify: HMAC-{alg}({cand_text!r}, header.payload) == signature)"),
+                    observed={"proof": "hs256_weak_key", "alg": alg, "recovered_key": cand_text})
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"{alg} signature not reproducible from any supplied/weak candidate key — the secret "
+                      f"is not recoverable, so no structural-forgery proof (stays a lead)"),
+            observed={"alg": alg, "candidates_tried": len(candidate_keys) + len(_WEAK_HS_SECRETS)})
+
+    # A normal RS256/ES256/... token (an asymmetric signature, never an HMAC) — forging it needs the
+    # PRIVATE key, which the token alone cannot yield. Correctly NOT a structural-forgery proof.
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=(f"alg={alg or '?'!r}: an asymmetric signature requires the private key to forge — not "
+                  f"structurally forgeable from the token alone (stays a lead)"),
+        observed={"alg": alg})
