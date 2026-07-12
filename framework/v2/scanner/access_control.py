@@ -29,6 +29,7 @@ numeric id or an admin route is a LEAD, never a fact.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable, Iterable
 
 from ..verify.adapter import FindingContext
 from .checks import Check, IdorCheck, Send
@@ -164,3 +165,110 @@ def build_access_control_checks(
     if config.mass_assignment is not None:
         checks.append(config.mass_assignment)
     return tuple(checks)
+
+
+# ---------------------------------------------------------------------------
+# operator CLI wiring — build a config from --ac-victim-header / --ac-ref
+# ---------------------------------------------------------------------------
+#
+# The pack fundamentally needs OPERATOR input: a second authenticated identity (the
+# victim / ground truth) and the object/endpoint references to cross-read. There is no
+# safe autodiscovery for either. These helpers turn the small, honest CLI surface
+# (`--ac-victim-header NAME: VALUE`, repeatable; `--ac-ref bug_class:ref_param:victim_ref`,
+# repeatable) into an :class:`AccessControlConfig`, mirroring how ``IdorCheck`` is
+# configured. They are TOTAL — a malformed argument is reported (via ``on_warn``) and
+# skipped, never raised — and return ``None`` when no usable reference was supplied, so a
+# bare ``--access-control`` is an explicit, documented no-op rather than a silent guess.
+
+
+def _merge_victim_headers(
+    base: list[tuple[str, str]], override: tuple[tuple[str, str], ...]
+) -> list[tuple[str, str]]:
+    """The victim identity's headers REPLACE any same-named header on the rendered
+    request (case-insensitive) and append the rest — so a victim ``Cookie`` / ``Authorization``
+    actually swaps the attacker's session rather than duplicating the header."""
+    override_names = {k.lower() for k, _ in override}
+    kept = [(k, v) for k, v in base if k.lower() not in override_names]
+    return kept + list(override)
+
+
+def victim_send_with_headers(base_send: Send, headers: tuple[tuple[str, str], ...]) -> Send:
+    """Wrap ``base_send`` so every request it issues first carries the victim identity's
+    headers — the same gated send, re-authenticated as the *other* user. With no headers it
+    returns ``base_send`` unchanged (both identities are the same client — only meaningful
+    when the object is genuinely public)."""
+    if not headers:
+        return base_send
+
+    def _send(req: HttpRequest) -> dict:
+        merged = req.model_copy(update={"headers": _merge_victim_headers(list(req.headers), headers)})
+        return base_send(merged)
+
+    return _send
+
+
+def parse_victim_header(raw: str) -> tuple[str, str] | None:
+    """Parse a ``Name: Value`` header. Returns None (caller warns) on a malformed value."""
+    if ":" not in raw:
+        return None
+    name, _, value = raw.partition(":")
+    name = name.strip()
+    if not name:
+        return None
+    return (name, value.strip())
+
+
+def parse_cross_spec(raw: str) -> CrossAccessSpec | None:
+    """Parse ``bug_class:ref_param:victim_ref`` into a :class:`CrossAccessSpec`. ``victim_ref``
+    may itself contain colons (a URL / UUID) — only the first two delimiters split. Returns None
+    (caller warns) when the class is not an access-control class or the shape is wrong."""
+    parts = raw.split(":", 2)
+    if len(parts) != 3:
+        return None
+    bug_class, ref_param, victim_ref = (p.strip() for p in parts)
+    if bug_class not in ACCESS_CONTROL_CLASSES or not ref_param:
+        return None
+    return CrossAccessSpec(bug_class=bug_class, ref_param=ref_param, victim_ref=victim_ref)
+
+
+def config_from_cli(
+    base_send: Send,
+    victim_headers: Iterable[str],
+    refs: Iterable[str],
+    *,
+    id_prefix: str = "ac",
+    on_warn: Callable[[str], None] | None = None,
+) -> AccessControlConfig | None:
+    """Build an :class:`AccessControlConfig` from the operator's CLI arguments, wrapping
+    ``base_send`` (the gated executor's send, or ``loopback_send``) as the victim identity via
+    ``--ac-victim-header``. Returns ``None`` when no valid ``--ac-ref`` was supplied — the pack
+    then seeds nothing, so ``--access-control`` alone is a documented no-op the caller can note.
+
+    Every victim request rides the SAME gated ``base_send`` (the second identity is authenticated
+    by swapped headers, not by bypassing the safety stack), and confirmation stays with the
+    achieved-state oracle — this tests the operator's OWN authorization, never a third party."""
+    def _warn(msg: str) -> None:
+        if on_warn is not None:
+            on_warn(msg)
+
+    specs: list[CrossAccessSpec] = []
+    for raw in refs:
+        spec = parse_cross_spec(raw)
+        if spec is None:
+            _warn(f"ignoring malformed --ac-ref {raw!r} "
+                  f"(expected bug_class:ref_param:victim_ref, class one of {', '.join(ACCESS_CONTROL_CLASSES)})")
+            continue
+        specs.append(spec)
+    if not specs:
+        return None
+
+    headers: list[tuple[str, str]] = []
+    for raw in victim_headers:
+        parsed = parse_victim_header(raw)
+        if parsed is None:
+            _warn(f"ignoring malformed --ac-victim-header {raw!r} (expected 'Name: Value')")
+            continue
+        headers.append(parsed)
+
+    victim_send = victim_send_with_headers(base_send, tuple(headers))
+    return AccessControlConfig(victim_send=victim_send, cross_specs=tuple(specs), id_prefix=id_prefix)

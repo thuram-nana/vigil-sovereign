@@ -41,6 +41,7 @@ from .worldmodel.graph import WorldModel
 if TYPE_CHECKING:  # intel types are only referenced in annotations on the default path
     from .intel.predict import AssetHypothesis
     from .intel.resolve import Entity
+    from .scanner.access_control import AccessControlConfig
 
 
 class EngagementRefused(RuntimeError):
@@ -449,6 +450,10 @@ def run_engagement(
     enable_sso: bool = False,
     enable_graphql_dos: bool = False,
     use_library: bool = False,
+    enable_access_control: bool = False,
+    access_control_config: "AccessControlConfig | None" = None,
+    access_control_victim_headers: "tuple[str, ...]" = (),
+    access_control_refs: "tuple[str, ...]" = (),
     priors: object = None,
     transfer_archetype: str | None = None,
     prompt_callback: PromptCallback | None = None,
@@ -559,6 +564,14 @@ def run_engagement(
         request_budget=request_budget,
         prompt_callback=prompt_callback or stdin_prompt_with_timeout,
     )
+    # Opt-in access-control pack: an explicit config wins; otherwise build one from the CLI
+    # refs/victim-headers, wrapping the GATED executor as the victim identity so the second
+    # identity's requests still pass the full safety stack. No refs => None (documented no-op).
+    ac_config = access_control_config
+    if enable_access_control and ac_config is None and access_control_refs:
+        from .scanner.access_control import config_from_cli
+        ac_config = config_from_cli(
+            ex.gated_fetch, access_control_victim_headers, access_control_refs)
     try:
         report = WebScanCampaign(
             ex.gated_fetch,
@@ -582,6 +595,8 @@ def run_engagement(
             enable_sso=enable_sso,
             enable_graphql_dos=enable_graphql_dos,
             use_library=use_library,
+            enable_access_control=enable_access_control,
+            access_control_config=ac_config,
             priors=priors,
             progress=sink,   # opt-in: mirror scan phases/findings onto the spine (None → off)
         ).run(seed_url)
@@ -778,6 +793,21 @@ def main(argv: list[str]) -> int:
                              "LIBRARY (scanner.library) whose applicability predicate matches the "
                              "detected stack. Oracle-anchored exactly like the built-ins; scoped so a "
                              "stack-specific payload never fires off-stack. Off by default.")
+    parser.add_argument("--access-control", action="store_true",
+                        help="Enable the two-identity access-control pack (scanner.access_control: "
+                             "idor/bola/bfla/authorization/privilege_escalation/mass_assignment). It "
+                             "needs OPERATOR input — a victim identity and object references — supplied "
+                             "with --ac-ref (repeatable) and, for an authenticated victim, "
+                             "--ac-victim-header. The victim identity rides the SAME gated executor. "
+                             "Confirms via the achieved-state oracle (a 403 never fires); with no "
+                             "--ac-ref it runs nothing (documented no-op). Off by default.")
+    parser.add_argument("--ac-ref", action="append", default=None, metavar="BUGCLASS:PARAM:VICTIMREF",
+                        help="An access-control cross-read target, e.g. 'idor:id:42'. Repeatable. "
+                             "Requires --access-control. VICTIMREF may contain ':'.")
+    parser.add_argument("--ac-victim-header", action="append", default=None, metavar="NAME: VALUE",
+                        help="A header authenticating the VICTIM identity (the ground truth), e.g. "
+                             "'Cookie: session=BOB'. Repeatable; replaces the same-named header on "
+                             "the victim probe.")
     parser.add_argument("--recon", action="store_true",
                         help="Run the Intelligence Engine alongside the scan: resolve an "
                              "asset inventory into the shared world-model and produce a "
@@ -861,6 +891,9 @@ def main(argv: list[str]) -> int:
             enable_sso=args.sso,
             enable_graphql_dos=args.graphql_dos,
             use_library=args.library,
+            enable_access_control=args.access_control,
+            access_control_victim_headers=tuple(args.ac_victim_header or ()),
+            access_control_refs=tuple(args.ac_ref or ()),
             enable_defender=args.defender,
             defender_ruleset=args.defender_ruleset,
             defender_sigma_dir=args.defender_sigma,
