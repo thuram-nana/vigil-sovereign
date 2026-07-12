@@ -34,11 +34,12 @@ _FROZEN_15 = frozenset({
     "DOM_EXECUTION", "SERVICE_REACHABILITY", "TLS_WEAKNESS", "VERSION_RANGE", "POLICY_PATH",
 })
 
-# The 7 additive kinds (4 AEGIS telemetry + 2 request-side parse-proof + 1 WS-3 k8s-posture) that MUST
-# stay OUT of the frozen fallback — reachable only via their explicit BUG_CLASS_ORACLES rows.
-_ADDITIVE_7 = frozenset({
+# The 8 additive kinds (4 AEGIS telemetry + 2 request-side parse-proof + 1 WS-3 k8s-posture + 1 WS-B
+# sso-assertion-forgery) that MUST stay OUT of the frozen fallback — reachable only via their explicit
+# BUG_CLASS_ORACLES rows.
+_ADDITIVE_8 = frozenset({
     "PROMPT_INJECTION", "SYSTEM_PROMPT_DISCLOSURE", "AUTOMATED_ACCESS", "CREDENTIAL_STUFFING",
-    "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "K8S_POSTURE",
+    "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "K8S_POSTURE", "SSO_ASSERTION_FORGERY",
 })
 
 
@@ -54,15 +55,15 @@ def test_all_oracles_fallback_is_exactly_the_frozen_15_by_name():
 
 def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     frozen_names = {k.name for k in V._ALL_ORACLES}
-    for name in _ADDITIVE_7:
+    for name in _ADDITIVE_8:
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 7 additive = 22; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 8 additive = 23; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
-    assert len(OracleKind) == 22
-    assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE_7
-    assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE_7}
+    assert len(OracleKind) == 23
+    assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE_8
+    assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE_8}
 
 
 def test_unknown_class_falls_back_to_the_frozen_15_after_importing_aegis():
@@ -72,10 +73,11 @@ def test_unknown_class_falls_back_to_the_frozen_15_after_importing_aegis():
     assert {k.name for k in fallback} == _FROZEN_15
 
 
-def test_inband_xxe_block_rides_a_frozen_oracle_no_new_kind():
-    """The XXE inline block reuses the pre-existing ``xxe`` -> (OOB_CALLBACK, SIDE_EFFECT) mapping, so
-    it added NO new OracleKind. The inline in-band proof rides SIDE_EFFECT, which is one of the frozen
-    15 — the block-path introduces nothing the gate has not always carried."""
+def test_xxe_mapping_is_unchanged_and_adds_no_new_kind():
+    """AEGIS emits in-band XXE as a request-side LEAD (never an inline block — the review proved a
+    single inline exchange cannot soundly confirm it). The offensive ``xxe`` -> (OOB_CALLBACK,
+    SIDE_EFFECT) mapping is UNCHANGED and both kinds are pre-existing frozen members, so nothing about
+    XXE introduced a new OracleKind or touched the frozen fallback."""
     assert BUG_CLASS_ORACLES["xxe"] == (OracleKind.OOB_CALLBACK, OracleKind.SIDE_EFFECT)
     assert OracleKind.SIDE_EFFECT in V._ALL_ORACLES
     assert "SIDE_EFFECT" in _FROZEN_15
