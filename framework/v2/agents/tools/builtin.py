@@ -8,7 +8,19 @@ observation over data CRUCIBLE already holds), require no entitlement, and reach
 
 from __future__ import annotations
 
+from typing import Any
+
 from .base import Tool, ToolContext, ToolRegistry, ToolResult
+
+# The entitlement capability an ACTIVE probe honestly declares ("active probing within scope").
+# Imported guardedly so the tool module never hard-couples on the entitlement package: on any import
+# trouble the capability degrades to None (the entitlement gate is then a no-op, exactly as for the
+# safe built-in tools) — a fail-open on the ADVISORY entitlement metadata only; scope still authorizes.
+try:
+    from ...entitlement import Capability as _Capability
+    _ACTIVE_RECON = _Capability.ACTIVE_RECON
+except Exception:                                   # pragma: no cover - entitlement always importable
+    _ACTIVE_RECON = None
 
 
 class ReverifyFindingTool:
@@ -47,6 +59,94 @@ class ReverifyFindingTool:
             ok=True,
             summary=f"reverify {bug_class}: {'GROUNDED (fact)' if is_fact else 'NOT re-grounded'}",
             output={"is_fact": is_fact, "verdict": str(verdict), "reason": reason})
+
+
+class ProbeSurfaceTool:
+    """DISCOVERY probe (W-C, first slice): run ONE existing scanner check against a localhost endpoint
+    and mint a NEW oracle-confirmed finding ONLY when the check's deterministic oracle FIRES over the
+    evidence it collected. This is the first honest step toward a DISCOVERING autonomous loop — today
+    the loop only RE-VERIFIES (``reverify_finding``). A probe-leaf on an unexplored ENDPOINT drives
+    this tool; the wrapped check probes the surface; and the ORACLE — never the planner, never this
+    tool — decides confirmation.
+
+    REUSE, not new offense. It wraps ONE existing ``scanner.checks.Check`` (default ``REFLECTED_XSS``,
+    a marker-reflection side-effect probe — one request, deterministic canary) driven by the existing
+    ``scanner.engine.AuditEngine``, whose ``confirm_finding`` gate is the SOLE authority for a finding.
+    No new attack capability is built here; this is autonomy plumbing over an existing check.
+
+    Gated + localhost/authorized-only. It declares ``capability=ACTIVE_RECON`` (active probing within
+    scope) and acts on ``args['target']``, so the FULL ``invoke_tool`` chain (kill-switch → entitlement
+    → scope → destructive → egress) authorizes the probe BEFORE ``run``; a tripped kill-switch or an
+    out-of-scope target REFUSES it and it probes nothing. The actual HTTP is issued by an INJECTED
+    ``send`` — in production the charter/scope/egress/rate-gated executor (``HttpExecutor.gated_fetch``,
+    exactly the send the whole scanner rides), in tests a loopback send — so egress stays enforced at
+    the point of I/O too. ``egress_hosts`` is left empty at this seam (the injected send is what reaches
+    the host, mirroring the ``declared_service`` sensor); the load-bearing host authorization is the
+    scope gate over ``args['target']``.
+
+    Prove-don't-guess. The ToolResult carries the NEW AuditFinding(s) — serialised, with their retained
+    ``oracle_context`` — ONLY when the oracle fired (``minted=True``); otherwise it honestly reports the
+    probe ran and confirmed nothing (``minted=False``). The tool never promotes a finding on its own."""
+
+    name = "probe_surface"
+    tier = "T2"
+    capability = _ACTIVE_RECON     # active probing within scope; None-degraded if entitlement absent
+    destructive = False
+    egress_hosts: tuple = ()       # the injected send performs (gated) egress; scope authorizes the target
+
+    def __init__(self, send: Any, *, check: Any = None, max_requests: int = 8) -> None:
+        self._send = send
+        self._check = check
+        self._max_requests = max(1, int(max_requests))
+
+    def run(self, args: dict, ctx: ToolContext) -> ToolResult:
+        target = args.get("target") if isinstance(args, dict) else None
+        if not isinstance(target, str) or not target.strip():
+            return ToolResult(
+                ok=False,
+                note="probe_surface requires args['target'] — a localhost endpoint URL to probe")
+        if not callable(self._send):
+            return ToolResult(
+                ok=False, note="probe_surface has no injected send (misconfigured — no discovery I/O)")
+        try:
+            from ...scanner.checks import REFLECTED_XSS
+            from ...scanner.engine import AuditEngine
+            from ...scanner.insertion import HttpRequest
+        except Exception as e:
+            return ToolResult(ok=False, note=f"probe_surface could not load the scanner check to wrap: {e}")
+        check = self._check if self._check is not None else REFLECTED_XSS
+        request = HttpRequest(
+            method="GET", url=target.strip(),
+            headers=[("User-Agent", "OBSIDIAN/1.0 (authorized owner-test)")])
+        try:
+            engine = AuditEngine(self._send, max_requests=self._max_requests)
+            findings = engine.audit(request, checks=(check,))
+        except Exception as e:
+            return ToolResult(ok=False, note=f"probe error: {e}")
+        minted = bool(findings)
+        dumps: list = []
+        for f in findings:
+            try:
+                dumps.append(f.model_dump(mode="json"))
+            except Exception:
+                pass
+        bug = str(getattr(check, "bug_class", "?"))
+        return ToolResult(
+            ok=True,
+            summary=(f"probe {bug} @ {target.strip()}: oracle FIRED — {len(dumps)} new finding(s)"
+                     if minted else f"probe {bug} @ {target.strip()}: oracle did not fire (no finding)"),
+            output={"minted": minted, "findings": dumps, "check_id": str(getattr(check, "id", "")),
+                    "bug_class": bug, "endpoint": target.strip()})
+
+
+def probe_surface_registry(send: Any, *, check: Any = None, max_requests: int = 8) -> ToolRegistry:
+    """A fresh registry carrying ONLY the gated ``probe_surface`` discovery tool, wired with the
+    injected ``send`` (production: the gated executor's ``gated_fetch``; tests: a loopback send).
+    Built ON DEMAND so the default autonomous path (discovery OFF) never constructs it and stays
+    byte-identical. Deliberately NOT part of ``default_registry`` — discovery is opt-in only."""
+    reg = ToolRegistry()
+    reg.register(ProbeSurfaceTool(send, check=check, max_requests=max_requests))
+    return reg
 
 
 def register_builtin_tools(registry: ToolRegistry) -> ToolRegistry:
