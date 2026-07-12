@@ -427,29 +427,17 @@ def inspect_response(
             if confirmed is not None:
                 return _payload_verdict("path_traversal", param, confirmed, fc, enforce=enforce)
 
-    # In-band file-disclosure XXE — the request body DECLARED an external entity (the same `_XXE_RE`
-    # LEAD signal `inspect_request` raises: a `<!DOCTYPE ... <!ENTITY ... SYSTEM "file:///etc/passwd">`
-    # external-entity declaration) AND a strict `/etc/passwd` root-line signature surfaced in the
-    # RESPONSE. This is the SAME three-part near-zero-FP discipline as path traversal: a declared
-    # external-entity vector, a strict uid/gid-0 root-line anchor (`_PASSWD_ROOT_RE`), and a
-    # not-reflected guard. ``side_effect_oracle`` confirms the exact leaked line reached the response.
-    # ONLY in-band file disclosure blocks here; BLIND/OOB XXE (no file content inline) and ALL SSRF
-    # stay LEADS (`inspect_request`) — a single inline response cannot prove them (their block-path is
-    # the OOB callback oracle). Reuses the existing `xxe` -> SIDE_EFFECT mapping, so there is NO new
-    # OracleKind / bug_class / registry edit.
-    xxe_m = _PASSWD_ROOT_RE.search(sink)
-    if xxe_m is not None and body and _XXE_RE.search(body):
-        # not-reflected guard (the path_traversal `value in sink` twin): a docs/help page that ships a
-        # DTD example AND echoes an /etc/passwd line reflects the request body VERBATIM; a real XXE
-        # returns the RESOLVED file content, not the raw DTD. Require the declaring body NOT be echoed.
-        if body not in sink:
-            marker = xxe_m.group(0).strip()
-            start = max(0, xxe_m.start() - _TRAVERSAL_MARGIN)
-            snippet = sink[start:xxe_m.end() + _TRAVERSAL_MARGIN]
-            fc = FindingContext.from_side_effect(marker, snippet, bug_class="xxe")
-            confirmed = confirm_finding({"bug_class": "xxe"}, context=fc, verifier=verifier)
-            if confirmed is not None:
-                return _payload_verdict("xxe", "body", confirmed, fc, enforce=enforce)
+    # NOTE — in-band XXE is DELIBERATELY not confirmed inline; it stays the request-side LEAD that
+    # `inspect_request` raises via `_XXE_RE` (observe + belief, never a block). The adversarial review
+    # proved a single inline exchange cannot causally prove it, unlike path traversal (attacker-CHOSEN
+    # file path): a `/etc/passwd` root line in the response can be REFLECTED user content — a
+    # security-KB / paste / code-review / Q&A page that documents an XXE example AND echoes a sample
+    # root line — not a file the app read from disk; and once the DTD is HTML-escaped in the response,
+    # a whole-body not-reflected guard passes on that benign echo (false block + a "confirmed"
+    # certificate that overclaims file disclosure on reflected content). The "proof" would also be a
+    # GENERIC marker extracted from the same response it is judged against (a circular self-proof).
+    # Blind/OOB XXE and ALL SSRF stay LEADS for the same reason; their only sound block-path is the
+    # OOB callback oracle (see the roadmap — a passive correlation on a token the app already carried).
 
     # NOTE — error-based SQLi is DELIBERATELY not confirmed inline. Without a control/baseline response
     # (a differential the offensive engine has but a live proxy does not), a datastore-error signature
