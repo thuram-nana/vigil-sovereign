@@ -171,6 +171,67 @@ def _xss_markers(value: str) -> list[str]:
     return seen
 
 
+# --- SSTI (server-side template / expression-language injection) — response-side proof ------------
+#
+# The confirmable signature is EVALUATION, not reflection: the request value carries a template
+# wrapper around a PURE ARITHMETIC expression (`{{7*7}}`, `${7*7}`), and the app's OWN response shows
+# the COMPUTED result (`49`) while the raw expression is GONE. ``evaluation_oracle`` proves exactly
+# that (result present AND raw absent), so a reflected-but-unevaluated payload — the app echoed
+# `{{7*7}}` verbatim, or HTML-encoded it — never fires (near-zero FP). We only recognise a wrapper
+# around a PURE arithmetic body, so `{{ user.name }}` / `${price}` (no arithmetic) are not even
+# candidates. The regexes are fixed-structure with bounded `\d{1,6}` operands — non-backtracking
+# (ReDoS-safe). A 1-digit result (`{{1*1}}`) is skipped: too coincidental a token to confirm on.
+_SSTI_ARITH = r"(\d{1,6})\s*([*+])\s*(\d{1,6})"
+_SSTI_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\{\{\s*" + _SSTI_ARITH + r"\s*\}\}"),   # Jinja2/Twig/Nunjucks/Angular  {{7*7}}
+    re.compile(r"\$\{\s*" + _SSTI_ARITH + r"\s*\}"),      # JSP-EL/Freemarker/Thymeleaf/JS ${7*7}
+    re.compile(r"#\{\s*" + _SSTI_ARITH + r"\s*\}"),       # Ruby / JSF-EL                  #{7*7}
+    re.compile(r"<%=\s*" + _SSTI_ARITH + r"\s*%>"),       # ERB / JSP                      <%= 7*7 %>
+    re.compile(r"\*\{\s*" + _SSTI_ARITH + r"\s*\}"),       # Thymeleaf selection            *{7*7}
+    re.compile(r"@\(\s*" + _SSTI_ARITH + r"\s*\)"),       # Razor                          @(7*7)
+)
+_SSTI_MIN_RESULT = 10   # require a >= 2-digit result so a coincidental single digit cannot confirm
+
+
+def _ssti_candidates(value: str) -> list[tuple[str, str]]:
+    """``(inner_expr, expected_result)`` pairs for each template-wrapped PURE-arithmetic payload in
+    ``value`` — e.g. ``("7*7", "49")``. ``inner_expr`` is passed as the oracle's ``raw`` so BOTH a
+    full-payload reflection (`{{7*7}}` contains `7*7`) and a bare-inner reflection are caught as
+    'reflected, not evaluated'. Bounded + deduped; deterministic."""
+    out: list[tuple[str, str]] = []
+    for rx in _SSTI_PATTERNS:
+        for m in rx.finditer(value):
+            a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+            result = a * b if op == "*" else a + b
+            if result < _SSTI_MIN_RESULT:
+                continue
+            inner = f"{m.group(1)}{op}{m.group(3)}"
+            pair = (inner, str(result))
+            if pair not in out:
+                out.append(pair)
+            if len(out) >= 8:
+                return out
+    return out
+
+
+# --- Path traversal / local file read — response-side proof ---------------------------------------
+#
+# The confirmable signature is a distinctive FILESYSTEM artifact surfacing in the response after a
+# request value walked the path toward a sensitive absolute file. The near-zero-FP anchor is a strict
+# `/etc/passwd` root-line signature — the canonical 7-colon-field shape with root at uid/gid 0, which
+# a benign HTML page essentially never carries. ``side_effect_oracle`` then confirms the exact matched
+# line reached the response. A benign request never even enters this path (the request value must
+# carry a `../`-style traversal indicator toward a sensitive file), so a benign input cannot trigger it.
+_TRAVERSAL_REQ_RE = re.compile(
+    r"(?i)(?:\.\.[\\/]|%2e%2e(?:[\\/]|%2f|%5c)|/etc/(?:passwd|shadow)\b|\\windows\\win\.ini\b"
+    r"|%2fetc%2fpasswd)")
+# A leaked /etc/passwd root line: `root:x:0:0:root:/root:/bin/bash`. Per-line, strictly shaped, with
+# bounded negated char-classes (non-backtracking → ReDoS-safe). Requires root at uid 0 gid 0.
+_PASSWD_ROOT_RE = re.compile(
+    r"(?m)^root:[^:\r\n]{0,64}:0:0:[^:\r\n]{0,120}:[^:\r\n]{0,120}:[^\s:]{0,64}$")
+_TRAVERSAL_MARGIN = 48   # bounded window retained around the matched signature (small certificate)
+
+
 def inspect_response(
     path: str,
     headers: list[tuple[str, str]],
@@ -182,10 +243,10 @@ def inspect_response(
 ) -> Verdict | None:
     """Run the RESPONSE-SIDE effect oracles over the (request, PROXIED-response) pair. Returns a
     CONFIRMED ``Verdict`` (with a re-runnable ``CertRef``) when the app's own answer PROVES
-    exploitation — a request value reflected into an executable HTML context (reflected XSS), or a
-    datastore error a quote-bearing value provoked (error-based SQLi) — else ``None`` (the gateway
-    then relays the response untouched). Pure/deterministic; total. ``enforce`` sets the confirmed
-    action to ``block``."""
+    exploitation — a request value reflected into an executable HTML context (reflected XSS), a
+    template expression the server EVALUATED (SSTI), or a `/etc/passwd` signature a traversal payload
+    surfaced (path traversal) — else ``None`` (the gateway then relays the response untouched).
+    Pure/deterministic; total. ``enforce`` sets the confirmed action to ``block``."""
     if not response_body:
         return None
     sink = response_body[:_MAX_RESPONSE_CHARS]
@@ -204,6 +265,37 @@ def inspect_response(
             confirmed = confirm_finding({"bug_class": "xss"}, context=fc, verifier=verifier)
             if confirmed is not None:
                 return _payload_verdict("xss", param, confirmed, fc, enforce=enforce)
+
+    # SSTI — a request value carried a template-wrapped arithmetic expression the server EVALUATED:
+    # the response shows the computed result while the raw expression is GONE. ``evaluation_oracle``
+    # (control-vs-treatment discipline: result present, raw absent) is what separates evaluation from
+    # reflection — a `{{7*7}}` echoed verbatim or HTML-encoded still carries the raw `7*7`, so it does
+    # NOT fire. Only a genuine server-side evaluation blocks (near-zero FP).
+    for param, value in values:
+        for inner, expected in _ssti_candidates(value):
+            fc = FindingContext.from_evaluation(inner, expected, sink, bug_class="ssti")
+            confirmed = confirm_finding({"bug_class": "ssti"}, context=fc, verifier=verifier)
+            if confirmed is not None:
+                return _payload_verdict("ssti", param, confirmed, fc, enforce=enforce)
+
+    # Path traversal / LFI — a request value walked the path toward a sensitive file AND a strict
+    # `/etc/passwd` root-line signature surfaced in the response. ``side_effect_oracle`` confirms the
+    # exact matched line reached the response; the request-side traversal gate + the strict, anchored
+    # signature keep it near-zero FP (a benign request never enters this path, and a benign page
+    # essentially never carries a uid/gid-0 root passwd line). The retained sink is a bounded window
+    # around the match, so the certificate stays small.
+    if _PASSWD_ROOT_RE.search(sink):
+        for param, value in values:
+            if not _TRAVERSAL_REQ_RE.search(value):
+                continue
+            m = _PASSWD_ROOT_RE.search(sink)
+            marker = m.group(0).strip()
+            start = max(0, m.start() - _TRAVERSAL_MARGIN)
+            snippet = sink[start:m.end() + _TRAVERSAL_MARGIN]
+            fc = FindingContext.from_side_effect(marker, snippet, bug_class="path_traversal")
+            confirmed = confirm_finding({"bug_class": "path_traversal"}, context=fc, verifier=verifier)
+            if confirmed is not None:
+                return _payload_verdict("path_traversal", param, confirmed, fc, enforce=enforce)
 
     # NOTE — error-based SQLi is DELIBERATELY not confirmed inline. Without a control/baseline response
     # (a differential the offensive engine has but a live proxy does not), a datastore-error signature
