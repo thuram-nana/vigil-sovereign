@@ -144,6 +144,15 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # leaves the unknown-class fallback and `make gate` byte-identical.
     "sqli_attempt": (OracleKind.SQL_INJECTION_BREAKOUT,),
     "command_injection_attempt": (OracleKind.COMMAND_INJECTION_BREAKOUT,),
+    # Workstream-3 (dormant-sensor promotion): a kube-bench CIS-control-failure LEAD
+    # (sensors.k8s_runtime) becomes a FACT only when the k8s-posture oracle re-derives a CONCRETE
+    # insecure setting over the RETAINED control (a hard FAIL whose observed value literally carries a
+    # dangerous flag). Like the AEGIS rows, this NEW OracleKind is reachable ONLY via this row — it is
+    # NOT in the frozen _ALL_ORACLES fallback — and fires only when the ctx carries `k8s_control`,
+    # which no benchmark/scan/engage finding does. So appending it leaves the unknown-class fallback and
+    # `make gate` byte-identical. (Cloud/CSPM public-exposure & over-broad-trust promotions reuse the
+    # existing POLICY_PATH rows above; live reachability reuses `service_reachable` — no new rows.)
+    "k8s_misconfiguration": (OracleKind.K8S_POSTURE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -267,6 +276,14 @@ _ALIASES: dict[str, str] = {
     "credential_stuffing_attack": "credential_stuffing",
     "credential_stuffing_ato": "credential_stuffing",
     "password_spraying": "credential_stuffing",
+    # k8s-posture spelling variants (a kube-bench CIS-control failure an oracle proves via a concrete
+    # observed insecure setting) fold onto the single canonical class.
+    "k8s_posture": "k8s_misconfiguration",
+    "kubernetes_misconfiguration": "k8s_misconfiguration",
+    "cis_k8s_fail": "k8s_misconfiguration",
+    "kube_bench_fail": "k8s_misconfiguration",
+    "insecure_k8s_setting": "k8s_misconfiguration",
+    "k8s_insecure_setting": "k8s_misconfiguration",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -538,6 +555,12 @@ class OracleVerifier:
             if "request_payload" in ctx:
                 return oracles.command_injection_breakout_oracle(
                     ctx["request_payload"], param=str(ctx.get("payload_param", "")))
+            return None
+        # -- Workstream-3 k8s posture — fire ONLY when the ctx carries `k8s_control` (a retained
+        #    kube-bench control); no benchmark/scan/engage finding does, so it is inert on the gate path.
+        if kind is OracleKind.K8S_POSTURE:
+            if "k8s_control" in ctx:
+                return oracles.k8s_posture_oracle(ctx["k8s_control"])
             return None
         return None
 

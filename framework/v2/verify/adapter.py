@@ -270,6 +270,9 @@ class FindingContext(BaseModel):
     # policy_path_oracle (a real IAM grant path lets a principal reach a resource) — the retained raw
     # policy graph + the reachability query it is judged on
     policy: dict[str, Any] | None = None
+    # k8s_posture_oracle (a kube-bench CIS control FAILED with a concrete observed insecure setting) —
+    # the RETAINED control evidence (sensors.k8s_runtime) the parse-proof judges
+    k8s_control: dict[str, Any] | None = None
 
     # -- builders ----------------------------------------------------------
 
@@ -436,6 +439,24 @@ class FindingContext(BaseModel):
         certificate re-verifies offline. ``policy`` carries {principal, resource, access?, grants,
         assume, member_of}."""
         return cls(bug_class=bug_class, policy=dict(policy or {}))
+
+    @classmethod
+    def from_k8s_posture(
+        cls, control: Mapping[str, Any], *, bug_class: str = "k8s_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED kube-bench CIS control (``sensors.k8s_runtime``), for the k8s-posture oracle — the
+        retained evidence that turns a CIS-control-failure LEAD into a FACT. The oracle re-derives the
+        weakness (a hard FAIL whose observed value literally carries a dangerous flag) over the retained
+        control, so a kube-bench FAIL is confirmed a FACT only by the actual insecure setting, never the
+        scanner's say-so. ``control`` carries {check_id, status, actual_value?, description?, section?}.
+
+        Only the structural fields the oracle judges are retained — a caller-supplied control that also
+        carries verbose scanner prose is reduced to the fields the parse-proof reads, so nothing else is
+        laundered into the certificate. JSON-safe + deterministic (re-verifies offline)."""
+        src = dict(control or {})
+        retained = {k: _coerce_text(src.get(k)) for k in (
+            "check_id", "status", "actual_value", "description", "section", "benchmark") if src.get(k)}
+        return cls(bug_class=bug_class, k8s_control=retained)
 
     @classmethod
     def from_process_output(
@@ -701,6 +722,8 @@ class FindingContext(BaseModel):
             ctx["version_advisory"] = self.version_advisory
         if self.policy is not None:
             ctx["policy"] = self.policy
+        if self.k8s_control is not None:
+            ctx["k8s_control"] = self.k8s_control
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary
