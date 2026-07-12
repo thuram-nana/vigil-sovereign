@@ -40,9 +40,11 @@ _HOP_BY_HOP = frozenset({
     "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
 })
 
-_MAX_REQUEST_BODY = 10 * 1024 * 1024   # 10 MiB — bounded request body (DoS-safe)
+_MAX_REQUEST_BODY = 10 * 1024 * 1024   # hard cap: a larger body is REFUSED (413), never truncated
+_MAX_INSPECT_BYTES = 2 * 1024 * 1024    # only the first N bytes of the body are inspected (the whole body is forwarded)
 _MAX_RESPONSE_BYTES = 25 * 1024 * 1024  # bounded upstream response we buffer
 _FORWARD_TIMEOUT_S = 30.0
+_CLIENT_TIMEOUT_S = 60.0                 # per-connection socket read deadline (slowloris bound)
 
 
 class GatewaySettings:
@@ -109,6 +111,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
 
     server_version = "AegisGateway/1.0"
     protocol_version = "HTTP/1.1"
+    timeout = _CLIENT_TIMEOUT_S   # bound a slow/stalled client so it cannot hold a thread forever
 
     def log_message(self, *_args: Any) -> None:   # quiet by default; use on_verdict for telemetry
         return
@@ -128,18 +131,23 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
     def settings(self) -> GatewaySettings:
         return self.server.settings   # type: ignore[attr-defined]
 
-    def _read_body(self) -> bytes:
+    def _read_body(self) -> tuple[bytes, bool]:
+        """Read the FULL request body (for forwarding intact). Returns ``(body, too_large)``. A body
+        whose Content-Length exceeds the hard cap is NOT read (``too_large=True``) so the caller sends
+        413 + closes the connection — never a silent truncation (which would corrupt the upload and
+        desync the keep-alive stream)."""
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError:
-            return b""
+            return b"", False
         if length <= 0:
-            return b""
+            return b"", False
         if length > _MAX_REQUEST_BODY:
-            # drain a bounded amount so the socket stays clean, then treat as empty for inspection
-            self.rfile.read(min(length, _MAX_REQUEST_BODY))
-            return b""
-        return self.rfile.read(length)
+            return b"", True
+        try:
+            return self.rfile.read(length), False
+        except Exception:
+            return b"", False
 
     def _request_headers(self) -> list[tuple[str, str]]:
         return [(k, v) for k, v in self.headers.items()]
@@ -181,11 +189,20 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
 
     def _forward_url(self, raw_path: str) -> str:
         """Configured-upstream base + ONLY the request's path+query (scheme/host discarded) — closes
-        forward-SSRF: a caller cannot redirect the forward to another host."""
-        p = urlsplit(raw_path)
-        pq = p.path or "/"
-        if p.query:
-            pq += "?" + p.query
+        forward-SSRF: a caller cannot redirect the forward to another host. The path is FORCED to
+        begin with a single '/', so an origin-form target that does not start with '/' (e.g.
+        `@evil.com/x`, which would otherwise splice as userinfo@host and re-home the forward) cannot
+        escape the fixed upstream host. urlsplit failures (a malformed IPv6 target) fall back to '/'."""
+        try:
+            p = urlsplit(raw_path)
+            pq = p.path or "/"
+            if p.query:
+                pq += "?" + p.query
+        except Exception:
+            pq = "/"
+        # collapse any leading '/' or '\' runs to exactly one '/' so neither '@host', '//host', nor
+        # '\\host' can be re-parsed as an authority against the upstream base.
+        pq = "/" + pq.lstrip("/\\")
         return self.settings.upstream_base + pq
 
     def _forward(self, method: str, body: bytes) -> tuple[int, list[tuple[str, str]], bytes] | None:
@@ -228,19 +245,47 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _send_too_large(self) -> None:
+        """413 for a body over the hard cap, and CLOSE the connection — we did not read the body, so
+        the residual bytes must not be mis-parsed as the next request (keep-alive desync)."""
+        self.close_connection = True
+        body = b'{"error":"payload_too_large","by":"aegis-gateway"}'
+        self.send_response(413)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
     # -- the request lifecycle --------------------------------------------
 
     def _handle(self) -> None:
+        try:
+            self._handle_inner()
+        except Exception:
+            # Total fail-safe: a handler error must not drop the connection with no response (that
+            # would be a fail-CLOSED reset). Send an honest 502 instead. Best-effort.
+            try:
+                self._send_bad_gateway()
+            except Exception:
+                pass
+
+    def _handle_inner(self) -> None:
         settings = self.settings
         method = self.command
-        body = self._read_body()
+        body, too_large = self._read_body()
+        if too_large:
+            self._send_too_large()   # honest 413 + close; never a truncated/desynced forward
+            return
+        # Inspect only a bounded prefix (the whole body is still forwarded intact).
+        inspect_body = body[:_MAX_INSPECT_BYTES].decode("utf-8", "replace") if body else None
 
         # (1) REQUEST-SIDE inspection — pure, fail-open. Any error => verdict None => forward.
         verdict: Verdict | None = None
         try:
             verdict = inspect_request(
-                method, self.path, self._request_headers(),
-                body.decode("utf-8", "replace") if body else None,
+                method, self.path, self._request_headers(), inspect_body,
                 honeypot_paths=settings.config.honeypot_paths,
                 enforce=settings.enforce,
             )
@@ -254,7 +299,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
             self._send_block(verdict)  # type: ignore[arg-type]
             return
 
-        # (3) FORWARD to the operator's upstream and CAPTURE the response.
+        # (3) FORWARD the FULL body to the operator's upstream and CAPTURE the response.
         captured = self._forward(method, body)
         if captured is None:
             self._send_bad_gateway()
@@ -266,8 +311,7 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         rverdict: Verdict | None = None
         try:
             rverdict = inspect_response(
-                self.path, self._request_headers(),
-                body.decode("utf-8", "replace") if body else None,
+                self.path, self._request_headers(), inspect_body,
                 content.decode("utf-8", "replace") if content else None,
                 enforce=settings.enforce,
             )

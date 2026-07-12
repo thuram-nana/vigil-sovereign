@@ -53,7 +53,7 @@ def test_api_accepts_headers_as_dict_or_list():
         status, v = inspect_http(json.dumps({
             "method": "POST", "path": "/login",
             "headers": headers,
-            "body": json.dumps({"user": "$(id)"})}), enforce=True)
+            "body": json.dumps({"user": "$(cat /etc/passwd)"})}), enforce=True)
         assert status == 200 and v["attack_class"] == "command_injection_attempt"
 
 

