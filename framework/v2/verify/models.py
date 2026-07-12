@@ -101,6 +101,23 @@ class OracleKind(str, enum.Enum):
     # (near-zero-FP). Full XML-DSig C14N/transform processing is deliberately NOT attempted (needs
     # lxml/signxml — out of scope); anything softer than these invariants stays an SsoLead.
     SAML_STRUCTURAL_FORGERY = "saml_structural_forgery"
+    # Wave-F1 cloud/CSPM posture — the ACHIEVED-STATE sibling of K8S_POSTURE (the offline promotion of a
+    # RETAINED cloud-posture LEAD, ``sensors.cloud.cloud_posture_leads``). Like the AEGIS / K8S_POSTURE /
+    # JWT / SAML members above, this is an ADDITIVE append reachable ONLY via its explicit
+    # BUG_CLASS_ORACLES row (keyed on the `cloud_control` ctx field NO benchmark/scan/engage finding
+    # carries), never via the frozen unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15).
+    # CLOUD_POSTURE promotes a retained cloud-posture control to a FACT — judged over the control's
+    # RETAINED achieved-state ALONE, offline, ZERO cloud calls — ONLY on a deterministic membership/
+    # parse-proof that a COMPLIANT control cannot exhibit: (a) encryption-at-rest DISABLED on a sensitive
+    # datastore (``encrypted`` explicitly ``false`` + ``sensitive`` — the un-oracle-provable
+    # `misconfiguration` lead the policy-path oracle STRUCTURALLY cannot prove, now provable as an
+    # achieved STATE); (b) an achieved PUBLIC-EXPOSURE flag (``public`` explicitly ``true``); or (c) a
+    # WILDCARD/anonymous principal literally named in the retained resource policy. A compliant control
+    # (encryption on, not public, no wildcard principal) or one with only ABSENT/unknown flags does NOT
+    # fire (near-zero-FP). Distinct from the LIVE reachability-PATH proof (POLICY_PATH re-derives a grant
+    # path over the whole policy GRAPH in ``confirm_cloud_posture_facts``): this is the single-control
+    # achieved-STATE membership lens — a parse-proof over ONE retained control record, no graph traversal.
+    CLOUD_POSTURE = "cloud_posture"
 
 
 class OracleProbe(BaseModel):

@@ -273,6 +273,12 @@ class FindingContext(BaseModel):
     # k8s_posture_oracle (a kube-bench CIS control FAILED with a concrete observed insecure setting) —
     # the RETAINED control evidence (sensors.k8s_runtime) the parse-proof judges
     k8s_control: dict[str, Any] | None = None
+    # cloud_posture_oracle (Wave-F1: a retained cloud/CSPM posture control whose ACHIEVED STATE literally
+    # carries an insecure fact — encryption-at-rest disabled / public exposure / a wildcard principal) —
+    # the RETAINED control evidence (sensors.cloud) the membership/parse-proof judges over its
+    # achieved-state ALONE, offline. No benchmark/scan/engage finding carries cloud_control, so appending
+    # this leaves the gate byte-identical.
+    cloud_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
