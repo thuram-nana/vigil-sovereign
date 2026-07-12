@@ -131,15 +131,27 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
     def settings(self) -> GatewaySettings:
         return self.server.settings   # type: ignore[attr-defined]
 
+    def _framing_unsupported(self) -> bool:
+        """This stdlib handler cannot safely buffer+forward a body it does not delimit by a valid
+        Content-Length: a chunked (Transfer-Encoding) body, or a malformed Content-Length. Such a
+        request is REFUSED (411 + close) rather than read-as-empty (which would drop the body and
+        desync the keep-alive stream). Returns True when the framing is unsupported."""
+        if self.headers.get("Transfer-Encoding"):
+            return True
+        cl = self.headers.get("Content-Length")
+        if cl is not None:
+            try:
+                int(cl)
+            except ValueError:
+                return True
+        return False
+
     def _read_body(self) -> tuple[bytes, bool]:
-        """Read the FULL request body (for forwarding intact). Returns ``(body, too_large)``. A body
-        whose Content-Length exceeds the hard cap is NOT read (``too_large=True``) so the caller sends
-        413 + closes the connection — never a silent truncation (which would corrupt the upload and
-        desync the keep-alive stream)."""
-        try:
-            length = int(self.headers.get("Content-Length", "0") or "0")
-        except ValueError:
-            return b"", False
+        """Read the FULL request body (for forwarding intact). Returns ``(body, too_large)``. Callers
+        must first check ``_framing_unsupported``; here Content-Length is known valid. A body over the
+        hard cap is NOT read (``too_large=True``) so the caller sends 413 + closes — never a silent
+        truncation (which would corrupt the upload and desync the keep-alive stream)."""
+        length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
             return b"", False
         if length > _MAX_REQUEST_BODY:
@@ -248,9 +260,18 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
     def _send_too_large(self) -> None:
         """413 for a body over the hard cap, and CLOSE the connection — we did not read the body, so
         the residual bytes must not be mis-parsed as the next request (keep-alive desync)."""
+        self._refuse_body(413, "payload_too_large")
+
+    def _send_length_required(self) -> None:
+        """411 for a body this handler cannot delimit (chunked / bad Content-Length) — CLOSE the
+        connection so the un-read body cannot desync the keep-alive stream. A real deployment fronts
+        the gateway with a proxy that de-chunks; unbuffered streaming is roadmap."""
+        self._refuse_body(411, "length_required")
+
+    def _refuse_body(self, status: int, err: str) -> None:
         self.close_connection = True
-        body = b'{"error":"payload_too_large","by":"aegis-gateway"}'
-        self.send_response(413)
+        body = ('{"error":"%s","by":"aegis-gateway"}' % err).encode()
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
@@ -274,6 +295,9 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
     def _handle_inner(self) -> None:
         settings = self.settings
         method = self.command
+        if self._framing_unsupported():
+            self._send_length_required()   # chunked/bad-CL: refuse+close, never drop-body+desync
+            return
         body, too_large = self._read_body()
         if too_large:
             self._send_too_large()   # honest 413 + close; never a truncated/desynced forward

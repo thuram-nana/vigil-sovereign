@@ -192,7 +192,7 @@ def inspect_response(
     verifier = verifier or OracleVerifier()
     values = candidate_values(path, headers, body)
 
-    # (1) reflected XSS — a request value's executable token reached an EXECUTABLE HTML context in the
+    # reflected XSS — a request value's executable token reached an EXECUTABLE HTML context in the
     # response. REQUIRE the value to be reflected VERBATIM first: an HTML-encoded reflection does not
     # appear verbatim (so it is inert and must not fire), and a marker that only coincides with the
     # site's OWN script is not a reflection of user input. Both were false positives without this gate.
@@ -205,29 +205,10 @@ def inspect_response(
             if confirmed is not None:
                 return _payload_verdict("xss", param, confirmed, fc, enforce=enforce)
 
-    # (2) error-based SQLi — a datastore error the request value PROVABLY caused. Require a
-    # quote-bearing value that (a) is reflected VERBATIM in the response AND (b) sits within a window
-    # of a datastore-error signature — linking the error to the payload. Without this, an unrelated
-    # error page (a pasted stack trace) plus any incidental apostrophe (`O'Brien`) was a false block.
-    for param, value in values:
-        if ("'" not in value and '"' not in value) or len(value) < 2:
-            continue
-        vpos = sink.find(value)
-        if vpos < 0:
-            continue
-        window = sink[max(0, vpos - _ERR_WINDOW): vpos + len(value) + _ERR_WINDOW].lower()
-        if not any(sig in window for sig in _DB_ERROR_NEAR):
-            continue
-        fc = FindingContext.from_error_signature(sink, bug_class="error_based_sqli")
-        confirmed = confirm_finding({"bug_class": "error_based_sqli"}, context=fc, verifier=verifier)
-        if confirmed is not None:
-            return _payload_verdict("error_based_sqli", param, confirmed, fc, enforce=enforce)
-
+    # NOTE — error-based SQLi is DELIBERATELY not confirmed inline. Without a control/baseline response
+    # (a differential the offensive engine has but a live proxy does not), a datastore-error signature
+    # in the response cannot be PROVEN to have been caused by the request value rather than merely
+    # displayed near it (a Q&A/paste/log-viewer page that reflects a searched error string, a name like
+    # O'Brien rendered next to a tracked error). The adversarial review proved every proximity heuristic
+    # still false-positives, so it stays OFF the block path (roadmap: a differential/OOB confirmation).
     return None
-
-
-_ERR_WINDOW = 256   # chars around the reflected value within which a DB-error signature links them
-# datastore-error signatures that, near the reflected payload, link the error to the request value.
-_DB_ERROR_NEAR = ("sql syntax", "sqlexception", "sqlstate", "odbc", "ora-0", "psql:", "sqlite",
-                  "mysql", "postgres", "syntax error", "unclosed quotation", "quoted string not properly",
-                  "unterminated", "you have an error in your")

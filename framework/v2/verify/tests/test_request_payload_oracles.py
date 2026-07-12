@@ -42,7 +42,7 @@ _SQLI_ATTACKS = [
     "1' UNION SELECT password FROM users--",
     "'; DROP TABLE users;--",
     "1'or'1'='1",
-    "admin'--",                                # comment-terminated auth bypass (anchored to the quote)
+    "'; DELETE FROM accounts WHERE 1=1--",     # stacked statement with a real DELETE..FROM shape
 ]
 
 # Quotes + SQL words + "N or M" phrasing are ubiquitous in ordinary human input; NONE may fire (a
@@ -56,6 +56,11 @@ _SQLI_BENIGN = [
     "Don't drop the ball; I'll update you", "I've got 5 or 6 options", "it's 4 or 5 apples",
     "I'll take 2 or 3", "I'm a member of the credit union, please select my account",
     "The workers' union will select delegates", "Customer O'Brien wants 2 or 3 licenses.",
+    # the re-review corpus: quoted-word + comment/em-dash, and quoted-word + semicolon + a bare
+    # English verb (not a real statement) — all benign UI/support/review/code-paste text.
+    "I loved 'Inception' -- best film ever", "local greeting = 'hello' -- default value",
+    'const label = "Submit" /* the button */', "Click 'Save'; select the file",
+    "Press 'OK'; delete the row you added", "Choose 'Yes'; update your profile",
 ]
 
 
@@ -88,6 +93,10 @@ _CMDI_BENIGN = [
     "eat; sleep; repeat", "dog|cat", "Name | Age | ID", "user | id", "; cat food",
     "Good night.\nSleep well", "red|curl the ribbon", "use `id`", "$(id)", "`whoami`",
     "$(document).ready", "reading\nsleep\ngaming",
+    # the re-review corpus: a comparison operator, and a value that merely BEGINS with a command word
+    # (a User-Agent / tool-version / deploy target / filter) with no preceding separator.
+    "id > 1000", "sleep > 8 hours", "ping > 500ms", "env > prod", "python-requests/2.25.1",
+    "curl/7.68.0", "env/production", "wget/1.20", "id/12345", "cat/pic.png",
 ]
 
 

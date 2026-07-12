@@ -118,15 +118,15 @@ def test_html_encoded_reflection_is_NOT_blocked(vuln_upstream):
         gw.shutdown()
 
 
-def test_error_based_sqli_is_blocked_when_linked_to_a_quote(vuln_upstream):
-    sink: list[Verdict] = []
-    gw, port = _gateway(vuln_upstream, mode="enforce", sink=sink)
+def test_error_based_sqli_is_not_blocked_inline_without_a_control(vuln_upstream):
+    """Error-based SQLi is DELIBERATELY off the inline block path: without a control/baseline response
+    a datastore error cannot be PROVEN caused by the payload (the adversarial review showed every
+    proximity heuristic still false-positives on Q&A/paste/log-viewer pages). So even a payload that
+    provokes a DB error is forwarded, not blocked (roadmap: a differential/OOB confirmation)."""
+    gw, port = _gateway(vuln_upstream, mode="enforce")
     try:
-        with pytest.raises(urllib.error.HTTPError) as ei:
-            _hit(port, "q=" + _Q("x'"))
-        assert ei.value.code == 403 and ei.value.headers.get("X-Aegis-Block") == "error_based_sqli"
-        v = next(v for v in sink if v.attack_class == "error_based_sqli")
-        assert v.certificate is not None and v.certificate.reverify() is True
+        body = _hit(port, "q=" + _Q("x'")).read().decode()
+        assert "error in your SQL syntax" in body   # the app's error is relayed, not blocked
     finally:
         gw.shutdown()
 

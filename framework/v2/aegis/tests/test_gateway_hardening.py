@@ -106,6 +106,22 @@ def test_oversized_body_gets_413_not_a_truncated_forward(upstream):
         gw.shutdown()
 
 
+def test_chunked_body_is_refused_411_not_dropped_and_desynced(upstream):
+    """A chunked (Transfer-Encoding) request body this handler cannot buffer must be refused with
+    411 + Connection: close — never read-as-empty (which would drop the body and desync keep-alive)."""
+    gw = serve_gateway(f"http://127.0.0.1:{upstream}",
+                       config=AegisConfig(deployment_secret="k"), host="127.0.0.1", port=0)
+    threading.Thread(target=gw.serve_forever, daemon=True).start()
+    port = gw.server_address[1]
+    try:
+        resp = _raw(port, b"POST /u HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                          b"5\r\nhello\r\n0\r\n\r\n")
+        first = resp.split(b"\r\n", 1)[0]
+        assert b"411" in first and b"close" in resp.lower()
+    finally:
+        gw.shutdown()
+
+
 def test_malformed_target_yields_a_response_not_a_dropped_connection(upstream):
     gw = serve_gateway(f"http://127.0.0.1:{upstream}",
                        config=AegisConfig(deployment_secret="k"), host="127.0.0.1", port=0)
@@ -121,19 +137,17 @@ def test_malformed_target_yields_a_response_not_a_dropped_connection(upstream):
 
 # --------------------------------------------------------------------------- response-side FP fixes
 
-def test_error_sqli_does_not_fire_on_benign_apostrophe_plus_unrelated_db_error():
-    """A benign O'Brien search whose results page merely CONTAINS an unrelated pasted stack trace
-    (java.sql.SQLException) far from the reflected value must NOT be blocked."""
-    resp = ("<html><body>results for O'Brien</body>" + ("x" * 2000)
-            + "<pre>java.sql.SQLException: connection timeout</pre></html>")
-    v = inspect_response("/search?q=O%27Brien", [], None, resp, enforce=True)
-    assert v is None, "error-based SQLi false-positive: benign apostrophe + unrelated DB error blocked"
-
-
-def test_error_sqli_still_fires_when_the_payload_caused_the_error():
-    resp = "<html>You have an error in your SQL syntax near 'x'' at line 1</html>"
-    v = inspect_response("/search?q=x%27", [], None, resp, enforce=True)
-    assert v is not None and v.attack_class == "error_based_sqli"
+def test_error_sqli_is_off_the_inline_block_path():
+    """Error-based SQLi is deliberately NOT confirmed inline (no control/baseline response, so a DB
+    error cannot be proven caused by the payload). Neither a benign apostrophe near an unrelated error
+    NOR a payload-provoked error is blocked — both are forwarded (roadmap: differential/OOB)."""
+    benign = ("<html><body>results for O'Brien</body>" + ("x" * 2000)
+              + "<pre>java.sql.SQLException: connection timeout</pre></html>")
+    assert inspect_response("/search?q=O%27Brien", [], None, benign, enforce=True) is None
+    # a page that reflects a *searched* DB-error string must also not self-trigger a block
+    searched = "<html>No results for: You have an error in your SQL syntax near '1'</html>"
+    q = "/search?q=" + "You%20have%20an%20error%20in%20your%20SQL%20syntax%20near%20%271%27"
+    assert inspect_response(q, [], None, searched, enforce=True) is None
 
 
 def test_reflected_xss_does_not_fire_when_marker_only_matches_the_sites_own_script():
