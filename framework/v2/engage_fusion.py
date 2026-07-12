@@ -418,9 +418,18 @@ def _reverify_cloud_misconfig(world: Any, inventory: dict, *, seq: int) -> int:
             continue
         seen.add(rid)
         try:
-            if not confirm_cloud_posture(r).confirmed:   # the cloud-posture oracle must FIRE
-                continue
+            result = confirm_cloud_posture(r)            # the cloud-posture oracle must FIRE
         except Exception:
+            continue
+        # Promote ONLY when the ENCRYPTION-AT-REST rule specifically fired. The oracle also fires on
+        # public_exposure / wildcard_principal, but those are promoted by the policy-path seam — so
+        # accepting a bare `.confirmed` here would DOUBLE-count them AND mislabel a public/wildcard fact
+        # as `encryption_at_rest_disabled` with a fabricated "encrypted=false, sensitive=true" achieved
+        # state (the review's mislabel FP). Gate on the actual fired proof, not the aggregate verdict.
+        if not (result.confirmed and any(
+                getattr(s, "fired", False)
+                and (getattr(s, "observed", None) or {}).get("rule") == "encryption_at_rest_disabled"
+                for s in (result.signals or []))):
             continue
         subject = _resource_ref(rid, str(r.get("kind") or ""))
         _project_oracle_fact(
