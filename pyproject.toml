@@ -28,8 +28,12 @@ description = "CRUCIBLE — authorized, prove-don't-guess offensive-security pla
 requires-python = ">=3.11"
 authors = [{name = "OBSIDIAN-FORGE"}]
 # Dual-licensed: GNU AGPL-3.0-or-later OR a Commercial License. See ./LICENSE and ./LICENSING.md.
-license = "AGPL-3.0-or-later"
-license-files = ["LICENSE", "LICENSING.md"]
+# NOTE: use the classic table form (not the PEP 639 SPDX-string `license = "..."` + `license-files`),
+# which those forms require setuptools>=77 — bumping the build-system floor that high would break
+# `pip install` on stock LTS setuptools (e.g. Ubuntu 24.04 ships ~68), defeating the installability
+# goal. The table form builds on the declared setuptools>=61 and matches framework/v2/pyproject.toml.
+# setuptools auto-includes the LICENSE file in the wheel metadata.
+license = {text = "AGPL-3.0-or-later"}
 readme = "README.md"
 classifiers = [
   "Programming Language :: Python :: 3",
