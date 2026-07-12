@@ -553,3 +553,61 @@ def test_engage_cognitive_refusal_is_not_inert():
     class _G(_F):
         oracle_context = None
     assert epistemic_refusal(_scanner_verification_claim(_G()), world=None) is None
+
+
+# ---------------------------------------------------------------------------
+# W2.2a — the learner-health META-MONITOR is scheduled as ADVISORY telemetry on
+# the --spine reasoning pass (previously it ran only under --autonomous). It is
+# advisory-only: the authoritative scan report is BYTE-IDENTICAL with the spine
+# advisors on vs off, and it never gates a surface or promotes a finding.
+# ---------------------------------------------------------------------------
+
+
+def _report_signature(rep):
+    """A stable signature of the authoritative report — everything a grader reads."""
+    return [(f.bug_class, f.confirmed_by, round(f.confidence, 6), bool(f.oracle_context),
+             f.insertion_point, f.param, f.endpoint) for f in rep.active_findings]
+
+
+def test_spine_advisors_leave_the_scan_report_byte_identical(
+    isolated_engagement, httpserver: HTTPServer, tmp_path: Path,
+):
+    """ADVISORY-ONLY proof for 2a: the same engagement run WITH the spine (critic panel +
+    reflection + learner-health meta-monitor all scheduled) produces a report byte-identical to the
+    run WITHOUT the spine (advisors off). The nervous system only lands evidence events; it never
+    touches report.active_findings."""
+    from framework.v2.agents.blackboard import open_blackboard
+
+    port = httpserver.port
+    isolated_engagement("alpha", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root)
+    httpserver.expect_request("/search").respond_with_handler(_search)
+    seed = f"http://127.0.0.1:{port}/"
+
+    # advisors OFF (no spine) — the default path.
+    off = run_engagement("alpha", seed, max_pages=5, enable_oob=False, prompt_callback=_deny)
+    # advisors ON (spine attached) — critic panel + reflection + meta-monitor all scheduled.
+    bb = open_blackboard(db_path=tmp_path / "spine.sqlite")
+    try:
+        on = run_engagement("alpha", seed, max_pages=5, enable_oob=False,
+                            prompt_callback=_deny, spine=bb)
+        assert on.report.active_findings, "engage confirmed nothing"
+        # (1) advisory-only: the authoritative report is byte-identical with vs without the advisors.
+        assert _report_signature(off.report) == _report_signature(on.report), \
+            "the scheduled --spine advisors mutated the authoritative scan report"
+        # (2) the learner-health meta-monitor advisory actually landed as a decision event.
+        decisions = bb.read(engagement="alpha", kinds=["decision"])
+        health = [d for d in decisions if d.payload["question"] == "learner health"]
+        assert health, "the scheduled meta-monitor advisory did not reach the spine"
+        # with no prior outcome ledger it honestly recommends gathering evidence — never gating.
+        assert health[0].payload["choice"] in ("gather_evidence", "ok", "trust_confidence_less")
+        # (3) the critic panel + reflection are scheduled alongside it (the full nervous system).
+        assert bb.read(engagement="alpha", kinds=["critic_verdict"]), "critic panel not scheduled"
+    finally:
+        bb.close()
+
+
+def test_advise_learner_health_is_a_noop_without_a_sink():
+    """The advisory is spine-only: with no sink it does nothing (and cannot raise) — the guarantee
+    that keeps the default/gate path (which attaches no spine) byte-identical."""
+    engage_mod._advise_learner_health(None, "alpha")   # must not raise

@@ -400,15 +400,49 @@ def _advise_critics(sink, finding: dict, finding_event_id: int | None) -> None:
                   rationale=f"{panel.rationale} (agreement={panel.agreement}, entropy={panel.entropy})")
 
 
+def _advise_learner_health(sink, slug) -> None:
+    """W2.2a — schedule the learner-health META-MONITOR as advisory telemetry on the ``--spine``
+    reasoning pass (it used to run only under ``--autonomous``). It reads the operator's outcome
+    ledger READ-ONLY (``targets/<slug>/outcomes.json``; a missing ledger is an empty one → an
+    honest 'gather_evidence'), diagnoses whether the learners (calibrator / conformal bands) are
+    trustworthy, and records ONE advisory ``decision`` event.
+
+    CAUTION-ONLY, by construction: the meta-monitor can only recommend MORE caution (order effort /
+    abstain more) — it NEVER gates a surface, promotes a finding, mutates the report, or feeds a
+    deterministic oracle/SCE/calibration input. Spine-only (no sink → no-op) and off the gate path
+    (``make gate`` attaches no spine), so the default engage/scan report stays byte-identical.
+    Best-effort/total — a meta-monitor failure never perturbs the engagement."""
+    if sink is None:
+        return
+    try:
+        from .calibration.ledger import OutcomeLedger
+        from .calibration.meta_monitor import assess_learner_health
+        from .common.paths import target_dir
+
+        path = target_dir(slug) / "outcomes.json"
+        ledger = OutcomeLedger.load(path) if path.is_file() else OutcomeLedger()
+        sig = assess_learner_health(ledger)
+        sink.decision(
+            "learner health",
+            str(getattr(sig, "recommend", "") or "unknown"),
+            rationale=(f"{getattr(sig, 'notes', '')} "
+                       f"(n_labels={getattr(sig, 'n_labels', 0)}, "
+                       f"ece={getattr(sig, 'ece', 0.0):.3f}) — advisory: orders effort, "
+                       f"never gates a surface or promotes a finding"))
+    except Exception:
+        pass
+
+
 def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
     """W1.1 — the nervous system, ADVISORY-ONLY, over the authoritative findings.
 
     Runs ONLY when the event spine is attached (opt-in telemetry). It NEVER alters
     ``report.active_findings`` nor any oracle verdict — it mirrors each finding, then re-grounds
-    (critic panel), refuses-to-conclude (cognitive refusal), and credits the outcome (reward
-    bus), recording each on the immutable stream. Because ``make gate`` runs WITHOUT a spine,
-    this path never executes during the eval gate, so the gate stays byte-identical. Best-effort
-    throughout — a reasoning failure never sinks the engagement."""
+    (critic panel), refuses-to-conclude (cognitive refusal), credits the outcome (reward bus), and
+    (W2.2a) records the learner-health meta-monitor's advisory — recording each on the immutable
+    stream. Because ``make gate`` runs WITHOUT a spine, this path never executes during the eval
+    gate, so the gate stays byte-identical. Best-effort throughout — a reasoning failure never
+    sinks the engagement."""
     try:
         from .agents.cognitive_refusal import emit_refusal, epistemic_refusal
         from .agents.reflection import reflect
@@ -453,6 +487,11 @@ def _run_reasoning_pass(sink, spine, slug, report, result, world) -> None:
             sink.reflection(r.get("trigger", "reflection"), r.get("observations", []),
                             reorientation=r.get("reorientation", ""),
                             rationale=r.get("rationale", ""))
+
+        # (5) W2.2a — the learner-health meta-monitor, scheduled here as ADVISORY telemetry
+        # (previously it ran only under --autonomous). Orders effort only; never gates a surface,
+        # promotes a finding, or touches the authoritative report. Spine-only → gate byte-identical.
+        _advise_learner_health(sink, slug)
 
         sink.decision(
             "engagement summary",
