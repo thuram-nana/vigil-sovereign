@@ -16,6 +16,25 @@ being built. Jargon is defined the first time it appears.
 
 ---
 
+> ## ⚠️ Legal disclaimer — authorized use only
+>
+> **CRUCIBLE is a dual-use security tool provided for lawful, authorized, and educational
+> purposes only.** Use it **only** against systems you **own** or have **explicit written
+> permission** to test. Unauthorized access to computer systems is illegal in most
+> jurisdictions (e.g. the U.S. CFAA, the U.K. Computer Misuse Act, EU Directive 2013/40/EU).
+>
+> **You — the user — are solely responsible for how you use this Software and for all
+> consequences of that use, including obtaining authorization and obeying all applicable
+> laws.** The author, **Junior Thuram Nana**, does **not** condone, encourage, or accept any
+> responsibility or liability for any misuse. The Software is provided **“AS IS”, without
+> warranty of any kind**, and **the author is not liable for any damage, loss, or legal
+> consequence arising from its use or misuse by anyone.** By using CRUCIBLE you accept these
+> terms.
+>
+> **Full terms:** [`DISCLAIMER.md`](./DISCLAIMER.md) · **Licensing:** [`LICENSING.md`](./LICENSING.md)
+
+---
+
 ## Table of contents
 
 - [1. Why CRUCIBLE exists (from first principles)](#1-why-crucible-exists-from-first-principles)

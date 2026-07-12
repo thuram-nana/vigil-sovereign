@@ -16,6 +16,21 @@ governed by the AGPL-3.0.
 > commercial terms are the signed agreement you receive from the Licensor. Where this summary and
 > those texts differ, those texts control.
 
+> ### ⚠️ Authorized use only — no liability for misuse
+>
+> CRUCIBLE is a **dual-use security tool for lawful, authorized use only.** Regardless of which
+> license you use it under, **you alone are responsible for how you use it** — including obtaining
+> proper authorization before testing any system and complying with all applicable laws.
+>
+> **Neither the AGPL-3.0 nor a commercial license makes the Licensor responsible for your use or
+> misuse of the Software.** Both the AGPL-3.0 ([`LICENSE`](./LICENSE) §§ 15–16) and the standalone
+> [`DISCLAIMER.md`](./DISCLAIMER.md) provide that the Software is supplied **“AS IS”, without
+> warranty,** and that **the Licensor is not liable for any damages arising from its use or misuse
+> by anyone.** A commercial license grants warranty/indemnity/support **only** to the extent
+> expressly set out in a signed agreement — absent that, no such obligations exist. See
+> [`DISCLAIMER.md`](./DISCLAIMER.md) for the full authorized-use policy, limitation of liability,
+> and indemnification terms, which every user accepts by using the Software.
+
 ---
 
 ## Option 1 — AGPL-3.0 (free and open source)
