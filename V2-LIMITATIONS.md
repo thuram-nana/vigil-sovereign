@@ -114,7 +114,7 @@ app** — a false-positive/regression ruler, not a coverage claim. `make test`
    AEGIS is defensive-only: default `mode="observe"` is read-only and it never
    attacks.
 
-**Last reconciled:** `main` @ `<pending>`, 2026-07-12 (reconciled after the
+**Last reconciled:** `main` @ `aa89a49`, 2026-07-12 (reconciled after the
 3-workstream program — AEGIS depth, autonomy-loop first slices, opt-in sensor
 fusion — landed as **reviewed, opt-in, gate-byte-identical** slices; items 1–3
 updated to reflect the new opt-in reach). Regenerate drifting counts from the
