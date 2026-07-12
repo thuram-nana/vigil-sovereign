@@ -161,7 +161,7 @@ def _lead_verdict(bug_class: str, param: str, evidence: str) -> Verdict:
 
 # --- SSRF / XXE — request-side LEADS (NOT blocks) --------------------------------------------------
 #
-# HONEST SCOPE: server-side request forgery and XML external-entity injection are confirmed by an
+# HONEST SCOPE: server-side request forgery, and BLIND / out-of-band XXE, are confirmed by an
 # OUT-OF-BAND (callback) interaction — a request the app makes to an attacker-controlled collector.
 # A single INLINE request/response cannot prove that near-zero-FP (a value that LOOKS like an
 # internal-host URL, or an XML doctype that DECLARES an external entity, does not prove the app
@@ -169,6 +169,13 @@ def _lead_verdict(bug_class: str, param: str, evidence: str) -> Verdict:
 # logged, but they NEVER block. The out-of-band block-path (reuse ``verify/oob.py``'s OOB_CALLBACK
 # oracle: mint a per-request correlation token, plant it in the payload, and confirm on an inbound
 # hit) is the roadmap to promote these to a proven block — it is deliberately NOT forced here.
+#
+# ONE narrow slice is promoted to a real inline block on the RESPONSE side (see ``inspect_response``):
+# IN-BAND file-disclosure XXE, where the leaked file content (a strict `/etc/passwd` root line)
+# surfaces in the app's OWN response. That is provable from a single exchange with the SAME three-part
+# near-zero-FP discipline path traversal uses (declared vector + strict root-line anchor + not-
+# reflected guard). BLIND/OOB XXE (no file content inline) and ALL SSRF stay LEADS here — their only
+# sound block-path is the OOB callback oracle.
 #
 # SSRF lead: a candidate value that is a URL toward an internal / link-local / cloud-metadata host,
 # or uses a dangerous non-HTTP scheme (file/gopher/dict/...). XXE lead: a request body that declares
@@ -355,9 +362,10 @@ def inspect_response(
     """Run the RESPONSE-SIDE effect oracles over the (request, PROXIED-response) pair. Returns a
     CONFIRMED ``Verdict`` (with a re-runnable ``CertRef``) when the app's own answer PROVES
     exploitation — a request value reflected into an executable HTML context (reflected XSS), a
-    template expression the server EVALUATED (SSTI), or a `/etc/passwd` signature a traversal payload
-    surfaced (path traversal) — else ``None`` (the gateway then relays the response untouched).
-    Pure/deterministic; total. ``enforce`` sets the confirmed action to ``block``."""
+    template expression the server EVALUATED (SSTI), a `/etc/passwd` signature a traversal payload
+    surfaced (path traversal), or a `/etc/passwd` signature an external-entity DTD leaked into the
+    response (in-band file-disclosure XXE) — else ``None`` (the gateway then relays the response
+    untouched). Pure/deterministic; total. ``enforce`` sets the confirmed action to ``block``."""
     if not response_body:
         return None
     sink = response_body[:_MAX_RESPONSE_CHARS]
@@ -418,6 +426,18 @@ def inspect_response(
             confirmed = confirm_finding({"bug_class": "path_traversal"}, context=fc, verifier=verifier)
             if confirmed is not None:
                 return _payload_verdict("path_traversal", param, confirmed, fc, enforce=enforce)
+
+    # NOTE — in-band XXE is DELIBERATELY not confirmed inline; it stays the request-side LEAD that
+    # `inspect_request` raises via `_XXE_RE` (observe + belief, never a block). The adversarial review
+    # proved a single inline exchange cannot causally prove it, unlike path traversal (attacker-CHOSEN
+    # file path): a `/etc/passwd` root line in the response can be REFLECTED user content — a
+    # security-KB / paste / code-review / Q&A page that documents an XXE example AND echoes a sample
+    # root line — not a file the app read from disk; and once the DTD is HTML-escaped in the response,
+    # a whole-body not-reflected guard passes on that benign echo (false block + a "confirmed"
+    # certificate that overclaims file disclosure on reflected content). The "proof" would also be a
+    # GENERIC marker extracted from the same response it is judged against (a circular self-proof).
+    # Blind/OOB XXE and ALL SSRF stay LEADS for the same reason; their only sound block-path is the
+    # OOB callback oracle (see the roadmap — a passive correlation on a token the app already carried).
 
     # NOTE — error-based SQLi is DELIBERATELY not confirmed inline. Without a control/baseline response
     # (a differential the offensive engine has but a live proxy does not), a datastore-error signature
