@@ -73,6 +73,18 @@ class OracleKind(str, enum.Enum):
     # over the retained policy graph, and live service-reachability the EXISTING SERVICE_REACHABILITY
     # oracle over a gated handshake — so neither adds a new kind.)
     K8S_POSTURE = "k8s_posture"                       # a kube-bench CIS control FAILED with a concrete observed insecure setting (membership/parse-proof over the retained control)
+    # Workstream-B SSO/JWT structural-forgery. Like the AEGIS / K8S_POSTURE members above, this is an
+    # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the `jwt_token`
+    # ctx field no benchmark/scan/engage finding carries), never via the frozen unknown-class fallback
+    # (verifier._ALL_ORACLES stays EXACTLY 15). SSO_ASSERTION_FORGERY promotes a captured JWT to a
+    # STRUCTURALLY-FORGEABLE FACT — judged on the token ALONE, offline, ZERO forged traffic — ONLY on a
+    # re-runnable proof: (a) ``alg=none``/``None`` (a valid token needs NO secret, so anyone can mint
+    # one); (b) an HS256 signature RECOMPUTABLE from a supplied/weak candidate key (the exact HMAC
+    # reproduces — a deterministic fact); or (c) an RS256->HS256 algorithm confusion (the HS256 signature
+    # verifies with a supplied RSA PUBLIC key as the HMAC secret — public material anyone holds). A
+    # normal RS256 token with an unknown key, or an HS256 token whose secret is not recoverable, does NOT
+    # fire (near-zero-FP). SAML XSW/c14n forgery is deliberately NOT attempted in this slice (JWT-only).
+    SSO_ASSERTION_FORGERY = "sso_assertion_forgery"
 
 
 class OracleProbe(BaseModel):
