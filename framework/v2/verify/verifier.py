@@ -162,6 +162,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # the unknown-class fallback and `make gate` byte-identical. Distinct from the EXISTING `jwt` class
     # (alg:none ACCEPTANCE proved live via ACHIEVED_STATE) — this proves FORGEABILITY offline, no traffic.
     "jwt_forgeable": (OracleKind.SSO_ASSERTION_FORGERY,),
+    # Workstream NW-1 SAML structural-forgery (the SAML SIBLING of `jwt_forgeable`): a captured SAML
+    # Response is a FACT (structurally forgeable) only when the saml-forgery oracle proves it from the
+    # captured XML ALONE — an unsigned consumed assertion, a ds:Reference/@URI that does not cover the
+    # consumed element, or the signature-wrapping shape (the dual of scanner.sso.wrap_assertion_xsw).
+    # Like the JWT / AEGIS / k8s rows, this NEW OracleKind is reachable ONLY via this row — it is NOT in
+    # the frozen _ALL_ORACLES fallback — and fires only when the ctx carries `saml_xml`, which no
+    # benchmark/scan/engage finding does. So appending it leaves the unknown-class fallback and `make
+    # gate` byte-identical. DISTINCT from the LIVE `saml_signature_wrapping` / `saml_assertion_tampering`
+    # classes (ACCEPTANCE proved live via ACHIEVED_STATE) — this proves FORGEABILITY offline, no traffic.
+    "saml_structural_forgery": (OracleKind.SAML_STRUCTURAL_FORGERY,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -307,6 +317,16 @@ _ALIASES: dict[str, str] = {
     "jwt_weak_key": "jwt_forgeable",
     "jwt_signature_forgery": "jwt_forgeable",
     "sso_assertion_forgery": "jwt_forgeable",
+    # SAML OFFLINE structural-forgery spelling variants fold onto the single canonical class. NOTE: the
+    # LIVE `saml_signature_wrapping` / `saml_assertion_tampering` classes and their aliases (xsw,
+    # signature_wrapping, saml_tampering, ...) are deliberately NOT aliased here — offline forgeability
+    # (XML-alone) and live acceptance are distinct proofs and stay distinct classes.
+    "saml_forgery": "saml_structural_forgery",
+    "saml_forgeable": "saml_structural_forgery",
+    "saml_structural_forgeability": "saml_structural_forgery",
+    "saml_offline_forgery": "saml_structural_forgery",
+    "saml_unsigned_assertion": "saml_structural_forgery",
+    "saml_reference_mismatch": "saml_structural_forgery",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -591,6 +611,13 @@ class OracleVerifier:
             if "jwt_token" in ctx:
                 return oracles.jwt_forgery_oracle(
                     ctx["jwt_token"], candidate_keys=ctx.get("jwt_candidate_keys", ()))
+            return None
+        # -- Workstream NW-1 SAML structural-forgery — fire ONLY when the ctx carries `saml_xml` (a
+        #    captured SAML Response's decoded XML); no benchmark/scan/engage finding does, so it is inert
+        #    on the gate path.
+        if kind is OracleKind.SAML_STRUCTURAL_FORGERY:
+            if "saml_xml" in ctx:
+                return oracles.saml_forgery_oracle(ctx["saml_xml"])
             return None
         return None
 

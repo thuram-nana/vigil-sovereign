@@ -280,6 +280,11 @@ class FindingContext(BaseModel):
     # this leaves the gate byte-identical.
     jwt_token: str | None = None
     jwt_candidate_keys: list[str] | None = None
+    # saml_forgery_oracle (Workstream NW-1: a captured SAML Response is STRUCTURALLY FORGEABLE — judged
+    # on the decoded XML ALONE, offline, zero traffic, on the XXE-safe parse). saml_xml is the decoded
+    # SAML Response XML string. No benchmark/scan/engage finding carries saml_xml, so appending this
+    # leaves the gate byte-identical.
+    saml_xml: str | None = None
 
     # -- builders ----------------------------------------------------------
 
@@ -491,6 +496,28 @@ class FindingContext(BaseModel):
             jwt_token=_coerce_text(token),
             jwt_candidate_keys=keys or None,
         )
+
+    @classmethod
+    def from_saml_structure(
+        cls,
+        xml: str,
+        *,
+        bug_class: str = "saml_structural_forgery",
+    ) -> "FindingContext":
+        """A captured SAML Response's decoded XML, for the saml-forgery oracle (Workstream NW-1 — the
+        SAML SIBLING of ``from_jwt_token``). Confirms STRUCTURAL FORGEABILITY — judged on the XML ALONE,
+        offline, ZERO forged traffic, on the XXE-safe parse — ONLY on a coarse, c14n-free STRUCTURAL
+        invariant a validly signed assertion cannot exhibit: an unsigned consumed assertion, a
+        ds:Reference/@URI that does not cover the consumed element, or the signature-wrapping shape (the
+        dual of ``scanner.sso.wrap_assertion_xsw``). A properly signed single assertion, a doc with no
+        consumed NameID, malformed/empty XML, and a DOCTYPE/ENTITY doc (XXE-refused) do NOT confirm
+        (near-zero-FP).
+
+        The XML is JSON-safe, so a confirmed forgery re-verifies OFFLINE from its certificate
+        (``verify.reverify``) — re-run the pure oracle over the retained XML, get the same verdict. Full
+        XML-DSig C14N/transform processing is deliberately NOT attempted (needs lxml/signxml, out of
+        scope); this is the offline structural complement to the LIVE response-differential SAML checks."""
+        return cls(bug_class=bug_class, saml_xml=_coerce_text(xml))
 
     @classmethod
     def from_process_output(
@@ -762,6 +789,8 @@ class FindingContext(BaseModel):
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:
                 ctx["jwt_candidate_keys"] = self.jwt_candidate_keys
+        if self.saml_xml is not None:
+            ctx["saml_xml"] = self.saml_xml
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary
