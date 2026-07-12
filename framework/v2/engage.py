@@ -868,6 +868,39 @@ def _resolve_oob_relay_secret(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _fusion_manifest_present(slug: str) -> bool:
+    """True iff the operator authored a ``targets/<slug>/fusion.json`` manifest — the NW-3
+    opt-in-by-presence signal that auto-activates sensor fusion. Defensive and total: no slug or any
+    path trouble yields False, so the default (manifest-absent) engage path — and ``make gate``, whose
+    in-process benchmark corpus carries no target-dir slug and never reaches this function at all —
+    stays byte-identical."""
+    if not slug:
+        return False
+    try:
+        from .common.paths import target_dir
+        return (target_dir(slug) / "fusion.json").is_file()
+    except Exception:
+        return False
+
+
+def _resolve_fuse_sensors(slug: str, *, fuse_sensors: bool, no_fuse_sensors: bool) -> tuple[bool, bool]:
+    """NW-3 fusion activation resolution → ``(enabled, auto_activated)``.
+
+    Auto-enable-by-manifest-presence: fusion turns ON when the operator has authored a
+    ``targets/<slug>/fusion.json`` manifest, even without an explicit ``--fuse-sensors``.
+    ``--no-fuse-sensors`` is the explicit opt-OUT and wins over a present manifest. With neither flag
+    and no manifest, fusion stays OFF and the engage path is byte-identical (and ``fuse_sensors`` still
+    no-ops without a manifest even if forced on, so this only ever ADDS oracle-grounded facts + leads —
+    never a finding or an oracle verdict).
+
+    ``auto_activated`` is True only when a present manifest (not an explicit flag) is what enabled
+    fusion — used purely to print the operator-facing 'fusion active' summary note."""
+    manifest_present = _fusion_manifest_present(slug)
+    enabled = (fuse_sensors or manifest_present) and not no_fuse_sensors
+    auto_activated = bool(enabled and manifest_present and not fuse_sensors)
+    return enabled, auto_activated
+
+
 def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: object) -> object:
     """Opt-in AUTONOMOUS OODA cycle over the authoritative engagement result. Additive and default-
     OFF (runs only under ``--autonomous``), so the default engage path never imports this module and
@@ -1074,7 +1107,12 @@ def main(argv: list[str]) -> int:
                              "reachability handshake for a declared_service task with "
                              "confirm_reachable). Each sensor is still gated at run time (kill-switch/"
                              "entitlement/scope/egress); a LEAD becomes a FACT only when an oracle "
-                             "confirms it. Off by default (0 sensors) = byte-identical.")
+                             "confirms it. Off by default (0 sensors) = byte-identical. AUTO-ENABLED "
+                             "when a targets/<slug>/fusion.json manifest is present (NW-3).")
+    parser.add_argument("--no-fuse-sensors", action="store_true",
+                        help="Force sensor fusion OFF even when a targets/<slug>/fusion.json manifest "
+                             "exists (the explicit opt-OUT that overrides NW-3's auto-enable-by-manifest-"
+                             "presence). The default (manifest-absent) path is byte-identical either way.")
     parser.add_argument("--autonomous", action="store_true",
                         help="AUTONOMOUS OODA cycle (opt-in; off = byte-identical). After the "
                              "authoritative scan, construct the Planner over the run world-model, "
@@ -1121,6 +1159,12 @@ def main(argv: list[str]) -> int:
                              "Labels stay non-circular: a single-oracle reverify is DISPUTED, never a "
                              "fact.")
     args = parser.parse_args(argv)
+
+    # NW-3: auto-enable sensor fusion when the operator has authored a targets/<slug>/fusion.json
+    # manifest (opt-in-by-presence), unless --no-fuse-sensors forces it off. Manifest-absent + no
+    # flag ⇒ stays False ⇒ byte-identical default path (the benchmark/gate never reaches main()).
+    args.fuse_sensors, args._fuse_sensors_auto = _resolve_fuse_sensors(
+        args.slug, fuse_sensors=args.fuse_sensors, no_fuse_sensors=args.no_fuse_sensors)
 
     if args.access_control and not args.ac_ref:
         print("note: --access-control set but no --ac-ref supplied; the access-control pack "
@@ -1242,6 +1286,10 @@ def main(argv: list[str]) -> int:
                   f"(ATT&CK {defense.ingested.techniques_detected or 'none'})")
     # Opt-in sensor fusion summary (default OFF → not printed; the engagement is byte-identical).
     if getattr(args, "fuse_sensors", False):
+        if getattr(args, "_fuse_sensors_auto", False):
+            # NW-3: fusion was auto-enabled purely by the operator's manifest — say so, and how to opt out.
+            print(f"  fusion active     : ({result.fused_leads} leads) — targets/{args.slug}/fusion.json "
+                  f"(auto-enabled by manifest; --no-fuse-sensors to disable)")
         print(f"  fused sensors     : {result.fused_leads} lead(s) folded, "
               f"{result.fused_facts} oracle-promoted fact(s) "
               f"(from targets/{args.slug}/fusion.json; leads stay leads, oracles prove facts)")
