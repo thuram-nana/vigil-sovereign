@@ -278,6 +278,31 @@ def test_discovery_on_a_safe_endpoint_mints_nothing(isolated_engagement, httpser
     assert out.cycles and out.cycles[0].is_probe is True and out.cycles[0].discovered_findings == 0
 
 
+def _reflect_json(request) -> Response:
+    """Reflects ``q`` verbatim but serves it as application/json — the marker lands in the body yet is
+    NOT executable (a browser will not run HTML markup in a JSON response). This is the review's false
+    XSS FACT: a reflecting JSON API that must NOT mint an XSS finding."""
+    q = request.args.get("q", "")
+    return Response(f'{{"results": "{q}"}}', status=200, mimetype="application/json")
+
+
+def test_discovery_on_a_json_endpoint_mints_nothing(isolated_engagement, httpserver: HTTPServer):
+    """Regression for the review's false XSS FACT [10]: a JSON API that echoes a query value reflects
+    the marker inertly. The probe RUNS and the reflection is present, but the content-type gate (the
+    reflection is not under text/html) drops it — nothing is minted (near-zero-FP)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/api").respond_with_handler(_reflect_json)
+
+    url = f"http://127.0.0.1:{port}/api?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), prompt_callback=_deny)
+
+    assert out.probes_driven == 1 and out.probes_refused == 0   # the probe ran (not refused)
+    assert out.discovered_count == 0                            # but the non-HTML reflection is inert
+
+
 # ---------------------------------------------------------------------------
 # determinism — same inputs → same discovery outcome
 # ---------------------------------------------------------------------------

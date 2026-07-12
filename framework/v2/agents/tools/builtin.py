@@ -118,8 +118,33 @@ class ProbeSurfaceTool:
         request = HttpRequest(
             method="GET", url=target.strip(),
             headers=[("User-Agent", "OBSIDIAN/1.0 (authorized owner-test)")])
+        # Record whether the probed endpoint ever served an HTML-ish response. A reflected marker is
+        # only EXECUTABLE (i.e. a real XSS finding) when the response is served as HTML — a JSON API or
+        # text/plain endpoint that echoes a query value reflects the marker inertly, which the review
+        # showed the underlying reflection check would otherwise mint as a false XSS FACT. We gate the
+        # XSS confirmation on the response Content-Type (mirroring scanner.passive._is_htmlish: text/html
+        # or a missing type, which a browser may MIME-sniff to HTML). Done here in the probe path so the
+        # shared reflection oracle / benchmark stay byte-identical.
+        saw_htmlish = {"v": False}
+        _raw_send = self._send
+
+        def _recording_send(req: Any):
+            resp = _raw_send(req)
+            try:
+                headers = resp.get("headers", []) if isinstance(resp, dict) else []
+                ctype = ""
+                for k, v in headers or []:
+                    if str(k).lower() == "content-type":
+                        ctype = str(v).lower()
+                        break
+                if "text/html" in ctype or ctype == "":
+                    saw_htmlish["v"] = True
+            except Exception:
+                pass
+            return resp
+
         try:
-            engine = AuditEngine(self._send, max_requests=self._max_requests)
+            engine = AuditEngine(_recording_send, max_requests=self._max_requests)
             # Target the endpoint lead's QUERY-VALUE parameters — the canonical reflected-parameter
             # surface a URL lead exposes. Scoping the probe to the values (not path segments / param
             # names) keeps it precise and bounded: it never rewrites the path, so it cannot trip a
@@ -128,6 +153,13 @@ class ProbeSurfaceTool:
                                     insertion_kinds=(InsertionKind.QUERY_VALUE,))
         except Exception as e:
             return ToolResult(ok=False, note=f"probe error: {e}")
+        # near-zero-FP gate: an XSS-family reflection under a non-HTML content-type is not executable,
+        # so it is NOT a finding — drop it (the review's JSON/text false-XSS-FACT).
+        bug_lower = str(getattr(check, "bug_class", "")).lower()
+        ct_gated = False
+        if findings and "xss" in bug_lower and not saw_htmlish["v"]:
+            findings = []
+            ct_gated = True
         minted = bool(findings)
         dumps: list = []
         for f in findings:
@@ -136,12 +168,17 @@ class ProbeSurfaceTool:
             except Exception:
                 pass
         bug = str(getattr(check, "bug_class", "?"))
+        if minted:
+            summary = f"probe {bug} @ {target.strip()}: oracle FIRED — {len(dumps)} new finding(s)"
+        elif ct_gated:
+            summary = (f"probe {bug} @ {target.strip()}: reflection under a non-HTML content-type "
+                       f"— not executable, not minted")
+        else:
+            summary = f"probe {bug} @ {target.strip()}: oracle did not fire (no finding)"
         return ToolResult(
-            ok=True,
-            summary=(f"probe {bug} @ {target.strip()}: oracle FIRED — {len(dumps)} new finding(s)"
-                     if minted else f"probe {bug} @ {target.strip()}: oracle did not fire (no finding)"),
+            ok=True, summary=summary,
             output={"minted": minted, "findings": dumps, "check_id": str(getattr(check, "id", "")),
-                    "bug_class": bug, "endpoint": target.strip()})
+                    "bug_class": bug, "endpoint": target.strip(), "content_type_gated": ct_gated})
 
 
 def probe_surface_registry(send: Any, *, check: Any = None, max_requests: int = 8) -> ToolRegistry:
