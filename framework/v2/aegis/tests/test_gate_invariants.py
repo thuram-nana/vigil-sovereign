@@ -34,12 +34,13 @@ _FROZEN_15 = frozenset({
     "DOM_EXECUTION", "SERVICE_REACHABILITY", "TLS_WEAKNESS", "VERSION_RANGE", "POLICY_PATH",
 })
 
-# The 8 additive kinds (4 AEGIS telemetry + 2 request-side parse-proof + 1 WS-3 k8s-posture + 1 WS-B
-# sso-assertion-forgery) that MUST stay OUT of the frozen fallback — reachable only via their explicit
-# BUG_CLASS_ORACLES rows.
-_ADDITIVE_8 = frozenset({
+# The 9 additive kinds (4 AEGIS telemetry + 2 request-side parse-proof + 1 WS-3 k8s-posture + 1 WS-B
+# sso-assertion-forgery + 1 NW-1 saml-structural-forgery) that MUST stay OUT of the frozen fallback —
+# reachable only via their explicit BUG_CLASS_ORACLES rows.
+_ADDITIVE_9 = frozenset({
     "PROMPT_INJECTION", "SYSTEM_PROMPT_DISCLOSURE", "AUTOMATED_ACCESS", "CREDENTIAL_STUFFING",
     "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "K8S_POSTURE", "SSO_ASSERTION_FORGERY",
+    "SAML_STRUCTURAL_FORGERY",
 })
 
 
@@ -55,15 +56,15 @@ def test_all_oracles_fallback_is_exactly_the_frozen_15_by_name():
 
 def test_every_additive_oraclekind_is_excluded_from_the_fallback():
     frozen_names = {k.name for k in V._ALL_ORACLES}
-    for name in _ADDITIVE_8:
+    for name in _ADDITIVE_9:
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 8 additive = 23; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 9 additive = 24; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
-    assert len(OracleKind) == 23
-    assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE_8
-    assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE_8}
+    assert len(OracleKind) == 24
+    assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE_9
+    assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE_9}
 
 
 def test_unknown_class_falls_back_to_the_frozen_15_after_importing_aegis():
