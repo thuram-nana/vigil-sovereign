@@ -176,7 +176,10 @@ def _ingest_one(doc: Mapping[str, Any]) -> dict | None:
         if action:
             control["action"] = action
         if isinstance(rules, (list, tuple)):
-            control["rules"] = [dict(r) if isinstance(r, Mapping) else {} for r in rules]
+            # DROP non-mapping rule entries — do NOT coerce them to {} (an empty dict reads as an
+            # allow-EVERYONE catch-all rule, which would fabricate a CONFIRMED misconfig on a
+            # malformed/benign policy — the review's ingestion false positive).
+            control["rules"] = [dict(r) for r in rules if isinstance(r, Mapping)]
         return control
 
     # -- Linkerd default-inbound-policy (annotation form, or a Server carrying it) ---

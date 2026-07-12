@@ -301,3 +301,25 @@ def test_ingest_computes_mesh_scope_for_root_namespace() -> None:
     controls = {c["name"]: c for c in ingest_mesh_config(_MANIFEST)}
     assert controls["default"]["scope"] == "mesh"        # istio-system root ns, no selector
     assert controls["allow-all"]["scope"] == "namespace"  # a workload namespace
+
+
+def test_requestprincipals_wildcard_requires_a_jwt_and_does_not_fire() -> None:
+    # REGRESSION (review FP): `requestPrincipals: ["*"]` REQUIRES a valid JWT (any authenticated caller) —
+    # Istio's recommended "require a token" posture, NOT an anonymous grant. It must NOT fire.
+    jwt_required = {"resource_kind": "AuthorizationPolicy", "provider": "istio", "action": "ALLOW",
+                    "rules": [{"from": [{"source": {"requestPrincipals": ["*"]}}]}]}
+    assert not mesh_posture_oracle(jwt_required).fired
+    # but a `*` on the mTLS PEER identity (`principals`) is still an anonymous-peer allow-all → fires.
+    anon = {"resource_kind": "AuthorizationPolicy", "provider": "istio", "action": "ALLOW",
+            "rules": [{"from": [{"source": {"principals": ["*"]}}]}]}
+    assert mesh_posture_oracle(anon).fired
+
+
+def test_malformed_rule_items_are_dropped_not_coerced_to_a_catch_all() -> None:
+    # REGRESSION (review FP): a non-mapping rule item must be DROPPED, not coerced to {} (an empty dict
+    # reads as an allow-everyone catch-all → a fabricated CONFIRMED misconfig on a malformed/benign policy).
+    controls = ingest_mesh_config({"kind": "AuthorizationPolicy", "metadata": {"name": "x"},
+                                   "spec": {"action": "ALLOW", "rules": ["not-a-mapping", 123, None]}})
+    ctl = controls[0] if isinstance(controls, list) else controls
+    assert ctl["rules"] == []                     # non-mapping entries dropped
+    assert not mesh_posture_oracle(ctl).fired     # ALLOW + no rules = deny-all = secure

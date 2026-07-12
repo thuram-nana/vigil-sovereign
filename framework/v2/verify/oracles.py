@@ -2133,8 +2133,11 @@ _MESH_COMPLIANT_STATUSES = frozenset({
 def _mesh_authz_allows_all(action: Any, rules: Any) -> tuple[bool, str]:
     """True iff an Istio AuthorizationPolicy provably admits EVERY caller. Fires only when ``action`` is
     ``ALLOW`` (or unset — Istio's default action is ALLOW) AND a rule matches everyone: an EMPTY catch-all
-    rule (no ``from`` / ``to`` / ``when`` — matches every request) or a ``*`` wildcard principal named in a
-    ``from.source.principals`` / ``requestPrincipals`` clause. An ALLOW policy with NO rules is DENY-all
+    rule (no ``from`` / ``to`` / ``when`` — matches every request) or a ``*`` wildcard PEER principal named
+    in a ``from.source.principals`` clause. NOTE: ``requestPrincipals: ["*"]`` is deliberately NOT treated
+    as allow-all — a ``*`` request principal REQUIRES a valid JWT (any authenticated caller), which is the
+    RECOMMENDED Istio "require a valid token" posture, not an anonymous grant (the review's false positive).
+    An ALLOW policy with NO rules is DENY-all
     (secure -> no fire); a ``DENY`` / ``CUSTOM`` / ``AUDIT`` action is never an allow-all grant. A rule that
     restricts by ``to`` (path/method) but omits ``from`` is deliberately NOT treated as allow-all — an
     operator publishing a public endpoint is a design choice, not a near-zero-FP-provable misconfig."""
@@ -2158,11 +2161,12 @@ def _mesh_authz_allows_all(action: Any, rules: Any) -> tuple[bool, str]:
                 src = f.get("source")
                 if not isinstance(src, Mapping):
                     continue
-                for key in ("principals", "requestPrincipals", "request_principals"):
-                    vals = src.get(key)
-                    if isinstance(vals, (list, tuple)) and any(
-                            _coerce_text(v).strip() in _MESH_ANON_PRINCIPALS for v in vals):
-                        return (True, "wildcard_principal")
+                # ONLY the mTLS PEER-identity `principals` — a `*` there is anonymous-peer allow-all.
+                # `requestPrincipals` (JWT identity) is excluded: `*` there requires a valid token.
+                vals = src.get("principals")
+                if isinstance(vals, (list, tuple)) and any(
+                        _coerce_text(v).strip() in _MESH_ANON_PRINCIPALS for v in vals):
+                    return (True, "wildcard_principal")
     return (False, "")
 
 
