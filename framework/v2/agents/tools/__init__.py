@@ -12,11 +12,18 @@ packet engine, Nuclei, cloud APIs), each a gated tool whose output an oracle re-
 from __future__ import annotations
 
 from .base import Tool, ToolContext, ToolError, ToolRegistry, ToolResult
-from .builtin import ReverifyFindingTool, default_registry, register_builtin_tools
+from .builtin import (
+    ProbeSurfaceTool,
+    ReverifyFindingTool,
+    default_registry,
+    probe_surface_registry,
+    register_builtin_tools,
+)
 from .invoker import invoke_tool
 
 __all__ = [
     "Tool", "ToolContext", "ToolError", "ToolRegistry", "ToolResult",
     "invoke_tool",
     "ReverifyFindingTool", "default_registry", "register_builtin_tools",
+    "ProbeSurfaceTool", "probe_surface_registry",
 ]

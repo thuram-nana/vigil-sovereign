@@ -155,6 +155,8 @@ class AutonomyStep:
     fused_observations: int = 0   # WS-B sensor observations folded into the world THIS cycle (OBSERVE)
     coordinator_events: int = 0   # events the wired advisory agents posted when the Coordinator ticked
     learned: bool = False         # this cycle's confirm/refute outcome was written to the OutcomeLedger
+    is_probe: bool = False        # W-C: this cycle DISCOVERED (drove probe_surface), not reverified
+    discovered_findings: int = 0  # W-C: NEW oracle-confirmed findings this probe minted (0 = oracle silent)
 
 
 @dataclass
@@ -191,6 +193,17 @@ class AutonomyResult:
     reachability_refused: bool = False # a fail-closed gate declined it (kill-switch / out-of-scope)
     reachability_gate: str = ""        # which gate refused (when refused)
     reachability_applied: int = 0      # world-model observations the re-check folded as LEADS (never facts)
+    # W-C — the DISCOVERING slice (opt-in): a gated `probe_surface` tool drives ONE existing scanner
+    # check against LOW-prior probe-leaves seeded from world-model ENDPOINT nodes, and mints a NEW
+    # oracle-confirmed finding (NOT in the seed set) ONLY when the wrapped check's oracle FIRES. This
+    # is the first honest step from a re-verifying loop toward a DISCOVERING one. Default off →
+    # byte-identical: no probe-leaves seeded, probe_surface never constructed, nothing minted.
+    discover_enabled: bool = False     # discovery was requested AND a send was injected (probe I/O available)
+    probe_leaves_seeded: int = 0       # LOW-prior probe-leaves seeded from ENDPOINT nodes (opt-in)
+    probes_driven: int = 0             # probe_surface tool calls that RAN through the gate chain (not refused)
+    probes_refused: int = 0            # probe_surface calls a fail-closed gate declined (kill-switch / scope)
+    discovered_findings: list = field(default_factory=list)  # serialised NEW AuditFindings (oracle_context kept)
+    discovered_count: int = 0          # NEW oracle-confirmed findings discovery minted this run
     notes: list[str] = field(default_factory=list)
 
 
@@ -210,10 +223,54 @@ def _finding_surface(f: object) -> str:
     return str(getattr(f, "endpoint", "") or getattr(f, "insertion_point", "") or "")
 
 
-def _build_goal_tree(findings: list) -> tuple[Any, dict[int, object]]:
+def _endpoint_probe_targets(world: "WorldModel | None", *, exclude: "set[str]") -> list[tuple[str, str]]:
+    """The unexplored ENDPOINT leads to seed probe-leaves from: ``(node_id, url)`` for every world-
+    model ENDPOINT node that carries a usable http(s) ``url`` NOT already covered by a confirmed
+    finding's surface (``exclude``). Deterministic (id-sorted, first-match) and read-only; best-effort
+    (any trouble → ``[]``). The scope gate — not this enumerator — is what authorizes probing a URL:
+    an out-of-scope endpoint that slips in here is REFUSED fail-closed when its probe is driven."""
+    if world is None:
+        return []
+    out: list[tuple[str, str]] = []
+    try:
+        from .worldmodel.models import NodeKind
+        for n in sorted(world.nodes_of_kind(NodeKind.ENDPOINT), key=lambda n: n.id):
+            url = n.attrs.get("url") if isinstance(getattr(n, "attrs", None), dict) else None
+            if not isinstance(url, str):
+                continue
+            u = url.strip()
+            if not (u.startswith("http://") or u.startswith("https://")):
+                continue
+            if u in exclude:
+                continue
+            out.append((n.id, u))
+    except Exception:
+        return []
+    return out
+
+
+def _build_goal_tree(
+    findings: list,
+    *,
+    world: "WorldModel | None" = None,
+    seed_probe_leaves: bool = False,
+    probe_bug_class: str = "xss",
+    probe_prior: float = 0.03,
+) -> tuple[Any, dict[int, object]]:
     """Build a goal tree whose leaves are the confirmed findings — one leaf per finding, its prior
     seeded from the finding's confidence, tagged with the finding's bug_class + surface. Returns the
-    tree and a ``leaf_id -> finding`` map so the ACT step can recover the finding to re-verify."""
+    tree and a ``leaf_id -> finding`` map so the ACT step can recover the finding to re-verify.
+
+    W-C (opt-in, default OFF → byte-identical): when ``seed_probe_leaves`` and a ``world`` is given,
+    the tree ALSO gets LOW-prior PROBE-leaves — one per world-model ENDPOINT node carrying an http(s)
+    url NOT already covered by a confirmed finding (:func:`_endpoint_probe_targets`). A probe-leaf is
+    an UNEXPLORED frontier the existing depth-2 lookahead can move toward; the ACT step recognises it
+    as an open leaf absent from ``leaf_to_finding`` and drives the gated ``probe_surface`` tool on its
+    ``surface`` (the endpoint url). Priors are kept LOW (``probe_prior``, default 0.03) so confirmed
+    findings still DOMINATE ordering — discovery is what the loop does once the known leads are spent.
+    Probe-leaves are deliberately NOT added to ``leaf_to_finding`` (they carry no finding yet), which
+    is exactly how the cycle tells a discover leaf from a reverify leaf. Default args leave the return
+    2-tuple and every seeded leaf byte-identical, so ``plan.py`` and the existing tests are unchanged."""
     from .planner.goal_tree import CostEstimate, GoalTree
 
     tree = GoalTree()
@@ -231,6 +288,21 @@ def _build_goal_tree(findings: list) -> tuple[Any, dict[int, object]]:
             estimate=CostEstimate(requests=1),
         )
         leaf_to_finding[lid] = f
+    if seed_probe_leaves and world is not None:
+        bc = str(probe_bug_class or "xss")
+        prior = min(max(float(probe_prior), 0.0), 1.0)
+        covered: set[str] = set()
+        for f in findings:
+            covered.add(str(getattr(f, "endpoint", "") or ""))
+            covered.add(_finding_surface(f))
+        covered.discard("")
+        for _nid, url in _endpoint_probe_targets(world, exclude=covered):
+            tree.add(
+                parent_id=root, kind="leaf",
+                label=f"probe {bc} @ {url}"[:120],
+                prior=prior, value=1.0, bug_class=bc, surface=url,
+                estimate=CostEstimate(requests=1),
+            )
     return tree, leaf_to_finding
 
 
@@ -731,6 +803,55 @@ def _drive_reverify(finding: object, registry: Any, ctx: Any, sink: Any) -> Any:
     return invoke_tool(registry, "reverify_finding", {"finding": finding_arg}, ctx, sink=sink)
 
 
+def _discovery_registry(discover_send: Any, discover_check: Any, budget: int) -> Any:
+    """A registry carrying ONLY the gated ``probe_surface`` discovery tool, wired with the injected
+    ``discover_send`` (production: the gated executor's ``gated_fetch``; tests: a loopback send) and
+    the ONE existing scanner check to wrap (default REFLECTED_XSS). Built on demand so the default
+    autonomous path (discovery off) never imports the scanner tool stack."""
+    from .agents.tools.builtin import probe_surface_registry
+    return probe_surface_registry(discover_send, check=discover_check, max_requests=max(1, int(budget)))
+
+
+def _drive_probe(target: str, registry: Any, ctx: Any, sink: Any) -> Any:
+    """Drive the gated ``probe_surface`` tool over ``target`` (an unexplored ENDPOINT url) through the
+    FULL ``invoke_tool`` chain (kill-switch → entitlement → scope → destructive → egress). The tool
+    runs ONE existing scanner check via the AuditEngine and returns a NEW oracle-confirmed finding
+    ONLY if that check's deterministic oracle FIRES — the tool/planner never promotes on its own. A
+    tripped kill-switch or an out-of-scope target REFUSES it and it probes nothing."""
+    from .agents.tools.invoker import invoke_tool
+    return invoke_tool(registry, "probe_surface", {"target": str(target or "")}, ctx, sink=sink)
+
+
+def _record_discovered(out: "AutonomyResult", sink: Any, dumps: list, emitted: set) -> int:
+    """Record probe-minted NEW findings on the AutonomyResult and mirror each to the spine as a
+    finding event. A discovered finding carries its retained ``oracle_context`` (the oracle fired
+    over evidence a real target produced), so the report grader renders it a FACT — honest, because a
+    deterministic oracle DID confirm it. Deduped by (bug_class, insertion_point, endpoint) so a
+    re-probed surface never double-counts. Best-effort/total. Returns the count newly recorded."""
+    n = 0
+    try:
+        from .scanner.engine import AuditFinding
+    except Exception:
+        return 0
+    for d in dumps or []:
+        try:
+            f = AuditFinding.model_validate(d)
+        except Exception:
+            continue
+        key = (str(f.bug_class), str(f.insertion_point), str(f.endpoint))
+        if key in emitted:
+            continue
+        emitted.add(key)
+        out.discovered_findings.append(d)
+        n += 1
+        if sink is not None:
+            try:
+                sink.finding_event(_finding_payload(f))
+            except Exception:
+                pass
+    return n
+
+
 def _fold_observation(world: "WorldModel | None", surface: str, verdict: str) -> str:
     """Fold the tool's observation back into the world-model: annotate the finding's node (resolved
     from its surface) with the live re-grounding verdict, in place (attrs is a mutable bag) so belief
@@ -910,27 +1031,43 @@ def _mirror_findings_to_spine(sink: Any, findings: list) -> int:
     return n
 
 
-def _post_leaf_hypothesis(blackboard: Any, slug: str, leaf: Any, cycle: int) -> None:
+def _post_leaf_hypothesis(blackboard: Any, slug: str, leaf: Any, cycle: int, *, is_probe: bool = False) -> None:
     """Mirror THIS cycle's picked action onto the spine as a ``hypothesis`` event — the honest
-    reasoning trace the reflection agent re-orients over. Best-effort; never raises."""
+    reasoning trace the reflection agent re-orients over. A probe-leaf (DISCOVER) carries a DIFFERENT,
+    honest hypothesis than a reverify-leaf: it does not yet have a confirmed finding, so it does not
+    claim one. Best-effort; never raises."""
     if blackboard is None:
         return
+    if is_probe:
+        payload = {
+            "handle": f"AUTO-H{cycle:03d}",
+            "surface": str(getattr(leaf, "surface", "") or "(surface)"),
+            "bug_class": str(getattr(leaf, "bug_class", "") or "unknown"),
+            "given": "an unexplored ENDPOINT lead sits on this surface (no confirmed finding yet)",
+            "if_action": "probe it with one existing scanner check via the gated probe_surface tool",
+            "then_observation": "the check's deterministic oracle either FIRES (a NEW finding) or does not",
+            "because_model": "discovery-by-oracle — only a fired oracle mints a finding",
+            "refute_on": "the probe oracle does not fire (no bug on this surface)",
+            "cheap_test": "probe_surface (one existing check; gated; localhost/authorized only)",
+            "confidence": min(1.0, max(0.0, float(getattr(leaf, "prior_p_success", 0.5) or 0.5))),
+            "status": "open",
+        }
+    else:
+        payload = {
+            "handle": f"AUTO-H{cycle:03d}",
+            "surface": str(getattr(leaf, "surface", "") or "(surface)"),
+            "bug_class": str(getattr(leaf, "bug_class", "") or "unknown"),
+            "given": "an oracle-confirmed finding sits on this surface",
+            "if_action": "re-execute the finding's retained oracle certificate",
+            "then_observation": "the oracle either re-fires (grounded) or does not",
+            "because_model": "prove-by-re-execution over the retained proof",
+            "refute_on": "the retained oracle certificate no longer re-grounds",
+            "cheap_test": "reverify_finding (Tier-1, no egress)",
+            "confidence": min(1.0, max(0.0, float(getattr(leaf, "prior_p_success", 0.5) or 0.5))),
+            "status": "open",
+        }
     try:
-        blackboard.post(
-            engagement=slug, kind="hypothesis", agent_name="autonomy",
-            payload={
-                "handle": f"AUTO-H{cycle:03d}",
-                "surface": str(getattr(leaf, "surface", "") or "(surface)"),
-                "bug_class": str(getattr(leaf, "bug_class", "") or "unknown"),
-                "given": "an oracle-confirmed finding sits on this surface",
-                "if_action": "re-execute the finding's retained oracle certificate",
-                "then_observation": "the oracle either re-fires (grounded) or does not",
-                "because_model": "prove-by-re-execution over the retained proof",
-                "refute_on": "the retained oracle certificate no longer re-grounds",
-                "cheap_test": "reverify_finding (Tier-1, no egress)",
-                "confidence": min(1.0, max(0.0, float(getattr(leaf, "prior_p_success", 0.5) or 0.5))),
-                "status": "open",
-            })
+        blackboard.post(engagement=slug, kind="hypothesis", agent_name="autonomy", payload=payload)
     except Exception:
         pass
 
@@ -980,6 +1117,10 @@ def run_autonomous_cycle(
     persist_learning: bool = False,
     lookahead_depth: int = 1,
     enable_reachability: bool = False,
+    enable_discover: bool = False,
+    discover_send: Any = None,
+    discover_check: Any = None,
+    discover_bug_class: str = "xss",
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -991,6 +1132,18 @@ def run_autonomous_cycle(
     (``<= depth`` leaves, cost fitting ``request_budget``) toward a crown jewel, still gated, still
     deterministic. Lookahead only re-ranks WHICH open leaf runs next; it never promotes a finding or
     changes the authoritative report.
+
+    ``enable_discover`` (default off → byte-identical, W-C): the DISCOVERING slice. With a
+    ``discover_send`` injected (production: the gated executor's ``gated_fetch``; tests: a loopback
+    send), the goal tree ALSO gets LOW-prior probe-leaves seeded from world-model ENDPOINT nodes
+    (:func:`_build_goal_tree`); when one is selected the loop drives the gated ``probe_surface`` tool
+    over that unexplored endpoint, which runs ONE existing scanner check (``discover_check``, default
+    REFLECTED_XSS) and mints a NEW oracle-confirmed finding — recorded on ``out.discovered_findings``
+    — ONLY when that check's deterministic oracle FIRES. The oracle stays the sole authority: the
+    tool/planner never promotes on their own, and the authoritative ``ScanReport`` is left UNTOUCHED
+    (discovered facts are recorded on the AutonomyResult + emitted to the spine, not spliced into the
+    seed report — a deliberately conservative boundary; folding them into the authoritative report is
+    the honest next slice). Off, no probe-leaf is seeded and ``probe_surface`` is never constructed.
 
     Localhost/authorized-only: the enclosing ``engage.run_engagement`` preflight already refused an
     out-of-scope / kill-switched engagement before this runs, and every tool call is re-gated by
@@ -1011,8 +1164,17 @@ def run_autonomous_cycle(
     objectives = _objective_kinds()
     out.objectives = [getattr(k, "value", str(k)) for k in objectives]
 
-    # ORIENT — goal tree over the confirmed findings + the planner over the run world-model.
-    tree, leaf_to_finding = _build_goal_tree(findings)
+    # DISCOVER (opt-in) — only when requested AND a send is injected AND a world exists to read
+    # ENDPOINT leads from. Off → the tree seeds NO probe-leaves and probe_surface is never built,
+    # so everything below is byte-identical to the pre-discovery loop.
+    discover_active = bool(enable_discover) and discover_send is not None and world is not None
+    out.discover_enabled = discover_active
+
+    # ORIENT — goal tree over the confirmed findings (+ opt-in unexplored ENDPOINT probe-leaves) and
+    # the planner over the run world-model.
+    tree, leaf_to_finding = _build_goal_tree(
+        findings, world=world, seed_probe_leaves=discover_active,
+        probe_bug_class=str(discover_bug_class or "xss"))
     baselines = _leaf_baselines(tree)   # fixed per-run priors; every advice re-weight recomputes from these
     source = _foothold(world)
     out.planner_source = source
@@ -1024,7 +1186,21 @@ def run_autonomous_cycle(
     sink = _spine_sink(blackboard, slug)
     emitted_lead_ids: set = set()   # I-C dedup — a fused observation emits at most one lead event
 
-    if not findings:
+    # A probe-leaf is exactly an open leaf the goal tree seeded that is NOT a confirmed finding (only
+    # discovery adds such leaves). Build the discovery registry once, on demand, when there is at
+    # least one to drive — so the default path never constructs the scanner tool stack.
+    probe_leaf_ids: set = (
+        {l.id for l in tree.open_leaves() if l.id not in leaf_to_finding} if discover_active else set())
+    out.probe_leaves_seeded = len(probe_leaf_ids)
+    discover_registry = (
+        _discovery_registry(discover_send, discover_check, request_budget)
+        if (discover_active and probe_leaf_ids) else None)
+    emitted_discovered: set = set()   # dedup NEW discovered findings by (bug_class, insertion_point, endpoint)
+    if discover_active and probe_leaf_ids:
+        out.notes.append(
+            f"discovery: {len(probe_leaf_ids)} unexplored ENDPOINT probe-leaf/leaves seeded (low prior)")
+
+    if not findings and not probe_leaf_ids:
         out.notes.append("no confirmed findings — nothing to drive this cycle")
         # still exercise the OBSERVE (WS-B) + reasoning (WS-F) seams so they are live on an empty run
         empty_obs = _fuse_sensors(world, slug, ctx)
@@ -1096,43 +1272,81 @@ def run_autonomous_cycle(
                             picked_surface=leaf.surface, picked_bug_class=leaf.bug_class,
                             fused_observations=cycle_fused)
         finding = leaf_to_finding.get(leaf.id)
+        # A probe-leaf (an unexplored ENDPOINT lead, not a confirmed finding) drives DISCOVERY;
+        # every other open leaf is a confirmed finding and drives the existing RE-VERIFY path.
+        is_probe = discover_registry is not None and leaf.id in probe_leaf_ids
+        step.is_probe = is_probe
 
         # DRIVE — mirror THIS cycle's picked action onto the spine as a hypothesis (the honest
         # reasoning trace the in-loop reflection agent re-orients over).
-        _post_leaf_hypothesis(blackboard, slug, leaf, c)
+        _post_leaf_hypothesis(blackboard, slug, leaf, c, is_probe=is_probe)
 
         # ACT — drive the picked action as a GATED tool call.
         tree.mark_status(leaf.id, "claimed")
-        res = _drive_reverify(finding, registry, ctx, sink) if finding is not None else None
-        step.tool = "reverify_finding"
-        step.gated = True
-        if res is not None:
+        if is_probe:
+            # ACT (DISCOVER) — drive the gated probe_surface tool over the unexplored endpoint. It
+            # runs ONE existing scanner check and mints a NEW oracle-confirmed finding ONLY if the
+            # check's deterministic oracle FIRES; the tool/planner never promote on their own.
+            res = _drive_probe(leaf.surface, discover_registry, ctx, sink)
+            step.tool = "probe_surface"
+            step.gated = True
             step.refused = bool(getattr(res, "refused", False))
             step.gate = str(getattr(res, "gate", "") or "")
             step.tool_ok = bool(getattr(res, "ok", False))
-            step.verdict = str((getattr(res, "output", {}) or {}).get("verdict", "")) or \
-                str(getattr(res, "summary", "") or "")
-
-        # UPDATE — fold the observation into the world-model + update the goal tree.
-        if step.refused:
-            # a fail-closed refusal is not a refutation of the finding — leave the leaf open, note it
-            tree.mark_status(leaf.id, "open")
-            out.notes.append(f"cycle {c}: tool refused at gate {step.gate!r} (fail-closed)")
+            output = getattr(res, "output", {}) or {}
+            step.verdict = str(getattr(res, "summary", "") or "")
+            # UPDATE (DISCOVER) — fold the outcome into the world-model + goal tree.
+            if step.refused:
+                # a fail-closed refusal is not a clean surface — leave the leaf open, note it.
+                tree.mark_status(leaf.id, "open")
+                out.probes_refused += 1
+                out.notes.append(f"cycle {c}: probe_surface refused at gate {step.gate!r} (fail-closed)")
+            else:
+                out.probes_driven += 1
+                if bool(output.get("minted", False)):
+                    recorded = _record_discovered(out, sink, output.get("findings", []), emitted_discovered)
+                    step.discovered_findings = recorded
+                    out.discovered_count += recorded
+                    step.folded_node = _fold_observation(world, leaf.surface, "discovered")
+                    tree.mark_status(leaf.id, "succeeded")
+                    out.notes.append(
+                        f"cycle {c}: DISCOVERED {recorded} NEW oracle-confirmed finding(s) at {leaf.surface}")
+                else:
+                    # the oracle stayed silent — no bug here; this is a refutation of the probe-leaf,
+                    # never of any finding (there was none). The surface stays covered (marked done).
+                    step.folded_node = _fold_observation(world, leaf.surface, "probed-clean")
+                    tree.mark_status(leaf.id, "failed", reason="probe oracle did not fire")
         else:
-            grounded = bool((getattr(res, "output", {}) or {}).get("is_fact", False)) if res else False
-            step.folded_node = _fold_observation(
-                world, leaf.surface, step.verdict or ("fact" if grounded else "not-grounded"))
-            tree.mark_status(leaf.id, "succeeded" if grounded else "failed",
-                             reason="" if grounded else "reverify did not re-ground")
-            # LEARN — feed THIS confirm/refute back into the persistent OutcomeLedger. This is the loop
-            # closure: the outcome the meta-monitor read at the START of this run is now written by the
-            # run itself, so the NEXT run's `_meta_caution` reads richer ground truth. A fail-closed
-            # refusal is excluded (handled in the `if step.refused` branch above — it is not a
-            # refutation). Non-circular + off-gate + best-effort (see the LEARN helpers).
-            if learn_active and finding is not None:
-                if _credit_finding_outcome(ledger, finding, leaf, grounded, sink, learn_credits):
-                    learn_credits += 1
-                    step.learned = True
+            res = _drive_reverify(finding, registry, ctx, sink) if finding is not None else None
+            step.tool = "reverify_finding"
+            step.gated = True
+            if res is not None:
+                step.refused = bool(getattr(res, "refused", False))
+                step.gate = str(getattr(res, "gate", "") or "")
+                step.tool_ok = bool(getattr(res, "ok", False))
+                step.verdict = str((getattr(res, "output", {}) or {}).get("verdict", "")) or \
+                    str(getattr(res, "summary", "") or "")
+
+            # UPDATE — fold the observation into the world-model + update the goal tree.
+            if step.refused:
+                # a fail-closed refusal is not a refutation of the finding — leave the leaf open, note it
+                tree.mark_status(leaf.id, "open")
+                out.notes.append(f"cycle {c}: tool refused at gate {step.gate!r} (fail-closed)")
+            else:
+                grounded = bool((getattr(res, "output", {}) or {}).get("is_fact", False)) if res else False
+                step.folded_node = _fold_observation(
+                    world, leaf.surface, step.verdict or ("fact" if grounded else "not-grounded"))
+                tree.mark_status(leaf.id, "succeeded" if grounded else "failed",
+                                 reason="" if grounded else "reverify did not re-ground")
+                # LEARN — feed THIS confirm/refute back into the persistent OutcomeLedger. This is the loop
+                # closure: the outcome the meta-monitor read at the START of this run is now written by the
+                # run itself, so the NEXT run's `_meta_caution` reads richer ground truth. A fail-closed
+                # refusal is excluded (handled in the `if step.refused` branch above — it is not a
+                # refutation). Non-circular + off-gate + best-effort (see the LEARN helpers).
+                if learn_active and finding is not None:
+                    if _credit_finding_outcome(ledger, finding, leaf, grounded, sink, learn_credits):
+                        learn_credits += 1
+                        step.learned = True
 
         # RE-ORIENT — run the WS-F reasoning hook, FEED its advice back into the tree (re-weight the
         # matching open leaves' priors), THEN re-select. This is what closes the loop: the reasoning
@@ -1213,6 +1427,11 @@ def render_summary(out: AutonomyResult) -> list[str]:
                      f"deprioritised (advisory; not gated)")
     if out.fused_observations:
         lines.append(f"    fused sensors   : {out.fused_observations} observation(s) (WS-B)")
+    if out.discover_enabled:
+        lines.append(
+            f"    discovery       : {out.probe_leaves_seeded} probe-leaf/leaves (unexplored ENDPOINTs); "
+            f"{out.probes_driven} probed, {out.probes_refused} refused → {out.discovered_count} NEW "
+            f"oracle-confirmed finding(s) minted")
     if out.reachability_driven:
         if out.reachability_refused:
             lines.append(f"    reachability    : {out.reachability_tool} on "

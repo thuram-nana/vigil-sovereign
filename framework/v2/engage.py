@@ -882,6 +882,27 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
         from .engage_autonomous import render_summary, run_autonomous_cycle
     except Exception:
         return None
+
+    # W-C — opt-in DISCOVERY. When --autonomous-discover is set, build a FRESH gated executor for the
+    # discovery probes (the engagement's own executor was already closed after the scan). Its
+    # `gated_fetch` is the probe I/O: every probe_surface request still funnels through the FULL
+    # charter/scope/kill-switch/egress/rate stack, so an out-of-scope endpoint or a tripped kill-
+    # switch refuses it. Default off → no executor is built and discovery never runs (byte-identical).
+    discover_send = None
+    discover_ex = None
+    if getattr(args, "autonomous_discover", False):
+        try:
+            discover_ex = HttpExecutor(
+                engagement_slug=args.slug,
+                base_url=_origin(args.seed_url),
+                auto_load_authority=True,
+                request_budget=max(1, int(getattr(args, "autonomous_budget", 8))),
+                prompt_callback=prompt_callback_from_args(args) or stdin_prompt_with_timeout,
+            )
+            discover_send = discover_ex.gated_fetch
+        except Exception:
+            discover_send = None   # discovery is value-add; a build failure just skips it
+
     try:
         out = run_autonomous_cycle(
             result, slug=args.slug,
@@ -896,6 +917,11 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
             # through the full fail-closed invoke_tool chain, folding a LEAD into the world-model.
             # Default off → byte-identical; localhost/authorized-only (an out-of-scope host refuses).
             enable_reachability=bool(getattr(args, "autonomous_reachability", False)),
+            # W-C — opt-in DISCOVERY: seed low-prior probe-leaves from world-model ENDPOINT nodes and
+            # drive the gated probe_surface tool over them, minting a NEW oracle-confirmed finding
+            # only when the wrapped check's oracle fires. Off (no send) → byte-identical.
+            enable_discover=bool(getattr(args, "autonomous_discover", False)),
+            discover_send=discover_send,
             blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
             # LEARN — opt in (default OFF) to writing this run's confirm/refute outcomes to the
             # operator's targets/<slug>/outcomes.json, closing the learning loop the meta-monitor
@@ -908,6 +934,12 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
     except Exception:
         # the autonomous cycle is value-add telemetry; a failure never sinks the engagement
         return None
+    finally:
+        if discover_ex is not None:
+            try:
+                discover_ex.close()
+            except Exception:
+                pass
 
 
 def prompt_callback_from_args(args: argparse.Namespace) -> PromptCallback | None:
@@ -1063,6 +1095,17 @@ def main(argv: list[str]) -> int:
                              "host or a tripped kill-switch REFUSES it — and folds its output into "
                              "the world-model as intel-tier LEADS, never facts (only an oracle "
                              "promotes). Off by default (byte-identical).")
+    parser.add_argument("--autonomous-discover", action="store_true",
+                        help="DISCOVER (opt-in; requires --autonomous): the first honest step from a "
+                             "re-verifying loop toward a DISCOVERING one. Seed LOW-prior probe-leaves "
+                             "from world-model ENDPOINT nodes and drive the gated `probe_surface` tool "
+                             "over them — it runs ONE existing scanner check (REFLECTED_XSS) through a "
+                             "FRESH gated executor (full kill-switch/scope/egress/rate stack) and mints "
+                             "a NEW oracle-confirmed finding ONLY when that check's oracle FIRES. "
+                             "Localhost/authorized only; an out-of-scope endpoint or a tripped kill-"
+                             "switch REFUSES the probe. Off by default (byte-identical); the "
+                             "authoritative scan report is never mutated (discovered facts are "
+                             "reported separately + on the spine).")
     parser.add_argument("--autonomous-lookahead", action="store_true",
                         help="Use bounded MULTI-STEP lookahead (depth-2) for --autonomous action "
                              "selection instead of one-step greedy (default off = byte-identical). "
