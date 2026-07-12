@@ -38,6 +38,36 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_gateway(args: argparse.Namespace) -> int:
+    """Run the inline reverse-proxy "provable firewall" in front of the operator's app. Blocks a
+    request ONLY when a deterministic oracle proves it is an attack (re-runnable certificate);
+    default ``observe`` is read-only. FAIL-OPEN: any error forwards, never taking the app down."""
+    from .gateway import serve_gateway
+
+    config = AegisConfig(deployment_secret=args.secret or _DEMO_SECRET, mode=args.mode,
+                         honeypot_paths=list(args.honeypot or ()))
+
+    def _log_verdict(v: object) -> None:
+        try:
+            sys.stderr.write(v.model_dump_json() + "\n")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    httpd = serve_gateway(args.upstream, config=config, host=args.host, port=args.port,
+                          slug=args.slug, on_verdict=_log_verdict)
+    active = "ENFORCE — blocking PROVEN attacks" if httpd.settings.enforce else "observe — read-only"
+    if args.mode == "enforce" and not httpd.settings.enforce:
+        active += " (downgraded: AEGIS_RESPOND entitlement not available in this governed deployment)"
+    sys.stderr.write(f"AEGIS Gateway  http://{args.host}:{args.port}  ->  {args.upstream}  [{active}]\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def _cmd_demo(_args: argparse.Namespace) -> int:
     canary = "AEGIS-DEMOCANARY-9f3a7b2e8d14c05a"
     config = AegisConfig(deployment_secret=_DEMO_SECRET)
@@ -67,6 +97,22 @@ def main(argv: list[str]) -> int:
     d.add_argument("--canary", default=None, help="the planted canary sentinel (LLM surface)")
     d.add_argument("--honeypot", action="append", help="a seeded honeypot path (repeatable)")
     d.set_defaults(func=_cmd_detect)
+
+    g = sub.add_parser("gateway", help="run the inline reverse-proxy provable firewall in front of your app")
+    g.add_argument("--upstream", required=True, metavar="URL",
+                   help="your app's base URL, e.g. http://127.0.0.1:3000 (the gateway forwards here)")
+    g.add_argument("--host", default="127.0.0.1",
+                   help="bind host (a real deployment binds a routable interface; default loopback)")
+    g.add_argument("--port", type=int, default=8080, help="gateway listen port (default 8080)")
+    g.add_argument("--mode", choices=("observe", "enforce"), default="observe",
+                   help="observe (default, read-only: inspect+forward) or enforce (block PROVEN "
+                        "attacks; needs the AEGIS_RESPOND entitlement in a governed deployment)")
+    g.add_argument("--secret", default="", help="per-deployment HMAC secret (PR2)")
+    g.add_argument("--honeypot", action="append", metavar="PATH",
+                   help="a seeded honeypot path a fetch of which proves automation (repeatable)")
+    g.add_argument("--slug", default="aegis-gateway",
+                   help="gateway identity for the kill-switch + audit trail")
+    g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")
     demo.set_defaults(func=_cmd_demo)
