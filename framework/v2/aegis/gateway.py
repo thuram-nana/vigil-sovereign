@@ -34,7 +34,7 @@ from ..common.logging import get_logger
 from .actor_graph import ActorGraph
 from .inspect import inspect_request, inspect_response
 from .models import AegisConfig, BeliefRef, Verdict
-from .response_policy import feed_and_score, graduated_action
+from .response_policy import feed_and_score, feed_oob_correlation, graduated_action
 
 _log = get_logger("aegis.gateway")
 
@@ -83,6 +83,47 @@ class GatewaySettings:
         self._belief_seq = itertools.count(1)
         self._belief_lock = threading.Lock()
         self.actor_last_class: dict[str, str] = {}
+        # OPT-IN passive OOB belief elevation (default OFF). Started ONLY when the operator configured a
+        # canary URL AND the AEGIS_RESPOND entitlement is available (like the rest of the response
+        # layer). The receiver binds LOOPBACK ONLY (verify.oob refuses any non-loopback bind). Any
+        # error → the feature stays dormant (fail-open); the gateway proxies exactly as before.
+        self.oob_correlator = None   # type: ignore[var-annotated]
+        self.oob_receiver = None     # type: ignore[var-annotated]
+        if config.oob_canary and self._authorize_oob():
+            try:
+                from ..verify.oob import OOBReceiver
+                from .oob_correlator import OOBCorrelator
+                self.oob_correlator = OOBCorrelator(config.oob_canary)
+                self.oob_receiver = OOBReceiver().start()   # loopback-only, ephemeral port
+                _log.info("aegis.gateway.oob_enabled", slug=self.slug,
+                          canary_host=self.oob_correlator.canary_host)
+            except Exception:
+                self.oob_correlator = None
+                self.oob_receiver = None
+                _log.warning("aegis.gateway.oob_disabled", slug=self.slug, reason="start failed")
+
+    def _authorize_oob(self) -> bool:
+        """Entitlement check for the OOB belief-elevation feature — the SAME AEGIS_RESPOND gate the
+        response layer uses (a governed deployment without the grant leaves it dormant). Total: any
+        entitlement-subsystem error fails CLOSED (feature off)."""
+        try:
+            from ..entitlement import Capability
+            from ..entitlement.policy import is_capability_available
+            return bool(is_capability_available(Capability.AEGIS_RESPOND))
+        except Exception:
+            return False
+
+    def stop_oob(self) -> None:
+        """Clean shutdown of the loopback OOB receiver (idempotent, total). The gateway's CLI/callers
+        invoke this in their teardown; the receiver thread is a daemon regardless, so a missed stop
+        never hangs the process."""
+        r = self.oob_receiver
+        self.oob_receiver = None
+        if r is not None:
+            try:
+                r.stop()
+            except Exception:
+                pass
 
     def _authorize_enforce(self) -> bool:
         """Entitlement check, once. Only meaningful when mode==enforce; a denied grant downgrades to
@@ -213,6 +254,63 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
                 return self.settings.actor_graph.belief(f"session:{self._actor_key()}")
         except Exception:
             return None
+
+    # -- passive OOB belief elevation (opt-in; TRANSLATOR not generator) ---
+
+    def _note_oob_lead(self, verdict: Verdict | None, inspect_body: str | None) -> None:
+        """If this request tripped an SSRF/XXE LEAD, record a pending OOB observation IFF the
+        attacker's OWN payload referenced the operator's canary host. Reads only the client's request
+        (self.path + the inspected body); NEVER mutates or plants anything. Total (fail-open)."""
+        corr = self.settings.oob_correlator
+        if corr is None or verdict is None or verdict.decision != "lead":
+            return
+        if verdict.attack_class not in ("ssrf", "xxe"):
+            return
+        try:
+            corr.note_lead(self._actor_key(), path=self.path, body=inspect_body,
+                           attack_class=verdict.attack_class)
+        except Exception:
+            pass
+
+    def _note_oob_elevation(self, actor_key: str, attack_class: str) -> None:
+        """Fold ONE OOB-correlated elevation into the actor's Beta belief via the EXISTING belief path
+        (``feed_oob_correlation``) — a strong AFFIRMING signal, NEVER a certificate, NEVER a block.
+        Serialised under the belief lock (the server is threaded); total."""
+        try:
+            with self.settings._belief_lock:
+                feed_oob_correlation(self.settings.actor_graph, actor_key, attack_class,
+                                     seq=next(self.settings._belief_seq))
+                self.settings.actor_last_class[f"session:{actor_key}"] = attack_class
+        except Exception:
+            pass
+
+    def _oob_elevation_verdict(self, attack_class: str, referenced_host: str) -> Verdict:
+        """A LEAD verdict for the on_verdict telemetry sink describing an OOB correlation — decision
+        LEAD, action observe, NO certificate. It is belief-only; it drives no response by itself (the
+        elevated belief surfaces on the actor's NEXT request as a graduated challenge/throttle)."""
+        return Verdict(decision="lead", attack_class=attack_class, confidence=0.0, certificate=None,
+                       provenance="intel:aegis:oob_correlation", action="observe",
+                       contributing=[f"oob-canary:{referenced_host}"])
+
+    def _drain_oob_elevations(self) -> None:
+        """Poll the loopback OOB receiver for unsolicited canary hits, correlate them to pending
+        SSRF/XXE observations, and elevate the tied actors' beliefs. Belief-only; total (any error
+        forwards). Called pre-request so a PRIOR inbound hit raises belief the CURRENT/next request's
+        graduated decision can act on."""
+        s = self.settings
+        corr, recv = s.oob_correlator, s.oob_receiver
+        if corr is None or recv is None:
+            return
+        try:
+            elevations = corr.poll_elevations(recv)
+        except Exception:
+            return
+        for el in elevations:
+            self._note_oob_elevation(el.actor_key, el.attack_class)
+            try:
+                self._emit(self._oob_elevation_verdict(el.attack_class, el.referenced_host))
+            except Exception:
+                pass
 
     def _graduated_verdict(self, action: str, current: Verdict | None) -> Verdict:
         """A lead Verdict carrying the graduated ``action`` (challenge/throttle) — for the on_verdict
@@ -372,6 +470,11 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
     def _handle_inner(self) -> None:
         settings = self.settings
         method = self.command
+        # (0) OPT-IN passive OOB belief elevation — drain any unsolicited canary hits and fold the
+        #     correlated elevations into the tied actors' beliefs BEFORE the graduated decision, so a
+        #     prior inbound hit is reflected in this/next request's belief. Belief-only; total; a no-op
+        #     when the feature is off. Reads nothing from THIS request — never mutates it.
+        self._drain_oob_elevations()
         if self._framing_unsupported():
             self._send_length_required()   # chunked/bad-CL: refuse+close, never drop-body+desync
             return
@@ -393,6 +496,11 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         except Exception:
             verdict = None
         self._emit(verdict)
+
+        # (1b) OOB — if this is an SSRF/XXE LEAD whose payload referenced the operator's canary host,
+        #      record a pending observation (reads the client's own request; NO injection). A later
+        #      inbound hit on that canary will elevate this actor's belief via _drain_oob_elevations.
+        self._note_oob_lead(verdict, inspect_body)
 
         # (2) ENFORCE (request-side) — block ONLY on a confirmed verdict whose action is "block" (D1).
         #     A PROVABLE block always wins over a belief-driven challenge (prove-don't-guess).

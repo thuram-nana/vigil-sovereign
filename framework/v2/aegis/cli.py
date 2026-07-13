@@ -45,7 +45,8 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     from .gateway import serve_gateway
 
     config = AegisConfig(deployment_secret=args.secret or _DEMO_SECRET, mode=args.mode,
-                         honeypot_paths=list(args.honeypot or ()))
+                         honeypot_paths=list(args.honeypot or ()),
+                         oob_canary=args.oob_canary)
 
     def _log_verdict(v: object) -> None:
         try:
@@ -59,11 +60,19 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     if args.mode == "enforce" and not httpd.settings.enforce:
         active += " (downgraded: AEGIS_RESPOND entitlement not available in this governed deployment)"
     sys.stderr.write(f"AEGIS Gateway  http://{args.host}:{args.port}  ->  {args.upstream}  [{active}]\n")
+    if args.oob_canary and httpd.settings.oob_receiver is not None:
+        sys.stderr.write(f"  passive OOB belief elevation ON (canary host "
+                         f"{httpd.settings.oob_correlator.canary_host}) — receiver is LOOPBACK-only; "
+                         f"AEGIS never injects the canary\n")
+    elif args.oob_canary:
+        sys.stderr.write("  passive OOB belief elevation requested but DORMANT "
+                         "(AEGIS_RESPOND entitlement not available)\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        httpd.settings.stop_oob()   # clean shutdown of the loopback OOB receiver
         httpd.server_close()
     return 0
 
@@ -115,6 +124,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="a seeded honeypot path a fetch of which proves automation (repeatable)")
     g.add_argument("--slug", default="aegis-gateway",
                    help="gateway identity for the kill-switch + audit trail")
+    g.add_argument("--oob-canary", default=None, metavar="URL",
+                   help="OPT-IN passive OOB belief elevation: the operator-planted STATIC canary URL "
+                        "(a host you control that tunnels back to a loopback receiver AND trips AEGIS's "
+                        "SSRF/XXE lead when referenced). AEGIS NEVER injects it — an unsolicited inbound "
+                        "hit on the canary that correlates to an actor's SSRF/XXE payload ELEVATES that "
+                        "actor's belief toward the graduated challenge/throttle, NEVER a block. Needs "
+                        "the AEGIS_RESPOND entitlement; the reverse tunnel is your charter responsibility")
     g.set_defaults(func=_cmd_gateway)
 
     demo = sub.add_parser("demo", help="run the class-1 canary-disclosure flow end-to-end")
