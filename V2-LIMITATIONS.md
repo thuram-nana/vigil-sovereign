@@ -35,17 +35,18 @@ and `aegis/` — the embeddable **defensive** AI-attack-detection library + the
 inline **provable firewall** (request-side SQLi/cmd-injection block oracles,
 response-side XSS/SSTI/path-traversal confirmation reusing the existing
 `EVALUATION`/`SIDE_EFFECT` oracles, and a per-actor graduated challenge/throttle).
-`verify.OracleKind` is now **25 members**: the **15** frozen offensive oracles
-(the benchmark set, unchanged) **+ 10 additive members held OUT of the frozen
-`_ALL_ORACLES`** (4 AEGIS detection, 2 AEGIS gateway request-side block oracles,
-1 `K8S_POSTURE` sensor-fusion, 1 `SSO_ASSERTION_FORGERY` offline JWT structural-
-forgery oracle, 1 `SAML_STRUCTURAL_FORGERY` offline SAML structural-forgery oracle,
-1 `CLOUD_POSTURE` offline achieved-state cloud/CSPM promotion oracle) — each fires
-only on a context key no benchmark finding carries, which is *why* the gate stays
-byte-identical. (A JWT embedded-key/`x5c` forgery oracle was built and then
-**rejected in review** as not offline-provable — a legitimate CA-chained `x5c` and
-DPoP/SIOP embedded-`jwk` tokens are indistinguishable from a forgery without knowing
-the relying party's trust anchor — so it was NOT merged; the near-zero-FP bar held.) AEGIS is also now **pip-installable + Docker-shippable**
+`verify.OracleKind` is now **27 members**: the **15** frozen offensive oracles
+(the benchmark set, unchanged) **+ 12 additive members held OUT of the frozen
+`_ALL_ORACLES`** (4 AEGIS detection, **3** AEGIS gateway request-side block oracles
+[sqli/cmdi/**nosql**], 1 `K8S_POSTURE` sensor-fusion, 1 `SSO_ASSERTION_FORGERY` offline
+JWT structural-forgery oracle, 1 `SAML_STRUCTURAL_FORGERY` offline SAML structural-forgery
+oracle, 1 `CLOUD_POSTURE` offline cloud/CSPM promotion oracle, 1 `MESH_POSTURE` offline
+service-mesh posture oracle) — each fires only on a context key no benchmark finding
+carries, which is *why* the gate stays byte-identical. The cloud oracle is also wired
+into the opt-in `--fuse-sensors` promotion loop. (A JWT embedded-key/`x5c` forgery oracle
+was built and then **rejected in review** — a legitimate CA-chained `x5c` and DPoP/SIOP
+embedded-`jwk` tokens are indistinguishable from a forgery offline — so it was NOT merged;
+the near-zero-FP bar held.) AEGIS is also now **pip-installable + Docker-shippable**
 (a repo-root `pyproject.toml` delivers an importable `framework.v2` + `crucible`/
 `aegis` console scripts; `framework/v2/aegis/Dockerfile` runs the observe-default
 gateway), and `engage --fuse-sensors` **auto-activates** when a `targets/<slug>/
