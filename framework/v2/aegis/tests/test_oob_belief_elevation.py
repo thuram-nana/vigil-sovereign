@@ -113,6 +113,31 @@ def test_benign_hit_with_no_pending_never_elevates():
         assert c.poll_elevations(recv) == []
 
 
+def test_hit_stream_cannot_re_elevate_a_single_lead():
+    # REGRESSION (review [MEDIUM]): ONE SSRF lead + a STREAM of canary hits must elevate AT MOST ONCE —
+    # the pending obs is CONSUMED after it elevates, so belief reflects distinct evidence, not a replay.
+    c = OOBCorrelator(CANARY)
+    with OOBReceiver() as recv:
+        c.note_lead("4.4.4.4", path="/fetch?url=" + urllib.parse.quote(CANARY, safe=""),
+                    body=None, attack_class="ssrf")
+        total = 0
+        for _ in range(8):                                   # 8 DISTINCT inbound hits (a stream)
+            _fire_hit(recv, "/" + CANARY_SEG, host=CANARY_HOST)
+            total += len(c.poll_elevations(recv))
+        assert total == 1, f"one lead should elevate at most once, got {total}"
+    # but N DISTINCT leads still each elevate once (distinct evidence is not suppressed).
+    c2 = OOBCorrelator(CANARY)
+    with OOBReceiver() as recv2:
+        for _ in range(3):
+            c2.note_lead("5.5.5.5", path="/fetch?url=" + urllib.parse.quote(CANARY, safe=""),
+                         body=None, attack_class="ssrf")
+        got = 0
+        for _ in range(3):
+            _fire_hit(recv2, "/" + CANARY_SEG, host=CANARY_HOST)
+            got += len(c2.poll_elevations(recv2))
+        assert got == 3, f"3 distinct leads should elevate 3 times, got {got}"
+
+
 def test_hit_before_pending_does_not_retro_correlate():
     # NEAR-ZERO-FP: a canary hit that arrives BEFORE any probe must not retro-correlate to a LATER
     # probe (a real correlation's hit always lands after its pending was recorded).
@@ -211,29 +236,30 @@ def _get(port: int, path: str):
 
 
 def test_correlated_canary_hit_elevates_to_429_never_blocks(upstream):
-    """A single SSRF probe alone does NOT escalate; correlated canary hits ELEVATE the actor's belief
-    to a soft 429 (challenge/throttle). NEVER a 403, never a confirmed/block verdict."""
+    """Several distinct SSRF probes at the canary + one correlated hit each ELEVATE the actor's belief
+    to a soft 429 (challenge/throttle) — NEVER a 403, never a confirmed/block verdict. Each lead is
+    consumed once, so belief tracks distinct evidence (a single lead amplified by a hit stream cannot
+    escalate — see test_hit_stream_cannot_re_elevate_a_single_lead)."""
     sink: list[Verdict] = []
     gw, port = _gw(upstream, oob_canary=CANARY, sink=sink)
     try:
         assert gw.settings.oob_receiver is not None   # feature active (entitlement available in tests)
         recv = gw.settings.oob_receiver
 
-        # 1 SSRF probe → relayed (a lead never blocks) and records a pending correlation. Alone, a
-        # single hit never escalates (MIN_SUSTAINED_OBS + LCB).
-        s0, _ = _get(port, "/fetch?url=" + _SSRF_ENC)
-        assert s0 == 200
-
-        # the vulnerable app dereferences the canary several times → unsolicited inbound hits.
+        statuses: list[int] = []
+        # SEVERAL distinct SSRF probes, each recording its OWN pending correlation; the app dereferences
+        # the canary once per probe (one unsolicited hit each). We do NOT assert every probe is 200 — a
+        # SUSTAINED SSRF stream is itself belief-raising and may already earn a soft challenge; the point
+        # is only that escalation NEVER hardens into a 403/block. Interleave so hits drain into belief.
         for _ in range(6):
+            s, _ = _get(port, "/fetch?url=" + _SSRF_ENC)
+            statuses.append(s)
             _fire_hit(recv, "/" + CANARY_SEG, host=CANARY_HOST)
-
-        # subsequent requests DRAIN the hits, fold OOB elevations into the actor's belief, and cross
-        # the graduated threshold → a soft, retryable 429 (never a hard block).
         codes = [_get(port, "/home") for _ in range(3)]
-        statuses = [c for c, _ in codes]
-        assert 429 in statuses, statuses
-        assert 403 not in statuses
+        statuses += [c for c, _ in codes]
+
+        assert 429 in statuses, statuses          # escalated to a soft, retryable 429
+        assert 403 not in statuses                # NEVER a hard block
         first_429 = next(h for s, h in codes if s == 429)
         assert first_429.get("X-Aegis-Action") in ("challenge", "throttle")
         assert first_429.get("Retry-After") is not None

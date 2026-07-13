@@ -186,12 +186,20 @@ class OOBCorrelator:
                     # times is not counted N-fold for a single inbound hit (each probe already fed its
                     # own lead). The actor's earliest-seen attack_class labels the elevation.
                     seen_actors: set[str] = set()
-                    for actor_key, attack_class, _seq in self._pending.values():
+                    consumed: list[str] = []
+                    for obs_key, (actor_key, attack_class, _seq) in list(self._pending.items()):
                         if actor_key in seen_actors:
                             continue
                         seen_actors.add(actor_key)
+                        consumed.append(obs_key)
                         out.append(Elevation(actor_key=actor_key, attack_class=attack_class,
                                              referenced_host=self.canary_host, hit_path=hit.path))
+                    # CONSUME each pending obs it elevated — at-most-once per obs. A later STREAM of
+                    # canary hits therefore cannot RE-elevate the same lead (the review's unbounded
+                    # re-elevation FP): each SSRF/XXE lead contributes at most ONE belief elevation,
+                    # matching the distinct evidence it is. Distinct leads still each elevate once.
+                    for k in consumed:
+                        self._pending.pop(k, None)
         except Exception:
             return []
         return out

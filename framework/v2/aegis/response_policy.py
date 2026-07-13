@@ -52,9 +52,10 @@ THROTTLE_LCB = 0.50
 #     decay drives the review's "1 lead amid benign" FP down to ~0.38). A genuinely suspicious actor
 #     starts at 0.578 (3 sustained leads). 0.55 separates them with margin on the benign side.
 #   * THROTTLE_MEAN = 0.66 — a pure-lead actor's mean ASYMPTOTES at ~0.63 (never reaches it however
-#     many leads), so leads only ever reach `challenge`; only repeated CONFIRMED attacks (mean climbs
-#     past ~0.69) reach the harder `throttle`. This keeps throttle structurally reserved for proof-
-#     backed sustained abuse, not lead volume.
+#     many leads), so plain leads only ever reach `challenge`. `throttle` is reached only by a sustained
+#     STRONGER-than-lead affirming signal: repeated CONFIRMED attacks (~0.9) or repeated OOB-CORRELATED
+#     SSRF/XXE elevations (~0.85, `feed_oob_correlation`) — i.e. sustained high-belief evidence, not lead
+#     volume. Both remain belief-only: `throttle` is still a soft, retryable 429, NEVER a hard block.
 CHALLENGE_MEAN = 0.55
 THROTTLE_MEAN = 0.66
 # "sustained, not one hit": a floor on APPLIED observations before ANY escalation, on top of the LCB
