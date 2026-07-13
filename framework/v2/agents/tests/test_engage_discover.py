@@ -225,6 +225,84 @@ def test_discovery_off_mints_nothing_byte_identical(
 
 
 # ---------------------------------------------------------------------------
+# SLICE-0 KEYSTONE — a recon/sensor asset that is NOT an ENDPOINT (a SERVICE)
+# is PROMOTED to a testable ENDPOINT and reaches the gated probe loop. This is
+# the recon→test bridge: without promotion the loop sees nothing to probe.
+# ---------------------------------------------------------------------------
+
+
+def _service_world(hostkey: str, port: int) -> WorldModel:
+    """A world with ONLY a web SERVICE node (as a sensor/nmap mints it — ``{hostkey}:{port}/{proto}``
+    with a web service name) and an attacker foothold. Crucially NO ENDPOINT node exists, so the loop
+    has nothing to probe UNTIL promotion mints one."""
+    w = WorldModel()
+    w.add_node(Node(id="attacker:self", kind=NodeKind.PRINCIPAL, attrs={"role": "attacker"},
+                    provenance="obs-1", confidence=1.0, first_seen=0, last_seen=0))
+    w.add_node(Node(id=f"service:{hostkey}:{port}/tcp", kind=NodeKind.SERVICE,
+                    attrs={"port": port, "protocol": "tcp", "service": "http"},
+                    provenance="intel:obs:svc", confidence=0.8, first_seen=1, last_seen=1))
+    return w
+
+
+def test_promotion_bridges_a_recon_service_into_the_probe_loop(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """THE KEYSTONE: a world holding ONLY a recon/sensor SERVICE (no ENDPOINT) — the loop has nothing
+    to probe. Promotion mints an in-scope ``endpoint:promoted:http://127.0.0.1:<port>/`` ENDPOINT,
+    which then seeds a probe-leaf that the gated probe drives. Proves a *discovered* asset (not one a
+    human pointed at) reaches the test loop. (A finding needs a query param to inject into — that
+    arrives with in-loop crawl/mine expansion, Slice 2; here the bridge itself is the proof.)"""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_reflect)  # promoted root url is probed
+
+    world = _service_world("127.0.0.1", port)
+    # sanity: NO endpoint yet — the loop cannot see the service as a probe target
+    assert not any(n.kind is NodeKind.ENDPOINT for n in world.all_nodes())
+
+    out = run_autonomous_cycle(
+        world_result := _result(world, []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), prompt_callback=_deny)
+
+    # the SERVICE was promoted to a url-bearing ENDPOINT, which seeded a probe-leaf the gate let run
+    assert out.endpoints_promoted == 1, "the in-scope recon SERVICE was not promoted to an endpoint"
+    assert world.has_node(f"endpoint:promoted:http://127.0.0.1:{port}/")
+    assert out.probe_leaves_seeded == 1, "the promoted endpoint did not seed a probe-leaf"
+    assert out.probes_driven == 1 and out.probes_refused == 0, "the promoted endpoint was not probed"
+    assert out.cycles and out.cycles[0].is_probe is True
+    _ = world_result
+
+
+def test_promotion_of_out_of_scope_service_is_refused(isolated_engagement):
+    """An out-of-scope recon SERVICE (charter lists only 127.0.0.1) is NEVER promoted, so it seeds no
+    probe-leaf and no traffic is attempted — in-scope-by-construction at the promotion layer, atop the
+    fail-closed per-request gate."""
+    isolated_engagement("disco", "127.0.0.1")
+
+    def _no_send(_req):
+        raise AssertionError("no send may occur for an out-of-scope asset")
+
+    world = _service_world("10.9.9.9", 8080)   # out of scope
+    out = run_autonomous_cycle(
+        _result(world, []), slug="disco", enable_discover=True, discover_send=_no_send,
+        prompt_callback=_deny)
+    assert out.endpoints_promoted == 0
+    assert out.probe_leaves_seeded == 0
+    assert out.probes_driven == 0
+
+
+def test_promotion_off_when_discovery_off(isolated_engagement, httpserver: HTTPServer):
+    """Promotion runs ONLY on the opt-in discover path — with discovery off, a world full of recon
+    SERVICE nodes promotes nothing and the authoritative report is untouched (byte-identical control)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    world = _service_world("127.0.0.1", port)
+    out = run_autonomous_cycle(_result(world, []), slug="disco", prompt_callback=_deny)  # discover OFF
+    assert out.endpoints_promoted == 0
+    assert not world.has_node(f"endpoint:promoted:http://127.0.0.1:{port}/")
+
+
+# ---------------------------------------------------------------------------
 # FAIL-CLOSED — the probe rides the full gate chain: an out-of-scope endpoint
 # and a tripped kill-switch REFUSE it, and it mints nothing (no traffic).
 # ---------------------------------------------------------------------------
