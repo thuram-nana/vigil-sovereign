@@ -213,13 +213,18 @@ def curated_probe_checks() -> tuple:
       * REFLECTED_XSS   — a marker reflected into an affirmatively-HTML response (+ the content-type gate);
       * OPEN_REDIRECT   — a real redirect to the injected canary host (safe to run everywhere);
       * PATH_TRAVERSAL  — the target file's content signature appears in the response;
-      * SSTI_EVAL_*     — the server COMPUTED the injected arithmetic (raw expression absent);
-      * BOOLEAN_SQLI    — a true/false differential the app's own responses exhibit.
-    OOB checks (SSRF/XXE/RCE) are deliberately excluded — they self-skip without an OOBReceiver, and
-    wiring one is a separate, explicitly-gated step. Returns a fresh tuple; a missing check is skipped."""
+      * SSTI_EVAL_*     — the server COMPUTED the injected arithmetic (raw expression absent).
+
+    DELIBERATELY EXCLUDED as an unsupervised discovery probe (review wcqss59lb, CRITICAL): the single-shot
+    ``BOOLEAN_SQLI`` DifferentialCheck. A lone benign-vs-payload differential fires on ANY endpoint whose
+    response legitimately differs between the two fixed strings — most perversely an app that VALIDATES
+    input / WAF-blocks a quote (200 vs 403) — minting a FALSE confirmed boolean_sqli fact that folds into
+    the report. A differential without a multi-round control (SPRT) cannot be near-zero-FP unsupervised,
+    so it is not in the curated set; sound boolean-SQLi discovery would need the SPRT BooleanInferenceCheck
+    under a dedicated FP review. OOB checks (SSRF/XXE/RCE) are likewise excluded — they self-skip without an
+    OOBReceiver, a separate explicitly-gated step. Returns a fresh tuple; a missing check is skipped."""
     try:
         from ...scanner.checks import (
-            BOOLEAN_SQLI,
             OPEN_REDIRECT,
             PATH_TRAVERSAL,
             REFLECTED_XSS,
@@ -228,7 +233,7 @@ def curated_probe_checks() -> tuple:
         )
     except Exception:
         return ()
-    return (REFLECTED_XSS, OPEN_REDIRECT, PATH_TRAVERSAL, SSTI_EVAL_BRACES, SSTI_EVAL_DOLLAR, BOOLEAN_SQLI)
+    return (REFLECTED_XSS, OPEN_REDIRECT, PATH_TRAVERSAL, SSTI_EVAL_BRACES, SSTI_EVAL_DOLLAR)
 
 
 def probe_surface_registry(send: Any, *, check: Any = None, checks: Any = None,

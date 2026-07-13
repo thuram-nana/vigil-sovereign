@@ -54,3 +54,30 @@ def test_expand_crawl_error_returns_empty():
         raise RuntimeError("send failed")
     # a send that always errors → the crawler yields nothing → [] (best-effort, never raises)
     assert expand_endpoint(boom, "http://host.example/") == []
+
+
+def _downgrade_and_escape_send():
+    """Root (https) links to: a cleartext http downgrade, a '..' path-escape above the seed prefix, and
+    a legitimate same-scheme same-subtree param page. Only the last must be minted."""
+    def send(req):
+        url = getattr(req, "url", "")
+        if url.endswith("/app/") or url.rstrip("/").endswith("/app"):
+            body = ('<html><body>'
+                    '<a href="http://host.example/app/cleartext?d=1">downgrade</a>'
+                    '<a href="https://host.example/app/../secret/admin?t=1">escape</a>'
+                    '<a href="https://host.example/app/search?q=1">ok</a>'
+                    '</body></html>')
+            return {"status": 200, "body": body, "headers": [("Content-Type", "text/html")]}
+        return {"status": 200, "body": "<html><body>leaf</body></html>",
+                "headers": [("Content-Type", "text/html")]}
+    return send
+
+
+def test_expand_pins_scheme_and_path_prefix():
+    """Review wcqss59lb LOWs: expand must not downgrade https→http, and a '..' must not escape the seed's
+    path-prefix subtree. Only the same-scheme, in-subtree param page is minted."""
+    urls = expand_endpoint(_downgrade_and_escape_send(), "https://host.example/app/",
+                           max_pages=10, max_depth=2)
+    assert urls == ["https://host.example/app/search?q=1"]
+    assert all(u.startswith("https://") for u in urls)          # no http downgrade minted
+    assert all("/secret/" not in u for u in urls)               # no '..' path-prefix escape minted

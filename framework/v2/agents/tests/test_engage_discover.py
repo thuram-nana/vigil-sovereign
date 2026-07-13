@@ -519,10 +519,38 @@ def _passwd_on_traversal(request) -> Response:
 def test_curated_probe_set_covers_multiple_classes():
     from framework.v2.agents.tools.builtin import curated_probe_checks
     bug_classes = {str(getattr(c, "bug_class", "")) for c in curated_probe_checks()}
-    assert len(curated_probe_checks()) == 6
+    assert len(curated_probe_checks()) == 5
     assert "xss" in bug_classes
     assert any("redirect" in b for b in bug_classes)
     assert any("traversal" in b or "lfi" in b for b in bug_classes)
+    # review wcqss59lb (CRITICAL): the single-shot boolean-SQLi DifferentialCheck is DELIBERATELY out —
+    # it false-fires on any benign input-validation / WAF-block differential.
+    assert not any("sqli" in b or "sql_injection" in b for b in bug_classes)
+
+
+def _validating_endpoint(request) -> Response:
+    """A BENIGN app that VALIDATES input: a value with a SQL metacharacter is rejected with 403; a clean
+    value is served 200. This is the review's CRITICAL false-positive: a single-shot boolean-SQLi
+    differential (benign 200 vs "x' OR '1'='1" 403) would mint a false boolean_sqli fact — the app is
+    DEFENDING against SQLi, not vulnerable to it. The curated set must mint NOTHING here."""
+    q = request.args.get("q", "")
+    if "'" in q or '"' in q or "=" in q:
+        return Response("blocked: illegal characters", status=403, mimetype="text/plain")
+    return Response("<html><body>ok</body></html>", status=200, mimetype="text/html")
+
+
+def test_multi_probe_no_false_sqli_on_input_validation(isolated_engagement, httpserver: HTTPServer):
+    """Regression for review wcqss59lb CRITICAL: the generalized probe mints NO false boolean_sqli fact
+    on a benign input-validating endpoint (200 clean vs 403 on a quote). Nothing is minted."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/q").respond_with_handler(_validating_endpoint)
+    url = f"http://127.0.0.1:{port}/q?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.probes_driven == 1
+    assert out.discovered_count == 0, "the multi-probe minted a false fact on an input-validating app"
 
 
 def test_multi_probe_mints_a_non_xss_class(isolated_engagement, httpserver: HTTPServer):
@@ -599,6 +627,26 @@ def test_discover_queue_posture_issues_zero_probe_traffic(isolated_engagement):
     assert out.probes_driven == 0 and out.discovered_count == 0
     assert out.cycles and out.cycles[0].is_probe is True
     assert out.cycles[0].refused is False   # not a refusal — a deliberate park
+
+
+def test_discover_queue_does_not_crawl_expand(isolated_engagement):
+    """Regression for review wcqss59lb MEDIUM: discover-queue promises ZERO target traffic, so it must
+    NOT crawl-expand either (crawling is target contact). With a promoted SERVICE + enable_crawl_expand
+    + discover-queue and a send that RAISES on any call, no crawl or probe traffic is issued: nothing is
+    expanded, the promoted root is parked as a candidate, and the send is never reached."""
+    isolated_engagement("disco", "127.0.0.1")
+
+    def _no_send(_req):
+        raise AssertionError("discover-queue must issue ZERO target traffic (no crawl, no probe)")
+
+    world = _service_world("127.0.0.1", 8080)
+    out = run_autonomous_cycle(
+        _result(world, []), slug="disco", enable_discover=True, enable_crawl_expand=True,
+        discover_send=_no_send, probe_posture="discover-queue", prompt_callback=_deny)
+    assert out.endpoints_promoted == 1
+    assert out.endpoints_expanded == 0, "discover-queue crawled the target (posture-leak)"
+    assert out.candidates_queued >= 1
+    assert out.probes_driven == 0
 
 
 def test_auto_test_posture_probes_and_mints(isolated_engagement, httpserver: HTTPServer):

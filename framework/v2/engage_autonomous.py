@@ -262,6 +262,7 @@ def _build_goal_tree(
     seed_probe_leaves: bool = False,
     probe_bug_class: str = "xss",
     probe_prior: float = 0.03,
+    notes: "list | None" = None,
 ) -> tuple[Any, dict[int, object]]:
     """Build a goal tree whose leaves are the confirmed findings — one leaf per finding, its prior
     seeded from the finding's confidence, tagged with the finding's bug_class + surface. Returns the
@@ -310,7 +311,12 @@ def _build_goal_tree(
         from .intel.frontier import frontier_from_targets
         targets = _endpoint_probe_targets(world, exclude=covered)
         fr = frontier_from_targets(targets, world=world, bug_class=bc, prior=prior)
-        for item in fr.items():
+        items = fr.items()
+        if fr.truncated and notes is not None:   # surface the cap (review wcqss59lb: never drop silently)
+            notes.append(
+                f"discovery: frontier cap kept {len(items)} of {len(items) + fr.truncated} candidate "
+                f"surface(s) — {fr.truncated} lower-VOI surface(s) deferred this cycle")
+        for item in items:
             tree.add(
                 parent_id=root, kind="leaf",
                 label=f"probe {item.bug_class} @ {item.url}"[:120],
@@ -1278,7 +1284,11 @@ def run_autonomous_cycle(
         # scope-from-seed, over the SAME gated discover_send — and mint the discovered in-scope
         # param-bearing URLs as ENDPOINT nodes (provenance intel:expand). They flow through the frontier
         # into the goal tree, so a promoted host is not just reached but its real pages/params are tested.
-        if enable_crawl_expand and promoted:
+        # Gated on the AUTO-TEST posture: crawling IS target contact (read-only GET traffic), so the
+        # discover-queue posture — which promises ZERO target traffic until the operator approves — must
+        # NOT crawl either (review wcqss59lb MEDIUM: honor the posture for ALL target contact, not just
+        # the probe). Under discover-queue the promoted roots are parked as probe candidates for approval.
+        if enable_crawl_expand and promoted and probe_posture != "discover-queue":
             try:
                 from .intel.expand import expand_endpoint
                 from .worldmodel.models import Node, NodeKind
@@ -1305,7 +1315,7 @@ def run_autonomous_cycle(
     # the planner over the run world-model.
     tree, leaf_to_finding = _build_goal_tree(
         findings, world=world, seed_probe_leaves=discover_active,
-        probe_bug_class=str(discover_bug_class or "xss"))
+        probe_bug_class=str(discover_bug_class or "xss"), notes=out.notes)
     baselines = _leaf_baselines(tree)   # fixed per-run priors; every advice re-weight recomputes from these
     source = _foothold(world)
     out.planner_source = source
