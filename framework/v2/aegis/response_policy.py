@@ -52,9 +52,10 @@ THROTTLE_LCB = 0.50
 #     decay drives the review's "1 lead amid benign" FP down to ~0.38). A genuinely suspicious actor
 #     starts at 0.578 (3 sustained leads). 0.55 separates them with margin on the benign side.
 #   * THROTTLE_MEAN = 0.66 — a pure-lead actor's mean ASYMPTOTES at ~0.63 (never reaches it however
-#     many leads), so leads only ever reach `challenge`; only repeated CONFIRMED attacks (mean climbs
-#     past ~0.69) reach the harder `throttle`. This keeps throttle structurally reserved for proof-
-#     backed sustained abuse, not lead volume.
+#     many leads), so plain leads only ever reach `challenge`. `throttle` is reached only by a sustained
+#     STRONGER-than-lead affirming signal: repeated CONFIRMED attacks (~0.9) or repeated OOB-CORRELATED
+#     SSRF/XXE elevations (~0.85, `feed_oob_correlation`) — i.e. sustained high-belief evidence, not lead
+#     volume. Both remain belief-only: `throttle` is still a soft, retryable 429, NEVER a hard block.
 CHALLENGE_MEAN = 0.55
 THROTTLE_MEAN = 0.66
 # "sustained, not one hit": a floor on APPLIED observations before ANY escalation, on top of the LCB
@@ -69,6 +70,13 @@ MIN_SUSTAINED_OBS = 3
 _CONFIRMED_SIGNAL = (Polarity.AFFIRMS, 0.9)
 _LEAD_SIGNAL = (Polarity.AFFIRMS, 0.7)
 _BENIGN_SIGNAL = (Polarity.REFUTES, 0.7)
+# An OOB-CORRELATED SSRF/XXE lead — an unsolicited inbound hit on the operator's planted canary that
+# ties back to an actor's SSRF/XXE payload (the app dereferenced the attacker-chosen canary host). It
+# is STRONGER than a plain lead (0.85 > 0.70) — the out-of-band interaction is real corroboration a
+# single inline response cannot supply — yet DELIBERATELY below a confirmed attack (0.90): it is still
+# NOT a fired oracle, so it stays belief-only. It mints NO certificate and can NEVER produce a block
+# (``graduated_action`` only ever returns challenge/throttle/None). Prove-don't-guess holds.
+_OOB_CORRELATED_SIGNAL = (Polarity.AFFIRMS, 0.85)
 
 
 def _verdict_signal(verdict: Verdict | None) -> tuple[tuple[Polarity, float], str]:
@@ -98,6 +106,30 @@ def feed_and_score(graph: ActorGraph, actor_key: str, verdict: Verdict | None, *
         source="aegis:gateway", source_kind=IntelSourceKind.REQUEST_TELEMETRY, collector="aegis",
         subject=subject, attrs={}, source_reliability=_GATEWAY_RELIABILITY,
         confidence=confidence, polarity=polarity, seq=seq, evidence=f"gateway verdict: {claim}")
+    graph.observe(obs)
+    return graph.belief(node_id)
+
+
+def feed_oob_correlation(graph: ActorGraph, actor_key: str, attack_class: str, *, seq: int) -> BeliefRef | None:
+    """Fold an OOB-CORRELATED elevation (an unsolicited canary hit tied to this actor's SSRF/XXE lead)
+    into ``actor_key``'s Beta belief and return the updated belief. A STRONG affirming signal —
+    stronger than a plain lead — but STILL belief-only: it mints NO certificate and can NEVER produce a
+    block (``graduated_action`` never returns "block"). It only raises the actor toward the SAME
+    graduated challenge/throttle a sustained lead earns.
+
+    Reuses the SAME projection keystone as ``feed_and_score`` (same node, same source tier), so the
+    accumulation stays deterministic + order-independent (``obs_id`` keyed on ``(seq, actor, claim)`` —
+    no wallclock, no rng). AFFIRMS always accumulates a node (the actor already has one from the prior
+    lead), so — unlike a benign refute — this is never dropped."""
+    subject = EntityRef(kind=NodeKind.SESSION, key=actor_key)
+    node_id = subject.node_id
+    polarity, confidence = _OOB_CORRELATED_SIGNAL
+    claim = f"oob_correlated:{attack_class}"
+    obs = Observation(
+        obs_id=f"aegis:gateway:oob:{seq}:{node_id}|{claim}",
+        source="aegis:gateway", source_kind=IntelSourceKind.REQUEST_TELEMETRY, collector="aegis",
+        subject=subject, attrs={}, source_reliability=_GATEWAY_RELIABILITY,
+        confidence=confidence, polarity=polarity, seq=seq, evidence=f"gateway oob-correlation: {claim}")
     graph.observe(obs)
     return graph.belief(node_id)
 

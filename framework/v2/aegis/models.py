@@ -229,6 +229,13 @@ class AegisConfig(BaseModel):
     max_auth_events: int = Field(default=4096, gt=0, description="Bounded AUTH-window size (DoS-safe replay).")
     honeypot_paths: list[str] = Field(default_factory=list)
     crawler_allowlist: list[str] = Field(default_factory=list, description="Known-good crawler/monitor tokens whose fetches REFUTE.")
+    # OPT-IN passive OOB belief elevation (default OFF → the whole feature is dormant, no receiver
+    # started). The operator's STATIC canary URL: a host they control that tunnels back to a LOOPBACK
+    # OOBReceiver and that trips AEGIS's SSRF/XXE lead when an attacker references it. AEGIS NEVER
+    # injects/advertises it; an unsolicited inbound hit that correlates to an actor's SSRF/XXE payload
+    # only ELEVATES that actor's belief (soft challenge/throttle), never a block. Entitlement-gated
+    # (AEGIS_RESPOND) at the gateway, the operator's charter responsibility for the tunnel.
+    oob_canary: str | None = Field(default=None, description="Opt-in operator-planted OOB canary URL (passive belief elevation; never injected).")
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "AegisConfig":

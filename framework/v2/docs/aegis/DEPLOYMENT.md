@@ -153,7 +153,45 @@ app = AegisEnforceMiddleware(app, AegisConfig(deployment_secret="<random>", mode
   the `AEGIS_RESPOND` entitlement, and the kill-switch. Keep any control plane (config, certs) off the
   data port.
 
+## Passive OOB belief elevation (opt-in, canary-based) — `--oob-canary`
+
+SSRF and blind/OOB XXE cannot be *proven* from a single inline request/response, so AEGIS emits them
+as **leads** (belief-raising, never a block). This opt-in feature lets an **operator-planted canary**
+turn a real out-of-band interaction into a stronger — but still belief-only — signal, so a genuinely
+exploited SSRF/XXE actor escalates faster toward the graduated challenge/throttle.
+
+How it works, honestly:
+
+1. **You plant a STATIC canary.** Pick a host you control that (a) an app's server-side fetch can
+   reach and which you tunnel back to a **loopback** receiver (e.g. an SSH reverse-forward — your
+   charter's responsibility), and (b) trips AEGIS's SSRF/XXE lead when referenced (an internal /
+   RFC1918 / metadata-style host for SSRF; any external `SYSTEM`/`PUBLIC` host works for XXE). Run:
+   `aegis gateway --upstream … --mode enforce --oob-canary http://10.20.30.40/oob-beacon`.
+2. **AEGIS never touches the canary or the traffic.** It does **not** inject, advertise, or plant the
+   canary into any request — it is a *translator*, forwarding every inbound request byte-for-byte.
+   When an attacker's *own* payload references your canary host and trips the SSRF/XXE lead, AEGIS
+   records a bounded pending correlation (reading only the attacker's bytes).
+3. **A real callback elevates belief — never blocks.** If something server-side actually dereferences
+   the canary, the loopback receiver logs the unsolicited hit; AEGIS correlates it to the pending
+   observation and **elevates that actor's per-actor Beta belief** toward the *existing* graduated
+   challenge/throttle (a soft, retryable **429**). It **never** produces a block or a `confirmed`
+   verdict — a hard block still rides only a fired oracle certificate (prove-don't-guess).
+
+Guarantees (all tested): the receiver binds **loopback only**; the feature is **default-off** (no
+`--oob-canary` → no receiver, byte-identical behaviour) and **entitlement-gated** (`AEGIS_RESPOND`,
+like the rest of the response layer); it is **fail-open** (any error forwards, never blocks); and it
+adds **no new oracle** and **never mutates an inbound request**.
+
+Honest caveats: coverage is **narrow** — it fires only when an attacker actually targets your canary
+host with a payload that trips the lead *and* the app dereferences it back to the receiver. Correlation
+is by **canary host** (the primary, high-confidence signal); there is no timing/source fallback (it
+would be far harder to keep near-zero-FP). If several actors target the canary before a hit lands, the
+hit elevates all of them — each already sent an SSRF/XXE payload at the trap host, and elevation only
+ever raises belief toward a soft challenge, never a block.
+
 ## What AEGIS will never do
 
 Defensive only. It protects **your own** app; it never attacks anyone, never evades a defender, and is
-not a stealth tool. It blocks on proof or it forwards — there is no third, guess-based behavior.
+not a stealth tool. It blocks on proof or it forwards — there is no third, guess-based behavior. The
+`--oob-canary` correlation is passive and belief-only: AEGIS never injects a callback/token into
+traffic, and an out-of-band hit escalates only to a soft, retryable challenge/throttle — never a block.
