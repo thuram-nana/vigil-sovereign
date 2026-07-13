@@ -2806,7 +2806,98 @@ def _saml_resolve_ref(uri: str) -> tuple[str, str | None]:
     return ("unknown", None)
 
 
-def saml_forgery_oracle(xml: Any) -> OracleSignal:
+# ---------------------------------------------------------------------------
+# OPT-IN cryptographic XML-DSig escalation (the `saml` extra). Mirrors jwt_forgery_oracle's
+# candidate_keys: it runs ONLY when the operator supplies a TRUSTED IdP cert AND `signxml` is
+# importable. It NEVER runs on the gate path (no benchmark carries saml_xml, let alone a trusted
+# cert), so the structural oracle stays byte-identical when this branch is dormant.
+#
+# THE TWO HARD FP LINES this helper holds:
+#   1. NEVER trust the EMBEDDED cert. The signature's own ds:X509Certificate (KeyInfo) is attacker-
+#      controlled — a self-signed forgery "verifies" against it. We pin verification to the
+#      OPERATOR-PROVIDED trusted PEM via signxml's `x509_cert=` (confirmed: supplying x509_cert
+#      overrides the document's embedded KeyInfo as the trust anchor). No trusted cert -> DORMANT.
+#   2. REFUSE-TO-ADJUDICATE on can't-verify. We FIRE only on signxml's DEFINITIVE cryptographic-
+#      invalidity exceptions — InvalidSignature ("Signature verification failed", wrong signer) and
+#      its subclass InvalidDigest ("Digest mismatch", tampered content). We REFUSE (stay structural)
+#      on InvalidCertificate (a subclass of InvalidSignature — cert trust/expiry, NOT a bad signature),
+#      InvalidInput (a ValueError — no signature / unsupported SignatureMethod / transform), a parse
+#      error, or ANY other exception. "Couldn't verify" is NOT "forged". signxml's mature c14n does the
+#      canonicalization — we never hand-roll it.
+_SAML_CRYPTO_INPUT_CAP = 5 * 1024 * 1024   # bound the XML fed to signxml/lxml (DoS-safe over untrusted input)
+
+
+def _saml_crypto_verdict(text: str, candidate_certs: Sequence[str]) -> tuple[str, str, dict[str, Any]]:
+    """Cryptographically verify the captured SAML XML's XML-DSig signature against the OPERATOR-SUPPLIED
+    TRUSTED cert(s), returning ``(verdict, detail, observed_extra)`` where verdict is one of:
+
+      * ``"unavailable"`` — no trusted cert supplied, or ``signxml`` is not importable. The crypto branch
+        is DORMANT; the oracle stays structural-only (byte-identical).
+      * ``"verified"``    — at least one trusted cert cryptographically verifies the signature. The
+        signature was produced by a trusted IdP key (NOT a forgery on that dimension).
+      * ``"invalid"``     — no trusted cert verifies, AND every failure was a DEFINITIVE cryptographic
+        invalidity (InvalidSignature / InvalidDigest) with ZERO indeterminate outcomes: the signature is
+        provably NOT from any trusted key (wrong signer / tampered digest). This is the fire signal.
+      * ``"refuse"``      — could not conclusively adjudicate (an InvalidCertificate trust/expiry outcome,
+        an InvalidInput / unsupported-algorithm / unsupported-transform / parse / config error, or any
+        other exception on at least one cert). "Couldn't verify" is NOT "forged" — the oracle refuses.
+
+    Pure w.r.t. its inputs and deterministic (signxml verification of fixed bytes against a fixed cert is
+    reproducible), so a fire re-verifies OFFLINE from the retained XML + trusted certs. NEVER raises."""
+    certs = [c for c in (_coerce_text(x) for x in (candidate_certs or ())) if c.strip()]
+    if not certs:
+        return ("unavailable", "no operator-supplied trusted cert — crypto branch dormant", {})
+    try:  # guarded import (opt-in `saml` extra) — absent => dormant, structural-only
+        from signxml import XMLVerifier  # noqa: PLC0415
+        from signxml import exceptions as sx_ex  # noqa: PLC0415
+    except Exception:  # pragma: no cover - exercised via monkeypatch in tests
+        return ("unavailable", "signxml not importable (opt-in 'saml' extra absent)", {})
+
+    # XXE + DoS re-guard (defense-in-depth; the oracle's upstream safe_parse_xml already enforced this,
+    # so a DOCTYPE/ENTITY/oversize doc never reaches here — but keep the helper self-contained + safe).
+    raw = text.encode("utf-8", "replace")
+    if len(raw) > _SAML_CRYPTO_INPUT_CAP:
+        return ("refuse", f"XML exceeds the {_SAML_CRYPTO_INPUT_CAP}-byte crypto bound — declining", {})
+    low = raw.lower()
+    if b"<!doctype" in low or b"<!entity" in low:
+        return ("refuse", "DTD/ENTITY present — declining crypto verify (XXE-safe)", {})
+
+    definitive = 0
+    indeterminate = 0
+    first_invalid = ""
+    outcomes: list[str] = []
+    for pem in certs:
+        try:
+            # x509_cert pins the trust anchor to the OPERATOR's cert and OVERRIDES the document's own
+            # embedded KeyInfo cert (the cardinal FP guard). Success => a trusted key signed it.
+            XMLVerifier().verify(text, x509_cert=pem)
+            return ("verified", "signature verifies against a supplied trusted cert",
+                    {"crypto_outcome": "verified", "trusted_certs": len(certs)})
+        except sx_ex.InvalidCertificate as e:  # subclass of InvalidSignature — cert trust/expiry, NOT a bad sig
+            indeterminate += 1
+            outcomes.append(f"cert_untrusted:{type(e).__name__}")
+        except (sx_ex.InvalidDigest, sx_ex.InvalidSignature) as e:  # DEFINITIVE cryptographic invalidity
+            definitive += 1
+            if not first_invalid:
+                first_invalid = f"{type(e).__name__}: {str(e)[:160]}"
+            outcomes.append(f"definitive_invalid:{type(e).__name__}")
+        except Exception as e:  # InvalidInput / unsupported alg-or-transform / parse / config / anything
+            indeterminate += 1
+            outcomes.append(f"indeterminate:{type(e).__name__}")
+
+    # FIRE only when EVERY trusted cert gave a conclusive "not signed by this key" AND nothing was
+    # indeterminate. A single indeterminate outcome (a cert we could not evaluate — it MIGHT be the real
+    # signer) forces a REFUSE: "couldn't verify" is never "forged".
+    if definitive >= 1 and indeterminate == 0:
+        return ("invalid", first_invalid,
+                {"crypto_outcome": "invalid_signature", "trusted_certs": len(certs),
+                 "signxml_error": first_invalid, "outcomes": outcomes})
+    return ("refuse",
+            f"inconclusive crypto verify ({definitive} definitive-invalid, {indeterminate} indeterminate)",
+            {"crypto_outcome": "refuse", "trusted_certs": len(certs), "outcomes": outcomes})
+
+
+def saml_forgery_oracle(xml: Any, *, candidate_certs: Sequence[str] = ()) -> OracleSignal:
     """Fire (SAML_STRUCTURAL_FORGERY) iff the captured SAML Response ``xml`` exhibits a coarse, c14n-free
     STRUCTURAL forgery invariant a validly signed assertion cannot: (a) the assertion carrying the
     consumed NameID has ZERO ds:Signature; (b) every ds:Reference/@URI points at an id OTHER than the
@@ -2814,7 +2905,17 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
     signature-wrapping shape (>1 assertion, the unsigned consumed one supplies the identity while a
     signature references a DIFFERENT assertion — the dual of scanner.sso.wrap_assertion_xsw). A properly
     signed single assertion, a doc with no consumed NameID, malformed/empty XML, and a DOCTYPE/ENTITY doc
-    (XXE-refused) all DO NOT fire (near-zero-FP). Pure + deterministic; re-verifies offline from the XML."""
+    (XXE-refused) all DO NOT fire (near-zero-FP). Pure + deterministic; re-verifies offline from the XML.
+
+    OPT-IN cryptographic escalation: when ``candidate_certs`` (the OPERATOR-PROVIDED TRUSTED IdP PEM
+    cert(s)) is supplied AND ``signxml`` is importable, the structural NON-FIRE paths (a signature that
+    structurally COVERS the consumed element, or a coverage picture this oracle cannot string-decide) are
+    ADDITIONALLY escalated to a real XML-DSig verification against those trusted anchors — firing
+    (proof=``invalid_signature``) ONLY when the signature is DEFINITIVELY cryptographically invalid
+    (wrong signer / tampered digest). The signature's OWN embedded ds:X509Certificate is NEVER trusted
+    (attacker-controlled), and a signature signxml cannot verify (unsupported transform/algorithm, cert
+    trust/expiry, parse/config error) is REFUSED, not fired. No trusted cert (or signxml absent) => the
+    escalation is DORMANT and this stays byte-identical to the structural-only oracle."""
     kind = OracleKind.SAML_STRUCTURAL_FORGERY
     # Lazy import (see the module-note above) — a parse error at import stays a non-fire, never a raise.
     try:
@@ -2831,6 +2932,24 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
                             evidence="SAML parse helpers unavailable — cannot adjudicate")
 
     text = xml if isinstance(xml, str) else _coerce_text(xml)
+
+    def _crypto_escalation() -> OracleSignal | None:
+        """The opt-in XML-DSig escalation, evaluated ONLY at the structural NON-FIRE points below. Returns
+        a fired signal iff the signature is DEFINITIVELY cryptographically invalid against a trusted cert;
+        otherwise None (verified / refuse / dormant) so the caller returns the structural verdict
+        unchanged. With no candidate_certs it short-circuits to 'unavailable' -> None -> byte-identical."""
+        verdict, detail, extra = _saml_crypto_verdict(text, candidate_certs)
+        if verdict != "invalid":
+            return None
+        return OracleSignal(
+            kind=kind, fired=True, confidence=0.97,
+            evidence=(
+                "cryptographic XML-DSig verification: the ds:Signature is DEFINITIVELY INVALID against the "
+                f"operator-supplied trusted cert(s) — {detail} — a forged/tampered signature no trusted IdP "
+                "key produced (re-verify: signxml XMLVerifier.verify(xml, x509_cert=trusted_pem) raises "
+                "InvalidSignature/InvalidDigest; the document's OWN embedded KeyInfo cert is NOT the anchor)"),
+            observed={"proof": "invalid_signature", **extra})
+
     try:
         # XXE-safe: refuses any DOCTYPE/ENTITY + bounds size; a malicious-entity doc never resolves.
         root = safe_parse_xml(text)
@@ -2925,6 +3044,13 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
 
     covered = whole_doc_sig or bool(referenced_ids & consumed_chain_ids)
     if covered:
+        # Structurally the signature covers the consumed element — but "covers by URI" is not "valid
+        # crypto". If a trusted cert was supplied, escalate: a wrong-signer or tampered-digest forgery
+        # that structurally looks properly signed is caught here (fire); anything short of a definitive
+        # cryptographic invalidity leaves this the structural non-fire below (byte-identical when dormant).
+        esc = _crypto_escalation()
+        if esc is not None:
+            return esc
         return OracleSignal(
             kind=kind, fired=False, confidence=0.0,
             evidence=("a ds:Signature covers the consumed assertion (or an ancestor) — properly signed "
@@ -2975,6 +3101,11 @@ def saml_forgery_oracle(xml: Any) -> OracleSignal:
     # Signatures present but coverage is not string-decidable — no by-id references, the consumed
     # assertion has no id to compare, OR at least one reference is a transform/xpath/full-XPointer form
     # this oracle deliberately does not parse (c14n out of scope). Refuse rather than guess (near-zero-FP).
+    # But if a trusted cert was supplied, signxml's mature c14n may resolve exactly the transforms this
+    # oracle punts on: escalate — fire on a definitive cryptographic invalidity, else stay this refusal.
+    esc = _crypto_escalation()
+    if esc is not None:
+        return esc
     return OracleSignal(
         kind=kind, fired=False, confidence=0.0,
         evidence=("no c14n-free structural forgery invariant holds (signatures present but no provable "
