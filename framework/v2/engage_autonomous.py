@@ -814,13 +814,18 @@ def _drive_reverify(finding: object, registry: Any, ctx: Any, sink: Any) -> Any:
     return invoke_tool(registry, "reverify_finding", {"finding": finding_arg}, ctx, sink=sink)
 
 
-def _discovery_registry(discover_send: Any, discover_check: Any, budget: int) -> Any:
+def _discovery_registry(discover_send: Any, discover_check: Any, budget: int,
+                        *, multi_probe: bool = False) -> Any:
     """A registry carrying ONLY the gated ``probe_surface`` discovery tool, wired with the injected
     ``discover_send`` (production: the gated executor's ``gated_fetch``; tests: a loopback send) and
-    the ONE existing scanner check to wrap (default REFLECTED_XSS). Built on demand so the default
-    autonomous path (discovery off) never imports the scanner tool stack."""
-    from .agents.tools.builtin import probe_surface_registry
-    return probe_surface_registry(discover_send, check=discover_check, max_requests=max(1, int(budget)))
+    the scanner check(s) to wrap. Default: the ONE REFLECTED_XSS check (byte-identical). ``multi_probe``
+    (Slice-3, opt-in) wraps the CURATED near-zero-FP multi-class set so one probe tests a discovered
+    surface for several bug classes. Built on demand so the default autonomous path (discovery off)
+    never imports the scanner tool stack."""
+    from .agents.tools.builtin import curated_probe_checks, probe_surface_registry
+    checks = curated_probe_checks() if multi_probe else None
+    return probe_surface_registry(discover_send, check=discover_check, checks=checks,
+                                  max_requests=max(1, int(budget)))
 
 
 def _drive_probe(target: str, registry: Any, ctx: Any, sink: Any) -> Any:
@@ -1184,6 +1189,7 @@ def run_autonomous_cycle(
     discover_bug_class: str = "xss",
     enable_crawl_expand: bool = False,
     crawl_max_pages: int = 20,
+    enable_multi_probe: bool = False,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1308,7 +1314,7 @@ def run_autonomous_cycle(
         {l.id for l in tree.open_leaves() if l.id not in leaf_to_finding} if discover_active else set())
     out.probe_leaves_seeded = len(probe_leaf_ids)
     discover_registry = (
-        _discovery_registry(discover_send, discover_check, request_budget)
+        _discovery_registry(discover_send, discover_check, request_budget, multi_probe=enable_multi_probe)
         if (discover_active and probe_leaf_ids) else None)
     emitted_discovered: set = set()   # dedup NEW discovered findings by (bug_class, insertion_point, endpoint)
     if discover_active and probe_leaf_ids:

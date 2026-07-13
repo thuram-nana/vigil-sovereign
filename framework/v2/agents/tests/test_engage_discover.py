@@ -502,6 +502,77 @@ def test_discovery_multiparam_html_sibling_does_not_license_json_reflection(
 
 
 # ---------------------------------------------------------------------------
+# SLICE-3 — the generalized probe: one probe tests a discovered surface for
+# several near-zero-FP bug classes (not just XSS), each oracle-adjudicated.
+# ---------------------------------------------------------------------------
+
+
+def _passwd_on_traversal(request) -> Response:
+    """A path-traversal sink: any ``file`` value containing a traversal / ``etc/passwd`` leaks the
+    passwd signature. The PATH_TRAVERSAL content-signature oracle fires on ``root:x:0:0:``."""
+    f = request.args.get("file", "")
+    if "../" in f or "etc/passwd" in f:
+        return Response("root:x:0:0:root:/root:/bin/bash\n", status=200, mimetype="text/plain")
+    return Response("no such file", status=404, mimetype="text/plain")
+
+
+def test_curated_probe_set_covers_multiple_classes():
+    from framework.v2.agents.tools.builtin import curated_probe_checks
+    bug_classes = {str(getattr(c, "bug_class", "")) for c in curated_probe_checks()}
+    assert len(curated_probe_checks()) == 6
+    assert "xss" in bug_classes
+    assert any("redirect" in b for b in bug_classes)
+    assert any("traversal" in b or "lfi" in b for b in bug_classes)
+
+
+def test_multi_probe_mints_a_non_xss_class(isolated_engagement, httpserver: HTTPServer):
+    """The generalized probe finds a PATH-TRAVERSAL on a discovered endpoint — a class the single XSS
+    probe could never mint. Proves one probe now tests a surface for more than reflection-XSS."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/read").respond_with_handler(_passwd_on_traversal)
+
+    url = f"http://127.0.0.1:{port}/read?file=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+
+    assert out.probes_driven == 1 and out.probes_refused == 0
+    assert out.discovered_count >= 1, "the curated probe did not mint the path-traversal finding"
+    minted = [AuditFinding.model_validate(d) for d in out.discovered_findings]
+    assert any("traversal" in m.bug_class or "lfi" in m.bug_class for m in minted)
+
+
+def test_multi_probe_still_gates_xss_on_a_json_endpoint(isolated_engagement, httpserver: HTTPServer):
+    """The per-check content-type gate survives generalization: a JSON API that echoes a value under the
+    curated multi-check probe still mints NO XSS fact (the inert reflection is dropped)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/api").respond_with_handler(_reflect_json)
+
+    url = f"http://127.0.0.1:{port}/api?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.probes_driven == 1
+    assert out.discovered_count == 0, "the multi-check probe minted a false XSS fact on a JSON reflection"
+
+
+def test_multi_probe_still_mints_xss_on_html(isolated_engagement, httpserver: HTTPServer):
+    """Regression: the curated set INCLUDES REFLECTED_XSS, so a genuine HTML reflection still mints an
+    XSS fact under multi-probe (generalization did not drop the base case)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+    minted = [AuditFinding.model_validate(d) for d in out.discovered_findings]
+    assert any(m.bug_class == "xss" for m in minted)
+
+
+# ---------------------------------------------------------------------------
 # determinism — same inputs → same discovery outcome
 # ---------------------------------------------------------------------------
 
