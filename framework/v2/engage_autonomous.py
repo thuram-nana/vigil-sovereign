@@ -200,6 +200,7 @@ class AutonomyResult:
     # byte-identical: no probe-leaves seeded, probe_surface never constructed, nothing minted.
     discover_enabled: bool = False     # discovery was requested AND a send was injected (probe I/O available)
     endpoints_promoted: int = 0        # Slice-0: in-scope recon/sensor assets promoted to url-bearing ENDPOINTs
+    endpoints_expanded: int = 0        # Slice-2: param-bearing surfaces discovered by crawling promoted roots
     probe_leaves_seeded: int = 0       # LOW-prior probe-leaves seeded from ENDPOINT nodes (opt-in)
     probes_driven: int = 0             # probe_surface tool calls that RAN through the gate chain (not refused)
     probes_refused: int = 0            # probe_surface calls a fail-closed gate declined (kill-switch / scope)
@@ -1181,6 +1182,8 @@ def run_autonomous_cycle(
     discover_send: Any = None,
     discover_check: Any = None,
     discover_bug_class: str = "xss",
+    enable_crawl_expand: bool = False,
+    crawl_max_pages: int = 20,
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1253,6 +1256,34 @@ def run_autonomous_cycle(
                     "to testable endpoint(s)")
         except Exception:
             pass   # best-effort: promotion never breaks the cycle
+
+        # DISCOVER — Slice-2 in-loop crawl/mine expansion (opt-in on top of discover; default OFF so the
+        # existing discover tests stay byte-identical). Crawl each promoted ROOT endpoint — bounded,
+        # scope-from-seed, over the SAME gated discover_send — and mint the discovered in-scope
+        # param-bearing URLs as ENDPOINT nodes (provenance intel:expand). They flow through the frontier
+        # into the goal tree, so a promoted host is not just reached but its real pages/params are tested.
+        if enable_crawl_expand and promoted:
+            try:
+                from .intel.expand import expand_endpoint
+                from .worldmodel.models import Node, NodeKind
+                seq = max((n.last_seen for n in world.all_nodes()), default=0) + 1
+                expanded = 0
+                for _pid, root_url in promoted:
+                    for durl in expand_endpoint(discover_send, root_url, max_pages=crawl_max_pages):
+                        nid = f"endpoint:expand:{durl}"
+                        if world.has_node(nid):
+                            continue
+                        world.add_node(Node(id=nid, kind=NodeKind.ENDPOINT,
+                                            attrs={"url": durl, "expanded_from": root_url},
+                                            provenance=f"intel:expand:{root_url}", confidence=0.5,
+                                            first_seen=seq, last_seen=seq))
+                        expanded += 1
+                out.endpoints_expanded = expanded
+                if expanded:
+                    out.notes.append(
+                        f"discovery: crawl-expanded {expanded} in-scope param-bearing surface(s)")
+            except Exception:
+                pass   # best-effort: expansion never breaks the cycle
 
     # ORIENT — goal tree over the confirmed findings (+ opt-in unexplored ENDPOINT probe-leaves) and
     # the planner over the run world-model.

@@ -291,6 +291,57 @@ def test_promotion_of_out_of_scope_service_is_refused(isolated_engagement):
     assert out.probes_driven == 0
 
 
+def _root_links_to_search(request) -> Response:
+    """The promoted root: an HTML page linking to a param-bearing /search page. Crawl-expansion follows
+    the link and discovers /search?q=... as a new testable (injectable) surface."""
+    return Response('<html><body><a href="/search?q=hello">search</a></body></html>',
+                    status=200, mimetype="text/html")
+
+
+def test_full_chain_service_to_crawl_to_param_to_minted_finding(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """THE COMPOUNDING DISCOVERER, end to end: a world with ONLY a recon SERVICE (no ENDPOINT, no param
+    anywhere) -> promotion mints the root endpoint -> crawl-expansion (Slice 2) discovers the real
+    param-bearing /search?q= surface on it -> the gated probe injects q -> the reflection oracle FIRES
+    -> a NEW oracle-confirmed finding is minted. Nothing here was pointed at by a human: the whole chain
+    began from a single discovered service."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root_links_to_search)
+    httpserver.expect_request("/search").respond_with_handler(_reflect)
+
+    world = _service_world("127.0.0.1", port)
+    assert not any(n.kind is NodeKind.ENDPOINT for n in world.all_nodes())
+
+    out = run_autonomous_cycle(
+        _result(world, []), slug="disco", max_cycles=3, enable_discover=True,
+        enable_crawl_expand=True, discover_send=_loopback_send(), prompt_callback=_deny)
+
+    assert out.endpoints_promoted == 1, "the recon SERVICE was not promoted"
+    assert out.endpoints_expanded == 1, "crawl-expansion did not discover the param-bearing surface"
+    assert world.has_node(f"endpoint:expand:http://127.0.0.1:{port}/search?q=hello")
+    # the discovered param surface was probed and the oracle minted a NEW finding
+    assert out.discovered_count >= 1, "the discovered param surface did not mint a finding"
+    minted = [AuditFinding.model_validate(d) for d in out.discovered_findings]
+    assert any(m.bug_class == "xss" and "/search" in m.endpoint for m in minted)
+
+
+def test_crawl_expand_off_by_default_on_discover_path(isolated_engagement, httpserver: HTTPServer):
+    """Crawl-expansion is opt-in ON TOP of discovery: with enable_crawl_expand unset, a promoted root is
+    reached but NOT crawled — the existing discover behaviour is unchanged (byte-identical control)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root_links_to_search)
+    world = _service_world("127.0.0.1", port)
+    out = run_autonomous_cycle(
+        _result(world, []), slug="disco", enable_discover=True,   # enable_crawl_expand default False
+        discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.endpoints_promoted == 1
+    assert out.endpoints_expanded == 0
+    assert not world.has_node(f"endpoint:expand:http://127.0.0.1:{port}/search?q=hello")
+
+
 def test_promotion_off_when_discovery_off(isolated_engagement, httpserver: HTTPServer):
     """Promotion runs ONLY on the opt-in discover path — with discovery off, a world full of recon
     SERVICE nodes promotes nothing and the authoritative report is untouched (byte-identical control)."""
