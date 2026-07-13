@@ -298,11 +298,19 @@ def _build_goal_tree(
             covered.add(str(getattr(f, "endpoint", "") or ""))
             covered.add(_finding_surface(f))
         covered.discard("")
-        for _nid, url in _endpoint_probe_targets(world, exclude=covered):
+        # Slice-1: route the raw ENDPOINT probe-targets through the DiscoveryFrontier — it collapses
+        # value-variants of one location to a single canonical key, orders by expected information gain,
+        # and CAPS the count so a large recon/crawl graph cannot flood the goal tree. For a single
+        # producer / a single endpoint this returns the same one leaf (the existing behaviour); its value
+        # compounds once in-loop crawling (Slice 2) feeds many near-duplicate surfaces in.
+        from .intel.frontier import frontier_from_targets
+        targets = _endpoint_probe_targets(world, exclude=covered)
+        fr = frontier_from_targets(targets, world=world, bug_class=bc, prior=prior)
+        for item in fr.items():
             tree.add(
                 parent_id=root, kind="leaf",
-                label=f"probe {bc} @ {url}"[:120],
-                prior=prior, value=1.0, bug_class=bc, surface=url,
+                label=f"probe {item.bug_class} @ {item.url}"[:120],
+                prior=item.prior, value=1.0, bug_class=item.bug_class, surface=item.url,
                 estimate=CostEstimate(requests=1),
             )
     return tree, leaf_to_finding
