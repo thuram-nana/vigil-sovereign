@@ -29,26 +29,34 @@ response-differential SAML checks in ``scanner.sso`` (SamlSignatureWrapping / Sa
 
 from __future__ import annotations
 
+from typing import Sequence
+
 from .adapter import FindingContext
 from .models import VerificationResult
 from .verifier import OracleVerifier
 
 
-def saml_forgery_context(xml: str) -> dict:
-    """The verifier context for a captured SAML Response's decoded XML — routes to the saml-forgery oracle."""
-    return FindingContext.from_saml_structure(xml).to_verifier_context()
+def saml_forgery_context(xml: str, candidate_certs: Sequence[str | bytes] = ()) -> dict:
+    """The verifier context for a captured SAML Response's decoded XML — routes to the saml-forgery
+    oracle. ``candidate_certs`` are the OPT-IN operator-supplied TRUSTED IdP PEM cert(s) the XML-DSig
+    signature is cryptographically verified against when ``signxml`` is importable (absent -> structural)."""
+    return FindingContext.from_saml_structure(xml, candidate_certs=candidate_certs).to_verifier_context()
 
 
 def confirm_saml_forgery(
     xml: str,
+    candidate_certs: Sequence[str | bytes] = (),
     *,
     verifier: OracleVerifier | None = None,
 ) -> VerificationResult:
     """Judge a captured SAML Response with the deterministic oracle: ``confirmed`` iff the decoded XML is
     provably STRUCTURALLY FORGEABLE from the message alone — an unsigned consumed assertion, a
     ds:Reference/@URI that does not cover the consumed element, or the signature-wrapping shape (the dual
-    of ``scanner.sso.wrap_assertion_xsw``). The XML is JSON-safe, so the same verdict re-verifies offline
-    from the finding's certificate via ``verify.reverify``. A properly signed single assertion, a doc with
-    no consumed NameID, and malformed / XXE-refused XML are NOT confirmed (they stay honest LEADs). ZERO
-    forged traffic to any target."""
-    return (verifier or OracleVerifier()).confirm(saml_forgery_context(xml))
+    of ``scanner.sso.wrap_assertion_xsw``); OR (opt-in, when ``candidate_certs`` — the TRUSTED IdP cert(s)
+    — are supplied AND ``signxml`` is importable) when the ds:Signature is DEFINITIVELY cryptographically
+    INVALID against those trusted anchors (wrong signer / tampered digest). The signature's OWN embedded
+    cert is NEVER trusted, and a signature signxml cannot verify is REFUSED not confirmed. The XML + PEM
+    certs are JSON-safe, so the same verdict re-verifies offline from the finding's certificate via
+    ``verify.reverify``. A properly signed single assertion, a doc with no consumed NameID, and malformed
+    / XXE-refused XML are NOT confirmed (they stay honest LEADs). ZERO forged traffic to any target."""
+    return (verifier or OracleVerifier()).confirm(saml_forgery_context(xml, candidate_certs))

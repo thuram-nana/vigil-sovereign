@@ -297,6 +297,14 @@ class FindingContext(BaseModel):
     # SAML Response XML string. No benchmark/scan/engage finding carries saml_xml, so appending this
     # leaves the gate byte-identical.
     saml_xml: str | None = None
+    # saml_candidate_certs (the OPT-IN cryptographic escalation, mirroring jwt_candidate_keys): the
+    # OPERATOR-PROVIDED TRUSTED IdP signing cert(s) (PEM), the trust anchor the XML-DSig signature is
+    # cryptographically verified against when `signxml` is importable. The signature's OWN embedded
+    # ds:X509Certificate is NEVER a trust anchor (an attacker controls it — that self-signed FP is
+    # exactly what got the JWT x5c/embedded-key oracle rejected). When empty (or signxml absent) the
+    # crypto branch is DORMANT and the oracle degrades to structural-only, byte-identical. No
+    # benchmark/scan/engage finding carries saml_candidate_certs.
+    saml_candidate_certs: list[str] | None = None
 
     # -- builders ----------------------------------------------------------
 
@@ -620,6 +628,7 @@ class FindingContext(BaseModel):
         cls,
         xml: str,
         *,
+        candidate_certs: Sequence[str | bytes] = (),
         bug_class: str = "saml_structural_forgery",
     ) -> "FindingContext":
         """A captured SAML Response's decoded XML, for the saml-forgery oracle (Workstream NW-1 — the
@@ -631,11 +640,22 @@ class FindingContext(BaseModel):
         consumed NameID, malformed/empty XML, and a DOCTYPE/ENTITY doc (XXE-refused) do NOT confirm
         (near-zero-FP).
 
-        The XML is JSON-safe, so a confirmed forgery re-verifies OFFLINE from its certificate
-        (``verify.reverify``) — re-run the pure oracle over the retained XML, get the same verdict. Full
-        XML-DSig C14N/transform processing is deliberately NOT attempted (needs lxml/signxml, out of
-        scope); this is the offline structural complement to the LIVE response-differential SAML checks."""
-        return cls(bug_class=bug_class, saml_xml=_coerce_text(xml))
+        ``candidate_certs`` (OPT-IN, mirroring ``from_jwt_token``'s ``candidate_keys``) are the
+        OPERATOR-PROVIDED TRUSTED IdP signing cert(s) (PEM). When supplied AND ``signxml`` is importable,
+        the oracle ADDITIONALLY runs a real XML-DSig cryptographic verification against those trusted
+        anchors and fires when the signature is DEFINITIVELY invalid (wrong signer / tampered digest).
+        The signature's OWN embedded ds:X509Certificate is NEVER trusted (an attacker controls it). When
+        no trusted cert is supplied (or signxml is absent) the crypto branch is DORMANT and this degrades
+        to the structural-only oracle, byte-identical.
+
+        The XML (and PEM certs) are JSON-safe, so a confirmed forgery re-verifies OFFLINE from its
+        certificate (``verify.reverify``) — re-run the pure oracle over the retained XML + trusted certs,
+        get the same verdict. This is the offline structural complement to the LIVE response-differential
+        SAML checks, with an opt-in cryptographic escalation."""
+        certs = [c.decode("utf-8", "replace") if isinstance(c, bytes) else _coerce_text(c)
+                 for c in (candidate_certs or ())]
+        return cls(bug_class=bug_class, saml_xml=_coerce_text(xml),
+                   saml_candidate_certs=certs or None)
 
     @classmethod
     def from_process_output(
@@ -914,6 +934,8 @@ class FindingContext(BaseModel):
                 ctx["jwt_candidate_keys"] = self.jwt_candidate_keys
         if self.saml_xml is not None:
             ctx["saml_xml"] = self.saml_xml
+            if self.saml_candidate_certs is not None:
+                ctx["saml_candidate_certs"] = self.saml_candidate_certs
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary

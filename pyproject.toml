@@ -62,6 +62,7 @@ embeddings  = ["sentence-transformers>=2,<6"]
 analysis    = ["semgrep>=1.100"]
 smt         = ["z3-solver>=4.12,<5"]
 numerics    = ["numpy>=1.26,<3"]
+saml        = ["signxml>=5,<6"]                # opt-in cryptographic SAML XML-DSig verification (pulls lxml + cryptography)
 dev         = ["pytest>=8,<11", "mypy>=1.10,<2"]
 
 # Console entry points. `python3 -m framework.v2 <subcommand>` keeps working exactly

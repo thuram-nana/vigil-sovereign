@@ -703,7 +703,10 @@ class OracleVerifier:
         #    on the gate path.
         if kind is OracleKind.SAML_STRUCTURAL_FORGERY:
             if "saml_xml" in ctx:
-                return oracles.saml_forgery_oracle(ctx["saml_xml"])
+                # saml_candidate_certs (opt-in trusted IdP PEM certs) escalates to a real XML-DSig
+                # verification when supplied AND signxml is importable; absent -> structural-only.
+                return oracles.saml_forgery_oracle(
+                    ctx["saml_xml"], candidate_certs=ctx.get("saml_candidate_certs", ()))
             return None
         return None
 
