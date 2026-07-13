@@ -109,7 +109,8 @@ def _service_host(world: "WorldModel", svc_id: str, svc_key: str) -> str | None:
         from ..worldmodel.models import EdgeKind, NodeKind
         for e in world.neighbors(svc_id, [EdgeKind.HOSTS], incoming=True):
             src = world.get_node(e.src)
-            if src is not None and src.kind in (NodeKind.HOST, NodeKind.NETBLOCK):
+            # only a single HOST is a dialable authority — a NETBLOCK is a CIDR, never a URL host.
+            if src is not None and src.kind is NodeKind.HOST:
                 return _key_of(e.src)
     except Exception:
         pass
@@ -131,7 +132,7 @@ def promote_to_endpoints(world: "WorldModel | None", slug: str, *, seq: int | No
     if world is None:
         return []
     try:
-        from ..common.ethics import CharterMissing, host_matches_scope, parse_scope
+        from ..common.ethics import CharterMissing, extract_hostname, host_matches_scope, parse_scope
         from ..worldmodel.models import Node, NodeKind
     except Exception:
         return []
@@ -159,8 +160,24 @@ def promote_to_endpoints(world: "WorldModel | None", slug: str, *, seq: int | No
         if not h or not host_matches_scope(h, scope):
             return
         url = _url_for(h, scheme, port)
-        if url is not None:
-            candidates.append((src_id, h, url))
+        if url is None:
+            return
+        # ROUND-TRIP the built url through the SAME authority parser the live gate uses
+        # (``extract_hostname`` / urlparse). ``host_matches_scope`` is pure string suffix/exact
+        # matching, so a node key that string-matches scope but carries a URL-authority delimiter
+        # (``#``/``/``/``?``/``@``/a stray ``:``) or a CIDR ``/nn`` would embed verbatim as the
+        # authority yet PARSE to a DIFFERENT host — e.g. ``evil.com#.example.com`` matches
+        # ``*.example.com`` but dials ``evil.com``; ``10.0.0.0/24`` dials ``10.0.0.0``. Requiring the
+        # PARSED authority to equal the gated host (and to re-pass scope) makes promotion in-scope BY
+        # CONSTRUCTION — the same authority the per-request gate will re-authorize — and keeps a bare
+        # hostname / IPv4 / bracketed-IPv6 (which round-trip to themselves) promotable.
+        authority = extract_hostname(url)
+        if authority is None:
+            return
+        authority = authority.strip().rstrip(".").lower()
+        if authority != h or not host_matches_scope(authority, scope):
+            return
+        candidates.append((src_id, authority, url))
 
     try:
         for n in world.nodes_of_kind(NodeKind.DOMAIN):

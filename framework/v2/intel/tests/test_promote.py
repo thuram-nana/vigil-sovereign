@@ -204,6 +204,65 @@ def test_wildcard_and_apex_both_match(charter):
 
 
 # ---------------------------------------------------------------------------
+# SCOPE-ESCAPE regression (review wa4kfojcv): a node key that STRING-matches scope
+# but whose real parsed URL authority is a DIFFERENT (out-of-scope) host must NOT
+# be promoted — in-scope BY CONSTRUCTION, not by string-match.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("evil_key", [
+    "evil.com#.example.com",   # '#' → urlparse authority is evil.com (fragment split)
+    "evil.com/.example.com",   # '/' → authority evil.com, rest is path
+    "evil.com?.example.com",   # '?' → authority evil.com, rest is query
+    "evil.com@.example.com",   # '@' → userinfo split, authority is .example.com/evil
+])
+def test_delimiter_key_that_string_matches_scope_is_not_promoted(charter, evil_key):
+    charter("t", ["*.example.com"])
+    w = _world()
+    _domain(w, evil_key)                 # a crafted DOMAIN key that ends with .example.com as a STRING
+    _domain(w, "legit.example.com")      # a genuinely in-scope sibling (control — must still promote)
+    minted = promote_to_endpoints(w, "t")
+    urls = [u for _, u in minted]
+    assert "https://legit.example.com/" in urls, "the genuine in-scope host regressed"
+    # NO promoted url may parse to an out-of-scope authority
+    from framework.v2.common.ethics import extract_hostname, host_matches_scope, parse_scope
+    scope = parse_scope("t")
+    for u in urls:
+        auth = extract_hostname(u)
+        assert auth is not None and host_matches_scope(auth, scope), \
+            f"promoted {u!r} has out-of-scope authority {auth!r}"
+
+
+def test_cidr_netblock_service_is_not_promoted(charter):
+    """A NETBLOCK--HOSTS-->SERVICE (a real sensor shape) yields a service key like ``10.0.0.0/24:443/tcp``
+    whose host string-equals a CIDR charter entry, but ``https://10.0.0.0/24/`` parses to authority
+    ``10.0.0.0`` — a CIDR is not a dialable host, so it must NOT be promoted."""
+    charter("t", ["10.0.0.0/24"])
+    w = _world()
+    svc_id = "service:10.0.0.0/24:443/tcp"
+    w.add_node(Node(id=svc_id, kind=NodeKind.SERVICE,
+                    attrs={"port": 443, "protocol": "tcp", "service": "https"},
+                    provenance="intel:obs", confidence=0.7, first_seen=1, last_seen=1))
+    w.add_node(Node(id="netblock:10.0.0.0/24", kind=NodeKind.NETBLOCK, attrs={},
+                    provenance="intel:obs", confidence=0.7, first_seen=1, last_seen=1))
+    w.add_edge(Edge(src="netblock:10.0.0.0/24", dst=svc_id, kind=EdgeKind.HOSTS,
+                    provenance="intel:obs", confidence=0.7, first_seen=1, last_seen=1))
+    assert promote_to_endpoints(w, "t") == []
+
+
+def test_promoted_host_attr_is_the_real_parsed_authority(charter):
+    """attrs.host records the REAL parsed authority (what the endpoint will dial), never a raw key that
+    only string-matched — so the console/operator never sees an out-of-scope authority mislabeled."""
+    charter("t", ["*.example.com"])
+    w = _world()
+    _domain(w, "api.example.com")
+    minted = promote_to_endpoints(w, "t")
+    node = w.get_node(minted[0][0])
+    from framework.v2.common.ethics import extract_hostname
+    assert node.attrs["host"] == extract_hostname(node.attrs["url"]) == "api.example.com"
+
+
+# ---------------------------------------------------------------------------
 # best-effort: no charter / no scope / no world → empty, never raises
 # ---------------------------------------------------------------------------
 
