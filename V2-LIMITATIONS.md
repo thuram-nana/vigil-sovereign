@@ -43,7 +43,13 @@ JWT structural-forgery oracle, 1 `SAML_STRUCTURAL_FORGERY` offline SAML structur
 oracle, 1 `CLOUD_POSTURE` offline cloud/CSPM promotion oracle, 1 `MESH_POSTURE` offline
 service-mesh posture oracle) — each fires only on a context key no benchmark finding
 carries, which is *why* the gate stays byte-identical. The cloud oracle is also wired
-into the opt-in `--fuse-sensors` promotion loop. (A JWT embedded-key/`x5c` forgery oracle
+into the opt-in `--fuse-sensors` promotion loop. AEGIS now also has **passive-OOB belief
+elevation** (`aegis gateway --oob-canary`): an opt-in, loopback-only OOB receiver + an
+operator-planted static canary that, when an attacker's own SSRF/XXE payload references the
+canary and the app dereferences it, elevates that actor's per-actor belief toward the graduated
+challenge/throttle — **never a block, never injecting a request** (translator-not-generator,
+proven byte-identical; a dedicated generator-drift review lens came back negative), and adds no
+OracleKind. (A JWT embedded-key/`x5c` forgery oracle
 was built and then **rejected in review** — a legitimate CA-chained `x5c` and DPoP/SIOP
 embedded-`jwk` tokens are indistinguishable from a forgery offline — so it was NOT merged;
 the near-zero-FP bar held.) AEGIS is also now **pip-installable + Docker-shippable**
