@@ -182,7 +182,14 @@ class OOBCorrelator:
                     # so a benign/early hit can never RETRO-correlate to a later probe (a real
                     # correlation's hit always lands AFTER its pending was recorded synchronously).
                     self._remember_hit(hid)
-                    for actor_key, attack_class, _seq in list(self._pending.values()):
+                    # ONE elevation per (new hit × DISTINCT actor): an actor who probed the canary N
+                    # times is not counted N-fold for a single inbound hit (each probe already fed its
+                    # own lead). The actor's earliest-seen attack_class labels the elevation.
+                    seen_actors: set[str] = set()
+                    for actor_key, attack_class, _seq in self._pending.values():
+                        if actor_key in seen_actors:
+                            continue
+                        seen_actors.add(actor_key)
                         out.append(Elevation(actor_key=actor_key, attack_class=attack_class,
                                              referenced_host=self.canary_host, hit_path=hit.path))
         except Exception:
