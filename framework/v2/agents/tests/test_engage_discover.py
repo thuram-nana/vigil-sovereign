@@ -573,6 +573,64 @@ def test_multi_probe_still_mints_xss_on_html(isolated_engagement, httpserver: HT
 
 
 # ---------------------------------------------------------------------------
+# SLICE-4 — the autonomy-posture seam: "discover-queue" (the safe default)
+# enumerates autonomously but PARKS probe-leaves for operator approval, issuing
+# ZERO probe traffic; "auto-test" actively probes.
+# ---------------------------------------------------------------------------
+
+
+def test_discover_queue_posture_issues_zero_probe_traffic(isolated_engagement):
+    """The safe default: a probe-leaf is QUEUED for operator approval, not tested. The injected send is
+    NEVER reached (zero target probe traffic), nothing is minted, and the candidate is recorded."""
+    isolated_engagement("disco", "127.0.0.1")
+
+    def _no_send(_req):
+        raise AssertionError("discover-queue posture must issue ZERO probe traffic")
+
+    url = "http://127.0.0.1/reflect?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_no_send, probe_posture="discover-queue", prompt_callback=_deny)
+
+    assert out.probe_posture == "discover-queue"
+    assert out.probe_leaves_seeded == 1
+    assert out.candidates_queued == 1
+    assert out.queued_candidates == [url]
+    assert out.probes_driven == 0 and out.discovered_count == 0
+    assert out.cycles and out.cycles[0].is_probe is True
+    assert out.cycles[0].refused is False   # not a refusal — a deliberate park
+
+
+def test_auto_test_posture_probes_and_mints(isolated_engagement, httpserver: HTTPServer):
+    """The opt-in auto-test posture actively drives the gated probe and mints on a fire — the same chain
+    the existing discover tests exercise, here pinned against the posture field."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), probe_posture="auto-test", prompt_callback=_deny)
+    assert out.probe_posture == "auto-test"
+    assert out.candidates_queued == 0
+    assert out.probes_driven == 1 and out.discovered_count == 1
+
+
+def test_default_posture_is_auto_test_at_function_level(isolated_engagement, httpserver: HTTPServer):
+    """The function default stays auto-test (back-compat for the existing discover tests + direct
+    callers); the CONSERVATIVE discover-queue default is applied at the engage CLI boundary."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+    out = run_autonomous_cycle(   # no probe_posture arg
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.probe_posture == "auto-test"
+    assert out.probes_driven == 1
+
+
+# ---------------------------------------------------------------------------
 # determinism — same inputs → same discovery outcome
 # ---------------------------------------------------------------------------
 

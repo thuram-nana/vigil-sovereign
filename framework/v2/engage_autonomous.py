@@ -201,6 +201,9 @@ class AutonomyResult:
     discover_enabled: bool = False     # discovery was requested AND a send was injected (probe I/O available)
     endpoints_promoted: int = 0        # Slice-0: in-scope recon/sensor assets promoted to url-bearing ENDPOINTs
     endpoints_expanded: int = 0        # Slice-2: param-bearing surfaces discovered by crawling promoted roots
+    probe_posture: str = "auto-test"   # Slice-4: "auto-test" (probe now) | "discover-queue" (queue for human)
+    candidates_queued: int = 0         # Slice-4: probe-leaves parked for operator approval (discover-queue, no traffic)
+    queued_candidates: list = field(default_factory=list)  # the surfaces queued (discover-queue posture)
     probe_leaves_seeded: int = 0       # LOW-prior probe-leaves seeded from ENDPOINT nodes (opt-in)
     probes_driven: int = 0             # probe_surface tool calls that RAN through the gate chain (not refused)
     probes_refused: int = 0            # probe_surface calls a fail-closed gate declined (kill-switch / scope)
@@ -1190,6 +1193,7 @@ def run_autonomous_cycle(
     enable_crawl_expand: bool = False,
     crawl_max_pages: int = 20,
     enable_multi_probe: bool = False,
+    probe_posture: str = "auto-test",
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1245,6 +1249,12 @@ def run_autonomous_cycle(
     # so everything below is byte-identical to the pre-discovery loop.
     discover_active = bool(enable_discover) and discover_send is not None and world is not None
     out.discover_enabled = discover_active
+    # Slice-4 posture: "discover-queue" (park probe-leaves for operator approval, zero probe traffic) is
+    # the SAFE operator default; "auto-test" actively probes. Any unrecognised value falls back to the
+    # active posture (the function's back-compat default) — the operator-facing safe default lives at the
+    # engage CLI. Normalised once here.
+    probe_posture = "discover-queue" if str(probe_posture) == "discover-queue" else "auto-test"
+    out.probe_posture = probe_posture
 
     # DISCOVER — Slice-0 asset→endpoint promotion (the recon→test bridge). Before the goal tree is
     # built, promote each IN-SCOPE recon/sensor asset (DOMAIN/HOST/web-SERVICE) into a url-bearing
@@ -1404,9 +1414,24 @@ def run_autonomous_cycle(
 
         # ACT — drive the picked action as a GATED tool call.
         tree.mark_status(leaf.id, "claimed")
-        if is_probe:
-            # ACT (DISCOVER) — drive the gated probe_surface tool over the unexplored endpoint. It
-            # runs ONE existing scanner check and mints a NEW oracle-confirmed finding ONLY if the
+        if is_probe and probe_posture == "discover-queue":
+            # ACT (DISCOVER, discover-queue posture) — the SAFE default: enumerate/promote/crawl runs
+            # autonomously, but a probe-leaf is PARKED for operator approval rather than actively
+            # tested. Zero target probe traffic is issued here (the hypothesis lead was already emitted
+            # to the spine above); the operator reviews the queued candidates and re-runs under
+            # auto-test to actually probe an approved batch. Keeps a human on the ACT trigger.
+            step.tool = "probe_surface"
+            step.gated = True
+            step.tool_ok = True
+            step.verdict = f"queued for operator approval (discover-queue posture — no traffic): {leaf.surface}"
+            out.candidates_queued += 1
+            out.queued_candidates.append(str(leaf.surface))
+            tree.mark_status(leaf.id, "deferred")
+            out.notes.append(
+                f"cycle {c}: QUEUED probe candidate {leaf.surface} (discover-queue — awaiting operator approval)")
+        elif is_probe:
+            # ACT (DISCOVER, auto-test posture) — drive the gated probe_surface tool over the unexplored
+            # endpoint. It runs the curated check(s) and mints a NEW oracle-confirmed finding ONLY if a
             # check's deterministic oracle FIRES; the tool/planner never promote on their own.
             res = _drive_probe(leaf.surface, discover_registry, ctx, sink)
             step.tool = "probe_surface"

@@ -955,6 +955,15 @@ def _run_autonomous(args: argparse.Namespace, result: EngagementResult, spine: o
             # only when the wrapped check's oracle fires. Off (no send) → byte-identical.
             enable_discover=bool(getattr(args, "autonomous_discover", False)),
             discover_send=discover_send,
+            # Slice-2/3/4 — opt-in discovery depth (all default OFF → byte-identical). --autonomous-
+            # crawl-expand crawls each promoted root for its real param-bearing surfaces; --autonomous-
+            # multi-probe wraps the curated near-zero-FP multi-class check set; --autonomous-posture
+            # chooses whether a probe-leaf is TESTED now (auto-test) or PARKED for operator approval
+            # (discover-queue, the SAFE default). --discover-autotest is the explicit opt-in shortcut.
+            enable_crawl_expand=bool(getattr(args, "autonomous_crawl_expand", False)),
+            enable_multi_probe=bool(getattr(args, "autonomous_multi_probe", False)),
+            probe_posture=("auto-test" if getattr(args, "discover_autotest", False)
+                           else str(getattr(args, "autonomous_posture", "discover-queue"))),
             blackboard=spine,   # reuse the --spine blackboard as planning substrate + tool sink
             # LEARN — opt in (default OFF) to writing this run's confirm/refute outcomes to the
             # operator's targets/<slug>/outcomes.json, closing the learning loop the meta-monitor
@@ -1144,6 +1153,28 @@ def main(argv: list[str]) -> int:
                              "switch REFUSES the probe. Off by default (byte-identical); the "
                              "authoritative scan report is never mutated (discovered facts are "
                              "reported separately + on the spine).")
+    parser.add_argument("--autonomous-crawl-expand", action="store_true",
+                        help="EXPAND (opt-in; on top of --autonomous-discover): crawl each promoted/"
+                             "discovered ROOT endpoint (bounded, scope-from-seed, over the same gated "
+                             "send) and mint the discovered in-scope PARAM-BEARING surfaces as testable "
+                             "endpoints — so a discovered host is not just reached but its real pages/"
+                             "parameters are tested. Off by default (byte-identical).")
+    parser.add_argument("--autonomous-multi-probe", action="store_true",
+                        help="Probe each discovered surface with the CURATED near-zero-FP multi-class "
+                             "check set (reflected-XSS + open-redirect + path-traversal + SSTI + "
+                             "boolean-SQLi) instead of reflected-XSS only — one probe tests several bug "
+                             "classes, each oracle-adjudicated. Off by default (byte-identical).")
+    parser.add_argument("--autonomous-posture", choices=("discover-queue", "auto-test"),
+                        default="discover-queue",
+                        help="Whether an autonomously-discovered probe-leaf is TESTED now (`auto-test`) "
+                             "or PARKED for operator approval (`discover-queue`, the SAFE DEFAULT — "
+                             "enumeration/promotion/crawl run autonomously, but zero probe traffic is "
+                             "issued until you approve a batch). Every probe is fully gated in BOTH "
+                             "postures; discover-queue simply keeps a human on the ACT trigger.")
+    parser.add_argument("--discover-autotest", action="store_true",
+                        help="Shortcut for --autonomous-posture auto-test: actively test discovered "
+                             "surfaces within charter scope (bounded, gated, oracle-adjudicated). "
+                             "Explicit opt-in — the default parks discoveries for your approval.")
     parser.add_argument("--autonomous-lookahead", action="store_true",
                         help="Use bounded MULTI-STEP lookahead (depth-2) for --autonomous action "
                              "selection instead of one-step greedy (default off = byte-identical). "
