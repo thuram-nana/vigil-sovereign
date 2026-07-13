@@ -291,6 +291,57 @@ def test_promotion_of_out_of_scope_service_is_refused(isolated_engagement):
     assert out.probes_driven == 0
 
 
+def _root_links_to_search(request) -> Response:
+    """The promoted root: an HTML page linking to a param-bearing /search page. Crawl-expansion follows
+    the link and discovers /search?q=... as a new testable (injectable) surface."""
+    return Response('<html><body><a href="/search?q=hello">search</a></body></html>',
+                    status=200, mimetype="text/html")
+
+
+def test_full_chain_service_to_crawl_to_param_to_minted_finding(
+    isolated_engagement, httpserver: HTTPServer,
+):
+    """THE COMPOUNDING DISCOVERER, end to end: a world with ONLY a recon SERVICE (no ENDPOINT, no param
+    anywhere) -> promotion mints the root endpoint -> crawl-expansion (Slice 2) discovers the real
+    param-bearing /search?q= surface on it -> the gated probe injects q -> the reflection oracle FIRES
+    -> a NEW oracle-confirmed finding is minted. Nothing here was pointed at by a human: the whole chain
+    began from a single discovered service."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root_links_to_search)
+    httpserver.expect_request("/search").respond_with_handler(_reflect)
+
+    world = _service_world("127.0.0.1", port)
+    assert not any(n.kind is NodeKind.ENDPOINT for n in world.all_nodes())
+
+    out = run_autonomous_cycle(
+        _result(world, []), slug="disco", max_cycles=3, enable_discover=True,
+        enable_crawl_expand=True, discover_send=_loopback_send(), prompt_callback=_deny)
+
+    assert out.endpoints_promoted == 1, "the recon SERVICE was not promoted"
+    assert out.endpoints_expanded == 1, "crawl-expansion did not discover the param-bearing surface"
+    assert world.has_node(f"endpoint:expand:http://127.0.0.1:{port}/search?q=hello")
+    # the discovered param surface was probed and the oracle minted a NEW finding
+    assert out.discovered_count >= 1, "the discovered param surface did not mint a finding"
+    minted = [AuditFinding.model_validate(d) for d in out.discovered_findings]
+    assert any(m.bug_class == "xss" and "/search" in m.endpoint for m in minted)
+
+
+def test_crawl_expand_off_by_default_on_discover_path(isolated_engagement, httpserver: HTTPServer):
+    """Crawl-expansion is opt-in ON TOP of discovery: with enable_crawl_expand unset, a promoted root is
+    reached but NOT crawled — the existing discover behaviour is unchanged (byte-identical control)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/").respond_with_handler(_root_links_to_search)
+    world = _service_world("127.0.0.1", port)
+    out = run_autonomous_cycle(
+        _result(world, []), slug="disco", enable_discover=True,   # enable_crawl_expand default False
+        discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.endpoints_promoted == 1
+    assert out.endpoints_expanded == 0
+    assert not world.has_node(f"endpoint:expand:http://127.0.0.1:{port}/search?q=hello")
+
+
 def test_promotion_off_when_discovery_off(isolated_engagement, httpserver: HTTPServer):
     """Promotion runs ONLY on the opt-in discover path — with discovery off, a world full of recon
     SERVICE nodes promotes nothing and the authoritative report is untouched (byte-identical control)."""
@@ -448,6 +499,183 @@ def test_discovery_multiparam_html_sibling_does_not_license_json_reflection(
         discover_send=_loopback_send(), prompt_callback=_deny)
     # the JSON reflection is inert; the sibling static HTML page carries no marker → nothing minted.
     assert out.probes_driven == 1 and out.discovered_count == 0
+
+
+# ---------------------------------------------------------------------------
+# SLICE-3 — the generalized probe: one probe tests a discovered surface for
+# several near-zero-FP bug classes (not just XSS), each oracle-adjudicated.
+# ---------------------------------------------------------------------------
+
+
+def _passwd_on_traversal(request) -> Response:
+    """A path-traversal sink: any ``file`` value containing a traversal / ``etc/passwd`` leaks the
+    passwd signature. The PATH_TRAVERSAL content-signature oracle fires on ``root:x:0:0:``."""
+    f = request.args.get("file", "")
+    if "../" in f or "etc/passwd" in f:
+        return Response("root:x:0:0:root:/root:/bin/bash\n", status=200, mimetype="text/plain")
+    return Response("no such file", status=404, mimetype="text/plain")
+
+
+def test_curated_probe_set_covers_multiple_classes():
+    from framework.v2.agents.tools.builtin import curated_probe_checks
+    bug_classes = {str(getattr(c, "bug_class", "")) for c in curated_probe_checks()}
+    assert len(curated_probe_checks()) == 5
+    assert "xss" in bug_classes
+    assert any("redirect" in b for b in bug_classes)
+    assert any("traversal" in b or "lfi" in b for b in bug_classes)
+    # review wcqss59lb (CRITICAL): the single-shot boolean-SQLi DifferentialCheck is DELIBERATELY out —
+    # it false-fires on any benign input-validation / WAF-block differential.
+    assert not any("sqli" in b or "sql_injection" in b for b in bug_classes)
+
+
+def _validating_endpoint(request) -> Response:
+    """A BENIGN app that VALIDATES input: a value with a SQL metacharacter is rejected with 403; a clean
+    value is served 200. This is the review's CRITICAL false-positive: a single-shot boolean-SQLi
+    differential (benign 200 vs "x' OR '1'='1" 403) would mint a false boolean_sqli fact — the app is
+    DEFENDING against SQLi, not vulnerable to it. The curated set must mint NOTHING here."""
+    q = request.args.get("q", "")
+    if "'" in q or '"' in q or "=" in q:
+        return Response("blocked: illegal characters", status=403, mimetype="text/plain")
+    return Response("<html><body>ok</body></html>", status=200, mimetype="text/html")
+
+
+def test_multi_probe_no_false_sqli_on_input_validation(isolated_engagement, httpserver: HTTPServer):
+    """Regression for review wcqss59lb CRITICAL: the generalized probe mints NO false boolean_sqli fact
+    on a benign input-validating endpoint (200 clean vs 403 on a quote). Nothing is minted."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/q").respond_with_handler(_validating_endpoint)
+    url = f"http://127.0.0.1:{port}/q?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.probes_driven == 1
+    assert out.discovered_count == 0, "the multi-probe minted a false fact on an input-validating app"
+
+
+def test_multi_probe_mints_a_non_xss_class(isolated_engagement, httpserver: HTTPServer):
+    """The generalized probe finds a PATH-TRAVERSAL on a discovered endpoint — a class the single XSS
+    probe could never mint. Proves one probe now tests a surface for more than reflection-XSS."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/read").respond_with_handler(_passwd_on_traversal)
+
+    url = f"http://127.0.0.1:{port}/read?file=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+
+    assert out.probes_driven == 1 and out.probes_refused == 0
+    assert out.discovered_count >= 1, "the curated probe did not mint the path-traversal finding"
+    minted = [AuditFinding.model_validate(d) for d in out.discovered_findings]
+    assert any("traversal" in m.bug_class or "lfi" in m.bug_class for m in minted)
+
+
+def test_multi_probe_still_gates_xss_on_a_json_endpoint(isolated_engagement, httpserver: HTTPServer):
+    """The per-check content-type gate survives generalization: a JSON API that echoes a value under the
+    curated multi-check probe still mints NO XSS fact (the inert reflection is dropped)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/api").respond_with_handler(_reflect_json)
+
+    url = f"http://127.0.0.1:{port}/api?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.probes_driven == 1
+    assert out.discovered_count == 0, "the multi-check probe minted a false XSS fact on a JSON reflection"
+
+
+def test_multi_probe_still_mints_xss_on_html(isolated_engagement, httpserver: HTTPServer):
+    """Regression: the curated set INCLUDES REFLECTED_XSS, so a genuine HTML reflection still mints an
+    XSS fact under multi-probe (generalization did not drop the base case)."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        enable_multi_probe=True, discover_send=_loopback_send(), prompt_callback=_deny)
+    minted = [AuditFinding.model_validate(d) for d in out.discovered_findings]
+    assert any(m.bug_class == "xss" for m in minted)
+
+
+# ---------------------------------------------------------------------------
+# SLICE-4 — the autonomy-posture seam: "discover-queue" (the safe default)
+# enumerates autonomously but PARKS probe-leaves for operator approval, issuing
+# ZERO probe traffic; "auto-test" actively probes.
+# ---------------------------------------------------------------------------
+
+
+def test_discover_queue_posture_issues_zero_probe_traffic(isolated_engagement):
+    """The safe default: a probe-leaf is QUEUED for operator approval, not tested. The injected send is
+    NEVER reached (zero target probe traffic), nothing is minted, and the candidate is recorded."""
+    isolated_engagement("disco", "127.0.0.1")
+
+    def _no_send(_req):
+        raise AssertionError("discover-queue posture must issue ZERO probe traffic")
+
+    url = "http://127.0.0.1/reflect?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_no_send, probe_posture="discover-queue", prompt_callback=_deny)
+
+    assert out.probe_posture == "discover-queue"
+    assert out.probe_leaves_seeded == 1
+    assert out.candidates_queued == 1
+    assert out.queued_candidates == [url]
+    assert out.probes_driven == 0 and out.discovered_count == 0
+    assert out.cycles and out.cycles[0].is_probe is True
+    assert out.cycles[0].refused is False   # not a refusal — a deliberate park
+
+
+def test_discover_queue_does_not_crawl_expand(isolated_engagement):
+    """Regression for review wcqss59lb MEDIUM: discover-queue promises ZERO target traffic, so it must
+    NOT crawl-expand either (crawling is target contact). With a promoted SERVICE + enable_crawl_expand
+    + discover-queue and a send that RAISES on any call, no crawl or probe traffic is issued: nothing is
+    expanded, the promoted root is parked as a candidate, and the send is never reached."""
+    isolated_engagement("disco", "127.0.0.1")
+
+    def _no_send(_req):
+        raise AssertionError("discover-queue must issue ZERO target traffic (no crawl, no probe)")
+
+    world = _service_world("127.0.0.1", 8080)
+    out = run_autonomous_cycle(
+        _result(world, []), slug="disco", enable_discover=True, enable_crawl_expand=True,
+        discover_send=_no_send, probe_posture="discover-queue", prompt_callback=_deny)
+    assert out.endpoints_promoted == 1
+    assert out.endpoints_expanded == 0, "discover-queue crawled the target (posture-leak)"
+    assert out.candidates_queued >= 1
+    assert out.probes_driven == 0
+
+
+def test_auto_test_posture_probes_and_mints(isolated_engagement, httpserver: HTTPServer):
+    """The opt-in auto-test posture actively drives the gated probe and mints on a fire — the same chain
+    the existing discover tests exercise, here pinned against the posture field."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+    out = run_autonomous_cycle(
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), probe_posture="auto-test", prompt_callback=_deny)
+    assert out.probe_posture == "auto-test"
+    assert out.candidates_queued == 0
+    assert out.probes_driven == 1 and out.discovered_count == 1
+
+
+def test_default_posture_is_auto_test_at_function_level(isolated_engagement, httpserver: HTTPServer):
+    """The function default stays auto-test (back-compat for the existing discover tests + direct
+    callers); the CONSERVATIVE discover-queue default is applied at the engage CLI boundary."""
+    port = httpserver.port
+    isolated_engagement("disco", "127.0.0.1")
+    httpserver.expect_request("/reflect").respond_with_handler(_reflect)
+    url = f"http://127.0.0.1:{port}/reflect?q=seed"
+    out = run_autonomous_cycle(   # no probe_posture arg
+        _result(_endpoint_world(url), []), slug="disco", enable_discover=True,
+        discover_send=_loopback_send(), prompt_callback=_deny)
+    assert out.probe_posture == "auto-test"
+    assert out.probes_driven == 1
 
 
 # ---------------------------------------------------------------------------

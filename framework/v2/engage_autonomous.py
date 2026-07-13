@@ -200,6 +200,10 @@ class AutonomyResult:
     # byte-identical: no probe-leaves seeded, probe_surface never constructed, nothing minted.
     discover_enabled: bool = False     # discovery was requested AND a send was injected (probe I/O available)
     endpoints_promoted: int = 0        # Slice-0: in-scope recon/sensor assets promoted to url-bearing ENDPOINTs
+    endpoints_expanded: int = 0        # Slice-2: param-bearing surfaces discovered by crawling promoted roots
+    probe_posture: str = "auto-test"   # Slice-4: "auto-test" (probe now) | "discover-queue" (queue for human)
+    candidates_queued: int = 0         # Slice-4: probe-leaves parked for operator approval (discover-queue, no traffic)
+    queued_candidates: list = field(default_factory=list)  # the surfaces queued (discover-queue posture)
     probe_leaves_seeded: int = 0       # LOW-prior probe-leaves seeded from ENDPOINT nodes (opt-in)
     probes_driven: int = 0             # probe_surface tool calls that RAN through the gate chain (not refused)
     probes_refused: int = 0            # probe_surface calls a fail-closed gate declined (kill-switch / scope)
@@ -258,6 +262,7 @@ def _build_goal_tree(
     seed_probe_leaves: bool = False,
     probe_bug_class: str = "xss",
     probe_prior: float = 0.03,
+    notes: "list | None" = None,
 ) -> tuple[Any, dict[int, object]]:
     """Build a goal tree whose leaves are the confirmed findings — one leaf per finding, its prior
     seeded from the finding's confidence, tagged with the finding's bug_class + surface. Returns the
@@ -298,11 +303,24 @@ def _build_goal_tree(
             covered.add(str(getattr(f, "endpoint", "") or ""))
             covered.add(_finding_surface(f))
         covered.discard("")
-        for _nid, url in _endpoint_probe_targets(world, exclude=covered):
+        # Slice-1: route the raw ENDPOINT probe-targets through the DiscoveryFrontier — it collapses
+        # value-variants of one location to a single canonical key, orders by expected information gain,
+        # and CAPS the count so a large recon/crawl graph cannot flood the goal tree. For a single
+        # producer / a single endpoint this returns the same one leaf (the existing behaviour); its value
+        # compounds once in-loop crawling (Slice 2) feeds many near-duplicate surfaces in.
+        from .intel.frontier import frontier_from_targets
+        targets = _endpoint_probe_targets(world, exclude=covered)
+        fr = frontier_from_targets(targets, world=world, bug_class=bc, prior=prior)
+        items = fr.items()
+        if fr.truncated and notes is not None:   # surface the cap (review wcqss59lb: never drop silently)
+            notes.append(
+                f"discovery: frontier cap kept {len(items)} of {len(items) + fr.truncated} candidate "
+                f"surface(s) — {fr.truncated} lower-VOI surface(s) deferred this cycle")
+        for item in items:
             tree.add(
                 parent_id=root, kind="leaf",
-                label=f"probe {bc} @ {url}"[:120],
-                prior=prior, value=1.0, bug_class=bc, surface=url,
+                label=f"probe {item.bug_class} @ {item.url}"[:120],
+                prior=item.prior, value=1.0, bug_class=item.bug_class, surface=item.url,
                 estimate=CostEstimate(requests=1),
             )
     return tree, leaf_to_finding
@@ -805,13 +823,18 @@ def _drive_reverify(finding: object, registry: Any, ctx: Any, sink: Any) -> Any:
     return invoke_tool(registry, "reverify_finding", {"finding": finding_arg}, ctx, sink=sink)
 
 
-def _discovery_registry(discover_send: Any, discover_check: Any, budget: int) -> Any:
+def _discovery_registry(discover_send: Any, discover_check: Any, budget: int,
+                        *, multi_probe: bool = False) -> Any:
     """A registry carrying ONLY the gated ``probe_surface`` discovery tool, wired with the injected
     ``discover_send`` (production: the gated executor's ``gated_fetch``; tests: a loopback send) and
-    the ONE existing scanner check to wrap (default REFLECTED_XSS). Built on demand so the default
-    autonomous path (discovery off) never imports the scanner tool stack."""
-    from .agents.tools.builtin import probe_surface_registry
-    return probe_surface_registry(discover_send, check=discover_check, max_requests=max(1, int(budget)))
+    the scanner check(s) to wrap. Default: the ONE REFLECTED_XSS check (byte-identical). ``multi_probe``
+    (Slice-3, opt-in) wraps the CURATED near-zero-FP multi-class set so one probe tests a discovered
+    surface for several bug classes. Built on demand so the default autonomous path (discovery off)
+    never imports the scanner tool stack."""
+    from .agents.tools.builtin import curated_probe_checks, probe_surface_registry
+    checks = curated_probe_checks() if multi_probe else None
+    return probe_surface_registry(discover_send, check=discover_check, checks=checks,
+                                  max_requests=max(1, int(budget)))
 
 
 def _drive_probe(target: str, registry: Any, ctx: Any, sink: Any) -> Any:
@@ -1173,6 +1196,10 @@ def run_autonomous_cycle(
     discover_send: Any = None,
     discover_check: Any = None,
     discover_bug_class: str = "xss",
+    enable_crawl_expand: bool = False,
+    crawl_max_pages: int = 20,
+    enable_multi_probe: bool = False,
+    probe_posture: str = "auto-test",
 ) -> AutonomyResult:
     """Run ONE bounded OODA cycle (``max_cycles`` default 1) over an authoritative
     :class:`engage.EngagementResult`. The scan report is NEVER mutated — the cycle only reads the
@@ -1228,6 +1255,12 @@ def run_autonomous_cycle(
     # so everything below is byte-identical to the pre-discovery loop.
     discover_active = bool(enable_discover) and discover_send is not None and world is not None
     out.discover_enabled = discover_active
+    # Slice-4 posture: "discover-queue" (park probe-leaves for operator approval, zero probe traffic) is
+    # the SAFE operator default; "auto-test" actively probes. Any unrecognised value falls back to the
+    # active posture (the function's back-compat default) — the operator-facing safe default lives at the
+    # engage CLI. Normalised once here.
+    probe_posture = "discover-queue" if str(probe_posture) == "discover-queue" else "auto-test"
+    out.probe_posture = probe_posture
 
     # DISCOVER — Slice-0 asset→endpoint promotion (the recon→test bridge). Before the goal tree is
     # built, promote each IN-SCOPE recon/sensor asset (DOMAIN/HOST/web-SERVICE) into a url-bearing
@@ -1246,11 +1279,43 @@ def run_autonomous_cycle(
         except Exception:
             pass   # best-effort: promotion never breaks the cycle
 
+        # DISCOVER — Slice-2 in-loop crawl/mine expansion (opt-in on top of discover; default OFF so the
+        # existing discover tests stay byte-identical). Crawl each promoted ROOT endpoint — bounded,
+        # scope-from-seed, over the SAME gated discover_send — and mint the discovered in-scope
+        # param-bearing URLs as ENDPOINT nodes (provenance intel:expand). They flow through the frontier
+        # into the goal tree, so a promoted host is not just reached but its real pages/params are tested.
+        # Gated on the AUTO-TEST posture: crawling IS target contact (read-only GET traffic), so the
+        # discover-queue posture — which promises ZERO target traffic until the operator approves — must
+        # NOT crawl either (review wcqss59lb MEDIUM: honor the posture for ALL target contact, not just
+        # the probe). Under discover-queue the promoted roots are parked as probe candidates for approval.
+        if enable_crawl_expand and promoted and probe_posture != "discover-queue":
+            try:
+                from .intel.expand import expand_endpoint
+                from .worldmodel.models import Node, NodeKind
+                seq = max((n.last_seen for n in world.all_nodes()), default=0) + 1
+                expanded = 0
+                for _pid, root_url in promoted:
+                    for durl in expand_endpoint(discover_send, root_url, max_pages=crawl_max_pages):
+                        nid = f"endpoint:expand:{durl}"
+                        if world.has_node(nid):
+                            continue
+                        world.add_node(Node(id=nid, kind=NodeKind.ENDPOINT,
+                                            attrs={"url": durl, "expanded_from": root_url},
+                                            provenance=f"intel:expand:{root_url}", confidence=0.5,
+                                            first_seen=seq, last_seen=seq))
+                        expanded += 1
+                out.endpoints_expanded = expanded
+                if expanded:
+                    out.notes.append(
+                        f"discovery: crawl-expanded {expanded} in-scope param-bearing surface(s)")
+            except Exception:
+                pass   # best-effort: expansion never breaks the cycle
+
     # ORIENT — goal tree over the confirmed findings (+ opt-in unexplored ENDPOINT probe-leaves) and
     # the planner over the run world-model.
     tree, leaf_to_finding = _build_goal_tree(
         findings, world=world, seed_probe_leaves=discover_active,
-        probe_bug_class=str(discover_bug_class or "xss"))
+        probe_bug_class=str(discover_bug_class or "xss"), notes=out.notes)
     baselines = _leaf_baselines(tree)   # fixed per-run priors; every advice re-weight recomputes from these
     source = _foothold(world)
     out.planner_source = source
@@ -1269,7 +1334,7 @@ def run_autonomous_cycle(
         {l.id for l in tree.open_leaves() if l.id not in leaf_to_finding} if discover_active else set())
     out.probe_leaves_seeded = len(probe_leaf_ids)
     discover_registry = (
-        _discovery_registry(discover_send, discover_check, request_budget)
+        _discovery_registry(discover_send, discover_check, request_budget, multi_probe=enable_multi_probe)
         if (discover_active and probe_leaf_ids) else None)
     emitted_discovered: set = set()   # dedup NEW discovered findings by (bug_class, insertion_point, endpoint)
     if discover_active and probe_leaf_ids:
@@ -1359,9 +1424,24 @@ def run_autonomous_cycle(
 
         # ACT — drive the picked action as a GATED tool call.
         tree.mark_status(leaf.id, "claimed")
-        if is_probe:
-            # ACT (DISCOVER) — drive the gated probe_surface tool over the unexplored endpoint. It
-            # runs ONE existing scanner check and mints a NEW oracle-confirmed finding ONLY if the
+        if is_probe and probe_posture == "discover-queue":
+            # ACT (DISCOVER, discover-queue posture) — the SAFE default: enumerate/promote/crawl runs
+            # autonomously, but a probe-leaf is PARKED for operator approval rather than actively
+            # tested. Zero target probe traffic is issued here (the hypothesis lead was already emitted
+            # to the spine above); the operator reviews the queued candidates and re-runs under
+            # auto-test to actually probe an approved batch. Keeps a human on the ACT trigger.
+            step.tool = "probe_surface"
+            step.gated = True
+            step.tool_ok = True
+            step.verdict = f"queued for operator approval (discover-queue posture — no traffic): {leaf.surface}"
+            out.candidates_queued += 1
+            out.queued_candidates.append(str(leaf.surface))
+            tree.mark_status(leaf.id, "deferred")
+            out.notes.append(
+                f"cycle {c}: QUEUED probe candidate {leaf.surface} (discover-queue — awaiting operator approval)")
+        elif is_probe:
+            # ACT (DISCOVER, auto-test posture) — drive the gated probe_surface tool over the unexplored
+            # endpoint. It runs the curated check(s) and mints a NEW oracle-confirmed finding ONLY if a
             # check's deterministic oracle FIRES; the tool/planner never promote on their own.
             res = _drive_probe(leaf.surface, discover_registry, ctx, sink)
             step.tool = "probe_surface"

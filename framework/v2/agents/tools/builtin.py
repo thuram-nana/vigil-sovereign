@@ -100,9 +100,20 @@ class ProbeSurfaceTool:
     destructive = False
     egress_hosts: tuple = ()       # the injected send performs (gated) egress; scope authorizes the target
 
-    def __init__(self, send: Any, *, check: Any = None, max_requests: int = 8) -> None:
+    def __init__(self, send: Any, *, check: Any = None, checks: Any = None,
+                 max_requests: int = 8) -> None:
         self._send = send
-        self._check = check
+        # The check set to run over the discovered surface. Default: the single REFLECTED_XSS check
+        # (byte-identical to the pre-generalisation probe). ``checks`` (Slice-3, opt-in) runs a CURATED,
+        # near-zero-FP set — each check already oracle-adjudicated and evidence-carrying — so ONE probe
+        # tests a discovered endpoint for more than one bug class. ``check`` (singular) stays for
+        # back-compat; ``checks`` wins when both are given.
+        if checks:
+            self._checks = tuple(checks)
+        elif check is not None:
+            self._checks = (check,)
+        else:
+            self._checks = None   # resolved to (REFLECTED_XSS,) lazily in run()
         self._max_requests = max(1, int(max_requests))
 
     def run(self, args: dict, ctx: ToolContext) -> ToolResult:
@@ -120,90 +131,122 @@ class ProbeSurfaceTool:
             from ...scanner.insertion import HttpRequest, InsertionKind
         except Exception as e:
             return ToolResult(ok=False, note=f"probe_surface could not load the scanner check to wrap: {e}")
-        check = self._check if self._check is not None else REFLECTED_XSS
+        checks = self._checks if self._checks is not None else (REFLECTED_XSS,)
         request = HttpRequest(
             method="GET", url=target.strip(),
             headers=[("User-Agent", "OBSIDIAN/1.0 (authorized owner-test)")])
-        # Content-Type gate for the discovery probe's XSS confirmation (near-zero-FP). A reflected
-        # marker is only EXECUTABLE — a real XSS FACT — when it lands in a response served as HTML; a
-        # JSON API or text/plain endpoint that echoes a query value reflects the marker inertly, which
-        # the review showed the underlying reflection check would otherwise mint as a false XSS FACT.
-        # We record every (is_html, body) the probe saw and, for an XSS finding, require the REFLECTING
-        # response — the one that carries the marker — to be affirmatively `text/html`. This is precise
-        # (it ties the content-type to the response that actually reflected, so an UNRELATED param's
-        # HTML page cannot license a different param's inert JSON reflection) and it is STRICTER than
-        # scanner.passive._is_htmlish on purpose: a MISSING Content-Type does NOT count as HTML here,
-        # because minting a confirmed FACT via auto-discovery is a higher bar than a passive header
-        # lead (a MIME-sniff-only reflection stays unminted rather than false-asserting execution).
-        # Done in the probe path so the shared reflection oracle / benchmark stay byte-identical; the
-        # same latent gap in the shared oracle is a documented follow-up.
-        seen: list[tuple[bool, str]] = []   # (is_affirmatively_html, body) per response the probe saw
         _raw_send = self._send
 
-        def _recording_send(req: Any):
-            resp = _raw_send(req)
-            try:
-                headers = resp.get("headers", []) if isinstance(resp, dict) else []
-                ctype = ""
-                for k, v in headers or []:
-                    if str(k).lower() == "content-type":
-                        ctype = str(v).lower()
-                        break
-                body = resp.get("body", "") if isinstance(resp, dict) else ""
-                seen.append(("text/html" in ctype, body or ""))
-            except Exception:
-                pass
-            return resp
+        # Run each curated check over the discovered surface. Each iteration gets its OWN recording
+        # buffer so the XSS content-type gate keys on THIS check's reflecting response — never a sibling
+        # check's HTML page (the multi-param cross-contamination FP a prior review caught). All checks are
+        # scoped to QUERY-VALUE insertion (never path rewriting → cannot trip a server's own not-found
+        # page) and each is oracle-adjudicated + evidence-carrying, so the shared oracle / benchmark stay
+        # byte-identical (this generalisation lives entirely in the discover-only probe path).
+        all_dumps: list = []
+        minted_any = False
+        ct_gated_any = False
+        checks_run: list[str] = []
+        for check in checks:
+            seen: list[tuple[bool, str]] = []   # (is_affirmatively_html, body) per response THIS check saw
 
-        try:
-            engine = AuditEngine(_recording_send, max_requests=self._max_requests)
-            # Target the endpoint lead's QUERY-VALUE parameters — the canonical reflected-parameter
-            # surface a URL lead exposes. Scoping the probe to the values (not path segments / param
-            # names) keeps it precise and bounded: it never rewrites the path, so it cannot trip a
-            # server's own not-found/error page, and it confirms only a real parameter reflection.
-            findings = engine.audit(request, checks=(check,),
-                                    insertion_kinds=(InsertionKind.QUERY_VALUE,))
-        except Exception as e:
-            return ToolResult(ok=False, note=f"probe error: {e}")
-        # near-zero-FP gate: mint an XSS-family finding only when the marker was REFLECTED INTO an
-        # affirmatively-HTML response. If the marker only ever came back under a non-HTML (or absent)
-        # content-type, the reflection is not executable — drop it (the review's JSON/text/no-header
-        # false-XSS-FACT, incl. the multi-param cross-contamination case).
-        bug_lower = str(getattr(check, "bug_class", "")).lower()
-        ct_gated = False
-        if findings and "xss" in bug_lower:
-            reflected_in_html = any(is_html and _MARKER_RE.search(body) for is_html, body in seen)
-            if not reflected_in_html:
-                findings = []
-                ct_gated = True
-        minted = bool(findings)
-        dumps: list = []
-        for f in findings:
+            def _recording_send(req: Any, _seen: list = seen):
+                resp = _raw_send(req)
+                try:
+                    headers = resp.get("headers", []) if isinstance(resp, dict) else []
+                    ctype = ""
+                    for k, v in headers or []:
+                        if str(k).lower() == "content-type":
+                            ctype = str(v).lower()
+                            break
+                    body = resp.get("body", "") if isinstance(resp, dict) else ""
+                    _seen.append(("text/html" in ctype, body or ""))
+                except Exception:
+                    pass
+                return resp
+
             try:
-                dumps.append(f.model_dump(mode="json"))
+                engine = AuditEngine(_recording_send, max_requests=self._max_requests)
+                findings = engine.audit(request, checks=(check,),
+                                        insertion_kinds=(InsertionKind.QUERY_VALUE,))
             except Exception:
-                pass
-        bug = str(getattr(check, "bug_class", "?"))
-        if minted:
-            summary = f"probe {bug} @ {target.strip()}: oracle FIRED — {len(dumps)} new finding(s)"
-        elif ct_gated:
-            summary = (f"probe {bug} @ {target.strip()}: reflection under a non-HTML content-type "
+                continue   # one check erroring never aborts the probe — the others still run
+            checks_run.append(str(getattr(check, "id", "")))
+            # near-zero-FP gate: mint an XSS-family finding only when the marker was REFLECTED INTO an
+            # affirmatively-HTML response (a MIME-sniff-only / JSON / text reflection is inert). Applied
+            # per-check on THIS check's own `seen`, so a sibling check's HTML page can never license it.
+            bug_lower = str(getattr(check, "bug_class", "")).lower()
+            if findings and "xss" in bug_lower:
+                reflected_in_html = any(is_html and _MARKER_RE.search(body) for is_html, body in seen)
+                if not reflected_in_html:
+                    findings = []
+                    ct_gated_any = True
+            for f in findings:
+                try:
+                    all_dumps.append(f.model_dump(mode="json"))
+                except Exception:
+                    pass
+            minted_any |= bool(findings)
+
+        # deterministic order (the fold key) regardless of check-iteration order
+        all_dumps.sort(key=lambda d: (str(d.get("bug_class", "")), str(d.get("endpoint", "")),
+                                      str(d.get("insertion_point", ""))))
+        target_s = target.strip()
+        if minted_any:
+            summary = (f"probe @ {target_s}: oracle FIRED — {len(all_dumps)} new finding(s) "
+                       f"across {len(checks_run)} check(s)")
+        elif ct_gated_any:
+            summary = (f"probe @ {target_s}: reflection under a non-HTML content-type "
                        f"— not executable, not minted")
         else:
-            summary = f"probe {bug} @ {target.strip()}: oracle did not fire (no finding)"
+            summary = f"probe @ {target_s}: oracle did not fire (no finding)"
         return ToolResult(
             ok=True, summary=summary,
-            output={"minted": minted, "findings": dumps, "check_id": str(getattr(check, "id", "")),
-                    "bug_class": bug, "endpoint": target.strip(), "content_type_gated": ct_gated})
+            output={"minted": minted_any, "findings": all_dumps, "checks_run": checks_run,
+                    "endpoint": target_s, "content_type_gated": ct_gated_any})
 
 
-def probe_surface_registry(send: Any, *, check: Any = None, max_requests: int = 8) -> ToolRegistry:
+def curated_probe_checks() -> tuple:
+    """The CURATED, near-zero-FP check set the generalised discovery probe runs (Slice-3). Every check
+    is EVIDENCE-CARRYING — it confirms only on a re-runnable oracle proof a benign response cannot
+    trigger — and is scoped to QUERY-VALUE insertion:
+      * REFLECTED_XSS   — a marker reflected into an affirmatively-HTML response (+ the content-type gate);
+      * OPEN_REDIRECT   — a real redirect to the injected canary host (safe to run everywhere);
+      * PATH_TRAVERSAL  — the target file's content signature appears in the response;
+      * SSTI_EVAL_*     — the server COMPUTED the injected arithmetic (raw expression absent).
+
+    DELIBERATELY EXCLUDED as an unsupervised discovery probe (review wcqss59lb, CRITICAL): the single-shot
+    ``BOOLEAN_SQLI`` DifferentialCheck. A lone benign-vs-payload differential fires on ANY endpoint whose
+    response legitimately differs between the two fixed strings — most perversely an app that VALIDATES
+    input / WAF-blocks a quote (200 vs 403) — minting a FALSE confirmed boolean_sqli fact that folds into
+    the report. A differential without a multi-round control (SPRT) cannot be near-zero-FP unsupervised,
+    so it is not in the curated set; sound boolean-SQLi discovery would need the SPRT BooleanInferenceCheck
+    under a dedicated FP review. OOB checks (SSRF/XXE/RCE) are likewise excluded — they self-skip without an
+    OOBReceiver, a separate explicitly-gated step. Returns a fresh tuple; a missing check is skipped."""
+    try:
+        from ...scanner.checks import (
+            OPEN_REDIRECT,
+            PATH_TRAVERSAL,
+            REFLECTED_XSS,
+            SSTI_EVAL_BRACES,
+            SSTI_EVAL_DOLLAR,
+        )
+    except Exception:
+        return ()
+    return (REFLECTED_XSS, OPEN_REDIRECT, PATH_TRAVERSAL, SSTI_EVAL_BRACES, SSTI_EVAL_DOLLAR)
+
+
+def probe_surface_registry(send: Any, *, check: Any = None, checks: Any = None,
+                           max_requests: int = 8) -> ToolRegistry:
     """A fresh registry carrying ONLY the gated ``probe_surface`` discovery tool, wired with the
     injected ``send`` (production: the gated executor's ``gated_fetch``; tests: a loopback send).
     Built ON DEMAND so the default autonomous path (discovery OFF) never constructs it and stays
-    byte-identical. Deliberately NOT part of ``default_registry`` — discovery is opt-in only."""
+    byte-identical. Deliberately NOT part of ``default_registry`` — discovery is opt-in only.
+
+    ``checks`` (Slice-3, opt-in) runs the curated multi-class set (:func:`curated_probe_checks`) instead
+    of the single REFLECTED_XSS default, so one probe tests a discovered surface for several bug classes."""
     reg = ToolRegistry()
-    reg.register(ProbeSurfaceTool(send, check=check, max_requests=max_requests))
+    reg.register(ProbeSurfaceTool(send, check=check, checks=checks, max_requests=max_requests))
     return reg
 
 
