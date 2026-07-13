@@ -136,6 +136,31 @@ def _signed_response(
     return etree.tostring(full).decode()
 
 
+def _signed_multiref(signer_key, embed_pem: str, *, nameid: str = "alice@corp.test",
+                     aid: str = "_a1", rid: str = "_r1") -> str:
+    """A samlp:Response signed over BOTH the Assertion ID and the Response ID (TWO ds:Reference) — a
+    spec-legal, GENUINELY valid signature (e.g. an IdP that signs both the Response and the Assertion).
+    signxml's DEFAULT ``expect_references=1`` rejects it with InvalidSignature('Expected to find 1
+    references, but found 2') — a reference-COUNT policy mismatch, NOT a crypto invalidity."""
+    full = etree.fromstring(
+        f'<samlp:Response xmlns:samlp="{_NS_P}" xmlns:saml="{_NS_A}" ID="{rid}" Version="2.0">'
+        f"<saml:Issuer>idp</saml:Issuer>"
+        f'<saml:Assertion ID="{aid}"><saml:Subject><saml:NameID>{nameid}</saml:NameID></saml:Subject>'
+        f"<saml:Conditions/></saml:Assertion></samlp:Response>".encode()
+    )
+    signed = XMLSigner(signature_algorithm="rsa-sha256", digest_algorithm="sha256").sign(
+        full, key=signer_key, cert=embed_pem, reference_uri=[aid, rid]
+    )
+    return etree.tostring(signed).decode()
+
+
+def _pretty(doc: str) -> str:
+    """Re-indent (pretty-print) captured XML — a ROUTINE, non-adversarial capture transform (xmllint
+    --format, browser devtools, SAML-tracer). It adds inter-element whitespace text nodes that
+    exclusive-C14N does NOT normalize, so a valid signature raises InvalidSignature/InvalidDigest here."""
+    return etree.tostring(etree.fromstring(doc.encode()), pretty_print=True).decode()
+
+
 # ---------------------------------------------------------------------------
 # FIRES — a signature DEFINITIVELY invalid against the operator's TRUSTED cert
 # ---------------------------------------------------------------------------
@@ -244,6 +269,51 @@ def test_rotation_set_verified_by_any_cert_short_circuits_to_non_fire() -> None:
     doc = _signed_response(_KEY_A, _PEM_A)
     assert _saml_crypto_verdict(doc, [_PEM_B, _PEM_A])[0] == "verified"
     assert not saml_forgery_oracle(doc, candidate_certs=[_PEM_B, _PEM_A]).fired
+
+
+# ---------------------------------------------------------------------------
+# NON-FIRE — the review-confirmed cardinal FALSE POSITIVES (a genuinely valid,
+# trusted-key-signed assertion must NEVER read as a forgery). FP line 3 (relax
+# expect_references) + FP line 4 (whitespace/capture re-check).
+# ---------------------------------------------------------------------------
+
+
+def test_does_not_fire_on_pretty_printed_valid_assertion() -> None:
+    # FP#4 (cardinal c14n): a genuinely valid A-signed assertion, PRETTY-PRINTED in capture. Exclusive-
+    # C14N does not normalize inter-element whitespace, so signxml raises InvalidSignature/InvalidDigest;
+    # the whitespace-normalized re-check must recover it as verified -> NON-FIRE (was firing 0.97).
+    valid = _signed_response(_KEY_A, _PEM_A)
+    pretty = _pretty(valid)
+    assert _saml_crypto_verdict(pretty, [_PEM_A])[0] == "verified"
+    assert not saml_forgery_oracle(pretty, candidate_certs=[_PEM_A]).fired
+    # newline-injected between every element — the same class of capture disturbance — also non-fires.
+    newlined = valid.replace("><", ">\n<")
+    assert not saml_forgery_oracle(newlined, candidate_certs=[_PEM_A]).fired
+
+
+def test_still_fires_on_a_forgery_that_was_also_pretty_printed() -> None:
+    # the true-positive guard for the whitespace re-check: a REAL wrong-signer forgery that was ALSO
+    # pretty-printed must STILL fire. Stripping inter-element whitespace can heal a whitespace
+    # false-invalid but can NEVER heal a genuine content/signer forgery -> the fire is preserved.
+    forgery = _pretty(_signed_response(_KEY_A, _PEM_A))  # signed by A, will be judged vs trusted B
+    sig = saml_forgery_oracle(forgery, candidate_certs=[_PEM_B])
+    assert sig.fired and sig.observed["proof"] == "invalid_signature"
+    # a tampered-content (InvalidDigest) forgery, pretty-printed, likewise still fires.
+    tampered = _pretty(_signed_response(_KEY_A, _PEM_A).replace("alice@corp.test", "attacker@evil.test"))
+    assert saml_forgery_oracle(tampered, candidate_certs=[_PEM_A]).fired
+
+
+def test_does_not_fire_on_valid_multi_reference_signature() -> None:
+    # FP#3: a genuinely valid signature over TWO ds:Reference (Response + Assertion both signed) — a
+    # spec-legal SAML shape. signxml's default expect_references=1 rejects it as InvalidSignature; the
+    # oracle now verifies with expect_references=False so it reads verified -> NON-FIRE (was firing).
+    mref = _signed_multiref(_KEY_A, _PEM_A)
+    assert _saml_crypto_verdict(mref, [_PEM_A])[0] == "verified"
+    assert not saml_forgery_oracle(mref, candidate_certs=[_PEM_A]).fired
+    # multi-reference AND pretty-printed (both FP classes at once) still non-fires.
+    assert not saml_forgery_oracle(_pretty(mref), candidate_certs=[_PEM_A]).fired
+    # a multi-reference signature by the WRONG signer is still a genuine forgery -> fires.
+    assert saml_forgery_oracle(mref, candidate_certs=[_PEM_B]).fired
 
 
 # ---------------------------------------------------------------------------

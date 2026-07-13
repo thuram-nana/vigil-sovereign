@@ -2812,7 +2812,8 @@ def _saml_resolve_ref(uri: str) -> tuple[str, str | None]:
 # importable. It NEVER runs on the gate path (no benchmark carries saml_xml, let alone a trusted
 # cert), so the structural oracle stays byte-identical when this branch is dormant.
 #
-# THE TWO HARD FP LINES this helper holds:
+# THE HARD FP LINES this helper holds (near-zero-FP is cardinal — a valid, trusted-key-signed
+# assertion must NEVER read as a forgery):
 #   1. NEVER trust the EMBEDDED cert. The signature's own ds:X509Certificate (KeyInfo) is attacker-
 #      controlled — a self-signed forgery "verifies" against it. We pin verification to the
 #      OPERATOR-PROVIDED trusted PEM via signxml's `x509_cert=` (confirmed: supplying x509_cert
@@ -2824,7 +2825,62 @@ def _saml_resolve_ref(uri: str) -> tuple[str, str | None]:
 #      InvalidInput (a ValueError — no signature / unsupported SignatureMethod / transform), a parse
 #      error, or ANY other exception. "Couldn't verify" is NOT "forged". signxml's mature c14n does the
 #      canonicalization — we never hand-roll it.
+#   3. A REFERENCE-COUNT mismatch is POLICY, not crypto-invalidity. signxml's default
+#      SignatureConfiguration pins `expect_references=1`, so a spec-legal multi-reference / dual-signed
+#      (Response AND Assertion both signed) doc — a GENUINELY valid signature — raises InvalidSignature
+#      ("Expected to find 1 references, but found N"). We verify with `expect_references=False` so that
+#      benign shape verifies instead of firing; the STRUCTURAL branch (not signxml's count) is where we
+#      reason about which element a reference covers (XSW). Relaxing the count is strictly FP-REDUCING:
+#      it can only prevent a false invalid, never manufacture one.
+#   4. WHITESPACE / CAPTURE FIDELITY. Exclusive-C14N does NOT normalize inter-element whitespace text
+#      nodes (significant per XML-DSig), so a valid assertion pretty-printed / re-indented in capture
+#      (xmllint --format, browser devtools, SAML-tracer) raises InvalidSignature/InvalidDigest. Before
+#      calling a raw definitive-invalid a forgery we RE-VERIFY a whitespace-normalized form
+#      (`_saml_ws_normalized`); if THAT verifies, a trusted key signed it (capture artifact, NOT forgery)
+#      -> verified. Stripping only inter-element whitespace can heal a whitespace false-invalid but can
+#      never hide a content-tamper (that is not a whitespace difference), so no true positive is lost.
 _SAML_CRYPTO_INPUT_CAP = 5 * 1024 * 1024   # bound the XML fed to signxml/lxml (DoS-safe over untrusted input)
+
+
+def _saml_ws_normalized(text: str) -> str | None:
+    """Re-serialize ``text`` with inter-element indentation whitespace stripped (lxml
+    ``remove_blank_text``), or ``None`` if it will not parse. This reconstructs the canonical form a
+    signature covered when the captured bytes were merely pretty-printed / re-indented, so a crypto
+    re-verify of THIS form separates a whitespace/capture artifact (re-verifies) from a genuine forgery
+    (still fails). Stripping removes only whitespace-ONLY text nodes BETWEEN elements — never element
+    text content (base64 SignatureValue/DigestValue/X509Certificate survives) and never non-whitespace
+    — so it can HEAL a whitespace-induced false-invalid but can NEVER hide a content-tamper forgery.
+    XXE-safe (``resolve_entities=False``, ``no_network=True``); the caller already refused DTD/ENTITY."""
+    try:
+        from lxml import etree  # noqa: PLC0415 (signxml pulls in lxml; present iff the crypto branch runs)
+        parser = etree.XMLParser(remove_blank_text=True, resolve_entities=False, no_network=True)
+        return etree.tostring(etree.fromstring(text.encode("utf-8", "replace"), parser)).decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _saml_verify_one(text: str, pem: str, verifier: Any, cfg: Any, sx_ex: Any) -> tuple[str, str]:
+    """Classify ONE (cert, xml) crypto verification as ``(classification, detail)`` where classification
+    is ``"verified"`` | ``"definitive"`` | ``"indeterminate"``.
+
+      * ``verified``      — the trusted cert cryptographically verifies the signature.
+      * ``definitive``    — a DEFINITIVE cryptographic invalidity (InvalidSignature / InvalidDigest:
+        wrong signer / tampered digest). This is the ONLY fire-eligible outcome.
+      * ``indeterminate`` — InvalidCertificate (cert trust/expiry, NOT a bad sig), InvalidInput /
+        unsupported-algorithm / unsupported-transform / parse / config error, or anything else
+        ("couldn't verify" — never "forged").
+
+    ``cfg`` relaxes signxml's ``expect_references`` COUNT policy (FP line 3) so a spec-legal
+    multi-reference / dual-signed doc verifies instead of raising a spurious InvalidSignature."""
+    try:
+        verifier().verify(text, x509_cert=pem, expect_config=cfg)
+        return ("verified", "")
+    except sx_ex.InvalidCertificate as e:   # subclass of InvalidSignature — cert trust/expiry, NOT a bad sig
+        return ("indeterminate", f"cert_untrusted:{type(e).__name__}")
+    except (sx_ex.InvalidDigest, sx_ex.InvalidSignature) as e:   # DEFINITIVE cryptographic invalidity
+        return ("definitive", f"{type(e).__name__}: {str(e)[:160]}")
+    except Exception as e:   # InvalidInput / unsupported alg-or-transform / parse / config / anything
+        return ("indeterminate", f"indeterminate:{type(e).__name__}")
 
 
 def _saml_crypto_verdict(text: str, candidate_certs: Sequence[str]) -> tuple[str, str, dict[str, Any]]:
@@ -2843,12 +2899,16 @@ def _saml_crypto_verdict(text: str, candidate_certs: Sequence[str]) -> tuple[str
         other exception on at least one cert). "Couldn't verify" is NOT "forged" — the oracle refuses.
 
     Pure w.r.t. its inputs and deterministic (signxml verification of fixed bytes against a fixed cert is
-    reproducible), so a fire re-verifies OFFLINE from the retained XML + trusted certs. NEVER raises."""
+    reproducible), so a fire re-verifies OFFLINE from the retained XML + trusted certs. NEVER raises.
+
+    FP guards 3 (relax `expect_references` — a reference-COUNT mismatch is policy, not crypto-invalidity)
+    and 4 (a raw definitive-invalid is re-checked against a WHITESPACE-NORMALIZED form before it is
+    called a forgery — a pretty-print/capture artifact re-verifies) are applied per the module note."""
     certs = [c for c in (_coerce_text(x) for x in (candidate_certs or ())) if c.strip()]
     if not certs:
         return ("unavailable", "no operator-supplied trusted cert — crypto branch dormant", {})
     try:  # guarded import (opt-in `saml` extra) — absent => dormant, structural-only
-        from signxml import XMLVerifier  # noqa: PLC0415
+        from signxml import SignatureConfiguration, XMLVerifier  # noqa: PLC0415
         from signxml import exceptions as sx_ex  # noqa: PLC0415
     except Exception:  # pragma: no cover - exercised via monkeypatch in tests
         return ("unavailable", "signxml not importable (opt-in 'saml' extra absent)", {})
@@ -2862,32 +2922,46 @@ def _saml_crypto_verdict(text: str, candidate_certs: Sequence[str]) -> tuple[str
     if b"<!doctype" in low or b"<!entity" in low:
         return ("refuse", "DTD/ENTITY present — declining crypto verify (XXE-safe)", {})
 
+    # FP line 3: a reference-COUNT mismatch is policy, not crypto-invalidity — accept any count so a
+    # spec-legal multi-reference / dual-signed doc verifies instead of firing a spurious InvalidSignature.
+    cfg = SignatureConfiguration(expect_references=False)
+    # FP line 4: the whitespace/capture-fidelity re-check form (built once, reused per cert).
+    norm = _saml_ws_normalized(text)
+
     definitive = 0
     indeterminate = 0
     first_invalid = ""
     outcomes: list[str] = []
     for pem in certs:
-        try:
-            # x509_cert pins the trust anchor to the OPERATOR's cert and OVERRIDES the document's own
-            # embedded KeyInfo cert (the cardinal FP guard). Success => a trusted key signed it.
-            XMLVerifier().verify(text, x509_cert=pem)
+        # x509_cert pins the trust anchor to the OPERATOR's cert and OVERRIDES the document's own embedded
+        # KeyInfo cert (FP line 1). Success => a trusted key signed it.
+        cls, detail = _saml_verify_one(text, pem, XMLVerifier, cfg, sx_ex)
+        if cls == "verified":
             return ("verified", "signature verifies against a supplied trusted cert",
                     {"crypto_outcome": "verified", "trusted_certs": len(certs)})
-        except sx_ex.InvalidCertificate as e:  # subclass of InvalidSignature — cert trust/expiry, NOT a bad sig
-            indeterminate += 1
-            outcomes.append(f"cert_untrusted:{type(e).__name__}")
-        except (sx_ex.InvalidDigest, sx_ex.InvalidSignature) as e:  # DEFINITIVE cryptographic invalidity
+        if cls == "definitive" and norm is not None and norm != text:
+            # FP line 4: a raw definitive-invalid MIGHT be only whitespace/pretty-print disturbance.
+            # Re-verify the whitespace-normalized form before calling it a forgery.
+            cls2, detail2 = _saml_verify_one(norm, pem, XMLVerifier, cfg, sx_ex)
+            if cls2 == "verified":   # a trusted key DID sign it — the raw failure was capture whitespace
+                return ("verified", "signature verifies against a supplied trusted cert (whitespace-normalized)",
+                        {"crypto_outcome": "verified", "trusted_certs": len(certs), "note": "ws_normalized"})
+            if cls2 != "definitive":   # normalized form is not conclusively invalid -> refuse for this cert
+                cls, detail = "indeterminate", f"ws_indeterminate:{detail2}"
+            # else: still definitive under BOTH the raw AND the whitespace-normalized form -> genuine.
+        if cls == "definitive":
             definitive += 1
             if not first_invalid:
-                first_invalid = f"{type(e).__name__}: {str(e)[:160]}"
-            outcomes.append(f"definitive_invalid:{type(e).__name__}")
-        except Exception as e:  # InvalidInput / unsupported alg-or-transform / parse / config / anything
+                first_invalid = detail
+            outcomes.append(f"definitive_invalid:{detail[:48]}")
+        else:
             indeterminate += 1
-            outcomes.append(f"indeterminate:{type(e).__name__}")
+            outcomes.append(detail or "indeterminate")
 
-    # FIRE only when EVERY trusted cert gave a conclusive "not signed by this key" AND nothing was
-    # indeterminate. A single indeterminate outcome (a cert we could not evaluate — it MIGHT be the real
-    # signer) forces a REFUSE: "couldn't verify" is never "forged".
+    # FIRE only when EVERY trusted cert gave a conclusive "not signed by this key" (under BOTH the raw and
+    # the whitespace-normalized form) AND nothing was indeterminate. A single indeterminate outcome (a
+    # cert we could not evaluate — it MIGHT be the real signer) forces a REFUSE: "couldn't verify" is
+    # never "forged".
     if definitive >= 1 and indeterminate == 0:
         return ("invalid", first_invalid,
                 {"crypto_outcome": "invalid_signature", "trusted_certs": len(certs),
