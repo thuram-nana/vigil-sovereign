@@ -199,6 +199,7 @@ class AutonomyResult:
     # is the first honest step from a re-verifying loop toward a DISCOVERING one. Default off →
     # byte-identical: no probe-leaves seeded, probe_surface never constructed, nothing minted.
     discover_enabled: bool = False     # discovery was requested AND a send was injected (probe I/O available)
+    endpoints_promoted: int = 0        # Slice-0: in-scope recon/sensor assets promoted to url-bearing ENDPOINTs
     probe_leaves_seeded: int = 0       # LOW-prior probe-leaves seeded from ENDPOINT nodes (opt-in)
     probes_driven: int = 0             # probe_surface tool calls that RAN through the gate chain (not refused)
     probes_refused: int = 0            # probe_surface calls a fail-closed gate declined (kill-switch / scope)
@@ -1227,6 +1228,23 @@ def run_autonomous_cycle(
     # so everything below is byte-identical to the pre-discovery loop.
     discover_active = bool(enable_discover) and discover_send is not None and world is not None
     out.discover_enabled = discover_active
+
+    # DISCOVER — Slice-0 asset→endpoint promotion (the recon→test bridge). Before the goal tree is
+    # built, promote each IN-SCOPE recon/sensor asset (DOMAIN/HOST/web-SERVICE) into a url-bearing
+    # ENDPOINT node so the probe-leaf seeding below can SEE it. In-scope by construction (the charter
+    # predicate the live gate uses); a LEAD (intel:promote provenance), never a fact; deterministic +
+    # idempotent. Discover-path only → structurally unreachable from the byte-identical gate.
+    if discover_active:
+        try:
+            from .intel.promote import promote_to_endpoints
+            promoted = promote_to_endpoints(world, slug)
+            out.endpoints_promoted = len(promoted)
+            if promoted:
+                out.notes.append(
+                    f"discovery: promoted {len(promoted)} in-scope recon/sensor asset(s) "
+                    "to testable endpoint(s)")
+        except Exception:
+            pass   # best-effort: promotion never breaks the cycle
 
     # ORIENT — goal tree over the confirmed findings (+ opt-in unexplored ENDPOINT probe-leaves) and
     # the planner over the run world-model.
