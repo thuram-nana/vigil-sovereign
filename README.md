@@ -643,7 +643,11 @@ kind, **1** `SSO_ASSERTION_FORGERY` (an offline JWT structural-forgery oracle �
 recomputable-HS256 / RS256→HS256 confusion, keyed on a `jwt_token` context no benchmark finding carries),
 **1** `SAML_STRUCTURAL_FORGERY` (its SAML sibling — an offline structural-forgery oracle firing on
 no-signature / a `ds:Reference` that does not cover the consumed assertion / a signature-wrapping
-shape, keyed on a `saml_xml` context), **1** `CLOUD_POSTURE` (an offline achieved-state cloud/CSPM
+shape, keyed on a `saml_xml` context; with the **opt-in `saml` extra** (`pip install …[saml]`, pulls
+`signxml`) it additionally escalates a structurally-covered signature to a **real XML-DSig verification**
+against an **operator-supplied trusted IdP cert**, firing `invalid_signature` ONLY on a definitive
+crypto-invalidity — wrong signer / tampered digest — never trusting the document's own embedded cert,
+and refusing when it cannot conclusively verify), **1** `CLOUD_POSTURE` (an offline achieved-state cloud/CSPM
 promotion oracle — encryption-at-rest-disabled on a sensitive datastore / public exposure / a
 wildcard-anonymous principal, keyed on a `cloud_control` context; the complement to the reachability
 `POLICY_PATH` oracle), and **1** `MESH_POSTURE` (its service-mesh sibling — permissive-mTLS /

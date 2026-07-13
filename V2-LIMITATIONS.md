@@ -42,7 +42,16 @@ response-side XSS/SSTI/path-traversal confirmation reusing the existing
 JWT structural-forgery oracle, 1 `SAML_STRUCTURAL_FORGERY` offline SAML structural-forgery
 oracle, 1 `CLOUD_POSTURE` offline cloud/CSPM promotion oracle, 1 `MESH_POSTURE` offline
 service-mesh posture oracle) — each fires only on a context key no benchmark finding
-carries, which is *why* the gate stays byte-identical. The cloud oracle is also wired
+carries, which is *why* the gate stays byte-identical. The SAML oracle has an **opt-in
+`saml` extra** (`signxml`): when the operator supplies a **trusted IdP cert** it escalates a
+structurally-covered signature to a **real XML-DSig verification**, firing `invalid_signature`
+only on a definitive crypto-invalidity (wrong signer / tampered digest), never trusting the
+document's embedded cert and refusing when it cannot conclusively verify. Two adversarial
+reviews caught + fixed two cardinal FPs — a *valid* assertion firing after benign
+pretty-print capture (exclusive-C14N keeps inter-element whitespace significant → a
+whitespace-normalized re-verify heals it) and under a spec-legal multi-reference/dual-signed
+shape (signxml's default `expect_references=1` → relaxed) — with 0 residual FP and 0
+fix-induced false-negative on re-review; no new OracleKind, gate byte-identical. The cloud oracle is also wired
 into the opt-in `--fuse-sensors` promotion loop. AEGIS now also has **passive-OOB belief
 elevation** (`aegis gateway --oob-canary`): an opt-in, loopback-only OOB receiver + an
 operator-planted static canary that, when an attacker's own SSRF/XXE payload references the
