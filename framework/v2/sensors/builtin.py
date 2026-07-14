@@ -61,6 +61,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
     from .k8s_runtime import KubeBenchSensor
     from .fuzz import FuzzHarnessSensor
+    from .mobile import MobsfSensor
     from .nmap import NmapServiceSensor
     from .sbom import SbomVulnSensor
     from .tshark import TsharkFlowSensor
@@ -75,6 +76,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     registry.register(NmapServiceSensor())
     registry.register(TsharkFlowSensor())
     registry.register(SbomVulnSensor())   # passive SCA: grype/osv report -> vulnerable-dependency leads
+    registry.register(MobsfSensor())      # passive mobile: MobSF static report -> mobile posture LEADS
     # Web-scanner sensors: Nuclei/ZAP/Burp as gated LEAD producers. Registration is not invocation —
     # each is still gated at run_sensor time (ACTIVE_RECON + charter scope for the active ones, the
     # egress allowlist for the Burp REST pull), so registering them here is safe.
