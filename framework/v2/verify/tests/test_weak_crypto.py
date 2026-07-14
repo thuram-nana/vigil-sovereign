@@ -11,7 +11,12 @@ import datetime
 
 import pytest
 
-from framework.v2.verify import confirm_weak_crypto_artifact, signature_descriptor, weak_crypto_context
+from framework.v2.verify import (
+    confirm_weak_crypto_artifact,
+    signature_descriptor,
+    signature_descriptors,
+    weak_crypto_context,
+)
 from framework.v2.verify.oracles import weak_crypto_artifact_oracle
 from framework.v2.verify.models import OracleKind
 from framework.v2.verify.reverify import reverify_context
@@ -91,6 +96,35 @@ def test_no_fire_on_sha256_384_512_certs():
 def test_unparseable_cert_is_dormant():
     assert weak_crypto_context(b"not a cert") is None
     assert confirm_weak_crypto_artifact("garbage") is None
+
+
+# ---------------------------------------------------------------------------
+# CHAIN — a weak-hash INTERMEDIATE (not just the leaf) is judged (review w277ihd5a LOW)
+# ---------------------------------------------------------------------------
+
+
+def test_fires_on_weak_intermediate_in_a_chain():
+    from cryptography.hazmat.primitives import hashes
+    modern_leaf = _cert(hashes.SHA256()).decode()
+    chain = modern_leaf + "\n" + _SHA1_CERT_PEM   # modern leaf + SHA-1 "intermediate"
+    r = confirm_weak_crypto_artifact(chain)
+    assert r is not None, "a SHA-1 cert later in the chain must still fire"
+    # the certified evidence is the WEAK cert's subject, not the modern leaf's
+    ctx = weak_crypto_context(chain)
+    assert ctx.crypto_artifact["signature_algorithm"] == "sha1WithRSAEncryption"
+    assert "weak.example.com" in ctx.crypto_artifact["subject"]
+
+
+def test_all_modern_chain_does_not_fire():
+    from cryptography.hazmat.primitives import hashes
+    chain = _cert(hashes.SHA256()).decode() + "\n" + _cert(hashes.SHA384()).decode()
+    assert confirm_weak_crypto_artifact(chain) is None
+
+
+def test_private_key_pem_is_dormant_not_raising():
+    key_pem = ("-----BEGIN PRIVATE KEY-----\nMIIBVQ==\n-----END PRIVATE KEY-----")  # not a cert
+    assert signature_descriptors(key_pem) == []
+    assert weak_crypto_context(key_pem) is None
 
 
 # ---------------------------------------------------------------------------

@@ -12,25 +12,16 @@ the gate stays byte-identical.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .adapter import FindingContext
 
+_PEM_BLOCK_RE = re.compile(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
 
-def signature_descriptor(cert: Any) -> dict[str, str] | None:
-    """Parse a PEM/DER X.509 cert into ``{signature_algorithm, oid, subject}``, or ``None`` when it cannot
-    be parsed (or the ``cryptography`` lib is absent — the crypto branch is then dormant). Pure w.r.t.
-    the cert bytes; never raises."""
-    try:
-        from cryptography import x509  # noqa: PLC0415
-    except Exception:
-        return None
-    try:
-        raw = cert.encode() if isinstance(cert, str) else bytes(cert)
-        c = (x509.load_pem_x509_certificate(raw) if raw.lstrip().startswith(b"-----BEGIN")
-             else x509.load_der_x509_certificate(raw))
-    except Exception:
-        return None
+
+def _descriptor_of(c: Any) -> dict[str, str]:
+    """One parsed cert -> ``{signature_algorithm, oid, subject}``."""
     oid = c.signature_algorithm_oid
     try:
         subject = c.subject.rfc4514_string()
@@ -40,13 +31,59 @@ def signature_descriptor(cert: Any) -> dict[str, str] | None:
             "oid": oid.dotted_string, "subject": subject}
 
 
+def signature_descriptors(cert: Any) -> list[dict[str, str]]:
+    """Parse a PEM/DER cert (or a PEM chain / bundle) into the per-cert ``{signature_algorithm, oid,
+    subject}`` descriptors — ALL certs, so a weak-hash INTERMEDIATE CA (not just the leaf) is judged.
+    ``[]`` when nothing parses (or ``cryptography`` is absent). Pure w.r.t. the bytes; never raises."""
+    try:
+        from cryptography import x509  # noqa: PLC0415
+    except Exception:
+        return []
+    try:
+        raw = cert.encode() if isinstance(cert, str) else bytes(cert)
+    except Exception:
+        return []
+    certs: list[Any] = []
+    if raw.lstrip().startswith(b"-----BEGIN"):
+        try:  # cryptography >= 39 parses every CERTIFICATE block in one call
+            certs = list(x509.load_pem_x509_certificates(raw))
+        except AttributeError:  # older lib: split the blocks ourselves (skip a non-cert block like a key)
+            for block in _PEM_BLOCK_RE.findall(raw):
+                try:
+                    certs.append(x509.load_pem_x509_certificate(block))
+                except Exception:
+                    continue
+        except Exception:  # a single malformed / non-cert PEM (e.g. a private key) — try one, else none
+            try:
+                certs = [x509.load_pem_x509_certificate(raw)]
+            except Exception:
+                return []
+    else:
+        try:
+            certs = [x509.load_der_x509_certificate(raw)]
+        except Exception:
+            return []
+    return [_descriptor_of(c) for c in certs]
+
+
+def signature_descriptor(cert: Any) -> dict[str, str] | None:
+    """The LEAF cert's ``{signature_algorithm, oid, subject}`` descriptor, or ``None`` when nothing parses.
+    (The leaf is the first block; :func:`signature_descriptors` returns the whole chain.)"""
+    descs = signature_descriptors(cert)
+    return descs[0] if descs else None
+
+
 def weak_crypto_context(cert: Any) -> FindingContext | None:
-    """A FindingContext for a supplied cert, or ``None`` when it cannot be parsed. The oracle — not this
-    builder — decides whether the signature hash is broken; this only retains the descriptor it judges."""
-    desc = signature_descriptor(cert)
-    if desc is None:
+    """A FindingContext for a supplied cert/chain, or ``None`` when nothing parses. When a chain is given,
+    certify the FIRST cert whose signature hash is broken (so a weak-hash INTERMEDIATE fires, not just the
+    leaf); if none is broken, certify the leaf (the context exists but the oracle will not fire). The
+    oracle — not this builder — decides weakness; here it only PICKS which retained descriptor to judge."""
+    from .oracles import weak_crypto_artifact_oracle
+    descs = signature_descriptors(cert)
+    if not descs:
         return None
-    return FindingContext.from_crypto_artifact(desc)
+    broken = next((d for d in descs if weak_crypto_artifact_oracle(d).fired), None)
+    return FindingContext.from_crypto_artifact(broken if broken is not None else descs[0])
 
 
 def confirm_weak_crypto_artifact(cert: Any) -> Any:

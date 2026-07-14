@@ -70,6 +70,7 @@ from .tls import capture_tls_handshake, confirm_weak_tls, weak_tls_context
 from .weak_crypto import (
     confirm_weak_crypto_artifact,
     signature_descriptor,
+    signature_descriptors,
     weak_crypto_context,
 )
 from .version import (
