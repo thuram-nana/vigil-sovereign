@@ -76,6 +76,29 @@ def test_script_injection_does_not_fire_on_trusted_expressions():
     assert not _fires({"rule": "script_injection", "run": 'echo "${{ github.sha }}"'})
     assert not _fires({"rule": "script_injection", "run": 'echo "${{ steps.x.outputs.y }}"'})
     assert not _fires({"rule": "script_injection", "run": "echo no interpolation here"})
+    assert not _fires({"rule": "script_injection", "run": 'echo "${{ github.event.pull_request.number }}"'})
+
+
+def test_script_injection_substring_false_positives_fixed():
+    """Review wp7kachv5 (the ONLY confirmed defect): the unanchored `tok in flat` substring match
+    false-fired on non-injectable subfields, string literals, and different-prefix paths. The
+    boundary-anchored regex + quoted-literal stripping fixes each while keeping true positives."""
+    fp = [
+        'echo "${{ github.event.commits[0].id }}"',          # a commit SHA (non-injectable)
+        'echo "${{ github.event.commits[0].timestamp }}"',   # a date (non-injectable)
+        'echo "${{ github.event.pages[0].sha }}"',           # a page commit SHA
+        "echo \"${{ 'github.event.pull_request.title' }}\"",  # a quoted STRING LITERAL (no data flow)
+        'echo "${{ github.event.commits_url }}"',            # a different prefix (commits_url)
+    ]
+    for run in fp:
+        assert not _fires({"rule": "script_injection", "run": run}), f"FP still fires: {run}"
+    tp = [
+        'echo "${{ github.event.commits[0].message }}"',     # an injectable text leaf
+        'echo "${{ github.event.pages[0].page_name }}"',
+        'echo "${{ github.event.head_commit.author.email }}"',
+    ]
+    for run in tp:
+        assert _fires({"rule": "script_injection", "run": run}), f"true positive regressed: {run}"
 
 
 # ---------------------------------------------------------------------------

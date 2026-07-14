@@ -2331,17 +2331,25 @@ _CICD_VALUE_CAP = 8192
 _SHA40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _CICD_FIRST_PARTY = frozenset({"actions", "github"})
 _ACTION_REF_RE = re.compile(r"^([^/@\s]+)/([^@\s]+)@(\S+)$")
-# Untrusted, attacker-controllable Actions context expressions (GitHub's own script-injection set),
-# matched INSIDE a `${{ ... }}` interpolation in a `run:` body (whitespace-insensitive).
-_UNTRUSTED_CTX = (
-    "github.head_ref",
-    "github.event.issue.title", "github.event.issue.body",
-    "github.event.pull_request.title", "github.event.pull_request.body",
-    "github.event.pull_request.head.ref", "github.event.pull_request.head.label",
-    "github.event.comment.body", "github.event.review.body", "github.event.review_comment.body",
-    "github.event.discussion.title", "github.event.discussion.body",
-    "github.event.head_commit.message", "github.event.commits", "github.event.pages",
-)
+# Attacker-controllable Actions context REFERENCES as boundary-anchored regexes (NOT substrings — review
+# wp7kachv5): a reference matches only as a WHOLE property path at an INJECTABLE TEXT leaf, so a longer/
+# other path (`github.event.commits[0].id` — a SHA; `.timestamp`; `.url`), a different prefix
+# (`mygithub…`, `github.event.commits_url`), and a quoted STRING LITERAL (which never dereferences a
+# context) do NOT fire. `(?<![\w.])` / `(?![\w.])` are the identifier boundaries.
+_QUOTED_LIT_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_UNTRUSTED_CTX_RES: tuple["re.Pattern[str]", ...] = tuple(re.compile(p, re.I) for p in (
+    r"(?<![\w.])github\.head_ref(?![\w.])",
+    r"(?<![\w.])github\.event\.issue\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.pull_request\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.pull_request\.head\.(?:ref|label)(?![\w.])",
+    r"(?<![\w.])github\.event\.comment\.body(?![\w.])",
+    r"(?<![\w.])github\.event\.(?:review|review_comment)\.body(?![\w.])",
+    r"(?<![\w.])github\.event\.discussion\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.head_commit\.(?:message|author\.(?:name|email))(?![\w.])",
+    # array contexts: an INDEX/wildcard then an injectable TEXT leaf ONLY (never .id/.sha/.timestamp/.url).
+    r"(?<![\w.])github\.event\.commits(?:\[[^\]]*\]|\.\*)?\.(?:message|author\.(?:name|email))(?![\w.])",
+    r"(?<![\w.])github\.event\.pages(?:\[[^\]]*\]|\.\*)?\.page_name(?![\w.])",
+))
 _UNTRUSTED_PR_CHECKOUT_RE = re.compile(
     r"(?i)(github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref|refs/pull/)")
 _INTERP_RE = re.compile(r"\$\{\{(.+?)\}\}", re.S)
@@ -2403,13 +2411,14 @@ def cicd_posture_oracle(observed_control: Any) -> OracleSignal:
         run = _coerce_text(ctl.get("run"))[:_CICD_VALUE_CAP]
         for m in _INTERP_RE.finditer(run):
             expr = m.group(1)
-            flat = expr.lower().replace(" ", "")
-            for tok in _UNTRUSTED_CTX:
-                if tok in flat:
+            body = _QUOTED_LIT_RE.sub(" ", expr)   # a quoted literal never dereferences a context
+            for rx in _UNTRUSTED_CTX_RES:
+                hit = rx.search(body)
+                if hit is not None:
                     return _cicd_signal(True, conf=0.9,
                         evidence=(f"{loc}: a `run:` step interpolates the UNTRUSTED expression "
                                   + "${{ " + expr.strip() + " }} into the shell — a script-injection sink"),
-                        observed={"rule": rule, "expression": expr.strip(), "token": tok})
+                        observed={"rule": rule, "expression": expr.strip(), "match": hit.group(0)})
         return _cicd_signal(False, evidence="no untrusted ${{ github.event.* }} interpolation in the run body",
                             observed={"rule": rule})
 
