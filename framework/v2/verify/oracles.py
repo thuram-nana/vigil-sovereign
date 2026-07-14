@@ -1612,6 +1612,52 @@ def tls_weakness_oracle(observed_tls: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Weak crypto artifact — a parsed cert signed with a BROKEN hash (MD5/SHA1)
+# ---------------------------------------------------------------------------
+
+# Broken signature hashes (collision-forgeable): MD2/MD4/MD5 and SHA-1. `sha1` must NOT match
+# sha224/256/384/512 — the negative lookahead ``(?![0-9])`` guards it (SHA-1 is never a prefix of a
+# stronger SHA-2 name). Applied ONLY to a controlled signatureAlgorithm OID name, case-insensitive.
+_WEAK_SIG_HASH_RE = re.compile(r"(?i)(?:md[245]|sha-?1(?![0-9]))")
+# Fallback when the signatureAlgorithm resolved only to a dotted OID: the known broken-hash sig OIDs.
+_WEAK_SIG_OIDS = frozenset({
+    "1.2.840.113549.1.1.2",   # md2WithRSAEncryption
+    "1.2.840.113549.1.1.3",   # md4WithRSAEncryption
+    "1.2.840.113549.1.1.4",   # md5WithRSAEncryption
+    "1.2.840.113549.1.1.5",   # sha1WithRSAEncryption
+    "1.2.840.10040.4.3",      # dsa-with-sha1
+    "1.2.840.10045.4.1",      # ecdsa-with-SHA1
+    "1.3.14.3.2.29",          # sha1WithRSASignature (legacy)
+    "1.3.14.3.2.27",          # dsaWithSHA1 (legacy)
+})
+
+
+def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
+    """Fire when a parsed crypto artifact (an X.509 cert) is signed with a BROKEN hash — MD5/MD4/MD2 or
+    SHA-1. These are collision-forgeable (MD5 chosen-prefix, SHA-1 SHAttered) with NO benign use for a
+    certificate signature, so a benign modern cert (SHA-256+) does NOT fire. The proof is the retained
+    signatureAlgorithm OID NAME (or dotted OID) — a pure, deterministic classification that re-verifies
+    offline, exactly like ``tls_weakness_oracle`` re-verifies a negotiated cipher name. Emitted under the
+    TLS_WEAKNESS kind (a weak-crypto FACT). Never raises."""
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+                            evidence="no crypto-artifact evidence")
+    name = _coerce_text(observed.get("signature_algorithm")).strip()
+    oid = _coerce_text(observed.get("oid")).strip()
+    subject = _coerce_text(observed.get("subject")).strip()
+    weak = bool(name and _WEAK_SIG_HASH_RE.search(name)) or (oid in _WEAK_SIG_OIDS)
+    if not weak:
+        return OracleSignal(
+            kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+            evidence=f"signature algorithm {name or oid or '?'} is not a broken hash")
+    return OracleSignal(
+        kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.95,
+        evidence=(f"certificate{(' ' + subject) if subject else ''} is signed with the BROKEN hash "
+                  f"{name or oid} — collision-forgeable (MD5 chosen-prefix / SHA-1 SHAttered), no benign use"),
+        observed={"signature_algorithm": name, "oid": oid, "subject": subject, "reason": "broken_sig_hash"})
+
+
+# ---------------------------------------------------------------------------
 # Version range — a package version provably falls in an advisory's affected range
 # ---------------------------------------------------------------------------
 

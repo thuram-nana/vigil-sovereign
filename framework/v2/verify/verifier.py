@@ -102,6 +102,11 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # TLS posture: a deprecated protocol / weak cipher is a FACT only when a real handshake negotiated
     # it (verify.tls captures it; the oracle judges the negotiated version/suite).
     "weak_tls": (OracleKind.TLS_WEAKNESS,),
+    # Phase-2 crypto: a parsed crypto ARTIFACT (an X.509 cert) signed with a BROKEN hash (MD5/SHA1) —
+    # unconditionally weak (collision-forgeable), a FACT re-verified from the retained signatureAlgorithm
+    # OID name. Reuses TLS_WEAKNESS (a weak-crypto FACT) via a distinct `crypto_artifact` ctx key no
+    # benchmark finding carries, so the gate stays byte-identical. See verify/weak_crypto.py.
+    "weak_crypto_artifact": (OracleKind.TLS_WEAKNESS,),
     # supply chain: a scanner's "package @ version is affected by CVE" is a FACT only when the version
     # provably falls in the advisory's affected range (verify.version's deterministic membership check).
     "vulnerable_dependency": (OracleKind.VERSION_RANGE,),
@@ -623,6 +628,8 @@ class OracleVerifier:
         if kind is OracleKind.TLS_WEAKNESS:
             if "tls" in ctx:
                 return oracles.tls_weakness_oracle(ctx["tls"])
+            if "crypto_artifact" in ctx:
+                return oracles.weak_crypto_artifact_oracle(ctx["crypto_artifact"])
             return None
         if kind is OracleKind.VERSION_RANGE:
             if "version_advisory" in ctx:
