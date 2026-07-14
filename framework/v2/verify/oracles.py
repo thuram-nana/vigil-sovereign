@@ -2311,6 +2311,122 @@ def mesh_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# CI/CD posture — a parsed GitHub-Actions control provably carries a dangerous construct
+# ---------------------------------------------------------------------------
+#
+# Phase-2: promote a parsed workflow control (verify.cicd_posture.ingest_workflow / sensors.cicd) to a
+# FACT by RE-DERIVING the danger over the RETAINED control — never trusting the ingest's rule label. Each
+# rule fires only on a concrete, literal construct a benign workflow does not carry (near-zero-FP):
+#   * unpinned_action  — a THIRD-PARTY action (owner/repo@ref, owner not actions/github, not ./local or
+#     docker://) pinned to a MUTABLE ref (ref is not a 40-hex commit SHA). SHA-pinned / first-party /
+#     local do NOT fire.
+#   * pwn_request      — `on: pull_request_target` AND a checkout of the UNTRUSTED PR head (head.sha /
+#     head.ref / github.head_ref / refs/pull/*). A plain `pull_request` trigger, or a base checkout, do
+#     NOT fire.
+#   * script_injection — a `run:` shell body that INTERPOLATES an untrusted `${{ github.event.*.title|
+#     body|... }}` / `${{ github.head_ref }}` expression (a shell-injection sink). A run with no untrusted
+#     `${{ }}` does NOT fire.
+# Pure + deterministic (re-verifies offline); ReDoS-safe (length-capped, fixed-alternation).
+_CICD_VALUE_CAP = 8192
+_SHA40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_CICD_FIRST_PARTY = frozenset({"actions", "github"})
+_ACTION_REF_RE = re.compile(r"^([^/@\s]+)/([^@\s]+)@(\S+)$")
+# Attacker-controllable Actions context REFERENCES as boundary-anchored regexes (NOT substrings — review
+# wp7kachv5): a reference matches only as a WHOLE property path at an INJECTABLE TEXT leaf, so a longer/
+# other path (`github.event.commits[0].id` — a SHA; `.timestamp`; `.url`), a different prefix
+# (`mygithub…`, `github.event.commits_url`), and a quoted STRING LITERAL (which never dereferences a
+# context) do NOT fire. `(?<![\w.])` / `(?![\w.])` are the identifier boundaries.
+_QUOTED_LIT_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_UNTRUSTED_CTX_RES: tuple["re.Pattern[str]", ...] = tuple(re.compile(p, re.I) for p in (
+    r"(?<![\w.])github\.head_ref(?![\w.])",
+    r"(?<![\w.])github\.event\.issue\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.pull_request\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.pull_request\.head\.(?:ref|label)(?![\w.])",
+    r"(?<![\w.])github\.event\.comment\.body(?![\w.])",
+    r"(?<![\w.])github\.event\.(?:review|review_comment)\.body(?![\w.])",
+    r"(?<![\w.])github\.event\.discussion\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.head_commit\.(?:message|author\.(?:name|email))(?![\w.])",
+    # array contexts: an INDEX/wildcard then an injectable TEXT leaf ONLY (never .id/.sha/.timestamp/.url).
+    r"(?<![\w.])github\.event\.commits(?:\[[^\]]*\]|\.\*)?\.(?:message|author\.(?:name|email))(?![\w.])",
+    r"(?<![\w.])github\.event\.pages(?:\[[^\]]*\]|\.\*)?\.page_name(?![\w.])",
+))
+_UNTRUSTED_PR_CHECKOUT_RE = re.compile(
+    r"(?i)(github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref|refs/pull/)")
+_INTERP_RE = re.compile(r"\$\{\{(.+?)\}\}", re.S)
+
+
+def _cicd_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.CICD_POSTURE, fired=fired, confidence=(conf if fired else 0.0),
+                        evidence=evidence, observed=observed)
+
+
+def cicd_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a parsed GitHub-Actions control PROVABLY carries a dangerous construct — a re-verifiable
+    parse-proof over the RETAINED control that promotes ``verify.cicd_posture`` / ``sensors.cicd``'s
+    workflow LEAD to a FACT. Never trusts the ingest's rule label: it re-derives the danger from the
+    literal evidence, so a benign workflow (SHA-pinned action, plain ``pull_request``, no untrusted
+    interpolation) never fires. Pure + deterministic; re-verifies offline. Never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _cicd_signal(False, evidence="no CI/CD control evidence", observed={})
+    ctl = observed_control
+    rule = _coerce_text(ctl.get("rule")).strip().lower()
+    wf = _coerce_text(ctl.get("workflow")).strip()
+    job = _coerce_text(ctl.get("job")).strip()
+    loc = (wf or "?") + (f" job {job}" if job else "")
+
+    if rule == "unpinned_action":
+        uses = _coerce_text(ctl.get("uses"))[:_CICD_VALUE_CAP].strip()
+        m = _ACTION_REF_RE.match(uses)
+        if m is None:
+            return _cicd_signal(False, evidence=f"{uses!r} is not an owner/repo@ref action reference",
+                                observed={"rule": rule, "uses": uses})
+        owner, repo, ref = m.group(1), m.group(2), m.group(3)
+        if owner.lower() in _CICD_FIRST_PARTY or uses.startswith("./") or uses.startswith("docker://"):
+            return _cicd_signal(False, evidence=f"{uses!r} is a first-party/local action (not a supply-chain risk)",
+                                observed={"rule": rule, "uses": uses, "owner": owner})
+        if _SHA40_RE.match(ref):
+            return _cicd_signal(False, evidence=f"{uses!r} is SHA-pinned (immutable)",
+                                observed={"rule": rule, "uses": uses, "ref": ref})
+        return _cicd_signal(True, conf=0.85,
+                            evidence=(f"{loc}: third-party action {owner}/{repo} is pinned to the MUTABLE ref "
+                                      f"{ref!r} (not a commit SHA) — a supply-chain risk (the action can change under you)"),
+                            observed={"rule": rule, "uses": uses, "owner": owner, "repo": repo, "ref": ref})
+
+    if rule == "pwn_request":
+        trigger = _coerce_text(ctl.get("trigger")).strip().lower()
+        checkout = _coerce_text(ctl.get("checkout_ref"))[:_CICD_VALUE_CAP]
+        if trigger != "pull_request_target":
+            return _cicd_signal(False, evidence=f"trigger {trigger!r} is not pull_request_target",
+                                observed={"rule": rule, "trigger": trigger})
+        if not _UNTRUSTED_PR_CHECKOUT_RE.search(checkout):
+            return _cicd_signal(False, evidence="pull_request_target does not check out the untrusted PR head",
+                                observed={"rule": rule, "trigger": trigger, "checkout_ref": checkout.strip()})
+        return _cicd_signal(True, conf=0.9,
+                            evidence=(f"{loc}: pull_request_target checks out the UNTRUSTED PR head "
+                                      f"({checkout.strip()!r}) — a pwn-request (attacker PR code runs with the "
+                                      f"workflow's write-scoped token/secrets)"),
+                            observed={"rule": rule, "trigger": trigger, "checkout_ref": checkout.strip()})
+
+    if rule == "script_injection":
+        run = _coerce_text(ctl.get("run"))[:_CICD_VALUE_CAP]
+        for m in _INTERP_RE.finditer(run):
+            expr = m.group(1)
+            body = _QUOTED_LIT_RE.sub(" ", expr)   # a quoted literal never dereferences a context
+            for rx in _UNTRUSTED_CTX_RES:
+                hit = rx.search(body)
+                if hit is not None:
+                    return _cicd_signal(True, conf=0.9,
+                        evidence=(f"{loc}: a `run:` step interpolates the UNTRUSTED expression "
+                                  + "${{ " + expr.strip() + " }} into the shell — a script-injection sink"),
+                        observed={"rule": rule, "expression": expr.strip(), "match": hit.group(0)})
+        return _cicd_signal(False, evidence="no untrusted ${{ github.event.* }} interpolation in the run body",
+                            observed={"rule": rule})
+
+    return _cicd_signal(False, evidence=f"unrecognised CI/CD rule {rule!r} (stays a lead)",
+                        observed={"rule": rule})
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They

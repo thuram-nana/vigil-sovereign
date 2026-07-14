@@ -30,6 +30,12 @@ from .models import (
     VerificationResult,
 )
 from .oob import OOBHit, OOBReceiver
+from .cicd_posture import (
+    cicd_posture_context,
+    confirm_cicd_posture,
+    confirm_workflow,
+    ingest_workflow,
+)
 from .k8s_posture import confirm_k8s_posture, k8s_posture_context
 from .cloud_posture import confirm_cloud_posture, cloud_posture_context
 from .mesh_posture import (
