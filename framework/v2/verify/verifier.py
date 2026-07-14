@@ -189,6 +189,12 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # unknown-class fallback and `make gate` byte-identical. The MESH twin of the k8s/cloud achieved-state
     # promotions — a single-control membership/parse-proof, offline, ZERO mesh/kubectl calls, NO attack.
     "mesh_misconfiguration": (OracleKind.MESH_POSTURE,),
+    # CI/CD-pipeline posture (Phase-2). A parsed GitHub-Actions control (verify.cicd_posture /
+    # sensors.cicd) is a LEAD; it becomes a FACT only when cicd_posture_oracle re-derives a concrete
+    # dangerous construct (unpinned third-party action / pwn-request / script-injection sink) over the
+    # RETAINED control. NOT in the frozen _ALL_ORACLES, and fires only when the ctx carries `cicd_control`
+    # (no benchmark finding does), so `make gate` stays byte-identical.
+    "cicd_misconfiguration": (OracleKind.CICD_POSTURE,),
     # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
     # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
     # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
@@ -697,6 +703,11 @@ class OracleVerifier:
         if kind is OracleKind.MESH_POSTURE:
             if "mesh_control" in ctx:
                 return oracles.mesh_posture_oracle(ctx["mesh_control"])
+        # -- Phase-2 CI/CD posture — fire ONLY when the ctx carries `cicd_control` (a retained workflow
+        # control), so this is inert on the benchmark/gate path.
+        if kind is OracleKind.CICD_POSTURE:
+            if "cicd_control" in ctx:
+                return oracles.cicd_posture_oracle(ctx["cicd_control"])
             return None
         # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
         #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.

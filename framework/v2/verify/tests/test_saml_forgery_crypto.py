@@ -354,7 +354,9 @@ def test_structural_path_byte_identical_with_and_without_empty_certs() -> None:
 
 
 def test_no_new_oracle_kind_and_frozen_fallback_unchanged() -> None:
-    assert len(OracleKind) == 27
+    # SAML crypto added NO new kind (it reuses SAML_STRUCTURAL_FORGERY, held OUT of the frozen fallback).
+    # The absolute OracleKind count is pinned by aegis/tests/test_gate_invariants.py, not here (so a later
+    # additive kind does not falsely fail this SAML test).
     assert len(_ALL_ORACLES) == 15
     assert OracleKind.SAML_STRUCTURAL_FORGERY not in _ALL_ORACLES
 

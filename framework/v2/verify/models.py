@@ -150,6 +150,19 @@ class OracleKind(str, enum.Enum):
     # ATTACK is never performed — this is a pure re-derivation over already-ingested config.
     MESH_POSTURE = "mesh_posture"
 
+    # CI/CD-pipeline posture (Phase-2 coverage). Reachable ONLY via its `cicd_misconfiguration`
+    # BUG_CLASS_ORACLES row — NOT in the frozen _ALL_ORACLES fallback (stays EXACTLY 15) — and fires only
+    # when the ctx carries `cicd_control` (a retained workflow control no benchmark finding carries), so
+    # `make gate` stays byte-identical. Promotes a parsed GitHub-Actions control to a FACT via a
+    # re-verifiable parse-proof over the RETAINED control: (a) a third-party action pinned to a MUTABLE
+    # (non-SHA) ref (supply-chain); (b) a `pull_request_target` workflow that checks out the untrusted PR
+    # head (pwn-request: attacker code runs with write-scoped secrets); (c) a `run:` shell step that
+    # interpolates an UNTRUSTED `github.event.*` / `github.head_ref` expression (script-injection sink).
+    # A SHA-pinned action, a plain `pull_request` trigger, a first-party (`actions/*`) action, and a
+    # `run:` with no untrusted expression do NOT fire (near-zero-FP). NO repo is cloned, NO pipeline runs
+    # — a pure re-derivation over the operator-supplied workflow YAML.
+    CICD_POSTURE = "cicd_posture"
+
 
 class OracleProbe(BaseModel):
     """A passive, abstract description of what an oracle must compare.

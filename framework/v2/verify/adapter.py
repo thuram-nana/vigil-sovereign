@@ -290,6 +290,11 @@ class FindingContext(BaseModel):
     # judges over its achieved-state ALONE, offline, ZERO mesh/kubectl calls. No benchmark/scan/engage
     # finding carries mesh_control, so appending this leaves the gate byte-identical.
     mesh_control: dict[str, Any] | None = None
+    # cicd_posture_oracle (Phase-2: a parsed GitHub-Actions control provably carries a dangerous construct
+    # — an unpinned third-party action / pwn-request / script-injection sink — judged over the RETAINED
+    # workflow control ALONE, offline, ZERO repo clone / pipeline run). No benchmark/scan/engage finding
+    # carries cicd_control, so appending this leaves the gate byte-identical.
+    cicd_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -610,6 +615,23 @@ class FindingContext(BaseModel):
                 canon.append(out)
             retained["rules"] = canon
         return cls(bug_class=bug_class, mesh_control=retained)
+
+    @classmethod
+    def from_cicd_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "cicd_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED GitHub-Actions workflow control (``verify.cicd_posture.ingest_workflow`` /
+        ``sensors.cicd``), for the CI/CD-posture oracle. The oracle re-derives the danger (an unpinned
+        third-party action, a pwn-request, a script-injection sink) over the control's literal evidence
+        alone — offline, ZERO repo clone / pipeline run — so a workflow linter's say-so is confirmed a
+        FACT only by the actual dangerous construct. Only the fields the oracle judges are retained
+        (verbose YAML is never laundered into the certificate). JSON-safe + deterministic."""
+        src = dict(control or {})
+        retained: dict[str, Any] = {}
+        for k in ("rule", "workflow", "job", "uses", "trigger", "checkout_ref", "run"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        return cls(bug_class=bug_class, cicd_control=retained)
 
     @classmethod
     def from_jwt_token(
@@ -945,6 +967,8 @@ class FindingContext(BaseModel):
             ctx["cloud_control"] = self.cloud_control
         if self.mesh_control is not None:
             ctx["mesh_control"] = self.mesh_control
+        if self.cicd_control is not None:
+            ctx["cicd_control"] = self.cicd_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

@@ -172,5 +172,7 @@ def test_fact_reverifies_offline():
 
 
 def test_reuses_tls_weakness_no_new_kind():
-    assert len(OracleKind) == 27                      # no new kind
-    assert OracleKind.TLS_WEAKNESS in _ALL_ORACLES    # reuses a frozen kind
+    # weak-crypto adds NO new kind: it reuses TLS_WEAKNESS (a frozen fallback member) and there is no
+    # WEAK_CRYPTO* member. (The absolute OracleKind count is pinned by the gate-invariant test, not here.)
+    assert OracleKind.TLS_WEAKNESS in _ALL_ORACLES
+    assert not any(k.name.startswith("WEAK_CRYPTO") for k in OracleKind)
