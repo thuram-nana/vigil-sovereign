@@ -230,6 +230,11 @@ class FindingContext(BaseModel):
     # tls_weakness_oracle (a real TLS handshake negotiated a deprecated protocol / weak cipher)
     tls: dict[str, Any] | None = None
 
+    # weak_crypto_artifact_oracle (a parsed crypto artifact — e.g. an X.509 cert — is signed with a
+    # BROKEN hash: MD5/SHA1). No benchmark/scan/engage finding carries this, so it leaves the gate
+    # byte-identical; routes to the TLS_WEAKNESS kind (a weak-crypto FACT) via a distinct ctx key.
+    crypto_artifact: dict[str, Any] | None = None
+
     # AEGIS system_prompt_disclosure_oracle (a planted high-entropy canary appeared VERBATIM
     # in the app's own LLM output). PR1: these carry PLAINTEXT — the reverify contract re-fires
     # on verbatim substrings, so the certificate honestly retains the random sentinel + a
@@ -448,6 +453,16 @@ class FindingContext(BaseModel):
         ``tls`` evidence MUST come from a real gated capture (``tls.capture_tls_handshake``), never a
         scanner's parsed row — the oracle re-verifies by an INDEPENDENT handshake."""
         return cls(bug_class=bug_class, tls=dict(tls or {}))
+
+    @classmethod
+    def from_crypto_artifact(
+        cls, artifact: Mapping[str, Any], *, bug_class: str = "weak_crypto_artifact"
+    ) -> "FindingContext":
+        """A parsed crypto-artifact descriptor (e.g. ``{"signature_algorithm": "sha1WithRSAEncryption",
+        "oid": "1.2.840.113549.1.1.5", "subject": ...}``) for the weak-crypto-artifact oracle. The
+        retained OID name is what the oracle classifies — a pure, re-verifiable string check (a broken
+        signature hash MD5/SHA1 is unconditionally weak), like the TLS oracle re-verifies a cipher name."""
+        return cls(bug_class=bug_class, crypto_artifact=dict(artifact or {}))
 
     @classmethod
     def from_version_advisory(
@@ -918,6 +933,8 @@ class FindingContext(BaseModel):
             ctx["handshake"] = self.handshake
         if self.tls is not None:
             ctx["tls"] = self.tls
+        if self.crypto_artifact is not None:
+            ctx["crypto_artifact"] = self.crypto_artifact
         if self.version_advisory is not None:
             ctx["version_advisory"] = self.version_advisory
         if self.policy is not None:
