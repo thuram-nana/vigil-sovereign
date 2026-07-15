@@ -8,6 +8,11 @@ evidence.cli — `python3 -m framework.v2 evidence <subcommand>`.
     verify  --report R --bundle DIR --trust-root TR.json
               independently verify every certificate (authenticity + binding + artifact
               integrity + reproduction) AND the tamper-evident chain. Exit 0 iff all sound.
+    pcf-export --report R --bundle DIR --out FILE
+              project the signed bundle into Proof-Carrying Findings (PCF v0.1) certificates
+    pcf-verify --pcf FILE --trust-root TR.json
+              independently verify PCF certificates offline (PCF §6's five fail-closed steps).
+              Exit 0 iff all verify.
 
 Signing is a governance/provisioning action; the runtime path is `verify`, which only
 ever checks. Offline throughout.
@@ -130,6 +135,50 @@ def _verify(args: argparse.Namespace) -> int:
     return 0 if result.ok else 2
 
 
+def _ctx_by_ref(report: dict) -> dict[str, dict]:
+    return {str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding"): f["oracle_context"]
+            for f in _findings(report) if isinstance(f, dict) and f.get("oracle_context")}
+
+
+def _pcf_export(args: argparse.Namespace) -> int:
+    """Project each signed certificate in a bundle into the PCF v0.1 wire format (the retained
+    oracle_context comes from the report, by finding_ref — the same rule ``certify`` uses)."""
+    from .pcf import to_pcf
+    bundle = json.loads((Path(args.bundle) / "evidence-bundle.json").read_text(encoding="utf-8"))
+    ctx = _ctx_by_ref(json.loads(Path(args.report).read_text(encoding="utf-8")))
+    pcf_certs = []
+    for raw in bundle.get("certificates", []):
+        sc = SignedEvidence.model_validate(raw)
+        oc = ctx.get(sc.certificate.finding_ref)
+        if oc is None:
+            print(f"  skip {sc.certificate.finding_ref}: no oracle_context in report", file=sys.stderr)
+            continue
+        pcf_certs.append(to_pcf(sc, oracle_context=oc))
+    Path(args.out).write_text(json.dumps({"pcf_certificates": pcf_certs}, indent=2), encoding="utf-8")
+    print(f"wrote {len(pcf_certs)} PCF certificate(s) to {args.out}")
+    return 0
+
+
+def _pcf_verify(args: argparse.Namespace) -> int:
+    """Independently verify PCF certificates offline (PCF §6's five fail-closed steps). Exit 0 iff all
+    verify. A trust root is REQUIRED — an un-anchored verify fails closed (ungoverned)."""
+    from .pcf import verify_pcf
+    doc = json.loads(Path(args.pcf).read_text(encoding="utf-8"))
+    trust_root = TrustRoot.model_validate_json(Path(args.trust_root).read_text(encoding="utf-8"))
+    evidence_root = Path(args.evidence_root) if args.evidence_root else None
+    certs = doc.get("pcf_certificates") if isinstance(doc, dict) and "pcf_certificates" in doc \
+        else (doc if isinstance(doc, list) else [doc])
+    ok_n = 0
+    for c in certs:
+        r = verify_pcf(c, trust_root, evidence_root=evidence_root)
+        ok_n += r.verified
+        cid = c.get("id") if isinstance(c, dict) else "?"
+        print(f"  [{'VERIFIED' if r.verified else 'REJECTED':8}] {cid}"
+              + (f"  step={r.step}: {r.reason}" if not r.verified else ""))
+    print(f"{ok_n}/{len(certs)} PCF certificate(s) verified")
+    return 0 if certs and ok_n == len(certs) else 2
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 evidence",
@@ -158,6 +207,19 @@ def main(argv: list[str]) -> int:
                    help="persisted anti-rollback high-water file: refuses a stale bundle "
                         "whose head last_seq is below the highest previously accepted")
     p.set_defaults(fn=_verify)
+
+    p = sub.add_parser("pcf-export", help="project a signed evidence bundle into PCF v0.1 certificates")
+    p.add_argument("--report", required=True)
+    p.add_argument("--bundle", required=True)
+    p.add_argument("--out", required=True, help="output JSON file of PCF certificates")
+    p.set_defaults(fn=_pcf_export)
+
+    p = sub.add_parser("pcf-verify", help="independently verify PCF v0.1 certificates offline (PCF §6)")
+    p.add_argument("--pcf", required=True, help="a PCF certificates JSON file (from pcf-export)")
+    p.add_argument("--trust-root", required=True, dest="trust_root")
+    p.add_argument("--evidence-root", default="", dest="evidence_root",
+                   help="root of the raw evidence tree — REQUIRED to check certs carrying an artifact manifest")
+    p.set_defaults(fn=_pcf_verify)
 
     args = parser.parse_args(argv)
     return args.fn(args)
