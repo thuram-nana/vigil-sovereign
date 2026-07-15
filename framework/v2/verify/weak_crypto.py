@@ -95,3 +95,20 @@ def confirm_weak_crypto_artifact(cert: Any) -> Any:
         return None
     subject = (ctx.crypto_artifact or {}).get("subject") or "certificate"
     return confirm_finding({"bug_class": "weak_crypto_artifact", "surface": subject}, ctx)
+
+
+def crypto_descriptor_context(descriptor: Any) -> dict:
+    """The verifier context for an ALREADY-PARSED cert descriptor (``{signature_algorithm, oid,
+    subject}``) — routes to the weak-crypto-artifact oracle. Used by the cert-capture feed
+    (``sensors.tls_cert`` / ``engage_fusion``), which retains the descriptor rather than the raw bytes."""
+    from collections.abc import Mapping
+    src = descriptor if isinstance(descriptor, Mapping) else {}
+    return FindingContext.from_crypto_artifact(dict(src)).to_verifier_context()
+
+
+def confirm_crypto_descriptor(descriptor: Any, *, verifier: Any = None) -> Any:
+    """Judge one retained cert descriptor: ``confirmed`` iff the oracle re-derives a broken signature hash
+    over its OID name. Offline; never raises. Mirrors ``confirm_cicd_posture`` / ``confirm_mobile_posture``
+    (routes through the verifier, the sole fact authority) for the fusion promotion path."""
+    from .verifier import OracleVerifier
+    return (verifier or OracleVerifier()).confirm(crypto_descriptor_context(descriptor))

@@ -468,6 +468,38 @@ def test_mobsf_report_with_no_app_identity_promotes_no_orphan_fact(tmp_path: Pat
     assert world.all_nodes() == []                             # and no orphan fact/stub control
 
 
+# ---- tls_cert: a broken-hash cert LEAD -> weak-crypto-artifact FACT ----------
+def test_tls_cert_broken_hash_signature_is_promoted_by_the_weak_crypto_oracle(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
+    from framework.v2.verify.tests.test_weak_crypto import _SHA1_CERT_PEM
+    world = WorldModel()
+    report = _write(tmp_path, "weak.pem", _SHA1_CERT_PEM)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "tls_cert", "args": {"cert": report}}))
+    # the cert folded in as a CONTROL LEAD (intel-grounded), never oracle-proof by itself
+    leads = [o for o in minted if o.subject.node_id.startswith("control:crypto:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # the weak-crypto oracle re-fired in-run: the SHA-1 signature is an oracle-GROUNDED FACT
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:tls_weakness:crypto:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 weak-crypto fact, got {[n.id for n in facts]}"
+    assert facts[0].provenance.startswith("oracle:")
+    control_id = "control:" + facts[0].id.split("finding:tls_weakness:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_tls_cert_modern_sha256_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from framework.v2.verify.tests.test_weak_crypto import _cert
+    world = WorldModel()
+    report = _write(tmp_path, "modern.pem", _cert(SHA256()).decode())
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "tls_cert", "args": {"cert": report}}))
+    assert any(o.subject.node_id.startswith("control:crypto:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:tls_weakness:crypto:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
 # ---- 3b: cloud_import LEAD -> policy-path FACT (no live cloud) ---------------
 
 

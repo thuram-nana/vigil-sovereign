@@ -28,6 +28,7 @@ from .cloud import (
     normalize_cloud_export,
 )
 from .cicd import WorkflowScanSensor, cicd_control_observations, parse_workflows
+from .tls_cert import CertScanSensor, cert_control_observations, parse_certs
 from .k8s_runtime import KubeBenchSensor, kube_bench_observations, parse_kube_bench
 from .fuzz import FuzzHarnessSensor, confirm_crash, default_fuzz_cases
 from .nmap import NmapServiceSensor, parse_nmap_xml
@@ -68,4 +69,6 @@ __all__ = [
     "KubeBenchSensor", "parse_kube_bench", "kube_bench_observations",
     # CI/CD posture sensor (GitHub-Actions workflow offline ingest -> CI/CD control leads)
     "WorkflowScanSensor", "parse_workflows", "cicd_control_observations",
+    # TLS/cert posture sensor (X.509 certificate offline ingest -> weak-crypto leads)
+    "CertScanSensor", "parse_certs", "cert_control_observations",
 ]

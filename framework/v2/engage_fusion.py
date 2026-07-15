@@ -81,7 +81,7 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 # stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
 # _reverify_reachability — which fires only through the fail-closed capture, never by default.)
 _SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows",
-                 "mobsf_static")
+                 "mobsf_static", "tls_cert")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -181,6 +181,7 @@ def _fusion_registry() -> ToolRegistry:
     from .sensors.cloud import CloudPostureImportSensor
     from .sensors.k8s_runtime import KubeBenchSensor
     from .sensors.mobile import MobsfSensor
+    from .sensors.tls_cert import CertScanSensor
 
     reg = ToolRegistry()
     reg.register(DeclaredServiceSensor())
@@ -189,6 +190,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
     reg.register(WorkflowScanSensor())        # offline GitHub-Actions workflow ingest (Tier-1)
     reg.register(MobsfSensor())               # offline MobSF static-report ingest (Tier-1)
+    reg.register(CertScanSensor())            # offline X.509 certificate ingest (Tier-1)
     return reg
 
 
@@ -428,6 +430,40 @@ def _reverify_mobile(world: Any, res: Any, *, seq: int) -> int:
     return promoted
 
 
+def _reverify_crypto(world: Any, res: Any, *, seq: int) -> int:
+    """Weak-crypto promotion: the weak-crypto-artifact oracle over each RETAINED certificate descriptor. A
+    cert signed with a BROKEN hash (MD5/SHA-1 — collision-forgeable) is promoted to an oracle-grounded FACT
+    on its CONTROL node; a modern SHA-256+ cert is left an honest LEAD. Mirrors :func:`_reverify_cicd`; the
+    oracle re-derives from the retained signatureAlgorithm OID name (a pure re-verifiable classification)."""
+    try:
+        from .verify.weak_crypto import confirm_crypto_descriptor
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_crypto_descriptor(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"crypto:{check_id}")
+        _project_oracle_fact(
+            world, subject, oracle_kind="tls_weakness", bug_class="weak_crypto_artifact",
+            evidence=f"certificate signed with a BROKEN hash ({c.get('signature_algorithm')}) — collision-forgeable",
+            seq=seq, detail={"check_id": check_id, "signature_algorithm": str(c.get("signature_algorithm") or "")})
+        promoted += 1
+    return promoted
+
+
 def _reverify_cloud(world: Any, res: Any, *, seq: int) -> int:
     """3b promotion: TWO cloud oracles re-fire over the RETAINED export — NO live cloud calls. The
     EXISTING policy-path oracle re-derives each REACHABILITY-provable posture LEAD (public exposure /
@@ -584,6 +620,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
       * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
       * mobsf_static    -> mobile-posture oracle over each retained MobSF control
+      * tls_cert        -> weak-crypto-artifact oracle over each retained certificate descriptor
       * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
                            oracle over each achieved-state misconfiguration lead (3b)
       * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c)
@@ -598,6 +635,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_cicd(world, res, seq=seq)
     if task.sensor == "mobsf_static":
         return _reverify_mobile(world, res, seq=seq)
+    if task.sensor == "tls_cert":
+        return _reverify_crypto(world, res, seq=seq)
     if task.sensor == "cloud_import":
         return _reverify_cloud(world, res, seq=seq)
     if task.sensor == "declared_service":
