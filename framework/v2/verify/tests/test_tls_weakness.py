@@ -128,6 +128,21 @@ def test_capture_tls_with_an_injected_connector_confirms_weakness(monkeypatch, t
     assert confirm_weak_tls(tls).confirmed
 
 
+def test_capture_tls_retains_the_peer_cert_der_when_the_connector_returns_it(monkeypatch, tmp_path) -> None:
+    # the default connector returns a 4-tuple (version, cipher, bits, cert_der); capture base64s the cert
+    # so the weak-crypto oracle can judge the leaf signature. A 3-tuple connector (no cert) stays valid.
+    _grant(monkeypatch)
+    _charter(tmp_path, "10.0.0.5")
+    import base64
+    tls4 = capture_tls_handshake("10.0.0.5", 443, slug="alpha",
+                                 connect=lambda h, p, t: ("TLSv1.3", "TLS_AES_256_GCM_SHA384", 256, b"DERBYTES"))
+    assert tls4["connected"] is True
+    assert base64.b64decode(tls4["cert_der_b64"]) == b"DERBYTES"
+    tls3 = capture_tls_handshake("10.0.0.5", 443, slug="alpha",
+                                 connect=lambda h, p, t: ("TLSv1.3", "TLS_AES_256_GCM_SHA384", 256))
+    assert tls3["connected"] is True and "cert_der_b64" not in tls3   # backward compatible
+
+
 def test_capture_tls_handshake_failure_is_a_clean_negative(monkeypatch, tmp_path) -> None:
     _grant(monkeypatch)
     _charter(tmp_path, "10.0.0.5")

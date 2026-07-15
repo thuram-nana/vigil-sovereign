@@ -715,3 +715,90 @@ def test_reachability_out_of_scope_host_is_refused(monkeypatch: pytest.MonkeyPat
         reach_connect=lambda h, p, t, b: (f"{h}:{p}", "banner"))
     minted = fuse_sensors(world, "alpha", ctx)
     assert minted == [] and not world.has_node("finding:service_reachability:8.8.8.8:53/tcp")
+
+
+# ---- live TLS: declared TLS service -> weak-TLS + weak-crypto FACTs (opt-in, gated) ----
+def _sha1_der() -> bytes:
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from framework.v2.verify.tests.test_weak_crypto import _SHA1_CERT_PEM
+    return x509.load_pem_x509_certificate(_SHA1_CERT_PEM.encode()).public_bytes(Encoding.DER)
+
+
+def _tls_task(**extra):
+    return {"sensor": "declared_service",
+            "args": {"host": "10.0.0.5", "confirm_tls": True,
+                     "services": [{"port": 443, "protocol": "tcp"}], **extra}}
+
+
+def test_tls_live_promotes_weak_protocol_and_weak_cert(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("cryptography")
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    # injected 4-tuple connector: a deprecated protocol + a SHA-1-signed leaf cert -> BOTH oracles fire
+    ctx = SimpleNamespace(fusion_tasks=[_tls_task()],
+                          tls_connect=lambda h, p, t: ("TLSv1", "AES128-SHA", 128, _sha1_der()))
+    fuse_sensors(world, "alpha", ctx)
+    ids = {n.id for n in world.all_nodes() if n.grounding == GROUNDING_GROUNDED}
+    assert "finding:tls_weakness:10.0.0.5:443/tcp" in ids          # weak protocol/cipher
+    assert "finding:weak_crypto_artifact:10.0.0.5:443/tcp" in ids  # SHA-1 cert (distinct node, no collision)
+
+
+def test_tls_live_strong_endpoint_promotes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("cryptography")
+    from cryptography import x509
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from framework.v2.verify.tests.test_weak_crypto import _cert
+    modern = x509.load_pem_x509_certificate(_cert(SHA256())).public_bytes(Encoding.DER)
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    ctx = SimpleNamespace(fusion_tasks=[_tls_task()],
+                          tls_connect=lambda h, p, t: ("TLSv1.3", "TLS_AES_256_GCM_SHA384", 256, modern))
+    fuse_sensors(world, "alpha", ctx)
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())   # no fact
+
+
+def test_tls_live_requires_the_confirm_tls_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    probed = {"n": 0}
+    # NO confirm_tls flag → the live probe must never be attempted
+    ctx = SimpleNamespace(
+        fusion_tasks=[{"sensor": "declared_service",
+                       "args": {"host": "10.0.0.5", "services": [{"port": 443, "protocol": "tcp"}]}}],
+        tls_connect=lambda *a: (probed.update(n=probed["n"] + 1) or ("TLSv1", "AES128-SHA", 128, b"")))
+    fuse_sensors(world, "alpha", ctx)
+    assert probed["n"] == 0
+    assert not any(n.id.startswith(("finding:tls_weakness", "finding:weak_crypto_artifact"))
+                   for n in world.all_nodes())
+
+
+def test_tls_live_non_tls_port_is_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    probed = {"n": 0}
+    # port 22 is not a well-known TLS port and not flagged tls → no handshake attempted
+    ctx = SimpleNamespace(
+        fusion_tasks=[{"sensor": "declared_service",
+                       "args": {"host": "10.0.0.5", "confirm_tls": True,
+                                "services": [{"port": 22, "protocol": "tcp"}]}}],
+        tls_connect=lambda *a: (probed.update(n=probed["n"] + 1) or ("TLSv1", "AES128-SHA", 128, b"")))
+    fuse_sensors(world, "alpha", ctx)
+    assert probed["n"] == 0
+
+
+def test_tls_live_out_of_scope_host_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 8.8.8.8 is not in the 'alpha' charter scope → the declared_service sensor is scope-refused and the
+    # gated TLS handshake's own _authorize would also refuse fail-closed; nothing folds, no fact.
+    pytest.importorskip("cryptography")
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    ctx = SimpleNamespace(
+        fusion_tasks=[{"sensor": "declared_service",
+                       "args": {"host": "8.8.8.8", "confirm_tls": True,
+                                "services": [{"port": 443, "protocol": "tcp"}]}}],
+        tls_connect=lambda h, p, t: ("TLSv1", "AES128-SHA", 128, _sha1_der()))
+    minted = fuse_sensors(world, "alpha", ctx)
+    assert minted == []
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
