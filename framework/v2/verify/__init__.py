@@ -36,6 +36,11 @@ from .cicd_posture import (
     confirm_workflow,
     ingest_workflow,
 )
+from .mobile_posture import (
+    confirm_mobile_controls,
+    confirm_mobile_posture,
+    mobile_posture_context,
+)
 from .k8s_posture import confirm_k8s_posture, k8s_posture_context
 from .cloud_posture import confirm_cloud_posture, cloud_posture_context
 from .mesh_posture import (
@@ -54,6 +59,7 @@ from .oracles import (
     cloud_posture_oracle,
     k8s_posture_oracle,
     mesh_posture_oracle,
+    mobile_posture_oracle,
     oob_callback_oracle,
     policy_path_oracle,
     prompt_injection_oracle,
@@ -110,6 +116,7 @@ __all__ = [
     "k8s_posture_oracle",
     "cloud_posture_oracle",
     "mesh_posture_oracle",
+    "mobile_posture_oracle",
     "jwt_forgery_oracle",
     "saml_forgery_oracle",
     # AEGIS (defensive dual) oracles
@@ -144,6 +151,10 @@ __all__ = [
     "mesh_posture_context",
     "ingest_mesh_config",
     "confirm_mesh_config",
+    # mobile static-posture (embedded private-key promotion; Phase-2)
+    "confirm_mobile_posture",
+    "mobile_posture_context",
+    "confirm_mobile_controls",
     # SSO/JWT structural-forgery (Workstream-B)
     "confirm_jwt_forgery",
     "jwt_forgery_context",

@@ -12,16 +12,21 @@ LEADS (never facts — a third-party tool's say-so is never a CRUCIBLE fact):
   * one ``ENDPOINT`` lead per embedded back-end URL (carrying a ``url`` attr so the discoverer can test
     it — the per-request charter scope gate refuses anything out of scope).
 
-STOP AT LEADS: no ``verify.mobile`` oracle, no new ``OracleKind``, no new ``NodeKind`` in this slice. The
-offline-provable signals (an exported component with no permission; cleartext-traffic permitted) promote
-to FACTs via a posture oracle in a LATER slice (mirroring how the kube-bench sensor shipped before the
-k8s-posture oracle). Pure + total: a malformed report is a non-ingestion, never a crash.
+MOSTLY LEADS: nearly every mobile signal is resolved by an Android precedence/gating chain (manifest-attr
+vs network_security_config; min vs target vs device SDK; explicit vs default export) a MobSF descriptor
+routinely omits, so promoting them to FACTs would false-fire — they STAY honest leads. The ONE offline-
+re-derivable exception this slice retains structured evidence for is an embedded PRIVATE-KEY PEM block:
+the ``verify.mobile_posture`` oracle re-derives it by actually LOADING the key material (never a label-
+match), and the ``engage_fusion`` feed promotes it to a FACT. Other sound slices (debuggable + non-debug
+signing cert; unguarded exported content provider) are later work. Pure + total: a malformed report is a
+non-ingestion, never a crash.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 
 from ..agents.tools import ToolContext, ToolResult
 from ..intel.models import Credibility, IntelSourceKind, Observation, Reliability, SourceReliability
@@ -34,6 +39,26 @@ _MOBILE_RELIABILITY = SourceReliability(reliability=Reliability.B, credibility=C
 # Severity strings MobSF uses for a NON-defect (a passing/secure check) — never a lead.
 _SECURE_SEV = frozenset({"secure", "good", "pass", "ok", "info", "none", ""})
 _MAX_ITEMS = 400   # bound per report (a huge report is still bounded, deterministic)
+_PEM_MAX = 20000   # a private key never approaches this; the bound just caps a pathological blob
+
+# A PEM private-key block (PKCS#1 / PKCS#8 / SEC1 / encrypted). Retained VERBATIM (newlines intact) so the
+# mobile-posture oracle can RE-DERIVE it by actually loading the key material offline — never a label-match.
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----.*?"
+    r"-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+    re.DOTALL)
+
+
+def _extract_private_key_pem(value: str) -> str | None:
+    """Return the FIRST embedded PEM private-key block VERBATIM (``\\n``-escapes normalised to real
+    newlines so the block re-parses), or ``None``. Pure; bounded by ``_PEM_MAX``."""
+    if not isinstance(value, str) or "PRIVATE KEY-----" not in value:
+        return None
+    text = value.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    m = _PEM_PRIVATE_KEY_RE.search(text)
+    if m is None:
+        return None
+    return m.group(0)[:_PEM_MAX]
 
 
 def _findings_from(section: object, category: str) -> list[dict]:
@@ -100,9 +125,24 @@ def parse_mobsf(text: str) -> dict:
     secrets = report.get("secrets") or report.get("possible_secrets")
     if isinstance(secrets, list):
         for i, s in enumerate(secrets):
-            controls.append({"check_id": f"secret:{i}", "category": "secret",
-                             "title": "possible hardcoded secret", "severity": "warning",
-                             "evidence": str(s)[:200]})
+            if isinstance(s, str):
+                sv = s
+            elif isinstance(s, (list, tuple)):
+                sv = "\n".join(str(x) for x in s)   # MobSF sometimes splits a secret into per-line pieces
+            else:
+                sv = str(s)
+            ctrl = {"check_id": f"secret:{i}", "category": "secret",
+                    "title": "possible hardcoded secret", "severity": "warning",
+                    "evidence": sv[:200]}
+            pem = _extract_private_key_pem(sv)
+            if pem is not None:
+                # a structured, machine-checkable value the posture oracle RE-DERIVES by loading the key —
+                # NOT the free-text a naive oracle would string-trust. Mirrors k8s `actual_value` / cicd `uses`.
+                ctrl["rule"] = "private_key_material"
+                ctrl["pem"] = pem
+                ctrl["title"] = "embedded private key material"
+                ctrl["severity"] = "high"
+            controls.append(ctrl)
     return {"app": app, "controls": controls[:_MAX_ITEMS], "urls": _embedded_urls(report)}
 
 
@@ -135,8 +175,9 @@ def mobsf_observations(parsed: dict, *, seq: int, source: str = "mobsf") -> list
             continue
         seen.add(cid)
         _obs(EntityRef(kind=NodeKind.CONTROL, key=f"mobile:{cid}"),
-             {"lead": True, "unverified": True, "category": c.get("category"), "title": c.get("title"),
-              "severity": c.get("severity"), "evidence": c.get("evidence"), "app": app_key}, 0.7)
+             {"lead": True, "unverified": True, "check_id": cid, "category": c.get("category"),
+              "rule": c.get("rule"), "title": c.get("title"), "severity": c.get("severity"),
+              "evidence": c.get("evidence"), "app": app_key}, 0.7)
 
     for url in parsed.get("urls") or []:
         _obs(EntityRef(kind=NodeKind.ENDPOINT, key=url),

@@ -295,6 +295,9 @@ class FindingContext(BaseModel):
     # workflow control ALONE, offline, ZERO repo clone / pipeline run). No benchmark/scan/engage finding
     # carries cicd_control, so appending this leaves the gate byte-identical.
     cicd_control: dict[str, Any] | None = None
+    # A RETAINED MobSF mobile-posture control for the mobile-posture oracle. No benchmark finding carries
+    # mobile_control, so appending this leaves the gate byte-identical.
+    mobile_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -634,6 +637,22 @@ class FindingContext(BaseModel):
         return cls(bug_class=bug_class, cicd_control=retained)
 
     @classmethod
+    def from_mobile_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "mobile_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED MobSF mobile-posture control (``sensors.mobile`` / ``verify.mobile_posture``), for
+        the mobile-posture oracle. The oracle re-derives the weakness over the control's literal evidence
+        alone — offline, by actually LOADING the embedded key material — so a scanner's say-so is confirmed
+        a FACT only by the reconstructed key. Only the fields the oracle judges are retained (the ``pem``
+        block verbatim so it re-parses); a lead-only control retains nothing extra. JSON-safe + deterministic."""
+        src = dict(control or {})
+        retained: dict[str, Any] = {}
+        for k in ("rule", "check_id", "category", "pem"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        return cls(bug_class=bug_class, mobile_control=retained)
+
+    @classmethod
     def from_jwt_token(
         cls,
         token: str,
@@ -969,6 +988,8 @@ class FindingContext(BaseModel):
             ctx["mesh_control"] = self.mesh_control
         if self.cicd_control is not None:
             ctx["cicd_control"] = self.cicd_control
+        if self.mobile_control is not None:
+            ctx["mobile_control"] = self.mobile_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:
