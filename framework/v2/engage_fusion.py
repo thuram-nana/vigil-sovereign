@@ -80,7 +80,7 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 # promotion oracle (k8s-posture, policy-path) — each still gated at run_sensor time. (declared_service
 # stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
 # _reverify_reachability — which fires only through the fail-closed capture, never by default.)
-_SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import")
+_SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -176,6 +176,7 @@ def _fusion_registry() -> ToolRegistry:
     still gated at ``run_sensor`` time), but keeping the registry minimal keeps the fusion path's scope
     and imports tight. Workstream-3 adds the offline kube-bench + cloud-posture importers alongside
     their promotion oracles."""
+    from .sensors.cicd import WorkflowScanSensor
     from .sensors.cloud import CloudPostureImportSensor
     from .sensors.k8s_runtime import KubeBenchSensor
 
@@ -184,6 +185,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(SbomVulnSensor())
     reg.register(KubeBenchSensor())          # offline kube-bench --json ingest (Tier-1)
     reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
+    reg.register(WorkflowScanSensor())        # offline GitHub-Actions workflow ingest (Tier-1)
     return reg
 
 
@@ -345,6 +347,40 @@ def _reverify_k8s(world: Any, res: Any, *, seq: int) -> int:
     return promoted
 
 
+def _reverify_cicd(world: Any, res: Any, *, seq: int) -> int:
+    """CI/CD promotion: the CI/CD-posture oracle over each RETAINED workflow control. A control that
+    re-derives a concrete dangerous construct (an unpinned third-party action / pwn-request checkout /
+    script-injection sink) is promoted to an oracle-grounded FACT on its CONTROL node; anything the
+    oracle cannot re-confirm is left an honest LEAD. Mirrors :func:`_reverify_k8s`."""
+    try:
+        from .verify.cicd_posture import confirm_cicd_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_cicd_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"cicd:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="cicd_posture", bug_class="cicd_misconfiguration",
+            evidence=f"CI/CD workflow control '{c.get('rule')}' re-derives a concrete dangerous construct",
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or "")})
+        promoted += 1
+    return promoted
+
+
 def _reverify_cloud(world: Any, res: Any, *, seq: int) -> int:
     """3b promotion: TWO cloud oracles re-fire over the RETAINED export — NO live cloud calls. The
     EXISTING policy-path oracle re-derives each REACHABILITY-provable posture LEAD (public exposure /
@@ -499,6 +535,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
 
       * sbom_vuln       -> version-range oracle over SBOM advisories
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
+      * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
       * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
                            oracle over each achieved-state misconfiguration lead (3b)
       * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c)
@@ -509,6 +546,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_sbom(world, res, seq=seq)
     if task.sensor == "kube_bench":
         return _reverify_k8s(world, res, seq=seq)
+    if task.sensor == "cicd_workflows":
+        return _reverify_cicd(world, res, seq=seq)
     if task.sensor == "cloud_import":
         return _reverify_cloud(world, res, seq=seq)
     if task.sensor == "declared_service":

@@ -350,6 +350,67 @@ def test_kube_bench_benign_fail_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -
     assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
 
 
+# ---- cicd_workflows: dangerous workflow control LEAD -> CI/CD-posture FACT ---
+# A dangerous GitHub-Actions workflow: pull_request_target + PR-head checkout (pwn_request), an unpinned
+# third-party action (unpinned_action), and a run interpolating an untrusted title (script_injection).
+_WF_VULN = """
+name: ci
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: evil-org/evil-action@main
+      - run: echo "PR ${{ github.event.pull_request.title }}"
+"""
+
+# A benign workflow: SHA-pinned first-party checkout + a static run under a plain pull_request trigger.
+_WF_BENIGN = """
+name: ci
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@abcabcabcabcabcabcabcabcabcabcabcabcabca
+      - run: make build
+"""
+
+
+def test_cicd_dangerous_workflow_control_is_promoted_by_the_cicd_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "ci.yml", _WF_VULN)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "cicd_workflows", "args": {"workflow": report}}))
+    # the workflow constructs folded in as CONTROL LEADS (intel-grounded), never oracle-proof by themselves
+    leads = [o for o in minted if o.subject.node_id.startswith("control:cicd:")]
+    assert leads, "no CI/CD control leads minted"
+    assert all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # the CI/CD-posture oracle re-fired in-run: each dangerous construct is an oracle-GROUNDED FINDING.
+    # The dangerous VULN workflow has exactly three: pwn_request, unpinned (evil-action), script_injection.
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:cicd_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 3, f"expected 3 CI/CD facts, got {[n.id for n in facts]}"
+    assert all(n.provenance.startswith("oracle:") for n in facts)
+    # each grounded finding hangs off its CONTROL lead via an oracle-GROUNDED EVIDENCES edge
+    for f in facts:
+        control_id = "control:" + f.id.split("finding:cicd_posture:", 1)[1]
+        edge = world.get_edge(f.id, control_id, EdgeKind.EVIDENCES)
+        assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_cicd_benign_workflow_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "ci.yml", _WF_BENIGN)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "cicd_workflows", "args": {"workflow": report}}))
+    # the SHA-pinned first-party checkout is still ingested as a LEAD, but the oracle rejects it
+    assert any(o.subject.node_id.startswith("control:cicd:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:cicd_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
 # ---- 3b: cloud_import LEAD -> policy-path FACT (no live cloud) ---------------
 
 
