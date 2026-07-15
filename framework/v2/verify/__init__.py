@@ -80,7 +80,9 @@ from .policy_path import (
 from .reachability import capture_handshake, confirm_reachable, reachable_context
 from .tls import capture_tls_handshake, confirm_weak_tls, weak_tls_context
 from .weak_crypto import (
+    confirm_crypto_descriptor,
     confirm_weak_crypto_artifact,
+    crypto_descriptor_context,
     signature_descriptor,
     signature_descriptors,
     weak_crypto_context,
