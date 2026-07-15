@@ -27,6 +27,7 @@ from .cloud import (
     confirm_cloud_privilege_path,
     normalize_cloud_export,
 )
+from .cicd import WorkflowScanSensor, cicd_control_observations, parse_workflows
 from .k8s_runtime import KubeBenchSensor, kube_bench_observations, parse_kube_bench
 from .fuzz import FuzzHarnessSensor, confirm_crash, default_fuzz_cases
 from .nmap import NmapServiceSensor, parse_nmap_xml
@@ -65,4 +66,6 @@ __all__ = [
     "confirm_cloud_privilege_path", "confirm_cloud_posture_facts",
     # Workstream C — Kubernetes-runtime posture sensor (kube-bench offline ingest -> CIS leads)
     "KubeBenchSensor", "parse_kube_bench", "kube_bench_observations",
+    # CI/CD posture sensor (GitHub-Actions workflow offline ingest -> CI/CD control leads)
+    "WorkflowScanSensor", "parse_workflows", "cicd_control_observations",
 ]

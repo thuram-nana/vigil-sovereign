@@ -58,6 +58,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     """Register the built-in reference sensors onto ``registry`` and return it. Registration is not
     invocation — every sensor is still gated at ``run_sensor`` time, so registering the active Nmap
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
+    from .cicd import WorkflowScanSensor
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
     from .k8s_runtime import KubeBenchSensor
     from .fuzz import FuzzHarnessSensor
@@ -94,6 +95,10 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     # invocation — still kill-switch-gated at run_sensor time. Mints CIS-control-failure LEADS only;
     # a FUTURE k8s-posture oracle re-verifies them to facts (docs/coverage-mobile-k8s-roadmap.md).
     registry.register(KubeBenchSensor())
+    # CI/CD posture sensor: offline GitHub-Actions workflow importer (Tier-1). Registration is not
+    # invocation — still kill-switch-gated at run_sensor time. Mints CI/CD-control LEADS only; the
+    # CI/CD-posture oracle (verify.cicd_posture) re-verifies them to facts via engage_fusion.
+    registry.register(WorkflowScanSensor())
     # Fuzz/ASan robustness producer (Workstream D.1): drives a bounded fuzz against an operator-
     # authorized LOCAL binary and feeds captured sanitizer output to the SANITIZER_SIGNAL oracle.
     # Registration is not invocation — it is OFF by default (allowed_root=None refuses everything) and
