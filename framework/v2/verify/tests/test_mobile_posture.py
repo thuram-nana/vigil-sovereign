@@ -90,6 +90,34 @@ def test_no_pem_field_refuses():
     assert not confirm_mobile_posture({"rule": "private_key_material", "check_id": "secret:0"}).confirmed
 
 
+def _provider(**kw) -> dict:
+    return {"rule": "exported_content_provider", "check_id": "component:provider:P",
+            "name": "com.x.P", **kw}
+
+
+def test_explicitly_exported_unguarded_provider_is_a_fact():
+    assert confirm_mobile_posture(_provider(exported="true")).confirmed
+
+
+def test_guarded_exported_provider_does_not_fire():
+    # ANY guard (permission / readPermission / writePermission / a path-permission child) → no fire
+    assert not confirm_mobile_posture(_provider(exported="true", permission="com.x.PERM")).confirmed
+    assert not confirm_mobile_posture(_provider(exported="true", read_permission="com.x.R")).confirmed
+    assert not confirm_mobile_posture(_provider(exported="true", write_permission="com.x.W")).confirmed
+    assert not confirm_mobile_posture(_provider(exported="true", has_path_permission=True)).confirmed
+
+
+def test_non_explicitly_exported_provider_refuses():
+    # exported=false, or ABSENT (the default-export gating chain we deliberately REFUSE) → never a fact
+    assert not confirm_mobile_posture(_provider(exported="false")).confirmed
+    assert not confirm_mobile_posture(_provider()).confirmed                    # exported absent
+
+
+def test_exported_value_is_normalized_but_only_true_fires():
+    assert confirm_mobile_posture(_provider(exported="  TrUe ")).confirmed       # whitespace/case tolerant
+    assert not confirm_mobile_posture(_provider(exported="1")).confirmed          # "1" is not the manifest bool
+
+
 def test_lead_only_rule_does_not_fire():
     # a general mobile lead (exported component, cleartext, allowBackup, secret-string) is NOT promoted
     for rule in ("exported_activity", "clear_text", "allow_backup", "secret", "unknown"):

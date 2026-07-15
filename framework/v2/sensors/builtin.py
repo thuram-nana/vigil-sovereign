@@ -60,6 +60,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     sensor here is safe: it cannot run without its ``ACTIVE_RECON`` entitlement + charter scope."""
     from .cicd import WorkflowScanSensor
     from .tls_cert import CertScanSensor
+    from .android_manifest import AndroidManifestSensor
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
     from .k8s_runtime import KubeBenchSensor
     from .fuzz import FuzzHarnessSensor
@@ -104,6 +105,10 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     # invocation — still kill-switch-gated at run_sensor time. Mints weak-crypto LEADS only; the weak-
     # crypto-artifact oracle (verify.weak_crypto) re-verifies a broken-hash signature to a fact via fusion.
     registry.register(CertScanSensor())
+    # Android-manifest posture sensor: offline decoded-AndroidManifest.xml importer (Tier-1). Mints
+    # provider LEADS only; the mobile-posture oracle re-verifies an explicitly-exported unguarded content
+    # provider to a fact via fusion. Still kill-switch-gated at run_sensor time.
+    registry.register(AndroidManifestSensor())
     # Fuzz/ASan robustness producer (Workstream D.1): drives a bounded fuzz against an operator-
     # authorized LOCAL binary and feeds captured sanitizer output to the SANITIZER_SIGNAL oracle.
     # Registration is not invocation — it is OFF by default (allowed_root=None refuses everything) and

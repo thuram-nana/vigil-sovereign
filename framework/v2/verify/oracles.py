@@ -2488,6 +2488,29 @@ def mobile_posture_oracle(observed_control: Any) -> OracleSignal:
                                         "by anyone with the APK; not a secret"),
                               observed={"rule": rule, "key_type": key_kind})
 
+    if rule == "exported_content_provider":
+        # SOUND only on an EXPLICIT android:exported="true" with ZERO permission guards. We deliberately
+        # REFUSE the default-export gating chain (a provider's export default depends on min/targetSdk —
+        # a semantic layer the manifest fragment may not resolve): an absent/other `exported` is a LEAD,
+        # never asserted. A provider carrying ANY of android:permission / readPermission / writePermission
+        # / a <path-permission> child is guarded → NO fire (conservative: a set permission of any level
+        # means the claim "unguarded" would be false).
+        exported = _coerce_text(observed_control.get("exported")).strip().lower()
+        if exported != "true":
+            return _mobile_signal(False, observed={"rule": rule, "exported": exported},
+                                  evidence="content provider is not EXPLICITLY exported=true (default-export unresolved — a lead)")
+        guarded = any(_coerce_text(observed_control.get(k)).strip()
+                      for k in ("permission", "read_permission", "write_permission"))
+        if guarded or bool(observed_control.get("has_path_permission")):
+            return _mobile_signal(False, observed={"rule": rule},
+                                  evidence="the exported content provider carries a permission guard (not unguarded)")
+        name = _coerce_text(observed_control.get("name")).strip()
+        return _mobile_signal(True, conf=0.9,
+                              evidence=(f"content provider{(' ' + name) if name else ''} is EXPORTED with no "
+                                        "permission/readPermission/writePermission/path-permission guard — any "
+                                        "installed app can read/write its content:// data"),
+                              observed={"rule": rule, "name": name})
+
     return _mobile_signal(False, evidence=f"unrecognised/lead-only mobile rule {rule!r} (stays a lead)",
                           observed={"rule": rule})
 
