@@ -1,12 +1,12 @@
 # Graph Report - /home/kali/Pictures/PENTEST-main  (2026-07-15)
 
 ## Corpus Check
-- 775 files · ~931,167 words
+- 775 files · ~931,509 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 13786 nodes · 61949 edges · 531 communities detected
-- Extraction: 29% EXTRACTED · 71% INFERRED · 0% AMBIGUOUS · INFERRED: 43922 edges (avg confidence: 0.59)
+- 13792 nodes · 61979 edges · 531 communities detected
+- Extraction: 29% EXTRACTED · 71% INFERRED · 0% AMBIGUOUS · INFERRED: 43942 edges (avg confidence: 0.59)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -555,130 +555,130 @@
 10. `AuditFinding` - 546 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `run_engagement()` --calls--> `test_run_engagement_threads_flag_to_campaign()`  [INFERRED]
-  /home/kali/Pictures/PENTEST-main/framework/v2/engage.py → /home/kali/Pictures/PENTEST-main/framework/v2/scanner/tests/test_cli_flag_wiring.py
 - `run_engagement()` --calls--> `test_run_engagement_default_leaves_capability_off()`  [INFERRED]
   /home/kali/Pictures/PENTEST-main/framework/v2/engage.py → /home/kali/Pictures/PENTEST-main/framework/v2/scanner/tests/test_cli_flag_wiring.py
 - `run_engagement()` --calls--> `test_run_engagement_threads_access_control()`  [INFERRED]
   /home/kali/Pictures/PENTEST-main/framework/v2/engage.py → /home/kali/Pictures/PENTEST-main/framework/v2/scanner/tests/test_cli_flag_wiring.py
-- `run_engagement()` --calls--> `test_run_engagement_access_control_default_off()`  [INFERRED]
-  /home/kali/Pictures/PENTEST-main/framework/v2/engage.py → /home/kali/Pictures/PENTEST-main/framework/v2/scanner/tests/test_cli_flag_wiring.py
+- `The output of one bounded reasoning step — ADVICE for the next autonomous     ac` --uses--> `LLMBackend`  [INFERRED]
+  /home/kali/Pictures/PENTEST-main/framework/v2/engage_reasoning.py → /home/kali/Pictures/PENTEST-main/framework/v2/kernel/llm.py
+- `A deterministic, JSON-serialisable projection — the decision-bearing         sur` --uses--> `LLMBackend`  [INFERRED]
+  /home/kali/Pictures/PENTEST-main/framework/v2/engage_reasoning.py → /home/kali/Pictures/PENTEST-main/framework/v2/kernel/llm.py
 - `framework.v2.plan — READ-ONLY planner projection over a prior engagement's world` --uses--> `CrucibleError`  [INFERRED]
   /home/kali/Pictures/PENTEST-main/framework/v2/plan.py → /home/kali/Pictures/PENTEST-main/framework/v2/common/errors.py
 
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.01
-Nodes (1334): AccessControlConfig, build_access_control_checks(), config_from_cli(), CrossAccessSpec, default_cross_specs(), MassAssignmentCheck, _merge_victim_headers(), parse_cross_spec() (+1326 more)
+Cohesion: 0.0
+Nodes (1233): _bounded_disclosure_span(), from_crypto_artifact(), from_dom_execution(), from_error_signature(), from_evaluation(), from_handshake(), from_honeypot(), from_jwt_token() (+1225 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.0
-Nodes (1146): from_cloud_control(), from_crypto_artifact(), from_error_signature(), from_evaluation(), from_handshake(), from_jwt_token(), from_mesh_control(), from_policy_graph() (+1138 more)
+Cohesion: 0.01
+Nodes (1013): build_access_control_checks(), config_from_cli(), CrossAccessSpec, default_cross_specs(), MassAssignmentCheck, _merge_victim_headers(), parse_cross_spec(), parse_victim_header() (+1005 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.01
-Nodes (1057): AndroidManifestSensor, _attr(), sensors.android_manifest — ingest a raw (decoded) AndroidManifest.xml into mobil, An ``android:`` namespaced attribute (ElementTree expands the prefix to the full, Ingest an operator-provided decoded ``AndroidManifest.xml`` and mint mobile post, AsnBgpCollector, intel.collectors.asn_bgp — ASN / BGP routing origin as Observations.  For a host, AttackerState (+1049 more)
+Cohesion: 0.0
+Nodes (781): console_dir(), launch_scan(), Spawn a loopback `scan` subprocess that streams progress + saves its report., Re-run the retained oracle certificates in a saved run's report — a pure,     of, reverify_run(), run_dir(), _write_meta(), _coerce_text() (+773 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.01
-Nodes (979): Agent, detect(), api_detection — identify API patterns (REST / GraphQL / SOAP / RPC)., _memory_summary(), detect(), auth_detection — identify the authentication scheme(s)., Agent, Base class for every agent under MAO.      Subclasses set the class-level `name` (+971 more)
+Nodes (987): default_registry(), AndroidManifestSensor, Ingest an operator-provided decoded ``AndroidManifest.xml`` and mint mobile post, AttackerState, worldmodel.attacker — the attacker's own state as first-class, persistent facts., Record that the attacker has reached ``service_id`` (a service /         endpoin, Node ids the attacker currently controls (deterministic order)., Credential/session/token ids the attacker currently holds. (+979 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.0
-Nodes (751): from_boolean_probes(), from_predicate(), from_side_effect(), from_state(), Normalise one observed HTTP response into `{status?, body, latency_ms?}`.      A, Fold another context's populated inputs into this one, so a single         findi, _response_to_dict(), ProbeOutcome (+743 more)
+Cohesion: 0.01
+Nodes (723): from_http_responses(), Agent, _memory_summary(), blackboard_path(), from_sqlite(), open_blackboard(), agents.blackboard — append-only event log shared by every agent.  Per FORGE PROT, Insert a new event. Validates payload against the kind's schema. (+715 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.02
-Nodes (874): console.api — read-only data providers for the Ops Console.  Every function here, Every engagement (a slug = a directory under ``targets/``), with its     safety/, One engagement's full at-a-glance state (charter presence, safety, logs)., Console-launched scan runs, newest first, with their meta + finding count., The saved `build_report` document for a console run (findings + attack_paths +, Reconstruct the world-model attack graph for a saved run — a PURE re-run of, Call a zero-arg read and swallow any error into ``default`` — the console     mu, The committed benchmark scoreboard + the regression baseline — reused as-is (+866 more)
+Cohesion: 0.01
+Nodes (699): _attr(), sensors.android_manifest — ingest a raw (decoded) AndroidManifest.xml into mobil, An ``android:`` namespaced attribute (ElementTree expands the prefix to the full, AsnBgpCollector, intel.collectors.asn_bgp — ASN / BGP routing origin as Observations.  For a host, Collector, collector_for_subject(), _default_collectors() (+691 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.01
-Nodes (648): Trip the kill-switch for an engagement — the emergency stop. Idempotent (the, trip_killswitch(), from_http_responses(), admit_finding(), claim_from_finding(), _endpoint_node_id(), _get(), Read a field from a finding that may be a pydantic model or a plain dict. (+640 more)
+Nodes (456): AdapterError, _burp_issue_list(), BurpAdapter, AdapterError, _nikto_class(), _nikto_hosts(), _nikto_location(), NiktoAdapter (+448 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.01
-Nodes (480): AdapterError, _burp_issue_list(), BurpAdapter, AdapterError, _nikto_class(), _nikto_hosts(), _nikto_location(), NiktoAdapter (+472 more)
+Nodes (487): binding_satisfied(), current_host_identifiers(), The set of identifiers the running host can present. Compared,     case-sensitiv, Return (ok, reason). A 'none' binding is always satisfied. A     'host_attestati, _read_machine_ids(), authority_signing_bytes(), entitlement_signing_bytes(), improve.canonical — deterministic signing bytes for a proposal.  Governance appr (+479 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.01
-Nodes (454): ActorGraph, aegis.actor_graph — the per-actor Beta belief, via the reused projection keyston, A bounded, continuously-updated per-actor belief graph., Project one observation; update the per-actor counter; evict the LRU actor if ov, The actor's current Beta posterior (mean + lower credible bound + observation, _bounded_disclosure_span(), _coerce_text(), from_auth_activity() (+446 more)
+Nodes (417): ActorGraph, aegis.actor_graph — the per-actor Beta belief, via the reused projection keyston, A bounded, continuously-updated per-actor belief graph., Project one observation; update the per-actor counter; evict the LRU actor if ov, The actor's current Beta posterior (mean + lower credible bound + observation, BoundaryError, _check_depth(), coarsen_ip() (+409 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.01
-Nodes (388): default_registry(), import_findings(), invoke(), _never_approve(), console.actions — the SAFE operator actions (the only mutations the console make, The SAFE tool registry the API drives: the built-in reference tools     (``rever, destructive-confirm callback for an API request: always DENY. There is no     in, Invoke ``tool`` through the fail-closed gate chain and return a JSON-safe result (+380 more)
+Nodes (415): AnthropicBackend, _backoff_delay(), _classify_transient(), AnthropicBackend — live LLM via the Anthropic Messages API.  Activates when:   -, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, Issue one Messages API call, retrying transient failures (429/overload/5xx/, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, The server-advised Retry-After delay in seconds, if present + numeric. An HTTP-d (+407 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.01
-Nodes (349): AnthropicBackend, _backoff_delay(), _classify_transient(), AnthropicBackend — live LLM via the Anthropic Messages API.  Activates when:   -, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, Issue one Messages API call, retrying transient failures (429/overload/5xx/, Live Anthropic backend. The ZDR variant differs only in `name`     (which the so, The server-advised Retry-After delay in seconds, if present + numeric. An HTTP-d (+341 more)
+Cohesion: 0.02
+Nodes (441): AccessControlConfig, Trip the kill-switch for an engagement — the emergency stop. Idempotent (the, trip_killswitch(), authority_full(), _authority_state(), benchmark_data(), engagement_detail(), _engagement_row() (+433 more)
 
 ### Community 11 - "Community 11"
 Cohesion: 0.01
-Nodes (309): beta_mean(), beta_mean_from_counts(), common.beta — the Beta-posterior mean, defined once for both learners.  Two comp, Mean of a ``Beta(alpha, beta)`` distribution: ``alpha / (alpha + beta)``.      `, Posterior mean of a success rate under a uniform ``Beta(1, 1)`` prior,     given, _bin_edges(), brier_score(), Calibrator (+301 more)
+Nodes (356): A recoverable tool-layer error — a duplicate/empty tool name, or an unknown tool, ToolError, beta_mean(), beta_mean_from_counts(), common.beta — the Beta-posterior mean, defined once for both learners.  Two comp, Mean of a ``Beta(alpha, beta)`` distribution: ``alpha / (alpha + beta)``.      `, Posterior mean of a success rate under a uniform ``Beta(1, 1)`` prior,     given, Insert a new event. Validates payload against the kind's schema. (+348 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.01
-Nodes (337): console_dir(), launch_scan(), Spawn a loopback `scan` subprocess that streams progress + saves its report., Re-run the retained oracle certificates in a saved run's report — a pure,     of, reverify_run(), run_dir(), _write_meta(), authority_full() (+329 more)
+Nodes (358): detect_outliers(), _median(), intruder.analysis — anomaly detection over an attack's result population.  Burp, Indices of anomalous rows.      A row is flagged if ANY of: its status code is a, _Row, detect(), api_detection — identify API patterns (REST / GraphQL / SOAP / RPC)., render_attack() (+350 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.02
-Nodes (266): PatternAnalyzer, _r(), Offline pattern-based static analyzer. Always available., _Rule, _analyzers(), _index(), _load_produced(), _regress() (+258 more)
+Cohesion: 0.01
+Nodes (383): import_findings(), invoke(), _never_approve(), console.actions — the SAFE operator actions (the only mutations the console make, The SAFE tool registry the API drives: the built-in reference tools     (``rever, destructive-confirm callback for an API request: always DENY. There is no     in, Invoke ``tool`` through the fail-closed gate chain and return a JSON-safe result, Convenience wrapper for the importer action — still routed through     ``invoke` (+375 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.01
-Nodes (276): A recoverable tool-layer error — a duplicate/empty tool name, or an unknown tool, ToolError, CrucibleError, analyze_html(), analyze_js(), _clip(), scanner.domxss — static DOM-XSS source→sink analysis.  DOM-based XSS lives entir, Variables assigned (directly) from a DOM source -> the source they carry. (+268 more)
+Cohesion: 0.02
+Nodes (378): admit_finding(), claim_from_finding(), _endpoint_node_id(), _get(), Read a field from a finding that may be a pydantic model or a plain dict., The world-model node a finding is about — matches the id the chainer mints     (, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex, Build a Claim from an ``AuditFinding`` (or an equivalent dict). An oracle_contex (+370 more)
 
 ### Community 15 - "Community 15"
 Cohesion: 0.02
-Nodes (201): BrokenWorkflowHandler, _confirm(), confirm_against_local_workflow(), demo_spec(), detect_workflow_abuse(), GuardedWorkflowHandler, _local_workflow(), probe_replay() (+193 more)
+Nodes (302): PatternAnalyzer, _r(), Offline pattern-based static analyzer. Always available., _Rule, _analyzers(), _index(), _load_produced(), _regress() (+294 more)
 
 ### Community 16 - "Community 16"
-Cohesion: 0.02
-Nodes (235): _is_loopback(), _load_json_findings(), main(), The (payload, event_id) pairs for an engagement's reportable findings —     orac, _reportable_from_blackboard(), demoted(), fact(), firing_ctx() (+227 more)
+Cohesion: 0.01
+Nodes (289): _annotate(), _descriptor(), _rules(), _ruleset(), _classify(), detection_cost_of_technique(), _noisy_or(), path_detection_cost() (+281 more)
 
 ### Community 17 - "Community 17"
 Cohesion: 0.02
-Nodes (223): _add_action_args(), _annotate(), build_parser(), _descriptor(), _rules(), _ruleset(), _action_kind_for(), attack_technique_for() (+215 more)
+Nodes (268): CrucibleError, analyze_html(), analyze_js(), _clip(), scanner.domxss — static DOM-XSS source→sink analysis.  DOM-based XSS lives entir, Variables assigned (directly) from a DOM source -> the source they carry., Find DOM-XSS source→sink flows in one JavaScript string., Extract inline scripts + ``javascript:`` URLs from HTML and analyze them. (+260 more)
 
 ### Community 18 - "Community 18"
-Cohesion: 0.03
-Nodes (165): planner.budget — three concurrent budgets enforced fail-closed.  Per FORGE PROTO, curated_probe_checks(), _advice_rank(), _credit_finding_outcome(), _default_registry(), _discovery_registry(), _distinct_confirming_kinds(), _drive_probe() (+157 more)
+Cohesion: 0.01
+Nodes (200): _no_send(), fast_numerics_enabled(), _flag(), has_numpy(), has_semantic(), has_z3(), common.capabilities — probe for OPTIONAL, heavy dependencies (Workstream G).  CR, True iff ``module`` is importable, WITHOUT importing it. Total: any     probing (+192 more)
 
 ### Community 19 - "Community 19"
-Cohesion: 0.03
-Nodes (138): BenchmarkReport, BlackboardError, Anything wrong with a blackboard operation (validation, IO)., _horizon(), _load_snapshot(), _now(), _review(), ingest_horizon() (+130 more)
+Cohesion: 0.02
+Nodes (227): demoted(), fact(), firing_ctx(), lead(), make_demoted(), make_fact(), make_lead(), nonfiring_ctx() (+219 more)
 
 ### Community 20 - "Community 20"
-Cohesion: 0.04
-Nodes (77): _build_server(), _cmd_list(), _cmd_serve(), MCPClientError, mcp.client — a minimal, SAFE JSON-RPC 2.0 client for CONSUMING an external MCP s, Production transport: a child MCP server spoken to over its stdio pipes (newline, A transport/protocol failure talking to an external MCP server (never a trust de, StdioSubprocessTransport (+69 more)
+Cohesion: 0.03
+Nodes (141): BlackboardError, Anything wrong with a blackboard operation (validation, IO)., proposal_signing_bytes(), The exact bytes a governance approver signs to approve a merge., _horizon(), _load_snapshot(), _now(), _review() (+133 more)
 
 ### Community 21 - "Community 21"
-Cohesion: 0.06
-Nodes (88): assess_finding(), confidence.decision — the Scientific Confidence Engine at the vulnerability gate, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, assess(), _credible_interval(), _logscore() (+80 more)
+Cohesion: 0.04
+Nodes (136): curated_probe_checks(), Feature, infer_predicate(), InferenceResult, InferredConstraint, scanner.constraints — infer a filter's predicate from black-box membership queri, The outcome of one inference: the constraint, a synthesized satisfying     input, Build an input that satisfies the constraint, starting from a known member: (+128 more)
 
 ### Community 22 - "Community 22"
 Cohesion: 0.03
-Nodes (75): AdaptResult, _alt_case(), _crossover(), _double_url_encode(), evolve(), EvolveResult, _fullwidth(), _mutate() (+67 more)
+Nodes (113): _assess(), _build_server(), _cmd_list(), _cmd_serve(), _is_loopback(), _load_json_findings(), _load_message(), main() (+105 more)
 
 ### Community 23 - "Community 23"
-Cohesion: 0.04
-Nodes (69): _classify(), detection_cost_of_technique(), _noisy_or(), path_detection_cost(), _path_techniques(), rank_paths(), scanner.detection_cost — stealth ranking via detection ACCOUNTING.  Rank candida, Map a planning operator to the DEL action whose telemetry best     represents ex (+61 more)
+Cohesion: 0.03
+Nodes (106): evaluate_predicate(), load_library(), select_entries(), Speed X1 — the shipped library (~170 JSON files) is parsed ONCE per process, not, test_custom_directory_is_read_fresh_not_cached(), test_default_dir_and_shipped_helper_agree(), test_each_call_returns_a_private_mutable_list(), test_shipped_library_is_parsed_once() (+98 more)
 
 ### Community 24 - "Community 24"
-Cohesion: 0.05
-Nodes (65): fast_numerics_enabled(), _flag(), has_numpy(), has_semantic(), has_z3(), common.capabilities — probe for OPTIONAL, heavy dependencies (Workstream G).  CR, True iff ``module`` is importable, WITHOUT importing it. Total: any     probing, numpy acceleration is OPT-IN: it fires only when numpy is importable AND     ``C (+57 more)
+Cohesion: 0.06
+Nodes (74): assess_finding(), confidence.decision — the Scientific Confidence Engine at the vulnerability gate, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, Assess a confirmed finding as a scientific hypothesis. ``finding`` is a scanner, assess(), _credible_interval(), _logscore() (+66 more)
 
 ### Community 25 - "Community 25"
-Cohesion: 0.07
-Nodes (47): _classify(), _gen_value(), generate(), infer_grammar(), ParamModel, scanner.grammar — probabilistic request-grammar inference for structure-valid fu, Induce a probabilistic request grammar from an observed corpus., Sample the grammar for one structurally-valid request: a frequency-weighted (+39 more)
+Cohesion: 0.08
+Nodes (52): capture(), mutate(), normalize_headers(), The aggregate verdict for one finding.      `confirmed` is True only when at lea, recall — fraction of ground truth rediscovered., An enumerated simple path through the world-model: an ordered list     of the ed, Source files under root matching the extension filter, sorted         for determ, Something observed at a surface — a recon hit, a probe response,     a side-effe (+44 more)
 
 ### Community 26 - "Community 26"
-Cohesion: 0.13
-Nodes (33): _assess(), _load_message(), Malformed message artifact., SocialDefenseError, assess_message(), _band(), _domain(), socialdefense.detectors — the inbound social-engineering indicator engine.  Dete (+25 more)
+Cohesion: 0.05
+Nodes (49): AdaptResult, _alt_case(), _crossover(), _double_url_encode(), evolve(), EvolveResult, _fullwidth(), _mutate() (+41 more)
 
 ### Community 27 - "Community 27"
-Cohesion: 0.08
-Nodes (25): _cl_0(), _control(), detect(), _offers_h2c(), scanner.smuggling — HTTP request-smuggling detection (raw sockets, timing-based), TE.CL-space — a space between the field-name and the colon     (``Transfer-Encod, TE.CL-tab — a horizontal tab instead of a space after the colon     (``Transfer-, TE.CL-dupe — two Transfer-Encoding headers, the second a bogus coding     (``Tra (+17 more)
+Cohesion: 0.2
+Nodes (11): analyze(), _is_sequential(), scanner.sequencer — session-token / nonce randomness analysis.  A session token, Interpret a token as an integer via decimal, hex, or base64-big-endian., True if the tokens decode to integers forming an arithmetic progression or     p, The randomness verdict for a set of tokens., Measure the randomness of ``tokens`` and flag the weaknesses that make a     ses, SequencerResult (+3 more)
 
 ### Community 28 - "Community 28"
 Cohesion: 1.0
@@ -3705,17 +3705,17 @@ Nodes (1): Return all hits recorded against `token` so far (possibly empty).
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` connect `Community 2` to `Community 0`, `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 16`, `Community 17`, `Community 18`, `Community 19`, `Community 20`, `Community 21`, `Community 22`, `Community 23`, `Community 24`, `Community 25`, `Community 26`?**
-  _High betweenness centrality (0.132) - this node is a cross-community bridge._
-- **Why does `WorldModel` connect `Community 5` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 12`, `Community 13`, `Community 15`, `Community 16`, `Community 18`, `Community 21`?**
-  _High betweenness centrality (0.072) - this node is a cross-community bridge._
-- **Why does `OracleKind` connect `Community 1` to `Community 0`, `Community 2`, `Community 4`, `Community 5`, `Community 6`, `Community 9`, `Community 15`, `Community 25`?**
-  _High betweenness centrality (0.051) - this node is a cross-community bridge._
+- **Why does `worldmodel — the persistent, typed attack-graph substrate.  Every other reasonin` connect `Community 5` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 16`, `Community 17`, `Community 18`, `Community 19`, `Community 20`, `Community 21`, `Community 22`, `Community 24`, `Community 25`, `Community 26`, `Community 27`?**
+  _High betweenness centrality (0.124) - this node is a cross-community bridge._
+- **Why does `WorldModel` connect `Community 3` to `Community 1`, `Community 2`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 15`, `Community 18`, `Community 19`, `Community 21`, `Community 24`?**
+  _High betweenness centrality (0.083) - this node is a cross-community bridge._
+- **Why does `FindingContext` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 12`, `Community 13`, `Community 14`, `Community 19`, `Community 24`, `Community 25`?**
+  _High betweenness centrality (0.058) - this node is a cross-community bridge._
 - **Are the 1133 inferred relationships involving `NodeKind` (e.g. with `EngagementRefused` and `EngagementResult`) actually correct?**
   _`NodeKind` has 1133 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 1011 inferred relationships involving `WorldModel` (e.g. with `EngagementRefused` and `EngagementResult`) actually correct?**
   _`WorldModel` has 1011 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 663 inferred relationships involving `OracleKind` (e.g. with `Tests for Workstream D.1 — the gated, opt-in fuzz/ASan producer.  The producer d` and `Tests for Wave 4a — the Nuclei / ZAP / Burp WEB-SCANNER sensors.  These wrap the`) actually correct?**
   _`OracleKind` has 663 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 620 inferred relationships involving `str` (e.g. with `_ingest_defender_logs()` and `_passive_finding_payload()`) actually correct?**
-  _`str` has 620 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 622 inferred relationships involving `str` (e.g. with `_ingest_defender_logs()` and `_passive_finding_payload()`) actually correct?**
+  _`str` has 622 INFERRED edges - model-reasoned connections that need verification._
