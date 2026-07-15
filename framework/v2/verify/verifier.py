@@ -195,6 +195,12 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # RETAINED control. NOT in the frozen _ALL_ORACLES, and fires only when the ctx carries `cicd_control`
     # (no benchmark finding does), so `make gate` stays byte-identical.
     "cicd_misconfiguration": (OracleKind.CICD_POSTURE,),
+    # Mobile static-posture (Phase-2). A retained MobSF control (verify.mobile_posture / sensors.mobile)
+    # is a LEAD; it becomes a FACT only when mobile_posture_oracle RE-DERIVES the weakness offline (this
+    # slice: an embedded PEM private key that actually LOADS as an unencrypted key). NOT in the frozen
+    # _ALL_ORACLES, and fires only when the ctx carries `mobile_control` (no benchmark finding does), so
+    # `make gate` stays byte-identical.
+    "mobile_misconfiguration": (OracleKind.MOBILE_POSTURE,),
     # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
     # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
     # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
@@ -708,6 +714,12 @@ class OracleVerifier:
         if kind is OracleKind.CICD_POSTURE:
             if "cicd_control" in ctx:
                 return oracles.cicd_posture_oracle(ctx["cicd_control"])
+            return None
+        # -- Phase-2 mobile static-posture — fire ONLY when the ctx carries `mobile_control` (a retained
+        # MobSF control), so this is inert on the benchmark/gate path.
+        if kind is OracleKind.MOBILE_POSTURE:
+            if "mobile_control" in ctx:
+                return oracles.mobile_posture_oracle(ctx["mobile_control"])
             return None
         # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
         #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.

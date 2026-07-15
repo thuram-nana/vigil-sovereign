@@ -162,6 +162,17 @@ class OracleKind(str, enum.Enum):
     # `run:` with no untrusted expression do NOT fire (near-zero-FP). NO repo is cloned, NO pipeline runs
     # — a pure re-derivation over the operator-supplied workflow YAML.
     CICD_POSTURE = "cicd_posture"
+    # Mobile static-posture (Phase-2 coverage). BUG_CLASS_ORACLES row — NOT in the frozen _ALL_ORACLES
+    # (stays EXACTLY 15) — fires only when the ctx carries `mobile_control` (a retained MobSF control no
+    # benchmark finding carries), so `make gate` stays byte-identical. The adversarial soundness map ruled
+    # nearly every mobile signal a LEAD (an Android precedence/gating chain the manifest omits: NSC-vs-attr
+    # cleartext, min-vs-target-SDK, explicit-vs-default export). The ONE offline-re-derivable FACT this
+    # oracle proves is an embedded PRIVATE-KEY PEM block: it RE-DERIVES by actually LOADING the key material
+    # (`cryptography`), firing ONLY on an UNENCRYPTED, structurally-valid private key — an encrypted key, a
+    # public key, a cert, a masked/partial blob, or an unparseable string do NOT fire (REFUSE, never assert
+    # the negative). A distributed client that ships a loadable private key is a true, rarely-benign, fully
+    # re-verifiable weakness (the key is extractable by anyone).
+    MOBILE_POSTURE = "mobile_posture"
 
 
 class OracleProbe(BaseModel):

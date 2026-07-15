@@ -11,6 +11,7 @@ deterministic + idempotent (caller seq, no wallclock/rng).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -409,6 +410,62 @@ def test_cicd_benign_workflow_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> 
     assert any(o.subject.node_id.startswith("control:cicd:") for o in minted), "the LEAD"
     assert not any(n.id.startswith("finding:cicd_posture:") for n in world.all_nodes())  # no fact
     assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+# ---- mobsf_static: embedded private-key control LEAD -> mobile-posture FACT --
+def _rsa_key_pem() -> str:
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    return rsa.generate_private_key(65537, 2048).private_bytes(
+        ser.Encoding.PEM, ser.PrivateFormat.PKCS8, ser.NoEncryption()).decode()
+
+
+def test_mobsf_embedded_private_key_is_promoted_by_the_mobile_posture_oracle(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
+    world = WorldModel()
+    report = _write(tmp_path, "mobsf.json", json.dumps({
+        "app_name": "DemoApp", "package_name": "com.demo.app",
+        "possible_secrets": [_rsa_key_pem(), "AKIAIOSFODNN7EXAMPLE"],
+    }))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mobsf_static", "args": {"report": report}}))
+    # the secret controls folded in as CONTROL LEADS (intel-grounded), never oracle-proof by themselves
+    leads = [o for o in minted if o.subject.node_id.startswith("control:mobile:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # the mobile-posture oracle re-fired in-run: the embedded key is an oracle-GROUNDED FACT; the AKIA
+    # example string is NOT a private key → stays a lead. Exactly one fact.
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:mobile_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 mobile fact, got {[n.id for n in facts]}"
+    assert facts[0].provenance.startswith("oracle:")
+    control_id = "control:" + facts[0].id.split("finding:mobile_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_mobsf_no_key_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "mobsf.json", json.dumps({
+        "app_name": "DemoApp", "package_name": "com.demo.app",
+        "manifest_analysis": {"manifest_findings": [
+            {"title": "Activity is exported", "severity": "high", "rule": "exported_activity"}]},
+        "possible_secrets": ["AKIAIOSFODNN7EXAMPLE"],
+    }))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mobsf_static", "args": {"report": report}}))
+    assert any(o.subject.node_id.startswith("control:mobile:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:mobile_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+def test_mobsf_report_with_no_app_identity_promotes_no_orphan_fact(tmp_path: Path) -> None:
+    # review defect [LOW]: without app metadata the sensor mints NO lead (mobsf_observations short-
+    # circuits), so the fusion promotion must ALSO short-circuit — never a grounded fact on a control
+    # node the sensor never minted as a lead.
+    pytest.importorskip("cryptography")
+    world = WorldModel()
+    report = _write(tmp_path, "mobsf.json", json.dumps({"possible_secrets": [_rsa_key_pem()]}))  # no package/name
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mobsf_static", "args": {"report": report}}))
+    assert minted == []                                        # no lead minted
+    assert world.all_nodes() == []                             # and no orphan fact/stub control
 
 
 # ---- 3b: cloud_import LEAD -> policy-path FACT (no live cloud) ---------------

@@ -80,7 +80,8 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 # promotion oracle (k8s-posture, policy-path) — each still gated at run_sensor time. (declared_service
 # stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
 # _reverify_reachability — which fires only through the fail-closed capture, never by default.)
-_SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows")
+_SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows",
+                 "mobsf_static")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -179,6 +180,7 @@ def _fusion_registry() -> ToolRegistry:
     from .sensors.cicd import WorkflowScanSensor
     from .sensors.cloud import CloudPostureImportSensor
     from .sensors.k8s_runtime import KubeBenchSensor
+    from .sensors.mobile import MobsfSensor
 
     reg = ToolRegistry()
     reg.register(DeclaredServiceSensor())
@@ -186,6 +188,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(KubeBenchSensor())          # offline kube-bench --json ingest (Tier-1)
     reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
     reg.register(WorkflowScanSensor())        # offline GitHub-Actions workflow ingest (Tier-1)
+    reg.register(MobsfSensor())               # offline MobSF static-report ingest (Tier-1)
     return reg
 
 
@@ -381,6 +384,50 @@ def _reverify_cicd(world: Any, res: Any, *, seq: int) -> int:
     return promoted
 
 
+def _reverify_mobile(world: Any, res: Any, *, seq: int) -> int:
+    """Mobile promotion: the mobile-posture oracle over each RETAINED MobSF control. A control the oracle
+    RE-DERIVES a concrete weakness for (this slice: an embedded PEM private key that loads as an
+    unencrypted key) is promoted to an oracle-grounded FACT on its CONTROL node; anything the oracle
+    cannot re-confirm (a lead-only rule, an encrypted/masked/unparseable key) is left an honest LEAD.
+    Mirrors :func:`_reverify_cicd`; the sensor output nests the controls under ``parsed``."""
+    try:
+        from .verify.mobile_posture import confirm_mobile_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    parsed = output.get("parsed")
+    if not isinstance(parsed, dict):
+        return 0
+    # the sensor mints NO lead (mobsf_observations short-circuits) when the report has no app identity;
+    # mirror that guard here so a fact is never promoted onto a control the sensor never minted as a lead.
+    app = parsed.get("app") or {}
+    app_key = (app.get("package") or app.get("name") or "").strip().lower()
+    if not app_key:
+        return 0
+    controls = parsed.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_mobile_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"mobile:{check_id}")
+        _project_oracle_fact(
+            world, subject, oracle_kind="mobile_posture", bug_class="mobile_misconfiguration",
+            evidence=f"mobile control '{c.get('rule')}' re-derives a concrete offline-provable weakness",
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or "")})
+        promoted += 1
+    return promoted
+
+
 def _reverify_cloud(world: Any, res: Any, *, seq: int) -> int:
     """3b promotion: TWO cloud oracles re-fire over the RETAINED export — NO live cloud calls. The
     EXISTING policy-path oracle re-derives each REACHABILITY-provable posture LEAD (public exposure /
@@ -536,6 +583,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * sbom_vuln       -> version-range oracle over SBOM advisories
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
       * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
+      * mobsf_static    -> mobile-posture oracle over each retained MobSF control
       * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
                            oracle over each achieved-state misconfiguration lead (3b)
       * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c)
@@ -548,6 +596,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_k8s(world, res, seq=seq)
     if task.sensor == "cicd_workflows":
         return _reverify_cicd(world, res, seq=seq)
+    if task.sensor == "mobsf_static":
+        return _reverify_mobile(world, res, seq=seq)
     if task.sensor == "cloud_import":
         return _reverify_cloud(world, res, seq=seq)
     if task.sensor == "declared_service":

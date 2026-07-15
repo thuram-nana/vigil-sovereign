@@ -2426,6 +2426,72 @@ def cicd_posture_oracle(observed_control: Any) -> OracleSignal:
                         observed={"rule": rule})
 
 
+def _mobile_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.MOBILE_POSTURE, fired=fired, confidence=(conf if fired else 0.0),
+                        evidence=evidence, observed=observed)
+
+
+def mobile_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Promote a retained MobSF mobile-posture control to a FACT ONLY when the weakness is offline-
+    RE-DERIVABLE from the control's literal evidence — never trusting the scanner's label. This slice
+    proves ONE rule: ``private_key_material`` — an embedded PEM private-key block is a FACT iff the
+    retained ``pem`` string LOADS as an UNENCRYPTED, structurally-valid private key (re-executed via
+    ``cryptography``). An encrypted key (needs a passphrase we cannot prove), a public key, a certificate,
+    a masked/partial blob, or an unparseable string do NOT fire — the oracle REFUSES rather than assert a
+    weakness it cannot reconstruct. Pure, offline, deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _mobile_signal(False, evidence="no mobile control evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower()
+
+    if rule == "private_key_material":
+        pem = _coerce_text(observed_control.get("pem"))
+        if "PRIVATE KEY-----" not in pem:
+            return _mobile_signal(False, evidence="no PEM private-key block in the retained evidence",
+                                  observed={"rule": rule})
+        try:
+            from cryptography.hazmat.primitives.serialization import (  # noqa: PLC0415
+                load_pem_private_key,
+            )
+        except Exception:
+            # the crypto lib is absent → we cannot RE-DERIVE, so we REFUSE (never assert on trust).
+            return _mobile_signal(False, evidence="cannot re-derive: cryptography unavailable",
+                                  observed={"rule": rule})
+        try:  # the OpenSSH container (ssh-keygen's default since 7.8) needs a distinct loader
+            from cryptography.hazmat.primitives.serialization import (  # noqa: PLC0415
+                load_ssh_private_key,
+            )
+        except Exception:  # very old cryptography — the PKCS1/8/SEC1 path below still works
+            load_ssh_private_key = None
+        data = pem.encode("utf-8", "replace")
+        loaders = [load_pem_private_key] + ([load_ssh_private_key] if load_ssh_private_key else [])
+        key = None
+        for loader in loaders:
+            try:
+                key = loader(data, password=None)
+                break
+            except TypeError:
+                # an ENCRYPTED private key (needs a passphrase we do not have) — real key material, but
+                # its usability is unproven, so it stays a LEAD, not a fact.
+                return _mobile_signal(False, evidence="an encrypted private key (passphrase-protected) — a lead, not a proven-usable key",
+                                      observed={"rule": rule, "encrypted": True})
+            except Exception:
+                # this container did not parse it — try the next loader (PEM vs OpenSSH), else REFUSE.
+                continue
+        if key is None:
+            # not a loadable key in any container (a public key, a cert, a masked/partial blob, garbage).
+            return _mobile_signal(False, evidence="the PEM block does not load as a private key",
+                                  observed={"rule": rule})
+        key_kind = type(key).__name__
+        return _mobile_signal(True, conf=0.95,
+                              evidence=("an UNENCRYPTED, structurally-valid private key "
+                                        f"({key_kind}) is embedded in the distributed client — extractable "
+                                        "by anyone with the APK; not a secret"),
+                              observed={"rule": rule, "key_type": key_kind})
+
+    return _mobile_signal(False, evidence=f"unrecognised/lead-only mobile rule {rule!r} (stays a lead)",
+                          observed={"rule": rule})
+
+
 # ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
