@@ -1630,6 +1630,12 @@ _WEAK_SIG_OIDS = frozenset({
     "1.3.14.3.2.29",          # sha1WithRSASignature (legacy)
     "1.3.14.3.2.27",          # dsaWithSHA1 (legacy)
 })
+# Public-key size floors below which a certificate key provides less than the ~112-bit security NIST has
+# required since 2013 (SP 800-131A). Conservative + unambiguous: RSA/DSA < 2048 bits (1024-bit RSA is a
+# ~80-bit-security deprecated key; 512-bit is factorable today), EC curve < 224 bits (P-192 and below).
+# A 2048-bit RSA / P-256 EC / Ed25519 key is fine and never fires. Ed25519/Ed448 have no classical size.
+_MIN_RSA_DSA_BITS = 2048
+_MIN_EC_BITS = 224
 
 
 def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
@@ -1645,16 +1651,32 @@ def weak_crypto_artifact_oracle(observed: Any) -> OracleSignal:
     name = _coerce_text(observed.get("signature_algorithm")).strip()
     oid = _coerce_text(observed.get("oid")).strip()
     subject = _coerce_text(observed.get("subject")).strip()
-    weak = bool(name and _WEAK_SIG_HASH_RE.search(name)) or (oid in _WEAK_SIG_OIDS)
-    if not weak:
+    subj = (" " + subject) if subject else ""
+    # (1) BROKEN SIGNATURE HASH — collision-forgeable, no benign use.
+    if (name and _WEAK_SIG_HASH_RE.search(name)) or (oid in _WEAK_SIG_OIDS):
         return OracleSignal(
-            kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
-            evidence=f"signature algorithm {name or oid or '?'} is not a broken hash")
+            kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.95,
+            evidence=(f"certificate{subj} is signed with the BROKEN hash {name or oid} — collision-forgeable "
+                      "(MD5 chosen-prefix / SHA-1 SHAttered), no benign use"),
+            observed={"signature_algorithm": name, "oid": oid, "subject": subject, "reason": "broken_sig_hash"})
+    # (2) UNDERSIZED PUBLIC KEY — below the ~112-bit-security floor (NIST SP 800-131A, deprecated 2013).
+    key_type = _coerce_text(observed.get("key_type")).strip().lower()
+    try:
+        key_bits = int(observed.get("key_bits"))
+    except (TypeError, ValueError):
+        key_bits = 0
+    if key_bits > 0 and (
+            (key_type in ("rsa", "dsa") and key_bits < _MIN_RSA_DSA_BITS)
+            or (key_type == "ec" and key_bits < _MIN_EC_BITS)):
+        floor = _MIN_RSA_DSA_BITS if key_type in ("rsa", "dsa") else _MIN_EC_BITS
+        return OracleSignal(
+            kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.9,
+            evidence=(f"certificate{subj} uses an UNDERSIZED {key_type.upper()} public key ({key_bits}-bit, "
+                      f"below the {floor}-bit floor) — under ~112-bit security (NIST SP 800-131A, deprecated 2013)"),
+            observed={"key_type": key_type, "key_bits": key_bits, "subject": subject, "reason": "short_key"})
     return OracleSignal(
-        kind=OracleKind.TLS_WEAKNESS, fired=True, confidence=0.95,
-        evidence=(f"certificate{(' ' + subject) if subject else ''} is signed with the BROKEN hash "
-                  f"{name or oid} — collision-forgeable (MD5 chosen-prefix / SHA-1 SHAttered), no benign use"),
-        observed={"signature_algorithm": name, "oid": oid, "subject": subject, "reason": "broken_sig_hash"})
+        kind=OracleKind.TLS_WEAKNESS, fired=False, confidence=0.0,
+        evidence=f"signature algorithm {name or oid or '?'} is not a broken hash and the key is not undersized")
 
 
 # ---------------------------------------------------------------------------
