@@ -514,6 +514,32 @@ def test_tls_cert_broken_hash_signature_is_promoted_by_the_weak_crypto_oracle(tm
     assert edge is not None and edge.grounding == GROUNDING_GROUNDED
 
 
+def test_tls_cert_undersized_key_is_promoted_by_the_weak_crypto_oracle(tmp_path: Path) -> None:
+    # the short-key rule reaches through the EXISTING tls_cert feed with ZERO new wiring
+    pytest.importorskip("cryptography")
+    import datetime
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.x509.oid import NameOID
+    k = rsa.generate_private_key(65537, 1024)   # a 1024-bit RSA key — under the 2048 floor
+    n = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "legacy.example.com")])
+    cert = (x509.CertificateBuilder().subject_name(n).issuer_name(n).public_key(k.public_key())
+            .serial_number(1).not_valid_before(datetime.datetime(2020, 1, 1))
+            .not_valid_after(datetime.datetime(2030, 1, 1)).sign(k, SHA256()))
+    report = _write(tmp_path, "weak-key.pem", cert.public_bytes(ser.Encoding.PEM).decode())
+    world = WorldModel()
+    fuse_sensors(world, "alpha", _ctx({"sensor": "tls_cert", "args": {"cert": report}}))
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:tls_weakness:crypto:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1
+    # review fix: the FACT must be labelled with its ACTUAL reason (undersized key), NOT the hardcoded
+    # broken-hash string — the cert's SHA-256 signature hash is fine; only the 1024-bit key is weak.
+    assert facts[0].attrs.get("reason") == "short_key"
+    assert "UNDERSIZED" in facts[0].attrs.get("evidence", "") and "BROKEN hash" not in facts[0].attrs.get("evidence", "")
+
+
 def test_tls_cert_modern_sha256_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
     pytest.importorskip("cryptography")
     from cryptography.hazmat.primitives.hashes import SHA256

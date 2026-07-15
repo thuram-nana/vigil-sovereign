@@ -474,7 +474,7 @@ def _reverify_crypto(world: Any, res: Any, *, seq: int) -> int:
     on its CONTROL node; a modern SHA-256+ cert is left an honest LEAD. Mirrors :func:`_reverify_cicd`; the
     oracle re-derives from the retained signatureAlgorithm OID name (a pure re-verifiable classification)."""
     try:
-        from .verify.weak_crypto import confirm_crypto_descriptor
+        from .verify.weak_crypto import crypto_descriptor_verdict
     except Exception:
         return 0
     output = getattr(res.result, "output", None) or {}
@@ -489,15 +489,18 @@ def _reverify_crypto(world: Any, res: Any, *, seq: int) -> int:
         if not check_id:
             continue
         try:
-            if not confirm_crypto_descriptor(c).confirmed:
-                continue
+            ok, evidence, reason = crypto_descriptor_verdict(c)
         except Exception:
+            continue
+        if not ok:
             continue
         subject = EntityRef(kind=NodeKind.CONTROL, key=f"crypto:{check_id}")
         _project_oracle_fact(
             world, subject, oracle_kind="tls_weakness", bug_class="weak_crypto_artifact",
-            evidence=f"certificate signed with a BROKEN hash ({c.get('signature_algorithm')}) — collision-forgeable",
-            seq=seq, detail={"check_id": check_id, "signature_algorithm": str(c.get("signature_algorithm") or "")})
+            evidence=evidence or "certificate carries a weak-crypto property",
+            seq=seq, detail={"check_id": check_id, "reason": reason,
+                             "signature_algorithm": str(c.get("signature_algorithm") or ""),
+                             "key_bits": c.get("key_bits")})
         promoted += 1
     return promoted
 
@@ -669,7 +672,7 @@ def _reverify_tls_live(world: Any, task: FusionTask, res: Any, *, seq: int, slug
         from .intel.from_scan import host_ref
         from .intel.refs import canonicalize
         from .verify.tls import capture_tls_handshake, confirm_weak_tls
-        from .verify.weak_crypto import confirm_crypto_descriptor, signature_descriptors
+        from .verify.weak_crypto import crypto_descriptor_verdict, signature_descriptors
     except Exception:
         return 0
     output = getattr(res.result, "output", None) or {}
@@ -712,21 +715,24 @@ def _reverify_tls_live(world: Any, task: FusionTask, res: Any, *, seq: int, slug
                 promoted += 1
         except Exception:
             pass
-        # (b) leaf certificate signed with a broken hash — a DISTINCT oracle_kind label so the two facts
-        # do not collide on the shared finding-key `{oracle_kind}:{subject}` (both are TLS_WEAKNESS-kind).
+        # (b) leaf certificate with a weak-crypto property (a broken signature hash OR an undersized key) —
+        # a DISTINCT oracle_kind label so the two facts do not collide on the shared finding-key
+        # `{oracle_kind}:{subject}` (both are TLS_WEAKNESS-kind). The FACT is labelled with the oracle's OWN
+        # per-reason evidence (broken hash vs short key), never a hardcoded string.
         cert_b64 = hs.get("cert_der_b64")
         if isinstance(cert_b64, str) and cert_b64:
             try:
                 cert = base64.b64decode(cert_b64)
                 for desc in signature_descriptors(cert):
-                    if confirm_crypto_descriptor(desc).confirmed:
+                    ok, evidence, reason = crypto_descriptor_verdict(desc)
+                    if ok:
                         _project_oracle_fact(
                             world, subject, oracle_kind="weak_crypto_artifact",
                             bug_class="weak_crypto_artifact",
-                            evidence=(f"{host}:{port} presents a certificate signed with the BROKEN hash "
-                                      f"{desc.get('signature_algorithm')} — collision-forgeable"),
-                            seq=seq, detail={"host": host, "port": port,
-                                             "signature_algorithm": str(desc.get("signature_algorithm") or "")})
+                            evidence=f"{host}:{port} — {evidence}" if evidence else f"{host}:{port} presents a weak-crypto certificate",
+                            seq=seq, detail={"host": host, "port": port, "reason": reason,
+                                             "signature_algorithm": str(desc.get("signature_algorithm") or ""),
+                                             "key_bits": desc.get("key_bits")})
                         promoted += 1
                         break
             except Exception:
