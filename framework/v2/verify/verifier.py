@@ -479,6 +479,30 @@ def canonical_bug_class(bug_class: str) -> str | None:
     return n if n in known_bug_classes() else None
 
 
+def canonical_oracle_for(bug_class: str) -> OracleKind | None:
+    """The canonical (primary) oracle kind for a KNOWN bug class — the FIRST in its ``BUG_CLASS_ORACLES``
+    tuple — used as the PCF certificate's ``oracle.binding`` reference. ``None`` for an out-of-vocabulary
+    class (which a PCF verifier rejects at step 1). Several oracles may legitimately confirm one class; this
+    names the canonical one for display/binding, while :func:`oracle_confirms_class` is the actual PCF
+    step-5 membership check."""
+    kinds = BUG_CLASS_ORACLES.get(normalize_bug_class(bug_class))
+    return kinds[0] if kinds else None
+
+
+def oracle_confirms_class(confirmed_by: str, bug_class: str) -> bool:
+    """PCF step 5 (claim-grounded): ``True`` iff the oracle that fired is a VALID confirmer for the
+    claimed class — i.e. it is in that class's acceptable oracle set. This defeats relabelling (you cannot
+    claim class X with an oracle that does not confirm X). An out-of-vocabulary class returns ``False``
+    (nothing in the substrate confirms it)."""
+    kinds = BUG_CLASS_ORACLES.get(normalize_bug_class(bug_class))
+    if not kinds:
+        return False
+    try:
+        return OracleKind(str(confirmed_by)) in kinds
+    except ValueError:
+        return False
+
+
 def require_known_bug_class(bug_class: str) -> str:
     """Pydantic AfterValidator: normalise, and REJECT an out-of-vocabulary class at PARSE
     time so an invented bug_class cannot survive into a schema field that asserts an

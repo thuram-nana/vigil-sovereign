@@ -96,15 +96,23 @@ class EvidenceCertificate(BaseModel):
     # governance signature and the chain digest cover it automatically (the whole model is
     # signed), so a flipped sentence breaks authenticity, and verify re-admits each one.
     report_claims: list[ReportClaim] | None = None
+    # PCF oracle id@version: the content-derived version of the oracle that fired, captured at MINT time
+    # and thus SIGNED. A verifier compares it to the current oracle version to detect a stale proof (the
+    # oracle body changed since issue). Kept "" by default and dropped from the canonical form when empty
+    # (see the serializer), so a certificate built without a stamped version — and every existing evidence
+    # bundle — serialises BYTE-IDENTICALLY, keeping its signature valid.
+    oracle_version: str = ""
 
     @model_serializer(mode="wrap")
     def _ser(self, handler):
-        """Drop ``report_claims`` from the canonical form when it is empty, so a
-        certificate built without bound sentences hashes/signs exactly as it did before
-        this field existed (default-safety: no existing evidence bundle changes bytes)."""
+        """Drop the additive ``report_claims`` / ``oracle_version`` members from the canonical form when
+        they are empty, so a certificate built without them hashes/signs exactly as it did before those
+        fields existed (default-safety: no existing evidence bundle changes bytes)."""
         data = handler(self)
         if not data.get("report_claims"):
             data.pop("report_claims", None)
+        if not data.get("oracle_version"):
+            data.pop("oracle_version", None)
         return data
 
     @property

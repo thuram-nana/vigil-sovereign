@@ -61,6 +61,11 @@ def build_certificate(
     if evidence_root is not None and action_id:
         artifacts = manifest_dir(Path(evidence_root) / action_id, root=Path(evidence_root))
     claims = sorted(report_claims, key=lambda c: (c.sentence, c.bug_class)) if report_claims else None
+    # Stamp the PCF oracle id@version at mint time (over the kind that fired), so the signature covers it
+    # and a verifier can detect a later oracle-body change. Empty when confirmed_by is unset/unknown —
+    # then the field is dropped from the canonical form and the cert serialises exactly as before.
+    from ..verify.oracle_version import oracle_version as _oracle_version
+    ov = _oracle_version(str(finding.get("confirmed_by", "")))
     return EvidenceCertificate(
         schema_version=2 if claims else 1,   # claim-bearing certs are schema v2
         engagement_slug=engagement_slug,
@@ -74,6 +79,7 @@ def build_certificate(
         artifacts=artifacts,
         seq=seq,
         report_claims=claims,
+        oracle_version=ov,
     )
 
 
