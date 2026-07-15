@@ -611,8 +611,95 @@ def _reverify_reachability(world: Any, task: FusionTask, res: Any, *, seq: int, 
     return promoted
 
 
+# Ports on which a TLS handshake is worth attempting when the operator opts in (a handshake to a non-TLS
+# port just fails and promotes nothing — this only avoids blindly TLS-probing every open port).
+_TLS_PORTS = frozenset({443, 465, 636, 989, 990, 993, 995, 4433, 5061, 8443, 8883})
+
+
+def _reverify_tls_live(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str,
+                       connect: Any = None) -> int:
+    """OPT-IN, GATED, LIVE TLS posture: for a declared_service 'open' TLS service, reproduce ONE real,
+    fail-closed-gated TLS handshake (``verify.tls.capture_tls_handshake``: kill-switch -> single-host ->
+    ACTIVE_RECON entitlement -> charter scope) and promote, over the SAME retained evidence, TWO already-
+    built oracles: a weak negotiated PROTOCOL/CIPHER (``confirm_weak_tls``) AND a leaf certificate signed
+    with a BROKEN hash (``confirm_crypto_descriptor`` over the captured cert). Fires ONLY when the task
+    opts in (``args['confirm_tls']`` truthy) AND the gate passes; a refused/failed handshake promotes
+    NOTHING. Never on the default/gate path. ``connect`` is injectable so the path is testable offline.
+    Mirrors :func:`_reverify_reachability`."""
+    if not (isinstance(task.args, dict) and task.args.get("confirm_tls")):
+        return 0
+    try:
+        import base64
+        from .intel.from_scan import host_ref
+        from .intel.refs import canonicalize
+        from .verify.tls import capture_tls_handshake, confirm_weak_tls
+        from .verify.weak_crypto import confirm_crypto_descriptor, signature_descriptors
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    host = output.get("host")
+    services = output.get("services")
+    if not isinstance(host, str) or not host or not isinstance(services, list):
+        return 0
+    host_key = host_ref(host).key
+    promoted = 0
+    for svc in services:
+        if not isinstance(svc, dict) or svc.get("port") is None:
+            continue
+        if str(svc.get("state", "open")).lower() != "open":
+            continue
+        try:
+            port = int(svc["port"])
+        except (TypeError, ValueError):
+            continue
+        # attempt TLS only where the operator flagged it, or on a well-known TLS port
+        if not (svc.get("tls") or port in _TLS_PORTS):
+            continue
+        proto = str(svc.get("protocol") or "tcp").lower()
+        try:
+            hs = capture_tls_handshake(host, port, slug=slug, connect=connect)
+        except Exception:
+            continue
+        if not hs.get("connected"):
+            continue
+        subject = canonicalize(NodeKind.SERVICE, f"{host_key}:{port}/{proto}")
+        # (a) weak negotiated protocol/cipher
+        try:
+            if confirm_weak_tls(hs).confirmed:
+                _project_oracle_fact(
+                    world, subject, oracle_kind="tls_weakness", bug_class="weak_tls",
+                    evidence=(f"{host}:{port} negotiated a weak TLS protocol/cipher "
+                              f"({hs.get('tls_version')}/{hs.get('cipher')}) in a real gated handshake"),
+                    seq=seq, detail={"host": host, "port": port,
+                                     "tls_version": str(hs.get("tls_version") or ""),
+                                     "cipher": str(hs.get("cipher") or "")})
+                promoted += 1
+        except Exception:
+            pass
+        # (b) leaf certificate signed with a broken hash — a DISTINCT oracle_kind label so the two facts
+        # do not collide on the shared finding-key `{oracle_kind}:{subject}` (both are TLS_WEAKNESS-kind).
+        cert_b64 = hs.get("cert_der_b64")
+        if isinstance(cert_b64, str) and cert_b64:
+            try:
+                cert = base64.b64decode(cert_b64)
+                for desc in signature_descriptors(cert):
+                    if confirm_crypto_descriptor(desc).confirmed:
+                        _project_oracle_fact(
+                            world, subject, oracle_kind="weak_crypto_artifact",
+                            bug_class="weak_crypto_artifact",
+                            evidence=(f"{host}:{port} presents a certificate signed with the BROKEN hash "
+                                      f"{desc.get('signature_algorithm')} — collision-forgeable"),
+                            seq=seq, detail={"host": host, "port": port,
+                                             "signature_algorithm": str(desc.get("signature_algorithm") or "")})
+                        promoted += 1
+                        break
+            except Exception:
+                pass
+    return promoted
+
+
 def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "",
-              connect: Any = None) -> int:
+              connect: Any = None, tls_connect: Any = None) -> int:
     """Let the existing oracles re-fire over the sensor's OWN retained evidence, in-run — the LEAD ->
     FACT bridge. Each promotion is a deterministic oracle over the sensor's retained evidence; the
     sensor's LEADS are untouched. Returns the number of facts promoted. Best-effort and deterministic.
@@ -626,7 +713,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * tls_cert        -> weak-crypto-artifact oracle over each retained certificate descriptor
       * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
                            oracle over each achieved-state misconfiguration lead (3b)
-      * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c)
+      * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c), PLUS the
+                           weak-TLS + weak-crypto oracles over a GATED, OPT-IN live TLS handshake
     """
     if not getattr(res, "ok", False):
         return 0
@@ -643,7 +731,9 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
     if task.sensor == "cloud_import":
         return _reverify_cloud(world, res, seq=seq)
     if task.sensor == "declared_service":
-        return _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
+        n = _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
+        n += _reverify_tls_live(world, task, res, seq=seq, slug=slug, connect=tls_connect)
+        return n
     return 0
 
 
@@ -673,9 +763,10 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     ingest = IntelIngest(world, engagement_slug=slug or "")
     sink = _sink_of(ctx)
     base = _base_seq(world, ctx)
-    # Injectable connector for the OPT-IN, GATED live reachability handshake (3c) — None => the real
-    # bounded socket connect (still fail-closed inside capture_handshake). Tests pass a fake connect.
+    # Injectable connectors for the OPT-IN, GATED live handshakes — None => the real bounded socket
+    # connect (still fail-closed inside capture_handshake / capture_tls_handshake). Tests pass a fake.
     reach_connect = getattr(ctx, "reach_connect", None)
+    tls_connect = getattr(ctx, "tls_connect", None)
 
     minted: list[Observation] = []
     for i, task in enumerate(tasks):
@@ -687,5 +778,6 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
             continue   # a sensor blowing up never sinks the whole fusion pass
         minted.extend(res.observations)
         # LEAD -> FACT, where an oracle re-fires over the sensor's OWN retained evidence.
-        _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect)
+        _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect,
+                  tls_connect=tls_connect)
     return minted
