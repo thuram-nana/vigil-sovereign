@@ -80,6 +80,18 @@ def test_send_error_is_best_effort_never_raises():
     assert r.pushed is False and "network down" in r.note
 
 
+def test_malformed_finding_is_best_effort_never_raises():
+    """Review w9dag6plf (LOW): grading/payload-build must be INSIDE the best-effort guard, so a malformed
+    --from-json finding returns a PushResult(pushed=False) instead of raising (never sinks the run)."""
+    bad = [{"finding_slug": "x", "severity": "High"}]  # missing required FindingPayload fields
+    r = push_report(bad, PushConfig(sink="webhook", url="https://h/x"), send=lambda *a: {"status": 200})
+    assert r.pushed is False and "payload build failed" in r.note
+    # a non-dict list element (a realistic malformed export) likewise never raises
+    r2 = push_report(["just-a-string"], PushConfig(sink="webhook", url="https://h/x"),
+                     send=lambda *a: {"status": 200})
+    assert r2.pushed is False
+
+
 # ---------------------------------------------------------------------------
 # push_via_urllib — the production gated sender (loopback only)
 # ---------------------------------------------------------------------------

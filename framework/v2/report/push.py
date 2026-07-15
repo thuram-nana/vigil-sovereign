@@ -87,17 +87,21 @@ def _slack_message(doc: dict) -> dict:
     return {"text": "\n".join(lines)}
 
 
-def build_push_payload(findings: Any, config: PushConfig, *, meta: ReportMeta | None = None) -> dict:
-    """Grade ``findings`` and shape the outbound payload for ``config.sink``. Pure (no I/O); deterministic
-    given ``meta``. A ``webhook`` sink gets the full export doc (facts levelled, leads marked); a ``slack``
-    sink gets a compact text message. ``facts_only`` drops leads first in BOTH cases."""
-    graded = grade_findings(list(findings or []))
+def _payload_from_graded(graded: list, config: PushConfig, meta: ReportMeta | None) -> dict:
+    """Shape the outbound payload from already-graded findings (no re-grading)."""
     doc = build_export_doc(graded, meta)
     if config.facts_only:
         doc = _filter_facts_only(doc)
     if config.sink == "slack":
         return _slack_message(doc)
     return doc
+
+
+def build_push_payload(findings: Any, config: PushConfig, *, meta: ReportMeta | None = None) -> dict:
+    """Grade ``findings`` and shape the outbound payload for ``config.sink``. Pure (no I/O); deterministic
+    given ``meta``. A ``webhook`` sink gets the full export doc (facts levelled, leads marked); a ``slack``
+    sink gets a compact text message. ``facts_only`` drops leads first in BOTH cases."""
+    return _payload_from_graded(grade_findings(list(findings or [])), config, meta)
 
 
 def push_via_urllib(url: str, headers: dict[str, str], body: dict, *, timeout: float = _PUSH_TIMEOUT) -> dict:
@@ -126,11 +130,16 @@ def push_report(findings: Any, config: PushConfig, *,
                 send: Callable[..., dict] | None = None, meta: ReportMeta | None = None) -> PushResult:
     """Build the payload and (unless ``dry_run``) deliver it via the gated ``send`` (default
     :func:`push_via_urllib`). Best-effort: any send error is caught into ``PushResult(pushed=False)``.
-    ``send(url, headers, body)`` performs the one gated egress."""
-    graded = grade_findings(list(findings or []))
-    n_facts = sum(1 for g in graded if g.is_fact)
-    n_leads = len(graded) - n_facts
-    payload = build_push_payload(findings, config, meta=meta)
+    ``send(url, headers, body)`` performs the one gated egress. Grading + payload build are INSIDE the
+    best-effort guard too, so even a malformed finding returns a ``PushResult``, never raises."""
+    try:
+        graded = grade_findings(list(findings or []))
+        n_facts = sum(1 for g in graded if g.is_fact)
+        n_leads = len(graded) - n_facts
+        payload = _payload_from_graded(graded, config, meta)
+    except Exception as e:  # a malformed finding must not sink the run either
+        return PushResult(pushed=False, sink=config.sink, url=config.url,
+                          note=f"payload build failed: {type(e).__name__}: {e}")
 
     if config.dry_run:
         return PushResult(pushed=False, sink=config.sink, url=config.url, facts=n_facts, leads=n_leads,

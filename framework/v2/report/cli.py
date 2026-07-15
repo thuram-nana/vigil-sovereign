@@ -154,11 +154,7 @@ def main(argv: list[str]) -> int:
                 headers[k.strip()] = v.strip()
         cfg = PushConfig(sink=args.push_sink, url=args.push_url, headers=headers,
                          facts_only=args.push_facts_only, dry_run=args.push_dry_run)
-        try:
-            res = push_report(findings, cfg, meta=meta)
-        except ValidationError as e:
-            print(f"error: invalid finding data for push: {e}")
-            return 2
+        res = push_report(findings, cfg, meta=meta)   # best-effort: never raises, never aborts the render
         if res.payload is not None:   # dry-run preview
             print(json.dumps(res.payload, indent=2, ensure_ascii=False))
         print(f"push[{res.sink}] -> {res.url}: "
