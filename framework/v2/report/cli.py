@@ -97,6 +97,19 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--status", default="Draft", help="Report status header (default: Draft).")
     parser.add_argument("--timestamp", metavar="ISO",
                         help="Opt-in generation timestamp (default: none — deterministic).")
+    # Opt-in OUTBOUND push to an operator-configured sink (nothing is sent unless --push-url is given).
+    parser.add_argument("--push-url", metavar="URL",
+                        help="Deliver the graded report to this sink URL (webhook/Slack). OUTBOUND + "
+                             "opt-in: a bounded POST to EXACTLY this URL, redirects refused, correlatable "
+                             "UA. Nothing is sent without this flag.")
+    parser.add_argument("--push-sink", choices=("webhook", "slack"), default="webhook",
+                        help="Sink format for --push-url (default: webhook).")
+    parser.add_argument("--push-facts-only", action="store_true",
+                        help="Push only proven FACTs (drop leads).")
+    parser.add_argument("--push-dry-run", action="store_true",
+                        help="Build the push payload and print it, but do NOT send (preview).")
+    parser.add_argument("--push-header", action="append", metavar="K:V", default=[],
+                        help="An extra header for the push (e.g. your sink's auth), repeatable.")
     args = parser.parse_args(argv)
 
     if not args.slug and not args.from_json:
@@ -129,6 +142,27 @@ def main(argv: list[str]) -> int:
         status=args.status,
         generated_at=args.timestamp,
     )
+
+    # OUTBOUND push (opt-in) — deliver the graded report to the operator's sink, then continue to the
+    # normal render below. Isolated + best-effort: a push failure never aborts report generation.
+    if args.push_url:
+        from .push import PushConfig, push_report
+        headers: dict[str, str] = {}
+        for h in (args.push_header or []):
+            if ":" in h:
+                k, v = h.split(":", 1)
+                headers[k.strip()] = v.strip()
+        cfg = PushConfig(sink=args.push_sink, url=args.push_url, headers=headers,
+                         facts_only=args.push_facts_only, dry_run=args.push_dry_run)
+        try:
+            res = push_report(findings, cfg, meta=meta)
+        except ValidationError as e:
+            print(f"error: invalid finding data for push: {e}")
+            return 2
+        if res.payload is not None:   # dry-run preview
+            print(json.dumps(res.payload, indent=2, ensure_ascii=False))
+        print(f"push[{res.sink}] -> {res.url}: "
+              f"{'delivered' if res.pushed else res.note} ({res.facts} fact(s), {res.leads} lead(s))")
 
     # machine export (json | sarif): ONE document, same graded-findings input as the
     # markdown docs. Additive; the default 'markdown' path below is unchanged.
