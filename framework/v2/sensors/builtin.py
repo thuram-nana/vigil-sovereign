@@ -61,6 +61,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     from .cicd import WorkflowScanSensor
     from .tls_cert import CertScanSensor
     from .android_manifest import AndroidManifestSensor
+    from .mesh import MeshConfigSensor
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
     from .k8s_runtime import KubeBenchSensor
     from .fuzz import FuzzHarnessSensor
@@ -109,6 +110,10 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     # provider LEADS only; the mobile-posture oracle re-verifies an explicitly-exported unguarded content
     # provider to a fact via fusion. Still kill-switch-gated at run_sensor time.
     registry.register(AndroidManifestSensor())
+    # Service-mesh posture sensor: offline Istio/Linkerd config importer (Tier-1). Mints mesh-resource
+    # LEADS only; the mesh-posture oracle (verify.mesh_posture) re-verifies a concrete insecure achieved
+    # state to a fact via fusion. Still kill-switch-gated at run_sensor time.
+    registry.register(MeshConfigSensor())
     # Fuzz/ASan robustness producer (Workstream D.1): drives a bounded fuzz against an operator-
     # authorized LOCAL binary and feeds captured sanitizer output to the SANITIZER_SIGNAL oracle.
     # Registration is not invocation — it is OFF by default (allowed_root=None refuses everything) and

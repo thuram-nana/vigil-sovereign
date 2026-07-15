@@ -526,6 +526,42 @@ def test_tls_cert_modern_sha256_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -
     assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
 
 
+# ---- mesh_config: a permissive Istio control LEAD -> mesh-posture FACT -------
+_MESH_PERMISSIVE = json.dumps([
+    {"kind": "PeerAuthentication", "metadata": {"name": "default", "namespace": "istio-system"},
+     "spec": {"mtls": {"mode": "PERMISSIVE"}}},
+    {"kind": "PeerAuthentication", "metadata": {"name": "strict", "namespace": "istio-system"},
+     "spec": {"mtls": {"mode": "STRICT"}}},
+])
+
+
+def test_mesh_permissive_mtls_is_promoted_by_the_mesh_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "istio.json", _MESH_PERMISSIVE)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mesh_config", "args": {"config": report}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:mesh:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # ONLY the PERMISSIVE PeerAuthentication promotes to a grounded FACT; the STRICT one stays a lead
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:mesh_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 mesh fact, got {[n.id for n in facts]}"
+    assert "istio-system/default" in facts[0].id
+    control_id = "control:" + facts[0].id.split("finding:mesh_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_mesh_strict_config_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "istio.json", json.dumps([
+        {"kind": "PeerAuthentication", "metadata": {"name": "default", "namespace": "istio-system"},
+         "spec": {"mtls": {"mode": "STRICT"}}}]))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mesh_config", "args": {"config": report}}))
+    assert any(o.subject.node_id.startswith("control:mesh:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:mesh_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
 # ---- 3b: cloud_import LEAD -> policy-path FACT (no live cloud) ---------------
 
 
