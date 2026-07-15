@@ -28,6 +28,10 @@ _SOURCE_KIND = {
     "zap": IntelSourceKind.WEB_SCANNER,
     "burp": IntelSourceKind.WEB_SCANNER,
     "sqlmap": IntelSourceKind.WEB_SCANNER,
+    "nikto": IntelSourceKind.WEB_SCANNER,
+    "wapiti": IntelSourceKind.WEB_SCANNER,
+    # SARIF is a neutral interchange format from ANY tool (DAST or SAST) — an operator-supplied export.
+    "sarif": IntelSourceKind.OPERATOR_INGEST,
     "generic": IntelSourceKind.OPERATOR_INGEST,
 }
 

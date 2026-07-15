@@ -53,13 +53,27 @@ GENERIC = json.dumps({"findings": [
      "confirmed": False, "evidence": "swapped id"},
     {"type": "open_redirect", "location": "http://t.example/go", "severity": "medium"},
 ]})
+SARIF = json.dumps({
+    "$schema": "https://json.schemastore.org/sarif-2.1.0.json", "version": "2.1.0",
+    "runs": [{"tool": {"driver": {"name": "Semgrep", "rules": [
+        {"id": "xss-rule", "properties": {"tags": ["security", "external/cwe/cwe-079"]}},
+        {"id": "sqli-rule", "properties": {"cwe": "CWE-89"}},
+        {"id": "secret-rule", "properties": {"tags": ["external/cwe/cwe-798"]}}]}},
+        "results": [
+            {"ruleId": "xss-rule", "level": "error", "message": {"text": "Reflected XSS"},
+             "locations": [{"physicalLocation": {"artifactLocation": {"uri": "http://t.example/search"},
+                                                 "region": {"startLine": 1}}}]},
+            {"ruleId": "sqli-rule", "level": "warning", "message": {"text": "SQLi"},
+             "locations": [{"physicalLocation": {"artifactLocation": {"uri": "src/db.py"},
+                                                 "region": {"startLine": 42}}}]},
+            {"ruleId": "passing", "kind": "pass", "message": {"text": "ok"}}]}]})
 
 
 # --- parsing ----------------------------------------------------------------
 
 @pytest.mark.parametrize("fmt,export,min_n,has_host", [
     ("nuclei", NUCLEI, 2, True), ("zap", ZAP, 1, True), ("burp", BURP, 1, True),
-    ("sqlmap", SQLMAP, 1, False), ("generic", GENERIC, 2, True),
+    ("sqlmap", SQLMAP, 1, False), ("generic", GENERIC, 2, True), ("sarif", SARIF, 2, True),
 ])
 def test_each_format_parses(fmt, export, min_n, has_host) -> None:
     findings, tool = parse_export(fmt, export)
@@ -75,7 +89,26 @@ def test_each_format_parses(fmt, export, min_n, has_host) -> None:
 
 
 def test_available_formats_stable() -> None:
-    assert available_formats() == ["burp", "generic", "nuclei", "sqlmap", "zap"]
+    assert available_formats() == ["burp", "generic", "nikto", "nuclei", "sarif", "sqlmap", "wapiti", "zap"]
+
+
+def test_sarif_cwe_mapping_and_code_locations() -> None:
+    findings, tool = parse_export("sarif", SARIF)
+    by_class = {f.bug_class: f for f in findings}
+    # a URL-located finding tagged CWE-79 maps to the CRUCIBLE `xss` class + a host -> re-verifiable
+    assert "xss" in by_class
+    assert by_class["xss"].host == "t.example" and by_class["xss"].severity == "High"
+    # a file-located SAST finding (CWE-89) maps to `sqli` but has NO host (a code location, aggregation)
+    assert "sqli" in by_class and by_class["sqli"].host == "" and "src/db.py" in by_class["sqli"].location
+    # the passing result (kind=pass) is skipped
+    assert "passing" not in by_class
+    # every SARIF finding is tool_confirmed=False (a LEAD — CRUCIBLE re-verifies, never trusts say-so)
+    assert all(not f.tool_confirmed for f in findings)
+
+
+def test_sarif_non_sarif_json_is_loud() -> None:
+    with pytest.raises(ImportAdapterError):
+        parse_export("sarif", json.dumps({"findings": []}))   # a generic export, not SARIF
 
 
 def test_unknown_format_is_loud() -> None:
@@ -104,6 +137,7 @@ def test_detect_format() -> None:
     assert detect_format(BURP) == "burp"
     assert detect_format(SQLMAP) == "sqlmap"
     assert detect_format(GENERIC) == "generic"
+    assert detect_format(SARIF) == "sarif"
     assert detect_format("") is None
     assert detect_format("plain text, no shape") is None
 
