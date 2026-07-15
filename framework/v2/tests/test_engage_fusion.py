@@ -468,6 +468,32 @@ def test_mobsf_report_with_no_app_identity_promotes_no_orphan_fact(tmp_path: Pat
     assert world.all_nodes() == []                             # and no orphan fact/stub control
 
 
+# ---- android_manifest: an exported unguarded provider LEAD -> mobile-posture FACT ----
+_ANDROID_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo.app">
+  <application>
+    <provider android:name="com.demo.Unguarded" android:exported="true" android:authorities="com.demo.a"/>
+    <provider android:name="com.demo.Guarded" android:exported="true" android:permission="com.demo.PERM"/>
+  </application>
+</manifest>"""
+
+
+def test_android_manifest_exported_provider_is_promoted_by_the_mobile_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "AndroidManifest.xml", _ANDROID_MANIFEST)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "android_manifest", "args": {"manifest": report}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:mobile:component:provider:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # ONLY the explicitly-exported UNGUARDED provider promotes to a grounded FACT (the guarded one stays a lead)
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:mobile_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 provider fact, got {[n.id for n in facts]}"
+    assert "unguarded" in facts[0].id.lower()
+    control_id = "control:" + facts[0].id.split("finding:mobile_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
 # ---- tls_cert: a broken-hash cert LEAD -> weak-crypto-artifact FACT ----------
 def test_tls_cert_broken_hash_signature_is_promoted_by_the_weak_crypto_oracle(tmp_path: Path) -> None:
     pytest.importorskip("cryptography")

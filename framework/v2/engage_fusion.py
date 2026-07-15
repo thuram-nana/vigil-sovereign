@@ -81,7 +81,7 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 # stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
 # _reverify_reachability — which fires only through the fail-closed capture, never by default.)
 _SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows",
-                 "mobsf_static", "tls_cert")
+                 "mobsf_static", "tls_cert", "android_manifest")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -182,6 +182,7 @@ def _fusion_registry() -> ToolRegistry:
     from .sensors.k8s_runtime import KubeBenchSensor
     from .sensors.mobile import MobsfSensor
     from .sensors.tls_cert import CertScanSensor
+    from .sensors.android_manifest import AndroidManifestSensor
 
     reg = ToolRegistry()
     reg.register(DeclaredServiceSensor())
@@ -191,6 +192,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(WorkflowScanSensor())        # offline GitHub-Actions workflow ingest (Tier-1)
     reg.register(MobsfSensor())               # offline MobSF static-report ingest (Tier-1)
     reg.register(CertScanSensor())            # offline X.509 certificate ingest (Tier-1)
+    reg.register(AndroidManifestSensor())     # offline decoded-AndroidManifest.xml ingest (Tier-1)
     return reg
 
 
@@ -620,6 +622,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
       * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
       * mobsf_static    -> mobile-posture oracle over each retained MobSF control
+      * android_manifest-> mobile-posture oracle over each retained AndroidManifest provider control
       * tls_cert        -> weak-crypto-artifact oracle over each retained certificate descriptor
       * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
                            oracle over each achieved-state misconfiguration lead (3b)
@@ -633,7 +636,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_k8s(world, res, seq=seq)
     if task.sensor == "cicd_workflows":
         return _reverify_cicd(world, res, seq=seq)
-    if task.sensor == "mobsf_static":
+    if task.sensor in ("mobsf_static", "android_manifest"):
         return _reverify_mobile(world, res, seq=seq)
     if task.sensor == "tls_cert":
         return _reverify_crypto(world, res, seq=seq)

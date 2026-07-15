@@ -29,6 +29,7 @@ from .cloud import (
 )
 from .cicd import WorkflowScanSensor, cicd_control_observations, parse_workflows
 from .tls_cert import CertScanSensor, cert_control_observations, parse_certs
+from .android_manifest import AndroidManifestSensor, parse_android_manifest
 from .k8s_runtime import KubeBenchSensor, kube_bench_observations, parse_kube_bench
 from .fuzz import FuzzHarnessSensor, confirm_crash, default_fuzz_cases
 from .nmap import NmapServiceSensor, parse_nmap_xml
@@ -71,4 +72,6 @@ __all__ = [
     "WorkflowScanSensor", "parse_workflows", "cicd_control_observations",
     # TLS/cert posture sensor (X.509 certificate offline ingest -> weak-crypto leads)
     "CertScanSensor", "parse_certs", "cert_control_observations",
+    # Android-manifest posture sensor (decoded AndroidManifest.xml -> exported-component leads)
+    "AndroidManifestSensor", "parse_android_manifest",
 ]

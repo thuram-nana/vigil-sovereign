@@ -647,9 +647,13 @@ class FindingContext(BaseModel):
         block verbatim so it re-parses); a lead-only control retains nothing extra. JSON-safe + deterministic."""
         src = dict(control or {})
         retained: dict[str, Any] = {}
-        for k in ("rule", "check_id", "category", "pem"):
-            if src.get(k) not in (None, ""):
-                retained[k] = _coerce_text(src.get(k))
+        for k in ("rule", "check_id", "category", "pem",
+                  # exported-content-provider evidence (parsed from the raw AndroidManifest)
+                  "name", "exported", "permission", "read_permission", "write_permission",
+                  "has_path_permission"):
+            v = src.get(k)
+            if v not in (None, ""):
+                retained[k] = v if isinstance(v, bool) else _coerce_text(v)
         return cls(bug_class=bug_class, mobile_control=retained)
 
     @classmethod
