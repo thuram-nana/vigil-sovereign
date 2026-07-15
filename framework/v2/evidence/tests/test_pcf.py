@@ -172,6 +172,31 @@ def test_reject_claim_not_grounded(monkeypatch):
     assert not r.verified and r.step == "claim"
 
 
+def test_cli_round_trip_certify_export_verify(tmp_path):
+    # the operator-facing path: certify (sign) -> pcf-export (project) -> pcf-verify (offline). Exit 0 iff
+    # sound; a tampered PCF cert exits 2.
+    import json
+
+    from framework.v2.evidence.cli import main
+    finding, oc = _mesh_finding()
+    tr, signers = _trust_root(2, 3)
+    (tmp_path / "report.json").write_text(json.dumps({"active_findings": [finding]}))
+    (tmp_path / "trust-root.json").write_text(tr.model_dump_json())
+    s = [f"{kid}:{priv}" for kid, priv in signers[:2]]
+    assert main(["certify", "--report", str(tmp_path / "report.json"), "--slug", "t",
+                 "--out", str(tmp_path / "bundle"), "--signer", s[0], "--signer", s[1]]) == 0
+    assert main(["pcf-export", "--report", str(tmp_path / "report.json"),
+                 "--bundle", str(tmp_path / "bundle"), "--out", str(tmp_path / "pcf.json")]) == 0
+    assert main(["pcf-verify", "--pcf", str(tmp_path / "pcf.json"),
+                 "--trust-root", str(tmp_path / "trust-root.json")]) == 0
+    # tamper the exported PCF cert -> pcf-verify exits non-zero
+    doc = json.loads((tmp_path / "pcf.json").read_text())
+    doc["pcf_certificates"][0]["claim"]["statement"] = "Confirmed RCE"
+    (tmp_path / "pcf.json").write_text(json.dumps(doc))
+    assert main(["pcf-verify", "--pcf", str(tmp_path / "pcf.json"),
+                 "--trust-root", str(tmp_path / "trust-root.json")]) == 2
+
+
 def test_malformed_input_is_rejection_not_crash():
     assert not verify_pcf(None, None).verified
     assert not verify_pcf("not a cert", None).verified
