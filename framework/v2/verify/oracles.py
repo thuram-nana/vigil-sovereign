@@ -2538,6 +2538,177 @@ def mobile_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Email-authentication posture (FORGE Domain 10) — a published policy that permits spoofing
+# ---------------------------------------------------------------------------
+
+# A DMARC policy that instructs receivers NOT to reject/quarantine spoofed mail. `p=none` is monitor-only:
+# the domain publishes DMARC but explicitly asks receivers to take NO action, so spoofed mail is delivered.
+# The `(?:^|;)\s*` boundary is load-bearing: it must never match the `sp=` (subdomain) or `np=` tags.
+_DMARC_P_RE = re.compile(r"(?i)(?:^|;)\s*p\s*=\s*(none|quarantine|reject)\s*(?:;|$)")
+# RFC 7489 §6.3: `sp=` overrides `p=` FOR SUBDOMAINS when present.
+_DMARC_SP_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=\s*(none|quarantine|reject)\s*(?:;|$)")
+# A PRESENCE probe for the `sp=` tag, independent of whether its VALUE parses. Load-bearing: "the value
+# regex did not match" must never be read as "there is no sp= tag" — a failed parse is not proof of absence
+# (the same error class as assuming a missing record means no policy). If sp= is present but unparseable we
+# REFUSE rather than fall through to `p=` and read the WRONG tag.
+_DMARC_SP_PRESENT_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=")
+# One DNS TXT character-string in PRESENTATION form.
+_TXT_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _normalize_txt(raw: Any) -> str:
+    """A DNS TXT record's PRESENTATION form -> the character-string it actually encodes.
+
+    ``dig +short`` and zone files emit records QUOTED (`"v=DMARC1; p=none; sp=reject"`), and RFC 1035
+    §3.3.14 splits a >255-byte record into ADJACENT quoted strings that a resolver CONCATENATES
+    (`"v=DMARC1; p=none;" " sp=reject"`). Reading the presentation form directly is unsound: a closing
+    quote defeats a tag's `(?:;|$)` terminator and can HIDE a protective tag while leaving a permissive one
+    visible. Every record is canonicalised here before any tag is read. Pure; a bare (already-canonical)
+    record passes through unchanged."""
+    s = _coerce_text(raw).strip()
+    if '"' not in s:
+        return s
+    parts = _TXT_STRING_RE.findall(s)
+    return "".join(parts).strip() if parts else s
+# SPF's `all` mechanism qualifier: `-all` fail (good), `~all` softfail, `?all` neutral, `+all`/`all` PASS-ALL
+# (any host on the internet passes SPF for this domain — an unconditionally broken policy).
+_SPF_ALL_RE = re.compile(r"(?i)(?:^|\s)([-~?+]?)all(?:\s|$)")
+
+
+def _email_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.EMAIL_AUTH_POSTURE, fired=fired,
+                        confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)
+
+
+def email_auth_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a domain's RETAINED, PUBLISHED email-authentication policy provably permits spoofing — a
+    pure re-derivation over the DNS TXT records themselves, never a receiving MTA's ``Authentication-Results``
+    say-so (that would be string trust). Three rules, each unconditional and re-verifiable offline:
+
+      * ``dmarc_missing``  — the domain publishes NO DMARC record: receivers are given no policy, so
+        header-From spoofing is unmitigated (SPF alone does not protect the header-From a user sees).
+      * ``dmarc_none``     — DMARC ``p=none``: the domain explicitly instructs receivers to take NO action.
+      * ``spf_permissive`` — SPF ends in ``+all``/``all``: ANY host on the internet passes SPF for the domain.
+
+    A hardened domain (``p=reject``/``p=quarantine``, SPF ``-all``) does NOT fire. DELIBERATELY out of scope
+    (REFUSE, never assert): message-level SPF/DKIM/DMARC verification — DKIM canonicalisation and SPF
+    include/macro chains are a semantic layer this cannot soundly re-derive offline; and ``spf_missing`` alone
+    (DKIM+DMARC may still protect the domain — a gating chain). Pure + deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _email_signal(False, evidence="no email-auth control evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower()
+    domain = _coerce_text(observed_control.get("domain")).strip()
+    where = f" for {domain}" if domain else ""
+
+    if rule == "dmarc_missing":
+        # only assert absence when the producer OBSERVED the lookup and recorded no record (never assume)
+        if _normalize_txt(observed_control.get("dmarc_record")):
+            return _email_signal(False, observed={"rule": rule},
+                                 evidence="a DMARC record is present — not missing")
+        if observed_control.get("dmarc_observed") is not True:
+            return _email_signal(False, observed={"rule": rule},
+                                 evidence="DMARC lookup not observed — absence unproven (REFUSE)")
+        # self-contradictory evidence (attested an org domain AND handed an org-domain policy to inherit)
+        # is refused rather than resolved down whichever branch happens to fire.
+        if observed_control.get("is_org_domain") is True and (
+                _normalize_txt(observed_control.get("org_dmarc_record"))
+                or observed_control.get("org_dmarc_observed") is True):
+            return _email_signal(False, observed={"rule": rule},
+                                 evidence=("contradictory evidence: attested an ORGANIZATIONAL domain yet "
+                                           "carries an organizational-domain policy to inherit (REFUSE)"))
+        # RFC 7489 §6.6.3: an ABSENT record at the From-domain does NOT mean "no policy" — receivers then
+        # query the ORGANIZATIONAL domain, and §6.3 applies its `sp=` (else `p=`) to the subdomain. So a
+        # subdomain that correctly publishes nothing is FULLY protected by an org `p=reject`. Absence alone
+        # therefore proves NOTHING; the EFFECTIVE policy must be resolved from the RETAINED evidence, or we
+        # REFUSE (the same discipline that already refuses `spf_missing` as a gating chain).
+        if observed_control.get("is_org_domain") is True:
+            return _email_signal(True, conf=0.9,
+                                 evidence=(f"no DMARC record is published for the ORGANIZATIONAL domain"
+                                           f"{where or ' (unnamed)'} — there is no parent policy to inherit, "
+                                           "so receivers are given no policy for it or its subdomains"),
+                                 observed={"rule": rule, "domain": domain, "scope": "organizational"})
+        if observed_control.get("org_dmarc_observed") is not True:
+            return _email_signal(False, observed={"rule": rule, "domain": domain},
+                                 evidence=("no DMARC here, but this is not attested an organizational domain "
+                                           "and the organizational-domain lookup was not observed — the RFC 7489 "
+                                           "§6.6.3 inheritance chain is UNRESOLVED (REFUSE)"))
+        org = _coerce_text(observed_control.get("org_domain")).strip()
+        if not org:
+            # a fired certificate must NAME the domain whose policy was looked up, or a third party
+            # re-running it cannot audit the inheritance claim.
+            return _email_signal(False, observed={"rule": rule, "domain": domain},
+                                 evidence=("the organizational domain is not named — the inheritance claim "
+                                           "would not be auditable from the certificate (REFUSE)"))
+        org_rec = _normalize_txt(observed_control.get("org_dmarc_record"))
+        if not org_rec:
+            return _email_signal(True, conf=0.9,
+                                 evidence=(f"neither{where} nor its organizational domain {org} publishes "
+                                           "DMARC — no policy exists anywhere in the chain to inherit"),
+                                 observed={"rule": rule, "domain": domain, "org_domain": org})
+        # §6.3: the subdomain inherits `sp=` when present, else the org domain's `p=`.
+        m = _DMARC_SP_RE.search(org_rec)
+        if m is None and _DMARC_SP_PRESENT_RE.search(org_rec):
+            # An `sp=` tag IS present but its value did not parse. Falling through to `p=` would read the
+            # WRONG tag and assert the negative from a failed parse — the same error class as assuming
+            # absence. The SUBDOMAIN policy is unresolved: REFUSE.
+            return _email_signal(False, observed={"rule": rule, "org_domain": org},
+                                 evidence=("the organizational record carries an sp= tag whose value did not "
+                                           "parse — the subdomain policy is UNRESOLVED (REFUSE)"))
+        if m is None:
+            m = _DMARC_P_RE.search(org_rec)
+        if m is None:
+            return _email_signal(False, observed={"rule": rule},
+                                 evidence="the organizational DMARC record has no parseable policy (REFUSE)")
+        eff = m.group(1).lower()
+        if eff != "none":
+            return _email_signal(False, observed={"rule": rule, "inherited_policy": eff},
+                                 evidence=(f"publishes no DMARC of its own but INHERITS the organizational "
+                                           f"domain's effective subdomain policy p={eff} — protected"))
+        return _email_signal(True, conf=0.9,
+                             evidence=(f"no DMARC is published{where} and the organizational domain"
+                                       f"{(' ' + org) if org else ''} resolves to an effective subdomain "
+                                       "policy of none — receivers are told to take no action"),
+                             observed={"rule": rule, "domain": domain, "org_domain": org,
+                                       "inherited_policy": eff})
+
+    if rule == "dmarc_none":
+        rec = _normalize_txt(observed_control.get("dmarc_record"))
+        m = _DMARC_P_RE.search(rec)
+        if m is None:
+            return _email_signal(False, observed={"rule": rule},
+                                 evidence="no parseable DMARC policy (p=) in the retained record (REFUSE)")
+        policy = m.group(1).lower()
+        if policy != "none":
+            return _email_signal(False, observed={"rule": rule, "policy": policy},
+                                 evidence=f"DMARC policy is p={policy} — receivers are told to act")
+        return _email_signal(True, conf=0.9,
+                             evidence=(f"DMARC policy{where} is p=none — the domain explicitly instructs "
+                                       "receivers to take NO action on spoofed mail (monitoring only)"),
+                             observed={"rule": rule, "domain": domain, "policy": policy})
+
+    if rule == "spf_permissive":
+        rec = _normalize_txt(observed_control.get("spf_record"))
+        if not rec:
+            return _email_signal(False, observed={"rule": rule},
+                                 evidence="no SPF record retained (REFUSE — absence is a gating chain)")
+        m = _SPF_ALL_RE.search(rec)
+        if m is None:
+            return _email_signal(False, observed={"rule": rule},
+                                 evidence="the SPF record has no `all` mechanism (REFUSE)")
+        qual = m.group(1) or "+"          # a bare `all` means `+all` (SPF default qualifier is pass)
+        if qual != "+":
+            return _email_signal(False, observed={"rule": rule, "qualifier": qual},
+                                 evidence=f"SPF ends in {qual}all — not a pass-all policy")
+        return _email_signal(True, conf=0.9,
+                             evidence=(f"SPF{where} ends in +all — ANY host on the internet passes SPF for "
+                                       "this domain (an unconditionally permissive sender policy)"),
+                             observed={"rule": rule, "domain": domain, "qualifier": qual})
+
+    return _email_signal(False, evidence=f"unrecognised/lead-only email-auth rule {rule!r} (stays a lead)",
+                         observed={"rule": rule})
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They

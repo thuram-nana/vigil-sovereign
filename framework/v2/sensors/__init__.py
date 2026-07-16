@@ -31,6 +31,7 @@ from .cicd import WorkflowScanSensor, cicd_control_observations, parse_workflows
 from .tls_cert import CertScanSensor, cert_control_observations, parse_certs
 from .android_manifest import AndroidManifestSensor, parse_android_manifest
 from .mesh import MeshConfigSensor, mesh_control_observations, parse_mesh
+from .email_auth import EmailAuthSensor, email_auth_observations, parse_email_auth_export
 from .k8s_runtime import KubeBenchSensor, kube_bench_observations, parse_kube_bench
 from .fuzz import FuzzHarnessSensor, confirm_crash, default_fuzz_cases
 from .nmap import NmapServiceSensor, parse_nmap_xml
@@ -77,4 +78,6 @@ __all__ = [
     "AndroidManifestSensor", "parse_android_manifest",
     # Service-mesh posture sensor (Istio/Linkerd config -> mesh-posture leads)
     "MeshConfigSensor", "parse_mesh", "mesh_control_observations",
+    # Email-auth posture sensor (FORGE Domain 10: DNS policy export -> spoofing-posture leads)
+    "EmailAuthSensor", "parse_email_auth_export", "email_auth_observations",
 ]

@@ -173,6 +173,20 @@ class OracleKind(str, enum.Enum):
     # the negative). A distributed client that ships a loadable private key is a true, rarely-benign, fully
     # re-verifiable weakness (the key is extractable by anyone).
     MOBILE_POSTURE = "mobile_posture"
+    # Email-authentication posture (FORGE Domain 10 — the first FORGE-built stream). BUG_CLASS_ORACLES row
+    # — NOT in the frozen _ALL_ORACLES (stays EXACTLY 15) — fires only when the ctx carries
+    # `email_auth_control` (a retained DNS policy record no benchmark finding carries), so `make gate` stays
+    # byte-identical. Proves that a domain's PUBLISHED policy provably permits spoofing, re-derived from the
+    # retained TXT records: DMARC `p=none` (explicitly instructs receivers NOT to enforce), SPF `+all` (any
+    # host may send as the domain), or an absent DMARC record whose EFFECTIVE policy is resolvable as
+    # absent/none. A hardened domain (`p=reject`/`p=quarantine`, SPF `-all`) does NOT fire — INCLUDING a
+    # subdomain that publishes nothing and inherits an enforcing organizational policy (RFC 7489 §6.6.3
+    # fallback, §6.3 `sp=`): that chain is resolved from RETAINED evidence or the oracle REFUSES, never
+    # asserts. DELIBERATELY NOT message-level SPF/DKIM verification: DKIM canonicalisation
+    # and SPF include-chains are a semantic layer this cannot soundly re-derive offline, and an
+    # `Authentication-Results` header would be the receiving MTA's say-so (string trust) — those stay LEADs.
+    # `spf_missing` alone does NOT fire either (DKIM+DMARC can still protect — a gating chain we refuse).
+    EMAIL_AUTH_POSTURE = "email_auth_posture"
 
 
 class OracleProbe(BaseModel):

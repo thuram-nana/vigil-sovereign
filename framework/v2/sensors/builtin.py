@@ -62,6 +62,7 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     from .tls_cert import CertScanSensor
     from .android_manifest import AndroidManifestSensor
     from .mesh import MeshConfigSensor
+    from .email_auth import EmailAuthSensor
     from .cloud import CloudInventoryPullSensor, CloudPostureImportSensor
     from .k8s_runtime import KubeBenchSensor
     from .fuzz import FuzzHarnessSensor
@@ -114,6 +115,10 @@ def register_builtin_sensors(registry: ToolRegistry) -> ToolRegistry:
     # LEADS only; the mesh-posture oracle (verify.mesh_posture) re-verifies a concrete insecure achieved
     # state to a fact via fusion. Still kill-switch-gated at run_sensor time.
     registry.register(MeshConfigSensor())
+    # Email-auth posture sensor (FORGE Domain 10): offline DNS policy-export importer (Tier-1).
+    # Mints policy LEADS only; the email-auth-posture oracle re-verifies a spoofing-permitting
+    # published policy to a fact. NO DNS query, NO mail. Still kill-switch-gated at run_sensor.
+    registry.register(EmailAuthSensor())
     # Fuzz/ASan robustness producer (Workstream D.1): drives a bounded fuzz against an operator-
     # authorized LOCAL binary and feeds captured sanitizer output to the SANITIZER_SIGNAL oracle.
     # Registration is not invocation — it is OFF by default (allowed_root=None refuses everything) and
