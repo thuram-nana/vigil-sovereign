@@ -81,7 +81,7 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 # stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
 # _reverify_reachability — which fires only through the fail-closed capture, never by default.)
 _SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows",
-                 "mobsf_static", "tls_cert", "android_manifest", "mesh_config")
+                 "mobsf_static", "tls_cert", "android_manifest", "mesh_config", "email_auth")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -184,6 +184,7 @@ def _fusion_registry() -> ToolRegistry:
     from .sensors.tls_cert import CertScanSensor
     from .sensors.android_manifest import AndroidManifestSensor
     from .sensors.mesh import MeshConfigSensor
+    from .sensors.email_auth import EmailAuthSensor
 
     reg = ToolRegistry()
     reg.register(DeclaredServiceSensor())
@@ -195,6 +196,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(CertScanSensor())            # offline X.509 certificate ingest (Tier-1)
     reg.register(AndroidManifestSensor())     # offline decoded-AndroidManifest.xml ingest (Tier-1)
     reg.register(MeshConfigSensor())          # offline Istio/Linkerd config ingest (Tier-1)
+    reg.register(EmailAuthSensor())           # offline DNS email-auth policy ingest (Tier-1, Domain 10)
     return reg
 
 
@@ -420,6 +422,45 @@ def _reverify_mesh(world: Any, res: Any, *, seq: int) -> int:
             world, subject, oracle_kind="mesh_posture", bug_class="mesh_misconfiguration",
             evidence=f"mesh {c.get('resource_kind')} '{check_id}' re-derives a concrete insecure achieved state",
             seq=seq, detail={"check_id": check_id, "resource_kind": str(c.get("resource_kind") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_email_auth(world: Any, res: Any, *, seq: int) -> int:
+    """Email-auth promotion (FORGE Domain 10): the email-auth-posture oracle over each RETAINED DNS policy
+    control. A control whose PUBLISHED policy re-derives a concrete spoofing weakness (no DMARC anywhere in
+    the RFC 7489 §6.6.3 chain, ``p=none``, or SPF ``+all``) is promoted to an oracle-grounded FACT on its
+    CONTROL node; a hardened domain (``p=reject``/``sp=reject``/``-all``) is left an honest LEAD. NO DNS is
+    queried, NO mail is sent — a pure re-derivation over the operator's retained records. Mirrors
+    :func:`_reverify_mesh`; the lead and its FACT share the ``email:<check_id>`` node (lowercased, exactly as
+    ``sensors.email_auth.email_auth_observations`` keys it)."""
+    try:
+        from .verify.email_auth import confirm_email_auth_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_email_auth_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"email:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="email_auth_posture", bug_class="email_auth_misconfiguration",
+            evidence=(f"the published email-auth policy for '{c.get('domain')}' ({c.get('rule')}) "
+                      "re-derives a concrete spoofing weakness"),
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or ""),
+                             "domain": str(c.get("domain") or "")})
         promoted += 1
     return promoted
 
@@ -751,6 +792,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
       * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
       * mesh_config     -> mesh-posture oracle over each retained Istio/Linkerd control
+      * email_auth      -> email-auth-posture oracle over each retained DNS policy control (Domain 10)
       * mobsf_static    -> mobile-posture oracle over each retained MobSF control
       * android_manifest-> mobile-posture oracle over each retained AndroidManifest provider control
       * tls_cert        -> weak-crypto-artifact oracle over each retained certificate descriptor
@@ -769,6 +811,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_cicd(world, res, seq=seq)
     if task.sensor == "mesh_config":
         return _reverify_mesh(world, res, seq=seq)
+    if task.sensor == "email_auth":
+        return _reverify_email_auth(world, res, seq=seq)
     if task.sensor in ("mobsf_static", "android_manifest"):
         return _reverify_mobile(world, res, seq=seq)
     if task.sensor == "tls_cert":

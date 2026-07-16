@@ -588,6 +588,42 @@ def test_mesh_strict_config_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> No
     assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
 
 
+# ---- email_auth: a spoofable DNS policy LEAD -> email-auth-posture FACT (Domain 10) ----
+_EMAIL_EXPORT = json.dumps({"domains": [
+    {"domain": "spoofable.example", "dmarc": "v=DMARC1; p=none",
+     "dmarc_observed": True, "is_org_domain": True},
+    {"domain": "hardened.example", "dmarc": "v=DMARC1; p=reject",
+     "dmarc_observed": True, "is_org_domain": True},
+]})
+
+
+def test_email_auth_spoofable_policy_is_promoted_by_the_email_auth_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "dns-email-auth.json", _EMAIL_EXPORT)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:email:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # ONLY the p=none domain promotes to a grounded FACT; the p=reject domain stays a lead
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:email_auth_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 email-auth fact, got {[n.id for n in facts]}"
+    assert "spoofable.example" in facts[0].id and "hardened.example" not in facts[0].id
+    control_id = "control:" + facts[0].id.split("finding:email_auth_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_email_auth_hardened_domain_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "dns-email-auth.json", json.dumps({"domains": [
+        {"domain": "hardened.example", "dmarc": "v=DMARC1; p=reject; sp=reject",
+         "spf": "v=spf1 -all", "dmarc_observed": True, "is_org_domain": True}]}))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    assert any(o.subject.node_id.startswith("control:email:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:email_auth_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
 # ---- 3b: cloud_import LEAD -> policy-path FACT (no live cloud) ---------------
 
 
