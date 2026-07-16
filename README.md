@@ -635,9 +635,9 @@ the machinery to route, combine, and re‑run them.
 **Why it exists.** This is the embodiment of prove‑don't‑guess (§1, §3). It is the only place a claim
 becomes a fact.
 
-**How it works.** The `OracleKind` enum holds **30 kinds** in all — the **15 offensive** oracles
+**How it works.** The `OracleKind` enum holds **31 kinds** in all — the **15 offensive** oracles
 that form the frozen benchmark authority (`_ALL_ORACLES`, unchanged — confirmed by a dedicated test
-that asserts `len(_ALL_ORACLES) == 15`), **plus 15 additive kinds held OUT of the frozen
+that asserts `len(_ALL_ORACLES) == 15`), **plus 16 additive kinds held OUT of the frozen
 `_ALL_ORACLES`** so the gate stays byte-identical: **7 defensive** (the AEGIS classes — 4 detection +
 the 3 gateway request-side block oracles `sqli`/`cmdi`/`nosql`, §9.18), **1** `K8S_POSTURE` sensor-fusion
 kind, **1** `SSO_ASSERTION_FORGERY` (an offline JWT structural-forgery oracle — `alg=none` /
@@ -660,7 +660,11 @@ block that actually LOADS as an unencrypted private key, or an exported content 
 permission guard, keyed on a `mobile_control` context), and **1** `EMAIL_AUTH_POSTURE` (FORGE Domain
 10 — an offline DNS-TXT-policy oracle proving a domain's published email-auth policy permits
 spoofing: no DMARC anywhere in the RFC 7489 §6.6.3 organizational-domain chain, DMARC `p=none`, or
-SPF `+all`, keyed on an `email_auth_control` context; §9.16, §13). Of the
+SPF `+all`, keyed on an `email_auth_control` context; §9.16, §13), and **1** `IDENTITY_POSTURE`
+(FORGE Domain 7, slice 1 — an offline IdP-export oracle proving an identity-posture weakness: a
+producer-attested privileged identity with MFA provably off, or a credential at/past its rotation
+policy, keyed on an `identity_control` context; anomaly/behavioral detection and cloud-resource IAM
+are out of scope; §28-style ledger in `V2-LIMITATIONS.md` §29). Of the
 15 offensive kinds, the **11 web/injection oracles** below are the confirmation authority for
 `scan`/`engage`; the other four (`SERVICE_REACHABILITY`, `TLS_WEAKNESS`, `VERSION_RANGE`,
 `POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). The AEGIS gateway's response-side SSTI and

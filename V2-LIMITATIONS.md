@@ -1291,6 +1291,55 @@ What is NOT here — honest scope:
   a clean policy). That fault line is why Domain 10's merge bar required **both** a RED-PEN
   attestation **and** an independent multi-lens sweep — not either alone.
 
+## 29. Identity posture (IDENTITY_POSTURE, FORGE Domain 7, slice 1)
+
+FORGE Domain 7, slice 1 — the second FORGE-built stream, on the PCF foundation, and the first built under
+the now-standing **dual gate** (RED-PEN + an independent `adversarial-sweep`, both required — FORGE §3
+stage 9). The oracle (`verify/oracles.py::identity_posture_oracle`) re-derives, from a domain's own RETAINED
+identity-provider export — never an IdP API's or scanner's say-so — that an identity carries a posture
+weakness: `privileged_without_mfa` (`privileged is True` **and** `mfa_enrolled is False`) or `stale_credential`
+(`never_rotated is True`, or two retained integers `age_days >= max_age_days` with `max_age_days >= 1`). The
+seam + producer (`verify/identity_posture.py::confirm_identity_posture` / `ingest_identity_export`) map an
+operator-supplied export into the candidate controls the oracle judges; the sensor
+(`sensors/identity.py::IdentitySensor`, Tier-1, `capability=None`, `egress_hosts=()`) reads a LOCAL export —
+**no IdP is queried, no authentication is attempted**. `OracleKind.IDENTITY_POSTURE` is the enum's 31st
+member, held OUT of the frozen `_ALL_ORACLES` (still exactly 15), reachable only via its
+`identity_misconfiguration` `BUG_CLASS_ORACLES` row keyed on an `identity_control` field no
+benchmark/scan/engage finding carries, so `make gate` stays byte-identical. A confirmed finding emits a real
+signed **PCF v0.1** certificate that re-verifies offline; promotion into a live engagement is opt-in and off
+the default path (`engage_fusion.py::_reverify_identity` runs only under `engage --fuse-sensors`), and the
+grounded world-model FACT is self-re-derivable from its own CONTROL node (the node persists the judged fields,
+parity with every sibling posture domain).
+
+What is NOT here — honest scope:
+
+- **`privileged` is a PRODUCER ATTESTATION, not inferred.** The oracle never guesses privilege from a role
+  name; it fires only on a strict `privileged is True` in the export. A wrong attestation changes which
+  identities are assessed. `privileged`/`mfa_enrolled`/`never_rotated` are read by STRICT identity (`is True`/
+  `is False`, `verify/adapter.py::from_identity_control`), never `bool()`-coerced — a truthy `"false"`/`1` is
+  dropped, not laundered into a signed certificate; `age_days`/`max_age_days` are retained only as genuine
+  ints (a bool is not an int, a numeric string is not coerced), so there is no wall-clock and no presentation
+  parse in the proof path.
+- **Conservative misses — accepted false NEGATIVES, never a false FACT (the oracle REFUSES):** an ABSENT/
+  unknown `mfa_enrolled` on a privileged identity REFUSES (a missing field is not proof MFA is off); a
+  missing/non-integer `age_days` or `max_age_days` REFUSES; `max_age_days < 1` REFUSES (a 0-day "rotation
+  policy" is a likely no-policy sentinel that would otherwise fire against every credential); a `float`/string
+  age is refused (silent). A contradictory same-subject export is deduped FIRST-WINS by the case-insensitive
+  control-node key, so a compliant-first row can mask a later weak row (a false negative on malformed input).
+- **DELIBERATELY out of scope (REFUSE, never assert):** anomaly / behavioral detection (impossible-travel,
+  unusual-login, entropy/risk scoring — probabilistic, cannot be a near-zero-FP FACT, exactly as Domain 10
+  refused message-level DKIM); cloud-resource IAM over-broad grants (the existing `POLICY_PATH` / `CLOUD_POSTURE`
+  oracles own that — Domain 7 is the IdP's OWN identity/role model only). The slice-1 charter's other two
+  predicates — `wildcard_grant` and `dormant_privileged` — are DEFERRED to a follow-up charter, not built here.
+- **Not verified live.** Offline-only over a retained export; NO live IdP resolution, NO authentication
+  attempt. The upstream export collector (whatever produces the IdP JSON) is out of scope and unexercised. The
+  test suite is green OFFLINE tests — not a live-IdP verification claim.
+- **The build bar.** Slice 1 cleared the standing dual gate: RED-PEN caught a real graph-integrity defect
+  (a grounded FACT that was not self-re-derivable because the sensor dropped the judged evidence from its
+  node — now fixed, parity with the siblings), the oracle's near-zero-FP engine survived a full
+  laundering/absence/coercion/inference battery from both reviewers, and the independent sweep attested a
+  19-variant benign-twin pass with zero false facts.
+
 ## What the operator should do next
 
 In rough order:
