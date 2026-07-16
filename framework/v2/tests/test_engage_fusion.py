@@ -711,6 +711,32 @@ def test_a_grounded_identity_fact_re_derives_from_its_own_node_attrs(tmp_path: P
         assert confirm_identity_posture(reconstructed).confirmed, f"{n.id} not re-derivable from its node"
 
 
+def test_identity_slice2_rules_promote_and_re_derive_from_their_nodes(tmp_path: Path) -> None:
+    # slice 2 (wildcard_grant + dormant_privileged) through the real fusion path, incl. the BLOCK-1
+    # re-derivability invariant (each grounded FACT re-fires from its own node's attrs).
+    from framework.v2.verify.identity_posture import confirm_identity_posture
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", json.dumps({"identities": [
+        {"subject": "root@corp", "admin_all": True},                                              # wildcard
+        {"subject": "stale-admin@corp", "privileged": True, "days_since_login": 400,
+         "dormancy_threshold_days": 90},                                                          # dormant
+        {"subject": "scoped@corp", "grants": ["read:*", "*:invoices"]},                           # partial -> lead
+    ]}))
+    fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:identity_posture:") and n.grounding == GROUNDING_GROUNDED]
+    subjects = sorted(n.id for n in facts)
+    assert len(facts) == 2, subjects
+    assert any("root@corp" in s for s in subjects) and any("stale-admin@corp" in s for s in subjects)
+    assert not any("scoped@corp" in s for s in subjects)
+    for n in facts:
+        control = world.get_node("control:" + n.id.split("finding:identity_posture:", 1)[1])
+        reconstructed = {k: control.attrs[k] for k in
+                         ("rule", "subject", "admin_all", "grant", "privileged",
+                          "days_since_login", "dormancy_threshold_days") if k in (control.attrs or {})}
+        assert confirm_identity_posture(reconstructed).confirmed, f"{n.id} not re-derivable from its node"
+
+
 def test_identity_compliant_export_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
     world = WorldModel()
     export = _write(tmp_path, "identity.json", json.dumps({"identities": [

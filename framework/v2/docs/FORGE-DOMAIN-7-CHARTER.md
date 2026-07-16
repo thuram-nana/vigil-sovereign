@@ -59,3 +59,30 @@ benchmark/scan/engage finding carries — so `make gate` stays byte-identical.
 
 RED-PEN attestation **and** an independent `adversarial-sweep` attestation (FORGE §3 stage 9, both required),
 `make gate` byte-identical, CHRONICLER ledger, and human approval. No self-merge.
+
+---
+
+# Domain 7 slice 2 — signed charter (2026-07-16)
+
+Two new rules on the SAME `IDENTITY_POSTURE` kind (#31) — no new OracleKind, no new sensor. Signed
+"full-wildcard only" by the operator.
+
+## The proof it emits (slice-2 predicates)
+
+3. **`wildcard_grant`** — an over-broad grant in the IdP's OWN role/entitlement model (NEVER cloud-resource
+   IAM — `POLICY_PATH`/`CLOUD_POSTURE` own that). Fires ONLY on `admin_all is True` (an explicit unrestricted-
+   admin attestation) OR a **universal** wildcard grant — everything-on-everything (`_is_universal_grant`:
+   every `:`/`/`-separated segment is a bare `*`). A SCOPED or PARTIAL wildcard (`read:*`, `*:invoices`) does
+   NOT fire — those are common and legitimate, and firing on them is exactly where the false positives would
+   live. Benign twin: scoped grants → silent.
+4. **`dormant_privileged`** — a producer-attested privileged identity idle past the operator's dormancy
+   threshold: `privileged is True` AND two retained integers `days_since_login >= dormancy_threshold_days`
+   (threshold ≥ 1). A deterministic threshold on a RETAINED integer the producer computed — NOT behavioral
+   anomaly (no wall-clock, no scoring). Absent/non-int/`threshold<1` → REFUSE. Benign twin: recently active →
+   silent.
+
+## Trust boundaries / non-goals (unchanged from slice 1)
+
+`admin_all`/`privileged` are strict-`is True` PRODUCER ATTESTATIONS (never inferred); `dormancy_threshold_days`
+is producer POLICY (≥1); `days_since_login` is a retained int (no wall-clock). Still out of scope: anomaly/
+behavioral detection; cloud-resource IAM; privilege/admin inference; live IdP calls.

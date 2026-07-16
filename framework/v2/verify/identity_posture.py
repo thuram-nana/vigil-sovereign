@@ -27,7 +27,21 @@ from typing import Any
 
 from .adapter import FindingContext
 from .models import VerificationResult
+from .oracles import _is_universal_grant
 from .verifier import OracleVerifier
+
+
+def _grant_str(g: Any) -> str:
+    """Normalise one grant (a string, or a ``{"action":…, "resource":…}`` dict) to an ``action:resource``
+    string so the universality check runs over one shape. Non-grant entries -> ``""``."""
+    if isinstance(g, str):
+        return g.strip()
+    if isinstance(g, Mapping):
+        action = str(g.get("action") or "").strip()
+        resource = str(g.get("resource") or "").strip()
+        if action or resource:
+            return f"{action}:{resource}"
+    return ""
 
 
 def identity_posture_context(control: Mapping[str, Any]) -> dict:
@@ -104,6 +118,35 @@ def ingest_identity_export(rows: Any) -> list[dict[str, Any]]:
             if key not in seen:
                 seen.add(key)
                 out.append(c)
+        # wildcard_grant (slice 2): admin_all attestation, else the FIRST provably-UNIVERSAL grant. A scoped
+        # or partial wildcard mints no candidate (the oracle re-derives universality regardless).
+        wc: dict[str, Any] | None = None
+        if row.get("admin_all") is True:
+            wc = {"rule": "wildcard_grant", "subject": subject, "admin_all": True}
+        else:
+            grants = row.get("grants")
+            if isinstance(grants, (list, tuple)):
+                for g in grants:
+                    gs = _grant_str(g)
+                    if gs and _is_universal_grant(gs):
+                        wc = {"rule": "wildcard_grant", "subject": subject, "grant": gs}
+                        break
+        if wc is not None:
+            key = f"{subject}:wildcard_grant".lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(wc)
+        # dormant_privileged (slice 2): a privileged identity with both dormancy integers retained.
+        dsl = row.get("days_since_login")
+        dthr = row.get("dormancy_threshold_days")
+        has_dormancy = (isinstance(dsl, int) and not isinstance(dsl, bool)
+                        and isinstance(dthr, int) and not isinstance(dthr, bool))
+        if row.get("privileged") is True and has_dormancy:
+            key = f"{subject}:dormant_privileged".lower()
+            if key not in seen:
+                seen.add(key)
+                out.append({"rule": "dormant_privileged", "subject": subject, "privileged": True,
+                            "days_since_login": dsl, "dormancy_threshold_days": dthr})
     return out
 
 
