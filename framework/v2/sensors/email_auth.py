@@ -64,6 +64,7 @@ def parse_email_auth_export(text: str) -> list[dict]:
     if not isinstance(rows, list):
         return []
     controls: list[dict] = []
+    seen_nodes: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -80,6 +81,18 @@ def parse_email_auth_export(text: str) -> list[dict]:
                                    org_dmarc_record=row.get("org_dmarc"),
                                    org_dmarc_observed=row.get("org_dmarc_observed") is True):
             c["check_id"] = f"{domain}:{c['rule']}"
+            # Dedup FIRST-WINS by the CONTROL node a lead/FACT lands on (case-insensitive: DNS names are
+            # case-insensitive, RFC 4343, and the node key is `email:<check_id>`.lower()). A registrable
+            # domain has ONE policy per rule, so two rows that collide on one node are a contradictory/
+            # duplicate operator export — keep the first and drop the rest. Load-bearing for PCF round-trip
+            # integrity: without it a LATER row's oracle-confirmed FACT could ground onto the node carrying
+            # an EARLIER row's (possibly hardened) record, so an offline re-verify from that node's own
+            # retained evidence would reproduce nothing. Deduping here (the sole producer) keeps the lead
+            # path and the fusion-promotion path judging the SAME control per node, by construction.
+            node_key = c["check_id"].lower()
+            if node_key in seen_nodes:
+                continue
+            seen_nodes.add(node_key)
             controls.append(c)
             if len(controls) >= _MAX_DOMAINS:
                 return controls

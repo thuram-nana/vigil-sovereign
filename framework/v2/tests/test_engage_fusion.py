@@ -624,6 +624,58 @@ def test_email_auth_hardened_domain_stays_a_lead_no_oracle_no_fact(tmp_path: Pat
     assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
 
 
+# ---- Independent-sweep LOW (fusion provenance mis-attribution): a contradictory same-domain export must
+# ---- never ground a FACT onto a node whose retained record contradicts it (a PCF round-trip violation).
+# Fixed at the producer: parse_email_auth_export dedups controls first-wins by the (case-insensitive) node
+# key, so the lead path and the fusion path judge the SAME control per node.
+
+def _grounded_email_facts(world: WorldModel):
+    out = []
+    for n in world.all_nodes():
+        if n.id.startswith("finding:email_auth_posture:") and n.grounding == GROUNDING_GROUNDED:
+            control_id = "control:" + n.id.split("finding:email_auth_posture:", 1)[1]
+            node = world.get_node(control_id)
+            out.append((n.id, (node.attrs or {}).get("dmarc_record") if node else None))
+    return out
+
+
+@pytest.mark.parametrize("rows,expect_facts,expect_record", [
+    # p=reject listed FIRST: the second (p=none) row is deduped away -> node keeps p=reject -> no FACT
+    ([{"domain": "dup.example", "dmarc": "v=DMARC1; p=reject"},
+      {"domain": "dup.example", "dmarc": "v=DMARC1; p=none"}], 0, None),
+    # p=none listed FIRST: a FACT is minted and grounds onto a node whose retained record IS p=none
+    ([{"domain": "dup.example", "dmarc": "v=DMARC1; p=none"},
+      {"domain": "dup.example", "dmarc": "v=DMARC1; p=reject"}], 1, "v=DMARC1; p=none"),
+    # case-variant of the same DNS name collapses to one node (RFC 4343), first-wins p=reject -> no FACT
+    ([{"domain": "A.example", "dmarc": "v=DMARC1; p=reject"},
+      {"domain": "a.example", "dmarc": "v=DMARC1; p=none"}], 0, None),
+])
+def test_contradictory_same_domain_export_never_misattributes_a_fact(tmp_path, rows, expect_facts, expect_record):
+    for r in rows:
+        r.update({"dmarc_observed": True, "is_org_domain": True})
+    export = _write(tmp_path, "dup.json", json.dumps({"domains": rows}))
+    world = WorldModel()
+    fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    facts = _grounded_email_facts(world)
+    assert len(facts) == expect_facts, facts
+    # every grounded FACT must sit on a node carrying the record it was DERIVED from (round-trip integrity)
+    for _fid, record in facts:
+        assert record == expect_record, facts
+
+
+def test_dedup_does_not_swallow_a_well_formed_domains_distinct_rules(tmp_path: Path) -> None:
+    # a single domain publishing a weak DMARC AND a permissive SPF is TWO distinct rules -> two facts,
+    # never collapsed by the dedup (which keys on domain:rule, not domain).
+    export = _write(tmp_path, "weak.json", json.dumps({"domains": [
+        {"domain": "weak.example", "dmarc": "v=DMARC1; p=none", "spf": "v=spf1 +all",
+         "dmarc_observed": True, "is_org_domain": True}]}))
+    world = WorldModel()
+    fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    rules = sorted(n.id.split(":")[-1] for n in world.all_nodes()
+                   if n.id.startswith("finding:email_auth_posture:") and n.grounding == GROUNDING_GROUNDED)
+    assert rules == ["dmarc_none", "spf_permissive"], rules
+
+
 # ---- 3b: cloud_import LEAD -> policy-path FACT (no live cloud) ---------------
 
 
