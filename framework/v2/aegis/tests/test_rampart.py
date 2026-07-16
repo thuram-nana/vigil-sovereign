@@ -74,19 +74,38 @@ def test_a_benign_request_produces_no_block_and_no_certificate(method, path, _):
 def test_rampart_certifies_only_blocks_never_a_lead_or_clear():
     _tr, signers = _trust_root_and_signers()
     from framework.v2.aegis.models import Verdict
-    # THE named negative control (RED-PEN BLOCK-1): a TYPED lead/clear Verdict — belief-raising or
-    # below-band, never a block — must yield no CertRef and no certificate. This is what proves the
-    # `decision != "confirmed"` gate, not merely the isinstance guard; deleting that gate must fail here.
+    # A TYPED lead/clear Verdict — belief-raising or below-band, never a block — yields no CertRef and no
+    # certificate at the certref_of / block_pcf_certificate boundary. HONEST NOTE (RED-PEN + independent
+    # sweep): the LOAD-BEARING guard for this property is the Verdict MODEL INVARIANT (a non-confirmed
+    # verdict cannot carry a certificate — proven directly in the next test); certref_of's
+    # `decision != "confirmed"` line is REDUNDANT defense-in-depth and cannot be isolated in a unit test,
+    # because pydantic refuses to build a non-confirmed Verdict holding a certificate. This asserts the
+    # observable boundary behaviour; the invariant test below is what actually pins the guard.
     lead = Verdict(decision="lead", attack_class="sqli_attempt", action="observe", confidence=0.6)
     clear = Verdict(decision="clear", attack_class="sqli_attempt", action="allow")
     for v in (lead, clear):
-        assert v.certificate is None                      # model invariant: no cert on a non-block
+        assert v.certificate is None
         assert certref_of(v) is None
         assert block_pcf_certificate(v, signers=signers, seq=1) is None
     # and non-Verdict junk is likewise inert (total over the `block` argument)
     for junk in (None, "not a verdict", 42, [1, 2], {"decision": "confirmed"}, b"x"):
         assert certref_of(junk) is None
         assert block_pcf_certificate(junk, signers=signers, seq=1) is None
+
+
+def test_the_verdict_model_invariant_is_the_real_no_cert_on_non_block_guard():
+    # The ACTUAL load-bearing guard behind "only a block carries a certificate": the Verdict model itself
+    # refuses to construct a non-confirmed verdict holding one. This is the guard certref_of relies on, and
+    # the one the boundary test above cannot isolate — so it is pinned here, directly.
+    from framework.v2.aegis.models import CertRef, Verdict
+    ref = CertRef.mint({"request_payload": "1' UNION SELECT 1-- -"}, bug_class="sqli_attempt",
+                       confirmed_by="sql_injection_breakout", confidence=0.9)
+    for dec in ("lead", "clear"):
+        with pytest.raises(Exception):     # pydantic: "only a confirmed verdict may carry a certificate"
+            Verdict(decision=dec, attack_class="sqli_attempt", certificate=ref)
+    # and a confirmed verdict REQUIRES one (the invariant's other half) — so the two are strictly coupled
+    with pytest.raises(Exception):
+        Verdict(decision="confirmed", attack_class="sqli_attempt", certificate=None)
 
 
 def test_block_pcf_certificate_is_total_over_seq():
