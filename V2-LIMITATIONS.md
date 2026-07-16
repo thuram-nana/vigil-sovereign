@@ -1358,6 +1358,43 @@ What is NOT here — honest scope:
   laundering/absence/coercion/inference battery from both reviewers, and the independent sweep attested a
   19-variant benign-twin pass with zero false facts.
 
+## 30. RAMPART — proof-carrying edge, slice 1 (certificate-per-block)
+
+FORGE RAMPART slice 1 (`aegis/rampart.py`, charter `docs/FORGE-RAMPART-CHARTER.md`): every inline BLOCK the
+AEGIS gateway makes can emit a real, signed, offline-re-verifiable **PCF v0.1** certificate over the real
+`evidence/pcf.py` layer, instead of only the lighter `CertRef`. `block_pcf_certificate(block, *, signers,
+seq)` mints the certificate from a BLOCK's retained `oracle_context` (the fired request-side oracle's bug
+class + kind + `verdict.fired`); `verify_block_pcf` runs the five offline PCF steps (schema+vocabulary, m-of-n
+signature, evidence-digest integrity, oracle RE-FIRE, claim-grounded). A third party re-verifies a block with
+no trust in RAMPART. Reuse-first: **no new oracle kind** (`OracleKind` stays 31), the gateway's existing
+request-side oracles do the deciding, and the module is off the scan/engage/benchmark gate path (lazy
+imports) — `make gate` byte-identical.
+
+What is NOT here — honest scope:
+
+- **This is the decision + certificate CORE, not a deployed edge.** The reverse-proxy TRANSPORT — TLS
+  termination, ACME auto-cert, forward-to-origin — is **deferred to a later slice**. Slice 1 is drivable
+  in-process/in-test (a `Verdict` → a certificate); it is **not** exercised as a live inline proxy terminating
+  real traffic, and no such end-to-end deployment is claimed.
+- **Plane A (agentless assessment)** — driving the engine against an authorized origin's public surface to
+  emit finding certificates — is **not built** in this slice. When it is built and RUN it is charter-bound
+  exactly like CRUCIBLE owner-testing (RAMPART protects/asseses only authorized sites).
+- **A certificate exists ONLY for a genuinely-fired-oracle BLOCK** (`decision == "confirmed"`); a benign /
+  allowed request, a lead, or a clear verdict produces no block and no certificate. Verification is
+  fail-closed on every tamper class and when no trust root is provisioned; enforcement (actually blocking) is
+  separately gated by the gateway's entitlement + kill-switch and fails OPEN on availability (a gateway error
+  never spuriously blocks). Near-zero-FP is inherited from the already-dual-attested request-side oracles;
+  slice 1 adds no detection.
+- **Guard provenance (test-honesty note).** The property "only a block carries a certificate" is enforced by
+  the `Verdict` MODEL INVARIANT (a non-confirmed verdict cannot hold a certificate); `certref_of`'s
+  `decision != "confirmed"` check is redundant defense-in-depth. The test suite pins the invariant directly.
+- **The build bar.** Slice 1 cleared the standing dual gate: RED-PEN attested all six security properties (no
+  false proof on benign traffic, every tamper class + untrusted key + no-trust-root rejected fail-closed,
+  prove-by-re-execution load-bearing, determinism/totality, no offensive drift, gate integrity) and the
+  independent sweep drove 34 benign twins + every confirmable gateway class through a JSON round-trip with
+  zero false certificates; the only findings were test-honesty items (a green-washed negative control, seq
+  totality), both fixed.
+
 ## What the operator should do next
 
 In rough order:
