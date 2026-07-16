@@ -377,6 +377,35 @@ def test_escaped_own_domain_records_read_the_true_qualifier(rule, field, record,
         {"rule": rule, "domain": "gov.example", field: record}).confirmed is fires, record
 
 
+# ---- Independent-sweep CRITICAL #7 (the escape decode surviving on the BARE path): the decoder was wired
+# ---- only into the quoted branch; a BARE (unquoted) record with a \009 escape hid a protective sp=reject.
+# A bare record is already-wire octets, whose valid form never contains a backslash — so a backslash here is
+# an ambiguous undecoded escape (or malformed) and must REFUSE, exactly as the quoted path decodes.
+
+def test_a_bare_record_hiding_sp_reject_behind_an_escape_refuses_end_to_end():
+    # THE R7 case, through the REAL producer: a hardened org whose sp=reject is behind an unquoted \009
+    # must NOT fire the subdomain.
+    facts = confirm_dns_policy("mail.bank.example", dmarc_observed=True, org_domain="bank.example",
+                               org_dmarc_record="v=DMARC1; p=none;\\009sp=reject", org_dmarc_observed=True)
+    assert facts == []
+
+
+@pytest.mark.parametrize("rule,field,record", [
+    ("dmarc_none", "dmarc_record", "v=DMARC1;\\009p=none"),          # bare, escaped exposed p=none
+    ("dmarc_none", "dmarc_record", "v=DMARC1; p=reject;\\009rua=x"), # bare, escaped hardened
+    ("spf_permissive", "spf_record", "v=spf1\\009+all"),            # bare, escaped exposed +all
+])
+def test_a_bare_record_containing_a_backslash_refuses_rather_than_asserting(rule, field, record):
+    # bare + backslash is unresolvable (wire octets never contain '\\'); refuse, never assert a FACT.
+    assert not confirm_email_auth_posture({"rule": rule, "domain": "g", field: record}).confirmed, record
+
+
+def test_bare_and_quoted_forms_of_the_same_record_resolve_consistently():
+    # the asymmetry that caused R7: bare and quoted must not disagree on a valid (backslash-free) record
+    for rec in ("v=DMARC1; p=none; sp=reject", "v=DMARC1; p=reject", "v=spf1 -all", "v=spf1 +all"):
+        assert _resolve_txt_record(rec) == _resolve_txt_record(f'"{rec}"'), rec
+
+
 def test_the_decoder_is_total_and_never_raises_on_pathological_escapes():
     for pathological in ("\\", "\\\\", "\\0", "\\00", "\\256", "\\999", "\\9x", "a\\", "\\z\\", "\\255",
                          "\\000", "\\; \\059 \\061"):

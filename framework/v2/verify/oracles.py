@@ -2613,7 +2613,14 @@ def _resolve_txt_record(line: str) -> str | None:
     protective tag disappears (`'"v=DMARC1; p=none;" sp=reject'` -> a `sp=reject` that never reaches the
     parser). Unquoted content mixed among character-strings is REFUSED, never dropped."""
     if '"' not in line:
-        return line.strip()                     # bare / already-canonical (already wire octets, no escapes)
+        bare = line.strip()
+        # A BARE (unquoted) record is the operator's already-decoded wire octets — and the wire form of a
+        # valid DMARC/SPF record never contains a backslash. So a backslash here is UNRESOLVABLE: it is
+        # either an undecoded RFC 1035 §5.1 presentation escape (a quote-stripping export left `\009` for a
+        # separator octet, which would HIDE a protective tag behind the literal backslash) or malformed
+        # content. We cannot tell which without guessing, and guessing is the fault line — so REFUSE. (The
+        # QUOTED branch below decodes, because there a backslash is unambiguously a §5.1 escape.)
+        return None if "\\" in bare else bare
     spans = list(_TXT_STRING_RE.finditer(line))
     if not spans:
         return None                             # a quote opens a string that never closes
