@@ -59,7 +59,7 @@ The naming is a smithing guild, to match OBSIDIAN / CRUCIBLE / AEGIS. Read the r
 | **GATE-MARSHAL** | The fail-closed safety cage + defensive-only | `agents/http_executor.py`, `egress_guard.py`, `scope_gate.py`, `common/ethics.py` | **highest** |
 | **REPORT-WRIGHT** | Reporting, standards export, the certificate standard | `report/`, `plugins/` | low |
 | **PROVER** | Tests, benchmark, `make gate` | `eval/`, `tests/`, `Makefile` | high |
-| **RED-PEN** | Adversarial pre-merge review (the refuter) | reads everything; owns nothing | **highest** |
+| **RED-PEN** (+ the independent `adversarial-sweep`) | Adversarial pre-merge review, two disjoint reviewers (the refuters) | read everything; own nothing | **highest** |
 | **CHRONICLER** | Docs, honesty ledger, capability catalog | `README.md` §9/§13, `V2-LIMITATIONS.md` | low |
 
 "Safety weight" sets how much human review the agent's output requires at the merge gate (§5): **highest** = mandatory line-by-line human review; **high** = human review of the diff and the tests; **medium/low** = human review of the summary and spot-check.
@@ -78,7 +78,7 @@ The naming is a smithing guild, to match OBSIDIAN / CRUCIBLE / AEGIS. Read the r
 
 **Hard rules.** Never self-merge — the merge gate (§5) always ends at a human. Never run two streams in parallel unless their dependency graph is disjoint (§5). Never let an agent operate outside its lane. Never advance a stream past a stage whose gate did not pass. Never allow a stream that would violate an invariant in §1 — halt and escalate.
 
-**Definition of done (per stream).** `make gate` byte-identical; PROVER green; RED-PEN attestation on file; CHRONICLER ledger entry written; human approval recorded on the blackboard.
+**Definition of done (per stream).** `make gate` byte-identical; PROVER green; RED-PEN attestation on file; an **independent adversarial-sweep attestation** on file (a disjoint second reviewer — see §3 stage 9); CHRONICLER ledger entry written; human approval recorded on the blackboard.
 
 **Invocation.** The top-level Claude Code session. It reads this file, picks the next stream from §4, and drives it. Everything else is a subagent it spawns with a scoped guide.
 
@@ -224,6 +224,8 @@ The naming is a smithing guild, to match OBSIDIAN / CRUCIBLE / AEGIS. Read the r
 
 **Hard rules.** RED-PEN **cannot be waived** — no stream merges without its attestation. It must either find something or explicitly attest that it tried hard to break each property and could not. A pass with no evidence of adversarial effort is itself a finding against the review. RED-PEN never fixes — it objects; the owning agent fixes and re-submits.
 
+**RED-PEN does not review alone.** Stage 9 requires a *second, independent* adversarial pass from a **disjoint attack model** — the `adversarial-sweep` workflow (`.claude/workflows/adversarial-sweep.js`): a panel of independent lenses (benign-twin false-positive, producer/transform-lossless, evidence-truth + round-trip, green-wash + next-instance, totality/determinism/gate, and fusion-promotion), each of which attacks then *refutes each objection with a real executed repro*, reporting only what survives. Both attestations are required to merge; neither substitutes for the other. This is not redundancy — it is the empirically-forced rule of this codebase: **near-zero-false-positive cannot be self-certified by one reviewer.** On the first FORGE-built stream (Domain 10, email-auth posture) RED-PEN attested a PASS and the independent sweep then found **three** further defects on the same fault line — two CRITICAL false-positives on hardened inputs — past that PASS; across the stream, eight defects fell to the two reviewers together, all one fault line (asserting from a transform not verified lossless), and several were caught only because a *second, differently-structured* adversary re-derived from the real producer path a single reviewer had already walked past. A sweep that loses a lens to an infrastructure failure reports INCOMPLETE, never a pass — a verdict is only as sound as the lenses that actually ran.
+
 **Definition of done.** Every property in "Works on" attacked and either broken (→ block) or attested held; the attestation on the blackboard. **Its own output is human-reviewed** — the reviewer of a security build is itself load-bearing.
 
 ---
@@ -259,9 +261,9 @@ Every one of the twenty domains is built by the *same* fixed pipeline, composing
 | **6 · Cage the actions** | GATE-MARSHAL | Every action routed through the fail-closed chain; offense-free attestation | Gated in order; refusals recorded; egress audit clean; no offense added |
 | **7 · Report and export** | REPORT-WRIGHT | Deterministic reports, SARIF/JSON export, standards mapping | Export grades identically; leads capped; mappings correct |
 | **8 · Prove precision** | PROVER | Real offline tests + corpus extension with safe controls | Suite green offline/deterministically; negative + safe controls present; regression gate green |
-| **9 · Refute** | RED-PEN | Adversarial-review attestation | Every property attacked and held (or blocked and fixed) |
+| **9 · Refute** | RED-PEN **+ an independent adversarial sweep** | Two attestations from disjoint attack models | Every property attacked and held (or blocked and fixed) by **both** |
 | **10 · Record honestly** | CHRONICLER | §9/§13 + `V2-LIMITATIONS.md` entries | Honest wiring status; limitations logged |
-| **Merge** | FORGEMASTER + **human** | The merged domain | `make gate` byte-identical + PROVER green + RED-PEN attested + **human approval** |
+| **Merge** | FORGEMASTER + **human** | The merged domain | `make gate` byte-identical + PROVER green + RED-PEN attested + **independent-sweep attested** + **human approval** |
 
 Stages 1–8 interleave in practice (the oracle and its test are written together; the sensor and its projection co-evolve), exactly as the engagement lifecycle's stages 4–6 interleave. Stages 0, 9, and Merge never interleave and never skip.
 
@@ -320,7 +322,7 @@ Domain 1 (national asset & config graph) is not a separate stream — it is the 
 
 **Sequencing.** One stream at a time by default. Parallelism only where the dependency graph is disjoint — e.g., SENSOR-WRIGHT may scaffold the ingest for a Phase-2 domain while RED-PEN reviews a Phase-1 domain, but two streams that both touch `verify/` or `aegis/registry.py` never run concurrently. FORGEMASTER owns the dependency graph and refuses unsafe parallelism.
 
-**The merge gate — where the agent stops and the human decides.** A stream merges only when *all* hold: `make gate` byte-identical; PROVER green offline; RED-PEN attestation on file; CHRONICLER ledger written; and **human approval recorded**. Human review scales with safety weight (§2): **highest**-weight output (oracles, crypto, gates, RED-PEN itself) gets mandatory line-by-line human review; high-weight gets diff + test review; low-weight gets summary + spot-check. Merge approval reuses the entitlement crypto and `CODEOWNERS` — the same threshold signing that authorizes distribution authorizes a merge. **No self-merge, ever.**
+**The merge gate — where the agent stops and the human decides.** A stream merges only when *all* hold: `make gate` byte-identical; PROVER green offline; RED-PEN attestation on file; an **independent adversarial-sweep attestation on file** (the disjoint second reviewer, §2 RED-PEN); CHRONICLER ledger written; and **human approval recorded**. Human review scales with safety weight (§2): **highest**-weight output (oracles, crypto, gates, RED-PEN itself) gets mandatory line-by-line human review; high-weight gets diff + test review; low-weight gets summary + spot-check. Merge approval reuses the entitlement crypto and `CODEOWNERS` — the same threshold signing that authorizes distribution authorizes a merge. **No self-merge, ever.**
 
 **The never-stop loop, gated.** The self-improvement discipline (`improve/`, `ROADMAP-FLAGSHIP.md` Pillar 3) runs continuously in the background of the program: mine each merged stream for gaps, draft the next reviewable proposals, ingest new advisories into new detection candidates. It is **authorise-not-apply** — it proposes forever; a human (or threshold) gate governs every merge. The program has no terminal state; the *asking* is automated, the *answering* is governed.
 
@@ -376,7 +378,7 @@ The twenty domains are a large body of code that still has to be written. FORGE 
 3. **Pick the stream.** Take the next domain from §4 (Phase 1 first — the wedge). Never start a Phase-2+ domain while a Phase-1 dependency is unmet.
 4. **Charter it (stage 0).** Draft the domain charter; present it to the human; do not proceed until it is signed and confirmed non-offensive.
 5. **Drive the recipe (stages 1–10).** Spawn each specialist agent in turn, scoped to its lane and guide; record every proposal and gate result on the blackboard; never advance past a failed gate.
-6. **Refute (stage 9).** RED-PEN attacks every property; block-and-fix until it attests each held.
+6. **Refute (stage 9).** RED-PEN **and** an independent adversarial sweep (disjoint attack models) each attack every property; block-and-fix until **both** attest each held.
 7. **Halt for merge.** Present the candidate: `make gate` diff, PROVER results, RED-PEN attestation, CHRONICLER entries. **Wait for human approval.** Merge only on approval. Never self-merge.
 8. **Record and continue.** CHRONICLER writes the honest status; FORGEMASTER updates the backlog and returns to step 3 for the next stream. The never-stop loop runs continuously in the background, proposing the next gaps for the human to govern.
 
