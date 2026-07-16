@@ -661,10 +661,11 @@ permission guard, keyed on a `mobile_control` context), and **1** `EMAIL_AUTH_PO
 10 — an offline DNS-TXT-policy oracle proving a domain's published email-auth policy permits
 spoofing: no DMARC anywhere in the RFC 7489 §6.6.3 organizational-domain chain, DMARC `p=none`, or
 SPF `+all`, keyed on an `email_auth_control` context; §9.16, §13), and **1** `IDENTITY_POSTURE`
-(FORGE Domain 7, slice 1 — an offline IdP-export oracle proving an identity-posture weakness: a
-producer-attested privileged identity with MFA provably off, or a credential at/past its rotation
-policy, keyed on an `identity_control` context; anomaly/behavioral detection and cloud-resource IAM
-are out of scope; §28-style ledger in `V2-LIMITATIONS.md` §29). Of the
+(FORGE Domain 7, slices 1–2 — an offline IdP-export oracle proving an identity-posture weakness over
+four rules on one kind: a producer-attested privileged identity with MFA provably off; a credential
+at/past its rotation policy; a UNIVERSAL wildcard grant / `admin_all` (a scoped or partial wildcard
+refuses); or a dormant privileged identity; keyed on an `identity_control` context. Anomaly/behavioral
+detection and cloud-resource IAM are out of scope; ledger in `V2-LIMITATIONS.md` §29). Of the
 15 offensive kinds, the **11 web/injection oracles** below are the confirmation authority for
 `scan`/`engage`; the other four (`SERVICE_REACHABILITY`, `TLS_WEAKNESS`, `VERSION_RANGE`,
 `POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). The AEGIS gateway's response-side SSTI and

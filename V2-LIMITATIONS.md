@@ -1293,12 +1293,15 @@ What is NOT here — honest scope:
 
 ## 29. Identity posture (IDENTITY_POSTURE, FORGE Domain 7, slice 1)
 
-FORGE Domain 7, slice 1 — the second FORGE-built stream, on the PCF foundation, and the first built under
+FORGE Domain 7, slices 1–2 — the second FORGE-built stream, on the PCF foundation, and the first built under
 the now-standing **dual gate** (RED-PEN + an independent `adversarial-sweep`, both required — FORGE §3
 stage 9). The oracle (`verify/oracles.py::identity_posture_oracle`) re-derives, from a domain's own RETAINED
 identity-provider export — never an IdP API's or scanner's say-so — that an identity carries a posture
-weakness: `privileged_without_mfa` (`privileged is True` **and** `mfa_enrolled is False`) or `stale_credential`
-(`never_rotated is True`, or two retained integers `age_days >= max_age_days` with `max_age_days >= 1`). The
+weakness, over four rules (slice 1: `privileged_without_mfa` = `privileged is True` **and** `mfa_enrolled is
+False`; `stale_credential` = `never_rotated is True`, or two retained integers `age_days >= max_age_days` with
+`max_age_days >= 1`. slice 2: `wildcard_grant` = `admin_all is True`, or a **universal** grant where every
+`:`/`/`-separated segment is a bare `*` — a scoped or *partial* wildcard does NOT fire; `dormant_privileged` =
+`privileged is True` **and** two retained integers `days_since_login >= dormancy_threshold_days >= 1`). The
 seam + producer (`verify/identity_posture.py::confirm_identity_posture` / `ingest_identity_export`) map an
 operator-supplied export into the candidate controls the oracle judges; the sensor
 (`sensors/identity.py::IdentitySensor`, Tier-1, `capability=None`, `egress_hosts=()`) reads a LOCAL export —
@@ -1326,11 +1329,26 @@ What is NOT here — honest scope:
   policy" is a likely no-policy sentinel that would otherwise fire against every credential); a `float`/string
   age is refused (silent). A contradictory same-subject export is deduped FIRST-WINS by the case-insensitive
   control-node key, so a compliant-first row can mask a later weak row (a false negative on malformed input).
+  `dormant_privileged` mirrors `stale_credential` exactly: `days_since_login`/`dormancy_threshold_days` are
+  retained ints (no wall-clock — it is a threshold on a producer-computed integer, NOT behavioral anomaly),
+  and `dormancy_threshold_days < 1` REFUSES.
+- **`wildcard_grant` scoping + the out-of-contract-grant refusal (slice 2).** Fires ONLY on `admin_all is
+  True` or a UNIVERSAL grant; a scoped or *partial* wildcard (`read:*`, `*:invoices`) never fires (that is
+  where the false positives would live). A grant OBJECT is in-contract only as `{action, resource}`: a grant
+  dict carrying ANY other key (`effect: "Deny"` — a hardened deny-all, the OPPOSITE of a weakness; a
+  `condition`-bounded break-glass grant; a `scope`/`sid`) **REFUSES** (`_grant_str` returns `""`, no
+  candidate) rather than dropping the bounding/inverting key and asserting universality — both reviewers
+  converged on this. CONSERVATIVE MISS (accepted FN): a genuinely-universal grant object DECORATED with a
+  harmless display key (`name`/`id`) also refuses; supply such a grant as a bare string (`"*:*"`), via
+  `admin_all: true`, or as a clean `{action, resource}` dict to have it fire. (An inert-display-key allowlist
+  could recover this FN later — an operator-decidable follow-up, deliberately not added now to avoid a new
+  "which keys are inert" ambiguity.)
 - **DELIBERATELY out of scope (REFUSE, never assert):** anomaly / behavioral detection (impossible-travel,
   unusual-login, entropy/risk scoring — probabilistic, cannot be a near-zero-FP FACT, exactly as Domain 10
   refused message-level DKIM); cloud-resource IAM over-broad grants (the existing `POLICY_PATH` / `CLOUD_POSTURE`
-  oracles own that — Domain 7 is the IdP's OWN identity/role model only). The slice-1 charter's other two
-  predicates — `wildcard_grant` and `dormant_privileged` — are DEFERRED to a follow-up charter, not built here.
+  oracles own that — Domain 7 is the IdP's OWN identity/role model only; a grant object's `effect`/`condition`
+  IAM-policy semantics are precisely why an out-of-contract-key grant refuses here). The anomaly half of the
+  domain remains unbuilt.
 - **Not verified live.** Offline-only over a retained export; NO live IdP resolution, NO authentication
   attempt. The upstream export collector (whatever produces the IdP JSON) is out of scope and unexercised. The
   test suite is green OFFLINE tests — not a live-IdP verification claim.
