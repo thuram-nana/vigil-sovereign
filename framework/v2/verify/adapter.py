@@ -298,6 +298,9 @@ class FindingContext(BaseModel):
     # A RETAINED MobSF mobile-posture control for the mobile-posture oracle. No benchmark finding carries
     # mobile_control, so appending this leaves the gate byte-identical.
     mobile_control: dict[str, Any] | None = None
+    # A RETAINED DNS email-auth policy record (FORGE Domain 10) for the email-auth-posture oracle. No
+    # benchmark finding carries email_auth_control, so appending this leaves the gate byte-identical.
+    email_auth_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -657,6 +660,29 @@ class FindingContext(BaseModel):
         return cls(bug_class=bug_class, mobile_control=retained)
 
     @classmethod
+    def from_email_auth_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "email_auth_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED DNS email-authentication policy record (``sensors.email_auth`` /
+        ``verify.email_auth``), for the email-auth-posture oracle (FORGE Domain 10). The oracle re-derives
+        a spoofing-permitting policy (no DMARC / p=none / SPF +all) from the record's literal text alone —
+        offline, ZERO DNS calls — so a scanner's say-so is confirmed a FACT only by the published policy
+        itself. Only the fields the oracle judges are retained. JSON-safe + deterministic."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        retained: dict[str, Any] = {}
+        for k in ("rule", "domain", "dmarc_record", "spf_record", "org_domain", "org_dmarc_record"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        # The attestation flags are retained STRICTLY: only a literal True survives. NEVER bool()-coerce —
+        # that would widen the oracle's `is not True` guard back open (a truthy "false"/"no"/1 would become
+        # True) and, because retention happens BEFORE the certificate is minted, would LAUNDER a fabricated
+        # attestation permanently into a signed, forever-re-firing certificate.
+        for flag in ("dmarc_observed", "org_dmarc_observed", "is_org_domain"):
+            if src.get(flag) is True:
+                retained[flag] = True
+        return cls(bug_class=bug_class, email_auth_control=retained)
+
+    @classmethod
     def from_jwt_token(
         cls,
         token: str,
@@ -994,6 +1020,8 @@ class FindingContext(BaseModel):
             ctx["cicd_control"] = self.cicd_control
         if self.mobile_control is not None:
             ctx["mobile_control"] = self.mobile_control
+        if self.email_auth_control is not None:
+            ctx["email_auth_control"] = self.email_auth_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

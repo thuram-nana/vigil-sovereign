@@ -36,6 +36,12 @@ from .cicd_posture import (
     confirm_workflow,
     ingest_workflow,
 )
+from .email_auth import (
+    confirm_dns_policy,
+    confirm_email_auth_posture,
+    email_auth_context,
+    ingest_dns_policy,
+)
 from .mobile_posture import (
     confirm_mobile_controls,
     confirm_mobile_posture,
@@ -60,6 +66,7 @@ from .oracles import (
     k8s_posture_oracle,
     mesh_posture_oracle,
     mobile_posture_oracle,
+    email_auth_posture_oracle,
     oob_callback_oracle,
     policy_path_oracle,
     prompt_injection_oracle,

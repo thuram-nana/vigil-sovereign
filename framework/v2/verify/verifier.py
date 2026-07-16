@@ -201,6 +201,12 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # _ALL_ORACLES, and fires only when the ctx carries `mobile_control` (no benchmark finding does), so
     # `make gate` stays byte-identical.
     "mobile_misconfiguration": (OracleKind.MOBILE_POSTURE,),
+    # Email-authentication posture (FORGE Domain 10). A retained DNS policy record (verify.email_auth /
+    # sensors.email_auth) is a LEAD; it becomes a FACT only when email_auth_posture_oracle RE-DERIVES a
+    # published policy that permits spoofing (no DMARC / p=none / SPF +all) over the RETAINED record. NOT in
+    # the frozen _ALL_ORACLES, and fires only when the ctx carries `email_auth_control` (no benchmark finding
+    # does), so `make gate` stays byte-identical.
+    "email_auth_misconfiguration": (OracleKind.EMAIL_AUTH_POSTURE,),
     # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
     # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
     # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
@@ -744,6 +750,12 @@ class OracleVerifier:
         if kind is OracleKind.MOBILE_POSTURE:
             if "mobile_control" in ctx:
                 return oracles.mobile_posture_oracle(ctx["mobile_control"])
+            return None
+        # -- FORGE Domain 10 email-auth posture — fire ONLY when the ctx carries `email_auth_control` (a
+        # retained DNS policy record), so this is inert on the benchmark/gate path.
+        if kind is OracleKind.EMAIL_AUTH_POSTURE:
+            if "email_auth_control" in ctx:
+                return oracles.email_auth_posture_oracle(ctx["email_auth_control"])
             return None
         # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
         #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.

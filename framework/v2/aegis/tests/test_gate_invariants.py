@@ -43,7 +43,7 @@ _ADDITIVE = frozenset({
     "PROMPT_INJECTION", "SYSTEM_PROMPT_DISCLOSURE", "AUTOMATED_ACCESS", "CREDENTIAL_STUFFING",
     "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "NOSQL_INJECTION_BREAKOUT", "K8S_POSTURE",
     "SSO_ASSERTION_FORGERY", "SAML_STRUCTURAL_FORGERY", "CLOUD_POSTURE", "MESH_POSTURE",
-    "CICD_POSTURE", "MOBILE_POSTURE",
+    "CICD_POSTURE", "MOBILE_POSTURE", "EMAIL_AUTH_POSTURE",
 })
 
 
@@ -63,9 +63,9 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 14 additive = 29; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 15 additive = 30; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
-    assert len(OracleKind) == 29
+    assert len(OracleKind) == 30
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 
