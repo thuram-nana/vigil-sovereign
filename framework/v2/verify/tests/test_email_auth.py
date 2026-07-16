@@ -113,26 +113,85 @@ _PROTECTED_ORG = "v=DMARC1; p=none; sp=reject"      # org monitors its own mail,
 _EXPOSED_ORG = "v=DMARC1; p=reject; sp=none"        # org enforces its own mail, exempts subdomains
 
 
-def _encodings(record: str) -> list[tuple[str, str]]:
+# What a real apex TXT set actually carries alongside a policy record — the cardinality axis.
+_NEIGHBOUR = '"google-site-verification=Xy3pl0AcQ"'
+_NEIGHBOUR2 = '"MS=ms94722371"'
+
+
+def _faithful_encodings(record: str) -> list[tuple[str, str]]:
+    """Generate the benign twin from the TXT input GRAMMAR — not from a hand-list of the forms the author
+    already thought of.
+
+    Three RED-PEN rounds each found the defect on the ONE axis the twin did not carry (record content ->
+    domain shape -> character-string encoding -> record CARDINALITY). That is not bad luck: a twin built
+    from the author's own model of the input space can only ever CONFIRM that model. So the axes here are
+    the grammar's, not the author's — character-string SHAPE (a single string / adjacent strings a resolver
+    concatenates), QUOTING (bare / quoted), zone-file SCAFFOLDING (none / RR header / `( )` continuation),
+    and record CARDINALITY (alone / among the neighbour records a real apex carries, in either RRset order,
+    which DNS does not promise to keep stable).
+
+    Every form below FAITHFULLY encodes the same one policy record, so every one MUST reach the same
+    verdict as the bare form. A form that reads a DIFFERENT policy, or silently drops a tag, is a defect."""
+    head, _, tail = record.partition("; sp=")
+    shapes = [("one string", f'"{record}"')]
+    if tail:
+        shapes.append(("adjacent strings", f'"{head};" " sp={tail}"'))   # RFC 1035 §3.3.14
+    forms = [("bare", record)]
+    for shape, quoted in shapes:
+        forms += [
+            (f"quoted (dig +short), {shape}", quoted),
+            (f"zone-file RR header+ttl, {shape}", f"_dmarc.gov.example. 3600 IN TXT {quoted}"),
+            (f"zone-file ( ) continuation, {shape}", f"_dmarc.gov.example. 3600 IN TXT (\n    {quoted}\n)"),
+            (f"among neighbours, policy first, {shape}", f"{quoted}\n{_NEIGHBOUR}"),
+            (f"among neighbours, policy last, {shape}", f"{_NEIGHBOUR}\n{quoted}"),
+            (f"among 2 neighbours, {shape}", f"{_NEIGHBOUR}\n{quoted}\n{_NEIGHBOUR2}"),
+        ]
+    return forms
+
+
+def _ambiguous_encodings(record: str) -> list[tuple[str, str]]:
+    """Blobs that do NOT resolve to exactly one policy record. None of them may FIRE — a verdict read off a
+    spliced or truncated record asserts a policy that NO record published. THE BLOCK-6 case: joining across
+    record boundaries both DESTROYS a tag (unquoted `sp=reject` silently discarded -> a hardened org fires)
+    and FABRICATES one (two DMARC records spliced -> a `p=` nobody wrote, its verdict decided by RRset
+    order). Refusal is the only sound answer — for the exposed record exactly as much as the protected one,
+    since the oracle cannot tell which it is holding until it has resolved the record."""
     head, _, tail = record.partition("; sp=")
     return [
-        ("bare", record),
-        ("quoted (dig +short)", f'"{record}"'),
-        ("multi-string TXT", f'"{head};" " sp={tail}"'),
-        ("zone-file quoted+ttl", f'_dmarc.gov.example. 3600 IN TXT "{record}"'),
+        ("unquoted tail mixed among strings", f'"{head};" sp={tail}'),
+        ("unquoted head mixed among strings", f'{head}; "sp={tail}"'),
+        ("duplicate policy records", f'"{record}"\n"v=DMARC1; p=quarantine"'),
+        ("duplicate policy records, reversed", f'"v=DMARC1; p=quarantine"\n"{record}"'),
+        ("unbalanced quote", f'"{record}'),
+        ("unbalanced zone-file paren", f'_dmarc.gov.example. 3600 IN TXT (\n    "{record}"'),
+        # A record this cannot canonicalise must never be read as "the domain publishes no policy" —
+        # selection failing is the SAME error class as a tag's value regex failing (BLOCK-4): the record is
+        # right there in the evidence. Absence is asserted only from a producer that retained NOTHING.
+        ("non-DNS quoting", f"'{record}'"),
+        ("neighbours only, no policy record", f"{_NEIGHBOUR}\n{_NEIGHBOUR2}"),
     ]
 
 
-@pytest.mark.parametrize("label,org_record", _encodings(_PROTECTED_ORG))
-def test_a_protected_subdomain_never_fires_in_any_record_encoding(label, org_record):
-    # THE BLOCK-4 case: in EVERY wire encoding, an org `sp=reject` protects the subdomain -> no fact.
+@pytest.mark.parametrize("label,org_record", _faithful_encodings(_PROTECTED_ORG))
+def test_a_protected_subdomain_never_fires_in_any_faithful_record_encoding(label, org_record):
+    # THE BLOCK-4 case: in EVERY faithful wire encoding, an org `sp=reject` protects the subdomain -> no fact.
     assert not confirm_email_auth_posture({**_SUB, "org_dmarc_record": org_record}).confirmed, label
 
 
-@pytest.mark.parametrize("label,org_record", _encodings(_EXPOSED_ORG))
-def test_an_exposed_subdomain_still_fires_in_any_record_encoding(label, org_record):
+@pytest.mark.parametrize("label,org_record", _faithful_encodings(_EXPOSED_ORG))
+def test_an_exposed_subdomain_still_fires_in_any_faithful_record_encoding(label, org_record):
     # …and normalisation must not silence the genuine weakness either (no safe-but-useless refusal).
     assert confirm_email_auth_posture({**_SUB, "org_dmarc_record": org_record}).confirmed, label
+
+
+_AMBIGUOUS = [(f"{label} / {'protected' if rec is _PROTECTED_ORG else 'exposed'}", blob)
+              for rec in (_PROTECTED_ORG, _EXPOSED_ORG)
+              for label, blob in _ambiguous_encodings(rec)]
+
+
+@pytest.mark.parametrize("label,org_record", _AMBIGUOUS)
+def test_an_unresolvable_record_set_never_fires(label, org_record):
+    assert not confirm_email_auth_posture({**_SUB, "org_dmarc_record": org_record}).confirmed, label
 
 
 @pytest.mark.parametrize("org_record", [
@@ -208,6 +267,46 @@ def test_enforcing_dmarc_does_not_fire(record):
 def test_non_pass_all_spf_does_not_fire(record):
     assert not confirm_email_auth_posture(
         {"rule": "spf_permissive", "domain": "gov.example", "spf_record": record}).confirmed
+
+
+# ---- RED-PEN BLOCK-7 regression: SPF's real record set is MULTI-record ----
+# An apex almost always carries site-verification TXT records alongside SPF, and `dig +short TXT` prints
+# them all. Joining across those record boundaries destroyed the `all` token's terminator, silently making
+# the rule INERT on the commonest real export (a genuinely broken `+all` domain was MISSED) — a rule that
+# appears to work while doing nothing is exactly what the honest-ledger invariant exists to prevent.
+# RFC 7208 §4.5 record selection is what makes a real export readable: pick the `v=spf1` record, discard
+# the neighbours, and never splice.
+
+@pytest.mark.parametrize("fires,record", [
+    (True, "v=spf1 +all"),
+    (False, "v=spf1 include:_spf.example.com ~all"),
+])
+@pytest.mark.parametrize("order", ["policy first", "policy last", "policy between"])
+def test_spf_is_read_from_a_real_multi_record_apex_set(fires, record, order):
+    blob = {"policy first": f'"{record}"\n{_NEIGHBOUR}',
+            "policy last": f'{_NEIGHBOUR}\n"{record}"',
+            "policy between": f'{_NEIGHBOUR}\n"{record}"\n{_NEIGHBOUR2}'}[order]
+    result = confirm_email_auth_posture(
+        {"rule": "spf_permissive", "domain": "gov.example", "spf_record": blob})
+    assert result.confirmed is fires, f"{order}: {blob!r}"
+
+
+@pytest.mark.parametrize("blob", [
+    '"v=spf1 mx -all"\n"v=spf1 +all"',          # duplicate v=spf1 -> RFC 7208 §4.5 PermError, no policy
+    '"v=spf1 +all"\n"v=spf1 mx -all"',          # …and the verdict may not depend on RRset order
+    '"v=spf1 mx" +all',                          # unquoted content mixed among character-strings
+])
+def test_an_unresolvable_spf_record_set_never_fires(blob):
+    assert not confirm_email_auth_posture(
+        {"rule": "spf_permissive", "domain": "gov.example", "spf_record": blob}).confirmed
+
+
+def test_a_neighbour_record_can_never_supply_the_all_token():
+    # the third BLOCK-6 instance: a neighbour ending in `all ` spliced ahead of a HARD-FAIL spf record and
+    # fired `+all` on a correctly-hardened domain.
+    assert not confirm_email_auth_posture(
+        {"rule": "spf_permissive", "domain": "gov.example",
+         "spf_record": '"some-token=x all"\n"v=spf1 mx -all"'}).confirmed
 
 
 def test_the_benign_twin_domain_yields_no_facts_end_to_end():
