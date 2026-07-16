@@ -635,8 +635,9 @@ the machinery to route, combine, and re‑run them.
 **Why it exists.** This is the embodiment of prove‑don't‑guess (§1, §3). It is the only place a claim
 becomes a fact.
 
-**How it works.** The `OracleKind` enum holds **27 kinds** in all — the **15 offensive** oracles
-that form the frozen benchmark authority, **plus 12 additive kinds held OUT of the frozen
+**How it works.** The `OracleKind` enum holds **30 kinds** in all — the **15 offensive** oracles
+that form the frozen benchmark authority (`_ALL_ORACLES`, unchanged — confirmed by a dedicated test
+that asserts `len(_ALL_ORACLES) == 15`), **plus 15 additive kinds held OUT of the frozen
 `_ALL_ORACLES`** so the gate stays byte-identical: **7 defensive** (the AEGIS classes — 4 detection +
 the 3 gateway request-side block oracles `sqli`/`cmdi`/`nosql`, §9.18), **1** `K8S_POSTURE` sensor-fusion
 kind, **1** `SSO_ASSERTION_FORGERY` (an offline JWT structural-forgery oracle — `alg=none` /
@@ -650,8 +651,16 @@ crypto-invalidity — wrong signer / tampered digest — never trusting the docu
 and refusing when it cannot conclusively verify), **1** `CLOUD_POSTURE` (an offline achieved-state cloud/CSPM
 promotion oracle — encryption-at-rest-disabled on a sensitive datastore / public exposure / a
 wildcard-anonymous principal, keyed on a `cloud_control` context; the complement to the reachability
-`POLICY_PATH` oracle), and **1** `MESH_POSTURE` (its service-mesh sibling — permissive-mTLS /
-allow-all-authz from a retained Istio/Linkerd config, keyed on a `mesh_control` context). Of the
+`POLICY_PATH` oracle), **1** `MESH_POSTURE` (its service-mesh sibling — permissive-mTLS /
+allow-all-authz from a retained Istio/Linkerd config, keyed on a `mesh_control` context), **1**
+`CICD_POSTURE` (an offline GitHub-Actions workflow posture oracle — an unpinned third-party action /
+a `pull_request_target` pwn-request / an untrusted-expression script-injection sink, keyed on a
+`cicd_control` context), **1** `MOBILE_POSTURE` (an offline MobSF-control oracle — an embedded PEM
+block that actually LOADS as an unencrypted private key, or an exported content provider with no
+permission guard, keyed on a `mobile_control` context), and **1** `EMAIL_AUTH_POSTURE` (FORGE Domain
+10 — an offline DNS-TXT-policy oracle proving a domain's published email-auth policy permits
+spoofing: no DMARC anywhere in the RFC 7489 §6.6.3 organizational-domain chain, DMARC `p=none`, or
+SPF `+all`, keyed on an `email_auth_control` context; §9.16, §13). Of the
 15 offensive kinds, the **11 web/injection oracles** below are the confirmation authority for
 `scan`/`engage`; the other four (`SERVICE_REACHABILITY`, `TLS_WEAKNESS`, `VERSION_RANGE`,
 `POLICY_PATH`) confirm *sensor‑produced* facts (§9.16). The AEGIS gateway's response-side SSTI and
@@ -1613,6 +1622,15 @@ what ships versus what is experimental or dormant:
 - The **`defender/` DEL pass** (detection‑gap report + Sigma efficacy) runs via **`engage --defender`**
   (opt‑in); the **`report` SARIF/JSON export**, the loopback **`api`** (optional bearer / `X‑Relay‑Key`
   auth), the **`mcp`** tool‑server, and **`imports`** are shipped but off the scan/engage gate path.
+- **FORGE Domain 10 — email‑authentication posture** (`EMAIL_AUTH_POSTURE`, `verify/email_auth.py`,
+  `sensors/email_auth.py::EmailAuthSensor`) is **shipped, opt‑in, and fusion‑wired** — not built‑but‑
+  unwired: the sensor reads a LOCAL operator‑supplied DNS‑policy export (no live DNS, no mail); its
+  LEADS are promoted to oracle‑grounded FACTS only through `engage --fuse-sensors`
+  (`engage_fusion.py::_reverify_email_auth`), never on the default `scan`/`engage` path. Off = the
+  gate stays byte‑identical. A confirmed finding here emits a real signed, offline‑re‑runnable **PCF
+  v0.1** certificate (`evidence/pcf.py`, an adapter over the signed‑evidence layer of §9.13). See
+  `V2-LIMITATIONS.md` §28 for the trust‑boundary (producer‑attested `is_org_domain`, no PSL lookup)
+  and the conservative‑miss inventory.
 
 **Constraints and honest limits:**
 - DAA taint is **Python‑only** and the Semgrep/Joern adapters are optional. The remote browser path is
