@@ -32,11 +32,20 @@ from .verifier import OracleVerifier
 
 
 def _grant_str(g: Any) -> str:
-    """Normalise one grant (a string, or a ``{"action":…, "resource":…}`` dict) to an ``action:resource``
-    string so the universality check runs over one shape. Non-grant entries -> ``""``."""
+    """Normalise one grant (a string, or an ``{"action":…, "resource":…}`` dict) to an ``action:resource``
+    string so the universality check runs over one shape. Non-grant entries -> ``""``.
+
+    A grant OBJECT is in-contract ONLY as ``{action, resource}``. Any other key — ``effect`` (a ``Deny``
+    is a HARDENED control, the OPPOSITE of a weakness), a ``condition`` (a bounded break-glass grant is not
+    unrestricted access), a scope/sid/etc. — can BOUND or INVERT the grant. Flattening to ``action:resource``
+    and asserting universality would drop that key and assert PAST an ambiguity — the exact fault line this
+    oracle refuses. So a grant object carrying any out-of-contract key REFUSES (``""`` -> no candidate), and
+    such a grant stays a LEAD rather than a false FACT (both reviewers converged on this)."""
     if isinstance(g, str):
         return g.strip()
     if isinstance(g, Mapping):
+        if set(g.keys()) - {"action", "resource"}:
+            return ""
         action = str(g.get("action") or "").strip()
         resource = str(g.get("resource") or "").strip()
         if action or resource:

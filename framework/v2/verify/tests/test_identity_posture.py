@@ -158,6 +158,21 @@ def test_slice2_end_to_end_through_the_real_producer():
         ("svc@corp", "wildcard_grant")]
 
 
+@pytest.mark.parametrize("grant_obj,fires", [
+    ({"action": "*", "resource": "*"}, True),                                    # clean universal -> fire
+    ({"action": "*", "resource": "*", "effect": "Deny"}, False),                 # deny-all: HARDENED, refuse
+    ({"action": "*", "resource": "*", "effect": "Allow"}, False),                # out-of-contract key -> refuse
+    ({"action": "*", "resource": "*", "condition": "mfa_and_ip"}, False),        # bounded break-glass -> refuse
+    ({"action": "*", "resource": "*", "sid": "x"}, False),                       # any extra key -> refuse
+])
+def test_wildcard_grant_refuses_a_grant_object_with_out_of_contract_keys(grant_obj, fires):
+    # RED-PEN + independent-sweep: a bounding/inverting key (effect=Deny, condition, …) must not be dropped
+    # and flattened to '*:*' — that asserts 'everything-on-everything' over a control that may DENY it.
+    export = {"identities": [{"subject": "svc@x", "grants": [grant_obj]}]}
+    got = confirm_identity_export(export)
+    assert (len(got) == 1) is fires, (grant_obj, got)
+
+
 def test_slice2_benign_twins_yield_zero_facts():
     twins = {"identities": [
         {"subject": "scoped@corp", "grants": ["read:*", "*:invoices", "billing:read"]},
