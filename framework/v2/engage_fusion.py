@@ -81,7 +81,7 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 # stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
 # _reverify_reachability — which fires only through the fail-closed capture, never by default.)
 _SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows",
-                 "mobsf_static", "tls_cert", "android_manifest", "mesh_config", "email_auth")
+                 "mobsf_static", "tls_cert", "android_manifest", "mesh_config", "email_auth", "identity")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -185,6 +185,7 @@ def _fusion_registry() -> ToolRegistry:
     from .sensors.android_manifest import AndroidManifestSensor
     from .sensors.mesh import MeshConfigSensor
     from .sensors.email_auth import EmailAuthSensor
+    from .sensors.identity import IdentitySensor
 
     reg = ToolRegistry()
     reg.register(DeclaredServiceSensor())
@@ -197,6 +198,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(AndroidManifestSensor())     # offline decoded-AndroidManifest.xml ingest (Tier-1)
     reg.register(MeshConfigSensor())          # offline Istio/Linkerd config ingest (Tier-1)
     reg.register(EmailAuthSensor())           # offline DNS email-auth policy ingest (Tier-1, Domain 10)
+    reg.register(IdentitySensor())            # offline IdP-export identity-posture ingest (Tier-1, Domain 7)
     return reg
 
 
@@ -461,6 +463,45 @@ def _reverify_email_auth(world: Any, res: Any, *, seq: int) -> int:
                       "re-derives a concrete spoofing weakness"),
             seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or ""),
                              "domain": str(c.get("domain") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_identity(world: Any, res: Any, *, seq: int) -> int:
+    """Identity promotion (FORGE Domain 7): the identity-posture oracle over each RETAINED IdP-export
+    control. A control whose STRICT-TYPED fields re-derive a concrete weakness (a privileged identity with
+    MFA provably off, or a credential past its rotation policy) is promoted to an oracle-grounded FACT on its
+    CONTROL node; a compliant identity is left an honest LEAD. NO IdP is queried, NO authentication is
+    attempted — a pure re-derivation over the operator's retained export. Mirrors :func:`_reverify_email_auth`;
+    the lead and its FACT share the ``identity:<check_id>`` node (lowercased, exactly as
+    ``sensors.identity.identity_observations`` keys it)."""
+    try:
+        from .verify.identity_posture import confirm_identity_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_identity_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"identity:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="identity_posture", bug_class="identity_misconfiguration",
+            evidence=(f"the retained identity control for '{c.get('subject')}' ({c.get('rule')}) "
+                      "re-derives a concrete identity-posture weakness"),
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or ""),
+                             "subject": str(c.get("subject") or "")})
         promoted += 1
     return promoted
 
@@ -793,6 +834,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
       * mesh_config     -> mesh-posture oracle over each retained Istio/Linkerd control
       * email_auth      -> email-auth-posture oracle over each retained DNS policy control (Domain 10)
+      * identity        -> identity-posture oracle over each retained IdP-export control (Domain 7)
       * mobsf_static    -> mobile-posture oracle over each retained MobSF control
       * android_manifest-> mobile-posture oracle over each retained AndroidManifest provider control
       * tls_cert        -> weak-crypto-artifact oracle over each retained certificate descriptor
@@ -813,6 +855,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_mesh(world, res, seq=seq)
     if task.sensor == "email_auth":
         return _reverify_email_auth(world, res, seq=seq)
+    if task.sensor == "identity":
+        return _reverify_identity(world, res, seq=seq)
     if task.sensor in ("mobsf_static", "android_manifest"):
         return _reverify_mobile(world, res, seq=seq)
     if task.sensor == "tls_cert":
