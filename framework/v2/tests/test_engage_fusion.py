@@ -663,6 +663,64 @@ def test_contradictory_same_domain_export_never_misattributes_a_fact(tmp_path, r
         assert record == expect_record, facts
 
 
+# ---- identity: an IdP-export weakness LEAD -> identity-posture FACT (FORGE Domain 7) ----
+_IDENTITY_EXPORT = json.dumps({"identities": [
+    {"subject": "admin@corp", "privileged": True, "mfa_enrolled": False},        # weak -> FACT
+    {"subject": "svc-key", "age_days": 400, "max_age_days": 90},                 # stale -> FACT
+    {"subject": "ok@corp", "privileged": True, "mfa_enrolled": True,             # compliant -> lead only
+     "age_days": 5, "max_age_days": 90},
+]})
+
+
+def test_identity_weakness_is_promoted_by_the_identity_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", _IDENTITY_EXPORT)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:identity:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # exactly the two weak identities promote to grounded FACTs; the compliant one stays a lead
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:identity_posture:") and n.grounding == GROUNDING_GROUNDED]
+    subjects = sorted(n.id for n in facts)
+    assert len(facts) == 2, subjects
+    assert any("admin@corp" in s for s in subjects) and any("svc-key" in s for s in subjects)
+    assert not any("ok@corp" in s for s in subjects)
+    # each FACT grounds onto the control node carrying the record it was derived from (round-trip integrity)
+    for n in facts:
+        control_id = "control:" + n.id.split("finding:identity_posture:", 1)[1]
+        assert world.get_edge(n.id, control_id, EdgeKind.EVIDENCES) is not None
+
+
+def test_a_grounded_identity_fact_re_derives_from_its_own_node_attrs(tmp_path: Path) -> None:
+    # RED-PEN BLOCK-1: a grounded FACT must be re-derivable from the CONTROL node's OWN retained evidence
+    # (prove-by-re-execution at the graph layer) — not merely carry an EVIDENCES edge. Re-fire the oracle
+    # over each fact-node's control attrs and assert it reproduces the weakness.
+    from framework.v2.verify.identity_posture import confirm_identity_posture
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", _IDENTITY_EXPORT)
+    fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:identity_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 2
+    for n in facts:
+        control = world.get_node("control:" + n.id.split("finding:identity_posture:", 1)[1])
+        # reconstruct the control the oracle judges purely from the node's retained attrs
+        reconstructed = {k: control.attrs[k] for k in
+                         ("rule", "subject", "privileged", "mfa_enrolled", "never_rotated",
+                          "age_days", "max_age_days") if k in (control.attrs or {})}
+        assert confirm_identity_posture(reconstructed).confirmed, f"{n.id} not re-derivable from its node"
+
+
+def test_identity_compliant_export_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", json.dumps({"identities": [
+        {"subject": "ok@corp", "privileged": True, "mfa_enrolled": True, "age_days": 5, "max_age_days": 90}]}))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    assert any(o.subject.node_id.startswith("control:identity:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:identity_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
 def test_dedup_does_not_swallow_a_well_formed_domains_distinct_rules(tmp_path: Path) -> None:
     # a single domain publishing a weak DMARC AND a permissive SPF is TWO distinct rules -> two facts,
     # never collapsed by the dedup (which keys on domain:rule, not domain).

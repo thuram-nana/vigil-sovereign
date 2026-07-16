@@ -207,6 +207,12 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # the frozen _ALL_ORACLES, and fires only when the ctx carries `email_auth_control` (no benchmark finding
     # does), so `make gate` stays byte-identical.
     "email_auth_misconfiguration": (OracleKind.EMAIL_AUTH_POSTURE,),
+    # Identity posture (FORGE Domain 7, slice 1): a retained IdP-export control (sensors.identity /
+    # verify.identity_posture) is a LEAD; it becomes a FACT only when identity_posture_oracle RE-DERIVES a
+    # weakness over STRICT-TYPED literal fields (a privileged identity with MFA provably off, or a credential
+    # past its rotation policy). NOT in the frozen _ALL_ORACLES, and fires only when the ctx carries
+    # `identity_control` (no benchmark finding does), so `make gate` stays byte-identical.
+    "identity_misconfiguration": (OracleKind.IDENTITY_POSTURE,),
     # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
     # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
     # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
@@ -756,6 +762,12 @@ class OracleVerifier:
         if kind is OracleKind.EMAIL_AUTH_POSTURE:
             if "email_auth_control" in ctx:
                 return oracles.email_auth_posture_oracle(ctx["email_auth_control"])
+            return None
+        # -- FORGE Domain 7 identity posture — fire ONLY when the ctx carries `identity_control` (a retained
+        #    IdP-export control); no benchmark/scan/engage finding does, so it is inert on the gate path.
+        if kind is OracleKind.IDENTITY_POSTURE:
+            if "identity_control" in ctx:
+                return oracles.identity_posture_oracle(ctx["identity_control"])
             return None
         # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
         #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.

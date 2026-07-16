@@ -187,6 +187,20 @@ class OracleKind(str, enum.Enum):
     # `Authentication-Results` header would be the receiving MTA's say-so (string trust) — those stay LEADs.
     # `spf_missing` alone does NOT fire either (DKIM+DMARC can still protect — a gating chain we refuse).
     EMAIL_AUTH_POSTURE = "email_auth_posture"
+    # Identity posture (FORGE Domain 7, slice 1). BUG_CLASS_ORACLES row — NOT in the frozen _ALL_ORACLES
+    # (stays EXACTLY 15) — fires only when the ctx carries `identity_control` (a retained IdP-export control
+    # no benchmark finding carries), so `make gate` stays byte-identical. Proves an identity-posture weakness
+    # by pure re-derivation over an export's STRICT-TYPED literal fields: `privileged_without_mfa` (a
+    # producer-attested privileged identity with MFA provably absent — `privileged is True` AND
+    # `mfa_enrolled is False`; an ABSENT mfa flag REFUSES, never asserts absence), or `stale_credential`
+    # (`never_rotated is True`, or two retained integers `age_days >= max_age_days`). A compliant identity
+    # (privileged + MFA on, credential within its rotation age) does NOT fire. DELIBERATELY out of scope
+    # (REFUSE, never assert): anomaly/behavioral detection (probabilistic — cannot be a near-zero-FP FACT);
+    # cloud-resource IAM (POLICY_PATH/CLOUD_POSTURE own that); privilege INFERENCE from role names (the oracle
+    # requires the `privileged` producer attestation, never guesses). Offline; no IdP call, no auth attempt.
+    # `privileged`/`mfa_enrolled`/`never_rotated` are read by STRICT identity (`is True`/`is False`), never
+    # coerced; `max_age_days` is producer-supplied POLICY; `age_days` is a retained integer (no wall-clock).
+    IDENTITY_POSTURE = "identity_posture"
 
 
 class OracleProbe(BaseModel):

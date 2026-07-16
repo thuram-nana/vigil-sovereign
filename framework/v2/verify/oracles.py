@@ -2880,6 +2880,105 @@ def email_auth_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Identity posture (FORGE Domain 7, slice 1) — a published IdP config that provably weakens an identity
+# ---------------------------------------------------------------------------
+
+
+def _identity_signal(fired: bool, *, evidence: str, observed: dict, conf: float = 0.9) -> OracleSignal:
+    return OracleSignal(kind=OracleKind.IDENTITY_POSTURE, fired=fired,
+                        confidence=(conf if fired else 0.0), evidence=evidence, observed=observed)
+
+
+def _as_nonneg_int(v: Any) -> "int | None":
+    """A retained value as a non-negative int, else ``None``. STRICT: a bool is NOT an int here (``True``
+    must never be read as age 1), and a numeric STRING is NOT coerced (a retained age/threshold must be a
+    real integer the producer computed, not a parse of presentation text — the fault line that cost Domain
+    10 eight defects). Only a genuine ``int >= 0`` qualifies."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and v >= 0:
+        return v
+    return None
+
+
+def identity_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a RETAINED identity-provider export provably carries an identity-posture weakness — a pure
+    re-derivation over STRICT-TYPED literal fields, never an IdP's or scanner's say-so. Two rules (FORGE
+    Domain 7, slice 1), each unconditional and re-verifiable offline:
+
+      * ``privileged_without_mfa`` — a producer-attested privileged identity with MFA PROVABLY absent:
+        ``privileged is True`` AND ``mfa_enrolled is False``. An ABSENT/unknown ``mfa_enrolled`` REFUSES —
+        a missing field is NOT proof MFA is absent (absence must be OBSERVED, never assumed).
+      * ``stale_credential`` — ``never_rotated is True`` (a producer attestation that the credential is
+        configured NEVER to expire/rotate — a permanent secret), OR two retained integers
+        ``age_days >= max_age_days`` (the operator's rotation policy). A missing/non-integer age or
+        threshold REFUSES.
+
+    A compliant identity (``mfa_enrolled is True``; ``age_days < max_age_days``) does NOT fire. DELIBERATELY
+    out of scope (REFUSE, never assert): anomaly/behavioral detection (probabilistic); cloud-resource IAM
+    (POLICY_PATH/CLOUD_POSTURE own that); privilege INFERENCE — the ``privileged`` attestation is REQUIRED,
+    never guessed from a role name. Pure + deterministic; never raises."""
+    if not isinstance(observed_control, Mapping):
+        return _identity_signal(False, evidence="no identity control evidence", observed={})
+    rule = _coerce_text(observed_control.get("rule")).strip().lower()
+    subject = _coerce_text(observed_control.get("subject")).strip()
+    where = f" for {subject}" if subject else ""
+
+    if rule == "privileged_without_mfa":
+        # privilege is a PRODUCER ATTESTATION, never inferred; without it there is no privileged-account
+        # weakness to assert.
+        if observed_control.get("privileged") is not True:
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence=("identity is not attested privileged — no privileged-account "
+                                              "weakness to assert (REFUSE)"))
+        mfa = observed_control.get("mfa_enrolled")
+        if mfa is True:
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence="MFA is enrolled — compliant")
+        if mfa is not False:
+            # a MISSING/unknown mfa flag is NOT proof MFA is absent (the failed-parse≠absence discipline).
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence="MFA status not observed — absence unproven (REFUSE)")
+        return _identity_signal(True, conf=0.9,
+                                evidence=(f"a privileged identity{where or ' (unnamed)'} has MFA provably "
+                                          "disabled (mfa_enrolled=false) — a single stolen password fully "
+                                          "compromises a privileged account"),
+                                observed={"rule": rule, "subject": subject, "privileged": True,
+                                          "mfa_enrolled": False})
+
+    if rule == "stale_credential":
+        if observed_control.get("never_rotated") is True:
+            return _identity_signal(True, conf=0.9,
+                                    evidence=(f"a credential{where or ' (unnamed)'} is attested configured "
+                                              "never to expire/rotate — a permanent, non-expiring secret"),
+                                    observed={"rule": rule, "subject": subject, "never_rotated": True})
+        age = _as_nonneg_int(observed_control.get("age_days"))
+        maxa = _as_nonneg_int(observed_control.get("max_age_days"))
+        if age is None or maxa is None:
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence=("credential age or its rotation-policy threshold is missing or "
+                                              "not an integer — staleness UNRESOLVED (REFUSE)"))
+        if maxa < 1:
+            # a rotation policy of 0 (or less) days is not a real policy — it is almost always a "no policy"
+            # sentinel, against which EVERY credential (age >= 0) would fire. Refuse rather than assert.
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence=("the rotation-policy threshold is 0 days — not a real policy "
+                                              "(a likely 'no policy' sentinel); staleness UNRESOLVED (REFUSE)"))
+        if age < maxa:
+            return _identity_signal(False, observed={"rule": rule, "age_days": age, "max_age_days": maxa},
+                                    evidence=(f"credential age {age}d is within the {maxa}d rotation policy "
+                                              "— compliant"))
+        return _identity_signal(True, conf=0.9,
+                                evidence=(f"a credential{where or ' (unnamed)'} is {age} days old, at or past "
+                                          f"its {maxa}-day rotation policy — a stale long-lived secret"),
+                                observed={"rule": rule, "subject": subject, "age_days": age,
+                                          "max_age_days": maxa})
+
+    return _identity_signal(False, evidence=f"unrecognised/lead-only identity rule {rule!r} (stays a lead)",
+                            observed={"rule": rule})
+
+
+# ---------------------------------------------------------------------------
 # AEGIS request-side PARSE-PROOF oracles (the inline "provable firewall" gateway).
 #
 # These judge a single DECODED request-parameter value on the REQUEST ALONE (no app response). They

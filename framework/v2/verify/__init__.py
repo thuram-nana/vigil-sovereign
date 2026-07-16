@@ -42,6 +42,12 @@ from .email_auth import (
     email_auth_context,
     ingest_dns_policy,
 )
+from .identity_posture import (
+    confirm_identity_export,
+    confirm_identity_posture,
+    identity_posture_context,
+    ingest_identity_export,
+)
 from .mobile_posture import (
     confirm_mobile_controls,
     confirm_mobile_posture,
