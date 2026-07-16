@@ -61,6 +61,7 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.CICD_POSTURE: (oracles.cicd_posture_oracle,),
     OracleKind.MOBILE_POSTURE: (oracles.mobile_posture_oracle,),
     OracleKind.EMAIL_AUTH_POSTURE: (oracles.email_auth_posture_oracle,),
+    OracleKind.IDENTITY_POSTURE: (oracles.identity_posture_oracle,),
     OracleKind.SSO_ASSERTION_FORGERY: (oracles.jwt_forgery_oracle,),
     OracleKind.SAML_STRUCTURAL_FORGERY: (oracles.saml_forgery_oracle,),
 }
