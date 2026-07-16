@@ -2556,11 +2556,16 @@ _DMARC_SP_PRESENT_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=")
 _TXT_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 # A zone-file RR header (`_dmarc.gov.example. 3600 IN TXT`) — the ONLY unquoted content permitted to
 # precede a record's character-strings.
-_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"]+(?:\s+(?:\d+|IN|CH|CS|HS))*\s+TXT$")
+# The owner name excludes `=` so a tag-value string can never be mistaken for an RR header and swallowed
+# as scaffolding; the TTL accepts BIND's unit suffixes (`1h`, `1D`, `1h30m`) as well as bare seconds.
+_ZONE_RR_HEADER_RE = re.compile(r"(?i)^[^\s\"=]+(?:\s+(?:(?:\d+[smhdw]?)+|IN|CH|CS|HS))*\s+TXT$")
 # RFC 7489 §6.6.3 / RFC 7208 §4.5 record SELECTION: a record that does not begin with the version tag is
-# not a policy record at all and is discarded by receivers.
-_DMARC_VERSION_RE = re.compile(r"(?i)^v\s*=\s*DMARC1\s*(?:;|$)")
-_SPF_VERSION_RE = re.compile(r"(?i)^v=spf1(?:\s|$)")
+# not a policy record at all and is discarded by receivers. Deliberately UNANCHORED: `.match()` anchors at
+# position 0 for the selection test, while the same pattern counts version tags across a whole record to
+# detect a spliced one. The DMARC/SPF asymmetry is the RFCs' own — RFC 7489's ABNF is `"v" *WSP "=" *WSP`
+# (whitespace legal), RFC 7208's is the literal `"v=spf1"` (it is not).
+_DMARC_VERSION_RE = re.compile(r"(?i)v\s*=\s*DMARC1\s*(?:;|$)")
+_SPF_VERSION_RE = re.compile(r"(?i)v=spf1(?:\s|$)")
 
 
 def _resolve_txt_record(line: str) -> str | None:
@@ -2624,11 +2629,11 @@ def _txt_records(raw: Any) -> list[str] | None:
             if depth < 0:
                 return None
             buf.append(" ")
-        elif c == "\n" and depth == 0:
+        elif c in "\r\n" and depth == 0:         # CR, LF or CRLF: an empty chunk between them is dropped below
             lines.append("".join(buf))
             buf = []
         else:
-            buf.append(" " if c == "\n" else c)
+            buf.append(" " if c in "\r\n" else c)
         i += 1
     if in_quote or depth != 0:
         return None
@@ -2640,8 +2645,11 @@ def _txt_records(raw: Any) -> list[str] | None:
         record = _resolve_txt_record(line)
         if record is None:
             return None
-        if record:
-            out.append(record)
+        # An EMPTY record (`""`) is retained, not dropped: a record that exists but carries no policy is
+        # not the same thing as a producer that retained nothing, and only the latter may be read as
+        # absence. Dropping it here would make `_select_txt` report absence and mint evidence reading
+        # "no DMARC record is published" about a domain that published one.
+        out.append(record)
     return out
 
 
@@ -2667,6 +2675,11 @@ def _select_txt(raw: Any, version: "re.Pattern[str]") -> str | None:
         return ""                               # the producer retained nothing — absence, gated on *_observed
     hits = [r for r in records if version.match(r)]
     if len(hits) != 1:
+        return None
+    if len(version.findall(hits[0])) != 1:
+        # TWO version tags inside ONE record: RFC 1035 §3.3.14 faithfully concatenated adjacent strings a
+        # publisher meant as separate records, yielding a syntactically invalid policy string. Reading a
+        # tag out of it names a policy that is not in effect — refuse rather than pick.
         return None
     return hits[0]
 # SPF's `all` mechanism qualifier: `-all` fail (good), `~all` softfail, `?all` neutral, `+all`/`all` PASS-ALL

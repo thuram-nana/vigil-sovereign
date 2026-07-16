@@ -194,6 +194,50 @@ def test_an_unresolvable_record_set_never_fires(label, org_record):
     assert not confirm_email_auth_posture({**_SUB, "org_dmarc_record": org_record}).confirmed, label
 
 
+# ---- RED-PEN round-4 residuals: refuse rather than mint a FALSE EVIDENCE SENTENCE ----
+# None of these was a false FACT — each was self-correcting in direction (an invalid or empty record does
+# leave the domain spoofable). They are fixed anyway, because a fired certificate that says "no DMARC
+# record is published" about a domain that published one is an untrue claim inside signed text, and the
+# signature makes it durable. Refusing costs a detection; overclaiming costs the certificate's meaning.
+
+@pytest.mark.parametrize("label,org_record", [
+    # an EMPTY record EXISTS — that is not "the producer retained nothing", the only thing absence may
+    # be read from. (Reported as violating this module's own stated invariant. It did.)
+    ("empty quoted record", '""'),
+    ("empty zone-file record", '_dmarc.gov.example. 3600 IN TXT ""'),
+    # RFC 1035 §3.3.14 faithfully concatenates what the publisher meant as two records, into one
+    # syntactically invalid policy string. `p=` is then readable anywhere in it.
+    ("two version tags spliced into one record", '"v=DMARC1; p=reject" "v=DMARC1; p=none"'),
+])
+def test_a_record_that_exists_but_carries_no_resolvable_policy_refuses(label, org_record):
+    assert not confirm_email_auth_posture({**_SUB, "org_dmarc_record": org_record}).confirmed, label
+
+
+@pytest.mark.parametrize("ttl", ["3600", "1h", "1D", "1w", "1h30m"])
+def test_bind_unit_suffixed_ttls_are_read_not_refused(ttl):
+    # a legitimate zone-file export must not silently refuse (it failed safe, but a rule that quietly
+    # does nothing on real input is the inertness the honest-ledger invariant exists to prevent).
+    assert confirm_email_auth_posture(
+        {**_SUB, "org_dmarc_record": f'_dmarc.gov.example. {ttl} IN TXT "{_EXPOSED_ORG}"'}).confirmed
+    assert not confirm_email_auth_posture(
+        {**_SUB, "org_dmarc_record": f'_dmarc.gov.example. {ttl} IN TXT "{_PROTECTED_ORG}"'}).confirmed
+
+
+def test_a_tag_value_string_is_never_swallowed_as_zone_file_scaffolding():
+    # `_ZONE_RR_HEADER_RE` is the ONLY unquoted content permitted before a record; an owner name cannot
+    # contain `=`, so a tag-value string can never pose as one.
+    assert not confirm_email_auth_posture(
+        {**_SUB, "org_dmarc_record": 'sp=reject TXT "v=DMARC1; p=none"'}).confirmed
+
+
+@pytest.mark.parametrize("sep", ["\n", "\r\n", "\r"])
+def test_every_line_ending_separates_records(sep):
+    # a lone CR (classic-Mac) must split records exactly as LF and CRLF do — if it does not, two records
+    # splice into one and the splice decides the verdict.
+    blob = f'"{_PROTECTED_ORG}"{sep}"v=DMARC1; p=quarantine"'
+    assert not confirm_email_auth_posture({**_SUB, "org_dmarc_record": blob}).confirmed, sep
+
+
 @pytest.mark.parametrize("org_record", [
     "v=DMARC1; p=none; sp=reject.",     # trailing dot — sp= present, value unparseable
     "v=DMARC1; p=none; sp=rejct",       # typo'd value
