@@ -691,26 +691,26 @@ class FindingContext(BaseModel):
     ) -> "FindingContext":
         """A RETAINED identity-provider export control (``sensors.identity`` / ``verify.identity_posture``),
         for the identity-posture oracle (FORGE Domain 7). The oracle re-derives an identity-posture weakness
-        (a privileged identity with MFA provably off, or a credential past its rotation policy) from the
-        control's STRICT-TYPED literal fields alone — offline, ZERO IdP calls — so a scanner's say-so is a
-        FACT only by the export itself. Only the fields the oracle judges are retained. JSON-safe +
-        deterministic."""
+        (a privileged identity with MFA provably off; a credential past its rotation policy; a universal
+        wildcard grant; or a dormant privileged identity) from the control's STRICT-TYPED literal fields alone
+        — offline, ZERO IdP calls — so a scanner's say-so is a FACT only by the export itself. Only the fields
+        the oracle judges are retained. JSON-safe + deterministic."""
         src = dict(control or {}) if isinstance(control, Mapping) else {}
         retained: dict[str, Any] = {}
-        for k in ("rule", "subject"):
+        for k in ("rule", "subject", "grant"):
             if src.get(k) not in (None, ""):
                 retained[k] = _coerce_text(src.get(k))
         # Integer fields are retained ONLY as genuine ints (a bool is not an int; a numeric string is not
         # coerced) — the oracle compares them; a laundered non-integer would be refused there, but keeping
         # retention strict means the certificate never carries a value the oracle would not itself accept.
-        for k in ("age_days", "max_age_days"):
+        for k in ("age_days", "max_age_days", "days_since_login", "dormancy_threshold_days"):
             v = src.get(k)
             if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
                 retained[k] = v
         # The attestation flags are retained STRICTLY: only a literal True/False survives (never coerced) —
         # a truthy "false"/1 would widen the oracle's strict `is True`/`is False` guards and, because
         # retention precedes minting, LAUNDER a fabricated attestation permanently into a signed certificate.
-        for flag in ("privileged", "never_rotated"):
+        for flag in ("privileged", "never_rotated", "admin_all"):
             if src.get(flag) is True:
                 retained[flag] = True
         # mfa_enrolled is the one flag whose FALSE is load-bearing (it is the fired condition), so BOTH a
