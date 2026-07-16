@@ -51,6 +51,10 @@ def block_pcf_certificate(block: "Verdict | CertRef", *, signers: list[tuple[str
     ref = block if isinstance(block, CertRef) else certref_of(block)
     if ref is None:
         return None
+    # total over `seq` too: an invalid sequence yields NO certificate (fail-closed), never an exception —
+    # `seq` is an internal monotonic counter, never adversary-controlled, but the seam promises totality.
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+        return None
     # lazy import: keep evidence/PCF off the gate path
     from ..evidence.certify import build_certificate, sign_certificate
     from ..evidence.pcf import to_pcf

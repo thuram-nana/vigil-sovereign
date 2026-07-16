@@ -73,11 +73,30 @@ def test_a_benign_request_produces_no_block_and_no_certificate(method, path, _):
 
 def test_rampart_certifies_only_blocks_never_a_lead_or_clear():
     _tr, signers = _trust_root_and_signers()
-    # a lead/observe verdict (belief-raising, never a block) yields no certificate
     from framework.v2.aegis.models import Verdict
-    for junk in (None, "not a verdict", 42):
+    # THE named negative control (RED-PEN BLOCK-1): a TYPED lead/clear Verdict — belief-raising or
+    # below-band, never a block — must yield no CertRef and no certificate. This is what proves the
+    # `decision != "confirmed"` gate, not merely the isinstance guard; deleting that gate must fail here.
+    lead = Verdict(decision="lead", attack_class="sqli_attempt", action="observe", confidence=0.6)
+    clear = Verdict(decision="clear", attack_class="sqli_attempt", action="allow")
+    for v in (lead, clear):
+        assert v.certificate is None                      # model invariant: no cert on a non-block
+        assert certref_of(v) is None
+        assert block_pcf_certificate(v, signers=signers, seq=1) is None
+    # and non-Verdict junk is likewise inert (total over the `block` argument)
+    for junk in (None, "not a verdict", 42, [1, 2], {"decision": "confirmed"}, b"x"):
         assert certref_of(junk) is None
         assert block_pcf_certificate(junk, signers=signers, seq=1) is None
+
+
+def test_block_pcf_certificate_is_total_over_seq():
+    # RED-PEN secondary: an invalid seq yields no certificate (fail-closed), never raises.
+    tr, signers = _trust_root_and_signers()
+    v = inspect_request("GET", "/x?q=1' UNION SELECT 1-- -", [], None, enforce=True)
+    for bad_seq in (-1, "1", 1.0, True, None):
+        assert block_pcf_certificate(v, signers=signers, seq=bad_seq) is None
+    # a valid seq still mints (sanity: the guard did not over-refuse)
+    assert block_pcf_certificate(v, signers=signers, seq=0) is not None
 
 
 # ---- fail-closed: every tamper class on a block's certificate is rejected --------------------------------
