@@ -691,6 +691,26 @@ def test_identity_weakness_is_promoted_by_the_identity_posture_oracle(tmp_path: 
         assert world.get_edge(n.id, control_id, EdgeKind.EVIDENCES) is not None
 
 
+def test_a_grounded_identity_fact_re_derives_from_its_own_node_attrs(tmp_path: Path) -> None:
+    # RED-PEN BLOCK-1: a grounded FACT must be re-derivable from the CONTROL node's OWN retained evidence
+    # (prove-by-re-execution at the graph layer) — not merely carry an EVIDENCES edge. Re-fire the oracle
+    # over each fact-node's control attrs and assert it reproduces the weakness.
+    from framework.v2.verify.identity_posture import confirm_identity_posture
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", _IDENTITY_EXPORT)
+    fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:identity_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 2
+    for n in facts:
+        control = world.get_node("control:" + n.id.split("finding:identity_posture:", 1)[1])
+        # reconstruct the control the oracle judges purely from the node's retained attrs
+        reconstructed = {k: control.attrs[k] for k in
+                         ("rule", "subject", "privileged", "mfa_enrolled", "never_rotated",
+                          "age_days", "max_age_days") if k in (control.attrs or {})}
+        assert confirm_identity_posture(reconstructed).confirmed, f"{n.id} not re-derivable from its node"
+
+
 def test_identity_compliant_export_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
     world = WorldModel()
     export = _write(tmp_path, "identity.json", json.dumps({"identities": [

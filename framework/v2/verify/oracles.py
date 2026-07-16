@@ -2958,6 +2958,12 @@ def identity_posture_oracle(observed_control: Any) -> OracleSignal:
             return _identity_signal(False, observed={"rule": rule},
                                     evidence=("credential age or its rotation-policy threshold is missing or "
                                               "not an integer — staleness UNRESOLVED (REFUSE)"))
+        if maxa < 1:
+            # a rotation policy of 0 (or less) days is not a real policy — it is almost always a "no policy"
+            # sentinel, against which EVERY credential (age >= 0) would fire. Refuse rather than assert.
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence=("the rotation-policy threshold is 0 days — not a real policy "
+                                              "(a likely 'no policy' sentinel); staleness UNRESOLVED (REFUSE)"))
         if age < maxa:
             return _identity_signal(False, observed={"rule": rule, "age_days": age, "max_age_days": maxa},
                                     evidence=(f"credential age {age}d is within the {maxa}d rotation policy "

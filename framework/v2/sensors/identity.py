@@ -4,10 +4,11 @@ FORGE **Domain 7** (slice 1), stage 1. The capture feed that makes the identity-
 (``verify.identity_posture``) reachable from an operator's exported IdP inventory — a confirmed finding emits
 a real signed **PCF v0.1** certificate (``evidence/pcf.py``) by construction.
 
-Mirrors ``sensors.email_auth.EmailAuthSensor`` method-for-method: Tier-1, reads a LOCAL operator-supplied JSON
-export (**no IdP is queried, no authentication is attempted**), kill-switch-gated via
-``sensors.pipeline.run_sensor``, and mints one ``NodeKind.CONTROL`` LEAD per candidate posture control, keyed
-``identity:<subject>:<rule>``. The leads STOP here; the oracle re-verifies a lead to a FACT only when the
+Mirrors ``sensors.email_auth.EmailAuthSensor``: Tier-1, reads a LOCAL operator-supplied JSON export (**no IdP
+is queried, no authentication is attempted**), kill-switch-gated via ``sensors.pipeline.run_sensor``, and
+mints one ``NodeKind.CONTROL`` LEAD per candidate posture control (keyed ``identity:<subject>:<rule>``)
+carrying the STRICT-TYPED evidence the oracle judges on the node, so a grounded FACT re-derives from its own
+node — parity with every sibling posture sensor. The leads STOP here; the oracle re-verifies a lead to a FACT only when the
 export's STRICT-TYPED fields provably carry a weakness (a privileged identity with MFA off, or a credential
 past its rotation policy). A compliant identity stays a LEAD-that-never-fires (in fact it mints no candidate).
 
@@ -62,10 +63,20 @@ def parse_identity_export(text: str) -> list[dict]:
     return out
 
 
+# The STRICT-TYPED fields the oracle judges — persisted on the CONTROL node so a grounded FACT re-derives
+# from its OWN node (prove-by-re-execution at the graph layer), exactly as every sibling posture sensor
+# persists its load-bearing record (email_auth: dmarc_record/spf_record; mesh: mtls_mode/action;
+# cicd: uses/run/trigger; k8s: actual_value). Booleans and ints only, so nothing sensitive beyond the
+# `subject` already on the node, and nothing free-text.
+_JUDGED_FIELDS = ("privileged", "mfa_enrolled", "never_rotated", "age_days", "max_age_days")
+
+
 def identity_observations(controls: list[dict], *, seq: int, source: str = "identity") -> list[Observation]:
     """Mint one ``NodeKind.CONTROL`` LEAD per candidate posture control, keyed ``identity:<check_id>``
-    (lowercased). The retained control fields (the exact evidence the oracle re-derives over) ride in
-    ``attrs``. GROUNDING_INTEL, claim-keyed obs_ids (idempotent), pure."""
+    (lowercased). The RETAINED control fields the oracle judges (``_JUDGED_FIELDS``) ride in ``attrs`` so a
+    later oracle-grounded FACT on this node RE-DERIVES from the node's own evidence — the graph-layer twin of
+    the PCF certificate's re-verifiability, and parity with every sibling posture sensor. GROUNDING_INTEL,
+    claim-keyed obs_ids (idempotent), pure."""
     out: list[Observation] = []
     seen: set[str] = set()
     for c in controls:
@@ -74,12 +85,18 @@ def identity_observations(controls: list[dict], *, seq: int, source: str = "iden
             continue
         seen.add(cid)
         ref = EntityRef(kind=NodeKind.CONTROL, key=f"identity:{cid}".lower())
-        attrs = {"lead": True, "unverified": True, "check_id": cid, "rule": c.get("rule"),
-                 "subject": c.get("subject")}
+        base = {"lead": True, "unverified": True, "check_id": cid, "rule": c.get("rule"),
+                "subject": c.get("subject")}
+        attrs: dict = {k: v for k, v in base.items() if v not in (None, "")}
+        # then persist the load-bearing evidence VERBATIM (added AFTER the empties filter, so a load-bearing
+        # `mfa_enrolled: False` or `age_days: 0` is kept, never dropped as falsy).
+        for k in _JUDGED_FIELDS:
+            if k in c and c.get(k) is not None:
+                attrs[k] = c.get(k)
         out.append(Observation(
             obs_id=f"{source}:{seq}:{ref.node_id}||", source=source,
             source_kind=IntelSourceKind.OPERATOR_INGEST, collector=source, subject=ref,
-            relation=None, object=None, attrs={k: v for k, v in attrs.items() if v not in (None, "")},
+            relation=None, object=None, attrs=attrs,
             source_reliability=_IDENTITY_RELIABILITY, confidence=0.7, seq=seq))
     return out
 

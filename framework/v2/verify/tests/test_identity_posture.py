@@ -77,6 +77,10 @@ def test_stale_credential_is_a_fact(control):
     ({"rule": "stale_credential", "subject": "k", "age_days": "200", "max_age_days": 90}, "string age -> refuse"),
     ({"rule": "stale_credential", "subject": "k", "never_rotated": "true"}, "truthy string never fires"),
     ({"rule": "stale_credential", "subject": "k", "never_rotated": 1}, "truthy int never fires"),
+    # RED-PEN hardening: max_age_days=0 is a likely 'no policy' sentinel — every credential (age>=0) would
+    # fire, so it must REFUSE, not assert.
+    ({"rule": "stale_credential", "subject": "k", "age_days": 0, "max_age_days": 0}, "0-day policy refuses"),
+    ({"rule": "stale_credential", "subject": "k", "age_days": 500, "max_age_days": 0}, "0-day policy refuses"),
 ])
 def test_stale_credential_does_not_fire_when_it_should_not(control, why):
     assert not _fires(control), why
