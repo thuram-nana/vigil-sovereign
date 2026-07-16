@@ -70,15 +70,20 @@ def ingest_dns_policy(domain: str, *, dmarc_record: str | None = None, spf_recor
         out.append({"rule": "dmarc_none", "domain": d, "dmarc_record": dmarc})
     elif dmarc_observed is True:
         c: dict[str, Any] = {"rule": "dmarc_missing", "domain": d, "dmarc_observed": True}
+        # The producer must be LOSSLESS: retain the org-domain evidence UNCONDITIONALLY, never gated on
+        # `is_org_domain`. A self-contradicting export (attests `is_org_domain=True` yet ALSO carries an
+        # organizational policy to inherit) must reach the oracle INTACT so its contradiction guard can
+        # REFUSE — dropping the org fields here on the org branch would launder that contradiction into a
+        # clean-looking control the guard never sees, firing on a subdomain an org `sp=reject`/`p=reject`
+        # protects. The ORACLE adjudicates the contradiction; the producer only faithfully carries evidence.
         if is_org_domain is True:
             c["is_org_domain"] = True
-        else:
-            if org_domain:
-                c["org_domain"] = str(org_domain).strip()
-            if org_dmarc_record:
-                c["org_dmarc_record"] = str(org_dmarc_record).strip()
-            if org_dmarc_observed is True:
-                c["org_dmarc_observed"] = True
+        if org_domain:
+            c["org_domain"] = str(org_domain).strip()
+        if org_dmarc_record:
+            c["org_dmarc_record"] = str(org_dmarc_record).strip()
+        if org_dmarc_observed is True:
+            c["org_dmarc_observed"] = True
         out.append(c)
     if spf:
         out.append({"rule": "spf_permissive", "domain": d, "spf_record": spf})

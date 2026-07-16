@@ -2554,6 +2554,41 @@ _DMARC_SP_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=\s*(none|quarantine|reject)\s*(?
 _DMARC_SP_PRESENT_RE = re.compile(r"(?i)(?:^|;)\s*sp\s*=")
 # One DNS TXT character-string in PRESENTATION form.
 _TXT_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _decode_txt_escapes(s: str) -> str:
+    """RFC 1035 §5.1: ONE captured character-string's PRESENTATION bytes -> the octets it actually encodes.
+
+    ``\\DDD`` (a backslash + exactly three decimal digits, value 0-255) is the octet with that decimal value;
+    ``\\c`` (a backslash + any other single char) is the literal ``c`` with the backslash dropped. This is
+    LOAD-BEARING and must run BEFORE any tag regex: a spec-legal separator octet <0x20 (RFC 7489 §6.4
+    ``dmarc-sep = *WSP %x3b *WSP``, WSP∋HTAB) is rendered by real ``dig +short``/BIND as the escape
+    ``\\009`` — a literal backslash that breaks a tag's ``(?:^|;)\\s*`` anchor and would HIDE a protective
+    ``sp=`` behind a visible ``p=none``. Decoding to wire bytes makes the TAB a real separator again.
+    Faithful by construction: it only ever yields exactly what the publisher encoded, so it can never
+    fabricate a protective tag the record does not carry (it removes FP risk, never adds it). Pure + total;
+    a malformed trailing backslash is preserved verbatim, never raises."""
+    if "\\" not in s:
+        return s
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        # a backslash: \DDD (three decimal digits, an octet 0-255) else \c (literal next char)
+        if i + 4 <= n and s[i + 1:i + 4].isdigit() and int(s[i + 1:i + 4]) <= 255:
+            out.append(chr(int(s[i + 1:i + 4])))
+            i += 4
+        elif i + 1 < n:
+            out.append(s[i + 1])                 # \c -> literal c (covers \" \\ \; and malformed \9)
+            i += 2
+        else:
+            out.append(c)                        # a lone trailing backslash: preserve, do not raise
+            i += 1
+    return "".join(out)
 # A zone-file RR header (`_dmarc.gov.example. 3600 IN TXT`) — the ONLY unquoted content permitted to
 # precede a record's character-strings.
 # The owner name excludes `=` so a tag-value string can never be mistaken for an RR header and swallowed
@@ -2572,12 +2607,13 @@ def _resolve_txt_record(line: str) -> str | None:
     """ONE record's presentation form -> the character-string it encodes; ``None`` if it does not
     unambiguously encode one.
 
-    RFC 1035 §3.3.14 concatenates ADJACENT character-strings *within a single record*. Anything else
+    RFC 1035 §3.3.14 concatenates ADJACENT character-strings *within a single record*, and §5.1 escape
+    sequences inside each string are decoded to wire octets FIRST (`_decode_txt_escapes`). Anything else
     outside the strings is content this cannot faithfully resolve — and silently DISCARDING it is how a
     protective tag disappears (`'"v=DMARC1; p=none;" sp=reject'` -> a `sp=reject` that never reaches the
     parser). Unquoted content mixed among character-strings is REFUSED, never dropped."""
     if '"' not in line:
-        return line.strip()                     # bare / already-canonical
+        return line.strip()                     # bare / already-canonical (already wire octets, no escapes)
     spans = list(_TXT_STRING_RE.finditer(line))
     if not spans:
         return None                             # a quote opens a string that never closes
@@ -2591,7 +2627,8 @@ def _resolve_txt_record(line: str) -> str | None:
         prev = span.end()
     if line[prev:].strip():
         return None                             # unquoted content trailing the record
-    return "".join(span.group(1) for span in spans).strip()
+    # §5.1 decode each string to wire octets, THEN §3.3.14 concatenate — so every tag regex reads wire bytes
+    return "".join(_decode_txt_escapes(span.group(1)) for span in spans).strip()
 
 
 def _txt_records(raw: Any) -> list[str] | None:

@@ -20,7 +20,9 @@ from framework.v2.verify.email_auth import (
     ingest_dns_policy,
 )
 from framework.v2.verify.models import OracleKind
+from framework.v2.verify.oracles import _decode_txt_escapes, _resolve_txt_record
 from framework.v2.verify.verifier import _ALL_ORACLES
+from framework.v2.sensors.email_auth import parse_email_auth_export
 
 _HARDENED_DMARC = "v=DMARC1; p=reject; rua=mailto:dmarc@gov.example; pct=100"
 _HARDENED_SPF = "v=spf1 include:_spf.gov.example -all"
@@ -269,6 +271,130 @@ def test_contradictory_org_evidence_refuses():
     assert not confirm_email_auth_posture(
         {"rule": "dmarc_missing", "domain": "g", "dmarc_observed": True, "is_org_domain": True,
          "org_dmarc_record": "v=DMARC1; p=reject"}).confirmed
+
+
+# ---- Independent-sweep CRITICAL #2 (producer discards evidence): the contradiction guard must be
+# ---- reachable from the REAL producer path, not only from a hand-built control fed to the oracle.
+# The guard was correct and unit-tested, but `ingest_dns_policy` dropped the org fields on the is_org_domain
+# branch, so the guard never saw the evidence and a subdomain hardened by an org sp=reject/p=reject FIRED
+# end-to-end. These tests route the SAME contradiction through ingest / the real sensor export.
+
+@pytest.mark.parametrize("org_policy", [
+    "v=DMARC1; p=reject; sp=reject",   # subdomain fully protected
+    "v=DMARC1; p=reject",              # inherited p=reject protects the subdomain
+    "v=DMARC1; p=quarantine; sp=quarantine",
+])
+def test_a_contradictory_export_refuses_through_ingest_dns_policy(org_policy):
+    # ingest must retain the org policy UNCONDITIONALLY so the oracle can adjudicate the contradiction
+    facts = confirm_dns_policy("mail.gov.example", dmarc_observed=True, is_org_domain=True,
+                               org_domain="gov.example", org_dmarc_record=org_policy,
+                               org_dmarc_observed=True)
+    assert facts == [], org_policy
+    # and the org fields survive ingest (the producer is lossless)
+    ctl = ingest_dns_policy("mail.gov.example", dmarc_observed=True, is_org_domain=True,
+                            org_domain="gov.example", org_dmarc_record=org_policy,
+                            org_dmarc_observed=True)[0]
+    assert ctl.get("org_dmarc_record") == org_policy and ctl.get("is_org_domain") is True
+
+
+def test_a_contradictory_export_refuses_through_the_real_sensor():
+    export = ('{"domains":[{"domain":"mail.gov.example","dmarc_observed":true,"is_org_domain":true,'
+              '"org_domain":"gov.example","org_dmarc":"v=DMARC1; p=reject; sp=reject",'
+              '"org_dmarc_observed":true}]}')
+    controls = parse_email_auth_export(export)
+    assert controls, "the sensor must parse the contradictory export"
+    assert not confirm_email_auth_posture(controls[0]).confirmed
+
+
+def test_the_producer_fix_does_not_suppress_a_genuine_org_domain_weakness():
+    # an ORG domain that truly publishes no DMARC (no org policy, no org_dmarc_observed) is a real weakness
+    # and must STILL fire — the lossless-retention fix must not over-refuse.
+    facts = confirm_dns_policy("gov.example", dmarc_observed=True, is_org_domain=True,
+                               org_domain="gov.example")
+    assert [f["rule"] for f in facts] == ["dmarc_missing"]
+
+
+# ---- Independent-sweep CRITICAL #1 (escape-decode): RFC 1035 §5.1 presentation escapes must be decoded to
+# ---- wire octets BEFORE any tag is read, or a `dig +short` `\009` TAB hides a protective tag.
+# The escape-encoding axis is ORTHOGONAL to the existing shape/quoting/cardinality axes — a twin built from
+# the author's model of the input space could only confirm it (the lesson from three prior rounds), so this
+# axis is derived from the RFC 1035 §5.1 grammar and cross-checked against an independent reference decoder.
+
+def _reference_decode(s: str) -> str:
+    """An independent RFC 1035 §5.1 decoder, written differently from the implementation, as a test oracle."""
+    result, i = [], 0
+    while i < len(s):
+        if s[i] == "\\" and i + 3 < len(s) + 1 and s[i + 1:i + 4].isdigit() and int(s[i + 1:i + 4] or "999") <= 255:
+            result.append(chr(int(s[i + 1:i + 4])))
+            i += 4
+        elif s[i] == "\\" and i + 1 < len(s):
+            result.append(s[i + 1])
+            i += 2
+        else:
+            result.append(s[i])
+            i += 1
+    return "".join(result)
+
+
+@pytest.mark.parametrize("wire", [
+    "v=DMARC1; p=none; sp=reject", 'v=DMARC1;\tp=reject', "google-site-verification=abc",
+    'a\\b"c', "v=spf1 -all", "", "\t\t;;", "p=none;sp=quarantine",
+])
+def test_the_decoder_matches_an_independent_reference_over_escaped_forms(wire):
+    # encode every octet as a mix of \DDD and passthrough, then assert both decoders recover the wire bytes
+    encoded_ddd = "".join(f"\\{ord(ch):03d}" for ch in wire)          # fully-escaped
+    for enc in (wire, encoded_ddd):
+        assert _decode_txt_escapes(enc) == _reference_decode(enc)
+    assert _decode_txt_escapes(encoded_ddd) == wire                   # \DDD round-trips to the octets
+
+
+@pytest.mark.parametrize("sep", ["\\009", "\\009\\009", " \\009 ", "\\032", "\t"])
+def test_a_protected_subdomain_never_fires_with_an_escaped_separator(sep):
+    # a hardened org whose sp=reject is preceded by a spec-legal separator octet (escaped \009/\032 TAB/SP,
+    # or a real TAB) must NOT fire — the separator must resolve to real whitespace, not hide the sp= tag.
+    org = f'"v=DMARC1; p=none;{sep}sp=reject"'
+    assert not confirm_email_auth_posture({**_SUB, "org_dmarc_record": org}).confirmed, sep
+
+
+@pytest.mark.parametrize("field,record,fires", [
+    ("org_dmarc_record", '"v=DMARC1; p=none;\\009sp=reject"', False),   # protected: escaped TAB before sp
+    ("org_dmarc_record", '"v=DMARC1; p=none; sp\\009=\\009reject"', False),  # escapes around '='
+    ("org_dmarc_record", '"v=DMARC1; p=none;" "\\009sp=reject"', False),  # split across strings
+    ("org_dmarc_record", '"v=DMARC1; p=none;\\009sp=none"', True),      # exposed: escaped, still fires
+])
+def test_escaped_org_records_resolve_to_wire_bytes(field, record, fires):
+    assert confirm_email_auth_posture({**_SUB, field: record}).confirmed is fires, record
+
+
+@pytest.mark.parametrize("rule,field,record,fires", [
+    ("dmarc_none", "dmarc_record", '"v=DMARC1;\\009p=none"', True),     # exposed p=none via escaped sep
+    ("dmarc_none", "dmarc_record", '"v=DMARC1;\\009p=reject"', False),  # hardened, escaped sep
+    ("spf_permissive", "spf_record", '"v=spf1\\009+all"', True),        # exposed +all via escaped sep
+    ("spf_permissive", "spf_record", '"v=spf1\\009-all"', False),       # hardened -all via escaped sep
+])
+def test_escaped_own_domain_records_read_the_true_qualifier(rule, field, record, fires):
+    assert confirm_email_auth_posture(
+        {"rule": rule, "domain": "gov.example", field: record}).confirmed is fires, record
+
+
+def test_the_decoder_is_total_and_never_raises_on_pathological_escapes():
+    for pathological in ("\\", "\\\\", "\\0", "\\00", "\\256", "\\999", "\\9x", "a\\", "\\z\\", "\\255",
+                         "\\000", "\\; \\059 \\061"):
+        assert isinstance(_decode_txt_escapes(pathological), str)   # no exception, always a string
+
+
+# ---- MEDIUM (green-wash gap): the R3 "unquoted content BETWEEN character-strings" guard was untested;
+# ---- its removal reintroduces the round-3 cardinal false positive while the suite stays green.
+
+@pytest.mark.parametrize("blob", [
+    '"v=DMARC1; p=none;" sp=reject "x"',        # unquoted sp=reject sits BETWEEN two character-strings
+    '"v=DMARC1; p=none" p=reject "y"',
+])
+def test_unquoted_content_between_character_strings_refuses(blob):
+    # _resolve_txt_record must return None (refuse) rather than silently concatenating across the gap and
+    # dropping the unquoted protective content.
+    assert _resolve_txt_record(blob) is None, blob
+    assert not confirm_email_auth_posture({**_SUB, "org_dmarc_record": blob}).confirmed, blob
 
 
 def test_an_unnamed_org_domain_refuses_so_the_certificate_stays_auditable():
