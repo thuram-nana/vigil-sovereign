@@ -195,6 +195,24 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # RETAINED control. NOT in the frozen _ALL_ORACLES, and fires only when the ctx carries `cicd_control`
     # (no benchmark finding does), so `make gate` stays byte-identical.
     "cicd_misconfiguration": (OracleKind.CICD_POSTURE,),
+    # Mobile static-posture (Phase-2). A retained MobSF control (verify.mobile_posture / sensors.mobile)
+    # is a LEAD; it becomes a FACT only when mobile_posture_oracle RE-DERIVES the weakness offline (this
+    # slice: an embedded PEM private key that actually LOADS as an unencrypted key). NOT in the frozen
+    # _ALL_ORACLES, and fires only when the ctx carries `mobile_control` (no benchmark finding does), so
+    # `make gate` stays byte-identical.
+    "mobile_misconfiguration": (OracleKind.MOBILE_POSTURE,),
+    # Email-authentication posture (FORGE Domain 10). A retained DNS policy record (verify.email_auth /
+    # sensors.email_auth) is a LEAD; it becomes a FACT only when email_auth_posture_oracle RE-DERIVES a
+    # published policy that permits spoofing (no DMARC / p=none / SPF +all) over the RETAINED record. NOT in
+    # the frozen _ALL_ORACLES, and fires only when the ctx carries `email_auth_control` (no benchmark finding
+    # does), so `make gate` stays byte-identical.
+    "email_auth_misconfiguration": (OracleKind.EMAIL_AUTH_POSTURE,),
+    # Identity posture (FORGE Domain 7, slice 1): a retained IdP-export control (sensors.identity /
+    # verify.identity_posture) is a LEAD; it becomes a FACT only when identity_posture_oracle RE-DERIVES a
+    # weakness over STRICT-TYPED literal fields (a privileged identity with MFA provably off, or a credential
+    # past its rotation policy). NOT in the frozen _ALL_ORACLES, and fires only when the ctx carries
+    # `identity_control` (no benchmark finding does), so `make gate` stays byte-identical.
+    "identity_misconfiguration": (OracleKind.IDENTITY_POSTURE,),
     # Workstream-B SSO/JWT structural-forgery: a captured JWT is a FACT (structurally forgeable) only
     # when the jwt-forgery oracle proves it from the token ALONE — alg=none/None, an HS* signature
     # recomputable from a supplied/weak key, or an RS256->HS256 confusion (the HS* sig verifies with a
@@ -473,6 +491,30 @@ def canonical_bug_class(bug_class: str) -> str | None:
     return n if n in known_bug_classes() else None
 
 
+def canonical_oracle_for(bug_class: str) -> OracleKind | None:
+    """The canonical (primary) oracle kind for a KNOWN bug class — the FIRST in its ``BUG_CLASS_ORACLES``
+    tuple — used as the PCF certificate's ``oracle.binding`` reference. ``None`` for an out-of-vocabulary
+    class (which a PCF verifier rejects at step 1). Several oracles may legitimately confirm one class; this
+    names the canonical one for display/binding, while :func:`oracle_confirms_class` is the actual PCF
+    step-5 membership check."""
+    kinds = BUG_CLASS_ORACLES.get(normalize_bug_class(bug_class))
+    return kinds[0] if kinds else None
+
+
+def oracle_confirms_class(confirmed_by: str, bug_class: str) -> bool:
+    """PCF step 5 (claim-grounded): ``True`` iff the oracle that fired is a VALID confirmer for the
+    claimed class — i.e. it is in that class's acceptable oracle set. This defeats relabelling (you cannot
+    claim class X with an oracle that does not confirm X). An out-of-vocabulary class returns ``False``
+    (nothing in the substrate confirms it)."""
+    kinds = BUG_CLASS_ORACLES.get(normalize_bug_class(bug_class))
+    if not kinds:
+        return False
+    try:
+        return OracleKind(str(confirmed_by)) in kinds
+    except ValueError:
+        return False
+
+
 def require_known_bug_class(bug_class: str) -> str:
     """Pydantic AfterValidator: normalise, and REJECT an out-of-vocabulary class at PARSE
     time so an invented bug_class cannot survive into a schema field that asserts an
@@ -708,6 +750,24 @@ class OracleVerifier:
         if kind is OracleKind.CICD_POSTURE:
             if "cicd_control" in ctx:
                 return oracles.cicd_posture_oracle(ctx["cicd_control"])
+            return None
+        # -- Phase-2 mobile static-posture — fire ONLY when the ctx carries `mobile_control` (a retained
+        # MobSF control), so this is inert on the benchmark/gate path.
+        if kind is OracleKind.MOBILE_POSTURE:
+            if "mobile_control" in ctx:
+                return oracles.mobile_posture_oracle(ctx["mobile_control"])
+            return None
+        # -- FORGE Domain 10 email-auth posture — fire ONLY when the ctx carries `email_auth_control` (a
+        # retained DNS policy record), so this is inert on the benchmark/gate path.
+        if kind is OracleKind.EMAIL_AUTH_POSTURE:
+            if "email_auth_control" in ctx:
+                return oracles.email_auth_posture_oracle(ctx["email_auth_control"])
+            return None
+        # -- FORGE Domain 7 identity posture — fire ONLY when the ctx carries `identity_control` (a retained
+        #    IdP-export control); no benchmark/scan/engage finding does, so it is inert on the gate path.
+        if kind is OracleKind.IDENTITY_POSTURE:
+            if "identity_control" in ctx:
+                return oracles.identity_posture_oracle(ctx["identity_control"])
             return None
         # -- Workstream-B SSO/JWT structural-forgery — fire ONLY when the ctx carries `jwt_token` (a
         #    captured JWT string); no benchmark/scan/engage finding does, so it is inert on the gate path.

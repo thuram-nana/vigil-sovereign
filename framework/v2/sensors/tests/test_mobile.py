@@ -86,6 +86,49 @@ def test_run_over_a_file(tmp_path: Path):
     assert not s.run({"report": str(tmp_path / "nope.json")}, ctx=None).ok
 
 
+def test_parse_retains_embedded_private_key_pem_as_structured_control():
+    import pytest
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    pem = rsa.generate_private_key(65537, 2048).private_bytes(
+        ser.Encoding.PEM, ser.PrivateFormat.PKCS8, ser.NoEncryption()).decode()
+    # MobSF often escapes newlines when the secret is a JSON string value
+    for shape in (pem, pem.replace("\n", "\\n")):
+        p = parse_mobsf(json.dumps({"package_name": "com.x", "possible_secrets": [shape]}))
+        pk = [c for c in p["controls"] if c.get("rule") == "private_key_material"]
+        assert len(pk) == 1
+        # the FULL PEM is retained verbatim (not truncated to 200) so the oracle can re-load it
+        assert "BEGIN PRIVATE KEY" in pk[0]["pem"] and "END PRIVATE KEY" in pk[0]["pem"]
+        assert pk[0]["severity"] == "high"
+
+
+def test_parse_reconstructs_a_list_of_lines_secret():
+    # review defect [LOW]: MobSF sometimes splits a secret into per-line pieces; joining with newlines
+    # (not str(list), which inserts ', ' separators) keeps the PEM re-loadable by the oracle.
+    import pytest
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from framework.v2.verify.mobile_posture import confirm_mobile_controls
+    pem = rsa.generate_private_key(65537, 2048).private_bytes(
+        ser.Encoding.PEM, ser.PrivateFormat.PKCS8, ser.NoEncryption()).decode()
+    p = parse_mobsf(json.dumps({"package_name": "com.x", "secrets": [pem.split("\n")]}))
+    assert confirm_mobile_controls(p["controls"])  # reconstructed → the oracle confirms it
+
+
+def test_parse_non_key_secret_stays_a_plain_lead():
+    # a normal flagged secret gets NO private_key_material rule (so the oracle never promotes it)
+    p = parse_mobsf(json.dumps({"package_name": "com.x", "possible_secrets": ["AKIAIOSFODNN7EXAMPLE"]}))
+    assert p["controls"] and all(c.get("rule") != "private_key_material" for c in p["controls"])
+
+
+def test_control_lead_carries_check_id_and_rule_in_attrs():
+    obs = mobsf_observations(parse_mobsf(json.dumps(_REPORT)), seq=1)
+    controls = [o for o in obs if o.subject.kind is NodeKind.CONTROL]
+    assert controls and all(o.attrs.get("check_id") for o in controls)  # parity with k8s/cicd
+
+
 def test_sensor_is_gated_tier1_and_registered():
     s = MobsfSensor()
     assert s.tier == "T1" and s.capability is None and s.egress_hosts == () and s.destructive is False

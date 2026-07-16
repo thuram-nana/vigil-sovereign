@@ -11,6 +11,7 @@ deterministic + idempotent (caller seq, no wallclock/rng).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -350,6 +351,389 @@ def test_kube_bench_benign_fail_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -
     assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
 
 
+# ---- cicd_workflows: dangerous workflow control LEAD -> CI/CD-posture FACT ---
+# A dangerous GitHub-Actions workflow: pull_request_target + PR-head checkout (pwn_request), an unpinned
+# third-party action (unpinned_action), and a run interpolating an untrusted title (script_injection).
+_WF_VULN = """
+name: ci
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: evil-org/evil-action@main
+      - run: echo "PR ${{ github.event.pull_request.title }}"
+"""
+
+# A benign workflow: SHA-pinned first-party checkout + a static run under a plain pull_request trigger.
+_WF_BENIGN = """
+name: ci
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@abcabcabcabcabcabcabcabcabcabcabcabcabca
+      - run: make build
+"""
+
+
+def test_cicd_dangerous_workflow_control_is_promoted_by_the_cicd_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "ci.yml", _WF_VULN)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "cicd_workflows", "args": {"workflow": report}}))
+    # the workflow constructs folded in as CONTROL LEADS (intel-grounded), never oracle-proof by themselves
+    leads = [o for o in minted if o.subject.node_id.startswith("control:cicd:")]
+    assert leads, "no CI/CD control leads minted"
+    assert all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # the CI/CD-posture oracle re-fired in-run: each dangerous construct is an oracle-GROUNDED FINDING.
+    # The dangerous VULN workflow has exactly three: pwn_request, unpinned (evil-action), script_injection.
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:cicd_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 3, f"expected 3 CI/CD facts, got {[n.id for n in facts]}"
+    assert all(n.provenance.startswith("oracle:") for n in facts)
+    # each grounded finding hangs off its CONTROL lead via an oracle-GROUNDED EVIDENCES edge
+    for f in facts:
+        control_id = "control:" + f.id.split("finding:cicd_posture:", 1)[1]
+        edge = world.get_edge(f.id, control_id, EdgeKind.EVIDENCES)
+        assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_cicd_benign_workflow_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "ci.yml", _WF_BENIGN)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "cicd_workflows", "args": {"workflow": report}}))
+    # the SHA-pinned first-party checkout is still ingested as a LEAD, but the oracle rejects it
+    assert any(o.subject.node_id.startswith("control:cicd:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:cicd_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+# ---- mobsf_static: embedded private-key control LEAD -> mobile-posture FACT --
+def _rsa_key_pem() -> str:
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    return rsa.generate_private_key(65537, 2048).private_bytes(
+        ser.Encoding.PEM, ser.PrivateFormat.PKCS8, ser.NoEncryption()).decode()
+
+
+def test_mobsf_embedded_private_key_is_promoted_by_the_mobile_posture_oracle(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
+    world = WorldModel()
+    report = _write(tmp_path, "mobsf.json", json.dumps({
+        "app_name": "DemoApp", "package_name": "com.demo.app",
+        "possible_secrets": [_rsa_key_pem(), "AKIAIOSFODNN7EXAMPLE"],
+    }))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mobsf_static", "args": {"report": report}}))
+    # the secret controls folded in as CONTROL LEADS (intel-grounded), never oracle-proof by themselves
+    leads = [o for o in minted if o.subject.node_id.startswith("control:mobile:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # the mobile-posture oracle re-fired in-run: the embedded key is an oracle-GROUNDED FACT; the AKIA
+    # example string is NOT a private key → stays a lead. Exactly one fact.
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:mobile_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 mobile fact, got {[n.id for n in facts]}"
+    assert facts[0].provenance.startswith("oracle:")
+    control_id = "control:" + facts[0].id.split("finding:mobile_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_mobsf_no_key_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "mobsf.json", json.dumps({
+        "app_name": "DemoApp", "package_name": "com.demo.app",
+        "manifest_analysis": {"manifest_findings": [
+            {"title": "Activity is exported", "severity": "high", "rule": "exported_activity"}]},
+        "possible_secrets": ["AKIAIOSFODNN7EXAMPLE"],
+    }))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mobsf_static", "args": {"report": report}}))
+    assert any(o.subject.node_id.startswith("control:mobile:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:mobile_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+def test_mobsf_report_with_no_app_identity_promotes_no_orphan_fact(tmp_path: Path) -> None:
+    # review defect [LOW]: without app metadata the sensor mints NO lead (mobsf_observations short-
+    # circuits), so the fusion promotion must ALSO short-circuit — never a grounded fact on a control
+    # node the sensor never minted as a lead.
+    pytest.importorskip("cryptography")
+    world = WorldModel()
+    report = _write(tmp_path, "mobsf.json", json.dumps({"possible_secrets": [_rsa_key_pem()]}))  # no package/name
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mobsf_static", "args": {"report": report}}))
+    assert minted == []                                        # no lead minted
+    assert world.all_nodes() == []                             # and no orphan fact/stub control
+
+
+# ---- android_manifest: an exported unguarded provider LEAD -> mobile-posture FACT ----
+_ANDROID_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo.app">
+  <application>
+    <provider android:name="com.demo.Unguarded" android:exported="true" android:authorities="com.demo.a"/>
+    <provider android:name="com.demo.Guarded" android:exported="true" android:permission="com.demo.PERM"/>
+  </application>
+</manifest>"""
+
+
+def test_android_manifest_exported_provider_is_promoted_by_the_mobile_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "AndroidManifest.xml", _ANDROID_MANIFEST)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "android_manifest", "args": {"manifest": report}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:mobile:component:provider:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # ONLY the explicitly-exported UNGUARDED provider promotes to a grounded FACT (the guarded one stays a lead)
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:mobile_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 provider fact, got {[n.id for n in facts]}"
+    assert "unguarded" in facts[0].id.lower()
+    control_id = "control:" + facts[0].id.split("finding:mobile_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+# ---- tls_cert: a broken-hash cert LEAD -> weak-crypto-artifact FACT ----------
+def test_tls_cert_broken_hash_signature_is_promoted_by_the_weak_crypto_oracle(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
+    from framework.v2.verify.tests.test_weak_crypto import _SHA1_CERT_PEM
+    world = WorldModel()
+    report = _write(tmp_path, "weak.pem", _SHA1_CERT_PEM)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "tls_cert", "args": {"cert": report}}))
+    # the cert folded in as a CONTROL LEAD (intel-grounded), never oracle-proof by itself
+    leads = [o for o in minted if o.subject.node_id.startswith("control:crypto:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # the weak-crypto oracle re-fired in-run: the SHA-1 signature is an oracle-GROUNDED FACT
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:tls_weakness:crypto:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 weak-crypto fact, got {[n.id for n in facts]}"
+    assert facts[0].provenance.startswith("oracle:")
+    control_id = "control:" + facts[0].id.split("finding:tls_weakness:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_tls_cert_undersized_key_is_promoted_by_the_weak_crypto_oracle(tmp_path: Path) -> None:
+    # the short-key rule reaches through the EXISTING tls_cert feed with ZERO new wiring
+    pytest.importorskip("cryptography")
+    import datetime
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.x509.oid import NameOID
+    k = rsa.generate_private_key(65537, 1024)   # a 1024-bit RSA key — under the 2048 floor
+    n = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "legacy.example.com")])
+    cert = (x509.CertificateBuilder().subject_name(n).issuer_name(n).public_key(k.public_key())
+            .serial_number(1).not_valid_before(datetime.datetime(2020, 1, 1))
+            .not_valid_after(datetime.datetime(2030, 1, 1)).sign(k, SHA256()))
+    report = _write(tmp_path, "weak-key.pem", cert.public_bytes(ser.Encoding.PEM).decode())
+    world = WorldModel()
+    fuse_sensors(world, "alpha", _ctx({"sensor": "tls_cert", "args": {"cert": report}}))
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:tls_weakness:crypto:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1
+    # review fix: the FACT must be labelled with its ACTUAL reason (undersized key), NOT the hardcoded
+    # broken-hash string — the cert's SHA-256 signature hash is fine; only the 1024-bit key is weak.
+    assert facts[0].attrs.get("reason") == "short_key"
+    assert "UNDERSIZED" in facts[0].attrs.get("evidence", "") and "BROKEN hash" not in facts[0].attrs.get("evidence", "")
+
+
+def test_tls_cert_modern_sha256_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    pytest.importorskip("cryptography")
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from framework.v2.verify.tests.test_weak_crypto import _cert
+    world = WorldModel()
+    report = _write(tmp_path, "modern.pem", _cert(SHA256()).decode())
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "tls_cert", "args": {"cert": report}}))
+    assert any(o.subject.node_id.startswith("control:crypto:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:tls_weakness:crypto:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+# ---- mesh_config: a permissive Istio control LEAD -> mesh-posture FACT -------
+_MESH_PERMISSIVE = json.dumps([
+    {"kind": "PeerAuthentication", "metadata": {"name": "default", "namespace": "istio-system"},
+     "spec": {"mtls": {"mode": "PERMISSIVE"}}},
+    {"kind": "PeerAuthentication", "metadata": {"name": "strict", "namespace": "istio-system"},
+     "spec": {"mtls": {"mode": "STRICT"}}},
+])
+
+
+def test_mesh_permissive_mtls_is_promoted_by_the_mesh_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "istio.json", _MESH_PERMISSIVE)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mesh_config", "args": {"config": report}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:mesh:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # ONLY the PERMISSIVE PeerAuthentication promotes to a grounded FACT; the STRICT one stays a lead
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:mesh_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 mesh fact, got {[n.id for n in facts]}"
+    assert "istio-system/default" in facts[0].id
+    control_id = "control:" + facts[0].id.split("finding:mesh_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_mesh_strict_config_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    report = _write(tmp_path, "istio.json", json.dumps([
+        {"kind": "PeerAuthentication", "metadata": {"name": "default", "namespace": "istio-system"},
+         "spec": {"mtls": {"mode": "STRICT"}}}]))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "mesh_config", "args": {"config": report}}))
+    assert any(o.subject.node_id.startswith("control:mesh:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:mesh_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+# ---- email_auth: a spoofable DNS policy LEAD -> email-auth-posture FACT (Domain 10) ----
+_EMAIL_EXPORT = json.dumps({"domains": [
+    {"domain": "spoofable.example", "dmarc": "v=DMARC1; p=none",
+     "dmarc_observed": True, "is_org_domain": True},
+    {"domain": "hardened.example", "dmarc": "v=DMARC1; p=reject",
+     "dmarc_observed": True, "is_org_domain": True},
+]})
+
+
+def test_email_auth_spoofable_policy_is_promoted_by_the_email_auth_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "dns-email-auth.json", _EMAIL_EXPORT)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:email:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # ONLY the p=none domain promotes to a grounded FACT; the p=reject domain stays a lead
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:email_auth_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 1, f"expected 1 email-auth fact, got {[n.id for n in facts]}"
+    assert "spoofable.example" in facts[0].id and "hardened.example" not in facts[0].id
+    control_id = "control:" + facts[0].id.split("finding:email_auth_posture:", 1)[1]
+    edge = world.get_edge(facts[0].id, control_id, EdgeKind.EVIDENCES)
+    assert edge is not None and edge.grounding == GROUNDING_GROUNDED
+
+
+def test_email_auth_hardened_domain_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "dns-email-auth.json", json.dumps({"domains": [
+        {"domain": "hardened.example", "dmarc": "v=DMARC1; p=reject; sp=reject",
+         "spf": "v=spf1 -all", "dmarc_observed": True, "is_org_domain": True}]}))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    assert any(o.subject.node_id.startswith("control:email:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:email_auth_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+# ---- Independent-sweep LOW (fusion provenance mis-attribution): a contradictory same-domain export must
+# ---- never ground a FACT onto a node whose retained record contradicts it (a PCF round-trip violation).
+# Fixed at the producer: parse_email_auth_export dedups controls first-wins by the (case-insensitive) node
+# key, so the lead path and the fusion path judge the SAME control per node.
+
+def _grounded_email_facts(world: WorldModel):
+    out = []
+    for n in world.all_nodes():
+        if n.id.startswith("finding:email_auth_posture:") and n.grounding == GROUNDING_GROUNDED:
+            control_id = "control:" + n.id.split("finding:email_auth_posture:", 1)[1]
+            node = world.get_node(control_id)
+            out.append((n.id, (node.attrs or {}).get("dmarc_record") if node else None))
+    return out
+
+
+@pytest.mark.parametrize("rows,expect_facts,expect_record", [
+    # p=reject listed FIRST: the second (p=none) row is deduped away -> node keeps p=reject -> no FACT
+    ([{"domain": "dup.example", "dmarc": "v=DMARC1; p=reject"},
+      {"domain": "dup.example", "dmarc": "v=DMARC1; p=none"}], 0, None),
+    # p=none listed FIRST: a FACT is minted and grounds onto a node whose retained record IS p=none
+    ([{"domain": "dup.example", "dmarc": "v=DMARC1; p=none"},
+      {"domain": "dup.example", "dmarc": "v=DMARC1; p=reject"}], 1, "v=DMARC1; p=none"),
+    # case-variant of the same DNS name collapses to one node (RFC 4343), first-wins p=reject -> no FACT
+    ([{"domain": "A.example", "dmarc": "v=DMARC1; p=reject"},
+      {"domain": "a.example", "dmarc": "v=DMARC1; p=none"}], 0, None),
+])
+def test_contradictory_same_domain_export_never_misattributes_a_fact(tmp_path, rows, expect_facts, expect_record):
+    for r in rows:
+        r.update({"dmarc_observed": True, "is_org_domain": True})
+    export = _write(tmp_path, "dup.json", json.dumps({"domains": rows}))
+    world = WorldModel()
+    fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    facts = _grounded_email_facts(world)
+    assert len(facts) == expect_facts, facts
+    # every grounded FACT must sit on a node carrying the record it was DERIVED from (round-trip integrity)
+    for _fid, record in facts:
+        assert record == expect_record, facts
+
+
+# ---- identity: an IdP-export weakness LEAD -> identity-posture FACT (FORGE Domain 7) ----
+_IDENTITY_EXPORT = json.dumps({"identities": [
+    {"subject": "admin@corp", "privileged": True, "mfa_enrolled": False},        # weak -> FACT
+    {"subject": "svc-key", "age_days": 400, "max_age_days": 90},                 # stale -> FACT
+    {"subject": "ok@corp", "privileged": True, "mfa_enrolled": True,             # compliant -> lead only
+     "age_days": 5, "max_age_days": 90},
+]})
+
+
+def test_identity_weakness_is_promoted_by_the_identity_posture_oracle(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", _IDENTITY_EXPORT)
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    leads = [o for o in minted if o.subject.node_id.startswith("control:identity:")]
+    assert leads and all(world.get_node(o.subject.node_id).grounding == GROUNDING_INTEL for o in leads)
+    # exactly the two weak identities promote to grounded FACTs; the compliant one stays a lead
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:identity_posture:") and n.grounding == GROUNDING_GROUNDED]
+    subjects = sorted(n.id for n in facts)
+    assert len(facts) == 2, subjects
+    assert any("admin@corp" in s for s in subjects) and any("svc-key" in s for s in subjects)
+    assert not any("ok@corp" in s for s in subjects)
+    # each FACT grounds onto the control node carrying the record it was derived from (round-trip integrity)
+    for n in facts:
+        control_id = "control:" + n.id.split("finding:identity_posture:", 1)[1]
+        assert world.get_edge(n.id, control_id, EdgeKind.EVIDENCES) is not None
+
+
+def test_a_grounded_identity_fact_re_derives_from_its_own_node_attrs(tmp_path: Path) -> None:
+    # RED-PEN BLOCK-1: a grounded FACT must be re-derivable from the CONTROL node's OWN retained evidence
+    # (prove-by-re-execution at the graph layer) — not merely carry an EVIDENCES edge. Re-fire the oracle
+    # over each fact-node's control attrs and assert it reproduces the weakness.
+    from framework.v2.verify.identity_posture import confirm_identity_posture
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", _IDENTITY_EXPORT)
+    fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    facts = [n for n in world.all_nodes()
+             if n.id.startswith("finding:identity_posture:") and n.grounding == GROUNDING_GROUNDED]
+    assert len(facts) == 2
+    for n in facts:
+        control = world.get_node("control:" + n.id.split("finding:identity_posture:", 1)[1])
+        # reconstruct the control the oracle judges purely from the node's retained attrs
+        reconstructed = {k: control.attrs[k] for k in
+                         ("rule", "subject", "privileged", "mfa_enrolled", "never_rotated",
+                          "age_days", "max_age_days") if k in (control.attrs or {})}
+        assert confirm_identity_posture(reconstructed).confirmed, f"{n.id} not re-derivable from its node"
+
+
+def test_identity_compliant_export_stays_a_lead_no_oracle_no_fact(tmp_path: Path) -> None:
+    world = WorldModel()
+    export = _write(tmp_path, "identity.json", json.dumps({"identities": [
+        {"subject": "ok@corp", "privileged": True, "mfa_enrolled": True, "age_days": 5, "max_age_days": 90}]}))
+    minted = fuse_sensors(world, "alpha", _ctx({"sensor": "identity", "args": {"export": export}}))
+    assert any(o.subject.node_id.startswith("control:identity:") for o in minted), "the LEAD"
+    assert not any(n.id.startswith("finding:identity_posture:") for n in world.all_nodes())  # no fact
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+def test_dedup_does_not_swallow_a_well_formed_domains_distinct_rules(tmp_path: Path) -> None:
+    # a single domain publishing a weak DMARC AND a permissive SPF is TWO distinct rules -> two facts,
+    # never collapsed by the dedup (which keys on domain:rule, not domain).
+    export = _write(tmp_path, "weak.json", json.dumps({"domains": [
+        {"domain": "weak.example", "dmarc": "v=DMARC1; p=none", "spf": "v=spf1 +all",
+         "dmarc_observed": True, "is_org_domain": True}]}))
+    world = WorldModel()
+    fuse_sensors(world, "alpha", _ctx({"sensor": "email_auth", "args": {"export": export}}))
+    rules = sorted(n.id.split(":")[-1] for n in world.all_nodes()
+                   if n.id.startswith("finding:email_auth_posture:") and n.grounding == GROUNDING_GROUNDED)
+    assert rules == ["dmarc_none", "spf_permissive"], rules
+
+
 # ---- 3b: cloud_import LEAD -> policy-path FACT (no live cloud) ---------------
 
 
@@ -539,3 +923,90 @@ def test_reachability_out_of_scope_host_is_refused(monkeypatch: pytest.MonkeyPat
         reach_connect=lambda h, p, t, b: (f"{h}:{p}", "banner"))
     minted = fuse_sensors(world, "alpha", ctx)
     assert minted == [] and not world.has_node("finding:service_reachability:8.8.8.8:53/tcp")
+
+
+# ---- live TLS: declared TLS service -> weak-TLS + weak-crypto FACTs (opt-in, gated) ----
+def _sha1_der() -> bytes:
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from framework.v2.verify.tests.test_weak_crypto import _SHA1_CERT_PEM
+    return x509.load_pem_x509_certificate(_SHA1_CERT_PEM.encode()).public_bytes(Encoding.DER)
+
+
+def _tls_task(**extra):
+    return {"sensor": "declared_service",
+            "args": {"host": "10.0.0.5", "confirm_tls": True,
+                     "services": [{"port": 443, "protocol": "tcp"}], **extra}}
+
+
+def test_tls_live_promotes_weak_protocol_and_weak_cert(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("cryptography")
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    # injected 4-tuple connector: a deprecated protocol + a SHA-1-signed leaf cert -> BOTH oracles fire
+    ctx = SimpleNamespace(fusion_tasks=[_tls_task()],
+                          tls_connect=lambda h, p, t: ("TLSv1", "AES128-SHA", 128, _sha1_der()))
+    fuse_sensors(world, "alpha", ctx)
+    ids = {n.id for n in world.all_nodes() if n.grounding == GROUNDING_GROUNDED}
+    assert "finding:tls_weakness:10.0.0.5:443/tcp" in ids          # weak protocol/cipher
+    assert "finding:weak_crypto_artifact:10.0.0.5:443/tcp" in ids  # SHA-1 cert (distinct node, no collision)
+
+
+def test_tls_live_strong_endpoint_promotes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("cryptography")
+    from cryptography import x509
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from framework.v2.verify.tests.test_weak_crypto import _cert
+    modern = x509.load_pem_x509_certificate(_cert(SHA256())).public_bytes(Encoding.DER)
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    ctx = SimpleNamespace(fusion_tasks=[_tls_task()],
+                          tls_connect=lambda h, p, t: ("TLSv1.3", "TLS_AES_256_GCM_SHA384", 256, modern))
+    fuse_sensors(world, "alpha", ctx)
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())   # no fact
+
+
+def test_tls_live_requires_the_confirm_tls_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    probed = {"n": 0}
+    # NO confirm_tls flag → the live probe must never be attempted
+    ctx = SimpleNamespace(
+        fusion_tasks=[{"sensor": "declared_service",
+                       "args": {"host": "10.0.0.5", "services": [{"port": 443, "protocol": "tcp"}]}}],
+        tls_connect=lambda *a: (probed.update(n=probed["n"] + 1) or ("TLSv1", "AES128-SHA", 128, b"")))
+    fuse_sensors(world, "alpha", ctx)
+    assert probed["n"] == 0
+    assert not any(n.id.startswith(("finding:tls_weakness", "finding:weak_crypto_artifact"))
+                   for n in world.all_nodes())
+
+
+def test_tls_live_non_tls_port_is_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    probed = {"n": 0}
+    # port 22 is not a well-known TLS port and not flagged tls → no handshake attempted
+    ctx = SimpleNamespace(
+        fusion_tasks=[{"sensor": "declared_service",
+                       "args": {"host": "10.0.0.5", "confirm_tls": True,
+                                "services": [{"port": 22, "protocol": "tcp"}]}}],
+        tls_connect=lambda *a: (probed.update(n=probed["n"] + 1) or ("TLSv1", "AES128-SHA", 128, b"")))
+    fuse_sensors(world, "alpha", ctx)
+    assert probed["n"] == 0
+
+
+def test_tls_live_out_of_scope_host_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 8.8.8.8 is not in the 'alpha' charter scope → the declared_service sensor is scope-refused and the
+    # gated TLS handshake's own _authorize would also refuse fail-closed; nothing folds, no fact.
+    pytest.importorskip("cryptography")
+    _grant_active_recon(monkeypatch)
+    world = WorldModel()
+    ctx = SimpleNamespace(
+        fusion_tasks=[{"sensor": "declared_service",
+                       "args": {"host": "8.8.8.8", "confirm_tls": True,
+                                "services": [{"port": 443, "protocol": "tcp"}]}}],
+        tls_connect=lambda h, p, t: ("TLSv1", "AES128-SHA", 128, _sha1_der()))
+    minted = fuse_sensors(world, "alpha", ctx)
+    assert minted == []
+    assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())

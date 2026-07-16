@@ -16,6 +16,7 @@ endpoints (mirrors ``scanner.quantum_era.pqc_scan``). ``connect`` is injectable 
 
 from __future__ import annotations
 
+import base64
 import socket
 import ssl
 from typing import Any, Callable
@@ -28,10 +29,12 @@ from .verifier import OracleVerifier
 _DEFAULT_TIMEOUT = 5.0
 
 
-def _tls_connect(host: str, port: int, timeout: float) -> tuple[str, str, int | None]:
+def _tls_connect(host: str, port: int, timeout: float) -> tuple[str, str, int | None, bytes | None]:
     """The default connector: ONE bounded TLS handshake with a standard client. Returns
-    (tls_version, cipher_name, cipher_bits); raises OSError/SSLError on a failed handshake. Cert
-    validation is disabled on purpose (posture probe, not trust check — see the module docstring)."""
+    (tls_version, cipher_name, cipher_bits, peer_cert_der); raises OSError/SSLError on a failed handshake.
+    Cert validation is disabled on purpose (posture probe, not trust check — see the module docstring);
+    ``getpeercert(binary_form=True)`` still returns the presented leaf DER under CERT_NONE, which the
+    weak-crypto oracle judges (a broken-hash signature)."""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -40,9 +43,13 @@ def _tls_connect(host: str, port: int, timeout: float) -> tuple[str, str, int | 
         with ctx.wrap_socket(raw, server_hostname=host) as tls:
             version = tls.version() or ""
             cipher = tls.cipher()
+            try:
+                cert_der = tls.getpeercert(binary_form=True)
+            except Exception:
+                cert_der = None
     name = cipher[0] if cipher else ""
     bits = cipher[2] if cipher and len(cipher) > 2 else None
-    return version, name, (int(bits) if isinstance(bits, int) else None)
+    return version, name, (int(bits) if isinstance(bits, int) else None), cert_der
 
 
 def capture_tls_handshake(
@@ -62,13 +69,22 @@ def capture_tls_handshake(
         return {**base, "error": refusal}
     conn = connect or _tls_connect
     try:
-        version, cipher, bits = conn(str(host), int(port), timeout)
+        result = conn(str(host), int(port), timeout)
     except Exception as e:
         return {**base, "error": f"{type(e).__name__}: {e}"[:200]}
+    # Flexible unpack: the default connector returns (version, cipher, bits, cert_der); an injected/legacy
+    # connector may return the 3-tuple (version, cipher, bits) with no cert — both are honoured.
+    version, cipher, bits = result[0], result[1], result[2]
+    cert_der = result[3] if len(result) > 3 else None
     out = {"connected": True, "host": str(host), "port": int(port),
            "tls_version": str(version or ""), "cipher": str(cipher or "")}
     if isinstance(bits, int):
         out["cipher_bits"] = bits
+    if cert_der:
+        try:
+            out["cert_der_b64"] = base64.b64encode(bytes(cert_der)).decode("ascii")
+        except Exception:
+            pass
     return out
 
 

@@ -20,18 +20,46 @@ from .adapter import FindingContext
 _PEM_BLOCK_RE = re.compile(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
 
 
-def _descriptor_of(c: Any) -> dict[str, str]:
-    """One parsed cert -> ``{signature_algorithm, oid, subject}``."""
+def _key_info(c: Any) -> tuple[str, int | None]:
+    """The cert's public-key ``(algorithm, bits)`` — ``("rsa", 1024)`` / ``("ec", 256)`` / ``("dsa", ...)``.
+    Ed25519/Ed448 (fixed, always-strong curves) and anything unrecognised return ``(name, None)`` → never
+    judged short. Pure; never raises (a key it cannot size is simply not size-judged)."""
+    try:
+        pk = c.public_key()
+    except Exception:
+        return "", None
+    try:
+        from cryptography.hazmat.primitives.asymmetric import dsa, ec, rsa  # noqa: PLC0415
+    except Exception:
+        return "", None
+    if isinstance(pk, rsa.RSAPublicKey):
+        return "rsa", int(pk.key_size)
+    if isinstance(pk, dsa.DSAPublicKey):
+        return "dsa", int(pk.key_size)
+    if isinstance(pk, ec.EllipticCurvePublicKey):
+        try:
+            return "ec", int(pk.curve.key_size)
+        except Exception:
+            return "ec", None
+    return type(pk).__name__.lower(), None   # ed25519/ed448/other → no classical size → never short
+
+
+def _descriptor_of(c: Any) -> dict[str, Any]:
+    """One parsed cert -> ``{signature_algorithm, oid, subject, key_type, key_bits?}``."""
     oid = c.signature_algorithm_oid
     try:
         subject = c.subject.rfc4514_string()
     except Exception:
         subject = ""
-    return {"signature_algorithm": getattr(oid, "_name", None) or "",
-            "oid": oid.dotted_string, "subject": subject}
+    key_type, key_bits = _key_info(c)
+    out: dict[str, Any] = {"signature_algorithm": getattr(oid, "_name", None) or "",
+                           "oid": oid.dotted_string, "subject": subject, "key_type": key_type}
+    if isinstance(key_bits, int):
+        out["key_bits"] = key_bits
+    return out
 
 
-def signature_descriptors(cert: Any) -> list[dict[str, str]]:
+def signature_descriptors(cert: Any) -> list[dict[str, Any]]:
     """Parse a PEM/DER cert (or a PEM chain / bundle) into the per-cert ``{signature_algorithm, oid,
     subject}`` descriptors — ALL certs, so a weak-hash INTERMEDIATE CA (not just the leaf) is judged.
     ``[]`` when nothing parses (or ``cryptography`` is absent). Pure w.r.t. the bytes; never raises."""
@@ -66,7 +94,7 @@ def signature_descriptors(cert: Any) -> list[dict[str, str]]:
     return [_descriptor_of(c) for c in certs]
 
 
-def signature_descriptor(cert: Any) -> dict[str, str] | None:
+def signature_descriptor(cert: Any) -> dict[str, Any] | None:
     """The LEAF cert's ``{signature_algorithm, oid, subject}`` descriptor, or ``None`` when nothing parses.
     (The leaf is the first block; :func:`signature_descriptors` returns the whole chain.)"""
     descs = signature_descriptors(cert)
@@ -95,3 +123,34 @@ def confirm_weak_crypto_artifact(cert: Any) -> Any:
         return None
     subject = (ctx.crypto_artifact or {}).get("subject") or "certificate"
     return confirm_finding({"bug_class": "weak_crypto_artifact", "surface": subject}, ctx)
+
+
+def crypto_descriptor_context(descriptor: Any) -> dict:
+    """The verifier context for an ALREADY-PARSED cert descriptor (``{signature_algorithm, oid,
+    subject}``) — routes to the weak-crypto-artifact oracle. Used by the cert-capture feed
+    (``sensors.tls_cert`` / ``engage_fusion``), which retains the descriptor rather than the raw bytes."""
+    from collections.abc import Mapping
+    src = descriptor if isinstance(descriptor, Mapping) else {}
+    return FindingContext.from_crypto_artifact(dict(src)).to_verifier_context()
+
+
+def confirm_crypto_descriptor(descriptor: Any, *, verifier: Any = None) -> Any:
+    """Judge one retained cert descriptor: ``confirmed`` iff the oracle re-derives a weak-crypto property —
+    a broken signature hash (MD5/SHA-1) OR an undersized public key. Offline; never raises. Mirrors
+    ``confirm_cicd_posture`` / ``confirm_mobile_posture`` (routes through the verifier, the sole fact
+    authority) for the fusion promotion path."""
+    from .verifier import OracleVerifier
+    return (verifier or OracleVerifier()).confirm(crypto_descriptor_context(descriptor))
+
+
+def crypto_descriptor_verdict(descriptor: Any, *, verifier: Any = None) -> tuple[bool, str, str]:
+    """``(confirmed, evidence, reason)`` for a retained cert descriptor: the verifier's verdict PLUS the
+    FIRED oracle signal's OWN evidence + reason (``broken_sig_hash`` vs ``short_key``). A promoter uses this
+    so the projected FACT is labelled with the ACTUAL proof (a weak hash vs an undersized key), never a
+    hardcoded string — a prove-don't-guess requirement. Offline; never raises."""
+    res = confirm_crypto_descriptor(descriptor, verifier=verifier)
+    sig = next((s for s in getattr(res, "signals", []) if getattr(s, "fired", False)), None)
+    evidence = (getattr(sig, "evidence", "") or "") if sig is not None else ""
+    obs = getattr(sig, "observed", None) if sig is not None else None
+    reason = str(obs.get("reason") or "") if isinstance(obs, dict) else ""
+    return bool(getattr(res, "confirmed", False)), evidence, reason

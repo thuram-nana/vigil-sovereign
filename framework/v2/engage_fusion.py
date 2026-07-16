@@ -80,7 +80,8 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 # promotion oracle (k8s-posture, policy-path) — each still gated at run_sensor time. (declared_service
 # stays offline; its LEADS can be promoted by a GATED, opt-in LIVE reachability handshake — see
 # _reverify_reachability — which fires only through the fail-closed capture, never by default.)
-_SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import")
+_SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows",
+                 "mobsf_static", "tls_cert", "android_manifest", "mesh_config", "email_auth", "identity")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -176,14 +177,28 @@ def _fusion_registry() -> ToolRegistry:
     still gated at ``run_sensor`` time), but keeping the registry minimal keeps the fusion path's scope
     and imports tight. Workstream-3 adds the offline kube-bench + cloud-posture importers alongside
     their promotion oracles."""
+    from .sensors.cicd import WorkflowScanSensor
     from .sensors.cloud import CloudPostureImportSensor
     from .sensors.k8s_runtime import KubeBenchSensor
+    from .sensors.mobile import MobsfSensor
+    from .sensors.tls_cert import CertScanSensor
+    from .sensors.android_manifest import AndroidManifestSensor
+    from .sensors.mesh import MeshConfigSensor
+    from .sensors.email_auth import EmailAuthSensor
+    from .sensors.identity import IdentitySensor
 
     reg = ToolRegistry()
     reg.register(DeclaredServiceSensor())
     reg.register(SbomVulnSensor())
     reg.register(KubeBenchSensor())          # offline kube-bench --json ingest (Tier-1)
     reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
+    reg.register(WorkflowScanSensor())        # offline GitHub-Actions workflow ingest (Tier-1)
+    reg.register(MobsfSensor())               # offline MobSF static-report ingest (Tier-1)
+    reg.register(CertScanSensor())            # offline X.509 certificate ingest (Tier-1)
+    reg.register(AndroidManifestSensor())     # offline decoded-AndroidManifest.xml ingest (Tier-1)
+    reg.register(MeshConfigSensor())          # offline Istio/Linkerd config ingest (Tier-1)
+    reg.register(EmailAuthSensor())           # offline DNS email-auth policy ingest (Tier-1, Domain 10)
+    reg.register(IdentitySensor())            # offline IdP-export identity-posture ingest (Tier-1, Domain 7)
     return reg
 
 
@@ -345,6 +360,233 @@ def _reverify_k8s(world: Any, res: Any, *, seq: int) -> int:
     return promoted
 
 
+def _reverify_cicd(world: Any, res: Any, *, seq: int) -> int:
+    """CI/CD promotion: the CI/CD-posture oracle over each RETAINED workflow control. A control that
+    re-derives a concrete dangerous construct (an unpinned third-party action / pwn-request checkout /
+    script-injection sink) is promoted to an oracle-grounded FACT on its CONTROL node; anything the
+    oracle cannot re-confirm is left an honest LEAD. Mirrors :func:`_reverify_k8s`."""
+    try:
+        from .verify.cicd_posture import confirm_cicd_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_cicd_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"cicd:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="cicd_posture", bug_class="cicd_misconfiguration",
+            evidence=f"CI/CD workflow control '{c.get('rule')}' re-derives a concrete dangerous construct",
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_mesh(world: Any, res: Any, *, seq: int) -> int:
+    """Service-mesh promotion: the mesh-posture oracle over each RETAINED mesh-config control. A control
+    whose achieved state re-derives a concrete insecure fact (permissive/disabled mTLS, an allow-everyone
+    AuthorizationPolicy, an unauthenticated Linkerd inbound policy) is promoted to an oracle-grounded FACT
+    on its CONTROL node; a STRICT/scoped/deny config is left an honest LEAD. Mirrors :func:`_reverify_cicd`."""
+    try:
+        from .verify.mesh_posture import confirm_mesh_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_mesh_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"mesh:{check_id}")
+        _project_oracle_fact(
+            world, subject, oracle_kind="mesh_posture", bug_class="mesh_misconfiguration",
+            evidence=f"mesh {c.get('resource_kind')} '{check_id}' re-derives a concrete insecure achieved state",
+            seq=seq, detail={"check_id": check_id, "resource_kind": str(c.get("resource_kind") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_email_auth(world: Any, res: Any, *, seq: int) -> int:
+    """Email-auth promotion (FORGE Domain 10): the email-auth-posture oracle over each RETAINED DNS policy
+    control. A control whose PUBLISHED policy re-derives a concrete spoofing weakness (no DMARC anywhere in
+    the RFC 7489 §6.6.3 chain, ``p=none``, or SPF ``+all``) is promoted to an oracle-grounded FACT on its
+    CONTROL node; a hardened domain (``p=reject``/``sp=reject``/``-all``) is left an honest LEAD. NO DNS is
+    queried, NO mail is sent — a pure re-derivation over the operator's retained records. Mirrors
+    :func:`_reverify_mesh`; the lead and its FACT share the ``email:<check_id>`` node (lowercased, exactly as
+    ``sensors.email_auth.email_auth_observations`` keys it)."""
+    try:
+        from .verify.email_auth import confirm_email_auth_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_email_auth_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"email:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="email_auth_posture", bug_class="email_auth_misconfiguration",
+            evidence=(f"the published email-auth policy for '{c.get('domain')}' ({c.get('rule')}) "
+                      "re-derives a concrete spoofing weakness"),
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or ""),
+                             "domain": str(c.get("domain") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_identity(world: Any, res: Any, *, seq: int) -> int:
+    """Identity promotion (FORGE Domain 7): the identity-posture oracle over each RETAINED IdP-export
+    control. A control whose STRICT-TYPED fields re-derive a concrete weakness (a privileged identity with
+    MFA provably off, or a credential past its rotation policy) is promoted to an oracle-grounded FACT on its
+    CONTROL node; a compliant identity is left an honest LEAD. NO IdP is queried, NO authentication is
+    attempted — a pure re-derivation over the operator's retained export. Mirrors :func:`_reverify_email_auth`;
+    the lead and its FACT share the ``identity:<check_id>`` node (lowercased, exactly as
+    ``sensors.identity.identity_observations`` keys it)."""
+    try:
+        from .verify.identity_posture import confirm_identity_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_identity_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"identity:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="identity_posture", bug_class="identity_misconfiguration",
+            evidence=(f"the retained identity control for '{c.get('subject')}' ({c.get('rule')}) "
+                      "re-derives a concrete identity-posture weakness"),
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or ""),
+                             "subject": str(c.get("subject") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_mobile(world: Any, res: Any, *, seq: int) -> int:
+    """Mobile promotion: the mobile-posture oracle over each RETAINED MobSF control. A control the oracle
+    RE-DERIVES a concrete weakness for (this slice: an embedded PEM private key that loads as an
+    unencrypted key) is promoted to an oracle-grounded FACT on its CONTROL node; anything the oracle
+    cannot re-confirm (a lead-only rule, an encrypted/masked/unparseable key) is left an honest LEAD.
+    Mirrors :func:`_reverify_cicd`; the sensor output nests the controls under ``parsed``."""
+    try:
+        from .verify.mobile_posture import confirm_mobile_posture
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    parsed = output.get("parsed")
+    if not isinstance(parsed, dict):
+        return 0
+    # the sensor mints NO lead (mobsf_observations short-circuits) when the report has no app identity;
+    # mirror that guard here so a fact is never promoted onto a control the sensor never minted as a lead.
+    app = parsed.get("app") or {}
+    app_key = (app.get("package") or app.get("name") or "").strip().lower()
+    if not app_key:
+        return 0
+    controls = parsed.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            if not confirm_mobile_posture(c).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"mobile:{check_id}")
+        _project_oracle_fact(
+            world, subject, oracle_kind="mobile_posture", bug_class="mobile_misconfiguration",
+            evidence=f"mobile control '{c.get('rule')}' re-derives a concrete offline-provable weakness",
+            seq=seq, detail={"check_id": check_id, "rule": str(c.get("rule") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_crypto(world: Any, res: Any, *, seq: int) -> int:
+    """Weak-crypto promotion: the weak-crypto-artifact oracle over each RETAINED certificate descriptor. A
+    cert signed with a BROKEN hash (MD5/SHA-1 — collision-forgeable) is promoted to an oracle-grounded FACT
+    on its CONTROL node; a modern SHA-256+ cert is left an honest LEAD. Mirrors :func:`_reverify_cicd`; the
+    oracle re-derives from the retained signatureAlgorithm OID name (a pure re-verifiable classification)."""
+    try:
+        from .verify.weak_crypto import crypto_descriptor_verdict
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            ok, evidence, reason = crypto_descriptor_verdict(c)
+        except Exception:
+            continue
+        if not ok:
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"crypto:{check_id}")
+        _project_oracle_fact(
+            world, subject, oracle_kind="tls_weakness", bug_class="weak_crypto_artifact",
+            evidence=evidence or "certificate carries a weak-crypto property",
+            seq=seq, detail={"check_id": check_id, "reason": reason,
+                             "signature_algorithm": str(c.get("signature_algorithm") or ""),
+                             "key_bits": c.get("key_bits")})
+        promoted += 1
+    return promoted
+
+
 def _reverify_cloud(world: Any, res: Any, *, seq: int) -> int:
     """3b promotion: TWO cloud oracles re-fire over the RETAINED export — NO live cloud calls. The
     EXISTING policy-path oracle re-derives each REACHABILITY-provable posture LEAD (public exposure /
@@ -490,8 +732,98 @@ def _reverify_reachability(world: Any, task: FusionTask, res: Any, *, seq: int, 
     return promoted
 
 
+# Ports on which a TLS handshake is worth attempting when the operator opts in (a handshake to a non-TLS
+# port just fails and promotes nothing — this only avoids blindly TLS-probing every open port).
+_TLS_PORTS = frozenset({443, 465, 636, 989, 990, 993, 995, 4433, 5061, 8443, 8883})
+
+
+def _reverify_tls_live(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str,
+                       connect: Any = None) -> int:
+    """OPT-IN, GATED, LIVE TLS posture: for a declared_service 'open' TLS service, reproduce ONE real,
+    fail-closed-gated TLS handshake (``verify.tls.capture_tls_handshake``: kill-switch -> single-host ->
+    ACTIVE_RECON entitlement -> charter scope) and promote, over the SAME retained evidence, TWO already-
+    built oracles: a weak negotiated PROTOCOL/CIPHER (``confirm_weak_tls``) AND a leaf certificate signed
+    with a BROKEN hash (``confirm_crypto_descriptor`` over the captured cert). Fires ONLY when the task
+    opts in (``args['confirm_tls']`` truthy) AND the gate passes; a refused/failed handshake promotes
+    NOTHING. Never on the default/gate path. ``connect`` is injectable so the path is testable offline.
+    Mirrors :func:`_reverify_reachability`."""
+    if not (isinstance(task.args, dict) and task.args.get("confirm_tls")):
+        return 0
+    try:
+        import base64
+        from .intel.from_scan import host_ref
+        from .intel.refs import canonicalize
+        from .verify.tls import capture_tls_handshake, confirm_weak_tls
+        from .verify.weak_crypto import crypto_descriptor_verdict, signature_descriptors
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    host = output.get("host")
+    services = output.get("services")
+    if not isinstance(host, str) or not host or not isinstance(services, list):
+        return 0
+    host_key = host_ref(host).key
+    promoted = 0
+    for svc in services:
+        if not isinstance(svc, dict) or svc.get("port") is None:
+            continue
+        if str(svc.get("state", "open")).lower() != "open":
+            continue
+        try:
+            port = int(svc["port"])
+        except (TypeError, ValueError):
+            continue
+        # attempt TLS only where the operator flagged it, or on a well-known TLS port
+        if not (svc.get("tls") or port in _TLS_PORTS):
+            continue
+        proto = str(svc.get("protocol") or "tcp").lower()
+        try:
+            hs = capture_tls_handshake(host, port, slug=slug, connect=connect)
+        except Exception:
+            continue
+        if not hs.get("connected"):
+            continue
+        subject = canonicalize(NodeKind.SERVICE, f"{host_key}:{port}/{proto}")
+        # (a) weak negotiated protocol/cipher
+        try:
+            if confirm_weak_tls(hs).confirmed:
+                _project_oracle_fact(
+                    world, subject, oracle_kind="tls_weakness", bug_class="weak_tls",
+                    evidence=(f"{host}:{port} negotiated a weak TLS protocol/cipher "
+                              f"({hs.get('tls_version')}/{hs.get('cipher')}) in a real gated handshake"),
+                    seq=seq, detail={"host": host, "port": port,
+                                     "tls_version": str(hs.get("tls_version") or ""),
+                                     "cipher": str(hs.get("cipher") or "")})
+                promoted += 1
+        except Exception:
+            pass
+        # (b) leaf certificate with a weak-crypto property (a broken signature hash OR an undersized key) —
+        # a DISTINCT oracle_kind label so the two facts do not collide on the shared finding-key
+        # `{oracle_kind}:{subject}` (both are TLS_WEAKNESS-kind). The FACT is labelled with the oracle's OWN
+        # per-reason evidence (broken hash vs short key), never a hardcoded string.
+        cert_b64 = hs.get("cert_der_b64")
+        if isinstance(cert_b64, str) and cert_b64:
+            try:
+                cert = base64.b64decode(cert_b64)
+                for desc in signature_descriptors(cert):
+                    ok, evidence, reason = crypto_descriptor_verdict(desc)
+                    if ok:
+                        _project_oracle_fact(
+                            world, subject, oracle_kind="weak_crypto_artifact",
+                            bug_class="weak_crypto_artifact",
+                            evidence=f"{host}:{port} — {evidence}" if evidence else f"{host}:{port} presents a weak-crypto certificate",
+                            seq=seq, detail={"host": host, "port": port, "reason": reason,
+                                             "signature_algorithm": str(desc.get("signature_algorithm") or ""),
+                                             "key_bits": desc.get("key_bits")})
+                        promoted += 1
+                        break
+            except Exception:
+                pass
+    return promoted
+
+
 def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "",
-              connect: Any = None) -> int:
+              connect: Any = None, tls_connect: Any = None) -> int:
     """Let the existing oracles re-fire over the sensor's OWN retained evidence, in-run — the LEAD ->
     FACT bridge. Each promotion is a deterministic oracle over the sensor's retained evidence; the
     sensor's LEADS are untouched. Returns the number of facts promoted. Best-effort and deterministic.
@@ -499,9 +831,17 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
 
       * sbom_vuln       -> version-range oracle over SBOM advisories
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
+      * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
+      * mesh_config     -> mesh-posture oracle over each retained Istio/Linkerd control
+      * email_auth      -> email-auth-posture oracle over each retained DNS policy control (Domain 10)
+      * identity        -> identity-posture oracle over each retained IdP-export control (Domain 7)
+      * mobsf_static    -> mobile-posture oracle over each retained MobSF control
+      * android_manifest-> mobile-posture oracle over each retained AndroidManifest provider control
+      * tls_cert        -> weak-crypto-artifact oracle over each retained certificate descriptor
       * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
                            oracle over each achieved-state misconfiguration lead (3b)
-      * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c)
+      * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c), PLUS the
+                           weak-TLS + weak-crypto oracles over a GATED, OPT-IN live TLS handshake
     """
     if not getattr(res, "ok", False):
         return 0
@@ -509,10 +849,24 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_sbom(world, res, seq=seq)
     if task.sensor == "kube_bench":
         return _reverify_k8s(world, res, seq=seq)
+    if task.sensor == "cicd_workflows":
+        return _reverify_cicd(world, res, seq=seq)
+    if task.sensor == "mesh_config":
+        return _reverify_mesh(world, res, seq=seq)
+    if task.sensor == "email_auth":
+        return _reverify_email_auth(world, res, seq=seq)
+    if task.sensor == "identity":
+        return _reverify_identity(world, res, seq=seq)
+    if task.sensor in ("mobsf_static", "android_manifest"):
+        return _reverify_mobile(world, res, seq=seq)
+    if task.sensor == "tls_cert":
+        return _reverify_crypto(world, res, seq=seq)
     if task.sensor == "cloud_import":
         return _reverify_cloud(world, res, seq=seq)
     if task.sensor == "declared_service":
-        return _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
+        n = _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
+        n += _reverify_tls_live(world, task, res, seq=seq, slug=slug, connect=tls_connect)
+        return n
     return 0
 
 
@@ -542,9 +896,10 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     ingest = IntelIngest(world, engagement_slug=slug or "")
     sink = _sink_of(ctx)
     base = _base_seq(world, ctx)
-    # Injectable connector for the OPT-IN, GATED live reachability handshake (3c) — None => the real
-    # bounded socket connect (still fail-closed inside capture_handshake). Tests pass a fake connect.
+    # Injectable connectors for the OPT-IN, GATED live handshakes — None => the real bounded socket
+    # connect (still fail-closed inside capture_handshake / capture_tls_handshake). Tests pass a fake.
     reach_connect = getattr(ctx, "reach_connect", None)
+    tls_connect = getattr(ctx, "tls_connect", None)
 
     minted: list[Observation] = []
     for i, task in enumerate(tasks):
@@ -556,5 +911,6 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
             continue   # a sensor blowing up never sinks the whole fusion pass
         minted.extend(res.observations)
         # LEAD -> FACT, where an oracle re-fires over the sensor's OWN retained evidence.
-        _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect)
+        _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect,
+                  tls_connect=tls_connect)
     return minted

@@ -360,7 +360,17 @@
       "Edit(//home/kali/Music/PENTEST/crucible/framework/knowledge-base/**)",
       "Edit(//home/kali/Music/PENTEST/crucible/framework/templates/**)",
       "Edit(//home/kali/Music/PENTEST/crucible/CLAUDE.md)",
-      "Edit(//home/kali/Music/PENTEST/crucible/README.md)"
+      "Edit(//home/kali/Music/PENTEST/crucible/README.md)",
+      "Edit(//home/kali/Pictures/PENTEST-main/framework/v2/intruder/**)",
+      "Write(//home/kali/Pictures/PENTEST-main/framework/v2/intruder/**)",
+      "Edit(//home/kali/Pictures/PENTEST-main/framework/v2/scanner/**)",
+      "Write(//home/kali/Pictures/PENTEST-main/framework/v2/scanner/**)",
+      "Edit(//home/kali/Pictures/PENTEST-main/framework/v2/engage.py)",
+      "Edit(//home/kali/Pictures/PENTEST-main/framework/v2/engage_autonomous.py)",
+      "Edit(//home/kali/Pictures/PENTEST-main/framework/v2/engage_fusion.py)",
+      "Edit(//home/kali/Pictures/PENTEST-main/framework/v2/engage_reasoning.py)",
+      "Edit(//home/kali/Pictures/PENTEST-main/FORGE.md)",
+      "Write(//home/kali/Pictures/PENTEST-main/FORGE.md)"
     ],
     "defaultMode": "default"
   },

@@ -295,6 +295,15 @@ class FindingContext(BaseModel):
     # workflow control ALONE, offline, ZERO repo clone / pipeline run). No benchmark/scan/engage finding
     # carries cicd_control, so appending this leaves the gate byte-identical.
     cicd_control: dict[str, Any] | None = None
+    # A RETAINED MobSF mobile-posture control for the mobile-posture oracle. No benchmark finding carries
+    # mobile_control, so appending this leaves the gate byte-identical.
+    mobile_control: dict[str, Any] | None = None
+    # A RETAINED DNS email-auth policy record (FORGE Domain 10) for the email-auth-posture oracle. No
+    # benchmark finding carries email_auth_control, so appending this leaves the gate byte-identical.
+    email_auth_control: dict[str, Any] | None = None
+    # A RETAINED IdP-export control (FORGE Domain 7) for the identity-posture oracle. No benchmark finding
+    # carries identity_control, so appending this leaves the gate byte-identical.
+    identity_control: dict[str, Any] | None = None
     # jwt_forgery_oracle (Workstream-B: a captured JWT is STRUCTURALLY FORGEABLE — judged on the token
     # ALONE, offline, zero traffic). jwt_token is the captured token string; jwt_candidate_keys are the
     # supplied secrets / RSA public keys the HMAC-reproduction proof is tried against (a weak-secret
@@ -634,6 +643,86 @@ class FindingContext(BaseModel):
         return cls(bug_class=bug_class, cicd_control=retained)
 
     @classmethod
+    def from_mobile_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "mobile_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED MobSF mobile-posture control (``sensors.mobile`` / ``verify.mobile_posture``), for
+        the mobile-posture oracle. The oracle re-derives the weakness over the control's literal evidence
+        alone — offline, by actually LOADING the embedded key material — so a scanner's say-so is confirmed
+        a FACT only by the reconstructed key. Only the fields the oracle judges are retained (the ``pem``
+        block verbatim so it re-parses); a lead-only control retains nothing extra. JSON-safe + deterministic."""
+        src = dict(control or {})
+        retained: dict[str, Any] = {}
+        for k in ("rule", "check_id", "category", "pem",
+                  # exported-content-provider evidence (parsed from the raw AndroidManifest)
+                  "name", "exported", "permission", "read_permission", "write_permission",
+                  "has_path_permission"):
+            v = src.get(k)
+            if v not in (None, ""):
+                retained[k] = v if isinstance(v, bool) else _coerce_text(v)
+        return cls(bug_class=bug_class, mobile_control=retained)
+
+    @classmethod
+    def from_email_auth_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "email_auth_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED DNS email-authentication policy record (``sensors.email_auth`` /
+        ``verify.email_auth``), for the email-auth-posture oracle (FORGE Domain 10). The oracle re-derives
+        a spoofing-permitting policy (no DMARC / p=none / SPF +all) from the record's literal text alone —
+        offline, ZERO DNS calls — so a scanner's say-so is confirmed a FACT only by the published policy
+        itself. Only the fields the oracle judges are retained. JSON-safe + deterministic."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        retained: dict[str, Any] = {}
+        for k in ("rule", "domain", "dmarc_record", "spf_record", "org_domain", "org_dmarc_record"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        # The attestation flags are retained STRICTLY: only a literal True survives. NEVER bool()-coerce —
+        # that would widen the oracle's `is not True` guard back open (a truthy "false"/"no"/1 would become
+        # True) and, because retention happens BEFORE the certificate is minted, would LAUNDER a fabricated
+        # attestation permanently into a signed, forever-re-firing certificate.
+        for flag in ("dmarc_observed", "org_dmarc_observed", "is_org_domain"):
+            if src.get(flag) is True:
+                retained[flag] = True
+        return cls(bug_class=bug_class, email_auth_control=retained)
+
+    @classmethod
+    def from_identity_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "identity_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED identity-provider export control (``sensors.identity`` / ``verify.identity_posture``),
+        for the identity-posture oracle (FORGE Domain 7). The oracle re-derives an identity-posture weakness
+        (a privileged identity with MFA provably off, or a credential past its rotation policy) from the
+        control's STRICT-TYPED literal fields alone — offline, ZERO IdP calls — so a scanner's say-so is a
+        FACT only by the export itself. Only the fields the oracle judges are retained. JSON-safe +
+        deterministic."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        retained: dict[str, Any] = {}
+        for k in ("rule", "subject"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        # Integer fields are retained ONLY as genuine ints (a bool is not an int; a numeric string is not
+        # coerced) — the oracle compares them; a laundered non-integer would be refused there, but keeping
+        # retention strict means the certificate never carries a value the oracle would not itself accept.
+        for k in ("age_days", "max_age_days"):
+            v = src.get(k)
+            if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                retained[k] = v
+        # The attestation flags are retained STRICTLY: only a literal True/False survives (never coerced) —
+        # a truthy "false"/1 would widen the oracle's strict `is True`/`is False` guards and, because
+        # retention precedes minting, LAUNDER a fabricated attestation permanently into a signed certificate.
+        for flag in ("privileged", "never_rotated"):
+            if src.get(flag) is True:
+                retained[flag] = True
+        # mfa_enrolled is the one flag whose FALSE is load-bearing (it is the fired condition), so BOTH a
+        # literal True (compliant, silent) and a literal False (the weakness) are retained; anything else is
+        # dropped so the oracle sees "unknown" and REFUSES rather than reading absence as False.
+        if src.get("mfa_enrolled") is True:
+            retained["mfa_enrolled"] = True
+        elif src.get("mfa_enrolled") is False:
+            retained["mfa_enrolled"] = False
+        return cls(bug_class=bug_class, identity_control=retained)
+
+    @classmethod
     def from_jwt_token(
         cls,
         token: str,
@@ -969,6 +1058,12 @@ class FindingContext(BaseModel):
             ctx["mesh_control"] = self.mesh_control
         if self.cicd_control is not None:
             ctx["cicd_control"] = self.cicd_control
+        if self.mobile_control is not None:
+            ctx["mobile_control"] = self.mobile_control
+        if self.email_auth_control is not None:
+            ctx["email_auth_control"] = self.email_auth_control
+        if self.identity_control is not None:
+            ctx["identity_control"] = self.identity_control
         if self.jwt_token is not None:
             ctx["jwt_token"] = self.jwt_token
             if self.jwt_candidate_keys is not None:

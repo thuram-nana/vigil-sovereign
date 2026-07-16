@@ -162,6 +162,45 @@ class OracleKind(str, enum.Enum):
     # `run:` with no untrusted expression do NOT fire (near-zero-FP). NO repo is cloned, NO pipeline runs
     # — a pure re-derivation over the operator-supplied workflow YAML.
     CICD_POSTURE = "cicd_posture"
+    # Mobile static-posture (Phase-2 coverage). BUG_CLASS_ORACLES row — NOT in the frozen _ALL_ORACLES
+    # (stays EXACTLY 15) — fires only when the ctx carries `mobile_control` (a retained MobSF control no
+    # benchmark finding carries), so `make gate` stays byte-identical. The adversarial soundness map ruled
+    # nearly every mobile signal a LEAD (an Android precedence/gating chain the manifest omits: NSC-vs-attr
+    # cleartext, min-vs-target-SDK, explicit-vs-default export). The ONE offline-re-derivable FACT this
+    # oracle proves is an embedded PRIVATE-KEY PEM block: it RE-DERIVES by actually LOADING the key material
+    # (`cryptography`), firing ONLY on an UNENCRYPTED, structurally-valid private key — an encrypted key, a
+    # public key, a cert, a masked/partial blob, or an unparseable string do NOT fire (REFUSE, never assert
+    # the negative). A distributed client that ships a loadable private key is a true, rarely-benign, fully
+    # re-verifiable weakness (the key is extractable by anyone).
+    MOBILE_POSTURE = "mobile_posture"
+    # Email-authentication posture (FORGE Domain 10 — the first FORGE-built stream). BUG_CLASS_ORACLES row
+    # — NOT in the frozen _ALL_ORACLES (stays EXACTLY 15) — fires only when the ctx carries
+    # `email_auth_control` (a retained DNS policy record no benchmark finding carries), so `make gate` stays
+    # byte-identical. Proves that a domain's PUBLISHED policy provably permits spoofing, re-derived from the
+    # retained TXT records: DMARC `p=none` (explicitly instructs receivers NOT to enforce), SPF `+all` (any
+    # host may send as the domain), or an absent DMARC record whose EFFECTIVE policy is resolvable as
+    # absent/none. A hardened domain (`p=reject`/`p=quarantine`, SPF `-all`) does NOT fire — INCLUDING a
+    # subdomain that publishes nothing and inherits an enforcing organizational policy (RFC 7489 §6.6.3
+    # fallback, §6.3 `sp=`): that chain is resolved from RETAINED evidence or the oracle REFUSES, never
+    # asserts. DELIBERATELY NOT message-level SPF/DKIM verification: DKIM canonicalisation
+    # and SPF include-chains are a semantic layer this cannot soundly re-derive offline, and an
+    # `Authentication-Results` header would be the receiving MTA's say-so (string trust) — those stay LEADs.
+    # `spf_missing` alone does NOT fire either (DKIM+DMARC can still protect — a gating chain we refuse).
+    EMAIL_AUTH_POSTURE = "email_auth_posture"
+    # Identity posture (FORGE Domain 7, slice 1). BUG_CLASS_ORACLES row — NOT in the frozen _ALL_ORACLES
+    # (stays EXACTLY 15) — fires only when the ctx carries `identity_control` (a retained IdP-export control
+    # no benchmark finding carries), so `make gate` stays byte-identical. Proves an identity-posture weakness
+    # by pure re-derivation over an export's STRICT-TYPED literal fields: `privileged_without_mfa` (a
+    # producer-attested privileged identity with MFA provably absent — `privileged is True` AND
+    # `mfa_enrolled is False`; an ABSENT mfa flag REFUSES, never asserts absence), or `stale_credential`
+    # (`never_rotated is True`, or two retained integers `age_days >= max_age_days`). A compliant identity
+    # (privileged + MFA on, credential within its rotation age) does NOT fire. DELIBERATELY out of scope
+    # (REFUSE, never assert): anomaly/behavioral detection (probabilistic — cannot be a near-zero-FP FACT);
+    # cloud-resource IAM (POLICY_PATH/CLOUD_POSTURE own that); privilege INFERENCE from role names (the oracle
+    # requires the `privileged` producer attestation, never guesses). Offline; no IdP call, no auth attempt.
+    # `privileged`/`mfa_enrolled`/`never_rotated` are read by STRICT identity (`is True`/`is False`), never
+    # coerced; `max_age_days` is producer-supplied POLICY; `age_days` is a retained integer (no wall-clock).
+    IDENTITY_POSTURE = "identity_posture"
 
 
 class OracleProbe(BaseModel):

@@ -160,6 +160,61 @@ def test_oracle_non_mapping_is_safe():
 
 
 # ---------------------------------------------------------------------------
+# undersized public key (a second weak-crypto rule over the SAME cert descriptor)
+# ---------------------------------------------------------------------------
+
+
+def _cert_with_key(key) -> bytes:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.x509.oid import NameOID
+    n = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "t.example.com")])
+    b = (x509.CertificateBuilder().subject_name(n).issuer_name(n).public_key(key.public_key())
+         .serial_number(1).not_valid_before(datetime.datetime(2020, 1, 1))
+         .not_valid_after(datetime.datetime(2030, 1, 1)))
+    hsh = None if isinstance(key, ed25519.Ed25519PrivateKey) else SHA256()
+    return b.sign(key, hsh).public_bytes(serialization.Encoding.PEM)
+
+
+def test_descriptor_carries_key_type_and_bits():
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    d = signature_descriptor(_cert_with_key(rsa.generate_private_key(65537, 2048)))
+    assert d["key_type"] == "rsa" and d["key_bits"] == 2048
+
+
+@pytest.mark.parametrize("key_type,bits", [("rsa", 512), ("rsa", 1024), ("dsa", 1024), ("ec", 160), ("ec", 192)])
+def test_oracle_fires_on_an_undersized_key(key_type, bits):
+    sig = weak_crypto_artifact_oracle(
+        {"signature_algorithm": "sha256WithRSAEncryption", "key_type": key_type, "key_bits": bits})
+    assert sig.fired and sig.observed["reason"] == "short_key"
+
+
+@pytest.mark.parametrize("key_type,bits", [("rsa", 2048), ("rsa", 4096), ("dsa", 2048), ("ec", 224), ("ec", 256), ("ec", 384)])
+def test_oracle_does_not_fire_on_an_adequate_key(key_type, bits):
+    assert not weak_crypto_artifact_oracle(
+        {"signature_algorithm": "sha256WithRSAEncryption", "key_type": key_type, "key_bits": bits}).fired
+
+
+def test_short_key_fires_end_to_end_over_a_real_cert():
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+    assert confirm_weak_crypto_artifact(_cert_with_key(rsa.generate_private_key(65537, 1024))) is not None
+    assert confirm_weak_crypto_artifact(_cert_with_key(ec.generate_private_key(ec.SECP192R1()))) is not None
+    # a strong 2048-bit RSA / P-256 / Ed25519 cert does NOT fire (near-zero-FP)
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    assert confirm_weak_crypto_artifact(_cert_with_key(rsa.generate_private_key(65537, 2048))) is None
+    assert confirm_weak_crypto_artifact(_cert_with_key(ec.generate_private_key(ec.SECP256R1()))) is None
+    assert confirm_weak_crypto_artifact(_cert_with_key(ed25519.Ed25519PrivateKey.generate())) is None
+
+
+def test_no_key_bits_field_never_fires_on_key_size():
+    # an absent/unknown key size must never be judged short (only a hash rule could fire here)
+    assert not weak_crypto_artifact_oracle({"signature_algorithm": "sha256WithRSAEncryption", "key_type": "rsa"}).fired
+    assert not weak_crypto_artifact_oracle({"key_type": "ed25519publickey", "key_bits": None}).fired
+
+
+# ---------------------------------------------------------------------------
 # offline re-verification + gate safety
 # ---------------------------------------------------------------------------
 

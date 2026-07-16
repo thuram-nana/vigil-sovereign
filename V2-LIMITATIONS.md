@@ -1207,6 +1207,139 @@ Do not read this as a live-path claim. None of the Wave 1 work has
 been exercised in a live end-to-end engagement. See the module READMEs
 and `V2-MANIFEST.md` § "Wave 1 (2026-07-02) hardening".
 
+## 28. Email-authentication posture (EMAIL_AUTH_POSTURE, FORGE Domain 10)
+
+FORGE Domain 10 — the first stream built under `/FORGE.md` on the PCF foundation. The oracle
+(`verify/oracles.py::email_auth_posture_oracle`, plus its helpers `_resolve_txt_record`,
+`_decode_txt_escapes`, `_txt_records`, `_select_txt`) re-derives, from a domain's own RETAINED,
+PUBLISHED DNS TXT records — never a receiving MTA's `Authentication-Results` say-so, that would be
+string trust — that the published policy provably permits spoofing: `dmarc_missing` (no DMARC
+anywhere in the RFC 7489 §6.6.3 organizational-domain inheritance chain), `dmarc_none` (DMARC
+`p=none`), or `spf_permissive` (SPF `+all`). The confirmation seam (`verify/email_auth.py::
+confirm_email_auth_posture` / `ingest_dns_policy`) maps an operator-supplied export into the
+candidate controls the oracle judges; the sensor (`sensors/email_auth.py::EmailAuthSensor`,
+Tier-1, `capability=None`, `egress_hosts=()`) reads a LOCAL operator-supplied JSON export — no DNS
+is queried, no mail is sent. `OracleKind.EMAIL_AUTH_POSTURE` is the enum's 30th member and is
+deliberately held OUT of the frozen `_ALL_ORACLES` (still exactly 15 members); it is reachable only
+via its `email_auth_misconfiguration` `BUG_CLASS_ORACLES` row, keyed on an `email_auth_control`
+context field no benchmark/scan/engage finding carries, so `make gate` stays byte-identical —
+`verify/tests/test_email_auth.py::test_email_auth_posture_is_not_in_the_frozen_fallback` asserts
+both facts directly. A confirmed finding here emits a real, signed, offline-re-runnable **PCF
+v0.1** certificate (`evidence/pcf.py`) by construction, exercised end-to-end in
+`test_a_confirmed_finding_emits_a_real_pcf_certificate_that_verifies_offline`. Promotion into a
+live engagement is opt-in and off the default path: `engage_fusion.py::_reverify_email_auth` runs
+only under `engage --fuse-sensors` (the sensor is registered in `_SAFE_SENSORS`), folding the
+sensor's LEADS into the run's world-model and re-firing the oracle over each RETAINED control
+in-run; nothing on the default `scan`/`engage` path imports this.
+
+What is NOT here — honest scope:
+
+- **`is_org_domain` is a PRODUCER ATTESTATION, not a Public-Suffix-List-derived fact.** There is no
+  PSL lookup anywhere in this path; the oracle trusts the sensor's/operator's `is_org_domain` and
+  `org_domain` attestations, and a wrong attestation changes which RFC 7489 §6.6.3 inheritance
+  branch the oracle takes. What IS enforced is strict identity retention:
+  `verify/adapter.py::FindingContext.from_email_auth_control` keeps an attestation flag only when
+  it is the literal `True` — never `bool()`-coerced — so a truthy `"false"`/`1` in an export is
+  dropped, not laundered, into a signed certificate; a falsified flag is not retained and a
+  reverify reproduces `False`.
+- **Conservative misses — accepted false NEGATIVES on malformed/ambiguous input, never a false
+  FACT; the oracle refuses rather than assert:**
+  - Duplicate DMARC records (and duplicate `v=spf1` records) REFUSE, even though such a domain is
+    genuinely spoofable (RFC 7489 §6.6.3 / RFC 7208 §4.5 both make a duplicate record set apply NO
+    policy) — the oracle cannot distinguish a real duplicate RRset from an export artifact.
+  - A BARE (unquoted) record containing a backslash REFUSES — an ambiguous undecoded RFC 1035
+    §5.1 escape vs. literal content — and a whole TXT blob refuses if ANY one of its records is
+    unresolvable, so a genuinely-exposed `+all` sharing a blob with a bare backslash-bearing
+    neighbour record is suppressed. A conservative false negative, never a false FACT.
+  - A contradictory same-domain export (the same registrable domain listed twice with divergent
+    policy) is deduped FIRST-WINS by the (case-insensitive) control-node key
+    (`sensors/email_auth.py::parse_email_auth_export`); the later row is silently dropped. This
+    preserves PCF round-trip integrity — a grounded FACT always re-derives from the record retained
+    on its own node — at the cost of dropping the second row, a conservative miss on malformed
+    operator input.
+  - Node-key canonicalization is CASE-FOLD ONLY (DNS case-insensitivity, RFC 4343). Other DNS-name
+    equivalences — a trailing-dot FQDN vs. the bare name, an IDN U-label vs. its A-label — mint
+    SEPARATE control nodes rather than collapsing to one. This is graph hygiene on inconsistent
+    operator input, not a round-trip violation and not a false FACT (each node still carries the
+    record its own fact was derived from).
+- **Deliberately out of scope (REFUSE, never assert):** message-level SPF/DKIM/DMARC
+  *verification*. DKIM canonicalization and SPF include/macro chains are a semantic layer this
+  cannot soundly re-derive offline, and a receiving MTA's `Authentication-Results` header would be
+  the MTA's say-so (string trust), not re-derivation — both stay LEADs. `spf_missing` alone does
+  NOT fire on its own — DKIM+DMARC may still protect the domain, a gating chain the oracle refuses
+  to resolve one-sided.
+- **Accepted vs. refused record forms.** Resolves: a bare (already-decoded wire) record, a QUOTED
+  record (`dig +short`, RFC 1035 §5.1 escape-decoded), adjacent character-strings concatenated
+  within one record (§3.3.14), a zone-file RR header plus BIND unit-suffix TTLs
+  (`1h`/`1D`/`1h30m`), `( )` continuation, and MULTI-record RRsets via RFC 7489 §6.6.3 / RFC 7208
+  §4.5 record selection. Refuses: unquoted content mixed among or around character-strings,
+  duplicate policy records, two version tags spliced into one record, unbalanced quotes/parens, a
+  bare record carrying a backslash, and any blob that does not resolve to exactly one policy
+  record. Absence is read ONLY from a producer that retained NOTHING at that domain plus a strict
+  `*_observed` attestation — never assumed from a failed or ambiguous parse.
+- **Not verified live.** The oracle and its seam are offline-only over retained/exported evidence:
+  they perform NO live DNS resolution and send NO mail. The upstream export collector — whatever
+  produces the operator's DNS-policy JSON in the first place — is out of scope of this domain and
+  unexercised here. Its test suite (`verify/tests/test_email_auth.py`,
+  `sensors/tests/test_email_auth_sensor.py`, `tests/test_engage_fusion.py`) is green OFFLINE
+  tests; that is a statement about the deterministic layer, not a live-DNS verification claim.
+- **Honesty note.** Reaching zero known false positives on this near-zero-FP oracle took **eight
+  defects across two independent adversarial reviewers** (RED-PEN and an independent multi-lens
+  sweep — both leave their marker comments in the test files, e.g. `RED-PEN BLOCK-1..7` and
+  `Independent-sweep CRITICAL #1/#2/#7`), all one fault line: asserting from a transform not
+  verified lossless (reading a failed/ambiguous parse as absence, or a spliced/duplicate record as
+  a clean policy). That fault line is why Domain 10's merge bar required **both** a RED-PEN
+  attestation **and** an independent multi-lens sweep — not either alone.
+
+## 29. Identity posture (IDENTITY_POSTURE, FORGE Domain 7, slice 1)
+
+FORGE Domain 7, slice 1 — the second FORGE-built stream, on the PCF foundation, and the first built under
+the now-standing **dual gate** (RED-PEN + an independent `adversarial-sweep`, both required — FORGE §3
+stage 9). The oracle (`verify/oracles.py::identity_posture_oracle`) re-derives, from a domain's own RETAINED
+identity-provider export — never an IdP API's or scanner's say-so — that an identity carries a posture
+weakness: `privileged_without_mfa` (`privileged is True` **and** `mfa_enrolled is False`) or `stale_credential`
+(`never_rotated is True`, or two retained integers `age_days >= max_age_days` with `max_age_days >= 1`). The
+seam + producer (`verify/identity_posture.py::confirm_identity_posture` / `ingest_identity_export`) map an
+operator-supplied export into the candidate controls the oracle judges; the sensor
+(`sensors/identity.py::IdentitySensor`, Tier-1, `capability=None`, `egress_hosts=()`) reads a LOCAL export —
+**no IdP is queried, no authentication is attempted**. `OracleKind.IDENTITY_POSTURE` is the enum's 31st
+member, held OUT of the frozen `_ALL_ORACLES` (still exactly 15), reachable only via its
+`identity_misconfiguration` `BUG_CLASS_ORACLES` row keyed on an `identity_control` field no
+benchmark/scan/engage finding carries, so `make gate` stays byte-identical. A confirmed finding emits a real
+signed **PCF v0.1** certificate that re-verifies offline; promotion into a live engagement is opt-in and off
+the default path (`engage_fusion.py::_reverify_identity` runs only under `engage --fuse-sensors`), and the
+grounded world-model FACT is self-re-derivable from its own CONTROL node (the node persists the judged fields,
+parity with every sibling posture domain).
+
+What is NOT here — honest scope:
+
+- **`privileged` is a PRODUCER ATTESTATION, not inferred.** The oracle never guesses privilege from a role
+  name; it fires only on a strict `privileged is True` in the export. A wrong attestation changes which
+  identities are assessed. `privileged`/`mfa_enrolled`/`never_rotated` are read by STRICT identity (`is True`/
+  `is False`, `verify/adapter.py::from_identity_control`), never `bool()`-coerced — a truthy `"false"`/`1` is
+  dropped, not laundered into a signed certificate; `age_days`/`max_age_days` are retained only as genuine
+  ints (a bool is not an int, a numeric string is not coerced), so there is no wall-clock and no presentation
+  parse in the proof path.
+- **Conservative misses — accepted false NEGATIVES, never a false FACT (the oracle REFUSES):** an ABSENT/
+  unknown `mfa_enrolled` on a privileged identity REFUSES (a missing field is not proof MFA is off); a
+  missing/non-integer `age_days` or `max_age_days` REFUSES; `max_age_days < 1` REFUSES (a 0-day "rotation
+  policy" is a likely no-policy sentinel that would otherwise fire against every credential); a `float`/string
+  age is refused (silent). A contradictory same-subject export is deduped FIRST-WINS by the case-insensitive
+  control-node key, so a compliant-first row can mask a later weak row (a false negative on malformed input).
+- **DELIBERATELY out of scope (REFUSE, never assert):** anomaly / behavioral detection (impossible-travel,
+  unusual-login, entropy/risk scoring — probabilistic, cannot be a near-zero-FP FACT, exactly as Domain 10
+  refused message-level DKIM); cloud-resource IAM over-broad grants (the existing `POLICY_PATH` / `CLOUD_POSTURE`
+  oracles own that — Domain 7 is the IdP's OWN identity/role model only). The slice-1 charter's other two
+  predicates — `wildcard_grant` and `dormant_privileged` — are DEFERRED to a follow-up charter, not built here.
+- **Not verified live.** Offline-only over a retained export; NO live IdP resolution, NO authentication
+  attempt. The upstream export collector (whatever produces the IdP JSON) is out of scope and unexercised. The
+  test suite is green OFFLINE tests — not a live-IdP verification claim.
+- **The build bar.** Slice 1 cleared the standing dual gate: RED-PEN caught a real graph-integrity defect
+  (a grounded FACT that was not self-re-derivable because the sensor dropped the judged evidence from its
+  node — now fixed, parity with the siblings), the oracle's near-zero-FP engine survived a full
+  laundering/absence/coercion/inference battery from both reviewers, and the independent sweep attested a
+  19-variant benign-twin pass with zero false facts.
+
 ## What the operator should do next
 
 In rough order:
