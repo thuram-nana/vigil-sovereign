@@ -86,6 +86,102 @@ def test_stale_credential_does_not_fire_when_it_should_not(control, why):
     assert not _fires(control), why
 
 
+# ---- slice 2: wildcard_grant — universal grant / admin_all only, NEVER a partial wildcard ---------------
+
+from framework.v2.verify.oracles import _is_universal_grant
+
+
+@pytest.mark.parametrize("grant,universal", [
+    ("*", True), ("*:*", True), ("*/*", True), ("*:*:*", True), ("  *:*  ", True),
+    ("read:*", False), ("*:invoices", False), ("read:invoices", False),
+    ("*:", False), (":*", False), ("", False), ("admin", False), ("*.read", False),
+])
+def test_is_universal_grant_only_on_everything_on_everything(grant, universal):
+    assert _is_universal_grant(grant) is universal
+
+
+@pytest.mark.parametrize("control", [
+    {"rule": "wildcard_grant", "subject": "r", "admin_all": True},
+    {"rule": "wildcard_grant", "subject": "r", "grant": "*:*"},
+    {"rule": "wildcard_grant", "subject": "r", "grant": "*"},
+])
+def test_wildcard_grant_is_a_fact(control):
+    assert _fires(control)
+
+
+@pytest.mark.parametrize("control,why", [
+    ({"rule": "wildcard_grant", "subject": "r", "grant": "read:*"}, "partial: action scoped"),
+    ({"rule": "wildcard_grant", "subject": "r", "grant": "*:invoices"}, "partial: resource scoped"),
+    ({"rule": "wildcard_grant", "subject": "r", "grant": "read:invoices"}, "scoped"),
+    ({"rule": "wildcard_grant", "subject": "r"}, "no admin_all, no grant -> refuse"),
+    ({"rule": "wildcard_grant", "subject": "r", "admin_all": 1}, "int 1 never launders"),
+    ({"rule": "wildcard_grant", "subject": "r", "admin_all": "true"}, "string never launders"),
+])
+def test_wildcard_grant_does_not_fire_when_it_should_not(control, why):
+    assert not _fires(control), why
+
+
+# ---- slice 2: dormant_privileged — a privileged identity idle past the dormancy threshold ---------------
+
+@pytest.mark.parametrize("control", [
+    {"rule": "dormant_privileged", "subject": "a", "privileged": True, "days_since_login": 200, "dormancy_threshold_days": 90},
+    {"rule": "dormant_privileged", "subject": "a", "privileged": True, "days_since_login": 90, "dormancy_threshold_days": 90},
+])
+def test_dormant_privileged_is_a_fact(control):
+    assert _fires(control)
+
+
+@pytest.mark.parametrize("control,why", [
+    ({"rule": "dormant_privileged", "subject": "a", "privileged": True, "days_since_login": 10, "dormancy_threshold_days": 90}, "recently active"),
+    ({"rule": "dormant_privileged", "subject": "a", "privileged": False, "days_since_login": 200, "dormancy_threshold_days": 90}, "not privileged -> refuse"),
+    ({"rule": "dormant_privileged", "subject": "a", "privileged": True, "days_since_login": 200, "dormancy_threshold_days": 0}, "0-day threshold sentinel -> refuse"),
+    ({"rule": "dormant_privileged", "subject": "a", "privileged": True, "days_since_login": "200", "dormancy_threshold_days": 90}, "string days -> refuse"),
+    ({"rule": "dormant_privileged", "subject": "a", "privileged": True, "days_since_login": True, "dormancy_threshold_days": 90}, "bool days -> refuse"),
+    ({"rule": "dormant_privileged", "subject": "a", "privileged": True, "dormancy_threshold_days": 90}, "days missing -> refuse"),
+    ({"rule": "dormant_privileged", "subject": "a", "privileged": 1, "days_since_login": 200, "dormancy_threshold_days": 90}, "privileged=1 never launders"),
+])
+def test_dormant_privileged_does_not_fire_when_it_should_not(control, why):
+    assert not _fires(control), why
+
+
+def test_slice2_end_to_end_through_the_real_producer():
+    export = {"identities": [
+        {"subject": "root@corp", "admin_all": True},
+        {"subject": "svc@corp", "grants": ["read:logs", {"action": "*", "resource": "*"}]},
+        {"subject": "stale-admin@corp", "privileged": True, "days_since_login": 400, "dormancy_threshold_days": 90},
+        {"subject": "scoped@corp", "grants": ["read:*", "*:invoices"]},        # partial only -> silent
+        {"subject": "active@corp", "privileged": True, "days_since_login": 3, "dormancy_threshold_days": 90},  # silent
+    ]}
+    facts = confirm_identity_export(export)
+    assert sorted((c["subject"], c["rule"]) for c in facts) == [
+        ("root@corp", "wildcard_grant"), ("stale-admin@corp", "dormant_privileged"),
+        ("svc@corp", "wildcard_grant")]
+
+
+@pytest.mark.parametrize("grant_obj,fires", [
+    ({"action": "*", "resource": "*"}, True),                                    # clean universal -> fire
+    ({"action": "*", "resource": "*", "effect": "Deny"}, False),                 # deny-all: HARDENED, refuse
+    ({"action": "*", "resource": "*", "effect": "Allow"}, False),                # out-of-contract key -> refuse
+    ({"action": "*", "resource": "*", "condition": "mfa_and_ip"}, False),        # bounded break-glass -> refuse
+    ({"action": "*", "resource": "*", "sid": "x"}, False),                       # any extra key -> refuse
+])
+def test_wildcard_grant_refuses_a_grant_object_with_out_of_contract_keys(grant_obj, fires):
+    # RED-PEN + independent-sweep: a bounding/inverting key (effect=Deny, condition, …) must not be dropped
+    # and flattened to '*:*' — that asserts 'everything-on-everything' over a control that may DENY it.
+    export = {"identities": [{"subject": "svc@x", "grants": [grant_obj]}]}
+    got = confirm_identity_export(export)
+    assert (len(got) == 1) is fires, (grant_obj, got)
+
+
+def test_slice2_benign_twins_yield_zero_facts():
+    twins = {"identities": [
+        {"subject": "scoped@corp", "grants": ["read:*", "*:invoices", "billing:read"]},
+        {"subject": "active@corp", "privileged": True, "days_since_login": 1, "dormancy_threshold_days": 90},
+        {"subject": "nograntpriv@corp", "privileged": True, "grants": []},
+    ]}
+    assert confirm_identity_export(twins) == []
+
+
 def test_an_unrecognised_rule_stays_a_lead():
     assert not _fires({"rule": "impossible_travel", "subject": "a"})   # anomaly is out of scope -> no fire
     assert not _fires({"rule": "", "subject": "a"})
@@ -154,6 +250,21 @@ def test_export_shape_variants_and_malformed_input_never_crash():
 def test_identity_posture_is_not_in_the_frozen_fallback():
     assert OracleKind.IDENTITY_POSTURE not in _ALL_ORACLES
     assert len(_ALL_ORACLES) == 15
+
+
+@pytest.mark.parametrize("control", [
+    {"rule": "wildcard_grant", "subject": "root@x", "admin_all": True},
+    {"rule": "wildcard_grant", "subject": "svc@x", "grant": "*:*"},
+    {"rule": "dormant_privileged", "subject": "adm@x", "privileged": True,
+     "days_since_login": 400, "dormancy_threshold_days": 90},
+])
+def test_slice2_facts_re_verify_offline_over_the_retained_context(control):
+    # the retained context (from_identity_control) must re-fire the oracle offline — the PCF/reverify path
+    from framework.v2.verify.identity_posture import identity_posture_context
+    from framework.v2.verify.reverify import reverify_context
+    oc = identity_posture_context(control)
+    rr = reverify_context(oc, bug_class="identity_misconfiguration")
+    assert rr.reproduced and rr.ok
 
 
 def test_the_oracle_is_deterministic():

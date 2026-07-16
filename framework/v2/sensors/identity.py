@@ -68,7 +68,8 @@ def parse_identity_export(text: str) -> list[dict]:
 # persists its load-bearing record (email_auth: dmarc_record/spf_record; mesh: mtls_mode/action;
 # cicd: uses/run/trigger; k8s: actual_value). Booleans and ints only, so nothing sensitive beyond the
 # `subject` already on the node, and nothing free-text.
-_JUDGED_FIELDS = ("privileged", "mfa_enrolled", "never_rotated", "age_days", "max_age_days")
+_JUDGED_FIELDS = ("privileged", "mfa_enrolled", "never_rotated", "age_days", "max_age_days",
+                  "admin_all", "grant", "days_since_login", "dormancy_threshold_days")
 
 
 def identity_observations(controls: list[dict], *, seq: int, source: str = "identity") -> list[Observation]:

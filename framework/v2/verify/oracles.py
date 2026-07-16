@@ -2901,6 +2901,19 @@ def _as_nonneg_int(v: Any) -> "int | None":
     return None
 
 
+def _is_universal_grant(grant: str) -> bool:
+    """A grant string that provably confers EVERYTHING-ON-EVERYTHING (FORGE Domain 7 slice 2). Universal iff
+    every ``:``/``/``-separated segment is a bare ``*`` (a bare ``*``, ``*:*``, ``*/*``, ``*:*:*`` …). A
+    scoped or PARTIAL wildcard — ``read:*`` (action scoped), ``*:invoices`` (resource scoped), ``*:`` (empty
+    segment) — is NOT universal and must NOT fire: partial wildcards are common and legitimate, and firing on
+    them is exactly where the false positives would live (the charter's near-zero-FP scoping)."""
+    s = (grant or "").strip()
+    if not s:
+        return False
+    parts = re.split(r"[:/]", s)
+    return bool(parts) and all(p.strip() == "*" for p in parts)
+
+
 def identity_posture_oracle(observed_control: Any) -> OracleSignal:
     """Fire when a RETAINED identity-provider export provably carries an identity-posture weakness — a pure
     re-derivation over STRICT-TYPED literal fields, never an IdP's or scanner's say-so. Two rules (FORGE
@@ -2973,6 +2986,53 @@ def identity_posture_oracle(observed_control: Any) -> OracleSignal:
                                           f"its {maxa}-day rotation policy — a stale long-lived secret"),
                                 observed={"rule": rule, "subject": subject, "age_days": age,
                                           "max_age_days": maxa})
+
+    if rule == "wildcard_grant":
+        # an explicit unrestricted-admin attestation is the strongest form
+        if observed_control.get("admin_all") is True:
+            return _identity_signal(True, conf=0.9,
+                                    evidence=(f"identity{where or ' (unnamed)'} is attested admin_all — "
+                                              "unrestricted everything-on-everything access"),
+                                    observed={"rule": rule, "subject": subject, "admin_all": True})
+        # else a single retained grant that is provably UNIVERSAL (everything on everything). A scoped or
+        # partial wildcard does NOT fire (near-zero-FP: only the universal grant is a weakness).
+        grant = _coerce_text(observed_control.get("grant")).strip()
+        if not grant:
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence="no admin_all attestation and no retained grant — nothing to assert (REFUSE)")
+        if not _is_universal_grant(grant):
+            return _identity_signal(False, observed={"rule": rule, "grant": grant},
+                                    evidence=f"grant {grant!r} is scoped or partially-wildcarded — not universal, compliant")
+        return _identity_signal(True, conf=0.9,
+                                evidence=(f"identity{where or ' (unnamed)'} holds a UNIVERSAL wildcard grant "
+                                          f"{grant!r} — everything-on-everything access"),
+                                observed={"rule": rule, "subject": subject, "grant": grant})
+
+    if rule == "dormant_privileged":
+        if observed_control.get("privileged") is not True:
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence=("identity is not attested privileged — no privileged-account "
+                                              "weakness to assert (REFUSE)"))
+        days = _as_nonneg_int(observed_control.get("days_since_login"))
+        thresh = _as_nonneg_int(observed_control.get("dormancy_threshold_days"))
+        if days is None or thresh is None:
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence=("days-since-login or the dormancy threshold is missing or not an "
+                                              "integer — dormancy UNRESOLVED (REFUSE)"))
+        if thresh < 1:
+            return _identity_signal(False, observed={"rule": rule},
+                                    evidence=("the dormancy threshold is 0 days — not a real policy (a likely "
+                                              "sentinel); dormancy UNRESOLVED (REFUSE)"))
+        if days < thresh:
+            return _identity_signal(False, observed={"rule": rule, "days_since_login": days,
+                                                     "dormancy_threshold_days": thresh},
+                                    evidence=f"last authenticated {days}d ago, within the {thresh}d dormancy policy — compliant")
+        return _identity_signal(True, conf=0.9,
+                                evidence=(f"a privileged identity{where or ' (unnamed)'} last authenticated "
+                                          f"{days} days ago, at or past the {thresh}-day dormancy threshold — a "
+                                          "stale privileged account an attacker can seize unnoticed"),
+                                observed={"rule": rule, "subject": subject, "days_since_login": days,
+                                          "dormancy_threshold_days": thresh})
 
     return _identity_signal(False, evidence=f"unrecognised/lead-only identity rule {rule!r} (stays a lead)",
                             observed={"rule": rule})
