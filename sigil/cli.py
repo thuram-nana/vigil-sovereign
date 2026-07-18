@@ -274,6 +274,58 @@ def cmd_warden_anchor_get(a) -> None:
     print(_json.dumps({"count": best_count, "head_hash": best_hash}))
 
 
+def cmd_warden(a) -> None:
+    """Phase 6 governor controls (SIGIL §5): kill switch + per-scope promotion policy."""
+    from .governor import KillSwitch, PromotionPolicy
+    store = SpineStore()
+    if a.action == "kill":
+        seq = KillSwitch(store).engage(reason=a.reason or "")
+        print(f"  KILL SWITCH ENGAGED (seq {seq}) — agent mesh halted; perception + memory read stay alive")
+    elif a.action == "release":
+        seq = KillSwitch(store).release(reason=a.reason or "")
+        print(f"  kill switch released (seq {seq}) — agent mesh live again")
+    elif a.action == "promote":
+        seq = PromotionPolicy(store).grant(a.agent, a.scope or "*")
+        print(f"  refused: {a.agent} has no promotion path (SIGIL §4.6)" if seq is None
+              else f"  promoted {a.agent}/{a.scope or '*'} → A2 auto-approve (seq {seq})")
+    elif a.action == "revoke":
+        seq = PromotionPolicy(store).revoke(a.agent, a.scope or "*")
+        print(f"  revoked promotion for {a.agent}/{a.scope or '*'} (seq {seq})")
+    elif a.action == "status":
+        engaged = KillSwitch(store).is_engaged()
+        print(f"  kill switch: {'ENGAGED (mesh halted)' if engaged else 'released (mesh live)'}")
+
+
+def cmd_audit(a) -> None:
+    from .audit import render_audit, self_audit
+    store = SpineStore()
+    rows = self_audit(store, agent=a.agent)
+    print(render_audit(rows, agent=a.agent))
+
+
+def cmd_approve(a) -> None:
+    from .agents.approvals import ApprovalQueue
+    from .reuse import KeyPair
+    import json as _json
+    owner_key = None
+    if a.key:
+        d = _json.loads(open(a.key).read())
+        owner_key = KeyPair(public_key_b64=d["public_key_b64"], private_key_b64=d["private_key_b64"])
+    q = ApprovalQueue(SpineStore(), owner_key=owner_key)
+    try:
+        fn = q.approve if a.decision == "approve" else q.deny
+        seq = fn(a.seq, approver=a.approver or "owner", reason=a.reason or "")
+        print(f"  {a.decision}d queued seq {a.seq} → recorded at seq {seq}"
+              + ("  (Ed25519-signed)" if owner_key else "  (unsigned — id only; A3 requires --key)"))
+    except Exception as e:  # noqa: BLE001
+        print(f"  cannot {a.decision} seq {a.seq}: {e}")
+
+
+def cmd_dashboard(a) -> None:
+    from .dashboard import render_dashboard, snapshot
+    print(render_dashboard(snapshot(SpineStore())))
+
+
 def cmd_verify(a) -> None:
     ok, msg = SpineStore().verify()
     print(("chain OK: " if ok else "chain FAIL: ") + msg)
@@ -366,6 +418,23 @@ def main(argv=None) -> None:
     pv.add_argument("--set-voice", dest="set_voice", metavar="VOICE_ID",
                     help="pin a TTS voice_id as the default (SIGIL_TTS_VOICE_ID)")
     pv.set_defaults(fn=cmd_voice)
+    pwd = sub.add_parser("warden", help="governor controls (kill switch, promotion policy)")
+    pwd.add_argument("action", choices=["kill", "release", "promote", "revoke", "status"])
+    pwd.add_argument("agent", nargs="?", default=None, help="agent for promote/revoke")
+    pwd.add_argument("--scope", default=None, help="promotion scope (default '*' = all scopes)")
+    pwd.add_argument("--reason", default=None, help="reason recorded on the spine")
+    pwd.set_defaults(fn=cmd_warden)
+    pau = sub.add_parser("audit", help="self-audit (C18): what the mesh did and why, from the log")
+    pau.add_argument("--agent", default=None, help="filter to one agent")
+    pau.set_defaults(fn=cmd_audit)
+    for name in ("approve", "deny"):
+        pap = sub.add_parser(name, help=f"{name} a queued A2/A3 proposal by seq")
+        pap.add_argument("seq", type=int)
+        pap.add_argument("--key", default=None, help="owner keypair JSON (required to sign A3 approvals)")
+        pap.add_argument("--approver", default=None, help="approver id (default 'owner')")
+        pap.add_argument("--reason", default=None)
+        pap.set_defaults(fn=cmd_approve, decision=name)
+    sub.add_parser("dashboard", help="read-only operator status over the spine").set_defaults(fn=cmd_dashboard)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     a = p.parse_args(argv)
