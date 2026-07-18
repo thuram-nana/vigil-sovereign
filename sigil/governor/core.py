@@ -52,10 +52,14 @@ def _load_caps() -> BudgetCaps:
 
 
 class Governor:
-    def __init__(self, store, *, caps: Optional[BudgetCaps] = None, day_iso: Optional[str] = None):
+    def __init__(self, store, *, caps: Optional[BudgetCaps] = None, day_iso: Optional[str] = None,
+                 owner_key=None, trusted_pubkey: Optional[str] = None):
+        from .identity import owner_keypair, owner_pubkey
         self.store = store
-        self.kill = KillSwitch(store)
-        self.promo = PromotionPolicy(store)
+        ok = owner_key if owner_key is not None else owner_keypair()
+        tp = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
+        self.kill = KillSwitch(store, owner_key=ok, trusted_pubkey=tp)
+        self.promo = PromotionPolicy(store, owner_key=ok, trusted_pubkey=tp)
         self.budget = BudgetLedger(store, caps if caps is not None else _load_caps())
         self._day = day_iso
 

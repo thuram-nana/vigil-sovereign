@@ -40,7 +40,6 @@ class Proposal:
     tier: Tier = Tier.A1
     parent_id: Optional[int] = None
     supersedes_id: Optional[int] = None   # this record supersedes an earlier one (e.g. a resolution)
-    scope: Optional[str] = None           # promotion scope (per-(agent,scope) A2 auto-approval)
 
 
 @dataclass
@@ -74,8 +73,10 @@ class Agent:
         res = AgentResult(agent=self.name)
         for p in proposals:
             effective = max(p.tier, Tier.A0)
+            # promotion scope = the RECORD KIND (the real action written), not a self-asserted label:
+            # a promotion is "this agent may auto-approve A2 records of this kind" (red-pen RP-3).
             decision = self.governor.decide(agent=self.name, tier=effective,
-                                            ceiling=self.ceiling, scope=p.scope)
+                                            ceiling=self.ceiling, scope=p.kind)
             common = {**p.payload, "agent": self.name, "tier": effective.label(),
                       "governor": decision.reason}
             if decision.outcome == Outcome.AUTO:

@@ -275,25 +275,28 @@ def cmd_warden_anchor_get(a) -> None:
 
 
 def cmd_warden(a) -> None:
-    """Phase 6 governor controls (SIGIL §5): kill switch + per-scope promotion policy."""
+    """Phase 6 governor controls (SIGIL §5): kill switch + per-kind promotion policy. Governance
+    mutations are signed by the persisted OWNER key (auto-created once if absent)."""
     from .governor import KillSwitch, PromotionPolicy
+    from .governor.identity import ensure_owner_keypair, owner_pubkey
     store = SpineStore()
+    if a.action == "status":
+        print(f"  kill switch: {'ENGAGED (mesh halted)' if KillSwitch(store).is_engaged() else 'released (mesh live)'}")
+        return
+    ok = ensure_owner_keypair()   # owner signing key (the trust anchor)
     if a.action == "kill":
-        seq = KillSwitch(store).engage(reason=a.reason or "")
+        seq = KillSwitch(store, owner_key=ok).engage(reason=a.reason or "")
         print(f"  KILL SWITCH ENGAGED (seq {seq}) — agent mesh halted; perception + memory read stay alive")
     elif a.action == "release":
-        seq = KillSwitch(store).release(reason=a.reason or "")
-        print(f"  kill switch released (seq {seq}) — agent mesh live again")
+        seq = KillSwitch(store, owner_key=ok).release(reason=a.reason or "")
+        print(f"  kill switch released (seq {seq}, owner-signed) — agent mesh live again")
     elif a.action == "promote":
-        seq = PromotionPolicy(store).grant(a.agent, a.scope or "*")
+        seq = PromotionPolicy(store, owner_key=ok).grant(a.agent, a.scope or "*")
         print(f"  refused: {a.agent} has no promotion path (SIGIL §4.6)" if seq is None
-              else f"  promoted {a.agent}/{a.scope or '*'} → A2 auto-approve (seq {seq})")
+              else f"  promoted {a.agent}/{a.scope or '*'} → A2 auto-approve, owner-signed (seq {seq})")
     elif a.action == "revoke":
-        seq = PromotionPolicy(store).revoke(a.agent, a.scope or "*")
+        seq = PromotionPolicy(store, owner_key=ok).revoke(a.agent, a.scope or "*")
         print(f"  revoked promotion for {a.agent}/{a.scope or '*'} (seq {seq})")
-    elif a.action == "status":
-        engaged = KillSwitch(store).is_engaged()
-        print(f"  kill switch: {'ENGAGED (mesh halted)' if engaged else 'released (mesh live)'}")
 
 
 def cmd_audit(a) -> None:
@@ -305,18 +308,13 @@ def cmd_audit(a) -> None:
 
 def cmd_approve(a) -> None:
     from .agents.approvals import ApprovalQueue
-    from .reuse import KeyPair
-    import json as _json
-    owner_key = None
-    if a.key:
-        d = _json.loads(open(a.key).read())
-        owner_key = KeyPair(public_key_b64=d["public_key_b64"], private_key_b64=d["private_key_b64"])
+    from .governor.identity import ensure_owner_keypair
+    owner_key = ensure_owner_keypair()   # the persisted owner key IS the trusted signer
     q = ApprovalQueue(SpineStore(), owner_key=owner_key)
     try:
         fn = q.approve if a.decision == "approve" else q.deny
         seq = fn(a.seq, approver=a.approver or "owner", reason=a.reason or "")
-        print(f"  {a.decision}d queued seq {a.seq} → recorded at seq {seq}"
-              + ("  (Ed25519-signed)" if owner_key else "  (unsigned — id only; A3 requires --key)"))
+        print(f"  {a.decision}d queued seq {a.seq} → recorded at seq {seq}  (Ed25519 owner-signed)")
     except Exception as e:  # noqa: BLE001
         print(f"  cannot {a.decision} seq {a.seq}: {e}")
 
@@ -428,9 +426,8 @@ def main(argv=None) -> None:
     pau.add_argument("--agent", default=None, help="filter to one agent")
     pau.set_defaults(fn=cmd_audit)
     for name in ("approve", "deny"):
-        pap = sub.add_parser(name, help=f"{name} a queued A2/A3 proposal by seq")
+        pap = sub.add_parser(name, help=f"{name} a queued A2/A3 proposal by seq (owner-signed)")
         pap.add_argument("seq", type=int)
-        pap.add_argument("--key", default=None, help="owner keypair JSON (required to sign A3 approvals)")
         pap.add_argument("--approver", default=None, help="approver id (default 'owner')")
         pap.add_argument("--reason", default=None)
         pap.set_defaults(fn=cmd_approve, decision=name)

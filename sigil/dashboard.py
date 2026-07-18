@@ -15,6 +15,7 @@ from .spine.store import SpineStore
 def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int = 300) -> dict:
     from .agents.approvals import pending
     from .governor import KillSwitch
+    from .governor.identity import owner_pubkey
     head = store.next_seq - 1
     day = day_iso or datetime.now(timezone.utc).date().isoformat()
 
@@ -30,14 +31,17 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
         if r.kind in ("entity", "contradiction") and r.source == "agent":
             last_consolidation = max(last_consolidation, r.seq)
         if r.source == "agent" and (r.ts or "").startswith(day):
-            actions_today[r.actor] += 1
-            if r.kind == "event":
-                interrupts_today[r.actor] += 1
+            # count only actions actually TAKEN (auto/queued), mirroring the enforced BudgetLedger —
+            # denials must not inflate the usage panel (red-pen RP-2 honesty).
+            if r.payload.get("decision") in ("auto", "queued"):
+                actions_today[r.actor] += 1
+                if r.kind == "event":
+                    interrupts_today[r.actor] += 1
         if r.source == "agent" and r.seq > head - lookback:
             per_agent[r.actor] += 1
             decisions[str(r.payload.get("decision"))] += 1
 
-    pend = pending(store)
+    pend = pending(store, owner_pubkey())
     return {
         "head_seq": head,
         "kill_switch": "ENGAGED" if KillSwitch(store).is_engaged() else "released",
