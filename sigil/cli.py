@@ -335,6 +335,24 @@ def cmd_dashboard(a) -> None:
     print(render_dashboard(snapshot(SpineStore())))
 
 
+def cmd_scrape(a) -> None:
+    """SCRIBE grounded web research — crawl PUBLIC, scope-gated, robots-respecting, serve-the-quote."""
+    from .scrape import ScrapeScope
+    from .scrape.researcher import WebResearcher
+    from .spine.store import SpineStore
+    if not a.scope_domain:
+        print("  --scope-domain is required (deny-all by default): e.g. --scope-domain example.com")
+        return
+    scope = ScrapeScope(a.scope_domain, include_subdomains=a.subdomains)
+    store = SpineStore()
+    res = WebResearcher(store).research_web(a.question or "", a.seed or [], scope)
+    print(f"  {'; '.join(res.notes)}")
+    for seq in res.applied:
+        rec = store.get(seq)
+        if rec and rec.payload.get("signal") == "web.research":
+            print("\n" + rec.payload.get("text", ""))
+
+
 def cmd_host(a) -> None:
     """Show this host's capability descriptor (WS-D) — what the mesh routes on."""
     from .platform import host
@@ -474,6 +492,12 @@ def main(argv=None) -> None:
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
     ph.set_defaults(fn=cmd_host)
+    psc = sub.add_parser("scrape", help="SCRIBE grounded web research (public, scope-gated, robots-respecting)")
+    psc.add_argument("--question", default=None)
+    psc.add_argument("--seed", action="append", help="seed URL (repeatable)")
+    psc.add_argument("--scope-domain", dest="scope_domain", action="append", help="allowed domain (repeatable; deny-all if none)")
+    psc.add_argument("--subdomains", action="store_true", help="include subdomains of allowed domains")
+    psc.set_defaults(fn=cmd_scrape)
     a = p.parse_args(argv)
     a.fn(a)
 
