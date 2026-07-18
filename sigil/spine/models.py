@@ -13,6 +13,7 @@ KINDS = frozenset({
     "warden_checkpoint",        # WARDEN (Phase 1) cross-anchors its action-log head here (anti-rollback)
     "event", "finding", "interaction", "draft",  # the agent mesh (Phase 3, §4): SENTINEL/BASTION/ENVOY
     "report", "pr",             # Phase 4: SCHOLAR sourced research reports, ARTIFICER PR proposals
+    "web_page", "operation",    # Phase 7/8: SCRIBE fetched-page provenance; OPERATOR plan/execute records
 })
 
 
