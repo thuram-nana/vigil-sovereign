@@ -557,6 +557,13 @@ def main(argv=None) -> None:
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
     ph.set_defaults(fn=cmd_host)
+    pm = sub.add_parser("mesh", help="authorize/revoke/list phone device keys (mesh pairing back-end)")
+    pm.add_argument("action", choices=["authorize", "revoke", "list-devices"])
+    pm.add_argument("device_id", nargs="?", default=None, help="device id (authorize/revoke)")
+    pm.add_argument("pubkey", nargs="?", default=None, help="device Ed25519 public key b64 (authorize/revoke)")
+    pm.add_argument("--yes", action="store_true",
+                    help="skip the interactive fingerprint confirmation (authorize)")
+    pm.set_defaults(fn=cmd_mesh)
     psc = sub.add_parser("scrape", help="SCRIBE grounded web research (public, scope-gated, robots-respecting)")
     psc.add_argument("--question", default=None)
     psc.add_argument("--seed", action="append", help="seed URL (repeatable)")
