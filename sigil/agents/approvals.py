@@ -30,20 +30,30 @@ def _approval_message(target_seq, decision: str, approver: str) -> bytes:
     return m if isinstance(m, bytes) else m.encode()
 
 
-def verify_approval(record, trusted_pubkey_b64: Optional[str]) -> bool:
-    """True iff the approval carries a valid OWNER signature over its (target, decision, approver).
-    Unsigned, wrong-key, or no-trusted-key → False (fail-closed)."""
+def verify_approval(record, trusted_pubkey_b64: Optional[str], *, extra_pubkeys=None) -> bool:
+    """True iff the approval carries a valid signature over its (target, decision, approver) by the
+    OWNER key OR by a currently-authorized DEVICE key (`extra_pubkeys`). The claimed `pubkey` must be
+    in the allowed set — which is composed ONLY of owner-minted keys (the owner identity + the
+    owner-signed device-authorization ledger, see `sigil.mesh`) — so a key the requester merely
+    presents is never trusted (RP-APPROVAL-2). The signed `target_seq` still binds (RP-APPROVAL-4).
+    Unsigned / not-in-allowed-set / no-trusted-key → False (fail-closed)."""
     p = record.payload if hasattr(record, "payload") else record
-    sig = p.get("sig")
-    if not sig or not trusted_pubkey_b64 or p.get("pubkey") != trusted_pubkey_b64:
+    sig, pub = p.get("sig"), p.get("pubkey")
+    allowed = set()
+    if trusted_pubkey_b64:
+        allowed.add(trusted_pubkey_b64)
+    if extra_pubkeys:
+        allowed.update(extra_pubkeys)
+    if not sig or not pub or pub not in allowed:
         return False
     msg = _approval_message(p.get("target_seq"), p.get("approval"), p.get("approver"))
-    return verify_one(trusted_pubkey_b64, msg, sig)
+    return verify_one(pub, msg, sig)                # verify against the (owner-minted) claimed key
 
 
-def pending(store: SpineStore, trusted_pubkey_b64: Optional[str] = None) -> List:
-    """Queued proposals with NO valid owner approval yet, oldest first. Resolution requires a
-    VERIFIED approval; an unsigned/forged/wrong-key approval leaves the item pending (fail-closed)."""
+def pending(store: SpineStore, trusted_pubkey_b64: Optional[str] = None, *, extra_pubkeys=None) -> List:
+    """Queued proposals with NO valid approval yet, oldest first. Resolution requires a VERIFIED
+    owner/authorized-device approval; an unsigned/forged/unauthorized approval leaves the item
+    pending (fail-closed)."""
     if trusted_pubkey_b64 is None:
         from ..governor.identity import owner_pubkey
         trusted_pubkey_b64 = owner_pubkey()
@@ -51,7 +61,7 @@ def pending(store: SpineStore, trusted_pubkey_b64: Optional[str] = None) -> List
     queued = {}
     for r in store.iter_records():
         p = r.payload
-        if p.get("signal") == SIGNAL and verify_approval(r, trusted_pubkey_b64):
+        if p.get("signal") == SIGNAL and verify_approval(r, trusted_pubkey_b64, extra_pubkeys=extra_pubkeys):
             resolved.add(p.get("target_seq"))       # honor the SIGNED target, not raw supersedes_id
         if p.get("decision") == "queued" and p.get("status") == _QUEUED_STATUS:
             queued[r.seq] = r

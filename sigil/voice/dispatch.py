@@ -9,11 +9,20 @@ from pathlib import Path
 
 
 def _default_bin() -> str:
-    for p in ("kernel/target/release/sigil-kernel", "kernel/target/debug/sigil-kernel"):
-        f = Path("/home/kali/sigil") / p
-        if f.exists():
-            return str(f)
-    return "sigil-kernel"
+    """Resolve the kernel binary portably (WS-D D7): an explicit env override, then package-relative
+    (the repo the package lives in), then the legacy dev path, then PATH."""
+    import os
+    exe = "sigil-kernel.exe" if os.name == "nt" else "sigil-kernel"
+    env = os.environ.get("SIGIL_KERNEL_BIN")
+    if env and Path(env).exists():
+        return env
+    # sigil/voice/dispatch.py → repo root is three parents up (sigil/<pkg>/voice/..)
+    repo_root = Path(__file__).resolve().parents[2]
+    for base in (repo_root, Path("/home/kali/sigil")):
+        for p in (f"kernel/target/release/{exe}", f"kernel/target/debug/{exe}"):
+            if (base / p).exists():
+                return str(base / p)
+    return exe
 
 
 class KernelDispatch:

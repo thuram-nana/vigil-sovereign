@@ -225,13 +225,15 @@ class Operator(Agent):
 
     # --- B5: execute --------------------------------------------------------------------------------
     def _approved(self, plan_seq: int) -> bool:
+        from ..mesh import authorized_devices
         from .approvals import SIGNAL as APPROVAL_SIGNAL
         from .approvals import verify_approval
         tp = self._tp()
+        devices = authorized_devices(self.store, tp)   # the owner + any owner-authorized device may approve
         for r in self.store.iter_records(since_seq=plan_seq):
             p = r.payload
             if (p.get("signal") == APPROVAL_SIGNAL and p.get("target_seq") == plan_seq
-                    and p.get("approval") == "approved" and verify_approval(r, tp)):
+                    and p.get("approval") == "approved" and verify_approval(r, tp, extra_pubkeys=devices)):
                 return True
         return False
 
