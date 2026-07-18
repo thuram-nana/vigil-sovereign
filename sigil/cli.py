@@ -335,6 +335,16 @@ def cmd_dashboard(a) -> None:
     print(render_dashboard(snapshot(SpineStore())))
 
 
+def cmd_serve(a) -> None:
+    """Start the loopback glass-cockpit UI. Mints a fresh session token (printed here); every
+    request needs it and no web page can read it. Read plane is GET-only; the owner-signed action
+    plane is CSRF/Host/Origin-gated."""
+    import secrets
+
+    from .ui.server import serve
+    serve(token=secrets.token_urlsafe(24), port=a.port)
+
+
 def cmd_verify(a) -> None:
     ok, msg = SpineStore().verify()
     print(("chain OK: " if ok else "chain FAIL: ") + msg)
@@ -450,6 +460,9 @@ def main(argv=None) -> None:
     sub.add_parser("dashboard", help="read-only operator status over the spine").set_defaults(fn=cmd_dashboard)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
+    psv.add_argument("--port", type=int, default=8733)
+    psv.set_defaults(fn=cmd_serve)
     a = p.parse_args(argv)
     a.fn(a)
 
