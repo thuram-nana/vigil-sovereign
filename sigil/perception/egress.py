@@ -28,14 +28,17 @@ def egress_token(frame_sha256: str, question: str) -> str:
 
 
 def egress_approved(store, seq: int, token: str, trusted_pubkey) -> bool:
-    """True iff `seq` is an egress request bound to `token` AND carries a VERIFIED owner approval.
-    Fail-closed: wrong token, no approval, denied, or an approval of a different seq → False."""
+    """True iff `seq` is an egress request bound to `token` AND carries a VERIFIED approval by the
+    owner OR an owner-authorized device. Fail-closed: wrong token, no approval, denied, or an
+    approval of a different seq → False."""
     rec = store.get(seq)
     if rec is None or rec.payload.get("signal") != EGRESS_SIGNAL or rec.payload.get("egress_token") != token:
         return False
+    from ..mesh import authorized_devices
+    devices = authorized_devices(store, trusted_pubkey)
     for r in store.iter_records(since_seq=seq):
         p = r.payload
         if (p.get("signal") == _APPROVAL_SIGNAL and p.get("target_seq") == seq
-                and p.get("approval") == "approved" and verify_approval(r, trusted_pubkey)):
+                and p.get("approval") == "approved" and verify_approval(r, trusted_pubkey, extra_pubkeys=devices)):
             return True
     return False

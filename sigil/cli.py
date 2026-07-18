@@ -335,6 +335,14 @@ def cmd_dashboard(a) -> None:
     print(render_dashboard(snapshot(SpineStore())))
 
 
+def cmd_host(a) -> None:
+    """Show this host's capability descriptor (WS-D) — what the mesh routes on."""
+    from .platform import host
+    d = host().capabilities()
+    print(f"  host {d.host_id} · {d.os}")
+    print(f"    screen={d.has_screen} camera={d.has_camera} gpu_vlm={d.has_gpu_vlm} always_on={d.always_on}")
+
+
 def cmd_serve(a) -> None:
     """Start the loopback glass-cockpit UI. Mints a fresh session token (printed here); every
     request needs it and no web page can read it. Read plane is GET-only; the owner-signed action
@@ -463,6 +471,9 @@ def main(argv=None) -> None:
     psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
     psv.add_argument("--port", type=int, default=8733)
     psv.set_defaults(fn=cmd_serve)
+    ph = sub.add_parser("host", help="this host's mesh capability descriptor")
+    ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
+    ph.set_defaults(fn=cmd_host)
     a = p.parse_args(argv)
     a.fn(a)
 
