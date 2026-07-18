@@ -11,8 +11,11 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from .capture import Frame, grab_camera, grab_screen  # noqa: E402
+from .delta import changed  # noqa: E402
 from .perceive import Perceptor, compose_perception  # noqa: E402
-from .vision import ClaudeVision, VisionModel  # noqa: E402
+from .recall import recall  # noqa: E402
+from .veracity import corroborate  # noqa: E402
+from .vision import ClaudeVision, MoondreamVision, VisionModel  # noqa: E402
 
 __all__ = ["Frame", "grab_screen", "grab_camera", "Perceptor", "compose_perception",
-           "VisionModel", "ClaudeVision"]
+           "VisionModel", "ClaudeVision", "MoondreamVision", "corroborate", "recall", "changed"]

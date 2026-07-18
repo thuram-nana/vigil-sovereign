@@ -183,24 +183,35 @@ def cmd_agents(a) -> None:
                 p = rec.payload
                 print(f"    [{p.get('severity')}] {p.get('summary')}  ({p.get('quote')}, seq {seq})")
     elif a.action == "perceive":
-        from .agents.base import Tier  # noqa: F401  (ensures agents pkg import/doctrine check runs)
-        from .perception import Frame, Perceptor, grab_camera, grab_screen
+        from .perception import (Frame, MoondreamVision, Perceptor, grab_camera,
+                                 grab_screen, recall)
         from .spine.store import SpineStore
-        if a.image:
-            frame = Frame.from_image("screen", a.image)
-        elif a.camera:
-            frame = grab_camera()
-        else:
-            frame = grab_screen()
+        store = SpineStore()
+        if a.recall:   # "where did I last see X?" — grounded, on-box, no capture needed
+            hit = recall(store, a.recall)
+            if not hit:
+                print(f"  no grounded sighting of {a.recall!r} in perception memory.")
+            else:
+                print(f"  last seen at seq {hit['seq']} ({hit['when']}): \"{hit['quote']}\"  "
+                      f"[frame {str(hit['frame_sha256'])[:12]}, entry {hit['entry_hash'][:12]}]")
+            return
+        frame = Frame.from_image("screen", a.image) if a.image else (grab_camera() if a.camera else grab_screen())
         if frame is None:
             print("  no capture — need a screenshot tool (scrot/…) or a camera, or pass --image <path>")
             return
-        store = SpineStore()
-        res = Perceptor(store).perceive(a.question or "", frame)
+        p = Perceptor(store)
+        if a.frontier or a.approved is not None:
+            from .perception.vision import ClaudeVision
+            res = p.frontier(a.question or "", frame, vision=ClaudeVision(), approved_seq=a.approved)
+        else:
+            res = p.perceive(a.question or "", frame, vision=MoondreamVision())
+        print(f"  {'; '.join(res.notes)}" if res.notes else "")
         for seq in res.applied:
             rec = store.get(seq)
-            if rec:
+            if rec and rec.payload.get("signal") == "perception":
                 print(rec.payload.get("text", ""))
+        for q in res.queued:
+            print(f"    [{q['tier']} {q['kind']}] {q.get('subject')}  (seq {q['seq']}, awaiting approval)")
 
 
 def cmd_voice(a) -> None:
@@ -398,6 +409,11 @@ def main(argv=None) -> None:
     pa.add_argument("--screen", action="store_true", help="PERCEIVE: capture the screen (default)")
     pa.add_argument("--camera", action="store_true", help="PERCEIVE: capture a camera frame")
     pa.add_argument("--image", default=None, help="PERCEIVE: describe a saved image path instead of capturing")
+    pa.add_argument("--frontier", action="store_true",
+                    help="PERCEIVE: use the frontier VLM — QUEUES the image egress for approval (uploads nothing)")
+    pa.add_argument("--approved", type=int, default=None,
+                    help="PERCEIVE: run an approved frontier egress by its queued seq (uploads only if verified)")
+    pa.add_argument("--recall", default=None, help="PERCEIVE: where did I last see <subject>? (grounded, on-box)")
     pa.add_argument("--now", default=None, help="BASTION: assessment 'now' (ISO) for cert-expiry math")
     pa.set_defaults(fn=cmd_agents)
     pv = sub.add_parser("voice")
