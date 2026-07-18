@@ -102,10 +102,15 @@ class SpineStore:
         ]
 
     def verify(self) -> tuple[bool, str]:
-        """Two-layer integrity: (1) BINDING — each record's payload still hashes to its
-        stored cert_digest (catches silent payload edits); (2) CHAIN — the entries link
-        cleanly (catches delete/reorder/entry tamper). A payload edit fails (1); editing
-        the digest to match cascades an entry_hash/prev_hash break caught by (2)."""
+        """Two-layer UNKEYED integrity: (1) BINDING — each record's payload still hashes to its
+        stored cert_digest (catches silent payload edits); (2) CHAIN — the entries link cleanly
+        (catches delete/reorder/entry tamper). This proves internal CONSISTENCY, not authenticity:
+        a naive payload edit fails (1), and a mid-chain digest edit cascades an entry_hash/prev_hash
+        break caught by (2) — BUT a writer who recomputes cert_digest+entry_hash for the tip (no
+        successor to cascade into) or forward-cascades a fork produces a self-consistent chain that
+        passes here. Resistance to a recompute-capable writer is the owner-SIGNED head's job
+        (`checkpoint.verify_checkpoint`, Ed25519 + monotonic last_seq). Use this for corruption/
+        naive-tamper detection; use the signed head for tamper-EVIDENCE."""
         entries: list[ChainEntry] = []
         for r in self.iter_records():
             content = {
