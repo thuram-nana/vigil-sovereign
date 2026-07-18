@@ -109,6 +109,17 @@ const A0_TOOLS: &[&str] = &[
     "threads.open", "commitments.due", "contradictions.pending",
 ];
 
+/// EXACT-NAME input-authorization tables (Phase 8, WS-F gesture control). Input injection has NO
+/// honest verb in the token sets (so it is fail-closed A3 by default). These exact `hid.*` names
+/// authorize gesture-driven input at the correct tier — checked AFTER the danger-first A3/A2/A1
+/// token pass, so a danger token ALWAYS wins (`hid.pointer.delete` → A3). Bare tokens (`move`/`type`/
+/// `click`) are DELIBERATELY never added to the token sets, so `file.move`/`data.type` stay A3. The
+/// keyboard tools avoid the token `key` (which is an A3 secret-target). Session-boundedness — A1
+/// injection ONLY inside an owner-armed session — is enforced in Python (`gesture/session.py`), and
+/// the raise-only registry (`registry.rs`) can only ever make an input tool MORE gated, never less.
+const INPUT_A1: &[&str] = &["hid.pointer.move", "hid.pointer.click", "hid.pointer.scroll", "hid.pointer.drag"];
+const INPUT_A2: &[&str] = &["hid.type", "hid.combo", "hid.app.launch"];
+
 /// Split a tool name into whole tokens on `.`/`_`/`-`/`/` and whitespace, lowercased.
 fn tokens(tool: &str) -> Vec<String> {
     tool.split(|c: char| c == '.' || c == '_' || c == '-' || c == '/' || c.is_whitespace())
@@ -134,6 +145,14 @@ pub fn classify(tool: &str) -> Tier {
     }
     if has(A1_TOKENS) {
         return Tier::A1;
+    }
+    // Exact-name input tables — reached ONLY after the danger-first pass, so `hid.pointer.delete`
+    // already returned A3. Bare `move`/`type` are never token-classified, so `file.move` stays A3.
+    if INPUT_A1.contains(&full.as_str()) {
+        return Tier::A1; // reversible pointer input (session-bounded in gesture/session.py)
+    }
+    if INPUT_A2.contains(&full.as_str()) {
+        return Tier::A2; // keystrokes / combos / app-launch → queued for owner/device approval
     }
     if A0_TOOLS.contains(&full.as_str()) || has(A0_VERBS) {
         return Tier::A0;
@@ -218,6 +237,26 @@ mod tests {
         assert_eq!(classify("read.then.delete"), Tier::A3);
         assert_eq!(classify("delete.and.list"), Tier::A3);
         assert_eq!(classify("search.and.deploy"), Tier::A3);
+    }
+
+    #[test]
+    fn hid_input_tables_tier_correctly_and_danger_wins() {
+        // exact HID input names authorize input at the right tier
+        assert_eq!(classify("hid.pointer.move"), Tier::A1);
+        assert_eq!(classify("hid.pointer.click"), Tier::A1);
+        assert_eq!(classify("hid.pointer.scroll"), Tier::A1);
+        assert_eq!(classify("hid.pointer.drag"), Tier::A1);
+        assert_eq!(classify("hid.type"), Tier::A2, "keystrokes are queued");
+        assert_eq!(classify("hid.combo"), Tier::A2);
+        assert_eq!(classify("hid.app.launch"), Tier::A2, "app-launch is queued");
+        // danger-first ALWAYS wins over an input name
+        assert_eq!(classify("hid.pointer.delete"), Tier::A3, "a danger token beats an input name");
+        assert_eq!(classify("hid.pointer.sudo"), Tier::A3);
+        // unknown hid.* fails closed; the exact-name approach does NOT leak to token-named tools
+        assert_eq!(classify("hid.unknown"), Tier::A3, "unknown hid.* → fail-closed A3");
+        assert_eq!(classify("file.move"), Tier::A3, "file.move is UNAFFECTED (never auto)");
+        assert_eq!(classify("data.type"), Tier::A3, "data.type is UNAFFECTED");
+        assert_eq!(classify("content.type"), Tier::A3);
     }
 
     #[test]

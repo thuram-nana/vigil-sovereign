@@ -12,6 +12,12 @@ from .base import CapabilityDescriptor, HostBackend
 assert_no_offense()
 
 
+def input_backend():
+    """The InputBackend for this OS (WS-F gesture injection). Always routed through the SessionGate."""
+    from .input import input_backend as _ib
+    return _ib()
+
+
 def host() -> HostBackend:
     """The backend for this OS (selected by `sys.platform`)."""
     if sys.platform == "darwin":
@@ -24,4 +30,4 @@ def host() -> HostBackend:
     return LinuxBackend()
 
 
-__all__ = ["host", "HostBackend", "CapabilityDescriptor"]
+__all__ = ["host", "input_backend", "HostBackend", "CapabilityDescriptor"]
