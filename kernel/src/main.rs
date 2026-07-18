@@ -35,6 +35,16 @@ enum Cmd {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Classify a tool name → its WARDEN tier + gate decision, and return it. This is an A0
+    /// OBSERVATION: it writes NO action-log record. It is the authoritative tiering oracle the
+    /// Python mesh consults so a Proposal's tier is DERIVED from the fail-closed Rust classifier
+    /// (via the raise-only registry) rather than self-declared.
+    Classify {
+        tool: String,
+        /// Emit machine-readable JSON ({"tier":"A3","decision":"explicit-required"}).
+        #[arg(long)]
+        json: bool,
+    },
     /// Replay the signed action log verbatim (self-audit, C18).
     Audit,
     /// Verify the action log's chain + signatures + the spine-anchored anti-rollback high-water.
@@ -74,6 +84,7 @@ fn main() {
     match cli.cmd {
         Cmd::Ask { intent } => cmd_ask(&w, &intent.join(" ")),
         Cmd::Do { tool, args } => cmd_do(&w, &tool, &args.join(" ")),
+        Cmd::Classify { tool, json } => cmd_classify(&w, &tool, json),
         Cmd::Audit => cmd_audit(&w),
         Cmd::Verify { allow_unanchored } => cmd_verify(&w, allow_unanchored),
         Cmd::Checkpoint => cmd_checkpoint(&w),
@@ -147,6 +158,20 @@ fn cmd_do(w: &Warden, tool: &str, args: &str) {
     // the round-trip + tiering + signed log are demonstrable end-to-end.
     let output = format!("[executed] {tool} {args}").trim_end().to_string();
     finish(w, "KERNEL", tool, args, &v, &output);
+}
+
+/// Classify a tool name and return its tier + gate decision. Reuses `Warden::decide` (registry
+/// raise-only pins over `tiers::classify`) so it can NEVER disagree with the enforced path, and
+/// writes NO action-log record — classification is a pure A0 observation, not an action. The
+/// `tier`/`decision` values are the enum `as_str()` forms (fixed ASCII), so the manual JSON needs
+/// no escaping.
+fn cmd_classify(w: &Warden, tool: &str, json: bool) {
+    let v = w.decide(tool);
+    if json {
+        println!("{{\"tier\":\"{}\",\"decision\":\"{}\"}}", v.tier.as_str(), v.decision.as_str());
+    } else {
+        println!("[classify {}] {} {}", tool, v.tier, v.decision.as_str());
+    }
 }
 
 fn finish(w: &Warden, agent: &str, tool: &str, args: &str, v: &Verdict, output: &str) {
