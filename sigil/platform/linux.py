@@ -20,8 +20,10 @@ class LinuxBackend:
         return grab_camera()
 
     def capabilities(self) -> CapabilityDescriptor:
+        from .input import has_hid_inject
+        cam = Path("/dev/video0").exists()
         return CapabilityDescriptor(
             host_id=host_id(), os="linux",
             has_screen=any(shutil.which(t) for t in _SCREEN_TOOLS),
-            has_camera=Path("/dev/video0").exists(),
-            has_gpu_vlm=probe_gpu_vlm(), always_on=probe_always_on())
+            has_camera=cam, has_gpu_vlm=probe_gpu_vlm(), always_on=probe_always_on(),
+            has_hid_inject=has_hid_inject(), has_camera_stream=cam and bool(shutil.which("ffmpeg")))

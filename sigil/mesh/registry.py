@@ -23,7 +23,8 @@ from ..spine.store import SpineStore
 
 CAP_SIGNAL = "mesh.host_capability"
 DEV_SIGNAL = "mesh.device"
-_CAP_CORE = ("signal", "host_id", "os", "has_screen", "has_camera", "has_gpu_vlm", "always_on")
+_CAP_CORE = ("signal", "host_id", "os", "has_screen", "has_camera", "has_gpu_vlm", "always_on",
+             "has_hid_inject", "has_camera_stream")
 _DEV_CORE = ("signal", "state", "device_id", "device_pubkey")
 
 
@@ -31,7 +32,9 @@ _DEV_CORE = ("signal", "state", "device_id", "device_pubkey")
 def advertise_capability(store: SpineStore, descriptor: dict, owner_key) -> int:
     core = {"signal": CAP_SIGNAL, "host_id": descriptor["host_id"], "os": descriptor["os"],
             "has_screen": bool(descriptor["has_screen"]), "has_camera": bool(descriptor["has_camera"]),
-            "has_gpu_vlm": bool(descriptor["has_gpu_vlm"]), "always_on": bool(descriptor["always_on"])}
+            "has_gpu_vlm": bool(descriptor["has_gpu_vlm"]), "always_on": bool(descriptor["always_on"]),
+            "has_hid_inject": bool(descriptor.get("has_hid_inject", False)),
+            "has_camera_stream": bool(descriptor.get("has_camera_stream", False))}
     payload = {**signed_payload(core, owner_key), "tier": "A0", "decision": "auto"}
     return store.append(kind="event", source="mesh", actor="OWNER", payload=payload)
 

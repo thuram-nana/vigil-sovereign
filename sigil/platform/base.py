@@ -19,10 +19,13 @@ class CapabilityDescriptor:
     has_camera: bool
     has_gpu_vlm: bool          # a local moondream-class VLM is reachable (Ollama up)
     always_on: bool
+    has_hid_inject: bool = False    # this host can inject cursor/keyboard events (WS-F gesture control)
+    has_camera_stream: bool = False # this host can stream the camera (persistent, low-latency)
 
     def to_dict(self) -> dict:
         return {"host_id": self.host_id, "os": self.os, "has_screen": self.has_screen,
-                "has_camera": self.has_camera, "has_gpu_vlm": self.has_gpu_vlm, "always_on": self.always_on}
+                "has_camera": self.has_camera, "has_gpu_vlm": self.has_gpu_vlm, "always_on": self.always_on,
+                "has_hid_inject": self.has_hid_inject, "has_camera_stream": self.has_camera_stream}
 
 
 @runtime_checkable
