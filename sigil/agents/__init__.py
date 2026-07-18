@@ -6,10 +6,12 @@ from ..reuse import assert_no_offense
 
 assert_no_offense()
 
+from .actor import Delegate, WebStep  # noqa: E402
 from .archivist import Archivist  # noqa: E402
 from .artificer import Artificer  # noqa: E402
 from .base import Agent, AgentResult, Proposal, Tier  # noqa: E402
 from .bastion import Asset, Bastion  # noqa: E402
+from .vault import CredentialVault, VaultRecord  # noqa: E402
 from .envoy import Envoy, FileInbox  # noqa: E402
 from .operator import Operator, Step  # noqa: E402
 from .operator_scope import OperatorScope  # noqa: E402
@@ -19,4 +21,5 @@ from .steward import Steward  # noqa: E402
 
 __all__ = ["Agent", "AgentResult", "Proposal", "Tier",
            "Archivist", "Sentinel", "Steward", "Envoy", "FileInbox", "Artificer", "Scholar",
-           "Bastion", "Asset", "Operator", "OperatorScope", "Step"]
+           "Bastion", "Asset", "Operator", "OperatorScope", "Step",
+           "Delegate", "WebStep", "CredentialVault", "VaultRecord"]

@@ -140,6 +140,7 @@ class FetchResult:
     url: str
     headers: dict = field(default_factory=dict)
     reason: str = ""
+    resolved_ip: str = ""    # the vetted, PINNED IP this fetch used (so a caller can bind a follow-up POST to the SAME address)
 
 
 def fetch_raw(ref: str, *, timeout: int = 20, max_bytes: int = 2_000_000) -> FetchResult:
@@ -160,14 +161,14 @@ def fetch_raw(ref: str, *, timeout: int = 20, max_bytes: int = 2_000_000) -> Fet
     try:
         with opener.open(req, timeout=timeout) as r:
             raw = r.read(max_bytes).decode("utf-8", "ignore")
-            return FetchResult(True, getattr(r, "status", 200), raw, ref, headers=dict(r.headers))
+            return FetchResult(True, getattr(r, "status", 200), raw, ref, headers=dict(r.headers), resolved_ip=ip)
     except urllib.error.HTTPError as e:                 # 3xx-not-followed / 4xx / 5xx — surface the code
         body = ""
         try:
             body = e.read(max_bytes).decode("utf-8", "ignore")
         except Exception:  # noqa: BLE001
             pass
-        return FetchResult(False, e.code, body, ref, headers=dict(e.headers or {}), reason=f"http-{e.code}")
+        return FetchResult(False, e.code, body, ref, headers=dict(e.headers or {}), reason=f"http-{e.code}", resolved_ip=ip)
     except (urllib.error.URLError, OSError, ValueError) as e:
         return FetchResult(False, 0, "", ref, reason=f"neterr:{type(e).__name__}")
 

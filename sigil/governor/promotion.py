@@ -15,7 +15,7 @@ from .authn import signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
 SIGNAL = "governor.promotion"
-NO_PROMOTION_AGENTS = frozenset({"ENVOY"})   # structural: outbound stays human-gated forever (§4.6)
+NO_PROMOTION_AGENTS = frozenset({"ENVOY", "DELEGATE"})   # outbound + account actions stay human-gated forever
 _CORE = ("signal", "state", "agent", "scope")
 
 
