@@ -11,10 +11,12 @@ from .artificer import Artificer  # noqa: E402
 from .base import Agent, AgentResult, Proposal, Tier  # noqa: E402
 from .bastion import Asset, Bastion  # noqa: E402
 from .envoy import Envoy, FileInbox  # noqa: E402
+from .operator import Operator, Step  # noqa: E402
+from .operator_scope import OperatorScope  # noqa: E402
 from .scholar import Scholar  # noqa: E402
 from .sentinel import Sentinel  # noqa: E402
 from .steward import Steward  # noqa: E402
 
 __all__ = ["Agent", "AgentResult", "Proposal", "Tier",
            "Archivist", "Sentinel", "Steward", "Envoy", "FileInbox", "Artificer", "Scholar",
-           "Bastion", "Asset"]
+           "Bastion", "Asset", "Operator", "OperatorScope", "Step"]
