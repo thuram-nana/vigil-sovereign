@@ -7,6 +7,19 @@ from ..reuse import assert_no_offense
 assert_no_offense()
 
 from .daemon import BridgeDaemon, bind_ok  # noqa: E402
+from .envelope import (  # noqa: E402
+    ACTIONS,
+    RECEIPT_SIGNAL,
+    build_core,
+    consume,
+    device_nonce_highwater,
+    envelope_message,
+    record_receipt,
+    sign_envelope,
+    verify_envelope,
+)
 from .notifier import PushNotifier  # noqa: E402
 
-__all__ = ["BridgeDaemon", "PushNotifier", "bind_ok"]
+__all__ = ["BridgeDaemon", "PushNotifier", "bind_ok",
+           "ACTIONS", "RECEIPT_SIGNAL", "envelope_message", "build_core", "sign_envelope",
+           "verify_envelope", "record_receipt", "device_nonce_highwater", "consume"]

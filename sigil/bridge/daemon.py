@@ -44,6 +44,19 @@ class BridgeDaemon:
         items = pending(self.store, self.trusted_pubkey, extra_pubkeys=self._authorized())
         return [{"seq": r.seq, "tier": r.payload.get("tier"), "kind": r.kind} for r in items]
 
+    def recall(self, subject: str) -> Optional[dict]:
+        """Read-only remote RECALL — "where did I last see X?" — answered from the owner's own
+        GROUNDED on-screen OCR history. Returns the perception-recall provenance dict VERBATIM
+        (seq/entry_hash/when/frame_sha256/quote) or None: A0, read-only, no VLM and no paraphrase —
+        the served `quote` is the owner's verbatim captured OCR line, never an advisory VLM lead.
+
+        This surfaces the owner's own on-screen text over the tunnel, so it leaks MORE than
+        `pending()`'s minimal {seq,tier,kind} fields. The network SERVER (a later slice) MUST
+        therefore gate this behind an authorized-device (device-signed) read request; this daemon
+        method is only the read-only core."""
+        from ..perception.recall import recall
+        return recall(self.store, subject)
+
     def submit_device_approval(self, payload: dict) -> int:
         """Append a DEVICE-signed approval the phone produced — ONLY if the signing device is
         currently authorized AND the signature verifies (fail-closed). A rogue/revoked device or a

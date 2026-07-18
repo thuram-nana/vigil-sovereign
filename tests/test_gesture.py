@@ -123,6 +123,55 @@ def test_run_gesture_end_to_end_with_doubles():
     assert any(r.payload.get("signal") == "gesture.session_disarmed" for r in s.iter_records())
 
 
+# ---- W2-H egress gate: the on-box-only guarantee is ENFORCED in the loop (not just documented) ----
+class EgressingLandmarker(ScriptedLandmarker):
+    """An off-box landmarker (would stream owner pixels to a service). The loop must REFUSE it."""
+    egresses = True
+
+
+def test_run_gesture_refuses_an_egressing_landmarker():
+    s = _store(); b = RecordingInputBackend()
+    n = run_gesture(store=s, owner_key=OWNER, source=ScriptedFrameSource([None] * 4),
+                    landmarker=EgressingLandmarker([[]] * 4), classifier=ScriptedGestures([]), backend=b,
+                    gate=SessionGate(s, b, classifier=FakeCls(), owner_key=OWNER),
+                    pipeline=GesturePipeline(confirm_frames=3, deadzone=0.001))
+    assert n == 0, "an egressing landmark model refuses the loop before arming (returns 0 frames)"
+    assert not b.calls, "NOTHING is injected when the loop refuses an egressing model"
+    refusals = [r for r in s.iter_records() if r.payload.get("signal") == "gesture.refused"]
+    assert refusals, "a tamper-evident refusal record is appended"
+    assert refusals[0].payload["decision"] == "refused" and refusals[0].payload["tier"] == "A0"
+    assert refusals[0].kind == "refusal" and refusals[0].source == "gesture"
+    # the loop never armed → no session lifecycle records exist
+    assert not any(r.payload.get("signal") in ("gesture.session_armed", "gesture.session_disarmed")
+                   for r in s.iter_records()), "an egressing model never arms a session"
+
+
+def test_run_gesture_strict_gate_refuses_a_landmarker_with_no_egresses_flag():
+    """Stricter-than-perceive: a landmarker that doesn't declare `egresses=False` is refused too."""
+    class UndeclaredLandmarker(ScriptedLandmarker):
+        egresses = None   # neither explicitly on-box (False) nor a normal bool
+    s = _store(); b = RecordingInputBackend()
+    n = run_gesture(store=s, owner_key=OWNER, source=ScriptedFrameSource([None] * 2),
+                    landmarker=UndeclaredLandmarker([[]] * 2), classifier=ScriptedGestures([]), backend=b,
+                    gate=SessionGate(s, b, classifier=FakeCls(), owner_key=OWNER),
+                    pipeline=GesturePipeline(confirm_frames=3, deadzone=0.001))
+    assert n == 0 and not b.calls, "refuse UNLESS egresses is explicitly False (fail-closed)"
+    assert any(r.payload.get("signal") == "gesture.refused" for r in s.iter_records())
+
+
+def test_run_gesture_still_runs_an_on_box_landmarker():
+    """The egress gate preserves normal behavior: an explicit egresses=False model runs + injects."""
+    s = _store(); b = RecordingInputBackend()
+    readings = [GestureReading("pinch", 0.9, margin=0.5)] * 3
+    n = run_gesture(store=s, owner_key=OWNER, source=ScriptedFrameSource([None] * 3),
+                    landmarker=ScriptedLandmarker([[]] * 3), classifier=ScriptedGestures(readings), backend=b,
+                    gate=SessionGate(s, b, classifier=FakeCls(), owner_key=OWNER),
+                    pipeline=GesturePipeline(confirm_frames=3, deadzone=0.001))
+    assert n == 3, "an on-box (egresses=False) landmarker runs the loop as before"
+    assert any(c[0] == "click" for c in b.calls), "and injection still works on the on-box path"
+    assert not any(r.payload.get("signal") == "gesture.refused" for r in s.iter_records()), "no refusal"
+
+
 # ---- F5 capability flags -------------------------------------------------------------------------
 def test_capability_advertises_hid_flags():
     from sigil.mesh import advertise_capability, capability_map
