@@ -19,7 +19,9 @@ from .envelope import (  # noqa: E402
     verify_envelope,
 )
 from .notifier import PushNotifier  # noqa: E402
+from .server import BridgeServer, build_server, serve  # noqa: E402
 
 __all__ = ["BridgeDaemon", "PushNotifier", "bind_ok",
            "ACTIONS", "RECEIPT_SIGNAL", "envelope_message", "build_core", "sign_envelope",
-           "verify_envelope", "record_receipt", "device_nonce_highwater", "consume"]
+           "verify_envelope", "record_receipt", "device_nonce_highwater", "consume",
+           "BridgeServer", "build_server", "serve"]

@@ -11,8 +11,15 @@ from .session import SessionGate
 
 
 def run_gesture(*, store=None, owner_key=None, source=None, landmarker=None, classifier=None,
-                backend=None, pipeline=None, gate=None, max_frames: Optional[int] = None) -> int:
-    """Run the loop; returns the number of frames processed. Injectable for tests."""
+                backend=None, pipeline=None, gate=None, max_frames: Optional[int] = None,
+                auto_arm: bool = True) -> int:
+    """Run the loop; returns the number of frames processed. Injectable for tests.
+
+    `auto_arm=True` (default) is the camera path: owner-arm the session locally on start. `auto_arm=False`
+    is for a caller that passes an ALREADY-ARMED `gate` — e.g. a LOCAL owner-armed session consuming a
+    `remote.RemoteLandmarkSource` (owner arms at the PC; the phone streams landmarks in). This adds NO
+    device-arm path; the owner still arms locally, and every other guarantee (egress gate, Layer-1
+    session, Layer-2 tier gate, disarm-in-finally) is unchanged."""
     if store is None:
         from ..spine.store import SpineStore
         store = SpineStore()
@@ -43,7 +50,9 @@ def run_gesture(*, store=None, owner_key=None, source=None, landmarker=None, cla
         backend = input_backend()
     pipe = pipeline or GesturePipeline()
     g = gate or SessionGate(store, backend, owner_key=owner_key)
-    g.arm(owner_key=owner_key)
+    if auto_arm:
+        g.arm(owner_key=owner_key)   # camera path: owner-arm locally. When False, the caller's gate is
+        # already armed (a LOCAL owner-armed session) and we consume it without a second arm.
     n = 0
     try:
         for frame in source.frames():
