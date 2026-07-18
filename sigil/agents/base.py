@@ -51,36 +51,50 @@ class AgentResult:
 
 
 class Agent:
-    """Base agent. Subclasses implement `run()` and use `propose()`; the base enforces the
-    ceiling + auto/queue gate and records everything to the spine."""
+    """Base agent. Subclasses implement `run()`; the base routes every Proposal through the GOVERNOR
+    (SIGIL §5: kill switch, budgets, promotion — Phase 6) and records the outcome on the spine.
+    Backward compatible: with no kill/cap/promotion the governor reproduces the original gate."""
     name: str = "AGENT"
     mandate: str = ""
     ceiling: Tier = Tier.A1
 
-    def __init__(self, store: Optional[SpineStore] = None):
+    def __init__(self, store: Optional[SpineStore] = None, *, governor=None):
         self.store = store or SpineStore()
+        if governor is None:
+            from ..governor import Governor
+            governor = Governor(self.store)
+        self.governor = governor
 
     def run(self) -> AgentResult:
         raise NotImplementedError
 
     def _dispatch(self, proposals: List[Proposal]) -> AgentResult:
+        from ..governor import Outcome
         res = AgentResult(agent=self.name)
         for p in proposals:
             effective = max(p.tier, Tier.A0)
-            # a proposal above the agent's ceiling can NEVER auto-run; above the auto bar → queued.
-            if effective <= self.ceiling and effective <= AUTO_BAR:
-                seq = self.store.append(
-                    kind=p.kind, source=AGENTS_SOURCE, actor=self.name,
-                    payload={**p.payload, "agent": self.name, "tier": effective.label(), "decision": "auto"},
-                    parent_id=p.parent_id, supersedes_id=p.supersedes_id)
+            # promotion scope = the RECORD KIND (the real action written), not a self-asserted label:
+            # a promotion is "this agent may auto-approve A2 records of this kind" (red-pen RP-3).
+            decision = self.governor.decide(agent=self.name, tier=effective,
+                                            ceiling=self.ceiling, scope=p.kind)
+            common = {**p.payload, "agent": self.name, "tier": effective.label(),
+                      "governor": decision.reason}
+            if decision.outcome == Outcome.AUTO:
+                seq = self.store.append(kind=p.kind, source=AGENTS_SOURCE, actor=self.name,
+                                        payload={**common, "decision": "auto"},
+                                        parent_id=p.parent_id, supersedes_id=p.supersedes_id)
                 res.applied.append(seq)
-            else:
-                # queued: recorded as a pending/draft the human approves; NEVER auto-executed.
-                seq = self.store.append(
-                    kind=p.kind, source=AGENTS_SOURCE, actor=self.name,
-                    payload={**p.payload, "agent": self.name, "tier": effective.label(),
-                             "decision": "queued", "status": "awaiting-approval"},
-                    parent_id=p.parent_id, supersedes_id=p.supersedes_id)
+            elif decision.outcome == Outcome.QUEUE:
+                seq = self.store.append(kind=p.kind, source=AGENTS_SOURCE, actor=self.name,
+                                        payload={**common, "decision": "queued", "status": "awaiting-approval"},
+                                        parent_id=p.parent_id, supersedes_id=p.supersedes_id)
                 res.queued.append({"seq": seq, "kind": p.kind, "tier": effective.label(),
                                    "subject": p.payload.get("subject") or p.payload.get("to")})
+            else:  # DENY — kill switch or budget; record the refusal, take no action
+                self.store.append(kind="refusal", source=AGENTS_SOURCE, actor=self.name,
+                                  payload={"agent": self.name, "tier": effective.label(),
+                                           "decision": "denied", "governor": decision.reason,
+                                           "of_kind": p.kind, "subject": p.payload.get("subject")},
+                                  parent_id=p.parent_id)
+                res.notes.append(f"DENIED {p.kind} ({effective.label()}): {decision.reason}")
         return res
