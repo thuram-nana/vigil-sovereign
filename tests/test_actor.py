@@ -330,6 +330,33 @@ def test_vault_tolerates_hostile_manifest():                      # sweep FINDIN
         tmp.unlink(missing_ok=True)
 
 
+# ---- re-check residuals (malformed URL fail-closed; per-origin cap; unretrievable page) ----------
+def test_malformed_url_fails_closed():                            # re-check residual 1
+    s = _store()
+    d, engine = _delegate(s, pages={})
+    q, res = d.preview([WebStep("svc", "login", "https://[::1/x", {"pw": "vault:password"})])
+    assert q == [] and not _acts(engine), "a malformed URL is refused, not crashed on, and never acts"
+
+
+def test_creation_cap_is_per_origin_not_just_label():             # re-check residual 2
+    s = _store()
+    d, engine = _delegate(s, cap=1)
+    aq = ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OP)
+    q1, _ = d.preview([WebStep("svcA", "account.create", f"{SVC}/signup", {"u": "literal:userA"})])
+    aq.approve(q1[0])
+    assert d.execute(q1[0]).applied, "first account.create at the origin is allowed"
+    q2, res = d.preview([WebStep("svcB", "account.create", f"{SVC}/signup", {"u": "literal:userB"})])
+    assert q2 == [] and any("creation cap" in n for n in res.notes), \
+        "a DIFFERENT service label at the SAME origin is still capped (relabelling can't outrun the cap)"
+
+
+def test_unretrievable_page_not_queued_and_never_acted():         # re-check residual 3
+    s = _store()
+    d, engine = _delegate(s, pages={f"{SVC}/signup": (0, "")})    # network error / no page
+    q, res = d.preview([WebStep("svc", "login", f"{SVC}/signup", {"pw": "vault:password"})])
+    assert q == [] and not _acts(engine), "an unretrievable page is not queued for action (nothing to act on)"
+
+
 # ---- the REAL HttpEngine independently refuses a private host (defense-in-depth below ActorScope) --
 def test_real_http_engine_refuses_private_host_act():
     from sigil.agents.web_engine import HttpEngine

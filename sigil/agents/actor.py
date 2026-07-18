@@ -136,10 +136,10 @@ class Delegate(Agent):
                                            "reason": "target origin is not in the owner's ActorScope"})
                 res.notes.append(f"REFUSED {step.url}: out of ActorScope")
                 continue
-            if step.kind == "account.create" and not self.scope.creation_allowed(self.store, step.service):
+            if step.kind == "account.create" and not self.scope.creation_allowed(self.store, step.service, step.url):
                 self.store.append(kind="refusal", source="agent", actor=self.name,
                                   payload={"tier": "A0", "decision": "refused", "service": step.service,
-                                           "reason": "per-service creation cap (mass account creation is out of doctrine)"})
+                                           "reason": "creation cap for this service/origin (mass account creation is out of doctrine)"})
                 res.notes.append(f"REFUSED account.create {step.service}: creation cap")
                 continue
             bad = sorted(k for k, v in step.fields.items() if not _valid_source(v))
@@ -157,6 +157,12 @@ class Delegate(Agent):
                                            "reason": block, "tier": "A0",
                                            "summary": f"{step.url} is blocked ({block}) — surfaced, NOT defeated"})
                 res.notes.append(f"BLOCKED {step.url}: {block} — surfaced, not defeated (doctrine)")
+                continue
+            if not pv.ok:                                    # a non-2xx / unreachable page has nothing to act on
+                self.store.append(kind="refusal", source="agent", actor=self.name,
+                                  payload={"tier": "A0", "decision": "refused", "requested": step.url,
+                                           "reason": f"page not retrievable (status {pv.status}) — nothing to act on"})
+                res.notes.append(f"REFUSED {step.url}: page not retrievable (status {pv.status})")
                 continue
             page_hash = sha256_hex(pv.html.encode("utf-8", "ignore"))
             fb = self._field_binding(step.service, step.fields)
@@ -220,6 +226,12 @@ class Delegate(Agent):
                                        "summary": f"{url} blocked at execute ({block}) — surfaced, no action"})
             res.notes.append(f"BLOCKED at execute {url}: {block} — surfaced, no action")
             return res
+        if not pv.ok:                                        # unreachable/non-2xx at execute → never POST to a dead page
+            self.store.append(kind="refusal", source="agent", actor=self.name,
+                              payload={"tier": "A0", "decision": "refused", "target_seq": step_seq, "requested": url,
+                                       "reason": f"page not retrievable at execute (status {pv.status}) — aborted"})
+            res.notes.append(f"ABORTED: {url} not retrievable at execute (status {pv.status}) — no action")
+            return res
         # RE-DERIVE the token from the CURRENT url + page hash + vault version + journaled fields; a changed
         # URL OR page OR a credential rotation OR a journal edit → mismatch → abort (never trust a field).
         fresh = action_token(service, kind, url, sha256_hex(pv.html.encode("utf-8", "ignore")),
@@ -232,7 +244,7 @@ class Delegate(Agent):
             return res
         # RE-CHECK the creation cap at execute (against committed applied records) so a batch previewed
         # before any execute cannot outrun cap=1 — the preview check alone counts zero applied.
-        if kind == "account.create" and not self.scope.creation_allowed(self.store, service):
+        if kind == "account.create" and not self.scope.creation_allowed(self.store, service, url):
             self.store.append(kind="refusal", source="agent", actor=self.name,
                               payload={"tier": "A0", "decision": "refused", "target_seq": step_seq, "service": service,
                                        "reason": "per-service creation cap reached at execute (mass creation out of doctrine)"})
