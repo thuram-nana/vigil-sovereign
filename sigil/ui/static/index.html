@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIGIL · cockpit</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-token="__SIGIL_TOKEN__">
+<header>
+  <h1>◆ SIGIL</h1><span class="sub">glass cockpit · loopback · provenance-first</span>
+  <span id="kill" class="kill-off">…</span>
+</header>
+<main>
+  <section class="panel"><h2>Approval queue</h2><div id="queue" class="q"><span class="empty">loading…</span></div></section>
+  <section class="panel"><h2>Agent activity (recent)</h2><div id="activity" class="kv"></div>
+    <h2 class="mt">Budget today</h2><div id="budget" class="kv"></div>
+    <h2 class="mt">Ingest lag</h2><div id="lag" class="kv"></div></section>
+  <section class="panel feed"><h2>Live event stream · click any atom to verify its provenance</h2>
+    <div id="feed"></div></section>
+</main>
+<div id="detail"><span id="detail-close" class="close">✕ close</span>
+  <div id="detail-body"></div></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
