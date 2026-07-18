@@ -10,12 +10,20 @@ from urllib.parse import urlsplit
 
 from .sources import is_public_host
 
+_DEFAULT_PORT = {"http": 80, "https": 443}
+
 
 def _origin(url: str) -> Optional[str]:
-    p = urlsplit(url if "//" in url else "https://" + url)
-    if p.scheme not in ("http", "https") or not p.hostname:
+    """Canonical scheme://host:port (default port made explicit) — so `https://h` and `https://h:443`
+    match, but `https://h:8443` does NOT match `https://h` (port confusion is refused)."""
+    try:
+        p = urlsplit(url if "//" in url else "https://" + url)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return None
+        port = p.port or _DEFAULT_PORT[p.scheme]
+    except ValueError:                      # malformed / out-of-range port → fail-closed
         return None
-    return f"{p.scheme}://{p.hostname.lower()}"
+    return f"{p.scheme}://{p.hostname.lower()}:{port}"
 
 
 class ActorScope:
@@ -27,7 +35,7 @@ class ActorScope:
         p = urlsplit(url)
         if p.scheme not in ("http", "https") or not p.hostname or not is_public_host(p.hostname):
             return False
-        return bool(self.allowed) and f"{p.scheme}://{p.hostname.lower()}" in self.allowed
+        return bool(self.allowed) and _origin(url) in self.allowed
 
     def creation_allowed(self, store, service: str) -> bool:
         n = sum(1 for r in store.iter_records()

@@ -249,6 +249,87 @@ def test_actor_has_no_browser_escalation_path():
         assert banned not in src, f"the actor must contain no {banned!r} path (HTTP-only, no evasion surface)"
 
 
+# ==== review negative controls (each FAILS on the pre-fix code, PASSES after) =====================
+
+def test_execute_is_single_shot():                                 # sweep FINDING 1 (HIGH)
+    s = _store()
+    d, engine = _delegate(s, pages={f"{SVC}/buy": (200, "<form>buy</form>")})
+    q, _ = d.preview([WebStep("svc", "purchase", f"{SVC}/buy", {"pw": "vault:password"})])
+    ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OP).approve(q[0])
+    first, second, third = d.execute(q[0]), d.execute(q[0]), d.execute(q[0])
+    assert first.applied and not second.applied and not third.applied, "ONE approval authorises exactly ONE action"
+    assert any("already executed" in n for n in second.notes)
+    assert len(_acts(engine)) == 1, "one owner signature → exactly one POST (an approval can't be replayed into repeats)"
+
+
+def test_creation_cap_holds_against_batched_preview():             # red-pen BLOCK-1 / sweep FINDING 2 (HIGH)
+    s = _store()
+    d, engine = _delegate(s, cap=1)
+    steps = [WebStep("svc", "account.create", f"{SVC}/signup", {"u": "vault:username"}) for _ in range(3)]
+    q, _ = d.preview(steps)
+    assert len(q) == 3, "all three queue at preview (0 applied yet) — the batch-race setup"
+    aq = ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OP)
+    for seq in q:
+        aq.approve(seq)
+    applied = sum(1 for seq in q if d.execute(seq).applied)
+    assert applied == 1 and len(_acts(engine)) == 1, "cap=1 holds at EXECUTE despite a batched preview+approve"
+
+
+def test_action_binds_url_no_journal_rebind():                    # red-pen BLOCK-3 (MEDIUM)
+    s = _store()
+    html = "<form>identical bytes</form>"
+    d, engine = _delegate(s, pages={f"{SVC}/login": (200, html), f"{SVC}/promo": (200, html)})
+    q, _ = d.preview([WebStep("svc", "login", f"{SVC}/login", {"pw": "vault:password"}),
+                      WebStep("svc", "login", f"{SVC}/promo", {"pw": "vault:password"})])
+    a, b = q
+    assert s.get(a).payload["action_token"] != s.get(b).payload["action_token"], \
+        "identical-HTML steps at DIFFERENT urls get DIFFERENT tokens (the url is bound into the token)"
+    assert s.get(a).payload["journal"] != s.get(b).payload["journal"], "no journal-file collision across urls"
+    ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OP).approve(a)
+    assert d.execute(a).applied
+    assert _acts(engine)[-1][1] == f"{SVC}/login", "the credential POST fires at the APPROVED url, not the sibling page"
+
+
+def test_unknown_or_nonstring_field_source_refused():             # sweep FINDING 4/5 (LOW)
+    s = _store()
+    d, engine = _delegate(s)
+    for bad in ({"x": "env:PATH"}, {"y": "file:/etc/passwd"}, {"z": "vault:secret_question"}, {"n": 123}):
+        q, res = d.preview([WebStep("svc", "login", f"{SVC}/signup", bad)])
+        assert q == [] and any("invalid field source" in n for n in res.notes), f"{bad} is refused at preview (no silent drop)"
+    assert not _acts(engine), "an invalid step never acts"
+
+
+def test_actor_scope_binds_port():                                # red-pen minor (port confusion)
+    sc = ActorScope(["https://svc.example"])
+    assert sc.origin_allowed(f"{SVC}/x") is True and sc.origin_allowed("https://svc.example:443/x") is True
+    assert sc.origin_allowed("https://svc.example:8443/x") is False, "a different port does NOT match (port confusion refused)"
+
+
+def test_pinned_ip_is_threaded_from_fetch_to_act():               # sweep FINDING 3 (anti-rebind)
+    s = _store()
+    d, engine = _delegate(s)                                        # FakeEngine.resolved_ip default 203.0.113.7
+    q, _ = d.preview([WebStep("svc", "login", f"{SVC}/signup", {"pw": "vault:password"})])
+    ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OP).approve(q[0])
+    d.execute(q[0])
+    assert _acts(engine)[-1][3] == "203.0.113.7", "the POST is pinned to the SAME vetted IP the block-checked fetch used"
+
+
+def test_vault_tolerates_hostile_manifest():                      # sweep FINDING 7 (LOW)
+    import sigil.agents.vault as vault_mod
+    tmp = Path(tempfile.mktemp(suffix=".json"))
+    orig = vault_mod._MANIFEST
+    vault_mod._MANIFEST = tmp
+    try:
+        v = vault_mod.CredentialVault(secret_store=object())        # object() avoids constructing a real keyring store
+        tmp.write_text("[1,2,3]")                                   # a JSON list, not a dict
+        assert v.get_record("svc") is None and v.records() == [], "a non-dict manifest → no records, not a crash"
+        tmp.write_text('{"svc": {"service": "svc", "bogus": 1}}')   # a record with an unknown key
+        assert v.get_record("svc") is None, "a malformed record is skipped, not crashed on"
+    finally:
+        vault_mod._MANIFEST = orig
+        tmp.unlink(missing_ok=True)
+
+
 # ---- the REAL HttpEngine independently refuses a private host (defense-in-depth below ActorScope) --
 def test_real_http_engine_refuses_private_host_act():
     from sigil.agents.web_engine import HttpEngine
