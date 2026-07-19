@@ -10,7 +10,8 @@ import time
 from sigil.agents.base import Tier
 from sigil.bridge.daemon import BridgeDaemon
 from sigil.gesture.components import RecordingInputBackend
-from sigil.gesture.session import MAX_DEVICE_TTL, SESSION_ARMED, SessionGate, arm_request_message, sign_arm_request
+from sigil.gesture.session import (MAX_DEVICE_TTL, SESSION_ARMED, SessionGate, arm_request_message,
+                                    pending_device_arm, sign_arm_request)
 from sigil.gesture.types import GestureIntent
 from sigil.mesh import authorize_device, revoke_device
 from sigil.reuse import generate_keypair, verify_one
@@ -172,6 +173,61 @@ def test_daemon_submit_arm_request_gates_on_authorization():
         assert False, "a bad signature must be refused"
     except ValueError:
         pass
+
+
+# ---- review fixes: NaN safety-bound bypass, clamp-self-verify, end-to-end consumption --------------
+def test_nan_ts_and_ttl_are_refused():                            # red-pen BLOCK-1
+    s = _store(); _authorize(s); g = _gate(s)
+    now = time.time()
+    assert g.arm_by_device(sign_arm_request(DEV, device_id="phone1", nonce=1, ts=float("nan"), ttl_seconds=120.0), now=now) is None, \
+        "a signed NaN ts is refused (freshness is fail-closed for non-finite input)"
+    assert g.arm_by_device(sign_arm_request(DEV, device_id="phone1", nonce=2, ts=now, ttl_seconds=float("nan")), now=now) is None, \
+        "a signed NaN ttl is refused (no never-expiring session)"
+    assert g.arm_by_device(sign_arm_request(DEV, device_id="phone1", nonce=3, ts=now, ttl_seconds=float("inf")), now=now) is None, \
+        "a signed +Inf ttl is refused"
+    assert g.session is None, "no non-finite request ever arms"
+
+
+def test_arm_record_self_verifies_even_when_ttl_is_clamped():     # red-pen BLOCK-2
+    s = _store(); _authorize(s); g = _gate(s)
+    now = time.time()
+    g.arm_by_device(_req(nonce=5, ts=now, ttl=99999.0), now=now)  # requested 99999 → clamped to MAX
+    rec = next(r for r in s.iter_records()
+               if r.payload.get("signal") == SESSION_ARMED and r.payload.get("armed_by") == "device")
+    p = rec.payload
+    assert p["effective_ttl"] == MAX_DEVICE_TTL and p["ttl_seconds"] == 99999.0, \
+        "the record keeps the ORIGINAL signed ttl AND the clamped effective ttl"
+    core = {"signal": "gesture.arm_request", "device_id": p["device_id"], "nonce": p["nonce"],
+            "ts": p["ts"], "ttl_seconds": p["ttl_seconds"]}
+    assert verify_one(p["device_pubkey"], arm_request_message(core), p["sig"]), \
+        "the armed record re-verifies against the device signature EVEN when the enforced TTL was clamped"
+
+
+def test_recorded_arm_request_is_consumed_exactly_once():         # HIGH-3 consumption path
+    s = _store(); _authorize(s)
+    BridgeDaemon(s, trusted_pubkey=OP).submit_arm_request(_req(nonce=9, ts=time.time()))
+    req = pending_device_arm(s, OP)
+    assert req is not None and req["pubkey"] == DEV.public_key_b64, "a recorded request is a pending candidate"
+    g = _gate(s)
+    assert g.arm_by_device(req, now=time.time()) is not None, "the daemon consumes it → armed"
+    assert pending_device_arm(s, OP) is None, "once armed it is no longer pending (never double-consumed)"
+
+
+def test_run_gesture_device_arm_activates_from_a_recorded_request():   # HIGH-3 end-to-end
+    from sigil.gesture.components import ScriptedLandmarker
+    from sigil.gesture.features import RuleClassifier
+    from sigil.gesture.run import run_gesture
+    from sigil.perception.camera_stream import ScriptedFrameSource
+    s = _store(); _authorize(s)
+    BridgeDaemon(s, trusted_pubkey=OP).submit_arm_request(_req(nonce=1, ts=time.time()))
+    b = RecordingInputBackend()
+    g = SessionGate(s, b, classifier=FakeCls(), trusted_pubkey=OP)
+    run_gesture(store=s, source=ScriptedFrameSource([None, None, None]),
+                landmarker=ScriptedLandmarker([[], [], []]), classifier=RuleClassifier(),
+                backend=b, gate=g, auto_arm=False, device_arm=True, trusted_pubkey=OP, max_frames=3)
+    assert any(r.payload.get("signal") == SESSION_ARMED and r.payload.get("armed_by") == "device"
+               for r in s.iter_records()), \
+        "run_gesture(device_arm=True) consumed the recorded request and ARMED end-to-end (feature is not inert)"
 
 
 if __name__ == "__main__":

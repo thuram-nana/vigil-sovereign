@@ -20,6 +20,7 @@ import subprocess
 from pathlib import Path
 
 from sigil.bridge import build_core, envelope_message
+from sigil.gesture.session import arm_request_message
 from sigil.reuse import canonical_json
 
 from sigil.bridge import envelope as _E
@@ -116,6 +117,17 @@ def test_canonicaljson_parity_via_node():
     approval = {"approver": "device", "decision": "approved", "target": 5}
     assert _node_canonical(approval) == canonical_json(approval), "approval-message canonicalization drifted"
 
+    # (b2) the gesture ARM-REQUEST core the phone signs for /api/gesture/arm. sigil.gesture.session
+    #      :: arm_request_message selects EXACTLY the _ARM_CORE keys {signal,device_id,nonce,ts,
+    #      ttl_seconds} — all present here — so the phone MUST reproduce these bytes or arm_by_device /
+    #      submit_arm_request reject every signature. Verified under Node against the shipped canonical.js.
+    arm_core = {"signal": "gesture.arm_request", "device_id": "phone1", "nonce": 1,
+                "ts": 1700000000, "ttl_seconds": 120}
+    arm_expected = b'{"device_id":"phone1","nonce":1,"signal":"gesture.arm_request","ts":1700000000,"ttl_seconds":120}'
+    assert arm_request_message(arm_core) == arm_expected, "the Python arm_request_message byte string drifted"
+    assert _node_canonical(arm_core) == arm_request_message(arm_core), \
+        "JS canonicalJson(arm core) != Python arm_request_message (arm signatures would be rejected)"
+
     # (c) nested / unicode / integer edges — key sort recurses, non-ASCII stays raw, ints have no .0
     for obj in (
         {"b": 2, "a": {"z": [3, 2, 1], "y": "x"}, "n": None, "t": True, "f": False},
@@ -123,6 +135,28 @@ def test_canonicaljson_parity_via_node():
         {"args": {"text": "halt now"}, "action": "relay", "v": 1, "nonce": 7, "ts": 1700000123, "device": "K"},
     ):
         assert _node_canonical(obj) == canonical_json(obj), f"canonicalization parity failed for {obj!r}"
+
+
+# ---- 4. FIX 2 (HIGH-3): the phone can actually ARM a gesture session, CSP-safely -----------------
+def test_gesture_arm_control_wired():
+    html = _read("index.html")
+    app = _read("app.js")
+    assert 'data-act="arm-gesture"' in html, "index.html must expose an Arm-gesture button (data-act, no inline handler)"
+    assert '"arm-gesture"' in app, "app.js click delegation must handle the arm-gesture action"
+    assert "/api/gesture/arm" in app, "app.js must POST the arm request to /api/gesture/arm"
+    assert "gesture.arm_request" in app, "app.js must build the gesture.arm_request core"
+    # honest copy: the button confirms a request was SENT/recorded, never that it definitely armed
+    assert "not armed yet" in app or "actually arms" in app, \
+        "app.js arm copy must stay honest — the desktop re-verifies and is what actually arms"
+
+
+# ---- 5. FIX 1 (LOW-8): a refused queued POST on flush is surfaced, never silently dropped ---------
+def test_flush_surfaces_refused_delivery():
+    app = _read("app.js")
+    assert "FAILED delivery" in app, "flushOutbox must surface a refused (>=400) queued POST as FAILED, not swallow it"
+    assert "PANIC NOT DELIVERED" in app, "a refused queued PANIC (emergency stop) must be surfaced explicitly (LOW-8)"
+    # the delete is now CONDITIONAL on a 2xx (r.ok) — a NON-OK response marks failed, it does not idbDel
+    assert "if (r.ok)" in app, "flushOutbox must inspect the response status before deleting a queued POST"
 
 
 if __name__ == "__main__":

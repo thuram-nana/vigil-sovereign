@@ -16,10 +16,13 @@ Only arm/disarm + DISCRETE actions (click/scroll/drag injected; type/launch queu
 per-frame pointer MOVES are telemetry (30 FPS records would DoS the append-only log)."""
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Optional
+
+_KS_CACHE_TTL = 0.5    # bound the per-intent kill-switch consult to ≤2 spine scans/sec (never per-frame at 30fps)
 
 from ..agents.base import Tier
 from ..reuse import sha256_hex
@@ -40,6 +43,25 @@ INTENT_TOOL = {
     "scroll_left": "hid.pointer.scroll", "scroll_right": "hid.pointer.scroll",
     "drag": "hid.pointer.drag", "type": "hid.type", "combo": "hid.combo", "launch": "hid.app.launch",
 }
+
+
+def pending_device_arm(store, trusted_pubkey=None):
+    """The newest RECORDED device arm request (written by the bridge's `submit_arm_request`) that has NOT
+    yet armed a session — a candidate for `arm_by_device`, which RE-VERIFIES it fully (auth / freshness /
+    kill-switch / replay / single-session / TTL). Returns the request dict, or None. This is the wiring
+    that makes the remote-arm path reachable end-to-end (the gesture daemon consumes it)."""
+    armed = set()
+    candidate = None
+    for r in store.iter_records():
+        p = r.payload
+        if p.get("signal") == SESSION_ARMED and p.get("armed_by") == "device":
+            armed.add((p.get("device_pubkey"), p.get("nonce")))
+        elif (p.get("signal") == ARM_REQUEST and p.get("decision") == "auto"
+              and p.get("sig") and p.get("pubkey")):
+            candidate = dict(p)                       # newest recorded request wins (seq order)
+    if candidate is None or (candidate.get("pubkey"), candidate.get("nonce")) in armed:
+        return None
+    return candidate
 
 
 def arm_request_message(core: dict) -> bytes:
@@ -78,12 +100,24 @@ class SessionGate:
         self._owner_key = owner_key
         self._trusted_pubkey = trusted_pubkey
         self.session: Optional[Session] = None
+        self._ks_engaged = False
+        self._ks_checked_at = -1e9        # forces a fresh check on the first consult
 
     def _trusted(self):
         if self._trusted_pubkey is None:
             from ..governor.identity import owner_pubkey
             self._trusted_pubkey = owner_pubkey()
         return self._trusted_pubkey
+
+    def _killswitch_engaged(self, now: float) -> bool:
+        """Kill-switch state, cached for ≤_KS_CACHE_TTL so a 30fps `handle` loop does not re-scan the
+        append-only spine per frame (that scan is O(spine) — a self-DoS). Panic latency is bounded by
+        the TTL. The arm path checks the kill-switch FRESH (uncached), so arming can never race a halt."""
+        if now - self._ks_checked_at >= _KS_CACHE_TTL:
+            from ..governor.killswitch import KillSwitch
+            self._ks_engaged = KillSwitch(self.store).is_engaged()
+            self._ks_checked_at = now
+        return self._ks_engaged
 
     def _cls(self):
         if self._classifier is None:
@@ -140,13 +174,15 @@ class SessionGate:
             sig_ok = False
         if not sig_ok:
             return self._refuse_arm(request, "unauthorized or invalid device signature")
-        # (3) freshness — bounds the replay window and rejects a stale captured request.
+        # (3) freshness — bounds the replay window and rejects a stale captured request. Written
+        #     fail-CLOSED for non-finite input: `nan > 30` is False, so a signed NaN ts would slip a
+        #     `>`-style gate; require finite AND within-window explicitly.
         try:
             ts = float(request.get("ts"))
         except (TypeError, ValueError):
             return self._refuse_arm(request, "missing/invalid timestamp")
-        if abs(now - ts) > ARM_FRESHNESS:
-            return self._refuse_arm(request, "stale arm request")
+        if not math.isfinite(ts) or not (abs(now - ts) <= ARM_FRESHNESS):
+            return self._refuse_arm(request, "stale or non-finite timestamp")
         # (4) replay — this (device, nonce) must not have armed before (the append-only spine is witness).
         nonce = request.get("nonce")
         for r in self.store.iter_records():
@@ -158,20 +194,26 @@ class SessionGate:
         if self.session is not None and self.session.live and not self.session.expired(now):
             return self._refuse_arm(request, "a gesture session is already live")
         # (6) TTL clamp — shorter than a local owner arm; a deliberate trust-narrowing inside the widening.
+        #     Reject non-finite/non-positive BEFORE the min() (min(nan,300)=nan → a never-expiring session).
         try:
-            ttl = min(float(request.get("ttl_seconds", MAX_DEVICE_TTL)), MAX_DEVICE_TTL)
+            raw_ttl = float(request.get("ttl_seconds", MAX_DEVICE_TTL))
         except (TypeError, ValueError):
-            ttl = MAX_DEVICE_TTL
-        if ttl <= 0:
-            return self._refuse_arm(request, "non-positive ttl")
+            return self._refuse_arm(request, "invalid ttl")
+        if not math.isfinite(raw_ttl) or raw_ttl <= 0:
+            return self._refuse_arm(request, "non-finite or non-positive ttl")
+        ttl = min(raw_ttl, MAX_DEVICE_TTL)
         sid = uuid.uuid4().hex
-        # the record's AUTHORIZATION is the verified device signature (self-verifying vs the owner-signed
-        # device ledger) — not the owner key; actor=DEVICE mirrors submit_device_approval.
+        # The record's AUTHORIZATION is the verified device signature — self-verifying vs the owner-signed
+        # device ledger; actor=DEVICE mirrors submit_device_approval. Store the ORIGINAL SIGNED core
+        # fields (so the sig re-verifies for ANY ttl, incl. a clamped one) + the effective TTL separately,
+        # and ONLY known fields (never `**request` — no unsigned extras persisted).
         self.store.append(kind="event", source="gesture", actor="DEVICE",
                           payload={"signal": SESSION_ARMED, "session_id": sid, "armed_by": "device",
-                                   "device_id": core["device_id"], "device_pubkey": pub, "nonce": nonce,
-                                   "ts": ts, "sig": request.get("sig"), "pubkey": pub,
-                                   "authorization": "device-signed", "ttl_seconds": ttl,
+                                   "device_id": core["device_id"], "device_pubkey": pub,
+                                   "nonce": core["nonce"], "ts": core["ts"],
+                                   "ttl_seconds": core["ttl_seconds"],   # ORIGINAL signed value → sig re-verifies
+                                   "effective_ttl": ttl,                 # the CLAMPED ttl actually enforced
+                                   "sig": request.get("sig"), "pubkey": pub, "authorization": "device-signed",
                                    "tier": "A0", "decision": "auto",
                                    "summary": "gesture session ARMED by authorized device (remote)"})
         self.session = Session(sid, live=True, expires_at=now + ttl)
@@ -191,10 +233,10 @@ class SessionGate:
         if intent.kind == "hand_lost":
             self.disarm()
             return {"injected": False, "reason": "hand lost — session disarmed"}
-        # An owner halt (incl. a phone panic_engage) instantly neuters injection mid-session — critical
-        # for a device-armed session the owner may not be watching. Consulted per intent (fail-closed).
-        from ..governor.killswitch import KillSwitch
-        if KillSwitch(self.store).is_engaged():
+        # An owner halt (incl. a phone panic_engage) neuters injection mid-session — critical for a
+        # device-armed session the owner may not be watching. Cached (≤_KS_CACHE_TTL) so a 30fps loop
+        # never re-scans the spine per frame; panic latency is bounded by the TTL.
+        if self._killswitch_engaged(time.time()):
             self.disarm()
             return {"injected": False, "reason": "kill-switch engaged — session disarmed"}
         if self.session is None or not self.session.live:

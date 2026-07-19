@@ -19,6 +19,7 @@
 </header>
 
 <div id="banner" class="banner info hidden"></div>
+<div id="outbox-status" class="mono"></div>
 
 <main>
   <section class="panel" id="pair">
@@ -44,6 +45,12 @@
       <button data-act="relay" id="relay-btn">Relay</button>
     </div>
     <div id="relay-msg" class="mono mt"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Arm gesture session <span class="hint">records a SIGNED arm request &middot; the desktop re-verifies &amp; is what actually arms</span></h2>
+    <button data-act="arm-gesture" id="arm-btn">Arm gesture session</button>
+    <div id="arm-msg" class="mono mt"></div>
   </section>
 
   <section class="panel">

@@ -227,19 +227,70 @@ async function deliver(req) {
   }
 }
 
-async function flushOutbox() {
+function actionLabel(path) {                          // human name for a queued POST (outbox surfacing)
+  if (path === "/api/panic") { return "PANIC"; }
+  if (path === "/api/relay") { return "relay"; }
+  if (path === "/api/action") { return "approval"; }
+  if (path === "/api/gesture/arm") { return "gesture arm"; }
+  return path;
+}
+
+/* Drop the persisted "failed" markers for a path once the owner has re-sent a FRESH one of that kind
+ * that the server accepted — the stale, refused body is now moot, so the FAILED state clears honestly. */
+async function clearFailedFor(path) {
   if (!DB) { return; }
   var items = await idbAll("outbox");
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
+    if (it.failed && it.req && it.req.path === path) { await idbDel("outbox", it.id); }
+  }
+}
+
+/* LOW-8: a queued POST that the server RESPONDS to but REFUSES (>=400) must NOT be silently dropped.
+ * The classic case: a panic / relay the owner tapped OFFLINE, flushed >120s later, refused as STALE
+ * (401/409). The emergency stop never took effect — so we mark it failed (persisted, survives reload),
+ * STOP auto-retrying the now-stale signed body, raise a visible banner, and keep it in the outbox
+ * render as an explicit "FAILED delivery — re-tap" state. Only a 2xx deletes (the server accepted it);
+ * a network error keeps it queued to retry on the next reconnect. */
+async function flushOutbox() {
+  if (!DB) { return; }
+  var items = await idbAll("outbox");
+  var failures = [];
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    if (it.failed) { continue; }                     // already refused & stale — never futilely re-send it
+    var r;
     try {
-      await fetch(it.req.path, { method: "POST", headers: it.req.headers, body: it.req.body, cache: "no-store" });
-      await idbDel("outbox", it.id);                 // server responded (any status) -> stop retrying
+      r = await fetch(it.req.path, { method: "POST", headers: it.req.headers, body: it.req.body, cache: "no-store" });
     } catch (e) {
-      /* still offline — keep it queued */
+      continue;                                       // still offline — keep it queued, retry next reconnect
+    }
+    if (r.ok) {
+      await idbDel("outbox", it.id);                  // 2xx — the server accepted it; stop retrying
+    } else {
+      it.failed = true;                               // server RESPONDED but REFUSED — do NOT silently delete
+      it.status = r.status;
+      await idbPut("outbox", it);                     // persist the FAILED marker (survives a reload)
+      failures.push(it);
     }
   }
+  if (failures.length) { surfaceFlushFailures(failures); }
   renderOutbox();
+}
+
+function surfaceFlushFailures(failures) {
+  var hadPanic = failures.some(function (x) { return x.req && x.req.path === "/api/panic"; });
+  var labels = failures.map(function (x) {
+    return esc(actionLabel(x.req.path)) + (x.status ? " (" + esc(x.status) + ")" : "");
+  }).join(", ");
+  if (hadPanic) {
+    banner("err", "<b>PANIC NOT DELIVERED.</b> A queued emergency stop was REFUSED by the server (likely "
+      + "stale — a panic must reach the desktop within its freshness window). The mesh was NOT halted by it. "
+      + "<b>Re-tap PANIC now.</b> Refused: " + labels + ".");
+  } else {
+    banner("err", "Delivery FAILED — the server refused " + failures.length + " queued action(s) (likely stale). "
+      + "Re-tap to send a fresh one. Refused: " + labels + ".");
+  }
 }
 
 /* --------------------------------------------------------------------------------- renderers */
@@ -367,9 +418,23 @@ async function restartStream() {
 
 function renderOutbox() {
   idbAll("outbox").then(function (items) {
-    var el = $("#panic-msg");   // reuse a nearby line for the queued indicator on the action plane
-    if (!items.length) { return; }
-    el.innerHTML = '<span class="outbox">' + items.length + ' signed action(s) queued offline — will flush on reconnect</span>';
+    var el = $("#outbox-status");                     // a dedicated line near the top — NOT auto-cleared by refresh
+    if (!el) { return; }
+    var failed = items.filter(function (x) { return x.failed; });
+    var pending = items.filter(function (x) { return !x.failed; });
+    var html = "";
+    if (failed.length) {
+      var hadPanic = failed.some(function (x) { return x.req && x.req.path === "/api/panic"; });
+      html += '<div class="deliver-failed" style="color:var(--red);font-weight:bold">'
+        + (hadPanic ? '&#9632; PANIC NOT DELIVERED &middot; ' : '')
+        + failed.length + ' signed action(s) FAILED delivery (server REFUSED — likely stale): '
+        + failed.map(function (x) { return esc(actionLabel(x.req.path)) + (x.status ? " " + esc(x.status) : ""); }).join(", ")
+        + ' &mdash; re-tap to send a fresh one.</div>';
+    }
+    if (pending.length) {
+      html += '<div class="outbox">' + pending.length + ' signed action(s) queued offline — will flush on reconnect.</div>';
+    }
+    el.innerHTML = html;                              // empty string clears the line when the outbox is drained
   });
 }
 
@@ -385,7 +450,7 @@ async function onApprove(seq, decision) {
   var res = await postApproval(seq, decision);
   if (res.queued) { banner("warn", "Offline — the " + decision + " for seq " + seq + " is signed and queued."); }
   else if (!res.ok) { banner("err", "Approval refused: " + esc((res.body && res.body.error) || res.status)); }
-  else { clearBanner(); }
+  else { clearBanner(); await clearFailedFor("/api/action"); }
   renderOutbox();
   refreshPending();
   refreshCockpit();
@@ -398,8 +463,9 @@ async function onPanic() {
   btn.disabled = false;
   var m = $("#panic-msg");
   if (res.queued) { m.innerHTML = '<span class="outbox">PANIC signed &amp; queued offline (note: a panic is freshness-bound; if reconnect &gt; 120s it will be refused as stale — re-tap when online).</span>'; }
-  else if (res.ok) { m.innerHTML = '<span style="color:var(--red)">PANIC engaged — mesh halted (seq ' + esc(res.body.seq) + ').</span>'; }
+  else if (res.ok) { m.innerHTML = '<span style="color:var(--red)">PANIC engaged — mesh halted (seq ' + esc(res.body.seq) + ').</span>'; await clearFailedFor("/api/panic"); }
   else { m.innerHTML = '<span style="color:var(--red)">panic refused: ' + esc((res.body && res.body.error) || res.status) + '</span>'; }
+  renderOutbox();
   refreshCockpit();
 }
 
@@ -412,8 +478,64 @@ async function onRelay() {
   var res = await effectfulPost("/api/relay", "relay", { text: text });
   btn.disabled = false;
   if (res.queued) { m.innerHTML = '<span class="outbox">relay signed &amp; queued offline (freshness-bound — may be refused if reconnect &gt; 120s).</span>'; }
-  else if (res.ok) { m.innerHTML = '<div class="prov">reply</div><pre>' + esc(res.body.reply) + '</pre>'; }
+  else if (res.ok) { m.innerHTML = '<div class="prov">reply</div><pre>' + esc(res.body.reply) + '</pre>'; await clearFailedFor("/api/relay"); }
   else { m.textContent = "relay refused: " + ((res.body && res.body.error) || res.status); }
+  renderOutbox();
+}
+
+/* ----------------------------------------------------------------------- gesture arm request */
+/* The phone-side twin of sigil.gesture.session :: sign_arm_request. The signed CORE is EXACTLY the
+ * _ARM_CORE tuple {signal,device_id,nonce,ts,ttl_seconds}; we sign canonicalJson(core) with the SAME
+ * device key + encoding path as approvals (standard-base64 sig — matches Python verify_one) and POST
+ * {...core, pubkey, sig} STRAIGHT to /api/gesture/arm. The BODY is the credential — there is NO
+ * X-SIGIL-Envelope wrapper (mirrors /api/action). A fresh monotonic INT nonce per arm, since the PC
+ * refuses a replayed (device, nonce). Recording only RECORDS a signed request; the desktop gesture
+ * daemon re-verifies (freshness / kill-switch / single live session / TTL) and is what actually arms. */
+var ARM_TTL_SECONDS = 120;
+async function buildArmRequest() {
+  var core = {
+    signal: "gesture.arm_request",
+    device_id: DEVICE.deviceId,           // the id the pairing panel generated for THIS device
+    nonce: await nextNonce(),             // fresh monotonic int — distinct per arm (replay-gated on the PC)
+    ts: Math.floor(Date.now() / 1000),    // INTEGER seconds — byte-parity with Python; the daemon window is tight
+    ttl_seconds: ARM_TTL_SECONDS
+  };
+  var sig = await signBytes(enc.encode(SigilCanonical.canonicalJson(core)));   // same key/encoding as approvals
+  var body = {};
+  for (var kk in core) { if (Object.prototype.hasOwnProperty.call(core, kk)) { body[kk] = core[kk]; } }
+  body.pubkey = DEVICE.pubB64;
+  body.sig = sig;
+  return body;                            // {signal,device_id,nonce,ts,ttl_seconds,pubkey,sig}
+}
+
+async function onArm() {
+  var btn = $("#arm-btn");
+  var m = $("#arm-msg");
+  btn.disabled = true;
+  m.textContent = "signing arm request…";
+  var res;
+  try {
+    var body = await buildArmRequest();
+    res = await deliver({ path: "/api/gesture/arm", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } catch (e) {
+    btn.disabled = false;
+    m.innerHTML = '<span style="color:var(--red)">could not build/sign the arm request: ' + esc(String(e)) + '</span>';
+    return;
+  }
+  btn.disabled = false;
+  if (res.queued) {
+    m.innerHTML = '<span class="outbox">arm request signed &amp; queued offline — but an arm is freshness-bound, so '
+      + 'the desktop will likely refuse it as stale on flush. Re-tap once you are online.</span>';
+  } else if (res.ok) {
+    m.innerHTML = '<div class="prov">arm request SENT &middot; recorded at seq ' + esc(res.body.seq) + '</div>'
+      + '<pre>' + esc(JSON.stringify(res.body, null, 2)) + '</pre>'
+      + '<div class="instr">This only RECORDS a signed request — it is <b>not armed yet</b>. The desktop gesture '
+      + 'daemon re-verifies it and is what actually arms the session; it still enforces freshness, the kill-switch, '
+      + 'a single live session, and the TTL. If the desktop declines any of those, no session arms.</div>';
+  } else {
+    m.innerHTML = '<span style="color:var(--red)">arm request refused: ' + esc((res.body && res.body.error) || res.status) + '</span>';
+  }
+  renderOutbox();
 }
 
 /* ------------------------------------------------------------------- event delegation (CSP-safe) */
@@ -425,6 +547,7 @@ document.addEventListener("click", function (e) {
     if (act === "deny") { return onApprove(Number(btn.dataset.seq), "denied"); }
     if (act === "panic") { return onPanic(); }
     if (act === "relay") { return onRelay(); }
+    if (act === "arm-gesture") { return onArm(); }
     if (act === "recall") { return doRecall(); }
     if (act === "copy-pub") { return copyText(DEVICE.pubB64).then(function (ok) { btn.textContent = ok ? "Copied" : "Select above to copy"; }); }
     if (act === "copy-cmd") {

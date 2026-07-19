@@ -7,10 +7,12 @@ mirrors the approval-record pattern (`agents.approvals._approval_message` / `ver
 canonical-JSON message, same fail-closed `verify_one`, same trust pinned to owner-minted device keys
 (a rogue/revoked device cannot self-authorize; a tampered field breaks the signature).
 
-Replay resistance is a deterministic, spine-anchored monotonic-nonce highwater PER DEVICE: an effectful
-request must carry a nonce strictly greater than the highest nonce that device has ever been receipted
-for. Reads still receipt (advancing the watermark) but skip the freshness gate (they have no side
-effect). The receipt is an append-only spine event, so the watermark is tamper-evident memory.
+Replay resistance is a deterministic, spine-anchored monotonic-nonce highwater PER DEVICE, enforced
+ATOMICALLY for EFFECTFUL requests: the check-then-receipt runs under the spine lock (re-entrant), so
+concurrent replays of one captured envelope can't both pass. An effectful request must carry a nonce
+strictly greater than the highest nonce that device has ever been receipted for. Reads are authenticated
+by signature alone (the transport verifies them without a receipt and bounds their replay with a
+timestamp window). The receipt is an append-only spine event, so the watermark is tamper-evident memory.
 
 This module is PURE by construction — NO wallclock, NO RNG. The caller supplies `nonce` and `ts` so the
 JS phone client and Python reproduce the exact signed bytes (the parity contract) and so freshness is a
@@ -63,7 +65,11 @@ def verify_envelope(payload, authorized: Set[str]) -> Tuple[bool, Union[dict, st
     if device not in authorized:                       # trust pinned to owner-minted device keys
         return False, "device is not authorized"
     core = {k: v for k, v in p.items() if k != "sig"}
-    if not verify_one(device, envelope_message(core), sig):
+    try:                                               # verify_one RAISES on a malformed-length sig
+        sig_ok = verify_one(device, envelope_message(core), sig)
+    except Exception:  # noqa: BLE001 — any crypto/decode error is a fail-closed refusal, never a crash
+        return False, "signature invalid"
+    if not sig_ok:
         return False, "signature invalid"
     if core.get("action") not in ACTIONS:              # allow-list the authenticated action (fail-closed)
         return False, f"unknown action: {core.get('action')!r}"
@@ -80,8 +86,9 @@ def record_receipt(store: SpineStore, core: dict) -> int:
 
 
 def device_nonce_highwater(store: SpineStore, device_pubkey: str) -> int:
-    """The highest receipted nonce for this device (0 if none). Non-int nonces are tolerated (skipped)."""
-    hi = 0
+    """The highest receipted nonce for this device (-1 if none, so a first nonce of 0 is valid). Non-int
+    nonces are tolerated (skipped)."""
+    hi = -1
     for r in store.iter_records():
         p = r.payload
         if p.get("signal") == RECEIPT_SIGNAL and p.get("device") == device_pubkey:
@@ -101,7 +108,20 @@ def consume(store: SpineStore, payload, authorized: Set[str], *, effectful: bool
     ok, core = verify_envelope(payload, authorized)
     if not ok:
         raise ValueError(core)
-    if effectful and int(core["nonce"]) <= device_nonce_highwater(store, core["device"]):
-        raise ValueError("replay: nonce not fresh")
-    record_receipt(store, core)
+    try:
+        nonce = int(core["nonce"])
+    except (TypeError, ValueError):
+        raise ValueError("invalid nonce")
+    if nonce < 0:
+        raise ValueError("invalid nonce")
+    if effectful:
+        # ATOMIC check-then-receipt: hold the re-entrant spine lock across the highwater read AND the
+        # receipt append, so two concurrent replays of one captured envelope can't both pass (TOCTOU).
+        from ..spine.store import spine_lock
+        with spine_lock(store.path):
+            if nonce <= device_nonce_highwater(store, core["device"]):
+                raise ValueError("replay: nonce not fresh")
+            record_receipt(store, core)
+    else:
+        record_receipt(store, core)
     return core

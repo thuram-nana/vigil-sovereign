@@ -165,6 +165,52 @@ def test_module_is_pure_no_clock_no_random():
         assert forbidden not in src, f"envelope.py must be pure: found {forbidden!r}"
 
 
+def _authed():
+    s = _store()
+    dev = generate_keypair()
+    authorize_device(s, "dev", dev.public_key_b64, OWNER)
+    return s, dev, authorized_devices(s, OP)
+
+
+def test_malformed_signature_is_a_clean_refusal_not_a_crash():    # red-pen BLOCK-3
+    s, dev, auth = _authed()
+    bad = {**build_core(dev.public_key_b64, "read:pending", {}, 1, 1700000000), "sig": "AAAA"}
+    ok, _reason = verify_envelope(bad, auth)                       # verify_one would RAISE on a wrong-length sig
+    assert ok is False, "a malformed-length signature returns (False, reason), never an unhandled exception"
+
+
+def test_nonce_zero_is_a_valid_first_value():                     # sweep LOW-7
+    s, dev, auth = _authed()
+    consume(s, sign_envelope(dev, build_core(dev.public_key_b64, "panic", {}, 0, 1700000000)), auth, effectful=True)
+    try:
+        consume(s, sign_envelope(dev, build_core(dev.public_key_b64, "panic", {}, 0, 1700000000)), auth, effectful=True)
+        assert False, "a replay of nonce 0 must be refused"
+    except ValueError:
+        pass
+
+
+def test_concurrent_replay_of_one_effectful_envelope_accepted_once():   # red-pen BLOCK-4 / sweep MED-4
+    import threading
+    s, dev, auth = _authed()
+    env = sign_envelope(dev, build_core(dev.public_key_b64, "relay", {"text": "x"}, 5, 1700000000))
+    results, barrier = [], threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        try:
+            consume(s, env, auth, effectful=True)
+            results.append("ok")
+        except ValueError:
+            results.append("refused")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count("ok") == 1, f"the atomic nonce gate accepts exactly ONE concurrent replay, got {results.count('ok')}"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
