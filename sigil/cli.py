@@ -485,6 +485,13 @@ def cmd_spine(a) -> None:
     elif a.action == "compact":
         n = store.compact()
         print(f"  compacted {n} sealed segment(s) to gzip (disk reclaimed)" if n else "  nothing to compact")
+    elif a.action == "convert":
+        from .spine.migrate_runner import backup_migrate_compact
+        rep = backup_migrate_compact(store)
+        print(f"  verify before: OK ({rep['count_before']} records)")
+        print(f"  backup:        {rep.get('backup', '(skipped)')}")
+        print(f"  migrated:      {rep['migrated']} | compacted {rep['compacted']} segment(s)")
+        print(f"  verify after:  OK ({rep['count_after']} records — every record preserved)")
     elif a.action == "status":
         segs = store.segment_info()
         if not segs:
@@ -613,8 +620,8 @@ def main(argv=None) -> None:
     sub.add_parser("dashboard", help="read-only operator status over the spine").set_defaults(fn=cmd_dashboard)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
-    psp = sub.add_parser("spine", help="segment rotation: migrate the legacy file; rotate; compact (gzip); status")
-    psp.add_argument("action", choices=["migrate", "rotate", "compact", "status"])
+    psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact (gzip); convert (backup+migrate+compact); status")
+    psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status"])
     psp.set_defaults(fn=cmd_spine)
     psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
     psv.add_argument("--port", type=int, default=8733)
