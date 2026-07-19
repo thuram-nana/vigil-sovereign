@@ -14,6 +14,14 @@ def _fresh(n=5):
     return p, s
 
 
+def test_tail_returns_the_last_n_records():   # tightening #2 (bounded-window dedup)
+    p, _ = _fresh(10)                          # 10 records, seq 0..9
+    s = SpineStore(p)
+    assert [r.seq for r in s.tail(3)] == [7, 8, 9], "tail(3) = the last three records, in order"
+    assert len(s.tail(100)) == 10, "tail(n > len) returns all"
+    assert s.tail(0) == [], "tail(0) is empty"
+
+
 def test_concurrent_appends_do_not_fork_the_chain():   # Phase 9 sweep HIGH-2 (threaded bridge server exposes it)
     import threading
     p = tempfile.mktemp(suffix=".jsonl")

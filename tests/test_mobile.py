@@ -204,6 +204,45 @@ def test_approval_dedup_holds_for_out_of_range_target_seq():   # re-check FINDIN
     assert len(seqs) == 1, "a replayed approval with an out-of-range target_seq is STILL deduped (full-range scan)"
 
 
+def test_stale_arm_body_is_refused_not_recorded():   # tightening BLOCK-1 fix: freshness-at-record bounds bloat
+    import time as _t
+
+    from sigil.gesture.session import sign_arm_request
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, dev = generate_keypair(), generate_keypair()
+    authorize_device(s, "d", dev.public_key_b64, owner)
+    d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
+    stale = sign_arm_request(dev, device_id="d", nonce=1, ts=_t.time() - 100, ttl_seconds=120.0)  # >30s old
+    try:
+        d.submit_arm_request(stale)
+        assert False, "an aged-out arm body must be REFUSED, not recorded"
+    except ValueError:
+        pass
+    assert not any(r.payload.get("signal") == "gesture.arm_request" for r in s.iter_records()), \
+        "a stale arm body is NEVER recorded → a rotated captured pool cannot bloat the spine"
+
+
+def test_approval_dedup_bounds_a_rotated_pool():   # tightening BLOCK-1 fix: full-scan bounds AGGREGATE replay bloat
+    from sigil.agents.approvals import _approval_message
+    from sigil.reuse import sha256_hex, sign
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, dev = generate_keypair(), generate_keypair()
+    authorize_device(s, "d", dev.public_key_b64, owner)
+    d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
+
+    def _appr(tgt):
+        msg = _approval_message(tgt, "approved", "device")
+        return {"signal": "governor.approval", "approval": "approved", "target_seq": tgt, "approver": "device",
+                "pubkey": dev.public_key_b64, "sig": sign(dev.private_key_b64, msg),
+                "msg_digest": sha256_hex(msg), "device": True}
+    pool = [_appr(t) for t in range(5)]              # 5 distinct captured approval bodies
+    for _round in range(4):                          # rotate-replay the whole pool 4 rounds
+        for a in pool:
+            d.submit_device_approval(a)
+    n = sum(1 for r in s.iter_records() if r.payload.get("signal") == "governor.approval")
+    assert n == 5, f"replay-bloat is bounded to the DISTINCT-body count (5), not 5×4=20 — got {n}"
+
+
 def test_authorized_device_authorizes_operator_execution():
     # BLOCK-1 fix: a device approval must authorize a real EXECUTION gate, not just a queue view.
     import tempfile as tf

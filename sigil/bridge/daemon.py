@@ -10,12 +10,14 @@ use: loopback or a PRIVATE (WireGuard) address only — NEVER 0.0.0.0 / a public
 from __future__ import annotations
 
 import ipaddress
+import time
 from typing import List, Optional
 
 from ..spine.store import SpineStore
 
 
 _CGNAT4 = ipaddress.ip_network("100.64.0.0/10")   # carrier-grade NAT — the range Tailscale assigns tailnet IPs
+_DEDUP_WINDOW = 2048                               # bound the replay-dedup scan to the most recent N records
 
 
 def bind_ok(addr: str) -> bool:
@@ -78,8 +80,10 @@ class BridgeDaemon:
             raise ValueError("approval signature invalid")
         sig, tgt = payload.get("sig"), payload.get("target_seq")
         # Best-effort dedup OUTSIDE the append lock (a rare concurrent double-record is benign; holding the
-        # lock across an O(spine) scan would stall every other writer). Scan the full spine (not from tgt —
-        # an out-of-range target_seq must not skip the scan and re-open the bloat sink).
+        # lock across the scan would stall every writer). A FULL-SPINE scan — approvals carry no freshness
+        # field to bound a rotated captured-body pool, so a bounded window would re-open a bloat sink; the
+        # full scan keeps replay-bloat bounded to the number of DISTINCT captured bodies, forever. Approvals
+        # are human-paced, so O(spine) here (off the lock) is imperceptible.
         for r in self.store.iter_records():
             p = r.payload
             if p.get("signal") == APPROVAL_SIGNAL and p.get("pubkey") == payload.get("pubkey") and p.get("sig") == sig:
@@ -87,12 +91,19 @@ class BridgeDaemon:
         return self.store.append(kind="event", source="mesh", actor="DEVICE",
                                  payload={**payload, "tier": "A0", "decision": "auto"}, supersedes_id=tgt)
 
-    def submit_arm_request(self, request: dict) -> int:
+    def submit_arm_request(self, request: dict, *, now: float = None) -> int:
         """Record a DEVICE-signed gesture arm request (the transport layer) — ONLY if the signing device
-        is authorized AND the signature verifies (fail-closed, mirrors submit_device_approval). The live
+        is authorized, the signature verifies, AND the signed `ts` is FRESH (fail-closed). The live
         SessionGate RE-VERIFIES and enforces freshness / kill-switch / single-session / TTL when it
-        consumes this via `arm_by_device`, so recording is necessary-but-not-sufficient to arm."""
-        from ..gesture.session import ARM_REQUEST, _ARM_CORE, arm_request_message
+        consumes this via `arm_by_device`, so recording is necessary-but-not-sufficient to arm.
+
+        The record-time FRESHNESS gate is what BOUNDS replay-bloat: a captured body older than
+        ARM_FRESHNESS is REFUSED (not recorded), so a rotated pool of captured bodies ages out and can
+        never grow the spine unbounded. The bounded-window dedup below then just collapses a RAPID
+        (within-freshness) replay flood — the two together bound bloat at O(window) cost."""
+        import math
+
+        from ..gesture.session import ARM_FRESHNESS, ARM_REQUEST, _ARM_CORE, arm_request_message
         from ..reuse import verify_one
         authorized = self._authorized()
         if request.get("signal") != ARM_REQUEST:
@@ -107,12 +118,21 @@ class BridgeDaemon:
             ok = False
         if not ok:
             raise ValueError("arm request signature invalid")
+        now = time.time() if now is None else now       # record-time freshness bounds aged-out replay bloat
+        try:
+            ts = float(core.get("ts"))
+        except (TypeError, ValueError):
+            raise ValueError("invalid arm timestamp")
+        if not math.isfinite(ts) or not (abs(now - ts) <= ARM_FRESHNESS):
+            raise ValueError("stale or non-finite arm request — refused (not recorded)")
         sig = request.get("sig")
-        # Best-effort dedup OUTSIDE the append lock (see submit_device_approval) — a captured body can't flood.
-        for r in self.store.iter_records():
+        # Bounded-window dedup OUTSIDE the append lock: collapses a rapid within-freshness replay flood
+        # (a flood is always recent). Aged-out replays are already refused above, so this need not scan
+        # the whole spine to bound bloat.
+        for r in self.store.tail(_DEDUP_WINDOW):
             p = r.payload
             if p.get("signal") == ARM_REQUEST and p.get("pubkey") == pub and p.get("sig") == sig:
-                return r.seq                            # already recorded — idempotent, no spine bloat
+                return r.seq                            # already recorded — idempotent
         # record ONLY the signed core + pubkey + sig (never `**request` — no unsigned extras persisted)
         return self.store.append(kind="event", source="mesh", actor="DEVICE",
                                  payload={"signal": ARM_REQUEST, "device_id": core["device_id"],
