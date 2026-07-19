@@ -12,12 +12,14 @@ in place. These tests pin the Slice-0 invariants:
     lock and never resurrects spine.jsonl (the split-brain the two-step migration guards against).
 Run: ~/.sigil/venv/bin/python -m pytest tests/test_spine_rotation.py -q
 """
+import json
 import os
 import tempfile
 from pathlib import Path
 
-from sigil.spine.manifest import read_manifest, SpineLayout
-from sigil.spine.store import SpineStore, spine_lock
+from sigil.reuse.chain import _GENESIS_PREV
+from sigil.spine.manifest import Manifest, Segment, read_manifest, write_manifest, SpineLayout
+from sigil.spine.store import SpineError, SpineStore, spine_lock
 
 
 def _fresh_dir(prefix: str) -> Path:
@@ -27,6 +29,91 @@ def _fresh_dir(prefix: str) -> Path:
 def _append_n(store: SpineStore, n: int, start: int = 0) -> None:
     for i in range(start, start + n):
         store.append(kind="event", source="t", actor="u", payload={"n": i})
+
+
+def _make_segmented(d: Path, seg_counts: list[int]) -> SpineLayout:
+    """Build a real chain of sum(seg_counts) records, then physically lay it out as len(seg_counts)
+    segments (the last is the ACTIVE) with a valid manifest — a genuine multi-segment spine of exactly the
+    shape Slice 3's rotation will produce. The chain spans every seam (each segment's first record's
+    prev_hash == the prior segment's last entry_hash), because the records were ONE chain before the split."""
+    p = d / "spine.jsonl"
+    s = SpineStore(p)
+    _append_n(s, sum(seg_counts))
+    lay = SpineLayout.for_path(p)
+    lines = [ln for ln in p.read_bytes().splitlines(keepends=True) if ln.strip()]
+    recs = [json.loads(ln) for ln in lines]
+    assert len(recs) == sum(seg_counts)
+    lay.segments_dir.mkdir(parents=True, exist_ok=True)
+    segments, idx, prev_boundary, prev_seq = [], 0, _GENESIS_PREV, -1
+    for seg_id, cnt in enumerate(seg_counts):
+        seg_lines, seg_recs = lines[idx:idx + cnt], recs[idx:idx + cnt]
+        (lay.segments_dir / f"seg-{seg_id:08d}.jsonl").write_bytes(b"".join(seg_lines))
+        is_last = seg_id == len(seg_counts) - 1
+        first_seq = seg_recs[0]["seq"] if seg_recs else prev_seq + 1   # empty active -> next seq after boundary
+        segments.append(Segment(
+            id=seg_id, file=f"{lay.segments_dir.name}/seg-{seg_id:08d}.jsonl", codec="none",
+            sealed=not is_last, first_seq=first_seq,
+            last_seq=None if is_last else seg_recs[-1]["seq"],
+            count=None if is_last else cnt,
+            first_prev_hash=prev_boundary,
+            boundary_hash=None if is_last else seg_recs[-1]["entry_hash"],
+        ))
+        if seg_recs:
+            prev_boundary, prev_seq = seg_recs[-1]["entry_hash"], seg_recs[-1]["seq"]
+        idx += cnt
+    p.unlink()                                             # the legacy file is now split into segments
+    write_manifest(lay, Manifest(generation=1, scope="", segments=segments))
+    return lay
+
+
+def test_reads_span_multiple_segments():
+    d = _fresh_dir("sigil-span-")
+    _make_segmented(d, [3, 4, 2])                          # seg-0(seq0-2) seg-1(seq3-6) sealed; seg-2(seq7-8) active
+    p = d / "spine.jsonl"
+    s = SpineStore(p)
+
+    ok, reason = s.verify()
+    assert ok, reason                                      # verify_chain spans all 3 segments from genesis
+    assert s.count() == 9
+    assert [r.seq for r in s.iter_records()] == list(range(9))
+    for seq in range(9):                                   # get() resolves a seq in EVERY segment
+        assert s.get(seq) is not None and s.get(seq).payload["n"] == seq
+    assert [r.seq for r in s.iter_records(since_seq=2)] == [3, 4, 5, 6, 7, 8]   # seeks past seg-0
+    assert [r.seq for r in s.iter_records(since_seq=6)] == [7, 8]               # into the active
+    assert [r.seq for r in s.tail(5)] == [4, 5, 6, 7, 8]   # tail() spans the seg-1→seg-2 seam (B3)
+    assert s.next_seq == 9                                 # tip from the active segment
+
+    s.append(kind="event", source="t", actor="u", payload={"n": 9})   # append continues across the last seam
+    fresh = SpineStore(p)
+    ok, reason = fresh.verify()
+    assert ok, reason
+    assert [r.seq for r in fresh.iter_records()] == list(range(10))
+
+
+def test_missing_referenced_segment_raises():
+    import pytest
+    d = _fresh_dir("sigil-missing-")
+    lay = _make_segmented(d, [3, 2])
+    (lay.segments_dir / "seg-00000000.jsonl").unlink()     # a sealed segment vanishes → fail closed
+    s = SpineStore(d / "spine.jsonl")
+    with pytest.raises(SpineError):
+        list(s.iter_records())
+    with pytest.raises(SpineError):
+        s.verify()
+
+
+def test_empty_active_seam_no_seq0_fork():
+    """A rotated (non-genesis) active segment that is EMPTY must seed its first append from the prior
+    sealed segment's boundary — NOT build_chain from genesis (which would fork the chain at seq 0)."""
+    d = _fresh_dir("sigil-seam-")
+    lay = _make_segmented(d, [4, 0])                       # seg-0 sealed (seq0-3); seg-1 active but EMPTY
+    p = d / "spine.jsonl"
+    s = SpineStore(p)
+    assert s.next_seq == 4, "tip resolves across the empty active to the sealed boundary"
+    s.append(kind="event", source="t", actor="u", payload={"n": 4})   # must become seq 4, prev=seg-0 boundary
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+    assert [r.seq for r in SpineStore(p).iter_records()] == [0, 1, 2, 3, 4], "no seq-0 fork across the seam"
 
 
 def test_legacy_store_is_byte_identical():

@@ -154,18 +154,18 @@ class SpineStore:
         self._manifest: Manifest | None = read_manifest(self._layout)
         self._reconcile_orphan_migration()          # complete a migrate() interrupted before the manifest write
         self._active: Path = self._resolve_active_path()
-        # seq -> byte-offset index (FIX 1). Built lazily on the first TARGETED read (get / iter_records
-        # with since_seq >= 0) and then kept current: maintained O(1) on our own appends, and extended
-        # (never rewritten — an append-only file's offsets never move) when a stat shows another PROCESS
-        # grew the file. Full scans (verify/count/entries/iter_records(-1)) never touch it, staying a
-        # single byte-identical pass. `_index_lock` guards the dict against concurrent read+append.
-        # Slice 0/1: the index is single-segment (over `self._active`); it is (segment, offset)-aware in
-        # a later slice. It is invalidated whenever the active segment changes under us.
+        # SEGMENT-AWARE seq -> (segment file, byte offset) index (Slice 1). Sealed segments are immutable,
+        # so each is indexed once and its offsets kept forever; the active segment's tail extends on our own
+        # appends (O(1)) or on the next read (over just the newly-appended bytes — offsets never move). Full
+        # scans (verify/count/entries/iter_records(-1)) never touch the index, staying a single pass across
+        # segments. Invalidation is EPOCH-based (`change_token`: manifest generation + active dev/ino/size),
+        # so a rotation/migration is detected — a same-size in-place rewrite can no longer fool a size-only
+        # heuristic (invariant 9). `_index_lock` guards the dicts against concurrent read+append.
         self._index_lock = threading.Lock()
-        self._index_built = False
-        self._offsets: dict[int, int] = {}
+        self._offsets: dict[int, tuple[str, int]] = {}   # seq -> (segment path str, byte offset in it)
+        self._seg_scanned: dict[str, int] = {}           # segment path str -> bytes indexed so far
+        self._index_epoch: tuple | None = None           # change_token when the index was last reconciled
         self._max_seq = -1
-        self._scan_pos = 0                          # byte offset just past the last COMPLETE line indexed
         self._last: ChainEntry | None = self._read_last_entry()
 
     # --- segment layout / manifest ------------------------------------------------
@@ -212,6 +212,47 @@ class SpineStore:
             if seg0.exists() and not self.path.exists():
                 return seg0
         return a
+
+    def _segments_in_order(self) -> list[Path]:
+        """The segment files to read, in seq order (sealed by first_seq, then the active tail). With no
+        manifest this is the single legacy/active file. Resolved fresh each call so a rotation/migration by
+        another process is seen. RAISES SpineError on a manifest-referenced segment file that is MISSING —
+        a read must never silently yield a short chain (invariant 15: no state-scanner fail-open)."""
+        m = read_manifest(self._layout)
+        if m is None:
+            t = self._read_target()
+            return [t] if t.exists() else []
+        out: list[Path] = []
+        for seg in m.ordered():
+            p = self._layout.seg_path(seg)
+            if not p.exists():
+                raise SpineError(
+                    f"spine manifest (generation {m.generation}) references a missing segment: {seg.file}")
+            out.append(p)
+        return out
+
+    def _seam_tip_for_active(self) -> "ChainEntry | None":
+        """When the ACTIVE segment is empty, the chain tip its first append must extend so the seam stays
+        contiguous: the prior SEALED segment's real last record (its boundary). None when the active is the
+        GENESIS segment (first_seq == 0) — a genuinely fresh spine correctly starts at seq 0. Prevents a
+        seq-0 fork across a rotation seam (invariant 13). MUST be consulted under the append lock (reads the
+        manifest fresh). No-op in Slices 0-2 (the only segment is genesis)."""
+        m = read_manifest(self._layout)
+        if m is None:
+            return None
+        act = m.active()
+        if act is None or act.first_seq == 0:
+            return None
+        sealed = m.sealed_in_order()
+        if not sealed:
+            return None
+        sp = self._layout.seg_path(sealed[-1])
+        line = _last_nonempty_line(sp) if sp.exists() else None
+        if not line:
+            return None
+        d = json.loads(line)
+        return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"],
+                          entry_hash=d["entry_hash"])
 
     @contextmanager
     def _crossproc_lock(self) -> "Iterator[None]":
@@ -269,13 +310,13 @@ class SpineStore:
             self._last = self._read_last_entry()
 
     def _invalidate_index(self) -> None:
-        """Drops the single-segment index so the next read rebuilds it against the (possibly changed)
-        active segment."""
+        """Drops the segment-aware index so the next read rebuilds it against the (possibly changed)
+        segment set."""
         with self._index_lock:
-            self._index_built = False
             self._offsets = {}
+            self._seg_scanned = {}
+            self._index_epoch = None
             self._max_seq = -1
-            self._scan_pos = 0
 
     def _reconcile_orphan_migration(self) -> None:
         """Close the migrate() crash window at CONSTRUCTION. migrate() does an ATOMIC
@@ -377,7 +418,14 @@ class SpineStore:
                         f.truncate(clean_end)
                         _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
                                      pre_size - clean_end, active)
-                    entry = append_entry([last], cert_digest) if last else build_chain([cert_digest])[0]
+                    if last is not None:
+                        entry = append_entry([last], cert_digest)          # extend the active segment's tip
+                    else:
+                        # active is EMPTY: seed from the prior sealed segment's boundary if this is a rotated
+                        # (non-genesis) segment, else start the genesis chain at seq 0. Never build_chain a
+                        # non-genesis segment from GENESIS (that would fork the chain at seq 0 — invariant 13).
+                        seam = self._seam_tip_for_active()
+                        entry = append_entry([seam], cert_digest) if seam is not None else build_chain([cert_digest])[0]
                     record = {
                         "seq": entry.seq, **content, "ts": ts or now_iso(),
                         "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
@@ -387,60 +435,79 @@ class SpineStore:
                     f.write(line.encode("utf-8"))
                     f.flush()
                     os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
-                    # FIX 1: keep the index current with NO re-scan when it is already exactly up to date.
-                    # If another PROCESS appended in between, `_scan_pos < offset` and we skip here — the next
-                    # read's `_ensure_index` extends from `_scan_pos`, picking up the gap records AND this one.
+                    # FIX 1: keep the index current with NO re-scan when the ACTIVE segment is already
+                    # indexed exactly up to this record's offset. If another PROCESS appended in between,
+                    # `_seg_scanned[active] < offset` and we skip — the next read's `_ensure_index` extends
+                    # the active over the gap bytes AND this one. `_index_epoch` is intentionally left stale
+                    # so that next read refreshes it (its extend then finds nothing to do — O(1)).
                     with self._index_lock:
-                        if self._index_built and self._scan_pos == offset:
-                            self._offsets[entry.seq] = offset
+                        active_str = str(active)
+                        if self._seg_scanned.get(active_str) == offset:
+                            self._offsets[entry.seq] = (active_str, offset)
                             if entry.seq > self._max_seq:
                                 self._max_seq = entry.seq
-                            self._scan_pos = offset + len(line.encode("utf-8"))
+                            self._seg_scanned[active_str] = offset + len(line.encode("utf-8"))
                 self._last = entry
         return entry.seq
 
     # --- read ---------------------------------------------------------------------
+    def _open_segment(self, p: Path):
+        """Open a segment for a forward byte read. Plaintext in Slices 1-3; gzip-transparent in Slice 4."""
+        return p.open("rb")
+
     def iter_records(self, *, since_seq: int = -1) -> Iterator[SpineRecord]:
-        """Records with seq > `since_seq`, in order. FIX 1: for since_seq >= 0 the index seeks straight
-        to the first wanted line (O(records-returned), not O(file)); a full read (since_seq < 0) starts
-        at byte 0 exactly as before. FIX 2: a line that fails to parse or lacks required keys is SKIPPED
-        (a torn tail no longer crashes the read); a torn MIDDLE line becomes a seq gap that verify() fails
-        on, so mid-file tampering is never silently hidden."""
-        target = self._read_target()
-        if not target.exists():
+        """Records with seq > `since_seq`, in seq order, ACROSS ALL SEGMENTS (sealed segments then the
+        active) as ONE contiguous chain, so every full-scanning consumer keeps seeing the whole log. For
+        since_seq >= 0 the index seeks straight to the first wanted line in its owning segment
+        (O(records-returned), not O(spine)); a full read (since_seq < 0) streams every segment from the
+        first. A line that fails to parse or lacks required keys is SKIPPED (a torn active tail can't crash
+        the read; a torn MIDDLE line becomes a seq gap that verify() fails on). RAISES SpineError if the
+        manifest references a segment that cannot be read — a read must NEVER silently yield a short chain
+        (invariant 15: no state-scanner fail-open)."""
+        segs = self._segments_in_order()                 # RAISES on a missing referenced segment
+        if not segs:
             return
-        start_off = self._start_offset_for(since_seq)
-        with target.open("rb") as f:
-            if start_off:
-                f.seek(start_off)
-            for raw in f:
-                if not raw.strip():
-                    continue
-                try:
-                    rec = SpineRecord.from_dict(json.loads(raw))
-                except (ValueError, KeyError, TypeError):
-                    _log.warning("spine: skipping malformed line during iter_records (%s)", self._active)
-                    continue
-                if rec.seq > since_seq:
-                    yield rec
+        start_i, start_off = self._start_locus(since_seq, segs)
+        for i in range(start_i, len(segs)):
+            p = segs[i]
+            try:
+                f = self._open_segment(p)
+            except FileNotFoundError as e:               # referenced but vanished mid-read
+                raise SpineError(f"spine segment vanished during read: {p}") from e
+            with f:
+                if i == start_i and start_off:
+                    f.seek(start_off)
+                for raw in f:
+                    if not raw.strip():
+                        continue
+                    try:
+                        rec = SpineRecord.from_dict(json.loads(raw))
+                    except (ValueError, KeyError, TypeError):
+                        _log.warning("spine: skipping malformed line during iter_records (%s)", p)
+                        continue
+                    if rec.seq > since_seq:
+                        yield rec
 
     def get(self, seq: int) -> SpineRecord | None:
-        """A single record by seq — O(1) via the index (FIX 1), byte-identical to a full scan."""
-        if seq < 0 or not self._read_target().exists():
+        """A single record by seq — O(1) via the segment-aware index (resolves the OWNING segment + offset),
+        byte-identical to a full scan. Falls back to a bounded forward scan (which spans segments) when the
+        seq is not indexed (beyond the tip, or a corrupt line was skipped)."""
+        if seq < 0:
             return None
         self._ensure_index()
         with self._index_lock:
-            off = self._offsets.get(seq)
-        if off is not None:
-            with self._read_target().open("rb") as f:
-                f.seek(off)
-                raw = f.readline()
+            loc = self._offsets.get(seq)
+        if loc is not None:
+            path_str, off = loc
             try:
+                with self._open_segment(Path(path_str)) as f:
+                    f.seek(off)
+                    raw = f.readline()
                 rec = SpineRecord.from_dict(json.loads(raw))
-            except (ValueError, KeyError, TypeError):
-                return None
-            return rec if rec.seq == seq else None
-        # not indexed (beyond the tip, or a corrupt line was skipped) — bounded fallback (still index-seeked)
+                if rec.seq == seq:
+                    return rec
+            except (OSError, ValueError, KeyError, TypeError):
+                pass                                     # stale/moved offset — fall through to the scan
         for r in self.iter_records(since_seq=seq - 1):
             if r.seq == seq:
                 return r
@@ -449,31 +516,40 @@ class SpineStore:
         return None
 
     def tail(self, n: int) -> list[SpineRecord]:
-        """The last `n` records, seek-from-end (O(n) bytes, NOT O(file)) — for a bounded RECENT-window
-        read on a large spine. Fewer than `n` if the spine is shorter. NOTE: a bounded window collapses
-        a RAPID (recent) replay flood, but does NOT bound AGGREGATE replay bloat — a rotated pool of
-        distinct bodies larger than the window each ages out and re-records. Only pair `tail()`-based
-        dedup with a record-time freshness gate (or an independent bound); do not rely on it alone to
-        close a bloat sink."""
-        target = self._read_target()
-        if n <= 0 or not target.exists():
+        """The last `n` records, walking segments backward from the ACTIVE across the seam (O(n) bytes,
+        NOT O(spine)) — a bounded RECENT-window read on a large spine. Fewer than `n` if the spine is
+        shorter. FIXES B3: the pre-Slice-1 version read only the active file, so right after a rotation it
+        returned < n. NOTE (unchanged): a bounded window collapses a rapid recent replay flood but does NOT
+        bound AGGREGATE replay bloat — pair `tail()`-based dedup with a record-time freshness gate."""
+        if n <= 0:
             return []
-        with target.open("rb") as f:
+        recs: list[SpineRecord] = []
+        for p in reversed(self._segments_in_order()):
+            recs = self._read_segment_tail(p, n - len(recs)) + recs
+            if len(recs) >= n:
+                break
+        return recs[-n:]
+
+    def _read_segment_tail(self, p: Path, k: int) -> list[SpineRecord]:
+        """The last `k` records of a single segment (seek-from-end, O(k) bytes). Plaintext in Slices 1-3."""
+        if k <= 0 or not p.exists():
+            return []
+        with p.open("rb") as f:
             f.seek(0, os.SEEK_END)
             pos = f.tell()
             buf = b""
-            while pos > 0 and buf.count(b"\n") <= n:
+            while pos > 0 and buf.count(b"\n") <= k:
                 step = min(65536, pos)
                 pos -= step
                 f.seek(pos)
                 buf = f.read(step) + buf
-        recs: list[SpineRecord] = []
-        for ln in [x for x in buf.split(b"\n") if x.strip()][-n:]:
+        out: list[SpineRecord] = []
+        for ln in [x for x in buf.split(b"\n") if x.strip()][-k:]:
             try:
-                recs.append(SpineRecord.from_dict(json.loads(ln)))
+                out.append(SpineRecord.from_dict(json.loads(ln)))
             except (ValueError, KeyError, TypeError):
                 continue
-        return recs
+        return out
 
     @property
     def next_seq(self) -> int:
@@ -510,63 +586,105 @@ class SpineStore:
             entries.append(ChainEntry(seq=r.seq, prev_hash=r.prev_hash, cert_digest=r.cert_digest, entry_hash=r.entry_hash))
         return verify_chain(entries)
 
-    def _read_last_entry(self) -> ChainEntry | None:
-        # `_last_nonempty_line` skips a torn/garbage tail and returns the last VALID line (FIX 2), so a
-        # crash mid-write can no longer block a restart. The returned line is guaranteed parseable.
-        target = self._read_target()
-        line = _last_nonempty_line(target) if target.exists() else None
+    @staticmethod
+    def _entry_from_line(line: str | None) -> "ChainEntry | None":
         if not line:
             return None
         d = json.loads(line)
-        return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"], entry_hash=d["entry_hash"])
+        return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"],
+                          entry_hash=d["entry_hash"])
 
-    # --- seq -> byte-offset index (FIX 1) -----------------------------------------
-    def _start_offset_for(self, since_seq: int) -> int:
-        """Byte offset to seek so a forward read yields exactly seq > since_seq. A full read
-        (since_seq < 0) starts at 0 WITHOUT building the index — full scans stay a single byte-identical
-        pass. Otherwise the index gives an O(1) seek to the line of seq (since_seq + 1)."""
+    def _read_last_entry(self) -> ChainEntry | None:
+        """The chain tip = the last valid record of the ACTIVE segment. If the active is EMPTY (a freshly
+        rotated segment before its first append), the tip is the last SEALED segment's real last record
+        (the seam boundary), so next_seq never regresses / reuses a seq across a rotation (invariant 13).
+        `_last_nonempty_line` skips a torn/garbage tail, so a crash mid-write can't block a restart."""
+        m = read_manifest(self._layout)
+        if m is None:
+            t = self._read_target()
+            return self._entry_from_line(_last_nonempty_line(t) if t.exists() else None)
+        act = m.active()
+        if act is not None:
+            ap = self._layout.seg_path(act)
+            line = _last_nonempty_line(ap) if ap.exists() else None
+            if line:
+                return self._entry_from_line(line)
+        for seg in reversed(m.sealed_in_order()):        # active empty/absent -> last sealed segment's tail
+            sp = self._layout.seg_path(seg)
+            line = _last_nonempty_line(sp) if sp.exists() else None
+            if line:
+                return self._entry_from_line(line)
+        return None
+
+    # --- segment-aware seq -> (segment, byte-offset) index ------------------------
+    def _start_locus(self, since_seq: int, segs: list[Path]) -> tuple[int, int]:
+        """(starting segment index in `segs`, byte offset within it) so a forward read yields exactly
+        seq > since_seq. A full read (since_seq < 0) → (0, 0). Otherwise the index seeks to seq
+        (since_seq + 1) in its owning segment; if that seq is beyond the tip, return a past-the-end index
+        so nothing is yielded; if not resolvable (below the min, or a skipped/corrupt gap), fall back to a
+        safe full span from segment 0."""
         if since_seq < 0:
-            return 0
+            return (0, 0)
         self._ensure_index()
+        want = since_seq + 1
         with self._index_lock:
-            off = self._offsets.get(since_seq + 1)
-            if off is not None:
-                return off
-            if since_seq + 1 > self._max_seq:
-                return self._scan_pos              # nothing beyond the tip → the read yields nothing
-        return 0                                    # below the min, or a skipped/corrupt gap → safe full scan
+            loc = self._offsets.get(want)
+            max_seq = self._max_seq
+        if loc is not None:
+            path_str, off = loc
+            for i, p in enumerate(segs):
+                if str(p) == path_str:
+                    return (i, off)
+            return (0, 0)                           # segment set changed under us → safe full span
+        if want > max_seq:
+            return (len(segs), 0)                   # nothing beyond the tip → yield nothing
+        return (0, 0)                               # below min / gap → safe full span
 
     def _ensure_index(self) -> None:
-        """Build the index lazily (one unavoidable scan) and keep it current. Detects a file that GREW
-        (our own or another PROCESS's appends — append-only ⇒ offsets never move, so we only EXTEND) and
-        a file that SHRANK / was rewritten in place smaller (rebuild). Thread-safe under `_index_lock`."""
-        target = self._read_target()
+        """Build/reconcile the segment-aware index lazily, keyed on the epoch (`change_token`). On an epoch
+        change (an append grew the active, or a rotation/migration changed the segment set) reconcile each
+        segment: the ACTIVE extends over the new bytes (or re-scans if it shrank in place — a truncation);
+        a SEALED segment is immutable and indexed exactly once. Thread-safe under `_index_lock`."""
+        tok = self.change_token()
         try:
-            size = target.stat().st_size if target.exists() else 0
-        except OSError:
-            return
+            segs = self._segments_in_order()
+        except SpineError:
+            return                                  # a missing segment → reads raise; don't poison the index
+        active_str = str(segs[-1]) if segs else None
         with self._index_lock:
-            if not self._index_built:
-                self._offsets = {}
-                self._max_seq = -1
-                self._scan_pos = 0
-                self._index_built = True
-                self._scan_from(0, size)
-            elif size > self._scan_pos:
-                self._scan_from(self._scan_pos, size)      # extend forward over the newly-appended bytes
-            elif size < self._scan_pos:
-                self._offsets = {}                          # truncated/rewritten smaller → rebuild
-                self._max_seq = -1
-                self._scan_pos = 0
-                self._scan_from(0, size)
+            if tok == self._index_epoch:
+                return
+            for p in segs:
+                ps = str(p)
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    continue
+                scanned = self._seg_scanned.get(ps, 0)
+                if ps == active_str:
+                    if size > scanned:
+                        self._scan_segment(ps, p, scanned, size)     # extend the active over new bytes
+                    elif size < scanned:                             # active shrank in place (truncation)
+                        self._purge_segment(ps)
+                        self._scan_segment(ps, p, 0, size)
+                elif scanned < size:                                 # sealed: immutable → index once
+                    self._scan_segment(ps, p, scanned, size)
+            self._index_epoch = tok
 
-    def _scan_from(self, start: int, size: int) -> None:
-        """Index every COMPLETE (newline-terminated) record line in bytes [start, size). MUST hold
-        `_index_lock`. A malformed complete line is left OUT of the index (so a mid-file gap still
-        surfaces via verify()); a trailing partial line (no newline yet) is left for the next extend."""
+    def _purge_segment(self, ps: str) -> None:
+        """Drop a segment's offsets (the active shrank in place — a truncation). MUST hold `_index_lock`."""
+        self._offsets = {s: loc for s, loc in self._offsets.items() if loc[0] != ps}
+        self._seg_scanned.pop(ps, None)
+        self._max_seq = max(self._offsets, default=-1)
+
+    def _scan_segment(self, ps: str, p: Path, start: int, size: int) -> None:
+        """Index every COMPLETE (newline-terminated) record line in bytes [start, size) of segment `p` as
+        `_offsets[seq] = (ps, line_offset)`. MUST hold `_index_lock`. A malformed complete line is left OUT
+        (so a mid-file gap still surfaces via verify()); a trailing partial line is left for the next
+        extend."""
         if size <= start:
             return
-        with self._read_target().open("rb") as f:
+        with p.open("rb") as f:
             f.seek(start)
             chunk = f.read(size - start)
         consumed = 0
@@ -586,7 +704,7 @@ class SpineStore:
                 seq = d["seq"]
             except (ValueError, KeyError, TypeError):
                 continue                                    # corrupt complete line — do not index it
-            self._offsets[seq] = line_off
+            self._offsets[seq] = (ps, line_off)
             if seq > self._max_seq:
                 self._max_seq = seq
-        self._scan_pos = start + consumed
+        self._seg_scanned[ps] = start + consumed
