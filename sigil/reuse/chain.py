@@ -34,8 +34,13 @@ def append_entry(entries: list[ChainEntry], cert_digest: str) -> ChainEntry:
                       entry_hash=_entry_hash(seq, prev, cert_digest))
 
 
-def verify_chain(entries: list[ChainEntry]) -> tuple[bool, str]:
-    prev = _GENESIS_PREV
+_HEAD_V2_FIELDS = ("base_seq", "base_prev_hash", "base_count", "cumulative_merkle_root",
+                   "snapshot_seq", "prev_head_hash")
+
+
+def verify_chain(entries: list[ChainEntry], *, genesis_prev: str = _GENESIS_PREV) -> tuple[bool, str]:
+    prev = genesis_prev                              # _GENESIS_PREV for a full chain; base_prev_hash for a
+    #                                                  re-based (pruned) live window — links cleanly, no fork
     for i, e in enumerate(entries):
         if e.prev_hash != prev:
             return False, f"chain break at seq {e.seq}: prev_hash mismatch (entry deleted/reordered)"
@@ -50,6 +55,13 @@ def verify_chain(entries: list[ChainEntry]) -> tuple[bool, str]:
 def _head_payload(head: SignedChainHead) -> dict:
     d = head.model_dump(mode="json")
     d.pop("signatures", None)
+    # Version-conditional signing payload: a v1 head (schema_version < 2) drops the v2 fields ENTIRELY, so
+    # its signing bytes are BYTE-IDENTICAL to a pre-v2 head — every persisted head.json and every old client
+    # verifies unchanged. Explicit pop, NOT model_dump(exclude_unset): model_validate_json marks defaulted
+    # fields "set", so exclude_unset would re-emit them and false-alarm every existing deployment.
+    if int(d.get("schema_version", 1)) < 2:
+        for f in _HEAD_V2_FIELDS:
+            d.pop(f, None)
     return d
 
 
@@ -64,13 +76,16 @@ def sign_head(entries: list[ChainEntry], *, engagement_slug: str, signers: list[
 
 
 def verify_head(head: SignedChainHead, entries: list[ChainEntry], trust_root: TrustRoot,
-                *, prev_highwater: int | None = None) -> tuple[bool, str]:
-    ok_chain, reason = verify_chain(entries)
+                *, prev_highwater: int | None = None, genesis_prev: str = _GENESIS_PREV) -> tuple[bool, str]:
+    ok_chain, reason = verify_chain(entries, genesis_prev=genesis_prev)
     if not ok_chain:
         return False, reason
-    exp_hash = entries[-1].entry_hash if entries else _GENESIS_PREV
-    exp_seq = entries[-1].seq if entries else 0
-    if head.head_hash != exp_hash or head.last_seq != exp_seq or head.entry_count != len(entries):
+    exp_hash = entries[-1].entry_hash if entries else genesis_prev
+    exp_seq = entries[-1].seq if entries else head.base_seq
+    # entry_count stays ABSOLUTE: it must equal base_count (pruned records the head commits by Merkle root)
+    # plus the length of the live window it was signed over. base_count == 0 for a v1 head, so this reduces
+    # to the pre-v2 `entry_count == len(entries)` exactly.
+    if head.head_hash != exp_hash or head.last_seq != exp_seq or head.entry_count != head.base_count + len(entries):
         return False, "head does not match the chain (log truncated or head rewritten)"
     thr = verify_threshold(evidence_signing_bytes(_head_payload(head)), head.signatures, trust_root)
     if not thr.satisfied:

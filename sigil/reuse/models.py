@@ -59,6 +59,15 @@ class SignedChainHead(BaseModel):
     schema_version: int = 1
     engagement_slug: str = ""   # SIGIL: the owner scope
     last_seq: int = Field(ge=0)
-    entry_count: int = Field(ge=0)
+    entry_count: int = Field(ge=0)   # ABSOLUTE record count = base_count + len(live window)
     head_hash: str
+    # v2 (cold-archive hard-prune) — defaulted to the NO-PRUNE identity, so a v1 head parses under this
+    # model AND (via the version-conditional _head_payload) SIGNS byte-identically. schema_version bumps
+    # 1->2 only at the FIRST prune and stays 2 thereafter (so every subsequent head carries the meta-chain).
+    base_seq: int = 0                    # first RETAINED seq (0 = nothing pruned)
+    base_prev_hash: str = _GENESIS_PREV  # synthetic genesis-prev the re-based live window links from
+    base_count: int = 0                  # absolute count of pruned records [0..base_seq)
+    cumulative_merkle_root: str = ""     # running Merkle accumulator over ALL pruned leaves (C2)
+    snapshot_seq: int = -1               # seq of the kind="snapshot" record this head commits (-1 = none)
+    prev_head_hash: str = ""             # sha256 of the prior accepted head's signing bytes (meta-chain)
     signatures: list[Signature] = Field(default_factory=list)

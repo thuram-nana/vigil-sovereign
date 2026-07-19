@@ -11,8 +11,11 @@ added later by raising the trust-root threshold.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+
+_MAX_HEAD_SCHEMA = 2   # head schema versions this build understands; a higher one -> "upgrade sigil"
 
 from ..config import HEAD_PATH, KEYS_DIR, OWNER_KEY_ID, SCOPE
 from ..reuse import (
@@ -63,25 +66,53 @@ def checkpoint(store: SpineStore | None = None) -> SignedChainHead:
 
 
 def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot) -> tuple[bool, str]:
-    """Pure head/chain classification (no globals — testable in isolation). Distinguishes
-    three cases honestly: a shrunk chain (truncation) or a mismatching prefix (history
-    rewrite) are TAMPERING; a chain that merely grew past the anchor is benign — stale.
-    """
-    n, signed_n = len(entries), head.entry_count
-    if n < signed_n:
-        return False, f"TAMPERING: chain has {n} records but the signed head anchors {signed_n} (truncated/rolled back)"
-    # verify the head against exactly the prefix it signed; append-only ⇒ the prefix is byte-identical.
-    ok, msg = verify_head(head, entries[:signed_n], tr)
+    """Pure head/chain classification (no globals — testable in isolation), SNAPSHOT-AWARE for the
+    cold-archive hard-prune. The live window is selected BY SEQ (`seq >= base_seq`), not by array prefix, so
+    every crash-cutover state verifies clean. Failures are TAMPERING (front-truncation, tail-truncation, or
+    a rewrite); a chain grown past the anchor is benign-stale. entry_count stays ABSOLUTE (base_count +
+    live). For a v1 head (base_seq=0, base_count=0) this is BYTE-IDENTICAL to the pre-v2 semantics."""
+    base = head.base_count
+    signed_live = head.entry_count - base
+    live = [e for e in entries if e.seq >= head.base_seq]
+    if len(live) < signed_live:
+        return False, (f"TAMPERING: live window has {len(live)} records but the signed head anchors "
+                       f"{signed_live} (truncated/rolled back)")
+    if signed_live > 0:
+        # LEFT-EDGE PIN — UNCONDITIONAL TAMPERING: the signed live window must start EXACTLY at base_seq and
+        # link from base_prev_hash. This closes the false-CLEAN front-drop hole (the n<entry_count no-op
+        # trap transposed to the left edge) — an attacker cannot drop the front of the live window. (Only
+        # the window-SHAPE check is gated on signed_live>0; the SIGNATURE check below is not.)
+        if live[0].seq != head.base_seq or live[0].prev_hash != head.base_prev_hash:
+            return False, "TAMPERING: live window does not start at the signed base (front-truncated/rolled back)"
+    # SIGNATURE / threshold check runs UNCONDITIONALLY — including signed_live == 0 (an empty live window, the
+    # case a forged zero-anchor head presents). verify_head over an empty window still validates
+    # head_hash==base_prev_hash, last_seq==base_seq, entry_count==base_count AND the owner Ed25519 signature,
+    # so a forged UNSIGNED zero head is TAMPERING (the whole tamper-evidence point), while a legitimately
+    # owner-signed empty spine still passes. (An earlier version gated this behind signed_live>0 and thereby
+    # skipped signature verification for empty heads — a keyless tamper-alert-suppression fail-open.)
+    ok, msg = verify_head(head, live[:signed_live], tr, genesis_prev=head.base_prev_hash)
     if not ok:
         return False, f"TAMPERING: history rewritten at or below the signed head — {msg}"
-    if n > signed_n:
-        return True, f"anchors {signed_n} records; {n - signed_n} appended since — run `sigil sign` to re-anchor"
-    return True, f"anchors all {signed_n} records (current)"
+    if len(live) > signed_live:
+        return True, f"anchors {signed_live} records; {len(live) - signed_live} appended since — run `sigil sign` to re-anchor"
+    return True, f"anchors all {signed_live} records (current)"
 
 
 def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
     store = store or SpineStore()
     if not HEAD_PATH.exists():
         return False, "no signed head — run `sigil sign` to anchor the spine"
-    head = SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8"))
+    raw = HEAD_PATH.read_text(encoding="utf-8")
+    try:
+        head = SignedChainHead.model_validate_json(raw)     # a future-schema head fails extra="forbid" here
+    except Exception:  # noqa: BLE001 — never crash + never false-clean: distinguish "too new" from "corrupt"
+        try:
+            sv = int(json.loads(raw).get("schema_version", 1))
+        except (ValueError, TypeError, AttributeError):
+            return False, "corrupt head — cannot parse (run `sigil sign` to re-anchor)"
+        if sv > _MAX_HEAD_SCHEMA:
+            return False, f"head schema v{sv} too new — upgrade sigil (never treated as clean)"
+        return False, "corrupt head — cannot parse (run `sigil sign` to re-anchor)"
+    if head.schema_version > _MAX_HEAD_SCHEMA:
+        return False, f"head schema v{head.schema_version} too new — upgrade sigil (never treated as clean)"
     return classify_head(head, store.entries(), trust_root())

@@ -28,9 +28,19 @@ from typing import Optional
 from ..config import HEAD_PATH
 from ..reuse import SignedChainHead
 from ..reuse.chain import _GENESIS_PREV
-from .checkpoint import classify_head, trust_root
+from .checkpoint import _MAX_HEAD_SCHEMA, classify_head, trust_root
 from .store import SpineStore
 from .verify import verify_record
+
+
+def _peek_schema(raw: str) -> int:
+    """Lenient read of a head's schema_version even when the strict model rejects it (a future-schema head
+    carries fields `extra="forbid"` refuses). 1 on any parse failure."""
+    try:
+        import json
+        return int(json.loads(raw).get("schema_version", 1))
+    except (ValueError, TypeError, AttributeError):
+        return 1
 
 
 def _shape(record, *, integrity_ok: bool, integrity_reason: str, anchored: bool) -> dict:
@@ -91,7 +101,12 @@ class SpineTailer:
             rollback = f"ROLLBACK: on-disk head seq {head_seq} < monotonic high-water {self._high_water}"
         else:
             self._high_water = head_seq
-        head, tr = self._resolve_head()
+        head, tr, status = self._resolve_head()
+        if status == "ahead":
+            self._signed_last_seq = -1
+            return {"anchor_ok": False, "signed_last_seq": -1, "rollback": rollback, "upgrade_required": True,
+                    "reason": "signed head schema is newer than this build understands — upgrade sigil "
+                              "(NOT treated as clean)"}
         if head is None:
             self._signed_last_seq = -1
             return {"anchor_ok": False, "signed_last_seq": -1, "rollback": rollback,
@@ -108,15 +123,25 @@ class SpineTailer:
                 "rollback": rollback, "reason": reason}
 
     def _resolve_head(self):
+        """(head, trust_root, status) where status is 'ok' | 'none' | 'ahead'. A head whose schema_version
+        exceeds what this build understands returns status='ahead' (surfaced by check_anchor as
+        anchor_ok=False + upgrade_required) — NEVER the benign 'un-notarized' degrade, which would be a
+        false-CLEAN for a too-new head. A v1/v2 head returns 'ok' (byte-identical path)."""
         if self._injected_head is not None:
-            return self._injected_head, self._injected_tr
+            return self._injected_head, self._injected_tr, "ok"
         try:
             if not HEAD_PATH.exists():
-                return None, None
-            head = SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8"))
-            return head, trust_root()
+                return None, None, "none"
+            raw = HEAD_PATH.read_text(encoding="utf-8")
+            try:
+                head = SignedChainHead.model_validate_json(raw)
+            except Exception:  # noqa: BLE001 — a future-schema head fails extra="forbid"; distinguish it
+                return None, None, ("ahead" if _peek_schema(raw) > _MAX_HEAD_SCHEMA else "none")
+            if head.schema_version > _MAX_HEAD_SCHEMA:
+                return None, None, "ahead"
+            return head, trust_root(), "ok"
         except Exception:  # noqa: BLE001 — no/broken head → unkeyed live tail (honest, fail-closed)
-            return None, None
+            return None, None, "none"
 
 
 class Broadcaster:
