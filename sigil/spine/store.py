@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -383,6 +384,45 @@ class SpineStore:
                 self._invalidate_index()
                 self._last = self._read_last_entry()
                 return True
+
+    def reset(self) -> None:
+        """Delete EVERY spine artifact for this store — the legacy data file, the manifest, all segments,
+        the trash, and the lockfile — for `sigil ingest --reset` (a full rebuild). Under the cross-process
+        lock so it can't race an append. Idempotent; leaves the store readable (empty) afterward. Replaces
+        the old `SPINE_PATH.unlink()`, which left the manifest + rotated segments behind (stale)."""
+        with spine_lock(self.path):
+            with self._crossproc_lock():
+                for pth in (self._layout.manifest_path, self.path, self._layout.lockfile_path):
+                    try:
+                        pth.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                for dpath in (self._layout.segments_dir, self._layout.trash_dir):
+                    if dpath.exists():
+                        shutil.rmtree(dpath, ignore_errors=True)
+                self._manifest = None
+                self._active = self._resolve_active_path()
+                self._invalidate_index()
+                self._last = self._read_last_entry()
+
+    def generation(self) -> int:
+        """The manifest generation (monotonic rotation epoch); -1 for a legacy (un-migrated) spine."""
+        m = read_manifest(self._layout)
+        return m.generation if m is not None else -1
+
+    def segment_info(self) -> list[dict]:
+        """A CLI/human summary of the segment set: one dict per segment in seq order. Empty list for a
+        legacy (un-migrated) single-file spine."""
+        m = read_manifest(self._layout)
+        if m is None:
+            return []
+        out: list[dict] = []
+        for seg in m.ordered():
+            p = self._layout.seg_path(seg)
+            out.append({"id": seg.id, "codec": seg.codec, "sealed": seg.sealed,
+                        "first_seq": seg.first_seq, "last_seq": seg.last_seq,
+                        "bytes": p.stat().st_size if p.exists() else 0, "file": seg.file})
+        return out
 
     # --- write --------------------------------------------------------------------
     def append(

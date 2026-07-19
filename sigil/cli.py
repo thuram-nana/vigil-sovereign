@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .config import SPINE_PATH, ensure_dirs
+from .config import ensure_dirs
 from .ingest import cursor as cur
 from .ingest.corpus import real_projects, session_files
 from .ingest.docs import ingest_docs
@@ -19,7 +19,7 @@ from .vectors.index import VectorIndex
 def cmd_ingest(a) -> None:
     ensure_dirs()
     if a.reset:
-        SPINE_PATH.unlink(missing_ok=True)
+        SpineStore().reset()                 # clears the legacy file, manifest, segments, trash, lockfile
         cur.clear()
         VectorIndex().reset()
         print("  reset: spine + cursor + vectors cleared")
@@ -470,6 +470,27 @@ def cmd_status(a) -> None:
     print(f"head:      {'OK' if hok else '(' + hmsg + ')'}")
 
 
+def cmd_spine(a) -> None:
+    """Segment-rotation ops. `migrate` moves the legacy single file into the segment layout (O(1), one-way,
+    idempotent). `status` lists the segment set. Retain-all: no records are ever deleted."""
+    store = SpineStore()
+    if a.action == "migrate":
+        if store.migrate():
+            print("  migrated: spine.jsonl → segments/seg-00000000.jsonl + manifest published")
+        else:
+            print("  already migrated (manifest present) — no change")
+    elif a.action == "status":
+        segs = store.segment_info()
+        if not segs:
+            print(f"spine: LEGACY single file (not migrated) | {store.count()} records | next_seq {store.next_seq}")
+            return
+        print(f"spine: {len(segs)} segment(s) | generation {store.generation()} | "
+              f"{store.count()} records | next_seq {store.next_seq}")
+        for s in segs:
+            where = "active" if not s["sealed"] else f"sealed[{s['first_seq']}..{s['last_seq']}]"
+            print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
+
+
 def cmd_doctor(a) -> None:
     """Whole-install self-check: SIGIL_HOME writable, kernel present, Qdrant reachable, keyring, claude."""
     import sys as _sys
@@ -586,6 +607,9 @@ def main(argv=None) -> None:
     sub.add_parser("dashboard", help="read-only operator status over the spine").set_defaults(fn=cmd_dashboard)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    psp = sub.add_parser("spine", help="segment rotation: migrate the legacy file into segments; show status")
+    psp.add_argument("action", choices=["migrate", "status"])
+    psp.set_defaults(fn=cmd_spine)
     psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
     psv.add_argument("--port", type=int, default=8733)
     psv.set_defaults(fn=cmd_serve)

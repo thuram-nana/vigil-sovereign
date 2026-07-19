@@ -331,6 +331,55 @@ def test_manifest_rejects_path_escaping_segment_file():
     Segment(id=0, file="spine.segments/seg-00000000.jsonl", first_seq=0)   # a contained relative path is fine
 
 
+def test_reset_clears_all_segment_artifacts():
+    """reset() must clear the legacy file, manifest, ALL segments, trash, and lockfile — not just
+    spine.jsonl (the old --reset left rotated segments + the manifest behind, resurrecting stale data)."""
+    d = _fresh_dir("sigil-reset-")
+    lay = _make_segmented(d, [3, 2])                       # a migrated, multi-segment spine + manifest
+    p = d / "spine.jsonl"
+    # touch a lockfile + trash to prove they are cleared too
+    _append_n(SpineStore(p), 0)                            # (constructs; no-op append count)
+    lay.trash_dir.mkdir(parents=True, exist_ok=True)
+    (lay.trash_dir / "old.jsonl").write_text("x")
+    assert lay.manifest_path.exists() and lay.segments_dir.exists()
+
+    SpineStore(p).reset()
+    assert not lay.manifest_path.exists(), "manifest cleared"
+    assert not lay.segments_dir.exists(), "segments dir cleared"
+    assert not lay.trash_dir.exists(), "trash cleared"
+    assert not p.exists(), "legacy file cleared"
+    # a fresh store reads empty and can be rebuilt
+    s = SpineStore(p)
+    assert s.count() == 0 and s.next_seq == 0
+    _append_n(s, 2)
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+
+
+def test_cli_spine_migrate_and_status(capsys):
+    """The `sigil spine migrate|status` wrappers operate on the DEFAULT store (isolated under the test
+    SIGIL_HOME). Bracketed with reset() so it neither inherits nor leaks default-spine state."""
+    from sigil.cli import cmd_spine
+
+    def _ns(**kw):
+        return type("A", (), kw)()
+
+    SpineStore().reset()                                   # clean legacy start on the default path
+    try:
+        _append_n(SpineStore(), 3)
+        cmd_spine(_ns(action="status"))
+        assert "LEGACY single file" in capsys.readouterr().out
+        cmd_spine(_ns(action="migrate"))
+        assert "migrated" in capsys.readouterr().out
+        cmd_spine(_ns(action="migrate"))                   # idempotent
+        assert "already migrated" in capsys.readouterr().out
+        cmd_spine(_ns(action="status"))
+        out = capsys.readouterr().out
+        assert "1 segment(s)" in out and "generation 0" in out and "3 records" in out
+    finally:
+        SpineStore().reset()                               # don't leak a migrated default spine to other tests
+
+
 def test_stale_appender_reresolves_no_split_brain():
     """The core split-brain test. Instance A appends in legacy mode; instance B migrates; A appends
     again. A MUST re-resolve the active segment under the lock and write to the migrated segment — never
