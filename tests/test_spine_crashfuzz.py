@@ -24,11 +24,24 @@ import pytest
 _CHILD = r"""
 import os, sys
 from pathlib import Path
+import sigil.spine.store as _store
+
+# Install the fault-injection hook IN THE TEST (production ships _crash_hook=None). The hook reads this
+# child's private env to crash at a named cutover barrier, after SIGIL_SPINE_CRASH_SKIP prior occurrences.
+def _hook(name):
+    if os.environ.get("SIGIL_SPINE_CRASH_AT") == name:
+        skip = int(os.environ.get("SIGIL_SPINE_CRASH_SKIP", "0") or "0")
+        if skip > 0:
+            os.environ["SIGIL_SPINE_CRASH_SKIP"] = str(skip - 1)
+            return
+        os._exit(137)
+_store._crash_hook = _hook
+
 from sigil.spine.store import SpineStore
 d = Path(sys.argv[1])
-ack = open(d / "acks.log", "w")
+ack = open(d / ("acks-%d.log" % os.getpid()), "w")   # pid-scoped so concurrent appenders don't clobber
 s = SpineStore(d / "spine.jsonl", seg_max_bytes=0, seg_max_records=4)
-s.migrate()
+s.migrate()                                          # idempotent — safe when two processes race it
 for i in range(400):
     seq = s.append(kind="event", source="fuzz", actor="u", payload={"n": i})
     ack.write(str(seq) + "\n"); ack.flush(); os.fsync(ack.fileno())
@@ -51,9 +64,14 @@ def _run_child(d: Path, *, crash_at: str | None = None, crash_skip: int = 0,
         time.sleep(kill_after)
         proc.kill()                                  # SIGKILL — the un-catchable crash
     rc = proc.wait(timeout=30)
-    ackf = d / "acks.log"
-    acked = [int(x) for x in ackf.read_text().split()] if ackf.exists() else []
-    return acked, rc
+    return _read_acks(d), rc
+
+
+def _read_acks(d: Path) -> list[int]:
+    acked: list[int] = []
+    for ackf in d.glob("acks-*.log"):
+        acked += [int(x) for x in ackf.read_text().split()]
+    return acked
 
 
 def _assert_recovers(d: Path, acked: list[int]) -> None:
@@ -96,3 +114,20 @@ def test_random_sigkill_during_rotation(trial):
     acked, rc = _run_child(d, kill_after=delay)
     assert rc in (-9, 137), f"child exited unexpectedly (rc={rc})"
     _assert_recovers(d, acked)
+
+
+@pytest.mark.parametrize("trial", range(3))
+def test_concurrent_appenders_sigkill(trial):
+    """Cross-process: TWO processes append+rotate the SAME spine concurrently (the path-stable flock must
+    serialize their read-tip→append→seal→publish), both SIGKILL'd. Recovery must be clean with every acked
+    seq (from either process) present — no fork, no lost ack, no double-count."""
+    d = _fresh_dir()
+    env = dict(os.environ)
+    procs = [subprocess.Popen([sys.executable, "-c", _CHILD, str(d)], env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for _ in range(2)]
+    time.sleep(0.06 + 0.03 * trial)
+    for pr in procs:
+        pr.kill()
+    for pr in procs:
+        pr.wait(timeout=30)
+    _assert_recovers(d, _read_acks(d))

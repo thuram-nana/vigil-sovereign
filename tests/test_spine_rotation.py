@@ -433,6 +433,31 @@ def test_manual_rotate():
     assert [r.seq for r in SpineStore(p).iter_records()] == list(range(8))
 
 
+def test_ambient_crash_env_is_inert_in_production(monkeypatch):
+    """Review fix: the fault-injection hook must NOT be armable by an ambient env var — production ships
+    _crash_hook=None, so setting SIGIL_SPINE_CRASH_AT does nothing (no os._exit crash-loop of every writer)."""
+    import sigil.spine.store as store
+    assert store._crash_hook is None, "production must ship no crash hook"
+    monkeypatch.setenv("SIGIL_SPINE_CRASH_AT", "append_after_fsync")
+    d = _fresh_dir("sigil-nohook-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_records=2)
+    s.migrate()
+    assert s.append(kind="event", source="t", actor="u", payload={"n": 0}) == 0   # must NOT os._exit
+
+
+def test_negative_threshold_clamps_to_disabled():
+    """Review fix: a negative threshold clamps to 0 (disabled), not `size >= -1` == always-over (which
+    would seal on every append — a self-DoS)."""
+    d = _fresh_dir("sigil-negthr-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=-1, seg_max_records=-1)
+    assert s._seg_max_bytes == 0 and s._seg_max_records == 0
+    s.migrate()
+    _append_n(s, 10)
+    assert len(s.segment_info()) == 1, "clamped to disabled — one segment, not one-per-record"
+
+
 def test_panic_append_durable_when_it_triggers_rotation():
     """D1 / write-then-rotate: a kill-switch PANIC append that itself trips the rotation threshold is
     written + fsync'd BEFORE the seal, so it is durable and honored even though it triggered a rotation."""

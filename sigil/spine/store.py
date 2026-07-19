@@ -45,17 +45,19 @@ class SpineError(Exception):
     chain (invariant 15: a state-scanner must never fail open)."""
 
 
+# Test-only fault-injection HOOK. Production ships it as None, so `_maybe_crash` is a single `is None`
+# check on the append/seal path and CANNOT be armed by an ambient environment variable (an env-triggered
+# os._exit in the durability-critical write path would be a footgun / local-DoS). The crash-fuzz harness
+# installs its own hook (which reads its private env + hard-exits) into THIS module, so the barrier logic
+# lives in the test, never in the shipped writer.
+_crash_hook: "Any" = None
+
+
 def _maybe_crash(name: str) -> None:
-    """Test-only fault injection: if the env var SIGIL_SPINE_CRASH_AT names this cutover barrier, hard-exit
-    (simulate a SIGKILL) EXACTLY here — so the crash-fuzz harness can prove the seal/append cutover is
-    crash-atomic at every barrier (no lost ack, no double-count, always verify()-clean on recovery). A
-    no-op unless the env var is set; never fires in production."""
-    if os.environ.get("SIGIL_SPINE_CRASH_AT") == name:
-        skip = int(os.environ.get("SIGIL_SPINE_CRASH_SKIP", "0") or "0")
-        if skip > 0:                                # skip this many occurrences first (crash at a later seal)
-            os.environ["SIGIL_SPINE_CRASH_SKIP"] = str(skip - 1)
-            return
-        os._exit(137)
+    """Invoke the installed test fault-injection hook (if any) at a named cutover barrier. No-op in
+    production (`_crash_hook is None`)."""
+    if _crash_hook is not None:
+        _crash_hook(name)
 
 
 # The record fields SpineRecord.from_dict needs; a line missing any of these is corrupt (skipped by
@@ -156,10 +158,12 @@ def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
 class SpineStore:
     def __init__(self, path: Path | str = SPINE_PATH, *,
                  seg_max_bytes: int | None = None, seg_max_records: int | None = None) -> None:
-        # Rotation thresholds (0/None on a bound disables it; both disabled = never rotate). Injectable so
-        # tests can force frequent rotation; default from config.
-        self._seg_max_bytes = SPINE_SEG_MAX_BYTES if seg_max_bytes is None else seg_max_bytes
-        self._seg_max_records = SPINE_SEG_MAX_RECORDS if seg_max_records is None else seg_max_records
+        # Rotation thresholds (0 on a bound disables it; both disabled = never rotate). Injectable so tests
+        # can force frequent rotation; default from config. CLAMPED to >= 0: a negative value (e.g. an
+        # operator using -1 to mean "off") must not read as `size >= -1` == always-true, which would seal on
+        # EVERY append — a self-DoS (one segment + full manifest rewrite per record).
+        self._seg_max_bytes = max(0, SPINE_SEG_MAX_BYTES if seg_max_bytes is None else seg_max_bytes)
+        self._seg_max_records = max(0, SPINE_SEG_MAX_RECORDS if seg_max_records is None else seg_max_records)
         # `self.path` is the STABLE identity + lock token (…/spine.jsonl). After a migration it is renamed
         # away and no longer a data file, but it remains the key for the in-process RLock and the anchor
         # the whole layout derives from — so the RLock that `envelope.consume` shares with `append` stays
@@ -526,7 +530,12 @@ class SpineStore:
         _maybe_crash("seal_after_manifest")         # crash-fuzz: committed; in-memory state not yet updated
         self._manifest = read_manifest(self._layout)
         self._active = self._layout.seg_path(new_active)
-        self._invalidate_index()
+        # A seal moves NO bytes (retain-all): the just-sealed segment keeps its path + content, so its
+        # indexed offsets stay valid. Do NOT clear the whole index (that would force an O(whole-spine)
+        # re-scan every ~12000 records); just drop the epoch so the next read reconciles — which finds every
+        # sealed segment already indexed (skip) and only registers the new empty active.
+        with self._index_lock:
+            self._index_epoch = None
         self._last = boundary                       # tip preserved; the next append seeds from the seam
         return True
 
