@@ -1,0 +1,91 @@
+# SIGIL — a local-first, offense-free personal AI orchestrator.
+# PEP 621 metadata. Classic setuptools backend (do NOT require bleeding-edge setuptools — stock LTS ships
+# an older version, and PEP 639 SPDX license expressions need >=77).
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigil"
+description = "A local-first, offense-free sovereign personal AI orchestrator (WARDEN kernel, signed memory spine, gated agent mesh)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "SIGIL" }]
+keywords = ["ai", "assistant", "local-first", "agents", "personal", "sovereign"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Private :: Do Not Upload",
+]
+dynamic = ["version"]
+
+# Core runtime dependencies — the memory loop, the MCP server, and the always-imported paths.
+# `numpy` is a genuine top-level import (sigil/voice/backends.py) and MUST be declared, not relied on
+# transitively via fastembed/onnxruntime.
+dependencies = [
+    "cryptography==49.0.0",
+    "fastembed==0.8.0",
+    "kuzu==0.11.3",
+    "mcp==1.28.1",
+    "numpy>=1.26,<3",
+    "onnxruntime==1.27.0",
+    "pydantic==2.13.4",
+    "qdrant-client==1.18.0",
+]
+
+# Optional stacks are lazy-imported and degrade gracefully; the extras make the install intentional
+# instead of trial-and-error. `pip install "sigil[voice]"` etc.
+[project.optional-dependencies]
+voice = ["sounddevice", "faster-whisper", "openwakeword", "piper-tts"]
+secrets = ["keyring"]
+capture = ["mss"]                 # cross-platform screen capture (macOS/Windows backends)
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+all = ["sounddevice", "faster-whisper", "openwakeword", "piper-tts", "keyring", "mss"]
+
+# The `sigil` console command + `python -m sigil` both resolve to the CLI.
+[project.scripts]
+sigil = "sigil.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "sigil.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["sigil*"]
+
+# ── quality gates ──────────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["sigil/bridge/webapp"]   # vendored/static front-end assets
+
+[tool.ruff.lint]
+# Start pragmatic: correctness + common bug classes, not stylistic churn on a large existing codebase.
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = [
+    "E501",   # line length is enforced by the formatter, not the linter
+    "B008",   # function call in argument default (used deliberately for injectable defaults)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "F401", "B011"]   # test files: late imports, unused re-exports, assert False are intentional
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+# Pragmatic entry posture for a large, dynamically-typed codebase: check what's annotated, don't block
+# on the untyped majority. Tighten module-by-module over time.
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = false
+exclude = ["sigil/bridge/webapp", "tests"]
