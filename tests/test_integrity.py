@@ -196,6 +196,30 @@ def test_torn_last_line_is_tolerated_by_reads():
     assert ok, "the valid prefix still verifies (a torn tail is a crash artifact, not tampering)"
 
 
+def test_append_after_a_torn_tail_is_not_lost():        # spine red-pen BLOCK-1 (silent acked-record loss)
+    p, _ = _fresh(4)                                    # clean seq 0..3
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"seq": 4, "kind": "event", "partial_incompl')   # interrupted-write torn tail, NO newline
+    seq = SpineStore(p).append(kind="event", source="t", actor="u", payload={"real": True})
+    got = SpineStore(p).get(seq)
+    assert got is not None and got.payload.get("real") is True, \
+        "the append AFTER a torn tail is durable + readable — not silently merged/lost (BLOCK-1 fix)"
+    assert [r.seq for r in SpineStore(p).iter_records()] == [0, 1, 2, 3, 4], "contiguous seqs after tail repair"
+    ok, reason = SpineStore(p).verify()
+    assert ok, f"chain intact after the torn tail is truncated + the real record appended: {reason}"
+
+
+def test_killswitch_engage_after_a_torn_tail_is_honored():   # spine red-pen BLOCK-1 (a MISSED panic)
+    from sigil.governor.killswitch import KillSwitch
+    owner = reuse.generate_keypair()
+    p, _ = _fresh(1)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"seq": 1, "partial torn write, no newline')      # a crash left a torn tail
+    KillSwitch(SpineStore(p), owner_key=owner, trusted_pubkey=owner.public_key_b64).engage(by="test")
+    assert KillSwitch(SpineStore(p), owner_key=owner, trusted_pubkey=owner.public_key_b64).is_engaged() is True, \
+        "a kill-switch PANIC recorded after a torn tail IS honored (not swallowed by an append-merge → mesh halts)"
+
+
 def test_torn_middle_line_still_fails_verify():
     p, _ = _fresh(6)                                    # clean seq 0..5
     lines = open(p).read().splitlines()

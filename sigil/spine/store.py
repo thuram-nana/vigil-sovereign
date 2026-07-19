@@ -80,6 +80,47 @@ def _last_nonempty_line(path: Path) -> str | None:
         window *= 4                                 # a torn tail bigger than the window (rare) — widen
 
 
+def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
+    """Return (byte offset just past the last VALID record line, its ChainEntry) — bytes BEYOND that
+    offset are a torn tail from an interrupted write, which `append` truncates before writing so the new
+    record cannot merge with them and be silently lost (BLOCK-1). (0, None) for an empty / all-torn file.
+    For a clean file the offset equals the file size (nothing to truncate)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0, None
+    if size == 0:
+        return 0, None
+    window = 8192
+    while True:
+        start = max(0, size - window)
+        with path.open("rb") as f:
+            f.seek(start)
+            buf = f.read(size - start)
+        segs: list[tuple[int, bytes]] = []          # (byte offset just past this line's \n, line bytes)
+        i = 0
+        while True:
+            nl = buf.find(b"\n", i)
+            if nl == -1:
+                break
+            segs.append((start + nl + 1, buf[i:nl]))
+            i = nl + 1
+        for end, raw in reversed(segs):             # near-EOF first; front partials (start>0) never win
+            if not raw.strip():
+                continue
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                d = None
+            if isinstance(d, dict) and all(k in d for k in _REQUIRED_KEYS):
+                return end, ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"],
+                                       cert_digest=d["cert_digest"], entry_hash=d["entry_hash"])
+            _log.warning("spine: skipping malformed tail segment while seeking the tip (%s)", path)
+        if start == 0:
+            return 0, None
+        window *= 4
+
+
 class SpineStore:
     def __init__(self, path: Path | str = SPINE_PATH) -> None:
         self.path = Path(path)
@@ -111,21 +152,33 @@ class SpineStore:
         # daemon) can't both fork off a stale tip and break the chain. Re-read the TRUE tip from disk
         # under the lock — `self._last` may be stale if another instance/process appended.
         with spine_lock(self.path):
-            with self.path.open("a", encoding="utf-8") as f:
+            # binary append+read: lets us TRUNCATE a torn tail before writing (BLOCK-1 fix). `a+b` creates
+            # the file if absent and — in append mode — every write still lands at EOF.
+            with self.path.open("a+b") as f:
                 if fcntl is not None:
                     try:
                         fcntl.flock(f.fileno(), fcntl.LOCK_EX)   # cross-process guard (advisory)
                     except OSError:  # pragma: no cover
                         pass
-                last = self._read_last_entry()
+                # BLOCK-1: an interrupted write can leave torn bytes PAST the last valid record. Appending
+                # after them would MERGE (torn + new) into one unparseable line → the new record is silently
+                # lost, verify() stays green, and a lost kill-switch panic never halts the mesh. Truncate the
+                # dead tail back to the last valid record FIRST (this only removes never-committed garbage
+                # from an interrupted write; committed records are untouched).
+                clean_end, last = _last_valid_boundary(self.path)
+                pre_size = os.fstat(f.fileno()).st_size
+                if pre_size > clean_end:
+                    f.truncate(clean_end)
+                    _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
+                                 pre_size - clean_end, self.path)
                 entry = append_entry([last], cert_digest) if last else build_chain([cert_digest])[0]
                 record = {
                     "seq": entry.seq, **content, "ts": ts or now_iso(),
                     "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
                 }
                 line = json.dumps(record, ensure_ascii=False) + "\n"
-                offset = os.fstat(f.fileno()).st_size   # byte offset where this line lands (append ⇒ EOF)
-                f.write(line)
+                offset = clean_end                      # after any truncate, EOF == clean_end (where the line lands)
+                f.write(line.encode("utf-8"))
                 f.flush()
                 os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
                 # FIX 1: keep the index current with NO re-scan when it is already exactly up to date.
