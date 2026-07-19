@@ -103,10 +103,15 @@ def kernel_bin() -> str | None:
             return str(cand)
     # A `pip install` ships the kernel (setuptools-rust RustBin) into the environment's script dir,
     # alongside this interpreter and the `sigil` console script — resolve it there even when that dir
-    # is not on PATH (e.g. the venv is invoked by absolute path, not "activated").
-    venv_bin = Path(sys.executable).parent / exe
-    if venv_bin.exists():
-        return str(venv_bin)
+    # is not on PATH (e.g. the venv is invoked by absolute path, not "activated"). Trust sys.executable
+    # ONLY when it is an ABSOLUTE path: an empty or bare-name sys.executable would make `.parent / exe`
+    # resolve CWD-relatively (`./sigil-kernel`), which — for the WARDEN authorizer — would let a binary
+    # planted in the process's CWD win. is_absolute() rejects both "" and "python3".
+    exe_path = Path(sys.executable)
+    if exe_path.is_absolute():
+        venv_bin = exe_path.parent / exe
+        if venv_bin.exists():
+            return str(venv_bin)
     return shutil.which(exe)
 
 
