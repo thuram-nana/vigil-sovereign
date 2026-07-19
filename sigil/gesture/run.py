@@ -58,13 +58,17 @@ def run_gesture(*, store=None, owner_key=None, source=None, landmarker=None, cla
         g.arm(owner_key=owner_key)   # camera path: owner-arm locally. When False, the caller's gate is
         # already armed (a LOCAL owner-armed session) and we consume it without a second arm.
     n = 0
+    _attempted: set = set()
     try:
         for frame in source.frames():
             if device_arm and (g.session is None or not g.session.live):
                 from .session import pending_device_arm     # REMOTE-arm: consume a recorded arm request
                 req = pending_device_arm(store, trusted_pubkey)
                 if req is not None:
-                    g.arm_by_device(req)                    # re-verifies fully; no-op if it doesn't pass
+                    _key = (req.get("pubkey"), req.get("nonce"))
+                    if _key not in _attempted:              # attempt each recorded request ONCE — a stale/
+                        _attempted.add(_key)                # refused request must NOT re-spam a refusal per frame
+                        g.arm_by_device(req)                # re-verifies fully; no-op if it doesn't pass
             reading = classifier.classify(landmarker.detect(frame))
             intent = pipe.on_frame(reading)
             if intent is not None:

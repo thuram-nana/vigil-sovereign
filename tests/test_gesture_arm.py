@@ -230,6 +230,24 @@ def test_run_gesture_device_arm_activates_from_a_recorded_request():   # HIGH-3 
         "run_gesture(device_arm=True) consumed the recorded request and ARMED end-to-end (feature is not inert)"
 
 
+def test_run_gesture_device_arm_does_not_respam_a_stale_request():   # fix-introduced-defect guard
+    from sigil.gesture.components import ScriptedLandmarker
+    from sigil.gesture.features import RuleClassifier
+    from sigil.gesture.run import run_gesture
+    from sigil.perception.camera_stream import ScriptedFrameSource
+    s = _store(); _authorize(s)
+    BridgeDaemon(s, trusted_pubkey=OP).submit_arm_request(_req(nonce=1, ts=time.time() - 10_000))  # STALE
+    b = RecordingInputBackend()
+    g = SessionGate(s, b, classifier=FakeCls(), trusted_pubkey=OP)
+    run_gesture(store=s, source=ScriptedFrameSource([None] * 6), landmarker=ScriptedLandmarker([[]] * 6),
+                classifier=RuleClassifier(), backend=b, gate=g, auto_arm=False, device_arm=True,
+                trusted_pubkey=OP, max_frames=6)
+    refusals = sum(1 for r in s.iter_records()
+                   if r.payload.get("signal") == "gesture.arm_request" and r.payload.get("decision") == "refused")
+    assert refusals <= 1, f"a stale recorded request is attempted at most ONCE (no per-frame refusal spam), got {refusals}"
+    assert not any(r.payload.get("armed_by") == "device" for r in s.iter_records()), "the stale request never armed"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
