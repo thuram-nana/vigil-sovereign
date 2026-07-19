@@ -1,0 +1,36 @@
+# SIGIL log rotation — TEMPLATE, only needed if you redirect logs to a file.
+# =====================================================================
+# By default SIGIL logs to STDERR (sigil/obs.py:configure_logging). Under the
+# systemd units in this directory that stderr is captured by the JOURNAL, and
+# journald already rotates/vacuums it — you do NOT need this file. Cap journal
+# growth instead with, e.g.:
+#     journalctl --user --vacuum-size=200M
+#     # or set SystemMaxUse= / MaxRetentionSec= in /etc/systemd/journald.conf
+#
+# THIS FILE is for the other case: you run SIGIL outside systemd (or add
+# `--append` style redirection) and send stderr to a real file, e.g.
+#     sigil bridge serve --addr 10.13.13.1 2>> ~/.sigil/logs/bridge.log
+#
+# Because SIGIL holds the log file descriptor open for the life of the process
+# and does not reopen on SIGHUP, use `copytruncate` (rotate a copy, then
+# truncate the live file in place) rather than `create` — otherwise the daemon
+# would keep writing to the rotated-away inode.
+#
+# USAGE
+#   System-wide (needs root): drop this at /etc/logrotate.d/sigil and edit the
+#   glob to the operator's real home (logrotate.d does not expand ~ or $HOME).
+#   Per-user (no root): run logrotate yourself with a private state file, e.g.
+#   from a user cron/timer:
+#       logrotate -s ~/.sigil/logrotate.state ~/sigil/deploy/logrotate/sigil
+
+/home/*/.sigil/logs/*.log {
+    weekly
+    rotate 8
+    size 50M
+    compress
+    delaycompress
+    copytruncate
+    missingok
+    notifempty
+    dateext
+}

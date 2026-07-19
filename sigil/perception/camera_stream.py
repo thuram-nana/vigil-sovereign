@@ -36,6 +36,7 @@ class CameraStreamSource:
                  "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{self.width}x{self.height}",
                  "-r", str(self.fps), "pipe:1"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            assert proc.stdout is not None  # stdout=PIPE guarantees a readable stream
             while True:
                 buf = proc.stdout.read(frame_bytes)
                 if not buf or len(buf) < frame_bytes:

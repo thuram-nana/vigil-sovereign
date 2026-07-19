@@ -92,8 +92,11 @@ def device_nonce_highwater(store: SpineStore, device_pubkey: str) -> int:
     for r in store.iter_records():
         p = r.payload
         if p.get("signal") == RECEIPT_SIGNAL and p.get("device") == device_pubkey:
+            nonce_raw = p.get("nonce")
+            if nonce_raw is None:                          # skip receipts with no recorded nonce
+                continue
             try:
-                n = int(p.get("nonce"))
+                n = int(nonce_raw)
             except (TypeError, ValueError):
                 continue
             if n > hi:
@@ -108,7 +111,10 @@ def consume(store: SpineStore, payload, authorized: Set[str], *, effectful: bool
     ok, core = verify_envelope(payload, authorized)
     if not ok:
         raise ValueError(core)
+    assert isinstance(core, dict)                          # verify_envelope returns the core dict when ok
     n_raw = core.get("nonce")
+    if n_raw is None:                                      # missing nonce → invalid (was: int(None) TypeError below)
+        raise ValueError("invalid nonce")
     if isinstance(n_raw, float) and n_raw != n_raw:        # NaN (n != n) — canonical-json serializes it, so guard here
         raise ValueError("invalid nonce")
     try:

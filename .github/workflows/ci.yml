@@ -42,5 +42,5 @@ jobs:
       - name: Python tests (pytest — blocking; the kernel is built, so oracle tests run, not skip)
         run: pytest -q
 
-      - name: Type check (mypy — advisory, ratcheting up over time)
-        run: mypy sigil/ || true
+      - name: Type check (mypy — blocking; the tree is clean, keep it clean)
+        run: mypy sigil/

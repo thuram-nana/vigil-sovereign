@@ -91,7 +91,7 @@ class BridgeDaemon:
         return self.store.append(kind="event", source="mesh", actor="DEVICE",
                                  payload={**payload, "tier": "A0", "decision": "auto"}, supersedes_id=tgt)
 
-    def submit_arm_request(self, request: dict, *, now: float = None) -> int:
+    def submit_arm_request(self, request: dict, *, now: Optional[float] = None) -> int:
         """Record a DEVICE-signed gesture arm request (the transport layer) — ONLY if the signing device
         is authorized, the signature verifies, AND the signed `ts` is FRESH (fail-closed). The live
         SessionGate RE-VERIFIES and enforces freshness / kill-switch / single-session / TTL when it
@@ -111,6 +111,7 @@ class BridgeDaemon:
         pub = request.get("pubkey")
         if pub not in authorized:
             raise ValueError("signing device is not authorized")
+        assert pub is not None  # None is never in the owner-minted authorized set (all str pubkeys)
         core = {k: request.get(k) for k in _ARM_CORE}
         try:                                            # verify_one RAISES on a malformed-length sig — refuse cleanly
             ok = verify_one(pub, arm_request_message(core), request.get("sig", ""))
@@ -119,8 +120,11 @@ class BridgeDaemon:
         if not ok:
             raise ValueError("arm request signature invalid")
         now = time.time() if now is None else now       # record-time freshness bounds aged-out replay bloat
+        ts_raw = core.get("ts")
+        if ts_raw is None:                               # missing ts → invalid (was: float(None) TypeError below)
+            raise ValueError("invalid arm timestamp")
         try:
-            ts = float(core.get("ts"))
+            ts = float(ts_raw)
         except (TypeError, ValueError):
             raise ValueError("invalid arm timestamp")
         if not math.isfinite(ts) or not (abs(now - ts) <= ARM_FRESHNESS):

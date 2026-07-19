@@ -65,7 +65,7 @@ class Envoy(Agent):
     mandate = "triage inbound, DRAFT outbound (never send), track open loops"
     ceiling = Tier.A2  # hard — no promotion to auto, ever
 
-    def run(self, inbox: InboxSource) -> AgentResult:
+    def run(self, inbox: InboxSource) -> AgentResult:  # type: ignore[override]  # SIGIL agents take domain-specific run() inputs; base run is an abstract placeholder
         proposals: List[Proposal] = []
         open_loops = 0
         for msg in inbox.messages():

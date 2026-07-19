@@ -31,6 +31,7 @@ def cmd_ingest(a) -> None:
         for sf in session_files(proj):
             key = str(sf)
             skip = cursor.get(key, 0)
+            assert isinstance(skip, int)  # transcript keys hold an int record count (git keys hold a str hash)
             events, seen = ingest_transcript(store, sf, proj.name, skip_records=skip, max_events=a.max_events)
             cursor[key] = seen
             if events:
@@ -201,12 +202,12 @@ def cmd_agents(a) -> None:
         if frame is None:
             print("  no capture — need a screenshot tool (scrot/…) or a camera, or pass --image <path>")
             return
-        p = Perceptor(store)
+        perceptor = Perceptor(store)
         if a.frontier or a.approved is not None:
             from .perception.vision import ClaudeVision
-            res = p.frontier(a.question or "", frame, vision=ClaudeVision(), approved_seq=a.approved)
+            res = perceptor.frontier(a.question or "", frame, vision=ClaudeVision(), approved_seq=a.approved)
         else:
-            res = p.perceive(a.question or "", frame, vision=MoondreamVision())
+            res = perceptor.perceive(a.question or "", frame, vision=MoondreamVision())
         print(f"  {'; '.join(res.notes)}" if res.notes else "")
         for seq in res.applied:
             rec = store.get(seq)

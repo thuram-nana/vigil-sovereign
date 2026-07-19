@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..config import SIGIL_HOME
 
@@ -66,7 +66,7 @@ class CredentialVault:
             self.secrets.set(ref, password)          # → keyring (or 0600 sigil.env), never the spine
         data = self._load()
         prev = data.get(service, {})
-        rec = {"service": service, "email": email or prev.get("email", ""),
+        rec: dict[str, Any] = {"service": service, "email": email or prev.get("email", ""),
                "username": username or prev.get("username", ""), "password_ref": ref,
                "notes": notes or prev.get("notes", ""), "version": int(prev.get("version", 0)) + 1}
         data[service] = rec

@@ -279,12 +279,12 @@ class Operator(Agent):
                 return res
             if inverse is not None:
                 applied.append(inverse)
-        seq = self._dispatch([Proposal("operation", {
+        applied_seqs = self._dispatch([Proposal("operation", {
             "signal": "operator.execute", "target_seq": plan_seq, "status": "APPLIED",
             "summary": f"executed plan {plan_seq}: {len(steps)} step(s) applied + verified",
             "journal": str(jdir), "inverses": applied,
         }, Tier.A1)]).applied
-        res.applied.extend(seq)
+        res.applied.extend(applied_seqs)
         res.notes.append(f"executed plan {plan_seq}: {len(steps)} step(s) applied, post-images verified")
         return res
 
@@ -356,10 +356,12 @@ class Operator(Agent):
                 return False, f"{path}: changed since execute — not deleted"
         try:
             if inv["op"] == "restore":
+                assert path is not None                             # a 'restore' inverse always carries its path (str)
                 shutil.copyfile(inv["pre"], path)
                 if inv.get("pre_mode") is not None:
                     os.chmod(path, inv["pre_mode"])                 # BLOCK-3: restore original mode
             elif inv["op"] == "delete-created":
+                assert path is not None                             # a 'delete-created' inverse always carries its path (str)
                 Path(path).unlink(missing_ok=True)
             else:
                 return False, None                                  # irreversible — handled by caller

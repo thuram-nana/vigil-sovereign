@@ -105,7 +105,7 @@ class Scholar(Agent):
     mandate = "sourced research; claims carry sources + confidence; disagreement reported, not averaged"
     ceiling = Tier.A1
 
-    def run(self, question: str, sources: List[str], *, synthesizer: Optional[Synthesizer] = None) -> AgentResult:
+    def run(self, question: str, sources: List[str], *, synthesizer: Optional[Synthesizer] = None) -> AgentResult:  # type: ignore[override]  # SIGIL agents take domain-specific run() inputs; base run is an abstract placeholder
         docs = {ref: read_source(ref) for ref in sources}
         claims = (synthesizer or ClaudeSynthesizer()).synthesize(question, docs)
         graded = [{**c, "grounded": grounds_in_source(c.get("quote", ""), docs.get(c["source"], ""))}

@@ -108,11 +108,11 @@ class VectorIndex:
         operator sees a loud failure instead of a silent full re-embed. A non-outage query error
         (e.g. order_by needs a payload index) is genuinely 'treat as empty' → -1 and is
         non-destructive (index_spine upserts by id=seq, idempotent — it never deletes)."""
-        from qdrant_client.models import OrderBy
+        from qdrant_client.models import Direction, OrderBy
         try:
             pts, _ = self.client.scroll(self.collection, limit=1, with_payload=True,
-                                        order_by=OrderBy(key="seq", direction="desc"))
-            return int(pts[0].payload["seq"]) if pts else -1
+                                        order_by=OrderBy(key="seq", direction=Direction.DESC))
+            return int((pts[0].payload or {})["seq"]) if pts else -1
         except Exception as e:  # noqa: BLE001 — classify, then re-raise outages / -1 the rest
             if _is_backend_unavailable(e):
                 _log.warning("vector backend unreachable while reading the durable cursor "

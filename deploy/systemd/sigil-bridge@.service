@@ -1,0 +1,88 @@
+# SIGIL WireGuard phone-bridge — systemd USER service (template unit)
+# =====================================================================
+# Runs `sigil bridge serve --addr %i`, the WS-D phone transport. The
+# instance name (%i) IS the bind address, e.g.:
+#
+#     systemctl --user enable --now sigil-bridge@10.13.13.1
+#
+# ┌───────────────────────────────────────────────────────────────────┐
+# │  PIN THE BIND ADDRESS TO A WIREGUARD / TAILSCALE IP — NEVER        │
+# │  0.0.0.0 AND NEVER A PUBLIC ADDRESS.                               │
+# │                                                                    │
+# │  The server itself fails closed (`bind_ok`): it binds ONLY         │
+# │  loopback, an RFC1918 private address, or the Tailscale CGNAT      │
+# │  range (100.64.0.0/10). A public / unspecified address is refused  │
+# │  with exit 2 and no cert is minted. The tunnel, not the transport, │
+# │  is the network boundary.                                          │
+# └───────────────────────────────────────────────────────────────────┘
+#
+# INSTALL (user-level, no root):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/sigil-bridge@.service ~/.config/systemd/user/
+#   cp deploy/bridge.env.example            ~/.sigil/bridge.env    # then edit
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sigil-bridge@10.13.13.1
+#   # keep it running after logout (optional): loginctl enable-linger "$USER"
+#
+# For an IPv6 tunnel address, escape it first:
+#   systemctl --user enable --now "sigil-bridge@$(systemd-escape fd7a::1)"
+#
+# Logs → the journal:  journalctl --user -u sigil-bridge@10.13.13.1 -f
+
+[Unit]
+Description=SIGIL WireGuard phone bridge (bound to %i)
+Documentation=file:%h/sigil/RUNBOOK.md
+# The bridge relays commands to the WARDEN-gated kernel and needs the tunnel up;
+# these are best-effort ordering hints, not hard requirements.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The addr is the instance name (%i). SIGIL_HOME / port / log level / kernel
+# path come from the env file (optional: the leading '-' means a missing file
+# does not fail the unit; SIGIL defaults to ~/.sigil either way).
+EnvironmentFile=-%h/.sigil/bridge.env
+Environment=SIGIL_LOG_LEVEL=INFO
+
+# ExecStart uses the `sigil` console command installed into the project venv
+# (README canonical layout: python3 -m venv ~/.sigil/venv && ~/.sigil/venv/bin/pip
+# install -e .). If you did NOT `pip install -e .` (only requirements.txt), the
+# console script is absent — swap the line below for the `python -m sigil` form.
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil bridge serve --addr %i --port ${SIGIL_BRIDGE_PORT}
+# Alternative if the `sigil` console script is not installed:
+# ExecStart=%h/.sigil/venv/bin/python -m sigil bridge serve --addr %i --port ${SIGIL_BRIDGE_PORT}
+
+# --- lifecycle -------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+# The server installs SIGTERM/SIGINT handlers and shuts down serve_forever
+# cleanly (see bridge/server.py:_serve_until_signal), so a plain SIGTERM is a
+# graceful stop, not an abrupt kill. Give it headroom to drain + close the
+# (TLS-wrapped) listening socket (it joins its worker with a 5s timeout).
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- hardening (verified NOT to break the daemon) --------------------------
+# Least privilege without cutting off what the bridge needs (loopback+tunnel
+# network, read of the repo/venv, write of ~/.sigil).
+NoNewPrivileges=yes
+ProtectSystem=strict
+# ~/.sigil is the ONLY path the process writes (spine append, TLS cert cache,
+# receipts). strict makes everything else read-only; this re-grants that tree.
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE — deliberately NOT set, because they WOULD break this daemon:
+#   PrivateNetwork=yes  → hides the WireGuard interface; the bind would fail.
+#   ProtectHome=yes     → hides ~/.sigil (spine + keys); everything would fail.
+#   MemoryDenyWriteExecute=yes → some bundled native libs dislike W^X; left off.
+
+[Install]
+WantedBy=default.target

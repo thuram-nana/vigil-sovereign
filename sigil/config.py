@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -100,6 +101,12 @@ def kernel_bin() -> str | None:
         cand = _REPO_ROOT / rel
         if cand.exists():
             return str(cand)
+    # A `pip install` ships the kernel (setuptools-rust RustBin) into the environment's script dir,
+    # alongside this interpreter and the `sigil` console script — resolve it there even when that dir
+    # is not on PATH (e.g. the venv is invoked by absolute path, not "activated").
+    venv_bin = Path(sys.executable).parent / exe
+    if venv_bin.exists():
+        return str(venv_bin)
     return shutil.which(exe)
 
 

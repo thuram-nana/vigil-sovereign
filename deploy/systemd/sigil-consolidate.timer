@@ -1,0 +1,23 @@
+# SIGIL nightly consolidation timer — runs the oneshot service off-peak.
+# =====================================================================
+# Enable with:
+#   systemctl --user enable --now sigil-consolidate.timer
+#   systemctl --user list-timers 'sigil-*'     # confirm next run
+
+[Unit]
+Description=Nightly trigger for SIGIL memory consolidation
+Documentation=file:%h/sigil/RUNBOOK.md
+
+[Timer]
+# 03:17 local time daily — a low-traffic hour, with a minute offset so it does
+# not stampede with every other 03:00 cron on the box.
+OnCalendar=*-*-* 03:17:00
+# If the machine was asleep/off at 03:17, run once on the next wake instead of
+# skipping the night entirely.
+Persistent=true
+# Smear the start by up to 15 min so many hosts do not fire simultaneously.
+RandomizedDelaySec=900
+Unit=sigil-consolidate.service
+
+[Install]
+WantedBy=timers.target

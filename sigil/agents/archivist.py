@@ -19,12 +19,13 @@ class Archivist(Agent):
         from ..consolidate.extract import HeuristicProvider
         rep = run_consolidation(provider or HeuristicProvider(), store=self.store,
                                 since_seq=since_seq, sign=sign, save_cursor=False)
+        summary = (f"consolidation: {rep.grounded} facts promoted, {rep.ungrounded} demoted, "
+                   f"{rep.contradictions} contradictions, over {rep.records_fed} records")
         finding = {
-            "summary": (f"consolidation: {rep.grounded} facts promoted, {rep.ungrounded} demoted, "
-                        f"{rep.contradictions} contradictions, over {rep.records_fed} records"),
+            "summary": summary,
             "grounded": rep.grounded, "ungrounded": rep.ungrounded,
             "contradictions": rep.contradictions, "window": [rep.window_from, rep.window_to],
         }
         res = self._dispatch([Proposal("finding", finding, Tier.A1)])
-        res.notes.append(finding["summary"])
+        res.notes.append(summary)
         return res

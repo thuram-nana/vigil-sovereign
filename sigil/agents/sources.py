@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 from urllib.parse import urlsplit
 
 # One stable, CORRELATABLE User-Agent (OBSIDIAN OPSEC §VI: identifiable, NOT evasive — never rotated).
@@ -61,7 +61,9 @@ def _vetted_ip(host: str) -> Optional[str]:
                 or ip.is_multicast or ip.is_unspecified or not ip.is_global):
             return None
         if chosen is None:
-            chosen = sockaddr[0]
+            # sockaddr[0] is the resolved IP string for an inet family (getaddrinfo's stub also admits
+            # a tuple[int, bytes] packet/netlink form that hostname resolution never yields here).
+            chosen = cast(str, sockaddr[0])
     return chosen
 
 

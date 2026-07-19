@@ -122,6 +122,7 @@ def _json_bytes(obj) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
+    server: BridgeServer                          # set by the socketserver machinery to our concrete server
     server_version = "sigil-bridge/1.0"
     timeout = 30                                  # per-connection socket timeout (no hung reader)
     _MAX_BODY = 65536                             # bodies are tiny; cap to avoid a Content-Length hang/alloc
@@ -173,6 +174,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             self._deny(401, f"unauthenticated: {core}")
             return None
+        assert isinstance(core, dict)                    # verify_envelope returns the core dict when ok
         if not self._fresh(core):
             self._deny(401, "stale request (timestamp outside freshness window)")
             return None
@@ -194,6 +196,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             self._deny(401, f"unauthenticated: {core}")
             return None
+        assert isinstance(core, dict)                    # verify_envelope returns the core dict when ok
         if not self._fresh(core):
             self._deny(401, "stale request (timestamp outside freshness window)")
             return None

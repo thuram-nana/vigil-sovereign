@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Iterable, Iterator, List, Optional
+from typing import Iterable, Iterator, List, Optional, TypeGuard
 
 from .types import Hand
 
@@ -34,7 +34,7 @@ N_LANDMARKS = 21
 _COORD_CAP = 8.0          # sane bound: reject NaN/inf/garbage coordinates (normalized hands live near [0,1])
 
 
-def _is_number(v) -> bool:
+def _is_number(v) -> TypeGuard[float]:
     # a real, finite number — bools are ints in Python, so exclude them explicitly
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
 

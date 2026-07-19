@@ -117,7 +117,8 @@ class FileAudioSource:
 class FileSink:
     """Collect played frames and write them to a WAV on close (16 kHz mono int16)."""
     def __init__(self, path: str, rate: int = SAMPLE_RATE):
-        self.path, self.rate, self._buf = path, rate, []
+        self.path, self.rate = path, rate
+        self._buf: List[np.ndarray] = []
 
     def play(self, frame) -> None:
         arr = frame if isinstance(frame, np.ndarray) else np.zeros(FRAME_SAMPLES, dtype=np.int16)
