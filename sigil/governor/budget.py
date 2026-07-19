@@ -1,21 +1,162 @@
-"""Per-agent daily budgets (SIGIL §5) — action and interrupt caps, enforced FAIL-CLOSED (at cap →
-deny). The spine IS the ledger: spend is derived by counting an agent's own records for the UTC day,
-so there is no separate counter to drift or forge. Caps default to None (uncapped) → budgets are
-opt-in and the default dispatch behavior is unchanged; a configured cap is hard-enforced.
+"""Per-agent daily budgets (SIGIL §5) — action, interrupt, and provider TOKEN + COST caps, enforced
+FAIL-CLOSED (at/over cap → deny). The spine IS the ledger: every dimension is derived by scanning an
+agent's own records for the UTC day, so there is no separate counter to drift or forge. Tokens and
+cost live in the action record's payload (`payload["usage"]`), stamped at dispatch WHEN a provider
+call supplied them — so `spent()` derives them exactly as it derives actions/interrupts. Caps default
+to None (uncapped) → every dimension is opt-in and the default dispatch behavior is byte-identical
+until a cap is set; a configured cap is hard-enforced.
 
-Token/cost caps are a documented seam: the mesh does not yet meter provider tokens per action, so
-`daily_actions`/`daily_interrupts` are the enforced dimensions today (interrupt = an A1 event/alert —
-the SENTINEL failure mode §4.3)."""
+Cost is FROZEN INTO THE RECORD at stamp time (from the price table below, or an explicit `cost_usd`),
+never re-derived at read time: the immutable spine is authoritative, so editing the price table never
+rewrites history. Token/cost were the documented seam in the action/interrupt-only version — this
+closes it without introducing a mutable counter. Tokens (input+output) are ALWAYS derivable from the
+datum; cost is best-effort (an unpriced model with no explicit `cost_usd` contributes 0 to the COST
+meter — its tokens still meter), so `daily_tokens` is the hard metering dimension and `daily_cost_usd`
+is enforced against whatever cost the record froze."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
+# Default per-model prices in USD per 1,000,000 tokens, as (input, output). DATA, not policy — override
+# or extend via ~/.sigil/prices.json or the SIGIL_MODEL_PRICES env (JSON), both merged OVER these. Keyed
+# by model id and provider-agnostic (add any vendor's models the same way). The Anthropic rows are the
+# published list prices as of 2026-06-24; `local` (Ollama / any fully-offline model) is $0. A model with
+# no row (and no explicit cost_usd on its Usage) contributes 0 to the COST meter — its TOKENS still meter.
+DEFAULT_PRICES: dict[str, tuple[float, float]] = {
+    "claude-fable-5": (10.0, 50.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "local": (0.0, 0.0),
+}
+
+
+def _coerce_rate(v: object) -> Optional[tuple[float, float]]:
+    """A price-table row → an (input, output) per-MTok tuple. Accepts `[in, out]` / `(in, out)` or
+    `{"input": in, "output": out}`; a malformed row is ignored (returns None) so a bad override file
+    never silently zeroes a known model or crashes the gate."""
+    try:
+        if isinstance(v, dict):
+            return float(v["input"]), float(v["output"])
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            return float(v[0]), float(v[1])
+    except (TypeError, ValueError, KeyError):
+        return None
+    return None
+
+
+def _merge_prices(dst: dict[str, tuple[float, float]], src: object) -> None:
+    if not isinstance(src, dict):
+        return
+    for model, row in src.items():
+        rate = _coerce_rate(row)
+        if rate is not None and isinstance(model, str):
+            dst[model] = rate
+
+
+def load_prices() -> dict[str, tuple[float, float]]:
+    """The active price table: DEFAULT_PRICES overlaid with ~/.sigil/prices.json and then the
+    SIGIL_MODEL_PRICES env var (JSON), each a {model: [input_per_mtok, output_per_mtok]} map. Absent or
+    malformed sources are ignored (prices are opt-in refinements; a bad file never crashes the gate or
+    silently zeroes a known model)."""
+    prices = dict(DEFAULT_PRICES)
+    import json
+    import os
+    try:
+        from ..config import SIGIL_HOME
+        f = SIGIL_HOME / "prices.json"
+        if f.exists():
+            _merge_prices(prices, json.loads(f.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        pass
+    raw = os.environ.get("SIGIL_MODEL_PRICES")
+    if raw:
+        try:
+            _merge_prices(prices, json.loads(raw))
+        except ValueError:
+            pass
+    return prices
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Provider token usage for ONE action, provider-agnostic. `cost_usd`, when None, is derived at
+    stamp time from the price table for `model` (input+output × per-MTok rate); pass an explicit
+    `cost_usd` to override (e.g. a metered invoice figure). `to_payload()` produces the datum recorded
+    on the spine — the ONLY place token/cost live, so the ledger cannot be forged apart from the log.
+    No secrets: only counts, a model id, and a number ever enter the payload."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = ""
+    cost_usd: Optional[float] = None
+
+    def compute_cost(self, prices: Optional[dict[str, tuple[float, float]]] = None) -> float:
+        """USD cost of this action. An explicit `cost_usd` wins; otherwise price `model` from the table
+        (input+output tokens × per-MTok rate). An unpriced model → 0.0 (tokens still meter)."""
+        if self.cost_usd is not None:
+            return float(self.cost_usd)
+        table = prices if prices is not None else load_prices()
+        rate = table.get(self.model)
+        if rate is None:
+            return 0.0
+        in_rate, out_rate = rate
+        return (self.input_tokens / 1_000_000.0) * in_rate + (self.output_tokens / 1_000_000.0) * out_rate
+
+    def to_payload(self, prices: Optional[dict[str, tuple[float, float]]] = None) -> dict:
+        """The immutable metering datum stamped into the action record's payload. Cost is frozen HERE,
+        so a later price-table edit never rewrites past spend."""
+        return {
+            "input_tokens": int(self.input_tokens),
+            "output_tokens": int(self.output_tokens),
+            "model": self.model,
+            "cost_usd": round(self.compute_cost(prices), 6),
+        }
+
+
+@dataclass(frozen=True)
+class Spend:
+    """What an agent has spent today, every field derived from the spine (never a stored counter).
+    `tokens` is input+output summed; `cost_usd` is the sum of the frozen per-record costs."""
+    actions: int = 0
+    interrupts: int = 0
+    tokens: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
 class BudgetCaps:
     daily_actions: Optional[int] = None       # max records an agent may write per UTC day
     daily_interrupts: Optional[int] = None    # max A1 events/alerts (the noise budget) per UTC day
+    daily_tokens: Optional[int] = None        # max provider tokens (input+output) per UTC day
+    daily_cost_usd: Optional[float] = None    # max provider spend in USD per UTC day
+
+
+def _as_int(v: object) -> int:
+    """Defensive coercion for a value read off the spine — a forged/hand-written usage datum must not
+    crash the enforcement path (mirrors the spine reader's skip-malformed posture): junk → 0. Also
+    catches OverflowError so a forged non-finite float (JSON accepts `Infinity`) can't raise here."""
+    if isinstance(v, (int, float, str)):
+        try:
+            return int(v)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return 0
+
+
+def _as_float(v: object) -> float:
+    """As `_as_int`, and additionally maps a non-finite value (NaN/±inf) to 0.0 — otherwise a forged
+    NaN cost would sum to NaN and slip the `cost >= cap` check (fail-open); this keeps it fail-closed."""
+    if isinstance(v, (int, float, str)):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        return f if math.isfinite(f) else 0.0
+    return 0.0
 
 
 class BudgetLedger:
@@ -23,30 +164,70 @@ class BudgetLedger:
         self.store = store
         self.caps = caps or BudgetCaps()
 
-    def spent(self, agent: str, day_iso: str) -> Tuple[int, int]:
-        """(#records this agent wrote today, #of those that were interrupt events). `day_iso` is the
-        UTC date prefix (YYYY-MM-DD) — the ts is informational, so bucketing is by wallclock date."""
-        actions = interrupts = 0
+    def spent(self, agent: str, day_iso: str) -> Spend:
+        """Today's spend for `agent`: actions, interrupt events, tokens (input+output), and USD cost —
+        all counted from the agent's own records for the UTC date `day_iso` (the ts is informational,
+        so bucketing is by wallclock date). Token/cost come from `payload["usage"]`, derived the SAME
+        way as actions so there is nothing separate to drift or forge."""
+        actions = interrupts = tokens = 0
+        cost = 0.0
         for r in self.store.iter_records():
             if r.source != "agent" or r.actor != agent:
                 continue
             if not (r.ts or "").startswith(day_iso):
                 continue
-            # count only actions actually TAKEN (auto/queued) — a denial consumes no budget, so a
-            # flood of denied attempts can't self-reinforce the cap.
+            # count only actions actually TAKEN (auto/queued) — a denial consumes no budget, so a flood
+            # of denied attempts can't self-reinforce the cap. A denied record carries no `usage` (the
+            # refusal record has none), so this same gate keeps token/cost fail-closed too.
             if r.payload.get("decision") not in ("auto", "queued"):
                 continue
             actions += 1
             if r.kind == "event":
                 interrupts += 1
-        return actions, interrupts
+            u = r.payload.get("usage")
+            if isinstance(u, dict):
+                tokens += _as_int(u.get("input_tokens")) + _as_int(u.get("output_tokens"))
+                cost += _as_float(u.get("cost_usd"))
+        return Spend(actions=actions, interrupts=interrupts, tokens=tokens, cost_usd=cost)
 
     def over_budget(self, agent: str, day_iso: str) -> Tuple[bool, str]:
-        if self.caps.daily_actions is None and self.caps.daily_interrupts is None:
+        """Fail-closed: at/over ANY configured cap → (True, reason). All caps None → never over (opt-in;
+        default dispatch unchanged). A denied action wrote no `usage`, so it never advances the meter."""
+        caps = self.caps
+        if (caps.daily_actions is None and caps.daily_interrupts is None
+                and caps.daily_tokens is None and caps.daily_cost_usd is None):
             return False, ""
-        actions, interrupts = self.spent(agent, day_iso)
-        if self.caps.daily_actions is not None and actions >= self.caps.daily_actions:
-            return True, f"daily action cap ({self.caps.daily_actions}) reached for {agent}"
-        if self.caps.daily_interrupts is not None and interrupts >= self.caps.daily_interrupts:
-            return True, f"daily interrupt cap ({self.caps.daily_interrupts}) reached for {agent}"
+        s = self.spent(agent, day_iso)
+        if caps.daily_actions is not None and s.actions >= caps.daily_actions:
+            return True, f"daily action cap ({caps.daily_actions}) reached for {agent}"
+        if caps.daily_interrupts is not None and s.interrupts >= caps.daily_interrupts:
+            return True, f"daily interrupt cap ({caps.daily_interrupts}) reached for {agent}"
+        if caps.daily_tokens is not None and s.tokens >= caps.daily_tokens:
+            return True, f"daily token cap ({caps.daily_tokens}) reached for {agent}"
+        if caps.daily_cost_usd is not None and s.cost_usd >= caps.daily_cost_usd:
+            return True, f"daily cost cap (${caps.daily_cost_usd:g}) reached for {agent}"
         return False, ""
+
+    def report(self, day_iso: str) -> dict[str, dict]:
+        """Per-agent {actions, interrupts, tokens, cost_usd} for `day_iso` (UTC date prefix) — the
+        read-only view behind `sigil budget`. Single spine scan; counts only actions actually TAKEN
+        (auto/queued), mirroring the enforced ledger, so a denial never inflates the report."""
+        out: dict[str, dict] = {}
+        for r in self.store.iter_records():
+            if r.source != "agent":
+                continue
+            if not (r.ts or "").startswith(day_iso):
+                continue
+            if r.payload.get("decision") not in ("auto", "queued"):
+                continue
+            a = out.setdefault(r.actor, {"actions": 0, "interrupts": 0, "tokens": 0, "cost_usd": 0.0})
+            a["actions"] += 1
+            if r.kind == "event":
+                a["interrupts"] += 1
+            u = r.payload.get("usage")
+            if isinstance(u, dict):
+                a["tokens"] += _as_int(u.get("input_tokens")) + _as_int(u.get("output_tokens"))
+                a["cost_usd"] += _as_float(u.get("cost_usd"))
+        for a in out.values():
+            a["cost_usd"] = round(a["cost_usd"], 6)
+        return out
