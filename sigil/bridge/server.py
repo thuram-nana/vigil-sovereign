@@ -33,6 +33,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import logging
 import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,6 +52,21 @@ from .notifier import PushNotifier
 _WEBAPP = Path(__file__).parent / "webapp"       # the PWA is a later slice — served if present, else 404
 _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 _DEFAULT_PORT = 8722
+
+# Operational audit trail for a NETWORK-FACING daemon: accepted effectful actions (INFO) and denials
+# (WARNING) go here so an operator can answer "who did what" — WITHOUT ever leaking a credential. We
+# log a device pubkey PREFIX only (never the full key), and NEVER the envelope / signature / token /
+# secret / request body. The stdlib access log (`log_message`) stays suppressed for exactly that
+# reason (an envelope can ride in `?env=`); this logger is the operable substitute. Emits only if the
+# host app configures logging (INFO stays silent by default; WARNING surfaces via lastResort).
+_log = logging.getLogger(__name__)
+_PUBKEY_LOG_PREFIX = 12                           # chars of a device pubkey we log — enough to correlate, not the key
+
+
+def _pk_prefix(pubkey) -> str:
+    """A short, non-reversible tag for a device pubkey (prefix only — NEVER the full key in a log)."""
+    s = str(pubkey) if pubkey else ""
+    return (s[:_PUBKEY_LOG_PREFIX] + "…") if s else "?"
 _TS_WINDOW = 120.0                               # ± seconds a request timestamp may differ from the server clock
 
 # Each network endpoint declares the ONE envelope action that authorizes it. Binding the
@@ -227,6 +243,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, _json_bytes(obj))
 
     def _deny(self, code=403, msg="forbidden"):
+        # WARNING-level audit of every denial: method, PATH ONLY (never the query — an envelope can ride
+        # in `?env=`), status, and the developer-controlled reason. `msg` is a fixed reason string, never
+        # the envelope/signature/token/secret/body.
+        _log.warning("bridge denied: %s %s -> %d (%s)",
+                     getattr(self, "command", "?"), urlparse(self.path).path, code, msg)
         self._json({"error": msg}, code)
 
     # --- GET (read plane) -------------------------------------------------------------------------
@@ -345,7 +366,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path not in ("/api/action", "/api/panic", "/api/relay", "/api/gesture/arm"):
             return self._deny(404, "not found")
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        try:                                                     # a missing/non-numeric/negative CL is a
+            length = int(self.headers.get("Content-Length", "0") or "0")   # clean 400 — never an unhandled
+        except (TypeError, ValueError):                          # ValueError that crashes the handler thread
+            return self._deny(400, "invalid Content-Length header")
+        if length < 0:
+            return self._deny(400, "invalid Content-Length header")
         if length > self._MAX_BODY:                              # cap the body (no CL hang / alloc)
             return self._deny(413, "body too large")
         body_bytes = self.rfile.read(length) if length else b""
@@ -360,11 +386,16 @@ class Handler(BaseHTTPRequestHandler):
         core = self._authed_effectful(action)
         if core is None:
             return
+        dev = _pk_prefix(core.get("device"))                    # device pubkey PREFIX only — never the full key
         if action == "panic":
-            return self._json({"ok": True, "seq": self.server.daemon().panic_engage(by="phone")})
+            seq = self.server.daemon().panic_engage(by="phone")
+            _log.info("bridge action ok: POST %s device=%s outcome=panic-engaged seq=%s", path, dev, seq)
+            return self._json({"ok": True, "seq": seq})
         a = core.get("args")                                     # the relayed command is INSIDE the signed core;
         text = str(a.get("text", "")) if isinstance(a, dict) else ""   # signed args may be ANY JSON type — guard
-        return self._json({"ok": True, "reply": self.server.daemon().relay(text)})
+        reply = self.server.daemon().relay(text)                # NB: never log the relayed text (may hold a subject)
+        _log.info("bridge action ok: POST %s device=%s outcome=relayed", path, dev)
+        return self._json({"ok": True, "reply": reply})
 
     def _device_action(self, body_bytes):
         """The phone posts its OWN device-signed `governor.approval` payload. The SERVER only VERIFIES
@@ -382,6 +413,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(403, f"approval refused: {str(e)[:200]}")
         except Exception as e:  # noqa: BLE001 — never leak internals as a 500
             return self._deny(400, f"action failed: {str(e)[:200]}")
+        _log.info("bridge action ok: POST /api/action device=%s outcome=approval-recorded seq=%s",
+                  _pk_prefix(body.get("pubkey")), seq)          # pubkey PREFIX only — never the sig/body
         self._json({"ok": True, "seq": seq})
 
     def _device_arm(self, body_bytes):
@@ -401,6 +434,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(403, f"arm refused: {str(e)[:200]}")
         except Exception as e:  # noqa: BLE001 — never leak internals as a 500
             return self._deny(400, f"arm failed: {str(e)[:200]}")
+        _log.info("bridge action ok: POST /api/gesture/arm device=%s outcome=arm-recorded seq=%s",
+                  _pk_prefix(body.get("pubkey")), seq)          # pubkey PREFIX only — never the sig/body
         self._json({"ok": True, "seq": seq})
 
 
@@ -513,7 +548,39 @@ def serve(*, addr: str, port: int = _DEFAULT_PORT, spine_path=None, tls: bool = 
         print("           register a service worker. Use TLS unless you terminate it upstream in the tunnel.")
     print("  pair a phone (owner, at the desktop):  sigil mesh authorize <device-id> <device-pubkey>")
     print("  every request must carry an authorized-device signature (X-SIGIL-Envelope) — there is no token")
+    _serve_until_signal(srv)
+
+
+def _serve_until_signal(srv) -> None:
+    """Serve until SIGTERM/SIGINT, then shut down CLEANLY so `systemd stop` is graceful, not an abrupt
+    kill. `serve_forever()` runs on a worker thread; a signal (delivered to the MAIN thread) sets a
+    stop event, and shutdown is driven from THIS (main) thread — a different thread from the one inside
+    `serve_forever`, which is required (calling `shutdown()` from within its own thread deadlocks). We
+    then `server_close()` to release the (possibly TLS-wrapped) listening socket."""
+    import signal
+    import threading
+
+    stop = threading.Event()
+
+    def _on_signal(signum, _frame):
+        _log.info("bridge: received signal %d — shutting down gracefully", signum)
+        stop.set()
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _on_signal)
+        except (ValueError, OSError):        # not the main thread / platform-unsupported — degrade below
+            pass
+
+    worker = threading.Thread(target=srv.serve_forever, name="sigil-bridge-serve", daemon=True)
+    worker.start()
     try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        srv.shutdown()
+        while not stop.wait(1.0):            # poll the flag so a delivered signal is always noticed
+            pass
+    except KeyboardInterrupt:               # belt-and-suspenders if SIGINT could not be installed above
+        stop.set()
+    finally:
+        srv.shutdown()                      # stop serve_forever (from a DIFFERENT thread — no deadlock)
+        srv.server_close()                  # close the (TLS-wrapped) listening socket
+        worker.join(timeout=5)
+        _log.info("bridge: stopped — listening socket closed")

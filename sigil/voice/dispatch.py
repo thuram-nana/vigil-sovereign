@@ -4,30 +4,33 @@ other — voice is just another interface onto the one authorized path. The spok
 KERNEL's answer body (the bracketed [T0…]/[WARDEN…] status lines are stripped)."""
 from __future__ import annotations
 
+import logging
+import os
 import subprocess
-from pathlib import Path
+
+from ..config import kernel_bin as _resolve_kernel_bin
+
+_log = logging.getLogger(__name__)
+
+# a clear, actionable message spoken/returned when the kernel binary cannot be resolved — chosen
+# over ENOENT-ing on a bare name (which surfaces a confusing generic error) or crashing the loop.
+_NO_KERNEL_MSG = ("the SIGIL kernel binary was not found — set SIGIL_KERNEL_BIN, add sigil-kernel "
+                  "to PATH, or build kernel/target/release/sigil-kernel.")
 
 
 def _default_bin() -> str:
-    """Resolve the kernel binary portably (WS-D D7): an explicit env override, then package-relative
-    (the repo the package lives in), then the legacy dev path, then PATH."""
-    import os
+    """Resolve the kernel binary via config (env SIGIL_KERNEL_BIN → package-relative build dir →
+    PATH). Kept for `KernelClassifier`, whose doctrine is fail-CLOSED (any error → A3): when the
+    binary is unresolved this returns the bare name so its subprocess ENOENTs into that safe path.
+    `KernelDispatch` instead fails LOUD (see below) rather than run a bare name."""
     exe = "sigil-kernel.exe" if os.name == "nt" else "sigil-kernel"
-    env = os.environ.get("SIGIL_KERNEL_BIN")
-    if env and Path(env).exists():
-        return env
-    # sigil/voice/dispatch.py → repo root is three parents up (sigil/<pkg>/voice/..)
-    repo_root = Path(__file__).resolve().parents[2]
-    for base in (repo_root, Path("/home/kali/sigil")):
-        for p in (f"kernel/target/release/{exe}", f"kernel/target/debug/{exe}"):
-            if (base / p).exists():
-                return str(base / p)
-    return exe
+    return _resolve_kernel_bin() or exe
 
 
 class KernelDispatch:
     def __init__(self, kernel_bin: str | None = None, timeout: int = 60):
-        self.kernel_bin = kernel_bin or _default_bin()
+        # resolve via config; keep None (not a bare name) when unresolved so send() fails LOUD.
+        self.kernel_bin = kernel_bin or _resolve_kernel_bin()
         self.timeout = timeout
 
     # exact KERNEL status-line prefixes to strip (so a legitimate answer line that merely starts
@@ -38,10 +41,15 @@ class KernelDispatch:
         text = (text or "").strip()
         if not text:
             return "I didn't catch that."
+        if not self.kernel_bin:                       # FAIL LOUD: no bare-name ENOENT, clear message + WARNING log
+            _log.warning("kernel dispatch requested but no kernel binary is resolvable")
+            return _NO_KERNEL_MSG
+        _log.debug("kernel dispatch: %d chars", len(text))
         try:
             proc = subprocess.run([self.kernel_bin, "ask", text],
                                   capture_output=True, text=True, timeout=self.timeout)
         except (subprocess.SubprocessError, OSError) as e:
+            _log.warning("kernel unavailable: %s", e)
             return f"the kernel is unavailable ({e})"
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout).strip().splitlines()

@@ -1,6 +1,7 @@
 """SIGIL Phase 8 WS-F — SIGIL-HAND gesture control: debounced fail-safe FSM, invariant landmark
 features, and THE KEYSTONE — injection only inside an owner-armed session, A2 actions queued (a
 gesture can never type a password or launch an app). Run: ~/.sigil/venv/bin/python tests/test_gesture.py"""
+import logging
 import math
 import tempfile
 from pathlib import Path
@@ -250,6 +251,85 @@ def test_session_gate_composes_with_the_real_oracle():                # BLOCK-4
     r = g.handle(GestureIntent("type", arg="my-secret-password"))
     assert r["injected"] is False and "queued" in r, "real oracle: hid.type → A2 → QUEUE (never inject)"
     assert not any(c[0] == "type" for c in b.calls), "the real composition never types on a gesture"
+
+
+# ---- SEAM-HONESTY: an inert backend never LOGS a real injection ----------------------------------
+class InertInputBackend:
+    """A platform SEAM that is honestly INERT (available() is False → no-op). Mirrors the macOS /
+    Windows `_SeamInputBackend` and a Linux box with no ydotool/xdotool."""
+    def __init__(self):
+        self.calls: list = []           # stays empty — the seam physically injects NOTHING
+
+    def available(self) -> bool:
+        return False
+
+    def move(self, dx, dy): pass
+    def click(self, button="left"): pass
+    def scroll(self, dx, dy): pass
+    def type(self, text): pass
+    def combo(self, keys): pass
+
+
+def test_inert_backend_does_not_claim_a_real_injection():
+    """SEAM-HONESTY: a click through an INERT backend must not write a spine record CLAIMING an
+    injection that never physically happened. It records honestly (backend_inert) and returns
+    injected=False. The A2-queue path is untouched."""
+    s = _store(); b = InertInputBackend()
+    g = SessionGate(s, b, classifier=FakeCls()); g.arm(owner_key=OWNER)
+    r = g.handle(GestureIntent("click"))
+    assert r["injected"] is False, "an inert backend injects NOTHING → injected must be False"
+    assert r.get("backend_inert") is True, "the verdict is honest about the inert backend"
+    assert not b.calls, "the seam physically did nothing"
+    recs = [x for x in s.iter_records() if x.payload.get("signal") == "gesture.action"
+            and x.payload.get("tool") == "hid.pointer.click"]
+    assert recs, "the attempted action is still AUDITED (honestly), not silently dropped"
+    for x in recs:
+        assert x.payload.get("backend_inert") is True, "the audit record is flagged backend_inert"
+        assert "NOT injected" in x.payload.get("summary", ""), "and its summary does not CLAIM an injection"
+    # a normal (spy) backend WITH no available() is still treated as able → records a real injection
+    s2 = _store(); b2 = RecordingInputBackend()
+    g2 = SessionGate(s2, b2, classifier=FakeCls()); g2.arm(owner_key=OWNER)
+    r2 = g2.handle(GestureIntent("click"))
+    assert r2["injected"] is True and "backend_inert" not in r2, "a working backend still injects for real"
+    live = [x for x in s2.iter_records() if x.payload.get("signal") == "gesture.action"]
+    assert live and live[0].payload.get("backend_inert") is None, "a real injection is recorded plainly"
+    assert "injected" in live[0].payload.get("summary", "")
+
+
+class _CaptureHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages: list = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def test_run_gesture_warns_when_the_onnx_landmarker_is_inert():
+    """The inert OnnxHandLandmarker stub (no bundled model) can NEVER fire an intent. run_gesture
+    must WARN it is not operational rather than silently spinning a dead loop. A scripted double
+    (used by every other test) has no `operational` method and is unaffected."""
+    from sigil.gesture.landmark import OnnxHandLandmarker
+    lm = OnnxHandLandmarker()
+    if lm.operational():           # meaningful only when no real model is installed on this box
+        print("    (skip — a real hand-landmark model IS installed; inertness test N/A)")
+        return
+    s = _store(); b = RecordingInputBackend()
+    cap = _CaptureHandler()
+    logger = logging.getLogger("sigil.gesture.run")
+    prev = logger.level
+    logger.addHandler(cap); logger.setLevel(logging.WARNING)
+    try:
+        n = run_gesture(store=s, owner_key=OWNER, source=ScriptedFrameSource([None] * 2),
+                        landmarker=lm, classifier=ScriptedGestures([]), backend=b,
+                        gate=SessionGate(s, b, classifier=FakeCls(), owner_key=OWNER),
+                        pipeline=GesturePipeline(confirm_frames=3, deadzone=0.001))
+    finally:
+        logger.removeHandler(cap); logger.setLevel(prev)
+    assert n == 2, "the loop still processes frames (but honestly warned it can never fire)"
+    assert any("not operational" in m.lower() for m in cap.messages), \
+        "run_gesture WARNS that local camera gesture is not operational without a model"
+    assert not b.calls, "an inert landmarker fires no intents → nothing is injected"
 
 
 if __name__ == "__main__":

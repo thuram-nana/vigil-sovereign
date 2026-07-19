@@ -6,6 +6,7 @@ spine + local system; live watchers (IMAP IDLE, CalDAV, uptime probes) are optio
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from typing import List, Protocol, runtime_checkable
 
 from .base import Agent, AgentResult, Proposal, Tier
@@ -37,8 +38,9 @@ class SpineActivityWatcher:
 
 class SystemHealthWatcher:
     """Local system posture — low disk is salient (BASTION-adjacent, own-infra only)."""
-    def __init__(self, path: str = "/home/kali", low_pct: float = 10.0):
-        self.path, self.low_pct = path, low_pct
+    def __init__(self, path: str | None = None, low_pct: float = 10.0):
+        # default to the operator's home partition (host-portable); overridable per call.
+        self.path, self.low_pct = (path or str(Path.home())), low_pct
 
     def poll(self) -> List[dict]:
         try:

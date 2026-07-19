@@ -46,6 +46,18 @@ def run_gesture(*, store=None, owner_key=None, source=None, landmarker=None, cla
                               "reason": "landmark model would egress owner imagery — the gesture "
                                         "loop is on-box only"})
         return 0  # inject NOTHING; never armed
+    # SEAM-HONESTY (WS-F): the default OnnxHandLandmarker is an INERT stub when no checksum-pinned
+    # model is bundled — detect() always returns [] so the loop can NEVER fire an intent. Don't spin
+    # that silently: warn clearly that local camera gesture is not operational without a model. A
+    # scripted double (no `operational` method) is unaffected and drives the loop exactly as before.
+    _op = getattr(landmarker, "operational", None)
+    if callable(_op) and not _op():
+        import logging
+        logging.getLogger(__name__).warning(
+            "local camera gesture is NOT operational: no hand-landmark model at %s — "
+            "OnnxHandLandmarker.detect() is an inert no-op (returns []), so the loop will process "
+            "frames but can never fire a gesture intent. Install a checksum-pinned model to enable "
+            "on-box gesture control.", getattr(landmarker, "model_path", "<unknown>"))
     if classifier is None:
         from .features import RuleClassifier
         classifier = RuleClassifier()

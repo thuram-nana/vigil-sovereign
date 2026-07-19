@@ -12,6 +12,8 @@ added later by raising the trust-root threshold.
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 from ..config import HEAD_PATH, KEYS_DIR, OWNER_KEY_ID, SCOPE
 from ..reuse import (
@@ -26,6 +28,36 @@ from .store import SpineStore
 
 _PRIV = KEYS_DIR / "owner.priv"
 _PUB = KEYS_DIR / "owner.pub"
+
+
+def _atomic_write_text(path: Path, data: str) -> None:
+    """Durably + atomically replace `path` with `data` (FIX 3): write a temp file in the SAME dir,
+    fsync it, `os.replace()` over the target (atomic on POSIX — a reader sees either the old or the
+    new head, never a torn one), then fsync the directory so the rename itself survives a crash. A
+    crash at any point leaves the previous valid signed head intact, never a partially-written one."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".head-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:                                     # fsync the directory so the rename is durable
+        dfd = os.open(str(path.parent), os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:  # pragma: no cover — dir fsync unsupported on some filesystems
+        pass
 
 
 def _owner_keys() -> tuple[str, str]:
@@ -48,7 +80,7 @@ def checkpoint(store: SpineStore | None = None) -> SignedChainHead:
     store = store or SpineStore()
     priv, _ = _owner_keys()
     head = sign_head(store.entries(), engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, priv)])
-    HEAD_PATH.write_text(head.model_dump_json(), encoding="utf-8")
+    _atomic_write_text(HEAD_PATH, head.model_dump_json())   # FIX 3: never leave a torn head on a crash
     return head
 
 

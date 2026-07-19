@@ -8,14 +8,17 @@ recall of the research is cited and honest, not confident. The synthesizer is pl
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 from typing import Dict, List, Optional, Protocol, runtime_checkable
 
+from ..config import claude_bin as _resolve_claude_bin
 from ..consolidate.gate import salient   # reuse the veracity tokenizer
 from .base import Agent, AgentResult, Proposal, Tier
 from .sources import read_source
 
+_log = logging.getLogger(__name__)
 _WS = re.compile(r"\s+")
 _MIN_QUOTE_SALIENT = 2
 
@@ -40,9 +43,10 @@ class Synthesizer(Protocol):
 
 class ClaudeSynthesizer:
     """`claude -p` over the sources → JSON claims, each citing a source ref + a verbatim quote."""
-    def __init__(self, claude_bin: str = "/home/kali/.local/bin/claude",
+    def __init__(self, claude_bin: str | None = None,
                  model: str = "claude-haiku-4-5-20251001", timeout: int = 180):
-        self.claude_bin, self.model, self.timeout = claude_bin, model, timeout
+        self.claude_bin = claude_bin or _resolve_claude_bin()
+        self.model, self.timeout = model, timeout
 
     def synthesize(self, question: str, docs: Dict[str, str]) -> List[dict]:
         rendered = "\n\n".join(f"[SOURCE {ref}]\n{text[:4000]}" for ref, text in docs.items())
@@ -56,7 +60,8 @@ class ClaudeSynthesizer:
         try:
             proc = subprocess.run([self.claude_bin, "-p", prompt, "--model", self.model],
                                   capture_output=True, text=True, timeout=self.timeout)
-        except (subprocess.SubprocessError, OSError):
+        except (subprocess.SubprocessError, OSError) as e:
+            _log.warning("SCHOLAR synthesizer subprocess failed: %s", e)
             return []
         m = re.search(r"\[.*\]", proc.stdout, re.S)
         if not m:

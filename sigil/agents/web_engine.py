@@ -4,9 +4,11 @@ correlatable-UA `sources.fetch_raw` for the read path and pins the SAME vetted I
 address — no DNS-rebinding split). `detect_block` is a BEST-EFFORT flag for a CAPTCHA / 403 / 429 /
 CF-challenge; a DETECTED block STOPS + is surfaced as a positive control (it is not a guarantee that
 every anti-automation page is recognised — a missed soft-block only ever means the actor proceeds as
-approved, never that a block is defeated). There is deliberately NO headless-browser / JS-render path
-in this actor: "use a browser to beat a block" is unreachable because the capability does not exist.
-`FakeEngine` is the deterministic double + call spy for tests."""
+approved, never that a block is defeated). This actor is HTTP-only: the ONLY engine implemented here
+is `HttpEngine` over `sources.fetch_raw`. It has no browser engine and executes no JavaScript, and no
+headless-render fallback exists anywhere on this path — so "use a browser to beat a block" is not a
+capability this actor has, rather than a capability it declines to use. `FakeEngine` is the
+deterministic double + call spy for tests."""
 from __future__ import annotations
 
 import re

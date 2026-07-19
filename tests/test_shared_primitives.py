@@ -196,6 +196,25 @@ def test_recompute_tip_tamper_is_labeled_unanchored_not_truth():
     assert all(e["anchored"] for e in ev if e["seq"] <= 1), "the owner-signed prefix stays anchored"
 
 
+# ---- FIX 1: the index-seeked iter_records SpineTailer.poll relies on matches a full scan ----------
+def test_iter_records_index_seek_matches_full_scan():
+    """SpineTailer.poll() reads via iter_records(since_seq=cursor). The seq→offset index seek (O(records
+    returned)) must return EXACTLY what a from-scratch full scan would, for every cursor boundary — and
+    a live tailer polling across an append must see exactly the new records."""
+    s = _store()
+    _append(s, 6)                                      # seq 0..5
+    truth = [r.seq for r in SpineStore(s.path).iter_records()]   # full scan, fresh instance (no index)
+    assert truth == list(range(6))
+    for since in range(-1, 7):
+        got = [r.seq for r in s.iter_records(since_seq=since)]   # index-seeked path on the built index
+        assert got == [x for x in truth if x > since], f"index seek at since={since} must match the scan"
+    t = SpineTailer(s, since_seq=-1)
+    assert [e["seq"] for e in t.poll()] == list(range(6)), "first poll (full) emits all"
+    _append(s, 3)                                      # seq 6..8
+    assert [e["seq"] for e in t.poll()] == [6, 7, 8], "poll seeks from the cursor and matches exactly"
+    assert t.poll() == [], "no new records → empty poll"
+
+
 def test_broadcaster_fans_out_and_flags_lag():
     b = Broadcaster(maxlen=3)
     a = b.subscribe()

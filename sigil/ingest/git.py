@@ -11,18 +11,16 @@ oldest-first so the spine's seq order tracks chronology.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Iterator
 
 from . import cursor as cur
+from ..config import INGEST_REPOS as DEFAULT_REPOS  # env SIGIL_INGEST_REPOS → host-relative default
 from ..spine.store import SpineStore
 
-# high-signal repos to ingest (relative to /home/kali). Excludes RECOR (257 GB) + flutter.
-DEFAULT_REPOS = [
-    "/home/kali/Pictures/PENTEST-main",
-    "/home/kali/sigil",
-]
+_log = logging.getLogger(__name__)
 
 _SEP_FIELD = "\x1f"
 _SEP_REC = "\x1e"
@@ -74,6 +72,7 @@ def ingest_git(store: SpineStore, repos: list[str] | None = None, *,
                                   "subject": c["subject"]}, ts=c["date"])
             added += 1
         cursor[key] = newest
+        _log.info("git ingest: %d commit(s) from %s", len(commits), p.name)
     if own:
         cur.save(cursor)
     return added

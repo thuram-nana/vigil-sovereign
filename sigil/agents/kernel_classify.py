@@ -38,6 +38,11 @@ class KernelClassifier:
             return Tier.A3
         try:
             data = json.loads(proc.stdout.strip().splitlines()[-1])
-            return _TIER.get(str(data.get("tier")), Tier.A3)
-        except (ValueError, IndexError, KeyError, TypeError):
+        except (ValueError, IndexError):
+            return Tier.A3                    # empty / unparseable output → fail-closed
+        if not isinstance(data, dict):
+            # Non-object JSON (a bare string/number/null/array/bool): `.get` would raise
+            # AttributeError and crash the classifier. The documented contract is fail-closed
+            # to the MOST-gated tier, so a kernel that emits a non-object resolves to A3.
             return Tier.A3
+        return _TIER.get(str(data.get("tier")), Tier.A3)
