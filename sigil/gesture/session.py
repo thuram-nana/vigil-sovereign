@@ -100,7 +100,7 @@ class SessionGate:
         self._trusted_pubkey = trusted_pubkey
         self.session: Optional[Session] = None
         self._ks_engaged = False
-        self._ks_size = -1                # last-scanned spine size; -1 forces a fresh check on the first consult
+        self._ks_token: tuple | None = None   # last-scanned spine change token; None forces a fresh check first
         self._ks_checked_at = -1e9
 
     def _trusted(self):
@@ -111,20 +111,19 @@ class SessionGate:
 
     def _killswitch_engaged(self, now: float) -> bool:
         """Kill-switch state for the per-intent gate. Re-scans the AUTHORITATIVE `KillSwitch` (which
-        verifies the owner-signed release — never re-implemented here) ONLY when the append-only spine
-        has GROWN since the last scan: a panic APPENDS a record → the file grows → the halt is honored
-        within ~1-2 frames (≤ the rescan floor + one frame, ≈66 ms worst case), not a fixed 0.5 s. A
-        pure-movement gesture appends nothing, so this is
-        O(1) (a `stat`) with NO scan at all. A short `_KS_MIN_RESCAN` floor stops a churning spine from
-        forcing a per-frame O(spine) scan (worst-case latency ≤ the floor). The arm path checks FRESH."""
-        try:
-            size = self.store.path.stat().st_size
-        except OSError:
-            size = self._ks_size
-        if size != self._ks_size and (now - self._ks_checked_at) >= _KS_MIN_RESCAN:
+        verifies the owner-signed release — never re-implemented here) ONLY when the store's ROTATION-AWARE
+        change token has moved since the last scan: a panic APPENDS a record → the token changes → the halt
+        is honored within ~1-2 frames (≈66 ms worst case), not a fixed 0.5 s. A pure-movement gesture
+        appends nothing, so the token is unchanged and this is cheap with NO scan. Using the change token
+        (invariant 9 / A4) rather than `store.path.stat()` is what keeps a panic observable AFTER a
+        migration — a bare size check would raise/freeze once spine.jsonl is renamed away, silently
+        stranding a device-armed session in the un-halted state. A short `_KS_MIN_RESCAN` floor caps a
+        churning spine at per-floor scanning. The arm path checks FRESH."""
+        token = self.store.change_token()
+        if token != self._ks_token and (now - self._ks_checked_at) >= _KS_MIN_RESCAN:
             from ..governor.killswitch import KillSwitch
             self._ks_engaged = KillSwitch(self.store).is_engaged()
-            self._ks_size = size
+            self._ks_token = token
             self._ks_checked_at = now
         return self._ks_engaged
 
