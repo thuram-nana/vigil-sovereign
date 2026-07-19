@@ -134,6 +134,20 @@ class SessionGate:
             self._classifier = KernelClassifier()
         return self._classifier
 
+    def _backend_available(self) -> bool:
+        """True if the input backend can actually inject (SEAM-HONESTY). A backend with no
+        `available()` — e.g. the `RecordingInputBackend` test spy, which faithfully records every
+        call — is treated as able. A platform SEAM whose `available()` returns False (macOS/Windows
+        native path not wired, or Linux with no ydotool/xdotool) is honestly INERT: it no-ops, so an
+        injection is NEVER recorded/returned as done when it physically did nothing."""
+        probe = getattr(self.backend, "available", None)
+        if probe is None:
+            return True
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 — a backend that can't even answer is treated as unavailable
+            return False
+
     # --- Layer 1: the owner-armed session ---------------------------------------------------------
     def arm(self, *, owner_key=None, ttl_seconds: float = 1800.0) -> Session:
         from ..governor.authn import signed_payload
@@ -260,15 +274,26 @@ class SessionGate:
         tier = self._cls().classify(tool)                 # DERIVED, fail-closed A3 on any error
         args = f"{intent.dx:.4f},{intent.dy:.4f},{intent.arg}"
         if tier <= Tier.A1:
-            self._inject(intent)
+            acted = self._backend_available()   # a platform SEAM (available()==False) is honestly inert
+            self._inject(intent)                # an inert backend no-ops → NOTHING is physically injected
             # BLOCK-1: log the DISCRETE A1 injections that actually take effect (click/scroll/drag);
             # per-frame `move` is telemetry (logging it at 30 FPS would DoS the append-only spine).
+            # SEAM-HONESTY: never let the audit log CLAIM an injection the backend didn't perform —
+            # when the backend is inert, record honestly (`backend_inert: True`, "NOT injected"), and
+            # return injected=False. The A2-queue path below is unchanged.
             if intent.kind != "move":
-                self.store.append(kind="event", source="gesture", actor="OWNER",
-                                  payload={"signal": ACTION_SIGNAL, "decision": "auto", "tier": tier.label(),
-                                           "tool": tool, "session_id": self.session.session_id,
-                                           "summary": f"gesture {tool} injected"})
-            return {"injected": True, "tier": tier.label(), "tool": tool}
+                payload = {"signal": ACTION_SIGNAL, "decision": "auto", "tier": tier.label(),
+                           "tool": tool, "session_id": self.session.session_id,
+                           "summary": (f"gesture {tool} injected" if acted
+                                       else f"gesture {tool} NOT injected — input backend inert (no-op)")}
+                if not acted:
+                    payload["backend_inert"] = True
+                self.store.append(kind="event", source="gesture", actor="OWNER", payload=payload)
+            verdict = {"injected": bool(acted), "tier": tier.label(), "tool": tool}
+            if not acted:
+                verdict["backend_inert"] = True
+                verdict["reason"] = "input backend inert — no physical injection performed"
+            return verdict
         # A2/A3 → QUEUE an approval bound to this exact action; inject NOTHING
         token = sha256_hex(f"{self.session.session_id}|{tool}|{args}".encode("utf-8"))
         seq = self.store.append(kind="event", source="gesture", actor="PERCEPTION",

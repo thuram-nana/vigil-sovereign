@@ -291,7 +291,7 @@ def cmd_warden(a) -> None:
     """Phase 6 governor controls (SIGIL §5): kill switch + per-kind promotion policy. Governance
     mutations are signed by the persisted OWNER key (auto-created once if absent)."""
     from .governor import KillSwitch, PromotionPolicy
-    from .governor.identity import ensure_owner_keypair, owner_pubkey
+    from .governor.identity import ensure_owner_keypair
     store = SpineStore()
     if a.action == "status":
         print(f"  kill switch: {'ENGAGED (mesh halted)' if KillSwitch(store).is_engaged() else 'released (mesh live)'}")
@@ -469,9 +469,28 @@ def cmd_status(a) -> None:
     print(f"head:      {'OK' if hok else '(' + hmsg + ')'}")
 
 
+def cmd_doctor(a) -> None:
+    """Whole-install self-check: SIGIL_HOME writable, kernel present, Qdrant reachable, keyring, claude."""
+    import sys as _sys
+
+    from .config import doctor, effective_config
+    print("SIGIL doctor — install self-check\n")
+    ok_all = True
+    for name, ok, detail in doctor():
+        ok_all = ok_all and ok
+        print(f"  [{'OK' if ok else '!!'}] {name:16} {detail}")
+    print("\neffective config (secrets redacted):")
+    for k, v in effective_config().items():
+        print(f"  {k:18} {v}")
+    _sys.exit(0 if ok_all else 1)
+
+
 def main(argv=None) -> None:
+    from .obs import configure_logging
+    configure_logging()                      # one structured-logging setup at startup (level from SIGIL_LOG_LEVEL)
     p = argparse.ArgumentParser(prog="sigil")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("doctor", help="self-check the install (SIGIL_HOME, kernel, Qdrant, keyring, claude)").set_defaults(fn=cmd_doctor)
     pi = sub.add_parser("ingest")
     pi.add_argument("--reset", action="store_true", help="clear spine+cursor+vectors and rebuild")
     pi.add_argument("--docs", action="store_true", help="also ingest curated memory/*.md")

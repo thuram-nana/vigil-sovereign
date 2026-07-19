@@ -1,8 +1,10 @@
 """SIGIL integrity + sovereignty guarantees. Run: ~/.sigil/venv/bin/python tests/test_integrity.py"""
 import json
+import random
 import tempfile
 
 from sigil import reuse
+from sigil.spine.models import SpineRecord
 from sigil.spine.store import SpineStore
 
 
@@ -12,6 +14,16 @@ def _fresh(n=5):
     for i in range(n):
         s.append(kind="message", source="t", actor="u", payload={"text": f"event {i}"})
     return p, s
+
+
+def _full_scan(path):
+    """Ground truth: parse EVERY well-formed line from byte 0, with no index (what the fix must match)."""
+    recs = []
+    for ln in open(path, encoding="utf-8"):
+        ln = ln.strip()
+        if ln:
+            recs.append(SpineRecord.from_dict(json.loads(ln)))
+    return recs
 
 
 def test_tail_returns_the_last_n_records():   # tightening #2 (bounded-window dedup)
@@ -125,6 +137,138 @@ def test_rewrite_below_head_is_tampering():
     entries[2].cert_digest = "0" * 64  # rewrite a record's digest inside the signed prefix
     ok, msg = classify_head(head, entries, tr)
     assert not ok and "TAMPERING" in msg, f"history rewrite must be tampering: {msg}"
+
+
+# ---- FIX 1: the seq -> byte-offset index is byte-identical to a full scan ------------------------
+def test_offset_index_matches_full_scan():
+    """get / iter_records(since_seq) / tail via the index return IDENTICAL records to a from-scratch
+    full scan — across random spine sizes, unicode payloads (byte != char offsets), and edge seqs.
+    Checked on BOTH a fresh store (index built lazily) and the append-maintained store."""
+    rnd = random.Random(20260719)
+    for _ in range(15):
+        n = rnd.choice([1, 2, 3, 8, 25, 60])
+        p = tempfile.mktemp(suffix=".jsonl")
+        s = SpineStore(p)
+        for i in range(n):
+            body = rnd.choice(["e", "café ☕", "日本語テキスト", "x"]) + f"-{i}-{rnd.randint(0, 1_000_000)}"
+            s.append(kind="message", source="t", actor="u", payload={"text": body, "i": i})
+        truth = _full_scan(p)
+        assert [r.seq for r in truth] == list(range(n)), "contiguous seqs from 0"
+        for store in (SpineStore(p), s):                       # fresh (lazy build) AND append-maintained
+            for seq in range(-2, n + 2):                       # every seq + out-of-range edges
+                want = truth[seq] if 0 <= seq < n else None
+                assert store.get(seq) == want, f"get({seq}) != scan (n={n})"
+            for since in range(-2, n + 1):                     # every since_seq boundary
+                got = list(store.iter_records(since_seq=since))
+                exp = [r for r in truth if r.seq > since]
+                assert got == exp, f"iter_records(since={since}) != scan (n={n})"
+            for k in (0, 1, 3, n, n + 5):                      # tail windows incl. > len
+                got = [r.seq for r in store.tail(k)]
+                exp = [] if k <= 0 else [r.seq for r in truth][-k:]
+                assert got == exp, f"tail({k}) != scan (n={n})"
+
+
+def test_index_extends_when_another_process_appends():
+    """An append via a SECOND store instance (simulating another PROCESS) grows the file; a read on the
+    FIRST instance (whose index was already built) must detect the growth and return the new records."""
+    p = tempfile.mktemp(suffix=".jsonl")
+    a = SpineStore(p)
+    for i in range(4):
+        a.append(kind="message", source="t", actor="u", payload={"text": f"a{i}"})
+    assert a.get(0).seq == 0, "build the index on instance A"                      # index now built
+    b = SpineStore(p)                                                              # "another process"
+    b.append(kind="message", source="t", actor="u", payload={"text": "from-B"})    # seq 4, A doesn't know
+    assert a.get(4) is not None and a.get(4).text() == "from-B", "A extends its index over B's append"
+    assert [r.seq for r in a.iter_records(since_seq=2)] == [3, 4], "A's index-seek sees B's record too"
+
+
+# ---- FIX 2: torn-line tolerance (reads survive a torn tail; middle corruption fails verify) -------
+def test_torn_last_line_is_tolerated_by_reads():
+    p, _ = _fresh(5)                                    # clean seq 0..4
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"seq": 5, "scope": "sigil", "kind": "messa')   # a torn/partial LAST line, NO newline
+    s = SpineStore(p)                                   # __init__ must NOT crash (daemon can restart)
+    assert s.next_seq == 5, "the tip is the last VALID record; the torn tail is skipped"
+    assert [r.seq for r in s.iter_records()] == [0, 1, 2, 3, 4], "reads skip the torn tail, no crash"
+    assert s.get(4).seq == 4 and s.get(2).seq == 2, "targeted reads survive the torn tail"
+    assert [r.seq for r in s.tail(10)] == [0, 1, 2, 3, 4], "tail survives the torn tail (skips it, no crash)"
+    ok, _ = s.verify()
+    assert ok, "the valid prefix still verifies (a torn tail is a crash artifact, not tampering)"
+
+
+def test_append_after_a_torn_tail_is_not_lost():        # spine red-pen BLOCK-1 (silent acked-record loss)
+    p, _ = _fresh(4)                                    # clean seq 0..3
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"seq": 4, "kind": "event", "partial_incompl')   # interrupted-write torn tail, NO newline
+    seq = SpineStore(p).append(kind="event", source="t", actor="u", payload={"real": True})
+    got = SpineStore(p).get(seq)
+    assert got is not None and got.payload.get("real") is True, \
+        "the append AFTER a torn tail is durable + readable — not silently merged/lost (BLOCK-1 fix)"
+    assert [r.seq for r in SpineStore(p).iter_records()] == [0, 1, 2, 3, 4], "contiguous seqs after tail repair"
+    ok, reason = SpineStore(p).verify()
+    assert ok, f"chain intact after the torn tail is truncated + the real record appended: {reason}"
+
+
+def test_killswitch_engage_after_a_torn_tail_is_honored():   # spine red-pen BLOCK-1 (a MISSED panic)
+    from sigil.governor.killswitch import KillSwitch
+    owner = reuse.generate_keypair()
+    p, _ = _fresh(1)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"seq": 1, "partial torn write, no newline')      # a crash left a torn tail
+    KillSwitch(SpineStore(p), owner_key=owner, trusted_pubkey=owner.public_key_b64).engage(by="test")
+    assert KillSwitch(SpineStore(p), owner_key=owner, trusted_pubkey=owner.public_key_b64).is_engaged() is True, \
+        "a kill-switch PANIC recorded after a torn tail IS honored (not swallowed by an append-merge → mesh halts)"
+
+
+def test_torn_middle_line_still_fails_verify():
+    p, _ = _fresh(6)                                    # clean seq 0..5
+    lines = open(p).read().splitlines()
+    lines[2] = '{"seq": 2, "kind": "messa'              # corrupt a MIDDLE line (real corruption/tamper)
+    open(p, "w").write("\n".join(lines) + "\n")
+    s = SpineStore(p)
+    assert [r.seq for r in s.iter_records()] == [0, 1, 3, 4, 5], "the corrupt middle line is skipped (a gap)"
+    ok, msg = s.verify()
+    assert not ok and "chain break" in msg, f"mid-file corruption must NEVER be hidden — verify() fails: {msg}"
+
+
+# ---- FIX 3: fsync'd append stays chain-valid + durable across a reopen ----------------------------
+def test_append_is_chain_valid_after_fsync():
+    p = tempfile.mktemp(suffix=".jsonl")
+    s = SpineStore(p)
+    seqs = [s.append(kind="message", source="t", actor="u", payload={"text": f"e{i}"}) for i in range(20)]
+    assert seqs == list(range(20)), "the fsync'd appends produce a contiguous chain"
+    ok, msg = s.verify()
+    assert ok, f"the chain verifies after fsync appends: {msg}"
+    s2 = SpineStore(p)                                  # reopen: the durable tip is read back
+    assert s2.next_seq == 20
+    assert s2.append(kind="message", source="t", actor="u", payload={"text": "more"}) == 20
+    assert s2.verify()[0], "the chain continues cleanly after a reopen"
+
+
+# ---- FIX 4: the kill-switch state cache is correct AND invalidates on growth ----------------------
+def test_killswitch_cache_correct_and_invalidates_on_growth():
+    from sigil.governor import KillSwitch
+    owner = reuse.generate_keypair()
+    pub = owner.public_key_b64
+    p = tempfile.mktemp(suffix=".jsonl")
+    s = SpineStore(p)
+    s.append(kind="message", source="t", actor="u", payload={"text": "seed"})
+    ks = KillSwitch(s, owner_key=owner, trusted_pubkey=pub)
+    assert ks.is_engaged() is False, "no kill record → released"
+    KillSwitch(s, owner_key=owner, trusted_pubkey=pub).engage(reason="drill")     # append → file grows
+    assert ks.is_engaged() is True, "an appended engage is honored on the next call (growth invalidates)"
+    assert ks.is_engaged() is True, "a repeat with no new append is a cache HIT with the same verdict"
+    s.append(kind="event", source="governor", actor="WARDEN",                     # forged UNSIGNED release
+             payload={"signal": "governor.killswitch", "state": "released"})
+    assert ks.is_engaged() is True, "an unsigned release cannot revive the mesh — even through the cache"
+    KillSwitch(s, owner_key=owner, trusted_pubkey=pub).release()                   # owner-signed → grows
+    assert ks.is_engaged() is False, "an owner-signed release un-halts on the next call"
+    # prove the cache is actually consulted: with no new appends the authoritative scan is NOT re-run
+    calls = {"n": 0}
+    real = ks._scan_engaged
+    ks._scan_engaged = lambda: (calls.__setitem__("n", calls["n"] + 1), real())[1]
+    assert ks.is_engaged() is False and ks.is_engaged() is False
+    assert calls["n"] == 0, "repeated calls with no new appends serve from cache without re-scanning (O(1))"
 
 
 def test_no_offense():

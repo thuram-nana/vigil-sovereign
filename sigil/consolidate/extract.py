@@ -13,13 +13,17 @@ to invent — belt (honest prompt) and suspenders (re-execution gate)."""
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 from pathlib import Path
 from typing import Iterable, Protocol, runtime_checkable
 
+from ..config import claude_bin as _resolve_claude_bin
 from ..spine.models import SpineRecord
 from .models import CandidateFact
+
+_log = logging.getLogger(__name__)
 
 # the prove-don't-guess doctrine, distilled for extraction (framework/cognitive/metacognition.md).
 DOCTRINE = (
@@ -116,9 +120,9 @@ class AgentProvider:
     Spawns `claude -p --model <fast> <prompt>` per window — no metered API key needed. A fast
     model (Haiku) keeps each batch quick and cheap for this mechanical extraction."""
 
-    def __init__(self, claude_bin: str = "/home/kali/.local/bin/claude",
+    def __init__(self, claude_bin: str | None = None,
                  model: str = FAST_MODEL, timeout: int = 180) -> None:
-        self.claude_bin = claude_bin
+        self.claude_bin = claude_bin or _resolve_claude_bin()
         self.model = model
         self.timeout = timeout
 
@@ -130,7 +134,8 @@ class AgentProvider:
             cmd += ["--model", self.model]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout)
-        except (subprocess.SubprocessError, OSError):
+        except (subprocess.SubprocessError, OSError) as e:
+            _log.warning("AgentProvider extraction subprocess failed: %s", e)
             return []
         return parse_candidates(proc.stdout, extractor="agent")
 
@@ -166,7 +171,8 @@ class ApiProvider:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 payload = _json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            _log.warning("ApiProvider extraction request failed: %s", e)  # never carries the key
             return []
         text = "".join(b.get("text", "") for b in payload.get("content", []) if isinstance(b, dict))
         return parse_candidates(text, extractor="api")
@@ -193,7 +199,8 @@ class LocalProvider:
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 payload = _json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            _log.warning("LocalProvider extraction request failed: %s", e)
             return []
         return parse_candidates(payload.get("response", ""), extractor="local")
 

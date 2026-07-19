@@ -3,12 +3,15 @@ gated by its autonomy ceiling and writing provenance-linked spine records. `morn
 the acceptance deliverable (the unprompted brief, with SENTINEL alerts folded in)."""
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from ..spine.store import SpineStore
 from .envoy import Envoy, FileInbox, InboxSource
 from .sentinel import Sentinel, SpineActivityWatcher, SystemHealthWatcher
 from .steward import Steward
+
+_log = logging.getLogger(__name__)
 
 
 def _sentinel_scan(store: SpineStore):
@@ -23,7 +26,6 @@ def _load_bastion(store: SpineStore):
     """Build a BASTION from ~/.sigil/bastion-assets.json (+ optional bastion-cve-feed.json) if
     present; None otherwise. Keeps the default brief path unchanged when no infra is configured."""
     import json
-    import sys
 
     from ..config import SIGIL_HOME
     from .bastion import Asset, Bastion
@@ -42,7 +44,7 @@ def _load_bastion(store: SpineStore):
         try:
             inv.append(Asset(name=a["name"], kind=a["kind"], ref=a["ref"], meta=a.get("meta")))
         except (KeyError, TypeError) as e:
-            print(f"  [BASTION] skipping malformed asset entry {a!r}: missing/invalid {e}", file=sys.stderr)
+            _log.warning("BASTION skipping malformed asset entry %r: missing/invalid %s", a, e)
     if not inv:
         return None
     feed = []
@@ -74,7 +76,8 @@ def morning(store: Optional[SpineStore] = None, *, date_label: str = "today", ba
 def triage(store: Optional[SpineStore] = None, *, inbox: Optional[InboxSource] = None,
            inbox_path: Optional[str] = None) -> dict:
     store = store or SpineStore()
-    src = inbox or FileInbox(inbox_path or "/home/kali/.sigil/inbox.json")
+    from ..config import SIGIL_HOME
+    src = inbox or FileInbox(inbox_path or str(SIGIL_HOME / "inbox.json"))
     res = Envoy(store).run(src)
     return {"envoy": res}
 

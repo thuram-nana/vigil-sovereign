@@ -9,15 +9,18 @@ review and push. The coder is pluggable: `ClaudeCoder` (headless `claude -p`) or
 test double."""
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 from typing import List, Optional, Protocol, runtime_checkable
 
+from ..config import claude_bin as _resolve_claude_bin
 from ..reuse import sha256_hex
 from .base import Agent, AgentResult, Proposal, Tier
+
+_log = logging.getLogger(__name__)
 
 # commands that "pass" trivially — a PR must never claim tests passing on one of these.
 _TRIVIAL_TEST = frozenset({(), ("true",), (":",), ("/bin/true",), ("/usr/bin/true",)})
@@ -42,8 +45,9 @@ class Coder(Protocol):
 
 class ClaudeCoder:
     """Headless Claude Code (`claude -p`) run inside the repo — the real ARTIFICER worker."""
-    def __init__(self, claude_bin: str = "/home/kali/.local/bin/claude", timeout: int = 600):
-        self.claude_bin, self.timeout = claude_bin, timeout
+    def __init__(self, claude_bin: str | None = None, timeout: int = 600):
+        self.claude_bin = claude_bin or _resolve_claude_bin()
+        self.timeout = timeout
 
     def code(self, task: str, workdir: str) -> str:
         prompt = (f"You are working in the repo at {workdir}. Task: {task}\n"
@@ -56,6 +60,7 @@ class ClaudeCoder:
                 [self.claude_bin, "-p", prompt, "--permission-mode", "acceptEdits"],
                 cwd=workdir, capture_output=True, text=True, timeout=self.timeout)
         except (subprocess.SubprocessError, OSError) as e:
+            _log.warning("ARTIFICER coder subprocess failed: %s", e)
             return f"(coder error: {e})"
         return (proc.stdout or "").strip()[:400]
 

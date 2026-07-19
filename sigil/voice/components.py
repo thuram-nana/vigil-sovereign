@@ -6,7 +6,7 @@ of mono 16-kHz audio (numpy int16/float32); the pipeline is frame-driven so full
 are testable without any audio hardware."""
 from __future__ import annotations
 
-from typing import Iterator, List, Optional, Protocol, runtime_checkable
+from typing import Iterator, List, Protocol, runtime_checkable
 
 try:
     import numpy as np

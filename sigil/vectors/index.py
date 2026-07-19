@@ -6,11 +6,44 @@ only embeds records above the last-indexed seq. (Chunking of long records = 0b r
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..config import EMBED_DIM, QDRANT_COLLECTION, QDRANT_PATH, QDRANT_URL
 from ..spine.store import SpineStore
 from .embed import embed, embed_one
+
+_log = logging.getLogger(__name__)
+
+# Transport/connection failure classes (matched by NAME so we don't hard-depend on httpx or a
+# specific qdrant version). qdrant wraps httpx transport errors in ResponseHandlingException.
+_UNREACHABLE_NAMES = frozenset({
+    "ResponseHandlingException", "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+    "PoolTimeout", "TimeoutException", "NetworkError", "TransportError", "ConnectionError",
+    "NewConnectionError", "MaxRetryError", "RemoteProtocolError",
+})
+
+
+class VectorBackendUnavailable(RuntimeError):
+    """The vector backend is UNREACHABLE (a connection/transport failure), so the durable cursor is
+    UNKNOWN. Raised instead of silently reporting an empty cursor (-1): treating an outage as 'empty'
+    would re-embed the ENTIRE corpus from scratch on every transient outage. Callers must treat this
+    as 'unknown — do not reindex', never as seq -1."""
+
+
+def _is_backend_unavailable(exc: BaseException) -> bool:
+    """True if `exc` (or anything in its cause/context chain) is a transport/connection failure to
+    the vector backend — as opposed to a query-shape / collection-absent error, which is a legitimate
+    'treat as empty' case. Walking the chain catches qdrant's ResponseHandlingException wrapping an
+    httpx ConnectError, etc."""
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if type(e).__name__ in _UNREACHABLE_NAMES:
+            return True
+        e = e.__cause__ or e.__context__
+    return False
 
 # bge-small cosine is compressed: genuinely in-corpus ~0.72-0.78, absent topics ~0.55-0.62.
 # GROUNDED = a top hit is a real match; below it, memory has nothing strongly relevant.
@@ -65,14 +98,31 @@ class VectorIndex:
         return self.client.count(self.collection, exact=True).count
 
     def last_indexed_seq(self) -> int:
-        """Highest spine seq already indexed (durable cursor), or -1 if empty."""
+        """Highest spine seq already indexed (durable cursor), or -1 if the collection is genuinely
+        empty / not-yet-created.
+
+        Raises `VectorBackendUnavailable` when the backend is UNREACHABLE: a connection/transport
+        outage must NOT masquerade as an empty cursor (-1), because the caller feeds -1 into
+        `index_spine(since_seq=-1)`, which re-embeds the ENTIRE corpus from scratch. On an outage we
+        raise so the reindex never runs — the append-only upsert-by-id spine is never wiped, and an
+        operator sees a loud failure instead of a silent full re-embed. A non-outage query error
+        (e.g. order_by needs a payload index) is genuinely 'treat as empty' → -1 and is
+        non-destructive (index_spine upserts by id=seq, idempotent — it never deletes)."""
         from qdrant_client.models import OrderBy
         try:
             pts, _ = self.client.scroll(self.collection, limit=1, with_payload=True,
                                         order_by=OrderBy(key="seq", direction="desc"))
             return int(pts[0].payload["seq"]) if pts else -1
-        except Exception:
-            # order_by needs a payload index; fall back to count-based cursor is unsafe → -1
+        except Exception as e:  # noqa: BLE001 — classify, then re-raise outages / -1 the rest
+            if _is_backend_unavailable(e):
+                _log.warning("vector backend unreachable while reading the durable cursor "
+                             "(last_indexed_seq); refusing to report an empty cursor so a transient "
+                             "outage does NOT trigger a full destructive reindex: %r", e)
+                raise VectorBackendUnavailable(
+                    "vector backend unreachable; durable cursor unknown — refusing to reindex "
+                    "from scratch") from e
+            # collection absent / order_by unsupported without a payload index → treat as empty.
+            # Non-destructive: index_spine upserts by id=seq (idempotent), it never wipes.
             return -1
 
     def index_spine(self, store: SpineStore, *, since_seq: int = -1, batch: int = 256) -> int:

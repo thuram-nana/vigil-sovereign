@@ -34,6 +34,13 @@ class OnnxHandLandmarker:
                 return None
         return self._session
 
+    def operational(self) -> bool:
+        """True ONLY when a real ONNX session is available (runtime importable AND the checksum-pinned
+        model is present at `model_path`). When False, `detect()` is a DOCUMENTED no-op that always
+        returns [] — the local camera gesture path is NOT functional, and `run_gesture` warns rather
+        than silently spinning a loop that can never fire a gesture intent."""
+        return self._sess() is not None
+
     def detect(self, image) -> List[Hand]:
         sess = self._sess()
         if sess is None or image is None:

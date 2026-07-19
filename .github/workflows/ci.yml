@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, production-hardening]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint · type · python · rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the WARDEN kernel
+        # Build the kernel BEFORE the Python tests so the Python↔Rust oracle integration tests actually
+        # RUN (they self-skip when the binary is absent — a skip must never be counted as a pass).
+        run: cargo build --release --manifest-path kernel/Cargo.toml
+
+      - name: Kernel unit tests
+        run: cargo test --release --manifest-path kernel/Cargo.toml
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install (editable + dev extras)
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Lint (ruff — blocking)
+        run: ruff check sigil/ tests/
+
+      - name: Python tests (pytest — blocking; the kernel is built, so oracle tests run, not skip)
+        run: pytest -q
+
+      - name: Type check (mypy — advisory, ratcheting up over time)
+        run: mypy sigil/ || true

@@ -7,11 +7,14 @@ the spine. Respects `core.hooksPath`. Safe to re-run; `uninstall` removes only S
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 _BEGIN = "# >>> sigil-hook >>>"
 _END = "# <<< sigil-hook <<<"
-_PY = "/home/kali/.sigil/venv/bin/python"
+# use the interpreter that is INSTALLING the hook (whatever venv/python invoked us), not a baked
+# absolute path — so the hook runs correctly on any host / venv layout.
+_PY = sys.executable or "python3"
 _BODY = f'{_PY} -m sigil.cli ingest --git-only >/dev/null 2>&1 || true'
 _HOOKS = ("post-commit", "post-merge")
 

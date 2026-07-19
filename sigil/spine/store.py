@@ -9,6 +9,7 @@ are O(1): read the last line's entry, `append_entry`, write.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -22,6 +23,12 @@ try:
     import fcntl  # POSIX advisory file lock — cross-PROCESS append serialization
 except ImportError:  # pragma: no cover — non-POSIX
     fcntl = None  # type: ignore[assignment]
+
+_log = logging.getLogger(__name__)
+
+# The record fields SpineRecord.from_dict needs; a line missing any of these is corrupt (skipped by
+# reads, so a mid-file gap still surfaces via verify()).
+_REQUIRED_KEYS = ("seq", "scope", "kind", "source", "actor", "cert_digest", "prev_hash", "entry_hash")
 
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, "threading.RLock"] = {}
@@ -41,30 +48,93 @@ def spine_lock(path: Path | str) -> "threading.RLock":
 
 
 def _last_nonempty_line(path: Path) -> str | None:
-    """Read the last non-empty line without loading the file (seek-from-end)."""
-    with path.open("rb") as f:
-        f.seek(0, os.SEEK_END)
-        end = f.tell()
-        if end == 0:
-            return None
-        buf = b""
-        pos = end
-        while pos > 0:
-            step = min(8192, pos)
-            pos -= step
-            f.seek(pos)
-            buf = f.read(step) + buf
-            lines = [ln for ln in buf.split(b"\n") if ln.strip()]
-            if lines and (pos == 0 or buf.count(b"\n") >= 2):
-                return lines[-1].decode("utf-8")
+    """Read the last VALID record line without loading the file (seek-from-end). A torn/garbage tail
+    line — a partial write from a crash — is SKIPPED so a read/restart never blows up on it: we return
+    the last line that JSON-parses and carries the chain fields (FIX 2). None if no valid line exists.
+    For a clean file this returns exactly the last non-empty line, byte-for-byte as before."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    window = 8192
+    while True:
+        start = max(0, size - window)
+        with path.open("rb") as f:
+            f.seek(start)
+            buf = f.read(size - start)
         lines = [ln for ln in buf.split(b"\n") if ln.strip()]
-        return lines[-1].decode("utf-8") if lines else None
+        if start > 0 and lines:
+            lines = lines[1:]                       # the first line may be partial unless we are at BOF
+        for raw in reversed(lines):
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                d = None
+            if isinstance(d, dict) and all(k in d for k in _REQUIRED_KEYS):
+                return raw.decode("utf-8")
+            _log.warning("spine: skipping malformed tail line while seeking the tip (%s)", path)
+        if start == 0:
+            return None                             # scanned the whole file, no valid line
+        window *= 4                                 # a torn tail bigger than the window (rare) — widen
+
+
+def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
+    """Return (byte offset just past the last VALID record line, its ChainEntry) — bytes BEYOND that
+    offset are a torn tail from an interrupted write, which `append` truncates before writing so the new
+    record cannot merge with them and be silently lost (BLOCK-1). (0, None) for an empty / all-torn file.
+    For a clean file the offset equals the file size (nothing to truncate)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0, None
+    if size == 0:
+        return 0, None
+    window = 8192
+    while True:
+        start = max(0, size - window)
+        with path.open("rb") as f:
+            f.seek(start)
+            buf = f.read(size - start)
+        segs: list[tuple[int, bytes]] = []          # (byte offset just past this line's \n, line bytes)
+        i = 0
+        while True:
+            nl = buf.find(b"\n", i)
+            if nl == -1:
+                break
+            segs.append((start + nl + 1, buf[i:nl]))
+            i = nl + 1
+        for end, raw in reversed(segs):             # near-EOF first; front partials (start>0) never win
+            if not raw.strip():
+                continue
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                d = None
+            if isinstance(d, dict) and all(k in d for k in _REQUIRED_KEYS):
+                return end, ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"],
+                                       cert_digest=d["cert_digest"], entry_hash=d["entry_hash"])
+            _log.warning("spine: skipping malformed tail segment while seeking the tip (%s)", path)
+        if start == 0:
+            return 0, None
+        window *= 4
 
 
 class SpineStore:
     def __init__(self, path: Path | str = SPINE_PATH) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # seq -> byte-offset index (FIX 1). Built lazily on the first TARGETED read (get / iter_records
+        # with since_seq >= 0) and then kept current: maintained O(1) on our own appends, and extended
+        # (never rewritten — an append-only file's offsets never move) when a stat shows another PROCESS
+        # grew the file. Full scans (verify/count/entries/iter_records(-1)) never touch it, staying a
+        # single byte-identical pass. `_index_lock` guards the dict against concurrent read+append.
+        self._index_lock = threading.Lock()
+        self._index_built = False
+        self._offsets: dict[int, int] = {}
+        self._max_seq = -1
+        self._scan_pos = 0                          # byte offset just past the last COMPLETE line indexed
         self._last: ChainEntry | None = self._read_last_entry()
 
     # --- write --------------------------------------------------------------------
@@ -82,37 +152,88 @@ class SpineStore:
         # daemon) can't both fork off a stale tip and break the chain. Re-read the TRUE tip from disk
         # under the lock — `self._last` may be stale if another instance/process appended.
         with spine_lock(self.path):
-            with self.path.open("a", encoding="utf-8") as f:
+            # binary append+read: lets us TRUNCATE a torn tail before writing (BLOCK-1 fix). `a+b` creates
+            # the file if absent and — in append mode — every write still lands at EOF.
+            with self.path.open("a+b") as f:
                 if fcntl is not None:
                     try:
                         fcntl.flock(f.fileno(), fcntl.LOCK_EX)   # cross-process guard (advisory)
                     except OSError:  # pragma: no cover
                         pass
-                last = self._read_last_entry()
+                # BLOCK-1: an interrupted write can leave torn bytes PAST the last valid record. Appending
+                # after them would MERGE (torn + new) into one unparseable line → the new record is silently
+                # lost, verify() stays green, and a lost kill-switch panic never halts the mesh. Truncate the
+                # dead tail back to the last valid record FIRST (this only removes never-committed garbage
+                # from an interrupted write; committed records are untouched).
+                clean_end, last = _last_valid_boundary(self.path)
+                pre_size = os.fstat(f.fileno()).st_size
+                if pre_size > clean_end:
+                    f.truncate(clean_end)
+                    _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
+                                 pre_size - clean_end, self.path)
                 entry = append_entry([last], cert_digest) if last else build_chain([cert_digest])[0]
                 record = {
                     "seq": entry.seq, **content, "ts": ts or now_iso(),
                     "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
                 }
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                line = json.dumps(record, ensure_ascii=False) + "\n"
+                offset = clean_end                      # after any truncate, EOF == clean_end (where the line lands)
+                f.write(line.encode("utf-8"))
                 f.flush()
+                os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
+                # FIX 1: keep the index current with NO re-scan when it is already exactly up to date.
+                # If another PROCESS appended in between, `_scan_pos < offset` and we skip here — the next
+                # read's `_ensure_index` extends from `_scan_pos`, picking up the gap records AND this one.
+                with self._index_lock:
+                    if self._index_built and self._scan_pos == offset:
+                        self._offsets[entry.seq] = offset
+                        if entry.seq > self._max_seq:
+                            self._max_seq = entry.seq
+                        self._scan_pos = offset + len(line.encode("utf-8"))
             self._last = entry
         return entry.seq
 
     # --- read ---------------------------------------------------------------------
     def iter_records(self, *, since_seq: int = -1) -> Iterator[SpineRecord]:
+        """Records with seq > `since_seq`, in order. FIX 1: for since_seq >= 0 the index seeks straight
+        to the first wanted line (O(records-returned), not O(file)); a full read (since_seq < 0) starts
+        at byte 0 exactly as before. FIX 2: a line that fails to parse or lacks required keys is SKIPPED
+        (a torn tail no longer crashes the read); a torn MIDDLE line becomes a seq gap that verify() fails
+        on, so mid-file tampering is never silently hidden."""
         if not self.path.exists():
             return
-        with self.path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+        start_off = self._start_offset_for(since_seq)
+        with self.path.open("rb") as f:
+            if start_off:
+                f.seek(start_off)
+            for raw in f:
+                if not raw.strip():
                     continue
-                d = json.loads(line)
-                if d["seq"] > since_seq:
-                    yield SpineRecord.from_dict(d)
+                try:
+                    rec = SpineRecord.from_dict(json.loads(raw))
+                except (ValueError, KeyError, TypeError):
+                    _log.warning("spine: skipping malformed line during iter_records (%s)", self.path)
+                    continue
+                if rec.seq > since_seq:
+                    yield rec
 
     def get(self, seq: int) -> SpineRecord | None:
+        """A single record by seq — O(1) via the index (FIX 1), byte-identical to a full scan."""
+        if seq < 0 or not self.path.exists():
+            return None
+        self._ensure_index()
+        with self._index_lock:
+            off = self._offsets.get(seq)
+        if off is not None:
+            with self.path.open("rb") as f:
+                f.seek(off)
+                raw = f.readline()
+            try:
+                rec = SpineRecord.from_dict(json.loads(raw))
+            except (ValueError, KeyError, TypeError):
+                return None
+            return rec if rec.seq == seq else None
+        # not indexed (beyond the tip, or a corrupt line was skipped) — bounded fallback (still index-seeked)
         for r in self.iter_records(since_seq=seq - 1):
             if r.seq == seq:
                 return r
@@ -182,8 +303,80 @@ class SpineStore:
         return verify_chain(entries)
 
     def _read_last_entry(self) -> ChainEntry | None:
+        # `_last_nonempty_line` skips a torn/garbage tail and returns the last VALID line (FIX 2), so a
+        # crash mid-write can no longer block a restart. The returned line is guaranteed parseable.
         line = _last_nonempty_line(self.path) if self.path.exists() else None
         if not line:
             return None
         d = json.loads(line)
         return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"], entry_hash=d["entry_hash"])
+
+    # --- seq -> byte-offset index (FIX 1) -----------------------------------------
+    def _start_offset_for(self, since_seq: int) -> int:
+        """Byte offset to seek so a forward read yields exactly seq > since_seq. A full read
+        (since_seq < 0) starts at 0 WITHOUT building the index — full scans stay a single byte-identical
+        pass. Otherwise the index gives an O(1) seek to the line of seq (since_seq + 1)."""
+        if since_seq < 0:
+            return 0
+        self._ensure_index()
+        with self._index_lock:
+            off = self._offsets.get(since_seq + 1)
+            if off is not None:
+                return off
+            if since_seq + 1 > self._max_seq:
+                return self._scan_pos              # nothing beyond the tip → the read yields nothing
+        return 0                                    # below the min, or a skipped/corrupt gap → safe full scan
+
+    def _ensure_index(self) -> None:
+        """Build the index lazily (one unavoidable scan) and keep it current. Detects a file that GREW
+        (our own or another PROCESS's appends — append-only ⇒ offsets never move, so we only EXTEND) and
+        a file that SHRANK / was rewritten in place smaller (rebuild). Thread-safe under `_index_lock`."""
+        try:
+            size = self.path.stat().st_size if self.path.exists() else 0
+        except OSError:
+            return
+        with self._index_lock:
+            if not self._index_built:
+                self._offsets = {}
+                self._max_seq = -1
+                self._scan_pos = 0
+                self._index_built = True
+                self._scan_from(0, size)
+            elif size > self._scan_pos:
+                self._scan_from(self._scan_pos, size)      # extend forward over the newly-appended bytes
+            elif size < self._scan_pos:
+                self._offsets = {}                          # truncated/rewritten smaller → rebuild
+                self._max_seq = -1
+                self._scan_pos = 0
+                self._scan_from(0, size)
+
+    def _scan_from(self, start: int, size: int) -> None:
+        """Index every COMPLETE (newline-terminated) record line in bytes [start, size). MUST hold
+        `_index_lock`. A malformed complete line is left OUT of the index (so a mid-file gap still
+        surfaces via verify()); a trailing partial line (no newline yet) is left for the next extend."""
+        if size <= start:
+            return
+        with self.path.open("rb") as f:
+            f.seek(start)
+            chunk = f.read(size - start)
+        consumed = 0
+        while True:
+            nl = chunk.find(b"\n", consumed)
+            if nl == -1:
+                break                                       # trailing partial line — not complete yet
+            raw = chunk[consumed:nl]
+            line_off = start + consumed
+            consumed = nl + 1
+            if not raw.strip():
+                continue
+            try:
+                d = json.loads(raw)
+                if not all(k in d for k in _REQUIRED_KEYS):
+                    raise KeyError
+                seq = d["seq"]
+            except (ValueError, KeyError, TypeError):
+                continue                                    # corrupt complete line — do not index it
+            self._offsets[seq] = line_off
+            if seq > self._max_seq:
+                self._max_seq = seq
+        self._scan_pos = start + consumed

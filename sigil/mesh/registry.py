@@ -12,7 +12,7 @@ All reads are fail-closed: a descriptor/authorization that does not verify again
 ignored. Reuses `governor.authn` (the same signed-event primitive kill/promotion/approval use)."""
 from __future__ import annotations
 
-from typing import List, Optional, Set
+from typing import Optional, Set
 
 from ..agents.approvals import SIGNAL as _APPROVAL_SIGNAL
 from ..agents.approvals import _approval_message

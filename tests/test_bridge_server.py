@@ -8,6 +8,7 @@ phone path uses ONLY owner-authorized DEVICE keys — the owner trust-root is ne
 Run: ~/.sigil/venv/bin/python tests/test_bridge_server.py"""
 import base64
 import json
+import socket
 import tempfile
 import threading
 import time
@@ -386,6 +387,77 @@ def test_webapp_served_and_static_is_traversal_guarded():
         assert _get(port, "/static/../../etc/passwd")[0] == 404, "no traversal to arbitrary files"
     finally:
         srv.shutdown()
+
+
+# ---- FIX 1: a malformed Content-Length must be a clean 4xx, never a crashed handler thread --------
+def _raw_status(port, raw_bytes):
+    """Send a HAND-CRAFTED HTTP request over a raw socket (urllib computes Content-Length for us, so a
+    malformed one can only be sent by hand) and return the response status code — or None if the peer
+    hung up with no response (a crashed handler thread / RemoteDisconnected)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        s.sendall(raw_bytes)
+        s.settimeout(5)
+        resp = b""
+        while b"\r\n" not in resp:                # read at least the status line
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+        if b"\r\n" not in resp:
+            return None                           # no status line → the handler thread died
+        parts = resp.split(b"\r\n", 1)[0].split()
+        return int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+    finally:
+        s.close()
+
+
+def test_non_numeric_content_length_is_a_clean_4xx_not_a_crash():
+    p = _spine()
+    srv, port = _serve(p)
+    try:
+        host = f"127.0.0.1:{port}".encode()
+        for bad in (b"not-a-number", b"12abc", b"-5", b""):
+            req = (b"POST /api/action HTTP/1.1\r\nHost: " + host +
+                   b"\r\nContent-Type: application/json\r\nContent-Length: " + bad +
+                   b"\r\nConnection: close\r\n\r\n")
+            code = _raw_status(port, req)
+            assert code is not None, f"CL={bad!r}: the handler answered (no crash / RemoteDisconnected)"
+            assert 400 <= code < 500, f"CL={bad!r}: a malformed Content-Length → a clean 4xx, got {code}"
+        # a sane request still works end-to-end after the malformed ones (the server thread is healthy)
+        assert _post(port, "/api/action", {"signal": "x"})[0] in (400, 403), \
+            "the server is still serving normally after malformed Content-Length requests"
+    finally:
+        srv.shutdown()
+
+
+# ---- FIX 2: the push feed reads the tailed record's OWN payload, not a per-event store.get refetch --
+def test_push_feed_uses_the_record_payload_not_a_store_get_refetch():
+    from sigil.bridge.notifier import PushNotifier
+    p = _spine()
+    store = SpineStore(p)
+    n = PushNotifier(store)                                    # cursor at head → only NEW items push
+    _Emitter(store).run(Tier.A2)                               # queue an A2 with a secret subject
+    # instrument store.get AFTER the queue write: poll() must not re-fetch per event (the O(K×file) sink)
+    calls = []
+    real_get = store.get
+    store.get = lambda seq: (calls.append(seq), real_get(seq))[1]
+    try:
+        pushes = n.poll()
+    finally:
+        store.get = real_get
+    assert calls == [], f"poll() no longer calls store.get per event — got refetches for seqs {calls}"
+    assert len(pushes) == 1 and set(pushes[0]) == {"seq", "tier", "kind"}, \
+        "exactly the one queued A2 pushes, carrying only {seq,tier,kind}"
+    ev = pushes[0]
+    assert ev["tier"] == "A2", "the queued A2 is reported at its tier"
+    assert "TOP SECRET" not in str(pushes) and "subject" not in str(pushes), \
+        "the push carries no subject/secret over the tunnel"
+    # behaviour-equivalence: the pushed fields equal the queued record's OWN fields on disk
+    rec = SpineStore(p).get(ev["seq"])
+    assert rec is not None and rec.seq == ev["seq"] and rec.kind == ev["kind"] \
+        and rec.payload.get("tier") == ev["tier"], \
+        "the pushed {seq,tier,kind} equal the queued record's own seq/kind/payload.tier"
 
 
 if __name__ == "__main__":

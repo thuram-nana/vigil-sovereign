@@ -6,7 +6,6 @@ contradictions, then a recent-activity summary. Every line is cited to a spine s
 from __future__ import annotations
 
 from collections import Counter
-from typing import List, Optional
 
 from ..consolidate.queries import due_commitments, open_threads, pending_contradictions
 from .base import Agent, AgentResult, Proposal, Tier
