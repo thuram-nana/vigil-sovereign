@@ -15,13 +15,14 @@ from sigil.agents.approvals import ApprovalQueue
 from sigil.agents.base import Tier
 from sigil.agents.vault import VaultRecord
 from sigil.agents.web_engine import FakeEngine
+from sigil.config import kernel_bin
 from sigil.governor.promotion import NO_PROMOTION_AGENTS, PromotionPolicy
 from sigil.reuse import generate_keypair
 from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
-_KERNEL = Path("/home/kali/sigil/kernel/target/release/sigil-kernel")
+_KERNEL = kernel_bin()   # the built kernel (env → repo-relative → PATH), or None → real-oracle test skips
 
 # --- test isolation: journal to a temp dir (off the real ~/.sigil); "public" excludes private hosts ---
 _TMP = Path(tempfile.mkdtemp(prefix="actor-journal-"))
@@ -85,11 +86,11 @@ def _acts(engine):
 
 # ---- G2 WARDEN honesty (real oracle) -------------------------------------------------------------
 def test_warden_locks_actor_verbs_a3():
-    if not _KERNEL.exists():
+    if not _KERNEL:
         print("    (skip real oracle — kernel not built)")
         return
     from sigil.agents.kernel_classify import KernelClassifier
-    kc = KernelClassifier(kernel_bin=str(_KERNEL))
+    kc = KernelClassifier(kernel_bin=_KERNEL)
     for verb in ("account.create", "login", "submit.form", "purchase.item", "form.fill", "browser.navigate"):
         assert kc.classify(verb) == Tier.A3, f"{verb} must be A3 (explicit, per-action) by the real oracle"
     assert kc.classify("http.get") == Tier.A0, "a clean read-verb is A0"

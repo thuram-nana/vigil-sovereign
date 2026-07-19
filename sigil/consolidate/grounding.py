@@ -18,7 +18,7 @@ def ground_tag(min_seq: int) -> str:
 
 
 def is_grounded(grounding: str | None) -> bool:
-    return bool(grounding) and grounding.startswith(GROUNDED_PREFIX)
+    return bool(grounding and grounding.startswith(GROUNDED_PREFIX))
 
 
 def belief_mean(alpha: float, beta: float) -> float:

@@ -54,12 +54,14 @@ def ingest_git(store: SpineStore, repos: list[str] | None = None, *,
     # when the caller owns the cursor (cmd_ingest), mutate its dict in place and let it save —
     # saving our own copy here would be clobbered by the caller's later save. Standalone → own it.
     own = cursor is None
-    cursor = cur.load() if own else cursor
+    if cursor is None:
+        cursor = cur.load()
     added = 0
     for repo in (repos or DEFAULT_REPOS):
         p = Path(repo)
         key = f"git:{p.name}"
-        since = cursor.get(key) or None
+        prev = cursor.get(key)                      # git keys hold the last commit hash (a str)
+        since = prev if isinstance(prev, str) and prev else None
         commits = git_log(p, since=since, max_commits=max_commits)  # newest-first
         if not commits:
             continue

@@ -222,11 +222,12 @@ def test_frontier_budget_truncation_is_recorded():                # BLOCK-2
 def test_warden_locks_scrape_verbs_a3():
     from sigil.agents.base import Tier
     from sigil.agents.kernel_classify import KernelClassifier
-    k = Path("/home/kali/sigil/kernel/target/release/sigil-kernel")
-    if not k.exists():
+    from sigil.config import kernel_bin
+    k = kernel_bin()   # built kernel (env → repo-relative → PATH), or None → skip
+    if not k:
         print("    (skip — kernel not built)")
         return
-    kc = KernelClassifier(kernel_bin=str(k))
+    kc = KernelClassifier(kernel_bin=k)
     assert kc.classify("scrape.fetch") == Tier.A3 and kc.classify("web.fetch") == Tier.A3, "generic scrape/fetch fail-closed A3"
     assert kc.classify("http.get") == Tier.A0, "a clean read-verb is A0"
 

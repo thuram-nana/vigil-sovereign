@@ -187,11 +187,12 @@ def test_capability_advertises_hid_flags():
 # ---- F1 WARDEN input tables (real oracle) --------------------------------------------------------
 def test_warden_input_tiers_and_danger_wins():
     from sigil.agents.kernel_classify import KernelClassifier
-    k = Path("/home/kali/sigil/kernel/target/release/sigil-kernel")
-    if not k.exists():
+    from sigil.config import kernel_bin
+    k = kernel_bin()   # built kernel (env → repo-relative → PATH), or None → skip
+    if not k:
         print("    (skip — kernel not built)")
         return
-    kc = KernelClassifier(kernel_bin=str(k))
+    kc = KernelClassifier(kernel_bin=k)
     assert kc.classify("hid.pointer.move") == Tier.A1 and kc.classify("hid.pointer.click") == Tier.A1
     assert kc.classify("hid.type") == Tier.A2 and kc.classify("hid.app.launch") == Tier.A2
     assert kc.classify("hid.pointer.delete") == Tier.A3, "danger token beats an input name"
@@ -240,12 +241,13 @@ def test_arm_requires_the_owner_key():                                # BLOCK-3
 
 def test_session_gate_composes_with_the_real_oracle():                # BLOCK-4
     from sigil.agents.kernel_classify import KernelClassifier
-    k = Path("/home/kali/sigil/kernel/target/release/sigil-kernel")
-    if not k.exists():
+    from sigil.config import kernel_bin
+    k = kernel_bin()   # built kernel (env → repo-relative → PATH), or None → skip
+    if not k:
         print("    (skip — kernel not built)")
         return
     s = _store(); b = RecordingInputBackend()
-    g = SessionGate(s, b, classifier=KernelClassifier(kernel_bin=str(k)))   # the REAL WARDEN oracle
+    g = SessionGate(s, b, classifier=KernelClassifier(kernel_bin=k))   # the REAL WARDEN oracle
     g.arm(owner_key=OWNER)
     assert g.handle(GestureIntent("move", dx=1, dy=1))["injected"] is True, "real oracle: hid.pointer.move → A1 → inject"
     r = g.handle(GestureIntent("type", arg="my-secret-password"))

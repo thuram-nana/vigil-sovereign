@@ -63,7 +63,7 @@ class Sentinel(Agent):
         self.salience_floor = salience_floor
         self.alert_budget = alert_budget
 
-    def run(self, watchers: List[Watcher]) -> AgentResult:
+    def run(self, watchers: List[Watcher]) -> AgentResult:  # type: ignore[override]  # SIGIL agents take domain-specific run() inputs; base run is an abstract placeholder
         candidates: List[dict] = []
         for w in watchers:
             candidates.extend(w.poll())

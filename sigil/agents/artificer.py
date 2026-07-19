@@ -70,7 +70,7 @@ class Artificer(Agent):
     mandate = "own background coding tasks: tests before done, PRs not pushes"
     ceiling = Tier.A2
 
-    def run(self, task: str, *, repo: str, test_cmd: Optional[List[str]] = None,
+    def run(self, task: str, *, repo: str, test_cmd: Optional[List[str]] = None,  # type: ignore[override]  # SIGIL agents take domain-specific run() inputs; base run is an abstract placeholder
             coder: Optional[Coder] = None, branch: Optional[str] = None) -> AgentResult:
         coder = coder or ClaudeCoder()
         base = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
@@ -101,6 +101,7 @@ class Artificer(Agent):
                 res.notes.append("no real test command → change is UNVERIFIED; PR withheld (correctness discipline)")
                 return res
 
+            assert test_cmd is not None  # real_test is True here → test_cmd was not None
             test = subprocess.run(test_cmd, cwd=wt, capture_output=True, text=True)
             if test.returncode != 0:
                 tail = (test.stdout + test.stderr).strip().splitlines()

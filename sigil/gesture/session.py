@@ -183,11 +183,13 @@ class SessionGate:
         now = time.time() if now is None else now
         # (1) kill-switch FIRST — an owner halt (incl. a phone panic) beats any arm.
         if KillSwitch(self.store).is_engaged():
-            return self._refuse_arm(request, "kill-switch engaged")
+            self._refuse_arm(request, "kill-switch engaged")
+            return None
         # (2) owner-minted device key + valid signature over the signed core (RP-APPROVAL-2: the
         #     authorized set is owner-signed only, so a merely-presented key is never trusted).
         if request.get("signal") != ARM_REQUEST:
-            return self._refuse_arm(request, "not an arm request")
+            self._refuse_arm(request, "not an arm request")
+            return None
         pub = request.get("pubkey")
         authorized = authorized_devices(self.store, self._trusted())
         core = {k: request.get(k) for k in _ARM_CORE}
@@ -196,34 +198,42 @@ class SessionGate:
         except Exception:  # noqa: BLE001 — any crypto/decoding error is a fail-closed refusal, never a crash
             sig_ok = False
         if not sig_ok:
-            return self._refuse_arm(request, "unauthorized or invalid device signature")
+            self._refuse_arm(request, "unauthorized or invalid device signature")
+            return None
         # (3) freshness — bounds the replay window and rejects a stale captured request. Written
         #     fail-CLOSED for non-finite input: `nan > 30` is False, so a signed NaN ts would slip a
         #     `>`-style gate; require finite AND within-window explicitly.
         try:
-            ts = float(request.get("ts"))
+            # request is a caller-supplied dict; a missing/None ts hits the except below (fail-closed)
+            ts = float(request.get("ts"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
-            return self._refuse_arm(request, "missing/invalid timestamp")
+            self._refuse_arm(request, "missing/invalid timestamp")
+            return None
         if not math.isfinite(ts) or not (abs(now - ts) <= ARM_FRESHNESS):
-            return self._refuse_arm(request, "stale or non-finite timestamp")
+            self._refuse_arm(request, "stale or non-finite timestamp")
+            return None
         # (4) replay — this (device, nonce) must not have armed before (the append-only spine is witness).
         nonce = request.get("nonce")
         for r in self.store.iter_records():
             p = r.payload
             if (p.get("signal") == SESSION_ARMED and p.get("armed_by") == "device"
                     and p.get("device_pubkey") == pub and p.get("nonce") == nonce):
-                return self._refuse_arm(request, "replayed arm nonce")
+                self._refuse_arm(request, "replayed arm nonce")
+                return None
         # (5) single live session — a device arm NEVER displaces an existing/owner session.
         if self.session is not None and self.session.live and not self.session.expired(now):
-            return self._refuse_arm(request, "a gesture session is already live")
+            self._refuse_arm(request, "a gesture session is already live")
+            return None
         # (6) TTL clamp — shorter than a local owner arm; a deliberate trust-narrowing inside the widening.
         #     Reject non-finite/non-positive BEFORE the min() (min(nan,300)=nan → a never-expiring session).
         try:
             raw_ttl = float(request.get("ttl_seconds", MAX_DEVICE_TTL))
         except (TypeError, ValueError):
-            return self._refuse_arm(request, "invalid ttl")
+            self._refuse_arm(request, "invalid ttl")
+            return None
         if not math.isfinite(raw_ttl) or raw_ttl <= 0:
-            return self._refuse_arm(request, "non-finite or non-positive ttl")
+            self._refuse_arm(request, "non-finite or non-positive ttl")
+            return None
         ttl = min(raw_ttl, MAX_DEVICE_TTL)
         sid = uuid.uuid4().hex
         # The record's AUTHORIZATION is the verified device signature — self-verifying vs the owner-signed

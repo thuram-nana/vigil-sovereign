@@ -15,8 +15,9 @@ loop half-duplex (gate the mic while SPEAKING). Hysteresis alone does not defeat
 self-echo — AEC is the real fix and is a runtime/hardware concern, not a state-machine one."""
 from __future__ import annotations
 
+from collections.abc import Iterator
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .components import Asr, AudioSink, Dispatch, Tts, Vad, WakeWord
 
@@ -47,7 +48,7 @@ class VoicePipeline:
         self._silence = 0
         self._speech = 0
         self._listen = 0
-        self._tts_iter = None
+        self._tts_iter: Optional[Iterator[Any]] = None
         self._barge = 0
         self._barge_buf: List = []
 
@@ -104,6 +105,7 @@ class VoicePipeline:
             self._advance_tts()
 
     def _advance_tts(self) -> None:
+        assert self._tts_iter is not None  # only called while SPEAKING, where _to_speaking set the iterator
         try:
             self.sink.play(next(self._tts_iter))
         except StopIteration:

@@ -7,13 +7,14 @@ from pathlib import Path
 
 from sigil.agents.base import Tier
 from sigil.agents.kernel_classify import KernelClassifier
+from sigil.config import kernel_bin
 from sigil.reuse import (AuthorizerKey, TrustRoot, digest_payload, generate_keypair, sign_head)
 from sigil.reuse.chain import _GENESIS_PREV, _entry_hash
 from sigil.spine.store import SpineStore
 from sigil.spine.tail import Broadcaster, SpineTailer
 from sigil.spine.verify import verify_record
 
-_KERNEL = Path("/home/kali/sigil/kernel/target/release/sigil-kernel")
+_KERNEL = kernel_bin()   # the built kernel (env → repo-relative → PATH), or None → real-oracle tests skip
 
 
 def _store():
@@ -32,15 +33,15 @@ def test_kernel_classifier_fail_closed_on_bad_binary():
 
 
 def test_kernel_classifier_empty_tool_is_a3():
-    kc = KernelClassifier(kernel_bin=str(_KERNEL) if _KERNEL.exists() else "/nonexistent")
+    kc = KernelClassifier(kernel_bin=_KERNEL or "/nonexistent")
     assert kc.classify("") == Tier.A3 and kc.classify("   ") == Tier.A3
 
 
 def test_kernel_classifier_real_oracle():
-    if not _KERNEL.exists():
+    if not _KERNEL:
         print("    (skip real oracle — kernel not built)")
         return
-    kc = KernelClassifier(kernel_bin=str(_KERNEL))
+    kc = KernelClassifier(kernel_bin=_KERNEL)
     expect = {"fs.read": Tier.A0, "memory.search": Tier.A0, "fs.write": Tier.A1,
               "vision.frontier.upload": Tier.A2, "shell.exec.rm": Tier.A3, "git.push": Tier.A3,
               "config.overwrite": Tier.A3, "totally.unknown.tool": Tier.A3}

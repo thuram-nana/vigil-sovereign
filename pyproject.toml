@@ -1,8 +1,12 @@
 # SIGIL — a local-first, offense-free personal AI orchestrator.
 # PEP 621 metadata. Classic setuptools backend (do NOT require bleeding-edge setuptools — stock LTS ships
 # an older version, and PEP 639 SPDX license expressions need >=77).
+# setuptools-rust compiles the WARDEN kernel (a Rust binary) at build time and ships it inside the wheel,
+# so `pip install sigil` yields a working fail-closed authorizer with no separate `cargo build` step.
+# Building from source therefore requires a Rust toolchain (rustc/cargo) — expected for this repo, which
+# already carries the kernel crate. See [[tool.setuptools-rust.bins]] below.
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=61", "wheel", "setuptools-rust>=1.9"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -58,6 +62,15 @@ version = { attr = "sigil.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["sigil*"]
+
+# The WARDEN kernel: build the Rust binary from kernel/Cargo.toml and install it into the environment's
+# script dir (next to the `sigil` console script), where `config.kernel_bin()` resolves it. A wheel build
+# compiles in release profile by default (no explicit --release — setuptools-rust adds it, and passing it
+# twice makes cargo error). `strip = "Debug"` keeps the shipped binary lean.
+[[tool.setuptools-rust.bins]]
+target = "sigil-kernel"
+path = "kernel/Cargo.toml"
+strip = "Debug"
 
 # ── quality gates ──────────────────────────────────────────────────────────────────────────────────
 [tool.ruff]

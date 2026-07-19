@@ -54,6 +54,7 @@ def _json_bytes(obj) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
+    server: UIServer                    # set by the socketserver machinery to our concrete server
     server_version = "sigil-ui/1.0"
     timeout = 30                        # per-connection socket timeout (BLOCK-4: no hung reader)
     _MAX_BODY = 65536                   # action bodies are tiny; cap to avoid a Content-Length hang
