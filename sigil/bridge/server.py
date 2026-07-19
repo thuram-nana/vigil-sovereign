@@ -340,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
     # --- POST (action plane) ----------------------------------------------------------------------
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/action", "/api/panic", "/api/relay"):
+        if path not in ("/api/action", "/api/panic", "/api/relay", "/api/gesture/arm"):
             return self._deny(404, "not found")
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length > self._MAX_BODY:                              # cap the body (no CL hang / alloc)
@@ -350,6 +350,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(403, "action denied (origin / host — possible DNS rebinding)")
         if path == "/api/action":
             return self._device_action(body_bytes)
+        if path == "/api/gesture/arm":
+            return self._device_arm(body_bytes)
         # panic / relay — effectful, envelope-authenticated with the strict nonce replay gate
         action = "panic" if path == "/api/panic" else "relay"
         core = self._authed_effectful(action)
@@ -376,6 +378,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(403, f"approval refused: {str(e)[:200]}")
         except Exception as e:  # noqa: BLE001 — never leak internals as a 500
             return self._deny(400, f"action failed: {str(e)[:200]}")
+        self._json({"ok": True, "seq": seq})
+
+    def _device_arm(self, body_bytes):
+        """The phone posts its OWN device-signed gesture arm request. The SERVER only VERIFIES + RECORDS
+        it (`submit_arm_request`, fail-closed on unauthorized/forged); the live SessionGate re-verifies
+        and enforces freshness / kill-switch / single-session / TTL when it consumes it. Recording is
+        necessary-but-not-sufficient to arm — the trust boundary is `arm_by_device`, not this endpoint."""
+        try:
+            body = json.loads(body_bytes or b"{}")
+        except (ValueError, TypeError) as e:
+            return self._deny(400, f"bad request: {e}")
+        if not isinstance(body, dict):
+            return self._deny(400, "bad request: body must be a JSON object")
+        try:
+            seq = self.server.daemon().submit_arm_request(body)
+        except ValueError as e:                                  # unauthorized / forged / not-an-arm-request
+            return self._deny(403, f"arm refused: {str(e)[:200]}")
+        except Exception as e:  # noqa: BLE001 — never leak internals as a 500
+            return self._deny(400, f"arm failed: {str(e)[:200]}")
         self._json({"ok": True, "seq": seq})
 
 

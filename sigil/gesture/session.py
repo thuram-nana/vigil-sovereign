@@ -29,12 +29,35 @@ from .types import GestureIntent
 SESSION_ARMED = "gesture.session_armed"
 SESSION_DISARMED = "gesture.session_disarmed"
 ACTION_SIGNAL = "gesture.action"
+ARM_REQUEST = "gesture.arm_request"
+
+MAX_DEVICE_TTL = 300.0        # a DEVICE-armed session is deliberately SHORTER than a local owner arm (1800)
+ARM_FRESHNESS = 30.0          # a device arm request must be recent (anti-stale / bounds the replay window)
+_ARM_CORE = ("signal", "device_id", "nonce", "ts", "ttl_seconds")
 
 INTENT_TOOL = {
     "move": "hid.pointer.move", "click": "hid.pointer.click",
     "scroll_left": "hid.pointer.scroll", "scroll_right": "hid.pointer.scroll",
     "drag": "hid.pointer.drag", "type": "hid.type", "combo": "hid.combo", "launch": "hid.app.launch",
 }
+
+
+def arm_request_message(core: dict) -> bytes:
+    """The canonical bytes a device signs to request an arm — ONLY the signed core fields, so a caller
+    cannot smuggle unsigned extras. Mirrors the approval/envelope canonical-json contract."""
+    from ..reuse import canonical_json
+    m = canonical_json({k: core.get(k) for k in _ARM_CORE})
+    return m if isinstance(m, bytes) else m.encode("utf-8")
+
+
+def sign_arm_request(device_key, *, device_id: str, nonce, ts: float, ttl_seconds: float) -> dict:
+    """Phone-side: build a device-signed arm request. The device signs with its OWN key (never the owner
+    trust-root); the owner authorized this device once via the mesh ledger. This is the credential the
+    bridge records and `SessionGate.arm_by_device` verifies."""
+    from ..reuse import sign
+    core = {"signal": ARM_REQUEST, "device_id": device_id, "nonce": nonce, "ts": ts, "ttl_seconds": ttl_seconds}
+    return {**core, "pubkey": device_key.public_key_b64,
+            "sig": sign(device_key.private_key_b64, arm_request_message(core))}
 
 
 @dataclass
@@ -48,12 +71,19 @@ class Session:
 
 
 class SessionGate:
-    def __init__(self, store, backend: InputBackend, *, classifier=None, owner_key=None):
+    def __init__(self, store, backend: InputBackend, *, classifier=None, owner_key=None, trusted_pubkey=None):
         self.store = store
         self.backend = backend
         self._classifier = classifier
         self._owner_key = owner_key
+        self._trusted_pubkey = trusted_pubkey
         self.session: Optional[Session] = None
+
+    def _trusted(self):
+        if self._trusted_pubkey is None:
+            from ..governor.identity import owner_pubkey
+            self._trusted_pubkey = owner_pubkey()
+        return self._trusted_pubkey
 
     def _cls(self):
         if self._classifier is None:
@@ -85,6 +115,75 @@ class SessionGate:
             self.session.live = False
         self.session = None
 
+    # --- Layer 1b: DEVICE-signed remote arm (a deliberate, reviewed trust-widening) ----------------
+    def arm_by_device(self, request: dict, *, now: Optional[float] = None) -> Optional[Session]:
+        """Arm on a VERIFIED, owner-authorized DEVICE signature (SIGIL §remote-arm). Every downstream
+        bound is UNCHANGED — the A1-inject/A2-queue tier gate, the TTL, hand-loss/expiry disarm, and an
+        owner disarm/kill that always wins. Fail-closed at each step; a refusal is recorded, never armed."""
+        from ..governor.killswitch import KillSwitch
+        from ..mesh import authorized_devices
+        from ..reuse import verify_one
+        now = time.time() if now is None else now
+        # (1) kill-switch FIRST — an owner halt (incl. a phone panic) beats any arm.
+        if KillSwitch(self.store).is_engaged():
+            return self._refuse_arm(request, "kill-switch engaged")
+        # (2) owner-minted device key + valid signature over the signed core (RP-APPROVAL-2: the
+        #     authorized set is owner-signed only, so a merely-presented key is never trusted).
+        if request.get("signal") != ARM_REQUEST:
+            return self._refuse_arm(request, "not an arm request")
+        pub = request.get("pubkey")
+        authorized = authorized_devices(self.store, self._trusted())
+        core = {k: request.get(k) for k in _ARM_CORE}
+        try:                                            # verify_one RAISES on a malformed-length sig — treat as refusal
+            sig_ok = bool(pub) and pub in authorized and verify_one(pub, arm_request_message(core), request.get("sig", ""))
+        except Exception:  # noqa: BLE001 — any crypto/decoding error is a fail-closed refusal, never a crash
+            sig_ok = False
+        if not sig_ok:
+            return self._refuse_arm(request, "unauthorized or invalid device signature")
+        # (3) freshness — bounds the replay window and rejects a stale captured request.
+        try:
+            ts = float(request.get("ts"))
+        except (TypeError, ValueError):
+            return self._refuse_arm(request, "missing/invalid timestamp")
+        if abs(now - ts) > ARM_FRESHNESS:
+            return self._refuse_arm(request, "stale arm request")
+        # (4) replay — this (device, nonce) must not have armed before (the append-only spine is witness).
+        nonce = request.get("nonce")
+        for r in self.store.iter_records():
+            p = r.payload
+            if (p.get("signal") == SESSION_ARMED and p.get("armed_by") == "device"
+                    and p.get("device_pubkey") == pub and p.get("nonce") == nonce):
+                return self._refuse_arm(request, "replayed arm nonce")
+        # (5) single live session — a device arm NEVER displaces an existing/owner session.
+        if self.session is not None and self.session.live and not self.session.expired(now):
+            return self._refuse_arm(request, "a gesture session is already live")
+        # (6) TTL clamp — shorter than a local owner arm; a deliberate trust-narrowing inside the widening.
+        try:
+            ttl = min(float(request.get("ttl_seconds", MAX_DEVICE_TTL)), MAX_DEVICE_TTL)
+        except (TypeError, ValueError):
+            ttl = MAX_DEVICE_TTL
+        if ttl <= 0:
+            return self._refuse_arm(request, "non-positive ttl")
+        sid = uuid.uuid4().hex
+        # the record's AUTHORIZATION is the verified device signature (self-verifying vs the owner-signed
+        # device ledger) — not the owner key; actor=DEVICE mirrors submit_device_approval.
+        self.store.append(kind="event", source="gesture", actor="DEVICE",
+                          payload={"signal": SESSION_ARMED, "session_id": sid, "armed_by": "device",
+                                   "device_id": core["device_id"], "device_pubkey": pub, "nonce": nonce,
+                                   "ts": ts, "sig": request.get("sig"), "pubkey": pub,
+                                   "authorization": "device-signed", "ttl_seconds": ttl,
+                                   "tier": "A0", "decision": "auto",
+                                   "summary": "gesture session ARMED by authorized device (remote)"})
+        self.session = Session(sid, live=True, expires_at=now + ttl)
+        return self.session
+
+    def _refuse_arm(self, request: dict, reason: str) -> None:
+        self.store.append(kind="refusal", source="gesture", actor="DEVICE",
+                          payload={"signal": ARM_REQUEST, "decision": "refused", "tier": "A0",
+                                   "device_id": request.get("device_id"), "reason": reason,
+                                   "summary": f"device gesture arm refused: {reason}"})
+        return None
+
     # --- Layer 2: per-intent tier gate ------------------------------------------------------------
     def handle(self, intent: GestureIntent) -> dict:
         """Authorize + act on ONE intent. Returns a verdict dict. Injection ONLY inside a live session
@@ -92,6 +191,12 @@ class SessionGate:
         if intent.kind == "hand_lost":
             self.disarm()
             return {"injected": False, "reason": "hand lost — session disarmed"}
+        # An owner halt (incl. a phone panic_engage) instantly neuters injection mid-session — critical
+        # for a device-armed session the owner may not be watching. Consulted per intent (fail-closed).
+        from ..governor.killswitch import KillSwitch
+        if KillSwitch(self.store).is_engaged():
+            self.disarm()
+            return {"injected": False, "reason": "kill-switch engaged — session disarmed"}
         if self.session is None or not self.session.live:
             return {"injected": False, "reason": "no armed session — injection refused"}
         if self.session.expired(time.time()):             # BLOCK-2: a session is bounded, never indefinite

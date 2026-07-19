@@ -77,6 +77,29 @@ class BridgeDaemon:
                                  payload={**payload, "tier": "A0", "decision": "auto"},
                                  supersedes_id=payload.get("target_seq"))
 
+    def submit_arm_request(self, request: dict) -> int:
+        """Record a DEVICE-signed gesture arm request (the transport layer) — ONLY if the signing device
+        is authorized AND the signature verifies (fail-closed, mirrors submit_device_approval). The live
+        SessionGate RE-VERIFIES and enforces freshness / kill-switch / single-session / TTL when it
+        consumes this via `arm_by_device`, so recording is necessary-but-not-sufficient to arm."""
+        from ..gesture.session import ARM_REQUEST, _ARM_CORE, arm_request_message
+        from ..reuse import verify_one
+        authorized = self._authorized()
+        if request.get("signal") != ARM_REQUEST:
+            raise ValueError("not an arm request")
+        pub = request.get("pubkey")
+        if pub not in authorized:
+            raise ValueError("signing device is not authorized")
+        core = {k: request.get(k) for k in _ARM_CORE}
+        try:                                            # verify_one RAISES on a malformed-length sig — refuse cleanly
+            ok = verify_one(pub, arm_request_message(core), request.get("sig", ""))
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            raise ValueError("arm request signature invalid")
+        return self.store.append(kind="event", source="mesh", actor="DEVICE",
+                                 payload={**request, "tier": "A0", "decision": "auto"})
+
     def panic_engage(self, *, by: str = "phone") -> int:
         """Halt the mesh from the phone. ANY engage halts (fail-safe) — no signature needed for the
         SAFE direction. Release stays owner-only at the desktop (the dangerous direction is signed)."""

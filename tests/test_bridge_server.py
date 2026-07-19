@@ -358,13 +358,16 @@ def test_oversized_action_body_rejected():
 
 
 # ---- the webapp is a later slice: serve gracefully ------------------------------------------------
-def test_webapp_absent_serves_graceful_404_and_no_traversal():
+def test_webapp_served_and_static_is_traversal_guarded():
+    # the PWA landed in Wave 3, so / serves the installed index and /static/* serves its assets;
+    # path traversal out of the webapp dir stays refused.
     p = _spine()
     srv, port = _serve(p)
     try:
-        assert _get(port, "/")[0] == 404, "the PWA is a later slice — / 404s gracefully (no crash)"
-        assert _get(port, "/static/app.js")[0] == 404, "static assets 404 gracefully when absent"
-        assert _get(port, "/static/../server.py")[0] == 404, "static serving is traversal-guarded"
+        assert _get(port, "/")[0] == 200, "the installed PWA index is served at /"
+        assert _get(port, "/static/app.js")[0] == 200, "webapp static assets are served"
+        assert _get(port, "/static/../server.py")[0] == 404, "static serving is traversal-guarded (no path escape)"
+        assert _get(port, "/static/../../etc/passwd")[0] == 404, "no traversal to arbitrary files"
     finally:
         srv.shutdown()
 
