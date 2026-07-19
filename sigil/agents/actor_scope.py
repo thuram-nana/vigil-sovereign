@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import List, Optional
 from urllib.parse import urlsplit
 
+from ..spine.snapshot import SnapshotState
 from .sources import is_public_host
 
 _DEFAULT_PORT = {"http": 80, "https": 443}
@@ -45,8 +46,14 @@ class ActorScope:
         """True while fewer than `creation_cap` accounts have been created for this service label OR at
         this origin — so relabelling the same origin cannot outrun the cap."""
         origin = _origin(url) if url else None
-        n = 0
-        for r in store.iter_records():
+        # Seed the count from the pruned-prefix PAIR-keyed histogram, summing over EITHER matching dimension
+        # (service OR origin) — a flat single-dimension key would under-count the OR and silently un-cap the
+        # pruned history. Under the Slice-C identity snapshot creation_counter()=={} => seed 0, base_seq=0 =>
+        # since_seq=-1 => the full genesis scan below => BYTE-IDENTICAL to the prior scan.
+        st = SnapshotState.load(store)
+        n = sum(cnt for (svc, org), cnt in st.creation_counter().items()
+                if svc == service or (origin is not None and org == origin))
+        for r in store.iter_records(since_seq=st.base_seq - 1):
             p = r.payload
             if (p.get("signal") == "web.actor.step" and p.get("step_kind") == "account.create"
                     and p.get("status") == "applied"

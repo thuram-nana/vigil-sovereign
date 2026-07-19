@@ -51,9 +51,21 @@ def pending_device_arms(store, trusted_pubkey=None):
     freshness / kill-switch / replay / single-session / TTL). Returns a list (possibly empty). Oldest-first
     + returning ALL candidates means a newer STALE request never shadows an older still-valid one. This is
     the wiring that makes the remote-arm path reachable end-to-end (the gesture daemon consumes it)."""
-    armed = set()
+    from ..spine.snapshot import SnapshotState
+    st = SnapshotState.load(store)
+    # SEED the `armed` set-union replay ledger from the folded pruned prefix [0..base_seq) (a COPY — never
+    # mutate the cached snapshot), then fold ONLY the live records [base_seq..T]. The arm ledger is the
+    # snapshot-covered `consumed_arm_nonces`, which is NOT pubkey-dependent (build() unions every device arm
+    # unconditionally, no verify_signed), so `trusted_pubkey` needs no trust-anchor bypass here.
+    # NOTE: the `cands` list (unconsumed ARM_REQUESTs) is NOT snapshot-covered — a pruned unconsumed
+    # ARM_REQUEST does not survive into `st`. This is BEHAVIOR-PRESERVING because ARM_FRESHNESS (30s) <<
+    # spine retention: any arm-request old enough to be pruned is already past freshness, so arm_by_device
+    # would refuse it as stale — a pruned arm-request is un-armable and never belongs in a live candidate.
+    # Byte-identical under the empty snapshot: base_seq==0 => since_seq==-1 => the current full genesis scan,
+    # and arm_set() == {} seeds `armed` empty => the same `armed`/`cands`/result as before.
+    armed = set(st.arm_set())
     cands = []
-    for r in store.iter_records():
+    for r in store.iter_records(since_seq=st.base_seq - 1):
         p = r.payload
         if p.get("signal") == SESSION_ARMED and p.get("armed_by") == "device":
             armed.add((p.get("device_pubkey"), p.get("nonce")))
@@ -213,7 +225,18 @@ class SessionGate:
             return None
         # (4) replay — this (device, nonce) must not have armed before (the append-only spine is witness).
         nonce = request.get("nonce")
-        for r in self.store.iter_records():
+        from ..spine.snapshot import SnapshotState
+        st = SnapshotState.load(self.store)
+        # The pruned prefix's consumed (device, nonce) arms are folded into the snapshot's set-union arm
+        # ledger; if this (pub, nonce) already armed in [0..base_seq), refuse. `nonce` type is preserved
+        # VERBATIM (int vs str — arm_set() rows round-trip type-exact; do NOT stringify). This fold is NOT
+        # pubkey-dependent (build() unions every device arm unconditionally), so no trust-anchor bypass.
+        # Byte-identical under the empty snapshot: arm_set() == {} (never matches) and base_seq==0 =>
+        # since_seq==-1 => the current full genesis scan below.
+        if (pub, nonce) in st.arm_set():
+            self._refuse_arm(request, "replayed arm nonce")
+            return None
+        for r in self.store.iter_records(since_seq=st.base_seq - 1):
             p = r.payload
             if (p.get("signal") == SESSION_ARMED and p.get("armed_by") == "device"
                     and p.get("device_pubkey") == pub and p.get("nonce") == nonce):

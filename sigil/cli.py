@@ -296,8 +296,17 @@ def cmd_warden_anchor_get(a) -> None:
     if not hok and "TAMPER" in hmsg.upper():
         print(f"REJECTED: spine head tampered — {hmsg}", file=sys.stderr)
         sys.exit(2)
-    best_count, best_hash = 0, ""
-    for r in store.iter_records():
+    # Hard-prune fold: seed the warden high-water from the folded prefix snapshot [0..base_seq), then fold
+    # ONLY the live window [base_seq..T]. warden_best is a max-count / LWW-head_hash-on-tie semilattice, and
+    # both build() and this loop process records in ascending seq, so fold(prefix)+fold(live) == full scan.
+    # warden_best is filtered by the WARDEN pubkey (payload.pubkey), NOT the trust anchor, so it is not a
+    # pubkey-dependent fold — no trusted_pubkey bypass is needed. Under the empty Slice-C snapshot
+    # base_seq==0 => since_seq=-1 (the current full genesis scan) and warden_best_of()==(0,"",-1) (empty
+    # seed) => BYTE-IDENTICAL to the old scan. Local import keeps this edit off the shared top import block.
+    from .spine.snapshot import SnapshotState
+    st = SnapshotState.load(store)
+    best_count, best_hash, _ = st.warden_best_of(a.pubkey)   # scalars — nothing to copy; cache is never mutated
+    for r in store.iter_records(since_seq=st.base_seq - 1):
         if r.kind == "warden_checkpoint" and r.payload.get("pubkey") == a.pubkey:
             c = int(r.payload.get("count", 0))
             if c >= best_count:

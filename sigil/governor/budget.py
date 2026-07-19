@@ -19,6 +19,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from ..spine.snapshot import SnapshotState
+
 # Default per-model prices in USD per 1,000,000 tokens, as (input, output). DATA, not policy — override
 # or extend via ~/.sigil/prices.json or the SIGIL_MODEL_PRICES env (JSON), both merged OVER these. Keyed
 # by model id and provider-agnostic (add any vendor's models the same way). The Anthropic rows are the
@@ -175,10 +177,24 @@ class BudgetLedger:
         """Today's spend for `agent`: actions, interrupt events, tokens (input+output), and USD cost —
         all counted from the agent's own records for the UTC date `day_iso` (the ts is informational,
         so bucketing is by wallclock date). Token/cost come from `payload["usage"]`, derived the SAME
-        way as actions so there is nothing separate to drift or forge."""
+        way as actions so there is nothing separate to drift or forge.
+
+        Hard-prune (NO-FOLD bearer): budget keeps NO snapshot sub-state — it seeds from the ZERO (identity)
+        Spend and windows to the LIVE records `[st.base_seq..T]`. This is EXACT for the enforced current-day
+        query because the prune's RETENTION INVARIANT keeps the current UTC day live: every pruned record
+        (seq < base_seq) bears a `ts` strictly BEFORE today, so it would fail the `startswith(day_iso)` filter
+        regardless — the pruned prefix contributes ZERO to a current-day count, so there is nothing to fold.
+        Under the empty (Slice-C) snapshot base_seq==0 => since_seq=-1 => the current full genesis scan, and
+        the ZERO seed is the current init => BYTE-IDENTICAL to today's behavior. (A caller passing a PAST
+        day_iso — e.g. report() — may under-count post-prune: the accepted live-meter semantic.)"""
+        st = SnapshotState.load(self.store)
+        # Retention invariant (Slice D/E prune): the current UTC day stays live, so no pruned record bears
+        # today's date; over_budget() only ever calls spent() with the CURRENT day, so this windowed live
+        # scan is EXACT for enforcement. Seed ZERO (budget has no sub-state) + window at base_seq-1; under
+        # the empty snapshot base_seq==0 => since_seq=-1 == the current full scan (byte-identical).
         actions = interrupts = tokens = 0
         cost = 0.0
-        for r in self.store.iter_records():
+        for r in self.store.iter_records(since_seq=st.base_seq - 1):
             if r.source != "agent" or r.actor != agent:
                 continue
             if not (r.ts or "").startswith(day_iso):
@@ -218,7 +234,12 @@ class BudgetLedger:
     def report(self, day_iso: str) -> dict[str, dict]:
         """Per-agent {actions, interrupts, tokens, cost_usd} for `day_iso` (UTC date prefix) — the
         read-only view behind `sigil budget`. Single spine scan; counts only actions actually TAKEN
-        (auto/queued), mirroring the enforced ledger, so a denial never inflates the report."""
+        (auto/queued), mirroring the enforced ledger, so a denial never inflates the report.
+
+        Hard-prune note: this is a live-meter view, so post-prune a report for a PAST day_iso may UNDER-COUNT
+        — the records for a pruned past day are physically gone and budget keeps no folded per-day sub-state
+        to recover them (the accepted live-meter semantic). The CURRENT-day report stays exact: the prune's
+        retention invariant keeps today's records live, so `iter_records()` still sees every one of them."""
         out: dict[str, dict] = {}
         for r in self.store.iter_records():
             if r.source != "agent":

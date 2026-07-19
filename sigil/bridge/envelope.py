@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Set, Tuple, Union
 
 from ..reuse import canonical_json, sign, verify_one
+from ..spine.snapshot import SnapshotState
 from ..spine.store import SpineStore
 
 # The request vocabulary the bridge accepts — a fail-closed allow-list. `panic`/`relay` are effectful;
@@ -88,8 +89,15 @@ def record_receipt(store: SpineStore, core: dict) -> int:
 def device_nonce_highwater(store: SpineStore, device_pubkey: str) -> int:
     """The highest receipted nonce for this device (-1 if none, so a first nonce of 0 is valid). Non-int
     nonces are tolerated (skipped)."""
-    hi = -1
-    for r in store.iter_records():
+    # Hard-prune fold: seed from the pruned-prefix high-water (the folded state of [0..base_seq)), then
+    # fold forward over the LIVE records [base_seq..T] only. `nonce_highwater` is a device-keyed MAX (a
+    # join-semilattice), NOT owner-trust dependent, so there is no trusted-pubkey anchor to bypass. The
+    # seed is a plain int (immutable) read from the cached snapshot — nothing to copy or mutate. Under
+    # Slice-C's EMPTY snapshot base_seq==0 => since_seq=-1 (the full genesis scan) and the seed is -1 (the
+    # device is absent from an empty dict) => BYTE-IDENTICAL to the old genesis scan.
+    st = SnapshotState.load(store)
+    hi = st.nonce_highwater.get(device_pubkey, -1)
+    for r in store.iter_records(since_seq=st.base_seq - 1):
         p = r.payload
         if p.get("signal") == RECEIPT_SIGNAL and p.get("device") == device_pubkey:
             nonce_raw = p.get("nonce")

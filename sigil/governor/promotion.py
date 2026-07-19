@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ..spine.snapshot import SnapshotState
 from .authn import signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
@@ -44,8 +45,17 @@ class PromotionPolicy:
     def is_promoted(self, agent: str, scope: str = "*") -> bool:
         if agent in NO_PROMOTION_AGENTS:
             return False                          # never — structural, not policy
-        state: dict = {}
-        for r in self.store.iter_records():
+        st = SnapshotState.load(self.store)
+        # promotion is a pubkey-DEPENDENT fold: the pre-folded prefix state is valid ONLY under the
+        # pubkey it was folded with. If our anchor differs (rotated key / custom anchor / the empty
+        # Slice-C identity whose tp=="") BYPASS the snapshot and full-scan from genesis (seed empty,
+        # since=-1). BYTE-IDENTICAL under the empty snapshot: base_seq==0 => since_seq=-1 => the current
+        # full scan and dict(promotion_map())=={}/{} seed => both branches collapse to the genesis scan.
+        if self.trusted_pubkey != st.trusted_pubkey:
+            state, since = {}, -1
+        else:
+            state, since = dict(st.promotion_map()), st.base_seq - 1
+        for r in self.store.iter_records(since_seq=since):
             p = r.payload
             if p.get("signal") != SIGNAL or p.get("state") not in ("granted", "revoked"):
                 continue

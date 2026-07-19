@@ -53,13 +53,31 @@ def verify_approval(record, trusted_pubkey_b64: Optional[str], *, extra_pubkeys=
 def pending(store: SpineStore, trusted_pubkey_b64: Optional[str] = None, *, extra_pubkeys=None) -> List:
     """Queued proposals with NO valid approval yet, oldest first. Resolution requires a VERIFIED
     owner/authorized-device approval; an unsigned/forged/unauthorized approval leaves the item
-    pending (fail-closed)."""
+    pending (fail-closed).
+
+    Hard-prune fold (SnapshotState §approvals): seed empty and window the LIVE records `[base_seq..T]`
+    only. The RESOLVED set is query-pubkey-dependent (it turns on `trusted_pubkey_b64`/`extra_pubkeys`),
+    so the snapshot deliberately carries NO resolved/queued seed — it carries only the referential-floor
+    ASSERT (`open_queued_below_base`, expected EMPTY: a prune must never orphan an OPEN queued item below
+    the floor). Because nothing pubkey-dependent is seeded from the snapshot (the resolved set is always
+    recomputed fresh over the live window with the caller's key), no trusted-pubkey bypass is needed.
+    Under Slice-C's empty snapshot `base_seq==0` ⇒ `since_seq=-1` (the current full genesis scan) with
+    empty seeds and the assert a no-op ([]), so this is BYTE-IDENTICAL to the prior full scan."""
     if trusted_pubkey_b64 is None:
         from ..governor.identity import owner_pubkey
         trusted_pubkey_b64 = owner_pubkey()
+    from ..spine.snapshot import SnapshotState
+    st = SnapshotState.load(store)
+    if st.open_queued_below_base:
+        # referential-floor ASSERT violated: the pruned prefix left OPEN queued item(s) below the floor,
+        # which this truncated window can no longer see. Fail closed (as SnapshotState.load does) rather
+        # than serve a pending list that silently drops them. Never reached under the empty snapshot ([]).
+        raise ApprovalError(
+            f"snapshot floor at base_seq {st.base_seq} carries {len(st.open_queued_below_base)} open "
+            f"queued item(s) below the prune floor — refusing to serve a truncated pending() window")
     resolved = set()
     queued = {}
-    for r in store.iter_records():
+    for r in store.iter_records(since_seq=st.base_seq - 1):
         p = r.payload
         if p.get("signal") == SIGNAL and verify_approval(r, trusted_pubkey_b64, extra_pubkeys=extra_pubkeys):
             resolved.add(p.get("target_seq"))       # honor the SIGNED target, not raw supersedes_id

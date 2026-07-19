@@ -19,6 +19,7 @@ from ..agents.approvals import _approval_message
 from ..governor.authn import signed_payload, verify_signed
 from ..governor.identity import owner_pubkey
 from ..reuse import sha256_hex, sign
+from ..spine.snapshot import SnapshotState
 from ..spine.store import SpineStore
 
 CAP_SIGNAL = "mesh.host_capability"
@@ -42,8 +43,17 @@ def advertise_capability(store: SpineStore, descriptor: dict, owner_key) -> int:
 def capability_map(store: SpineStore, trusted_pubkey: Optional[str] = None) -> dict:
     """Latest VERIFIED capability per host_id (forged/unsigned advertisements ignored)."""
     tp = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
-    latest: dict = {}
-    for r in store.iter_records():
+    st = SnapshotState.load(store)
+    # Fold the pruned prefix's folded summary forward over LIVE records only (right-biased LWW is
+    # associative, so fold(prefix)+fold(live) == the old genesis scan). Empty snapshot (Slice C):
+    # base_seq==0 => since_seq=-1 (a full genesis scan) + empty seed => BYTE-IDENTICAL to the old scan.
+    # Pubkey-dependent fold: if the caller's trust anchor != the one the snapshot was folded under, the
+    # pre-fold is invalid, so BYPASS it and re-scan from genesis (seed empty, since=-1).
+    if tp == st.trusted_pubkey:
+        latest, since = dict(st.capability_map), st.base_seq - 1
+    else:
+        latest, since = {}, -1
+    for r in store.iter_records(since_seq=since):
         p = r.payload
         if p.get("signal") == CAP_SIGNAL and verify_signed(p, _CAP_CORE, tp):
             latest[p.get("host_id")] = {k: p.get(k) for k in _CAP_CORE if k != "signal"}
@@ -67,8 +77,17 @@ def authorized_devices(store: SpineStore, trusted_pubkey: Optional[str] = None) 
     """The set of currently-authorized device pubkeys (owner-signed authorize, minus later revoke).
     An unsigned/forged authorization is ignored — a rogue device cannot self-authorize."""
     tp = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
-    state: dict = {}
-    for r in store.iter_records():
+    st = SnapshotState.load(store)
+    # Fold the pruned prefix's folded device-authz summary forward over LIVE records only (per-device LWW,
+    # keeping revoked, is associative, so fold(prefix)+fold(live) == the old genesis scan). Empty snapshot
+    # (Slice C): base_seq==0 => since_seq=-1 (a full genesis scan) + empty seed => BYTE-IDENTICAL to the old
+    # scan. Pubkey-dependent fold: if the caller's trust anchor != the one the snapshot was folded under, the
+    # pre-fold is invalid, so BYPASS it and re-scan from genesis (seed empty, since=-1).
+    if tp == st.trusted_pubkey:
+        state, since = dict(st.mesh_dev_state), st.base_seq - 1   # COPY the cached sub-state; never mutate it
+    else:
+        state, since = {}, -1
+    for r in store.iter_records(since_seq=since):
         p = r.payload
         if p.get("signal") == DEV_SIGNAL and p.get("state") in ("authorized", "revoked") \
                 and verify_signed(p, _DEV_CORE, tp):

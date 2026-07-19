@@ -80,14 +80,27 @@ class BridgeDaemon:
             raise ValueError("approval signature invalid")
         sig, tgt = payload.get("sig"), payload.get("target_seq")
         # Best-effort dedup OUTSIDE the append lock (a rare concurrent double-record is benign; holding the
-        # lock across the scan would stall every writer). A FULL-SPINE scan — approvals carry no freshness
-        # field to bound a rotated captured-body pool, so a bounded window would re-open a bloat sink; the
-        # full scan keeps replay-bloat bounded to the number of DISTINCT captured bodies, forever. Approvals
-        # are human-paced, so O(spine) here (off the lock) is imperceptible.
-        for r in self.store.iter_records():
+        # lock across the scan would stall every writer). Fold the cold-archive snapshot forward: SEED the
+        # dedup map from the pruned prefix's folded {(pubkey,sig): min_seq}, then min-seq-fold the LIVE records
+        # [base_seq..T] only — approvals carry no freshness field, so replay-bloat stays bounded to the number
+        # of DISTINCT captured bodies (now split across the snapshot + the live tail). Not a pubkey-dependent
+        # fold (the dedup step calls no verify), so no rotated-anchor genesis-bypass is needed here.
+        # BYTE-IDENTICAL under the empty Slice-C snapshot: base_seq==0 => since_seq=-1 (the old full genesis
+        # scan) and st_map seeds empty, and since iter_records yields ASCENDING seq the min-seq the map holds
+        # for the incoming key is exactly the FIRST match the old loop returned.
+        from ..spine.snapshot import SnapshotState
+        st = SnapshotState.load(self.store)
+        st_map = dict(st.approval_dedup_map())          # COPY — never mutate the cached snapshot
+        for r in self.store.iter_records(since_seq=st.base_seq - 1):
             p = r.payload
-            if p.get("signal") == APPROVAL_SIGNAL and p.get("pubkey") == payload.get("pubkey") and p.get("sig") == sig:
-                return r.seq                            # already recorded — idempotent
+            if p.get("signal") == APPROVAL_SIGNAL:
+                key = (p.get("pubkey"), p.get("sig"))
+                cur = st_map.get(key)
+                if cur is None or r.seq < cur:
+                    st_map[key] = r.seq
+        hit = st_map.get((payload.get("pubkey"), sig))
+        if hit is not None:
+            return hit                                  # already recorded — idempotent
         return self.store.append(kind="event", source="mesh", actor="DEVICE",
                                  payload={**payload, "tier": "A0", "decision": "auto"}, supersedes_id=tgt)
 

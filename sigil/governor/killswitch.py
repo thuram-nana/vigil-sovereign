@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from ..spine.snapshot import SnapshotState
 from .authn import signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
@@ -69,9 +70,22 @@ class KillSwitch:
 
     def _scan_engaged(self) -> bool:
         """The AUTHORITATIVE scan — unchanged semantics (not re-implemented): honor ANY engage (halting
-        is fail-safe), and un-halt only on an OWNER-SIGNED release that verifies (fail-closed)."""
-        engaged = False
-        for r in self.store.iter_records():
+        is fail-safe), and un-halt only on an OWNER-SIGNED release that verifies (fail-closed).
+
+        Hard-prune fold (Slice C): seed the latch from the folded snapshot prefix `[0..base_seq)` and fold
+        only the LIVE window `[base_seq..T]` forward. The latch is PUBKEY-DEPENDENT (a release un-halts only
+        under the trusted pubkey it verifies against), so a caller whose trust anchor differs from the one
+        the snapshot was folded under BYPASSES the snapshot and re-scans from genesis. Under the Slice-C
+        empty snapshot (base_seq==0, killswitch_engaged=False, trusted_pubkey=""), BOTH branches seed False
+        and window since_seq=-1 (the current full genesis scan), so this is BYTE-IDENTICAL to the old scan."""
+        st = SnapshotState.load(self.store)
+        if self.trusted_pubkey != st.trusted_pubkey:
+            engaged = False                         # pubkey mismatch: folded latch invalid → genesis rescan
+            since_seq = -1
+        else:
+            engaged = st.killswitch_engaged         # seed from the folded prefix (scalar bool; no mutation)
+            since_seq = st.base_seq - 1
+        for r in self.store.iter_records(since_seq=since_seq):
             p = r.payload
             if p.get("signal") != SIGNAL:
                 continue
