@@ -36,8 +36,9 @@ def _utc_day() -> str:
 
 
 def _load_caps() -> BudgetCaps:
-    """Optional per-agent caps from ~/.sigil/budgets.json ({daily_actions, daily_interrupts}).
-    Absent/malformed → uncapped (budgets opt-in; default behavior unchanged)."""
+    """Optional per-agent caps from ~/.sigil/budgets.json ({daily_actions, daily_interrupts,
+    daily_tokens, daily_cost_usd}). Absent/malformed → uncapped (budgets opt-in; default behavior
+    unchanged — an old file with only the action/interrupt keys leaves token/cost None)."""
     try:
         import json
 
@@ -46,7 +47,8 @@ def _load_caps() -> BudgetCaps:
         if not f.exists():
             return BudgetCaps()
         d = json.loads(f.read_text(encoding="utf-8"))
-        return BudgetCaps(daily_actions=d.get("daily_actions"), daily_interrupts=d.get("daily_interrupts"))
+        return BudgetCaps(daily_actions=d.get("daily_actions"), daily_interrupts=d.get("daily_interrupts"),
+                          daily_tokens=d.get("daily_tokens"), daily_cost_usd=d.get("daily_cost_usd"))
     except (OSError, ValueError, TypeError):
         return BudgetCaps()
 
