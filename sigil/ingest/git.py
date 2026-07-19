@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Iterator
 
 from . import cursor as cur
 from ..config import INGEST_REPOS as DEFAULT_REPOS  # env SIGIL_INGEST_REPOS → host-relative default

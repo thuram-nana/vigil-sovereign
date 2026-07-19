@@ -155,7 +155,7 @@ class Perceptor(Agent):
         markers; unchanged frames produce nothing (they never leave the machine)."""
         if vision is not None and getattr(vision, "egresses", False):
             # ambient must NEVER auto-upload to the frontier — hard refuse (red-pen BLOCK-2).
-            seq = self.store.append(kind="refusal", source="agent", actor=self.name,
+            self.store.append(kind="refusal", source="agent", actor=self.name,
                                     payload={"signal": "perception.ambient", "tier": "A0", "decision": "refused",
                                              "summary": "ambient watch REFUSED an egressing (frontier) model — "
                                                         "ambient escalation is on-box only; no upload."})

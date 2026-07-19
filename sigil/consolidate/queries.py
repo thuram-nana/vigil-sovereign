@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..spine.store import SpineStore
-from .grounding import belief_lcb, belief_mean, is_grounded
+from .grounding import belief_mean, is_grounded
 from .revise import iter_current
 
 

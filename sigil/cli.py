@@ -291,7 +291,7 @@ def cmd_warden(a) -> None:
     """Phase 6 governor controls (SIGIL §5): kill switch + per-kind promotion policy. Governance
     mutations are signed by the persisted OWNER key (auto-created once if absent)."""
     from .governor import KillSwitch, PromotionPolicy
-    from .governor.identity import ensure_owner_keypair, owner_pubkey
+    from .governor.identity import ensure_owner_keypair
     store = SpineStore()
     if a.action == "status":
         print(f"  kill switch: {'ENGAGED (mesh halted)' if KillSwitch(store).is_engaged() else 'released (mesh live)'}")

@@ -13,7 +13,7 @@ signal that WOULD decide escalation (it is NOT a block signal)."""
 from __future__ import annotations
 
 import re
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 _JS_APP_HINT = re.compile(r"<div[^>]+id=[\"'](root|app|__next)[\"']", re.I)
 

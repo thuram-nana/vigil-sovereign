@@ -66,22 +66,27 @@ target-version = "py311"
 exclude = ["sigil/bridge/webapp"]   # vendored/static front-end assets
 
 [tool.ruff.lint]
-# Start pragmatic: correctness + common bug classes, not stylistic churn on a large existing codebase.
-select = ["E", "F", "W", "B", "I", "UP"]
+# Pragmatic entry gate: block on REAL bug classes (pyflakes F: unused/undefined/f-strings; bugbear B:
+# likely bugs; E9: syntax/runtime errors) — NOT stylistic modernization (UP), import ordering (I), or
+# whitespace (E/W) on a large existing codebase. Tighten rule-by-rule over time.
+select = ["E9", "F", "B"]
 ignore = [
-    "E501",   # line length is enforced by the formatter, not the linter
-    "B008",   # function call in argument default (used deliberately for injectable defaults)
+    "B008",   # function call in an argument default — used deliberately for injectable defaults
+    "B011",   # assert False — used intentionally in tests/guards
+    "B904",   # raise ... from — style; tighten later (kept selected so B still catches real bug rules)
+    "B905",   # zip(strict=) — safety nudge; tighten later
+    "B007",   # unused loop control variable — style; tighten later
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["E402", "F401", "B011"]   # test files: late imports, unused re-exports, assert False are intentional
+"tests/*" = ["E402", "F401", "F841", "B011"]   # tests: late imports, unused re-exports/intermediates, assert False
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 # Pragmatic entry posture for a large, dynamically-typed codebase: check what's annotated, don't block
 # on the untyped majority. Tighten module-by-module over time.
 ignore_missing_imports = true

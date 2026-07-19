@@ -14,7 +14,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 from typing import List, Optional, Protocol, runtime_checkable
 
 from ..config import claude_bin as _resolve_claude_bin

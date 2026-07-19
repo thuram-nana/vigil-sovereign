@@ -4,7 +4,7 @@ model, no OS input. The real providers (`landmark.OnnxHandLandmarker`, `classifi
 `InputBackend`s) live behind the same Protocols and lazy-import their heavy deps."""
 from __future__ import annotations
 
-from typing import List, Optional, Protocol, runtime_checkable
+from typing import List, Protocol, runtime_checkable
 
 from .types import GestureReading, Hand
 

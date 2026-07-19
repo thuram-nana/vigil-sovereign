@@ -12,7 +12,6 @@ advisory's affected range; an unparseable version is a non-assessment, never a f
 from __future__ import annotations
 
 import re
-import socket
 import ssl
 import urllib.request
 from dataclasses import dataclass
