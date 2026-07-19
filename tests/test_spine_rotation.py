@@ -12,9 +12,13 @@ in place. These tests pin the Slice-0 invariants:
     lock and never resurrects spine.jsonl (the split-brain the two-step migration guards against).
 Run: ~/.sigil/venv/bin/python -m pytest tests/test_spine_rotation.py -q
 """
+import gzip
 import json
 import os
+import shutil
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from sigil.reuse.chain import _GENESIS_PREV
@@ -471,6 +475,132 @@ def test_panic_append_durable_when_it_triggers_rotation():
     KillSwitch(s).engage(by="owner", reason="panic")        # record 2 -> trips the seal (write-then-rotate)
     assert KillSwitch(SpineStore(p)).is_engaged() is True, "panic honored across the rotation it triggered"
     assert len(SpineStore(p).segment_info()) >= 2, "the seal happened"
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+
+
+def test_compact_gzips_sealed_and_reads_transparently():
+    d = _fresh_dir("sigil-compact-")
+    p = d / "spine.jsonl"
+    lay = SpineLayout.for_path(p)
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=40)
+    s.migrate()
+    for i in range(180):
+        s.append(kind="event", source="t", actor="a", payload={"n": i, "text": "lorem ipsum dolor sit amet " * 3})
+    before = sum(f.stat().st_size for f in lay.segments_dir.glob("*.jsonl"))
+    n = s.compact()
+    assert n >= 3, f"expected several sealed segments compressed, got {n}"
+    after = sum(f.stat().st_size for f in lay.segments_dir.glob("*.gz"))
+    assert after < before, f"gzip must reclaim disk: {after} !< {before}"
+    codecs = {x["id"]: x["codec"] for x in s.segment_info()}
+    assert all(codecs[i] == "gzip" for i in codecs if i != max(codecs)), "all sealed segments gzip"
+    assert codecs[max(codecs)] == "none", "active segment stays plaintext"
+
+    # every read is transparent across gz + plaintext
+    fresh = SpineStore(p)
+    ok, reason = fresh.verify()
+    assert ok, reason
+    assert [r.seq for r in fresh.iter_records()] == list(range(180))
+    assert fresh.count() == 180 and fresh.next_seq == 180
+    for seq in (0, 41, 179):                                # get() from a gz segment and the active
+        assert fresh.get(seq).payload["n"] == seq
+    assert [r.seq for r in fresh.tail(3)] == [177, 178, 179]
+    assert s.compact() == 0, "idempotent — nothing left to compact"
+    # a post-compact append still verifies and rotation still works over gz segments
+    s.append(kind="event", source="t", actor="a", payload={"n": 180})
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+
+
+def test_reader_grace_during_concurrent_compact():
+    """D2: lock-free readers iterating while a compactor gzips sealed segments (moving superseded plaintext
+    to trash) must NEVER ENOENT or see a short/forked chain — the manifest-reread retry + open-fd grace
+    keep every read a contiguous chain from genesis."""
+    d = _fresh_dir("sigil-d2-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=15)
+    s.migrate()
+    _append_n(s, 60)
+
+    errors: list[str] = []
+    stop = threading.Event()
+
+    def reader():
+        r = SpineStore(p)
+        while not stop.is_set():
+            try:
+                seqs = [rec.seq for rec in r.iter_records()]
+            except Exception as e:                          # noqa: BLE001 — any read exception is a failure
+                errors.append(f"reader raised {e!r}")
+                return
+            if seqs != list(range(len(seqs))):
+                errors.append(f"reader saw a non-contiguous chain: {seqs[:3]}..{seqs[-3:]}")
+                return
+
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for k in range(4):                                      # interleave: more sealed plaintext, then compact
+        _append_n(s, 15, start=60 + k * 15)
+        s.compact()
+        time.sleep(0.005)
+    stop.set()
+    for t in threads:
+        t.join(timeout=10)
+    assert not errors, errors[:3]
+
+
+def test_reap_trash_respects_grace(monkeypatch):
+    import sigil.spine.store as store_mod
+
+    d = _fresh_dir("sigil-reap-")
+    p = d / "spine.jsonl"
+    lay = SpineLayout.for_path(p)
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=5)
+    s.migrate()
+    _append_n(s, 12)
+    s.compact()
+    assert list(lay.trash_dir.iterdir()), "compact trashes superseded plaintext"
+    s._reap_trash()                                         # default grace (1h) => young trash survives
+    assert list(lay.trash_dir.iterdir()), "trash within the read-grace is NOT reaped"
+    monkeypatch.setattr(store_mod, "SPINE_TRASH_GRACE_SEC", -1)
+    s._reap_trash()                                         # grace -1 => everything is past grace
+    assert not list(lay.trash_dir.iterdir()), "trash past the grace is reaped"
+
+
+def test_compact_recovers_from_crash_before_codec_flip():
+    """Crash after building the .gz but before the manifest flip: an orphan .gz, manifest still plaintext.
+    Reads use the plaintext; re-running compact overwrites the orphan and completes."""
+    d = _fresh_dir("sigil-ccrash1-")
+    p = d / "spine.jsonl"
+    lay = SpineLayout.for_path(p)
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=5)
+    s.migrate()
+    _append_n(s, 12)
+    plain0 = lay.segments_dir / "seg-00000000.jsonl"
+    with plain0.open("rb") as fin, gzip.open(lay.segments_dir / "seg-00000000.jsonl.gz", "wb") as fout:
+        shutil.copyfileobj(fin, fout)                       # simulate the orphan .gz (crashed before flip)
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason                                       # manifest still plaintext -> reads use it
+    s.compact()
+    assert s.segment_info()[0]["codec"] == "gzip"
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+
+
+def test_compact_sweeps_orphan_plaintext_after_flip():
+    """Crash after the codec flip but before the plaintext move: an orphan plaintext beside the gz. The
+    next compact()'s orphan-sweep trashes it."""
+    d = _fresh_dir("sigil-ccrash2-")
+    p = d / "spine.jsonl"
+    lay = SpineLayout.for_path(p)
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=5)
+    s.migrate()
+    _append_n(s, 12)
+    s.compact()                                            # seg-0 -> gzip, plaintext trashed
+    (lay.segments_dir / "seg-00000000.jsonl").write_bytes(b'{"stale":true}\n')   # crash-stranded plaintext
+    s.compact()                                            # orphan-sweep must trash it
+    assert not (lay.segments_dir / "seg-00000000.jsonl").exists(), "orphan plaintext swept to trash"
     ok, reason = SpineStore(p).verify()
     assert ok, reason
 

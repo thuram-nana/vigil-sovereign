@@ -72,6 +72,9 @@ def _int_env(name: str, default: int) -> int:
 
 SPINE_SEG_MAX_BYTES = _int_env("SIGIL_SPINE_SEG_MAX_BYTES", 16 * 1024 * 1024)   # 16 MiB
 SPINE_SEG_MAX_RECORDS = _int_env("SIGIL_SPINE_SEG_MAX_RECORDS", 12_000)
+# Grace before a superseded (compressed-away) plaintext segment in trash/ is reaped: must exceed the
+# longest lock-free read, so a reader mid-scan is never ENOENT'd. Any bounded read is sub-second; 1h is safe.
+SPINE_TRASH_GRACE_SEC = _int_env("SIGIL_SPINE_TRASH_GRACE_SEC", 3600)
 
 # --- ingestion sources ----------------------------------------------------------------
 CLAUDE_PROJECTS = Path(os.environ.get("SIGIL_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))

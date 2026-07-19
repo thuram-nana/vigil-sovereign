@@ -8,16 +8,24 @@ are O(1): read the last line's entry, `append_entry`, write.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
 import shutil
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
+from ..config import (
+    SCOPE,
+    SPINE_PATH,
+    SPINE_SEG_MAX_BYTES,
+    SPINE_SEG_MAX_RECORDS,
+    SPINE_TRASH_GRACE_SEC,
+)
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
 from .atomicio import fsync_dir
 from .manifest import (
@@ -271,12 +279,9 @@ class SpineStore:
             return None                              # genesis: a fresh spine correctly starts at seq 0
         sealed = m.sealed_in_order()
         if sealed:
-            sp = self._layout.seg_path(sealed[-1])
-            line = _last_nonempty_line(sp) if sp.exists() else None
-            if line:
-                d = json.loads(line)
-                return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"],
-                                  entry_hash=d["entry_hash"])
+            entry = self._entry_from_line(self._last_line_of(self._layout.seg_path(sealed[-1])))
+            if entry is not None:
+                return entry
         raise SpineError(
             f"active segment first_seq={act.first_seq} is non-genesis but its seam boundary (the prior "
             f"sealed segment) is unreadable — refusing to fork the chain at seq 0")
@@ -553,6 +558,100 @@ class SpineStore:
                     return False
                 return self._seal_active_locked(m, act, self._layout.seg_path(act))
 
+    # --- compaction (gzip-on-seal; retain-all — no record removed) -----------------
+    def compact(self) -> int:
+        """Compress every SEALED plaintext segment to gzip. Retain-all: no record is removed, and a `.gz` is
+        byte-decompress-identical, so verify()/the signed head are unaffected. Reclaims ~5-8x on JSONL. The
+        heavy gzip runs LOCK-FREE (a sealed segment is immutable — no append is blocked); only the tiny
+        per-segment manifest codec-flip takes the flock. The superseded plaintext is MOVED to trash/ (never
+        unlinked under a reader), and a reaper deletes trash older than the read-grace. Idempotent (a no-op
+        on already-gzip / legacy). Returns the number compressed."""
+        m = read_manifest(self._layout)
+        if m is None:
+            return 0
+        n = 0
+        for seg in m.sealed_in_order():
+            if seg.codec == "none" and self._compress_one_sealed(seg.id):
+                n += 1
+        self._trash_orphan_plaintext()               # backstop: a crash between flip and move leaves plaintext
+        self._reap_trash()
+        return n
+
+    def _compress_one_sealed(self, seg_id: int) -> bool:
+        """P1 (lock-free gzip of the immutable sealed segment) + P2 (brief-locked manifest codec flip).
+        Crash-safe: the .gz is built to a temp then atomically renamed; the codec flip is the atomic commit;
+        the plaintext is left for _trash_orphan_plaintext. A crash before the flip leaves an orphan .gz that
+        the next run overwrites; the plaintext (still referenced) is never at risk."""
+        m = read_manifest(self._layout)
+        seg = next((s for s in (m.segments if m else []) if s.id == seg_id and s.sealed and s.codec == "none"), None)
+        if seg is None:
+            return False
+        plain = self._layout.seg_path(seg)
+        if not plain.exists():
+            return False
+        gz_rel = self._layout.segment_rel(seg_id, "gzip")
+        gz_abs = self._layout.spine_dir / gz_rel
+        tmp = gz_abs.with_name(gz_abs.name + ".tmp")
+        with plain.open("rb") as fin, gzip.open(tmp, "wb", compresslevel=6) as fout:
+            shutil.copyfileobj(fin, fout)
+        with open(tmp, "rb") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, gz_abs)
+        fsync_dir(self._layout.segments_dir)
+        with spine_lock(self.path):
+            with self._crossproc_lock():
+                m2 = read_manifest(self._layout)
+                if m2 is None:
+                    return False
+                flipped, segs2 = False, []
+                for s in m2.segments:
+                    if s.id == seg_id and s.sealed and s.codec == "none":
+                        segs2.append(s.model_copy(update={"codec": "gzip", "file": gz_rel,
+                                                          "bytes": gz_abs.stat().st_size}))
+                        flipped = True
+                    else:
+                        segs2.append(s)
+                if not flipped:
+                    return False                     # another process already flipped it
+                write_manifest(self._layout, Manifest(generation=m2.generation + 1, scope=m2.scope, segments=segs2))
+                self._manifest = read_manifest(self._layout)
+                with self._index_lock:
+                    self._index_epoch = None         # segment path+codec changed -> reconcile offsets
+        return True
+
+    def _trash_orphan_plaintext(self) -> None:
+        """Move to trash any plaintext seg-k.jsonl whose manifest entry is now GZIP — i.e. the superseded
+        plaintext after a codec flip (or one stranded by a crash between the flip and this move). Moving
+        (not unlinking) preserves reader-grace: a reader with an open fd keeps reading, and a reader that
+        ENOENTs on the vanished path re-resolves via the iter_records retry. Idempotent."""
+        m = read_manifest(self._layout)
+        if m is None:
+            return
+        for seg in m.segments:
+            if seg.codec != "gzip":
+                continue
+            plain = self._layout.segments_dir / segment_filename(seg.id, "none")
+            if plain.exists():
+                self._layout.trash_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.replace(plain, self._layout.trash_dir / f"{plain.name}.{seg.id}")
+                except OSError:
+                    pass
+
+    def _reap_trash(self) -> None:
+        """Delete trashed plaintext older than the read-grace (SPINE_TRASH_GRACE_SEC), which must exceed the
+        longest lock-free read so no reader is ever ENOENT'd."""
+        td = self._layout.trash_dir
+        if not td.exists():
+            return
+        cutoff = time.time() - SPINE_TRASH_GRACE_SEC
+        for f in td.iterdir():
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+
     # --- write --------------------------------------------------------------------
     def append(
         self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
@@ -626,7 +725,11 @@ class SpineStore:
 
     # --- read ---------------------------------------------------------------------
     def _open_segment(self, p: Path):
-        """Open a segment for a forward byte read. Plaintext in Slices 1-3; gzip-transparent in Slice 4."""
+        """Open a segment for a forward byte read, transparently decompressing a gzip-sealed segment. For a
+        `.gz` the index stores DECOMPRESSED byte offsets, which is exactly what `gzip.GzipFile.seek()` (used
+        by get()) consumes, so the offset semantics match. The active segment is always plaintext."""
+        if p.suffix == ".gz":
+            return gzip.open(p, "rb")
         return p.open("rb")
 
     def iter_records(self, *, since_seq: int = -1) -> Iterator[SpineRecord]:
@@ -638,29 +741,37 @@ class SpineStore:
         the read; a torn MIDDLE line becomes a seq gap that verify() fails on). RAISES SpineError if the
         manifest references a segment that cannot be read — a read must NEVER silently yield a short chain
         (invariant 15: no state-scanner fail-open)."""
-        segs = self._segments_in_order()                 # RAISES on a missing referenced segment
-        if not segs:
-            return
-        start_i, start_off = self._start_locus(since_seq, segs)
-        for i in range(start_i, len(segs)):
-            p = segs[i]
+        yielded_upto = since_seq
+        for _attempt in range(6):                        # D2 reader-grace: tolerate a few compaction moves
+            segs = self._segments_in_order()             # RAISES on a genuinely missing referenced segment
+            if not segs:
+                return
+            start_i, start_off = self._start_locus(yielded_upto, segs)
             try:
-                f = self._open_segment(p)
-            except FileNotFoundError as e:               # referenced but vanished mid-read
-                raise SpineError(f"spine segment vanished during read: {p}") from e
-            with f:
-                if i == start_i and start_off:
-                    f.seek(start_off)
-                for raw in f:
-                    if not raw.strip():
-                        continue
-                    try:
-                        rec = SpineRecord.from_dict(json.loads(raw))
-                    except (ValueError, KeyError, TypeError):
-                        _log.warning("spine: skipping malformed line during iter_records (%s)", p)
-                        continue
-                    if rec.seq > since_seq:
-                        yield rec
+                for i in range(start_i, len(segs)):
+                    p = segs[i]
+                    with self._open_segment(p) as f:
+                        if i == start_i and start_off:
+                            f.seek(start_off)
+                        for raw in f:
+                            if not raw.strip():
+                                continue
+                            try:
+                                rec = SpineRecord.from_dict(json.loads(raw))
+                            except (ValueError, KeyError, TypeError):
+                                _log.warning("spine: skipping malformed line during iter_records (%s)", p)
+                                continue
+                            if rec.seq > yielded_upto:
+                                yield rec
+                                yielded_upto = rec.seq
+                return                                    # completed cleanly
+            except FileNotFoundError:
+                # a concurrent compaction moved a plaintext segment to trash AFTER we resolved it — re-read
+                # the manifest (now pointing at the .gz) and continue from where we left off. Retain-all
+                # means the same seqs are still covered, so no record is skipped or repeated.
+                _log.debug("spine: a segment moved during read (compaction); re-resolving from seq %d", yielded_upto)
+                continue
+        raise SpineError("spine segments kept moving during read (compaction churn) — giving up")
 
     def get(self, seq: int) -> SpineRecord | None:
         """A single record by seq — O(1) via the segment-aware index (resolves the OWNING segment + offset),
@@ -705,20 +816,26 @@ class SpineStore:
         return recs[-n:]
 
     def _read_segment_tail(self, p: Path, k: int) -> list[SpineRecord]:
-        """The last `k` records of a single segment (seek-from-end, O(k) bytes). Plaintext in Slices 1-3."""
+        """The last `k` records of a single segment. Plaintext: seek-from-end (O(k) bytes). Gzip: decompress
+        (bounded by the seal threshold) and take the last k lines — no random access into a gz stream."""
         if k <= 0 or not p.exists():
             return []
-        with p.open("rb") as f:
-            f.seek(0, os.SEEK_END)
-            pos = f.tell()
-            buf = b""
-            while pos > 0 and buf.count(b"\n") <= k:
-                step = min(65536, pos)
-                pos -= step
-                f.seek(pos)
-                buf = f.read(step) + buf
+        if p.suffix == ".gz":
+            with gzip.open(p, "rb") as f:
+                lines = [x for x in f.read().split(b"\n") if x.strip()]
+        else:
+            with p.open("rb") as f:
+                f.seek(0, os.SEEK_END)
+                pos = f.tell()
+                buf = b""
+                while pos > 0 and buf.count(b"\n") <= k:
+                    step = min(65536, pos)
+                    pos -= step
+                    f.seek(pos)
+                    buf = f.read(step) + buf
+            lines = [x for x in buf.split(b"\n") if x.strip()]
         out: list[SpineRecord] = []
-        for ln in [x for x in buf.split(b"\n") if x.strip()][-k:]:
+        for ln in lines[-k:]:
             try:
                 out.append(SpineRecord.from_dict(json.loads(ln)))
             except (ValueError, KeyError, TypeError):
@@ -768,11 +885,33 @@ class SpineStore:
         return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"],
                           entry_hash=d["entry_hash"])
 
+    def _last_line_of(self, p: Path) -> str | None:
+        """The last VALID record line of a segment, codec-aware. Plaintext: seek-from-end (O(tail)). Gzip:
+        decompress (bounded by the seal threshold) and take the last well-formed line — used only for the
+        seam boundary of an already-compressed sealed segment (a rare empty-active edge)."""
+        if not p.exists():
+            return None
+        if p.suffix == ".gz":
+            last = None
+            with gzip.open(p, "rt", encoding="utf-8") as f:
+                for line in f:
+                    s = line.rstrip("\n")
+                    if not s.strip():
+                        continue
+                    try:
+                        d = json.loads(s)
+                    except ValueError:
+                        continue
+                    if all(k in d for k in _REQUIRED_KEYS):
+                        last = s
+            return last
+        return _last_nonempty_line(p)
+
     def _read_last_entry(self) -> ChainEntry | None:
         """The chain tip = the last valid record of the ACTIVE segment. If the active is EMPTY (a freshly
         rotated segment before its first append), the tip is the last SEALED segment's real last record
         (the seam boundary), so next_seq never regresses / reuses a seq across a rotation (invariant 13).
-        `_last_nonempty_line` skips a torn/garbage tail, so a crash mid-write can't block a restart."""
+        Skips a torn/garbage tail, so a crash mid-write can't block a restart."""
         m = read_manifest(self._layout)
         if m is None:
             t = self._read_target()
@@ -780,12 +919,11 @@ class SpineStore:
         act = m.active()
         if act is not None:
             ap = self._layout.seg_path(act)
-            line = _last_nonempty_line(ap) if ap.exists() else None
+            line = _last_nonempty_line(ap) if ap.exists() else None   # active is always plaintext
             if line:
                 return self._entry_from_line(line)
         for seg in reversed(m.sealed_in_order()):        # active empty/absent -> last sealed segment's tail
-            sp = self._layout.seg_path(seg)
-            line = _last_nonempty_line(sp) if sp.exists() else None
+            line = self._last_line_of(self._layout.seg_path(seg))     # may be gz-compressed
             if line:
                 return self._entry_from_line(line)
         return None
@@ -852,22 +990,30 @@ class SpineStore:
         self._max_seq = max(self._offsets, default=-1)
 
     def _scan_segment(self, ps: str, p: Path, start: int, size: int) -> None:
-        """Index every COMPLETE (newline-terminated) record line in bytes [start, size) of segment `p` as
-        `_offsets[seq] = (ps, line_offset)`. MUST hold `_index_lock`. A malformed complete line is left OUT
-        (so a mid-file gap still surfaces via verify()); a trailing partial line is left for the next
-        extend."""
-        if size <= start:
-            return
-        with p.open("rb") as f:
-            f.seek(start)
-            chunk = f.read(size - start)
+        """Index every COMPLETE (newline-terminated) record line of segment `p` as
+        `_offsets[seq] = (ps, line_offset)`. MUST hold `_index_lock`. Plaintext: index bytes [start, size)
+        (append-only ⇒ extend-forward). Gzip (sealed, immutable): index the whole DECOMPRESSED stream once
+        (offsets are decompressed byte offsets, matching `gzip.GzipFile.seek()` in get()). A malformed
+        complete line is left OUT (a mid-file gap still surfaces via verify()); a trailing partial line is
+        left for the next extend."""
+        if p.suffix == ".gz":
+            with gzip.open(p, "rb") as gf:
+                chunk = gf.read()
+            base = 0                                    # decompressed offsets; a sealed gz is indexed once
+        else:
+            if size <= start:
+                return
+            with p.open("rb") as f:
+                f.seek(start)
+                chunk = f.read(size - start)
+            base = start
         consumed = 0
         while True:
             nl = chunk.find(b"\n", consumed)
             if nl == -1:
                 break                                       # trailing partial line — not complete yet
             raw = chunk[consumed:nl]
-            line_off = start + consumed
+            line_off = base + consumed
             consumed = nl + 1
             if not raw.strip():
                 continue
@@ -881,4 +1027,4 @@ class SpineStore:
             self._offsets[seq] = (ps, line_off)
             if seq > self._max_seq:
                 self._max_seq = seq
-        self._seg_scanned[ps] = start + consumed
+        self._seg_scanned[ps] = base + consumed
