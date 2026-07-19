@@ -11,9 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from ..spine.store import SpineStore
+
+if TYPE_CHECKING:
+    from ..governor.budget import Usage
 
 AGENTS_SOURCE = "agent"
 
@@ -40,6 +43,8 @@ class Proposal:
     tier: Tier = Tier.A1
     parent_id: Optional[int] = None
     supersedes_id: Optional[int] = None   # this record supersedes an earlier one (e.g. a resolution)
+    usage: Optional["Usage"] = None       # provider token/cost for this action (metered on the spine);
+    # OPTIONAL — when None nothing is stamped and the record is byte-identical to the pre-metering path
 
 
 @dataclass
@@ -71,6 +76,7 @@ class Agent:
     def _dispatch(self, proposals: List[Proposal]) -> AgentResult:
         from ..governor import Outcome
         res = AgentResult(agent=self.name)
+        prices = None
         for p in proposals:
             effective = max(p.tier, Tier.A0)
             # promotion scope = the RECORD KIND (the real action written), not a self-asserted label:
@@ -79,6 +85,16 @@ class Agent:
                                             ceiling=self.ceiling, scope=p.kind)
             common = {**p.payload, "agent": self.name, "tier": effective.label(),
                       "governor": decision.reason}
+            # Metering seam (opt-in): a provider call may attach per-action token/cost usage. Stamp it
+            # onto the TAKEN record's payload so the spine stays the sole ledger (BudgetLedger derives
+            # token/cost from exactly this datum). Frozen once here; a denied action gets a refusal
+            # record with NO usage below → it consumes no budget. No usage supplied → nothing stamped,
+            # the record is byte-identical to the pre-metering path.
+            if p.usage is not None:
+                if prices is None:
+                    from ..governor.budget import load_prices
+                    prices = load_prices()
+                common["usage"] = p.usage.to_payload(prices)
             if decision.outcome == Outcome.AUTO:
                 seq = self.store.append(kind=p.kind, source=AGENTS_SOURCE, actor=self.name,
                                         payload={**common, "decision": "auto"},
