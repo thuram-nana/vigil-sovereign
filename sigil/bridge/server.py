@@ -22,13 +22,18 @@ the SSE structure, the anti-DNS-rebinding Host/Origin/Referer gate) and changes 
     the loopback pair when bound to loopback, for dev), not a hardcoded 127.0.0.1.
 
 Everything sensitive stays off the minimal frames: `/api/pending` and the SSE stream carry only
-`{seq, tier, kind}` — never a subject, never a payload, never a secret. TLS wrapping is a LATER
-slice; this is plain HTTP inside the tunnel. Offense-free."""
+`{seq, tier, kind}` — never a subject, never a payload, never a secret. `serve()` now wraps the
+transport in an owner-PINNED self-signed TLS cert (the phone PWA needs a secure context — https or
+localhost — to install and register a service worker; over a bare WireGuard IP that means self-signed
+TLS whose sha256 fingerprint the owner pins once, stable across restarts). `build_server` itself
+stays plain HTTP so the in-tunnel test harness is unchanged and TLS can be terminated upstream if
+preferred. Offense-free."""
 from __future__ import annotations
 
 import base64
 import ipaddress
 import json
+import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -383,10 +388,104 @@ def build_server(*, addr: str, port: int = _DEFAULT_PORT, spine_path=None, trust
                         trusted_pubkey=trusted_pubkey, clock=clock)
 
 
-def serve(*, addr: str, port: int = _DEFAULT_PORT, spine_path=None) -> None:
+def _write_secure(path: Path, data: bytes) -> None:
+    """Write `data` to `path` created 0600 up-front (no world-readable window) — the vault/secrets
+    secure-file idiom (`os.open(..., 0o600)`)."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+def _fingerprint(cert) -> str:
+    """The pinned identity: sha256 of the DER cert, hex, colon-grouped byte pairs (openssl-style,
+    upper-case) — what the owner eyeball-matches on the phone once."""
+    from cryptography.hazmat.primitives import hashes
+    h = cert.fingerprint(hashes.SHA256()).hex().upper()      # fingerprint() == sha256 of the DER encoding
+    return ":".join(h[i:i + 2] for i in range(0, len(h), 2))
+
+
+def ensure_bridge_cert(addr: str) -> tuple[str, str, str]:
+    """Mint (or REUSE) a minimal owner-pinned self-signed TLS cert for the bridge bound to `addr`,
+    returning `(certfile, keyfile, sha256_fingerprint)`.
+
+    The cert carries `addr` as its CN and (when `addr` is an IP — always true for a `bind_ok` bridge)
+    as an `x509.IPAddress` SubjectAlternativeName, so an IP-literal TLS connection matches. Cert+key
+    live under `SIGIL_HOME/bridge/` (dir 0700, files 0600). If a cert already exists FOR THIS ADDR it
+    is REUSED — the fingerprint is therefore STABLE across restarts, so the owner pins it exactly once
+    (a changed fingerprint later means a MITM / a wiped key, not a benign restart). An EC P-256 key is
+    used (easy for `cryptography`, accepted by `ssl`). Validity ~2 years; a real wallclock is fine here
+    (this is TLS notBefore/notAfter, not spine or learning math)."""
+    import datetime
+    import ipaddress as _ip
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    from ..config import SIGIL_HOME                          # read at call-time (patchable in tests)
+
+    bridge_dir = Path(SIGIL_HOME) / "bridge"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(bridge_dir, 0o700)                          # owner-only, like the spine/keys dirs
+    except OSError:
+        pass
+    tag = addr.replace(":", "_").replace("/", "_").replace("%", "_")   # one stable cert per bind addr
+    certfile = bridge_dir / f"cert-{tag}.pem"
+    keyfile = bridge_dir / f"key-{tag}.pem"
+
+    if certfile.is_file() and keyfile.is_file():             # REUSE → stable fingerprint (pin once)
+        cert = x509.load_pem_x509_certificate(certfile.read_bytes())
+        return str(certfile), str(keyfile), _fingerprint(cert)
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, addr)])
+    try:                                                     # bind addr is an IP by construction (bind_ok)
+        san = x509.SubjectAlternativeName([x509.IPAddress(_ip.ip_address(addr))])
+    except ValueError:                                       # defensive: a hostname would use a DNS SAN
+        san = x509.SubjectAlternativeName([x509.DNSName(addr)])
+    now = datetime.datetime.now(datetime.timezone.utc)       # real wallclock (tz-aware; TLS validity, not spine math)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)                                   # self-signed: issuer == subject
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))   # small skew tolerance
+        .not_valid_after(now + datetime.timedelta(days=730))     # ~2 years
+        .add_extension(san, critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    _write_secure(certfile, cert.public_bytes(serialization.Encoding.PEM))
+    _write_secure(keyfile, key.private_bytes(serialization.Encoding.PEM,
+                                             serialization.PrivateFormat.PKCS8,
+                                             serialization.NoEncryption()))
+    return str(certfile), str(keyfile), _fingerprint(cert)
+
+
+def serve(*, addr: str, port: int = _DEFAULT_PORT, spine_path=None, tls: bool = True) -> None:
+    """Run the WireGuard-bound bridge transport. With `tls=True` (default) it wraps the listening
+    socket in an owner-pinned self-signed TLS cert (`ensure_bridge_cert`) BEFORE serving, printing the
+    `https://` bind URL + the sha256 fingerprint to pin on the phone. With `tls=False` it serves plain
+    HTTP (degraded: no secure context → the PWA cannot install / register a service worker) and prints
+    an honest warning. `build_server` stays plain — TLS lives only here."""
     srv = build_server(addr=addr, port=port, spine_path=spine_path)
     bound = srv.server_address[1]
-    print(f"  SIGIL bridge → http://{addr}:{bound}/   (WireGuard-bound; loopback/private only — NO wire secret)")
+    if tls:
+        import ssl
+        certfile, keyfile, fp = ensure_bridge_cert(addr)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile, keyfile)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)   # wrap the listener before serve_forever
+        print(f"  SIGIL bridge → https://{addr}:{bound}/   (WireGuard-bound; loopback/private only — NO wire secret)")
+        print(f"  TLS fingerprint (sha256): {fp}")
+        print("    ↳ PIN this once on the phone — it is stable across restarts; a later change means MITM")
+    else:
+        print(f"  SIGIL bridge → http://{addr}:{bound}/   (WireGuard-bound; loopback/private only — NO wire secret)")
+        print("  WARNING: --no-tls → plain HTTP, NO secure context: the phone CANNOT install the PWA or")
+        print("           register a service worker. Use TLS unless you terminate it upstream in the tunnel.")
     print("  pair a phone (owner, at the desktop):  sigil mesh authorize <device-id> <device-pubkey>")
     print("  every request must carry an authorized-device signature (X-SIGIL-Envelope) — there is no token")
     try:

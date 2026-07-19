@@ -436,6 +436,21 @@ def cmd_serve(a) -> None:
     serve(token=secrets.token_urlsafe(24), port=a.port)
 
 
+def cmd_bridge_serve(a) -> None:
+    """Phase 9 W1-D — start the WireGuard-bound phone bridge transport. Binds a `bind_ok` address
+    (loopback or a PRIVATE WireGuard IP) — FAIL-CLOSED (exit 2) on a public/unspecified addr, minting
+    no cert — and, unless --no-tls, wraps it in an owner-pinned self-signed TLS cert so the phone gets
+    the secure context a PWA needs to install + register a service worker (pin the printed fingerprint
+    once). Mirrors `cmd_mesh` / `cmd_serve`."""
+    from .bridge.daemon import bind_ok
+    if not bind_ok(a.addr):
+        print(f"  refusing to bind {a.addr!r}: the bridge binds loopback or a PRIVATE (WireGuard) "
+              f"address only — never 0.0.0.0 / an unspecified / a public address", file=sys.stderr)
+        sys.exit(2)
+    from .bridge.server import serve
+    serve(addr=a.addr, port=a.port, tls=not a.no_tls)
+
+
 def cmd_verify(a) -> None:
     ok, msg = SpineStore().verify()
     print(("chain OK: " if ok else "chain FAIL: ") + msg)
@@ -564,6 +579,13 @@ def main(argv=None) -> None:
     pm.add_argument("--yes", action="store_true",
                     help="skip the interactive fingerprint confirmation (authorize)")
     pm.set_defaults(fn=cmd_mesh)
+    pb = sub.add_parser("bridge", help="the WireGuard-bound phone bridge transport (owner-pinned self-signed TLS)")
+    pb.add_argument("action", choices=["serve"])
+    pb.add_argument("--addr", required=True, help="bind address — loopback or a PRIVATE WireGuard IP (bind_ok)")
+    pb.add_argument("--port", type=int, default=8734, help="TCP port (default 8734)")
+    pb.add_argument("--no-tls", dest="no_tls", action="store_true",
+                    help="plain HTTP (degraded: no PWA install / no service worker) — TLS is the default")
+    pb.set_defaults(fn=cmd_bridge_serve)
     psc = sub.add_parser("scrape", help="SCRIBE grounded web research (public, scope-gated, robots-respecting)")
     psc.add_argument("--question", default=None)
     psc.add_argument("--seed", action="append", help="seed URL (repeatable)")
