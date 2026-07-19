@@ -17,11 +17,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..config import SCOPE, SPINE_PATH
+from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
 from .atomicio import fsync_dir
 from .manifest import (
     Manifest,
+    Segment,
     SpineLayout,
     initial_manifest,
     read_manifest,
@@ -42,6 +43,19 @@ class SpineError(Exception):
     """A structural spine fault — a corrupt/degenerate manifest or a manifest-referenced segment that
     cannot be read. Raised so the caller fails CLOSED rather than silently reading a truncated/empty
     chain (invariant 15: a state-scanner must never fail open)."""
+
+
+def _maybe_crash(name: str) -> None:
+    """Test-only fault injection: if the env var SIGIL_SPINE_CRASH_AT names this cutover barrier, hard-exit
+    (simulate a SIGKILL) EXACTLY here — so the crash-fuzz harness can prove the seal/append cutover is
+    crash-atomic at every barrier (no lost ack, no double-count, always verify()-clean on recovery). A
+    no-op unless the env var is set; never fires in production."""
+    if os.environ.get("SIGIL_SPINE_CRASH_AT") == name:
+        skip = int(os.environ.get("SIGIL_SPINE_CRASH_SKIP", "0") or "0")
+        if skip > 0:                                # skip this many occurrences first (crash at a later seal)
+            os.environ["SIGIL_SPINE_CRASH_SKIP"] = str(skip - 1)
+            return
+        os._exit(137)
 
 
 # The record fields SpineRecord.from_dict needs; a line missing any of these is corrupt (skipped by
@@ -140,7 +154,12 @@ def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
 
 
 class SpineStore:
-    def __init__(self, path: Path | str = SPINE_PATH) -> None:
+    def __init__(self, path: Path | str = SPINE_PATH, *,
+                 seg_max_bytes: int | None = None, seg_max_records: int | None = None) -> None:
+        # Rotation thresholds (0/None on a bound disables it; both disabled = never rotate). Injectable so
+        # tests can force frequent rotation; default from config.
+        self._seg_max_bytes = SPINE_SEG_MAX_BYTES if seg_max_bytes is None else seg_max_bytes
+        self._seg_max_records = SPINE_SEG_MAX_RECORDS if seg_max_records is None else seg_max_records
         # `self.path` is the STABLE identity + lock token (…/spine.jsonl). After a migration it is renamed
         # away and no longer a data file, but it remains the key for the in-process RLock and the anchor
         # the whole layout derives from — so the RLock that `envelope.consume` shares with `append` stays
@@ -307,8 +326,9 @@ class SpineStore:
         act = m.active() if m is not None else None
         if act is not None:
             new_active = self._layout.seg_path(act)
-        if new_active != self._active or (m is not None) != (self._manifest is not None):
-            self._manifest = m
+        changed = new_active != self._active or (m is not None) != (self._manifest is not None)
+        self._manifest = m                          # keep fresh so the rotation check reuses it (no 2nd read)
+        if changed:
             self._active = new_active
             self._invalidate_index()
             self._last = self._read_last_entry()
@@ -433,6 +453,97 @@ class SpineStore:
                         "bytes": p.stat().st_size if p.exists() else 0, "file": seg.file})
         return out
 
+    # --- rotation (retain-all seal-swap) ------------------------------------------
+    def _maybe_rotate_locked(self) -> None:
+        """MUST hold the flock (called at the end of append, after the ack). Seal the active segment + start
+        a fresh one if it hit a size/record threshold. Only for a MIGRATED store (a legacy single-file spine
+        never auto-rotates — the owner runs `sigil spine migrate` first). Write-then-rotate: the triggering
+        record is already durable in the active before we seal, so a panic append is never blocked by
+        rotation for more than the bounded (O(1)+O(tail)) seal-swap (D1)."""
+        if not (self._seg_max_bytes or self._seg_max_records):
+            return
+        m = self._manifest                          # kept fresh by _refresh_active_under_lock
+        if m is None:
+            return
+        act = m.active()
+        if act is None:
+            return
+        ap = self._layout.seg_path(act)
+        try:
+            size = ap.stat().st_size
+        except OSError:
+            return
+        tip = self._last.seq if self._last is not None else -1
+        records = (tip - act.first_seq + 1) if tip >= act.first_seq else 0
+        if ((self._seg_max_bytes and size >= self._seg_max_bytes)
+                or (self._seg_max_records and records >= self._seg_max_records)):
+            self._seal_active_locked(m, act, ap)
+
+    def _seal_active_locked(self, m: Manifest, act: Segment, ap: Path) -> bool:
+        """MUST hold the flock. Seal the active segment `act` and start a fresh empty active, publishing a
+        new-generation manifest ATOMICALLY (the single commit instant). Retain-all: no record is removed, so
+        the signed head + verify are untouched and entry_count stays absolute. Bounded (O(1)+O(tail)).
+        Ordering is crash-consistent: build the new active durably FIRST, then the manifest swap is the
+        commit — a crash before it leaves the pre-rotation spine intact (the triggering record already
+        durable in the old active); a crash after it leaves the post-rotation set. Returns True if sealed."""
+        # R2: seal-time torn-tail truncate (A2). The append-path truncate never revisits a sealed segment,
+        # so this is the ONLY place a just-sealed file is cleaned; usually already clean (we just fsync'd).
+        clean_end, boundary = _last_valid_boundary(ap)
+        if boundary is None:
+            return False                            # empty active — nothing to seal
+        try:
+            pre = ap.stat().st_size
+        except OSError:
+            return False
+        if pre > clean_end:
+            with ap.open("r+b") as f:
+                f.truncate(clean_end)
+                f.flush()
+                os.fsync(f.fileno())
+        seq_hi, boundary_hash = boundary.seq, boundary.entry_hash
+        new_id = act.id + 1
+        new_abs = self._layout.segments_dir / segment_filename(new_id)
+        # R1: GC an orphan next-segment left by a prior CRASHED seal (created but never committed to a
+        # manifest). Safe: it is not in the committed segment set, so it holds no acked record.
+        if new_abs.exists():
+            new_abs.unlink()
+        # R3: create the empty new active durably (it EXISTS before the manifest names it, so a reader that
+        # sees the new manifest always finds the active — no "active absent" window).
+        fd = os.open(str(new_abs), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.fsync(fd)
+        os.close(fd)
+        fsync_dir(self._layout.segments_dir)
+        _maybe_crash("seal_after_new_active")       # crash-fuzz: new active created, manifest NOT yet swapped
+        # R4: publish the new-generation manifest — the ATOMIC COMMIT INSTANT (temp→fsync→replace→dir-fsync).
+        sealed = Segment(id=act.id, file=act.file, codec=act.codec, sealed=True,
+                         first_seq=act.first_seq, last_seq=seq_hi, count=seq_hi - act.first_seq + 1,
+                         first_prev_hash=act.first_prev_hash, boundary_hash=boundary_hash, bytes=clean_end)
+        new_active = Segment(id=new_id, file=self._layout.segment_rel(new_id), codec="none", sealed=False,
+                             first_seq=seq_hi + 1, first_prev_hash=boundary_hash)
+        others = [s for s in m.segments if s.id != act.id]
+        write_manifest(self._layout, Manifest(generation=m.generation + 1, scope=m.scope,
+                                              segments=others + [sealed, new_active]))
+        _maybe_crash("seal_after_manifest")         # crash-fuzz: committed; in-memory state not yet updated
+        self._manifest = read_manifest(self._layout)
+        self._active = self._layout.seg_path(new_active)
+        self._invalidate_index()
+        self._last = boundary                       # tip preserved; the next append seeds from the seam
+        return True
+
+    def rotate(self) -> bool:
+        """Force a seal of the active segment now (for `sigil spine rotate` / an opportunistic seal at
+        checkpoint). No-op on a legacy (un-migrated) or empty active. Returns True if it sealed."""
+        with spine_lock(self.path):
+            with self._crossproc_lock():
+                self._refresh_active_under_lock()
+                m = self._manifest
+                if m is None:
+                    return False
+                act = m.active()
+                if act is None:
+                    return False
+                return self._seal_active_locked(m, act, self._layout.seg_path(act))
+
     # --- write --------------------------------------------------------------------
     def append(
         self, *, kind: str, source: str, actor: str, payload: dict[str, Any],
@@ -484,6 +595,7 @@ class SpineStore:
                     f.write(line.encode("utf-8"))
                     f.flush()
                     os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
+                    _maybe_crash("append_after_fsync")      # crash-fuzz: record durable, not yet acked/sealed
                     # FIX 1: keep the index current with NO re-scan when the ACTIVE segment is already
                     # indexed exactly up to this record's offset. If another PROCESS appended in between,
                     # `_seg_scanned[active] < offset` and we skip — the next read's `_ensure_index` extends
@@ -497,6 +609,10 @@ class SpineStore:
                                 self._max_seq = entry.seq
                             self._seg_scanned[active_str] = offset + len(line.encode("utf-8"))
                 self._last = entry
+                # write-then-rotate: the record is durable (fsync'd) above BEFORE any seal, so a panic
+                # append is never blocked by rotation for more than the bounded seal-swap (D1). No-op unless
+                # a migrated active hit a threshold.
+                self._maybe_rotate_locked()
         return entry.seq
 
     # --- read ---------------------------------------------------------------------

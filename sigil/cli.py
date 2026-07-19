@@ -479,6 +479,9 @@ def cmd_spine(a) -> None:
             print("  migrated: spine.jsonl → segments/seg-00000000.jsonl + manifest published")
         else:
             print("  already migrated (manifest present) — no change")
+    elif a.action == "rotate":
+        print("  sealed the active segment + started a new one" if store.rotate()
+              else "  nothing to rotate (legacy or empty active)")
     elif a.action == "status":
         segs = store.segment_info()
         if not segs:
@@ -607,8 +610,8 @@ def main(argv=None) -> None:
     sub.add_parser("dashboard", help="read-only operator status over the spine").set_defaults(fn=cmd_dashboard)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
-    psp = sub.add_parser("spine", help="segment rotation: migrate the legacy file into segments; show status")
-    psp.add_argument("action", choices=["migrate", "status"])
+    psp = sub.add_parser("spine", help="segment rotation: migrate the legacy file into segments; rotate; status")
+    psp.add_argument("action", choices=["migrate", "rotate", "status"])
     psp.set_defaults(fn=cmd_spine)
     psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
     psv.add_argument("--port", type=int, default=8733)

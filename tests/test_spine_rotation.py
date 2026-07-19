@@ -380,6 +380,76 @@ def test_cli_spine_migrate_and_status(capsys):
         SpineStore().reset()                               # don't leak a migrated default spine to other tests
 
 
+def test_rotation_seals_into_contiguous_segments():
+    d = _fresh_dir("sigil-rot-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=4)   # seal every 4 records
+    s.migrate()
+    _append_n(s, 18)
+    info = s.segment_info()
+    assert len(info) >= 4, f"expected several sealed segments, got {len(info)}"
+    assert sum(1 for x in info if not x["sealed"]) == 1, "exactly one active segment"
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason                                       # chain spans every seam from genesis
+    assert [r.seq for r in SpineStore(p).iter_records()] == list(range(18))
+    assert SpineStore(p).count() == 18 and SpineStore(p).next_seq == 18
+    for seq in (0, 5, 11, 17):                              # get() across sealed + active segments
+        assert SpineStore(p).get(seq).payload["n"] == seq
+
+
+def test_legacy_store_never_auto_rotates():
+    d = _fresh_dir("sigil-norot-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=2)   # tiny threshold, but NOT migrated
+    _append_n(s, 20)
+    assert s.segment_info() == [], "a legacy (un-migrated) spine never rotates"
+    assert s._active == p and p.exists()
+    ok, reason = s.verify()
+    assert ok, reason
+
+
+def test_rotation_disabled_when_thresholds_zero():
+    d = _fresh_dir("sigil-rotoff-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=0)   # both bounds off => never rotate
+    s.migrate()
+    _append_n(s, 30)
+    assert len(s.segment_info()) == 1, "rotation disabled: one (growing) active segment"
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+
+
+def test_manual_rotate():
+    d = _fresh_dir("sigil-manrot-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=0)   # no auto-rotation
+    s.migrate()
+    _append_n(s, 5)
+    assert s.rotate() is True                               # force a seal
+    assert len(s.segment_info()) == 2
+    _append_n(s, 3, start=5)
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+    assert [r.seq for r in SpineStore(p).iter_records()] == list(range(8))
+
+
+def test_panic_append_durable_when_it_triggers_rotation():
+    """D1 / write-then-rotate: a kill-switch PANIC append that itself trips the rotation threshold is
+    written + fsync'd BEFORE the seal, so it is durable and honored even though it triggered a rotation."""
+    from sigil.governor.killswitch import KillSwitch
+
+    d = _fresh_dir("sigil-panicrot-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=3)
+    s.migrate()
+    _append_n(s, 2)                                         # records 0,1 in the active
+    KillSwitch(s).engage(by="owner", reason="panic")        # record 2 -> trips the seal (write-then-rotate)
+    assert KillSwitch(SpineStore(p)).is_engaged() is True, "panic honored across the rotation it triggered"
+    assert len(SpineStore(p).segment_info()) >= 2, "the seal happened"
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+
+
 def test_reset_keeps_lockfile_so_it_still_excludes(monkeypatch):
     """Review F1: reset() must NOT unlink the lockfile it holds (flock binds to the inode, not the path),
     or a concurrent appender opens a new inode and slips the lock during the destructive rmtree. Assert the

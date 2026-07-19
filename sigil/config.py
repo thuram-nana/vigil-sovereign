@@ -60,6 +60,19 @@ CACHE_DIR = SIGIL_HOME / "cache"
 # which is the single source of truth. Naming fixed constants here would drift from that namespacing and
 # would wrongly assume the spine dir is private to one store (it is not, e.g. under tempfile.mktemp).
 
+# Rotation thresholds: seal the active segment + start a new one once it reaches EITHER bound. Applies only
+# to a MIGRATED store (a legacy single-file spine never auto-rotates — the owner runs `sigil spine migrate`
+# first). 0 on either bound disables that bound; 0 on both disables rotation (byte-identical passthrough).
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+SPINE_SEG_MAX_BYTES = _int_env("SIGIL_SPINE_SEG_MAX_BYTES", 16 * 1024 * 1024)   # 16 MiB
+SPINE_SEG_MAX_RECORDS = _int_env("SIGIL_SPINE_SEG_MAX_RECORDS", 12_000)
+
 # --- ingestion sources ----------------------------------------------------------------
 CLAUDE_PROJECTS = Path(os.environ.get("SIGIL_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
 # Phase-0a thin slice: PENTEST-main only. Slugified cwd = dir name under ~/.claude/projects.
