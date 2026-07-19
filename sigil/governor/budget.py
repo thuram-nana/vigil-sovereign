@@ -136,26 +136,33 @@ class BudgetCaps:
 
 
 def _as_int(v: object) -> int:
-    """Defensive coercion for a value read off the spine — a forged/hand-written usage datum must not
-    crash the enforcement path (mirrors the spine reader's skip-malformed posture): junk → 0. Also
-    catches OverflowError so a forged non-finite float (JSON accepts `Infinity`) can't raise here."""
+    """Defensive coercion for a usage value read off the spine — a forged/hand-written datum must not
+    crash the enforcement path (mirrors the spine reader's skip-malformed posture) NOR evade the cap.
+    CLAMPED to >= 0: a NEGATIVE token count must not CANCEL real spend — `spent()` sums the signed
+    per-record values, so a negative would zero the meter (fail-OPEN, a full cap bypass). Junk / a
+    too-large int (OverflowError) → 0."""
     if isinstance(v, (int, float, str)):
         try:
-            return int(v)
+            return max(0, int(v))
         except (TypeError, ValueError, OverflowError):
             return 0
     return 0
 
 
 def _as_float(v: object) -> float:
-    """As `_as_int`, and additionally maps a non-finite value (NaN/±inf) to 0.0 — otherwise a forged
-    NaN cost would sum to NaN and slip the `cost >= cap` check (fail-open); this keeps it fail-closed."""
+    """As `_as_int`, CLAMPED to >= 0.0 (a negative cost must not cancel spend — fail-open), and mapping a
+    non-finite value (NaN/±inf) to 0.0 (a forged NaN cost would sum to NaN and slip the `cost >= cap`
+    check). Catches OverflowError too: a forged huge-INTEGER cost (a 400-digit JSON int, which json.loads
+    returns as a Python int, not inf) would otherwise raise `float()`→OverflowError and CRASH the gate —
+    bricking the agent's dispatch for the whole UTC day and crashing `sigil budget`."""
     if isinstance(v, (int, float, str)):
         try:
             f = float(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0.0
-        return f if math.isfinite(f) else 0.0
+        if not math.isfinite(f) or f < 0.0:
+            return 0.0
+        return f
     return 0.0
 
 

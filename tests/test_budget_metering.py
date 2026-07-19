@@ -173,3 +173,28 @@ def test_malformed_usage_is_ignored_not_fatal():
     s.append(kind="event", source="agent", actor="TESTER", payload={"decision": "auto", "usage": "junk"})
     sp2 = _gov(s).budget.spent("TESTER", _today())
     assert sp2.actions == 2 and sp2.tokens == 0 and sp2.cost_usd == 0.0
+
+
+# ---- review BLOCK-1: a NEGATIVE usage datum must not cancel real spend (fail-open cap bypass) -----
+def test_negative_usage_cannot_cancel_spend():
+    s = _store()
+    led = _gov(s).budget
+    s.append(kind="tool_call", source="agent", actor="TESTER",     # a real 900-token / $0.90 action
+             payload={"decision": "auto", "usage": {"input_tokens": 900, "output_tokens": 0, "cost_usd": 0.90}})
+    s.append(kind="tool_call", source="agent", actor="TESTER",     # a FORGED record trying to cancel it
+             payload={"decision": "auto", "usage": {"input_tokens": -900, "output_tokens": -50, "cost_usd": -0.90}})
+    sp = led.spent("TESTER", _today())
+    assert sp.tokens >= 900, f"negative tokens must not cancel real spend (got {sp.tokens})"
+    assert sp.cost_usd >= 0.90 - 1e-9, f"negative cost must not cancel real spend (got {sp.cost_usd})"
+
+
+# ---- review BLOCK-2: a forged huge-INTEGER cost must not crash the gate (DoS) ---------------------
+def test_huge_int_cost_does_not_crash_the_gate():
+    s = _store()
+    led = _gov(s, caps=BudgetCaps(daily_cost_usd=1.0)).budget
+    huge = int("9" * 401)                                          # a valid JSON int; float(huge) -> OverflowError
+    s.append(kind="tool_call", source="agent", actor="VICTIM",
+             payload={"decision": "auto", "usage": {"input_tokens": 1, "output_tokens": 0, "cost_usd": huge}})
+    assert led.spent("VICTIM", _today()).cost_usd == 0.0           # un-representable cost coerces to 0, no raise
+    assert led.over_budget("VICTIM", _today())[0] in (True, False) # returns a verdict, does not crash the dispatch
+    led.report(_today())                                          # the `sigil budget` path must not crash either
