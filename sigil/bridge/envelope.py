@@ -108,9 +108,12 @@ def consume(store: SpineStore, payload, authorized: Set[str], *, effectful: bool
     ok, core = verify_envelope(payload, authorized)
     if not ok:
         raise ValueError(core)
+    n_raw = core.get("nonce")
+    if isinstance(n_raw, float) and n_raw != n_raw:        # NaN (n != n) — canonical-json serializes it, so guard here
+        raise ValueError("invalid nonce")
     try:
-        nonce = int(core["nonce"])
-    except (TypeError, ValueError):
+        nonce = int(n_raw)                                 # int(inf) raises OverflowError (NOT a ValueError) — catch it
+    except (TypeError, ValueError, OverflowError):
         raise ValueError("invalid nonce")
     if nonce < 0:
         raise ValueError("invalid nonce")

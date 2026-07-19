@@ -77,15 +77,15 @@ class BridgeDaemon:
         if not verify_approval(_Rec(payload), self.trusted_pubkey, extra_pubkeys=authorized):
             raise ValueError("approval signature invalid")
         sig, tgt = payload.get("sig"), payload.get("target_seq")
-        from ..spine.store import spine_lock
-        with spine_lock(self.store.path):               # atomic dedup-then-append: a replayed body can't bloat
-            for r in self.store.iter_records(since_seq=(tgt or 0) - 1):
-                p = r.payload
-                if p.get("signal") == APPROVAL_SIGNAL and p.get("pubkey") == payload.get("pubkey") and p.get("sig") == sig:
-                    return r.seq                        # already recorded — idempotent
-            return self.store.append(kind="event", source="mesh", actor="DEVICE",
-                                     payload={**payload, "tier": "A0", "decision": "auto"},
-                                     supersedes_id=tgt)
+        # Best-effort dedup OUTSIDE the append lock (a rare concurrent double-record is benign; holding the
+        # lock across an O(spine) scan would stall every other writer). Scan the full spine (not from tgt —
+        # an out-of-range target_seq must not skip the scan and re-open the bloat sink).
+        for r in self.store.iter_records():
+            p = r.payload
+            if p.get("signal") == APPROVAL_SIGNAL and p.get("pubkey") == payload.get("pubkey") and p.get("sig") == sig:
+                return r.seq                            # already recorded — idempotent
+        return self.store.append(kind="event", source="mesh", actor="DEVICE",
+                                 payload={**payload, "tier": "A0", "decision": "auto"}, supersedes_id=tgt)
 
     def submit_arm_request(self, request: dict) -> int:
         """Record a DEVICE-signed gesture arm request (the transport layer) — ONLY if the signing device
@@ -108,18 +108,17 @@ class BridgeDaemon:
         if not ok:
             raise ValueError("arm request signature invalid")
         sig = request.get("sig")
-        from ..spine.store import spine_lock
-        with spine_lock(self.store.path):               # atomic dedup-then-append: one captured body can't flood
-            for r in self.store.iter_records():
-                p = r.payload
-                if p.get("signal") == ARM_REQUEST and p.get("pubkey") == pub and p.get("sig") == sig:
-                    return r.seq                        # already recorded — idempotent, no spine bloat
-            # record ONLY the signed core + pubkey + sig (never `**request` — no unsigned extras persisted)
-            return self.store.append(kind="event", source="mesh", actor="DEVICE",
-                                     payload={"signal": ARM_REQUEST, "device_id": core["device_id"],
-                                              "nonce": core["nonce"], "ts": core["ts"],
-                                              "ttl_seconds": core["ttl_seconds"], "pubkey": pub, "sig": sig,
-                                              "tier": "A0", "decision": "auto"})
+        # Best-effort dedup OUTSIDE the append lock (see submit_device_approval) — a captured body can't flood.
+        for r in self.store.iter_records():
+            p = r.payload
+            if p.get("signal") == ARM_REQUEST and p.get("pubkey") == pub and p.get("sig") == sig:
+                return r.seq                            # already recorded — idempotent, no spine bloat
+        # record ONLY the signed core + pubkey + sig (never `**request` — no unsigned extras persisted)
+        return self.store.append(kind="event", source="mesh", actor="DEVICE",
+                                 payload={"signal": ARM_REQUEST, "device_id": core["device_id"],
+                                          "nonce": core["nonce"], "ts": core["ts"],
+                                          "ttl_seconds": core["ttl_seconds"], "pubkey": pub, "sig": sig,
+                                          "tier": "A0", "decision": "auto"})
 
     def panic_engage(self, *, by: str = "phone") -> int:
         """Halt the mesh from the phone. ANY engage halts (fail-safe) — no signature needed for the

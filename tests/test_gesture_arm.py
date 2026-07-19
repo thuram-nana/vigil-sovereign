@@ -11,7 +11,7 @@ from sigil.agents.base import Tier
 from sigil.bridge.daemon import BridgeDaemon
 from sigil.gesture.components import RecordingInputBackend
 from sigil.gesture.session import (MAX_DEVICE_TTL, SESSION_ARMED, SessionGate, arm_request_message,
-                                    pending_device_arm, sign_arm_request)
+                                    pending_device_arms, sign_arm_request)
 from sigil.gesture.types import GestureIntent
 from sigil.mesh import authorize_device, revoke_device
 from sigil.reuse import generate_keypair, verify_one
@@ -206,11 +206,31 @@ def test_arm_record_self_verifies_even_when_ttl_is_clamped():     # red-pen BLOC
 def test_recorded_arm_request_is_consumed_exactly_once():         # HIGH-3 consumption path
     s = _store(); _authorize(s)
     BridgeDaemon(s, trusted_pubkey=OP).submit_arm_request(_req(nonce=9, ts=time.time()))
-    req = pending_device_arm(s, OP)
-    assert req is not None and req["pubkey"] == DEV.public_key_b64, "a recorded request is a pending candidate"
+    reqs = pending_device_arms(s, OP)
+    assert len(reqs) == 1 and reqs[0]["pubkey"] == DEV.public_key_b64, "a recorded request is a pending candidate"
     g = _gate(s)
-    assert g.arm_by_device(req, now=time.time()) is not None, "the daemon consumes it → armed"
-    assert pending_device_arm(s, OP) is None, "once armed it is no longer pending (never double-consumed)"
+    assert g.arm_by_device(reqs[0], now=time.time()) is not None, "the daemon consumes it → armed"
+    assert pending_device_arms(s, OP) == [], "once armed it is no longer pending (never double-consumed)"
+
+
+def test_older_valid_arm_is_not_starved_by_a_newer_stale_one():   # re-check FINDING-4
+    from sigil.gesture.components import ScriptedLandmarker
+    from sigil.gesture.features import RuleClassifier
+    from sigil.gesture.run import run_gesture
+    from sigil.perception.camera_stream import ScriptedFrameSource
+    s = _store(); _authorize(s)
+    d = BridgeDaemon(s, trusted_pubkey=OP)
+    now = time.time()
+    d.submit_arm_request(_req(nonce=1, ts=now))              # R1: valid + fresh, recorded FIRST (older seq)
+    d.submit_arm_request(_req(nonce=2, ts=now + 10_000))     # R2: stale (future ts), recorded SECOND (newer seq)
+    b = RecordingInputBackend()
+    g = SessionGate(s, b, classifier=FakeCls(), trusted_pubkey=OP)
+    run_gesture(store=s, source=ScriptedFrameSource([None] * 3), landmarker=ScriptedLandmarker([[]] * 3),
+                classifier=RuleClassifier(), backend=b, gate=g, auto_arm=False, device_arm=True,
+                trusted_pubkey=OP, max_frames=3)
+    armed = [r.payload.get("nonce") for r in s.iter_records()
+             if r.payload.get("signal") == SESSION_ARMED and r.payload.get("armed_by") == "device"]
+    assert 1 in armed, "the older VALID request arms — a newer STALE request does not shadow/starve it"
 
 
 def test_run_gesture_device_arm_activates_from_a_recorded_request():   # HIGH-3 end-to-end

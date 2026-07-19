@@ -45,23 +45,22 @@ INTENT_TOOL = {
 }
 
 
-def pending_device_arm(store, trusted_pubkey=None):
-    """The newest RECORDED device arm request (written by the bridge's `submit_arm_request`) that has NOT
-    yet armed a session — a candidate for `arm_by_device`, which RE-VERIFIES it fully (auth / freshness /
-    kill-switch / replay / single-session / TTL). Returns the request dict, or None. This is the wiring
-    that makes the remote-arm path reachable end-to-end (the gesture daemon consumes it)."""
+def pending_device_arms(store, trusted_pubkey=None):
+    """ALL RECORDED device arm requests (written by the bridge's `submit_arm_request`) that have NOT yet
+    armed a session, OLDEST-FIRST — candidates for `arm_by_device`, which RE-VERIFIES each fully (auth /
+    freshness / kill-switch / replay / single-session / TTL). Returns a list (possibly empty). Oldest-first
+    + returning ALL candidates means a newer STALE request never shadows an older still-valid one. This is
+    the wiring that makes the remote-arm path reachable end-to-end (the gesture daemon consumes it)."""
     armed = set()
-    candidate = None
+    cands = []
     for r in store.iter_records():
         p = r.payload
         if p.get("signal") == SESSION_ARMED and p.get("armed_by") == "device":
             armed.add((p.get("device_pubkey"), p.get("nonce")))
         elif (p.get("signal") == ARM_REQUEST and p.get("decision") == "auto"
               and p.get("sig") and p.get("pubkey")):
-            candidate = dict(p)                       # newest recorded request wins (seq order)
-    if candidate is None or (candidate.get("pubkey"), candidate.get("nonce")) in armed:
-        return None
-    return candidate
+            cands.append(dict(p))
+    return [c for c in cands if (c.get("pubkey"), c.get("nonce")) not in armed]
 
 
 def arm_request_message(core: dict) -> bytes:

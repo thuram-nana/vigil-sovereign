@@ -188,6 +188,22 @@ def test_submit_arm_request_dedups_replayed_bodies():   # Phase 9 sweep MED-5 (s
     assert n == 1, f"exactly one gesture.arm_request record after 5 replays, got {n}"
 
 
+def test_approval_dedup_holds_for_out_of_range_target_seq():   # re-check FINDING-3 (dedup bypass)
+    from sigil.agents.approvals import _approval_message
+    from sigil.reuse import sha256_hex, sign
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, dev = generate_keypair(), generate_keypair()
+    authorize_device(s, "d", dev.public_key_b64, owner)
+    d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
+    tgt = 10 ** 18                                         # a target_seq far PAST the tip
+    msg = _approval_message(tgt, "approved", "device")
+    appr = {"signal": "governor.approval", "approval": "approved", "target_seq": tgt, "approver": "device",
+            "pubkey": dev.public_key_b64, "sig": sign(dev.private_key_b64, msg),
+            "msg_digest": sha256_hex(msg), "device": True}
+    seqs = {d.submit_device_approval(appr) for _ in range(3)}
+    assert len(seqs) == 1, "a replayed approval with an out-of-range target_seq is STILL deduped (full-range scan)"
+
+
 def test_authorized_device_authorizes_operator_execution():
     # BLOCK-1 fix: a device approval must authorize a real EXECUTION gate, not just a queue view.
     import tempfile as tf

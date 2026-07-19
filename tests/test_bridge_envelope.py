@@ -179,6 +179,17 @@ def test_malformed_signature_is_a_clean_refusal_not_a_crash():    # red-pen BLOC
     assert ok is False, "a malformed-length signature returns (False, reason), never an unhandled exception"
 
 
+def test_non_finite_nonce_is_a_clean_refusal_not_a_crash():       # re-check BLOCK (int(inf) → OverflowError)
+    s, dev, auth = _authed()
+    for bad_nonce in (float("inf"), float("-inf"), float("nan")):
+        env = sign_envelope(dev, build_core(dev.public_key_b64, "panic", {}, bad_nonce, 1700000000))
+        try:
+            consume(s, env, auth, effectful=True)
+            assert False, f"a non-finite nonce ({bad_nonce}) must be refused"
+        except ValueError:
+            pass          # clean ValueError — NOT an uncaught OverflowError crashing the handler
+
+
 def test_nonce_zero_is_a_valid_first_value():                     # sweep LOW-7
     s, dev, auth = _authed()
     consume(s, sign_envelope(dev, build_core(dev.public_key_b64, "panic", {}, 0, 1700000000)), auth, effectful=True)

@@ -186,8 +186,11 @@ class Handler(BaseHTTPRequestHandler):
             return None
         try:
             return consume(self.server.store(), payload, authorized, effectful=True)
-        except ValueError as e:                   # replay: nonce not fresh (fail-closed)
+        except ValueError as e:                   # replay / invalid nonce (fail-closed)
             self._deny(409, f"refused: {str(e)[:120]}")
+            return None
+        except Exception as e:  # noqa: BLE001 — never let a consume error crash the handler (no RemoteDisconnected)
+            self._deny(400, f"refused: {type(e).__name__}")
             return None
 
     def _rebind_ok(self) -> bool:

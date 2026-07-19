@@ -62,13 +62,14 @@ def run_gesture(*, store=None, owner_key=None, source=None, landmarker=None, cla
     try:
         for frame in source.frames():
             if device_arm and (g.session is None or not g.session.live):
-                from .session import pending_device_arm     # REMOTE-arm: consume a recorded arm request
-                req = pending_device_arm(store, trusted_pubkey)
-                if req is not None:
-                    _key = (req.get("pubkey"), req.get("nonce"))
-                    if _key not in _attempted:              # attempt each recorded request ONCE — a stale/
-                        _attempted.add(_key)                # refused request must NOT re-spam a refusal per frame
-                        g.arm_by_device(req)                # re-verifies fully; no-op if it doesn't pass
+                from .session import pending_device_arms    # REMOTE-arm: consume recorded arm requests
+                for req in pending_device_arms(store, trusted_pubkey):   # oldest-first — a newer stale one
+                    _key = (req.get("pubkey"), req.get("nonce"))         # can't shadow an older valid one
+                    if _key in _attempted:                  # attempt each recorded request ONCE (no per-frame
+                        continue                            # refusal spam from a stale/refused request)
+                    _attempted.add(_key)
+                    if g.arm_by_device(req) is not None:    # re-verifies fully; stop once one arms
+                        break
             reading = classifier.classify(landmarker.detect(frame))
             intent = pipe.on_frame(reading)
             if intent is not None:
