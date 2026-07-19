@@ -120,6 +120,39 @@ def test_empty_active_seam_no_seq0_fork():
     assert [r.seq for r in SpineStore(p).iter_records()] == [0, 1, 2, 3, 4], "no seq-0 fork across the seam"
 
 
+def test_end_to_end_migrate_rotate_compact_transparency():
+    """Acceptance: the whole pipeline (migrate -> auto-rotate -> compact) preserves integrity and keeps a
+    security-critical full-scan consumer transparent — a kill-switch engage buried in an early, now
+    GZIP-COMPRESSED segment is still reconstructed as engaged, and verify()/count()/the contiguous chain
+    all hold across the mixed gz+plaintext segment set. Retain-all: entry count == records appended."""
+    from sigil.governor.killswitch import KillSwitch
+
+    d = _fresh_dir("sigil-e2e-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=10)
+    s.migrate()
+    _append_n(s, 5)
+    KillSwitch(s).engage(by="owner", reason="e2e")     # seq 5 — buried in seg-0
+    _append_n(s, 44, start=6)                           # seq 6..49 — rotates several times
+    assert len(s.segment_info()) >= 4, "the spine rotated into several segments"
+    assert s.compact() >= 3                             # gzip the sealed segments (incl. the engage's)
+
+    fresh = SpineStore(p)
+    ok, reason = fresh.verify()
+    assert ok, reason                                   # verify_chain spans gz + plaintext from genesis
+    assert fresh.count() == 50
+    assert [r.seq for r in fresh.iter_records()] == list(range(50))
+    assert KillSwitch(SpineStore(p)).is_engaged() is True, "engage in a gz segment reconstructs across compaction"
+
+    # rotation + compaction keep working after, and the chain stays contiguous
+    more = SpineStore(p, seg_max_bytes=0, seg_max_records=10)
+    _append_n(more, 20, start=50)
+    more.compact()
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+    assert SpineStore(p).count() == 70 and SpineStore(p).next_seq == 70
+
+
 def test_legacy_store_is_byte_identical():
     """No manifest ⇒ active target IS the legacy single file; no manifest/segments artifacts appear."""
     d = _fresh_dir("sigil-legacy-")
