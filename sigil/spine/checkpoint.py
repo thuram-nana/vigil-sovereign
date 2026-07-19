@@ -27,6 +27,7 @@ from ..reuse import (
     verify_head,
 )
 from .atomicio import atomic_write_text
+from .floor import Floor, FloorDowngrade, advance_floor, check_floor, floor_lock, load_floor
 from .store import SpineStore
 
 _PRIV = KEYS_DIR / "owner.priv"
@@ -57,15 +58,54 @@ def trust_root() -> TrustRoot:
         AuthorizerKey(key_id=OWNER_KEY_ID, name="owner", public_key_b64=pub)])
 
 
-def checkpoint(store: SpineStore | None = None) -> SignedChainHead:
+def _read_head_on_disk() -> SignedChainHead | None:
+    """The current head.json parsed, or None (absent / unparseable). Used only as a best-effort monotonic
+    race guard — never a security boundary (the floor is)."""
+    try:
+        if not HEAD_PATH.exists():
+            return None
+        return SignedChainHead.model_validate_json(HEAD_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a corrupt/future-schema on-disk head has no comparable count
+        return None
+
+
+def checkpoint(store: SpineStore | None = None, *, force: bool = False) -> SignedChainHead:
+    """Sign the spine head + advance the durable anti-rollback floor as one critical section under a single
+    `floor_lock` (best-effort on non-POSIX / an unwritable home — see floor_lock), so two racing
+    checkpoint() callers do not leave head.json and floor.json inconsistent, and neither the head nor the
+    floor is rolled BACKWARDS by a stale concurrent signer. `force=True` (the `sigil floor reset` path)
+    re-anchors a deliberately SHORTER spine — it skips the monotonic head guard; the caller then
+    force-lowers the floor."""
     store = store or SpineStore()
     priv, _ = _owner_keys()
     head = sign_head(store.entries(), engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, priv)])
-    _atomic_write_text(HEAD_PATH, head.model_dump_json())   # FIX 3: never leave a torn head on a crash
+    with floor_lock():                                      # serialize head+floor commit across all callers
+        if not force:
+            # MONOTONIC HEAD GUARD: never roll head.json back to a shorter head — a concurrent checkpoint()
+            # that already committed a LONGER head (and advanced the floor to it) would otherwise be undone
+            # on disk, and the (higher) floor would then spurious-TAMPER the shorter head we wrote.
+            disk = _read_head_on_disk()
+            if disk is not None and disk.entry_count > head.entry_count:
+                return disk                                 # our sign is stale; the newer head stands
+        _atomic_write_text(HEAD_PATH, head.model_dump_json())   # FIX 3: never leave a torn head on a crash
+        # Advance the floor UNDER THE SAME LOCK (re-loads prior inside advance -> last-writer-monotonic).
+        # BEST-EFFORT so a floor problem never bricks signing (consolidate + warden-anchor route here too),
+        # AND a not-advanced floor only ever REJECTS MORE — never a false-CLEAN — so warning is fail-SAFE.
+        try:
+            advance_floor(head, _locked=True)
+        except FloorDowngrade as e:                         # the INTENDED downward-refusal (e.g. post-reset) — benign
+            import sys
+            print(f"warning: durable anti-rollback floor not advanced ({e}); run `sigil floor reset` after "
+                  f"a deliberate reset/restore", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 — a REAL IO/write/corrupt-or-wrong-scope-load failure — surface loudly
+            import sys
+            print(f"ERROR: durable anti-rollback floor WRITE FAILED ({e}) — the floor may be stale; "
+                  f"investigate before trusting `sigil verify`", file=sys.stderr)
     return head
 
 
-def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot) -> tuple[bool, str]:
+def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot,
+                  *, floor: Floor | None = None) -> tuple[bool, str]:
     """Pure head/chain classification (no globals — testable in isolation), SNAPSHOT-AWARE for the
     cold-archive hard-prune. The live window is selected BY SEQ (`seq >= base_seq`), not by array prefix, so
     every crash-cutover state verifies clean. Failures are TAMPERING (front-truncation, tail-truncation, or
@@ -93,6 +133,18 @@ def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot) -> tuple[
     ok, msg = verify_head(head, live[:signed_live], tr, genesis_prev=head.base_prev_hash)
     if not ok:
         return False, f"TAMPERING: history rewritten at or below the signed head — {msg}"
+    # DURABLE EXTERNAL FLOOR (hard-prune C1) — runs AFTER the in-band signature check, so it only ever
+    # ADDS a rejection: a VALIDLY-signed but STALE head is caught here by the monotonic floor / meta-chain,
+    # which the in-band signature cannot catch on its own. HONEST SCOPE (do not overclaim): this catches a
+    # stale head ONLY when `floor` is a NEWER value the attacker did NOT roll back — i.e. an OUT-OF-BAND
+    # verifier holding a retained floor (a paired device over WireGuard), or the routine `--reset` path
+    # (the floor survives the spine-dir rmtree). It does NOT stop a same-host attacker who can also rewrite
+    # the UNSIGNED floor.json: the local verify reads the floor fresh from that same attacker-controlled
+    # disk, rolling head.json and floor.json back together (see floor.py HONEST LIMIT). No floor -> pass
+    # (byte-identical to pre-floor).
+    ok_floor, floor_msg = check_floor(head, floor)
+    if not ok_floor:
+        return False, f"TAMPERING: {floor_msg}"
     if len(live) > signed_live:
         return True, f"anchors {signed_live} records; {len(live) - signed_live} appended since — run `sigil sign` to re-anchor"
     return True, f"anchors all {signed_live} records (current)"
@@ -115,4 +167,8 @@ def verify_checkpoint(store: SpineStore | None = None) -> tuple[bool, str]:
         return False, "corrupt head — cannot parse (run `sigil sign` to re-anchor)"
     if head.schema_version > _MAX_HEAD_SCHEMA:
         return False, f"head schema v{head.schema_version} too new — upgrade sigil (never treated as clean)"
-    return classify_head(head, store.entries(), trust_root())
+    try:
+        floor = load_floor()                                # None if absent -> byte-identical to pre-floor
+    except Exception as e:  # noqa: BLE001 — a PRESENT-but-corrupt floor is suspicious; fail CLOSED, never clean
+        return False, f"durable anti-rollback floor unreadable — refuse to certify (possible tamper): {e}"
+    return classify_head(head, store.entries(), trust_root(), floor=floor)

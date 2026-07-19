@@ -54,6 +54,10 @@ SPINE_PATH = _spine / "spine.jsonl"
 HEAD_PATH = _spine / "head.json"
 KEYS_DIR = _spine / "keys"
 CACHE_DIR = SIGIL_HOME / "cache"
+# Durable external anti-rollback floor (hard-prune C1). At the SIGIL_HOME root, deliberately OUTSIDE
+# `spine/` so `SpineStore.reset()` / `sigil ingest --reset` (which rmtree the spine dir) can NEVER lower
+# it — a routine reset cannot roll the durable floor back. See spine/floor.py.
+FLOOR_PATH = SIGIL_HOME / "floor.json"
 
 # The segment-rotation layout (manifest, lockfile, segments dir, …) is NOT named here: it is derived from
 # the spine data-file path — and NAMESPACED BY THAT FILE'S STEM — by `spine.manifest.SpineLayout.for_path`,

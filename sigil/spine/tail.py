@@ -29,6 +29,7 @@ from ..config import HEAD_PATH
 from ..reuse import SignedChainHead
 from ..reuse.chain import _GENESIS_PREV
 from .checkpoint import _MAX_HEAD_SCHEMA, classify_head, trust_root
+from .floor import load_floor
 from .store import SpineStore
 from .verify import verify_record
 
@@ -113,7 +114,13 @@ class SpineTailer:
                     "reason": "no signed checkpoint — the live tail is well-formed but UN-NOTARIZED "
                               "(run `sigil sign` to anchor)"}
         try:
-            ok, reason = classify_head(head, entries, tr)
+            floor = load_floor()                            # None if absent -> byte-identical to pre-floor
+        except Exception as e:  # noqa: BLE001 — a PRESENT-but-corrupt floor is suspicious; fail CLOSED, never clean
+            self._signed_last_seq = -1
+            return {"anchor_ok": False, "signed_last_seq": -1, "rollback": rollback,
+                    "reason": f"durable anti-rollback floor unreadable ({e})"}
+        try:
+            ok, reason = classify_head(head, entries, tr, floor=floor)
         except Exception as e:  # noqa: BLE001 — a malformed head must FAIL closed, never crash the feed
             self._signed_last_seq = -1
             return {"anchor_ok": False, "signed_last_seq": -1, "rollback": rollback,

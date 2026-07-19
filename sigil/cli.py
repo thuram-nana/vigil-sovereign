@@ -23,6 +23,13 @@ def cmd_ingest(a) -> None:
         cur.clear()
         VectorIndex().reset()
         print("  reset: spine + cursor + vectors cleared")
+        # The durable anti-rollback floor lives OUTSIDE spine/ and is intentionally NOT cleared here — a
+        # reset must not be able to silently lower it. Re-signing an emptied spine will flag ROLLBACK until
+        # the floor is deliberately re-seeded.
+        from .config import FLOOR_PATH
+        if FLOOR_PATH.exists():
+            print("  note: durable anti-rollback floor preserved — run `sigil floor reset --yes` to re-seed "
+                  "it to the fresh spine (else `sigil verify` will report ROLLBACK)")
     store = SpineStore()
     cursor = cur.load()
     total_events = 0
@@ -70,7 +77,17 @@ def cmd_index(a) -> None:
 
 
 def cmd_sign(a) -> None:
-    head = checkpoint()
+    store = SpineStore()
+    head = checkpoint(store)
+    tip = store.next_seq - 1
+    if store.count() and head.last_seq != tip:
+        # The monotonic head guard deferred: head.json already anchors a LONGER head than this spine's
+        # tip (a concurrent sign, or a planted head). We did NOT re-sign — report honestly, never a
+        # misleading success line echoing the on-disk head.
+        print(f"NOT re-signed: head.json already anchors last_seq={head.last_seq} > this spine's tip "
+              f"{tip}. Run `sigil floor reset --yes` after a legitimate truncation/restore, or remove a "
+              f"planted head.json.", file=sys.stderr)
+        sys.exit(2)
     print(f"signed spine head: last_seq={head.last_seq} entries={head.entry_count} head_hash={head.head_hash[:16]}…")
 
 
@@ -504,6 +521,35 @@ def cmd_spine(a) -> None:
             print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
 
 
+def cmd_floor(a) -> None:
+    """The durable external anti-rollback floor (hard-prune C1). `status` prints it (read-only). `reset`
+    DELIBERATELY re-seeds it downward to the current spine — the only path that may lower it — for a
+    legitimate reset/restore; owner-key-gated (re-signs the spine) + requires --yes."""
+    from .spine.floor import load_floor, reset_floor
+    if a.action == "status":
+        try:
+            fl = load_floor()
+        except Exception as e:  # noqa: BLE001 — a corrupt floor is surfaced, never treated as absent/clean
+            print(f"durable floor UNREADABLE (possible tamper): {e}", file=sys.stderr)
+            sys.exit(2)
+        if fl is None:
+            print("durable floor: none yet (pre-floor or never signed) — `sigil sign` seeds it")
+            return
+        print(f"durable floor: last_seq={fl.last_seq} base_seq={fl.base_seq} base_count={fl.base_count} "
+              f"head_sig={fl.head_sig_hash[:16]}… scope={fl.scope} updated={fl.updated_ts}")
+    elif a.action == "reset":
+        if not a.yes:
+            print("refusing: `sigil floor reset` DELIBERATELY LOWERS the durable anti-rollback floor to the "
+                  "current spine — only run this after a legitimate reset/restore, never routinely. Re-run "
+                  "with --yes to confirm.", file=sys.stderr)
+            sys.exit(2)
+        store = SpineStore()
+        head = checkpoint(store, force=True)  # owner-key-gated: re-sign the current spine (force: allow a
+        fl = reset_floor(head)                # SHORTER head), then force the floor down to that fresh head.
+        print(f"durable floor RE-SEEDED to current head: last_seq={fl.last_seq} base_seq={fl.base_seq} "
+              f"base_count={fl.base_count}")
+
+
 def cmd_budget(a) -> None:
     """Read-only per-agent budget usage (actions / interrupts / provider tokens / USD cost) for a UTC day,
     derived from the spine (zero-impact). Caps (opt-in, from ~/.sigil/budgets.json) are shown for context."""
@@ -644,6 +690,10 @@ def main(argv=None) -> None:
     pbud.set_defaults(fn=cmd_budget)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate downward re-seed)")
+    pfl.add_argument("action", choices=["status", "reset"])
+    pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")
+    pfl.set_defaults(fn=cmd_floor)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact (gzip); convert (backup+migrate+compact); status")
     psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status"])
     psp.set_defaults(fn=cmd_spine)
