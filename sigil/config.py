@@ -55,6 +55,11 @@ HEAD_PATH = _spine / "head.json"
 KEYS_DIR = _spine / "keys"
 CACHE_DIR = SIGIL_HOME / "cache"
 
+# The segment-rotation layout (manifest, lockfile, segments dir, …) is NOT named here: it is derived from
+# the spine data-file path — and NAMESPACED BY THAT FILE'S STEM — by `spine.manifest.SpineLayout.for_path`,
+# which is the single source of truth. Naming fixed constants here would drift from that namespacing and
+# would wrongly assume the spine dir is private to one store (it is not, e.g. under tempfile.mktemp).
+
 # --- ingestion sources ----------------------------------------------------------------
 CLAUDE_PROJECTS = Path(os.environ.get("SIGIL_CLAUDE_PROJECTS", str(Path.home() / ".claude" / "projects")))
 # Phase-0a thin slice: PENTEST-main only. Slugified cwd = dir name under ~/.claude/projects.

@@ -12,11 +12,21 @@ import json
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from ..config import SCOPE, SPINE_PATH
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
+from .atomicio import fsync_dir
+from .manifest import (
+    Manifest,
+    SpineLayout,
+    initial_manifest,
+    read_manifest,
+    segment_filename,
+    write_manifest,
+)
 from .models import SpineRecord, now_iso
 
 try:
@@ -25,6 +35,13 @@ except ImportError:  # pragma: no cover — non-POSIX
     fcntl = None  # type: ignore[assignment]
 
 _log = logging.getLogger(__name__)
+
+
+class SpineError(Exception):
+    """A structural spine fault — a corrupt/degenerate manifest or a manifest-referenced segment that
+    cannot be read. Raised so the caller fails CLOSED rather than silently reading a truncated/empty
+    chain (invariant 15: a state-scanner must never fail open)."""
+
 
 # The record fields SpineRecord.from_dict needs; a line missing any of these is corrupt (skipped by
 # reads, so a mid-file gap still surfaces via verify()).
@@ -123,19 +140,208 @@ def _last_valid_boundary(path: Path) -> "tuple[int, ChainEntry | None]":
 
 class SpineStore:
     def __init__(self, path: Path | str = SPINE_PATH) -> None:
+        # `self.path` is the STABLE identity + lock token (…/spine.jsonl). After a migration it is renamed
+        # away and no longer a data file, but it remains the key for the in-process RLock and the anchor
+        # the whole layout derives from — so the RLock that `envelope.consume` shares with `append` stays
+        # the same object across a rotation (invariant 14). All DATA I/O targets `self._active` (the
+        # manifest's active segment, or — with no manifest yet — the legacy single file in place, which is
+        # byte-identical to the pre-rotation store).
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._layout = SpineLayout.for_path(self.path)
+        # NB: `segments/` is created only when actually migrating/rotating (not on every construction), so a
+        # legacy/fresh store leaves the spine dir byte-identical to today (no stray empty dirs).
+        self._manifest: Manifest | None = read_manifest(self._layout)
+        self._reconcile_orphan_migration()          # complete a migrate() interrupted before the manifest write
+        self._active: Path = self._resolve_active_path()
         # seq -> byte-offset index (FIX 1). Built lazily on the first TARGETED read (get / iter_records
         # with since_seq >= 0) and then kept current: maintained O(1) on our own appends, and extended
         # (never rewritten — an append-only file's offsets never move) when a stat shows another PROCESS
         # grew the file. Full scans (verify/count/entries/iter_records(-1)) never touch it, staying a
         # single byte-identical pass. `_index_lock` guards the dict against concurrent read+append.
+        # Slice 0/1: the index is single-segment (over `self._active`); it is (segment, offset)-aware in
+        # a later slice. It is invalidated whenever the active segment changes under us.
         self._index_lock = threading.Lock()
         self._index_built = False
         self._offsets: dict[int, int] = {}
         self._max_seq = -1
         self._scan_pos = 0                          # byte offset just past the last COMPLETE line indexed
         self._last: ChainEntry | None = self._read_last_entry()
+
+    # --- segment layout / manifest ------------------------------------------------
+    def _resolve_active_path(self) -> Path:
+        """The current append/read target. With a manifest, the active segment's absolute path; without
+        one (a fresh or not-yet-migrated legacy spine), the legacy single file in place — byte-identical
+        to the pre-rotation store, so nothing destructive happens until an explicit `migrate()`. A manifest
+        that exists but names NO active segment is a corrupt/degenerate state and RAISES rather than
+        silently falling back to `spine.jsonl` (which would resurrect a data file OUTSIDE the segment set —
+        a fork; the guard also removes the same landmine for Slice-3 sealing, which must always leave an
+        active segment)."""
+        if self._manifest is not None:
+            act = self._manifest.active()
+            if act is None:
+                raise SpineError("manifest has no active segment (corrupt/degenerate) — refusing to "
+                                 "resurrect spine.jsonl outside the segment set")
+            return self._layout.seg_path(act)
+        return self.path
+
+    def _read_target(self) -> Path:
+        """The file to read for THIS operation. Normally the cached active segment; if it has VANISHED (a
+        migrate()/rotation in another process renamed it away), resolve the current active from the
+        manifest for this read only — WITHOUT mutating shared state (lock-free reads must not race
+        append's active update). Prevents a false-EMPTY read during the migrate instant, which for the
+        nonce-highwater scan would regress the replay floor. In Slice 0 the only mover is migrate(), which
+        RENAMES (byte-preserving), so the current index offsets stay valid for the resolved file. Fully
+        epoch-invalidated, segment-spanning reads land in Slice 1."""
+        a = self._active
+        if a.exists():
+            return a
+        m = read_manifest(self._layout)
+        act = m.active() if m is not None else None
+        if act is not None:
+            r = self._layout.seg_path(act)
+            if r.exists():
+                return r
+        # PRE-manifest migrate window: the atomic rename has already placed the data at seg-0 but the
+        # manifest is not published yet (so `m is None`). Read it there — otherwise a lock-free reader in
+        # exactly this instant sees a false-EMPTY spine (kill-switch un-halt / nonce-floor regression) and
+        # the indexed read path can hit a bare FileNotFoundError. seg-0 is byte-identical (rename), so the
+        # index built over the vanished file stays valid on it.
+        if m is None:
+            seg0 = self._layout.segments_dir / segment_filename(0)
+            if seg0.exists() and not self.path.exists():
+                return seg0
+        return a
+
+    @contextmanager
+    def _crossproc_lock(self) -> "Iterator[None]":
+        """Cross-process exclusion on the inode-stable lockfile (invariant 14 / D3). flock binds to the
+        open file DESCRIPTION, not the path, so an os.replace of the manifest/segments cannot move the
+        lock out from under a concurrent writer — which the prior flock-on-the-data-fd could not survive.
+        Best-effort exactly as before (fcntl absent on non-POSIX; a flock failure is swallowed). NOT
+        re-entrant across fds — never nest a second `_crossproc_lock` inside one (a second LOCK_EX on the
+        same file from a different fd self-deadlocks); the seal-swap that runs inside append reuses the
+        already-held lock rather than re-acquiring."""
+        if fcntl is None:  # pragma: no cover — non-POSIX
+            yield
+            return
+        self._layout.lockfile_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self._layout.lockfile_path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:  # pragma: no cover
+                pass
+            yield
+        finally:
+            os.close(fd)
+
+    def _complete_orphan_migration_locked(self) -> bool:
+        """MUST hold `_crossproc_lock`, and be called only when the manifest is currently ABSENT. If we are
+        in the migrate() crash window — seg-0 present, `spine.jsonl` gone (the rename is atomic + durable),
+        no manifest — finish the interrupted migration by publishing the manifest. Returns True iff it
+        completed one. Called from BOTH __init__'s reconciler AND append's `_refresh_active_under_lock`, so
+        a LIVE appender completes the orphan under the lock instead of re-creating `spine.jsonl` and forking
+        the log (the critical review finding)."""
+        seg0 = self._layout.segments_dir / segment_filename(0)
+        if seg0.exists() and not self.path.exists():
+            write_manifest(self._layout, initial_manifest(SCOPE, active_file=self._layout.segment_rel(0)))
+            _log.warning("spine: completed an interrupted migration — published the manifest for %s", seg0)
+            return True
+        return False
+
+    def _refresh_active_under_lock(self) -> None:
+        """MUST hold `_crossproc_lock`. FIRST complete any interrupted migration (so a live appender never
+        resurrects `spine.jsonl`), THEN re-resolve the active segment from the manifest so an appender
+        constructed before a concurrent migrate()/rotation writes to the CURRENT target — never a stale
+        path (fork) or a renamed-away file (resurrection). One manifest read in the steady state."""
+        m = read_manifest(self._layout)
+        if m is None and self._complete_orphan_migration_locked():
+            m = read_manifest(self._layout)
+        new_active = self.path
+        act = m.active() if m is not None else None
+        if act is not None:
+            new_active = self._layout.seg_path(act)
+        if new_active != self._active or (m is not None) != (self._manifest is not None):
+            self._manifest = m
+            self._active = new_active
+            self._invalidate_index()
+            self._last = self._read_last_entry()
+
+    def _invalidate_index(self) -> None:
+        """Drops the single-segment index so the next read rebuilds it against the (possibly changed)
+        active segment."""
+        with self._index_lock:
+            self._index_built = False
+            self._offsets = {}
+            self._max_seq = -1
+            self._scan_pos = 0
+
+    def _reconcile_orphan_migration(self) -> None:
+        """Close the migrate() crash window at CONSTRUCTION. migrate() does an ATOMIC
+        `os.replace(spine.jsonl → segments/seg-00000000.jsonl)` and THEN publishes the manifest; a crash
+        BETWEEN them leaves seg-0 present, `spine.jsonl` gone, and no manifest — at which point the legacy
+        fallback (active = spine.jsonl) would read the spine as EMPTY and silently hide all history. If we
+        observe exactly that state, finish the (already-durable) migration under the lock. (A live appender
+        does the same via `_refresh_active_under_lock`; a construction-time pass just recovers faster.)"""
+        if self._manifest is not None:
+            return
+        seg0 = self._layout.segments_dir / segment_filename(0)
+        if not (seg0.exists() and not self.path.exists()):
+            return
+        with self._crossproc_lock():
+            if read_manifest(self._layout) is None:          # re-check under the lock
+                self._complete_orphan_migration_locked()
+            self._manifest = read_manifest(self._layout)
+
+    def change_token(self) -> tuple:
+        """A cheap, rotation-aware epoch token — (manifest generation, active file, size, inode) — that
+        changes on ANY append (size), a migration/rotation (generation + active path/inode), or a reset.
+        THE unified replacement for the size-only 'has the spine changed?' heuristic at every site
+        (invariant 9 / A4) — notably the kill-switch verdict caches in `governor/killswitch.py` and
+        `gesture/session.py`. Because it reads the manifest FRESH and keys on the resolved active segment
+        (not the legacy `store.path`, which a migration renames away), a same-size rotation — or a
+        migration performed by another process — can never serve a stale (un-halting) kill-switch verdict."""
+        m = read_manifest(self._layout)
+        gen = m.generation if m is not None else -1
+        active = self.path
+        act = m.active() if m is not None else None
+        if act is not None:
+            active = self._layout.seg_path(act)
+        try:
+            st = active.stat()
+            return (gen, str(active), st.st_size, st.st_ino)
+        except OSError:
+            return (gen, str(active), -1, -1)
+
+    def migrate(self) -> bool:
+        """Move a legacy single-file spine into the segment layout: rename `spine.jsonl` →
+        `<stem>.segments/seg-00000000.jsonl` (atomic, same filesystem — O(1), no byte copy) and publish a
+        single-active-segment manifest. Idempotent (a no-op once a manifest exists). Returns True iff it
+        migrated. SPLIT-BRAIN SAFETY: run this only after every spine writer is on code that flocks the
+        path-stable lockfile (this Slice-0 code) and re-resolves the active segment under that lock — a
+        stale appender then completes/observes the migration instead of resurrecting `spine.jsonl`. After
+        migration `spine.jsonl` is absent and is NEVER re-created as a data file (all data I/O targets the
+        active segment)."""
+        with spine_lock(self.path):
+            with self._crossproc_lock():
+                if read_manifest(self._layout) is not None:
+                    self._refresh_active_under_lock()
+                    return False
+                self._layout.segments_dir.mkdir(parents=True, exist_ok=True)
+                seg0_abs = self._layout.segments_dir / segment_filename(0)
+                if self.path.exists():
+                    os.replace(self.path, seg0_abs)         # atomic rename (same fs); O(1), no copy
+                    fsync_dir(self._layout.spine_dir)       # persist the SOURCE-dir unlink of spine.jsonl
+                else:
+                    seg0_abs.touch()                        # fresh spine: create the empty active segment
+                fsync_dir(self._layout.segments_dir)        # persist the TARGET-dir creation of seg-0
+                write_manifest(self._layout, initial_manifest(SCOPE, active_file=self._layout.segment_rel(0)))
+                self._manifest = read_manifest(self._layout)
+                self._active = self._resolve_active_path()
+                self._invalidate_index()
+                self._last = self._read_last_entry()
+                return True
 
     # --- write --------------------------------------------------------------------
     def append(
@@ -149,48 +355,48 @@ class SpineStore:
         }
         cert_digest = digest_payload(content)  # wallclock-free
         # Serialize the whole read-tip → write so concurrent writers (threaded bridge server, gesture
-        # daemon) can't both fork off a stale tip and break the chain. Re-read the TRUE tip from disk
-        # under the lock — `self._last` may be stale if another instance/process appended.
+        # daemon) can't both fork off a stale tip and break the chain. The in-process RLock is keyed on
+        # the STABLE `self.path` (unchanged), so the check-then-append gate `envelope.consume` builds on
+        # top of it stays atomic across a rotation. Re-read the TRUE tip from disk under the lock.
         with spine_lock(self.path):
-            # binary append+read: lets us TRUNCATE a torn tail before writing (BLOCK-1 fix). `a+b` creates
-            # the file if absent and — in append mode — every write still lands at EOF.
-            with self.path.open("a+b") as f:
-                if fcntl is not None:
-                    try:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)   # cross-process guard (advisory)
-                    except OSError:  # pragma: no cover
-                        pass
-                # BLOCK-1: an interrupted write can leave torn bytes PAST the last valid record. Appending
-                # after them would MERGE (torn + new) into one unparseable line → the new record is silently
-                # lost, verify() stays green, and a lost kill-switch panic never halts the mesh. Truncate the
-                # dead tail back to the last valid record FIRST (this only removes never-committed garbage
-                # from an interrupted write; committed records are untouched).
-                clean_end, last = _last_valid_boundary(self.path)
-                pre_size = os.fstat(f.fileno()).st_size
-                if pre_size > clean_end:
-                    f.truncate(clean_end)
-                    _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
-                                 pre_size - clean_end, self.path)
-                entry = append_entry([last], cert_digest) if last else build_chain([cert_digest])[0]
-                record = {
-                    "seq": entry.seq, **content, "ts": ts or now_iso(),
-                    "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
-                }
-                line = json.dumps(record, ensure_ascii=False) + "\n"
-                offset = clean_end                      # after any truncate, EOF == clean_end (where the line lands)
-                f.write(line.encode("utf-8"))
-                f.flush()
-                os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
-                # FIX 1: keep the index current with NO re-scan when it is already exactly up to date.
-                # If another PROCESS appended in between, `_scan_pos < offset` and we skip here — the next
-                # read's `_ensure_index` extends from `_scan_pos`, picking up the gap records AND this one.
-                with self._index_lock:
-                    if self._index_built and self._scan_pos == offset:
-                        self._offsets[entry.seq] = offset
-                        if entry.seq > self._max_seq:
-                            self._max_seq = entry.seq
-                        self._scan_pos = offset + len(line.encode("utf-8"))
-            self._last = entry
+            with self._crossproc_lock():                 # cross-process guard on the path-stable lockfile
+                self._refresh_active_under_lock()        # pick up a concurrent migrate()/rotation; never fork
+                active = self._active
+                # binary append+read: lets us TRUNCATE a torn tail before writing (BLOCK-1 fix). `a+b`
+                # creates the file if absent and — in append mode — every write still lands at EOF.
+                with active.open("a+b") as f:
+                    # BLOCK-1: an interrupted write can leave torn bytes PAST the last valid record. Appending
+                    # after them would MERGE (torn + new) into one unparseable line → the new record is silently
+                    # lost, verify() stays green, and a lost kill-switch panic never halts the mesh. Truncate the
+                    # dead tail back to the last valid record FIRST (this only removes never-committed garbage
+                    # from an interrupted write; committed records are untouched). Evaluated on the ACTIVE
+                    # segment under the lock (invariant 7 — the append target is always the true chain tip).
+                    clean_end, last = _last_valid_boundary(active)
+                    pre_size = os.fstat(f.fileno()).st_size
+                    if pre_size > clean_end:
+                        f.truncate(clean_end)
+                        _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
+                                     pre_size - clean_end, active)
+                    entry = append_entry([last], cert_digest) if last else build_chain([cert_digest])[0]
+                    record = {
+                        "seq": entry.seq, **content, "ts": ts or now_iso(),
+                        "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
+                    }
+                    line = json.dumps(record, ensure_ascii=False) + "\n"
+                    offset = clean_end                      # after any truncate, EOF == clean_end (where the line lands)
+                    f.write(line.encode("utf-8"))
+                    f.flush()
+                    os.fsync(f.fileno())                    # FIX 3: an ack'd append is durable across a crash
+                    # FIX 1: keep the index current with NO re-scan when it is already exactly up to date.
+                    # If another PROCESS appended in between, `_scan_pos < offset` and we skip here — the next
+                    # read's `_ensure_index` extends from `_scan_pos`, picking up the gap records AND this one.
+                    with self._index_lock:
+                        if self._index_built and self._scan_pos == offset:
+                            self._offsets[entry.seq] = offset
+                            if entry.seq > self._max_seq:
+                                self._max_seq = entry.seq
+                            self._scan_pos = offset + len(line.encode("utf-8"))
+                self._last = entry
         return entry.seq
 
     # --- read ---------------------------------------------------------------------
@@ -200,10 +406,11 @@ class SpineStore:
         at byte 0 exactly as before. FIX 2: a line that fails to parse or lacks required keys is SKIPPED
         (a torn tail no longer crashes the read); a torn MIDDLE line becomes a seq gap that verify() fails
         on, so mid-file tampering is never silently hidden."""
-        if not self.path.exists():
+        target = self._read_target()
+        if not target.exists():
             return
         start_off = self._start_offset_for(since_seq)
-        with self.path.open("rb") as f:
+        with target.open("rb") as f:
             if start_off:
                 f.seek(start_off)
             for raw in f:
@@ -212,20 +419,20 @@ class SpineStore:
                 try:
                     rec = SpineRecord.from_dict(json.loads(raw))
                 except (ValueError, KeyError, TypeError):
-                    _log.warning("spine: skipping malformed line during iter_records (%s)", self.path)
+                    _log.warning("spine: skipping malformed line during iter_records (%s)", self._active)
                     continue
                 if rec.seq > since_seq:
                     yield rec
 
     def get(self, seq: int) -> SpineRecord | None:
         """A single record by seq — O(1) via the index (FIX 1), byte-identical to a full scan."""
-        if seq < 0 or not self.path.exists():
+        if seq < 0 or not self._read_target().exists():
             return None
         self._ensure_index()
         with self._index_lock:
             off = self._offsets.get(seq)
         if off is not None:
-            with self.path.open("rb") as f:
+            with self._read_target().open("rb") as f:
                 f.seek(off)
                 raw = f.readline()
             try:
@@ -248,9 +455,10 @@ class SpineStore:
         distinct bodies larger than the window each ages out and re-records. Only pair `tail()`-based
         dedup with a record-time freshness gate (or an independent bound); do not rely on it alone to
         close a bloat sink."""
-        if n <= 0 or not self.path.exists():
+        target = self._read_target()
+        if n <= 0 or not target.exists():
             return []
-        with self.path.open("rb") as f:
+        with target.open("rb") as f:
             f.seek(0, os.SEEK_END)
             pos = f.tell()
             buf = b""
@@ -305,7 +513,8 @@ class SpineStore:
     def _read_last_entry(self) -> ChainEntry | None:
         # `_last_nonempty_line` skips a torn/garbage tail and returns the last VALID line (FIX 2), so a
         # crash mid-write can no longer block a restart. The returned line is guaranteed parseable.
-        line = _last_nonempty_line(self.path) if self.path.exists() else None
+        target = self._read_target()
+        line = _last_nonempty_line(target) if target.exists() else None
         if not line:
             return None
         d = json.loads(line)
@@ -331,8 +540,9 @@ class SpineStore:
         """Build the index lazily (one unavoidable scan) and keep it current. Detects a file that GREW
         (our own or another PROCESS's appends — append-only ⇒ offsets never move, so we only EXTEND) and
         a file that SHRANK / was rewritten in place smaller (rebuild). Thread-safe under `_index_lock`."""
+        target = self._read_target()
         try:
-            size = self.path.stat().st_size if self.path.exists() else 0
+            size = target.stat().st_size if target.exists() else 0
         except OSError:
             return
         with self._index_lock:
@@ -356,7 +566,7 @@ class SpineStore:
         surfaces via verify()); a trailing partial line (no newline yet) is left for the next extend."""
         if size <= start:
             return
-        with self.path.open("rb") as f:
+        with self._read_target().open("rb") as f:
             f.seek(start)
             chunk = f.read(size - start)
         consumed = 0
