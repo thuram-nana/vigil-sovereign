@@ -504,6 +504,27 @@ def cmd_spine(a) -> None:
             print(f"  seg-{s['id']:08d} {s['codec']:4} {where:24} {s['bytes']:>13,} bytes  {s['file']}")
 
 
+def cmd_budget(a) -> None:
+    """Read-only per-agent budget usage (actions / interrupts / provider tokens / USD cost) for a UTC day,
+    derived from the spine (zero-impact). Caps (opt-in, from ~/.sigil/budgets.json) are shown for context."""
+    from datetime import datetime, timezone
+
+    from .governor import Governor
+    day = a.day or datetime.now(timezone.utc).date().isoformat()
+    led = Governor(SpineStore()).budget
+    c = led.caps
+    print(f"# SIGIL budget — {day}")
+    print(f"caps: actions={c.daily_actions} interrupts={c.daily_interrupts} "
+          f"tokens={c.daily_tokens} cost_usd={c.daily_cost_usd}")
+    rep = led.report(day)
+    for agent in sorted(rep):
+        u = rep[agent]
+        print(f"  {agent}: {u['actions']} action(s), {u['interrupts']} interrupt(s), "
+              f"{u['tokens']} token(s), ${u['cost_usd']:.4f}")
+    if not rep:
+        print("  (no agent activity)")
+
+
 def cmd_doctor(a) -> None:
     """Whole-install self-check: SIGIL_HOME writable, kernel present, Qdrant reachable, keyring, claude."""
     import sys as _sys
@@ -618,6 +639,9 @@ def main(argv=None) -> None:
         pap.add_argument("--reason", default=None)
         pap.set_defaults(fn=cmd_approve, decision=name)
     sub.add_parser("dashboard", help="read-only operator status over the spine").set_defaults(fn=cmd_dashboard)
+    pbud = sub.add_parser("budget", help="per-agent action/interrupt/token/cost budget usage for a UTC day (read-only)")
+    pbud.add_argument("--day", help="UTC date YYYY-MM-DD (default: today)")
+    pbud.set_defaults(fn=cmd_budget)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact (gzip); convert (backup+migrate+compact); status")
