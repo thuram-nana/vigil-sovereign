@@ -380,6 +380,46 @@ def test_cli_spine_migrate_and_status(capsys):
         SpineStore().reset()                               # don't leak a migrated default spine to other tests
 
 
+def test_reset_keeps_lockfile_so_it_still_excludes(monkeypatch):
+    """Review F1: reset() must NOT unlink the lockfile it holds (flock binds to the inode, not the path),
+    or a concurrent appender opens a new inode and slips the lock during the destructive rmtree. Assert the
+    lockfile survives reset so its flock keeps excluding appenders for the whole critical section."""
+    d = _fresh_dir("sigil-resetlock-")
+    _make_segmented(d, [3, 2])
+    p = d / "spine.jsonl"
+    lay = SpineLayout.for_path(p)
+    SpineStore(p).append(kind="event", source="t", actor="u", payload={"n": 99})   # ensure the lockfile exists
+    assert lay.lockfile_path.exists()
+    SpineStore(p).reset()
+    assert lay.lockfile_path.exists(), "reset() must keep the path-stable lockfile (it holds its flock)"
+    assert not lay.manifest_path.exists() and not lay.segments_dir.exists()
+
+
+def test_get_fails_closed_on_missing_segment():
+    """Review F2a: get() of a seq in a SURVIVING segment must NOT fail open while the chain is truncated —
+    it fails closed (raises) exactly like the scans, not returns a value from stale index state."""
+    import pytest
+    d = _fresh_dir("sigil-getclosed-")
+    lay = _make_segmented(d, [3, 3])                       # seg-0 seq0-2 sealed; seg-1 seq3-5 active
+    s = SpineStore(d / "spine.jsonl")
+    assert s.get(4) is not None                            # warm the index while whole
+    (lay.segments_dir / "seg-00000000.jsonl").unlink()     # a DIFFERENT segment vanishes
+    with pytest.raises(SpineError):
+        s.get(4)                                           # must fail closed, not return seq 4 from seg-1
+
+
+def test_append_fails_closed_not_fork_when_seam_unreadable():
+    """Review F3: append into an empty non-genesis active whose seam boundary is unreadable must FAIL
+    CLOSED (refuse) — never build_chain from genesis and write a seq-0 fork into a first_seq>0 segment."""
+    import pytest
+    d = _fresh_dir("sigil-seamclosed-")
+    lay = _make_segmented(d, [4, 0])                       # seg-0 sealed seq0-3; seg-1 active EMPTY first_seq=4
+    (lay.segments_dir / "seg-00000000.jsonl").unlink()     # the seam boundary vanishes
+    s = SpineStore(d / "spine.jsonl")
+    with pytest.raises(SpineError):
+        s.append(kind="event", source="t", actor="u", payload={"n": 4})   # must refuse, not fork at seq 0
+
+
 def test_stale_appender_reresolves_no_split_brain():
     """The core split-brain test. Instance A appends in legacy mode; instance B migrates; A appends
     again. A MUST re-resolve the active segment under the lock and write to the migrated segment — never

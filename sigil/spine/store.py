@@ -234,26 +234,29 @@ class SpineStore:
 
     def _seam_tip_for_active(self) -> "ChainEntry | None":
         """When the ACTIVE segment is empty, the chain tip its first append must extend so the seam stays
-        contiguous: the prior SEALED segment's real last record (its boundary). None when the active is the
-        GENESIS segment (first_seq == 0) — a genuinely fresh spine correctly starts at seq 0. Prevents a
-        seq-0 fork across a rotation seam (invariant 13). MUST be consulted under the append lock (reads the
-        manifest fresh). No-op in Slices 0-2 (the only segment is genesis)."""
+        contiguous: the prior SEALED segment's real last record (its boundary). Returns None ONLY when the
+        active is the GENESIS segment (first_seq == 0) — a genuinely fresh spine correctly starts at seq 0.
+        For a rotated (first_seq > 0) empty active whose seam boundary cannot be read, it FAILS CLOSED
+        (raises) rather than returning None — because append treats None as 'genesis' and would otherwise
+        fork the chain at seq 0 (invariant 13). The WRITE path must fail closed exactly like the read path.
+        MUST be consulted under the append lock (reads the manifest fresh). No-op in Slices 0-2 (genesis)."""
         m = read_manifest(self._layout)
         if m is None:
             return None
         act = m.active()
         if act is None or act.first_seq == 0:
-            return None
+            return None                              # genesis: a fresh spine correctly starts at seq 0
         sealed = m.sealed_in_order()
-        if not sealed:
-            return None
-        sp = self._layout.seg_path(sealed[-1])
-        line = _last_nonempty_line(sp) if sp.exists() else None
-        if not line:
-            return None
-        d = json.loads(line)
-        return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"],
-                          entry_hash=d["entry_hash"])
+        if sealed:
+            sp = self._layout.seg_path(sealed[-1])
+            line = _last_nonempty_line(sp) if sp.exists() else None
+            if line:
+                d = json.loads(line)
+                return ChainEntry(seq=d["seq"], prev_hash=d["prev_hash"], cert_digest=d["cert_digest"],
+                                  entry_hash=d["entry_hash"])
+        raise SpineError(
+            f"active segment first_seq={act.first_seq} is non-genesis but its seam boundary (the prior "
+            f"sealed segment) is unreadable — refusing to fork the chain at seq 0")
 
     @contextmanager
     def _crossproc_lock(self) -> "Iterator[None]":
@@ -392,7 +395,13 @@ class SpineStore:
         the old `SPINE_PATH.unlink()`, which left the manifest + rotated segments behind (stale)."""
         with spine_lock(self.path):
             with self._crossproc_lock():
-                for pth in (self._layout.manifest_path, self.path, self._layout.lockfile_path):
+                # NB: do NOT unlink the lockfile — we hold its flock. flock binds to the INODE, not the
+                # path (invariant 14), so unlinking it would let a concurrent cross-process appender open a
+                # NEW inode at the same path and acquire the flock during our destructive rmtree — losing an
+                # acked record and dangling the (re-published) manifest at a deleted segment. It is a tiny
+                # 0-byte token whose entire purpose is path-stability; keep it so reset() truly excludes
+                # appenders for its whole critical section.
+                for pth in (self._layout.manifest_path, self.path):
                     try:
                         pth.unlink(missing_ok=True)
                     except OSError:
@@ -686,10 +695,10 @@ class SpineStore:
         segment: the ACTIVE extends over the new bytes (or re-scans if it shrank in place — a truncation);
         a SEALED segment is immutable and indexed exactly once. Thread-safe under `_index_lock`."""
         tok = self.change_token()
-        try:
-            segs = self._segments_in_order()
-        except SpineError:
-            return                                  # a missing segment → reads raise; don't poison the index
+        segs = self._segments_in_order()            # RAISES on a missing referenced segment, so get() (which
+        #                                             calls _ensure_index) fails CLOSED too — never a
+        #                                             fail-OPEN point read from a surviving segment while the
+        #                                             chain is provably truncated (invariant 15).
         active_str = str(segs[-1]) if segs else None
         with self._index_lock:
             if tok == self._index_epoch:
