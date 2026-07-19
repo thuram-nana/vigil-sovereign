@@ -18,14 +18,34 @@ def input_backend():
     return _ib()
 
 
+def _is_termux() -> bool:
+    """True iff this Python core is running under Termux on Android. Termux reports
+    `sys.platform == "linux"`, so it is detected by environment/path signals instead."""
+    import os
+    from pathlib import Path
+    if os.environ.get("TERMUX_VERSION"):
+        return True
+    if "com.termux" in os.environ.get("PREFIX", ""):
+        return True
+    if os.environ.get("ANDROID_ROOT"):
+        return True
+    try:
+        return Path("/data/data/com.termux/files/usr").exists()
+    except OSError:
+        return False
+
+
 def host() -> HostBackend:
-    """The backend for this OS (selected by `sys.platform`)."""
+    """The backend for this OS (selected by `sys.platform`, then a Termux/Android probe)."""
     if sys.platform == "darwin":
         from .macos import MacOSBackend
         return MacOSBackend()
     if sys.platform.startswith("win"):
         from .windows import WindowsBackend
         return WindowsBackend()
+    if _is_termux():                       # Termux reports linux — describe the phone honestly
+        from .android import AndroidBackend
+        return AndroidBackend()
     from .linux import LinuxBackend
     return LinuxBackend()
 

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SIGIL">
+<title>SIGIL Companion</title>
+<link rel="icon" href="data:,">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>&#9670; SIGIL</h1><span class="sub">companion &middot; WireGuard &middot; provenance-first</span>
+  <span id="kill" class="kill-unknown">&hellip;</span>
+</header>
+
+<div id="banner" class="banner info hidden"></div>
+<div id="outbox-status" class="mono"></div>
+
+<main>
+  <section class="panel" id="pair">
+    <h2>Pairing <span class="hint" id="pair-state">this device</span></h2>
+    <div id="pair-body"><span class="empty">preparing device key&hellip;</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Pending approvals <span class="hint">A2 / A3 &middot; tier &amp; kind only over the tunnel</span></h2>
+    <div id="queue" class="q"><span class="empty">loading&hellip;</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Panic halt <span class="hint">any engage halts the mesh (fail-safe); release stays owner-only at the desktop</span></h2>
+    <button class="panic" data-act="panic" id="panic-btn">&#9632; PANIC &mdash; halt the mesh now</button>
+    <div id="panic-msg" class="mono"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Relay a command <span class="hint">signed inside the envelope &middot; same WARDEN gate as voice/UI</span></h2>
+    <div class="relaybox">
+      <input id="relay-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="kernel command&hellip;">
+      <button data-act="relay" id="relay-btn">Relay</button>
+    </div>
+    <div id="relay-msg" class="mono mt"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Arm gesture session <span class="hint">records a SIGNED arm request &middot; the desktop re-verifies &amp; is what actually arms</span></h2>
+    <button data-act="arm-gesture" id="arm-btn">Arm gesture session</button>
+    <div id="arm-msg" class="mono mt"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Cockpit <span class="hint">read-only</span></h2>
+    <div class="kv" id="cockpit"><span class="empty">loading&hellip;</span></div>
+    <h2 class="mt">Budget today</h2><div id="budget" class="kv"></div>
+    <h2 class="mt">Recent by agent</h2><div id="activity" class="kv"></div>
+    <h2 class="mt">Ingest lag</h2><div id="lag" class="kv"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Recall <span class="hint">where did I last see&hellip; (owner's own grounded OCR)</span></h2>
+    <div class="recallbox">
+      <input id="recall-input" type="text" autocomplete="off" placeholder="subject&hellip;">
+      <button data-act="recall" id="recall-btn">Recall</button>
+    </div>
+    <div id="recall-out" class="mono mt"></div>
+  </section>
+
+  <section class="panel feed">
+    <h2>Live stream <span class="hint">tap any atom to verify its provenance</span></h2>
+    <div id="feed"><span class="empty">connecting&hellip;</span></div>
+  </section>
+</main>
+
+<div id="detail"><span id="detail-close" class="close">&#10005; close</span>
+  <div id="detail-body"></div></div>
+
+<script src="/static/canonical.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

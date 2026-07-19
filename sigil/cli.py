@@ -9,6 +9,8 @@ from .ingest import cursor as cur
 from .ingest.corpus import real_projects, session_files
 from .ingest.docs import ingest_docs
 from .ingest.transcript import ingest_transcript
+from .mesh import authorize_device, authorized_devices, revoke_device
+from .reuse import sha256_hex
 from .spine.checkpoint import checkpoint, verify_checkpoint
 from .spine.store import SpineStore
 from .vectors.index import VectorIndex
@@ -361,6 +363,69 @@ def cmd_host(a) -> None:
     print(f"    screen={d.has_screen} camera={d.has_camera} gpu_vlm={d.has_gpu_vlm} always_on={d.always_on}")
 
 
+def _device_fingerprint(pubkey: str) -> str:
+    """A short, human-verifiable fingerprint of a device pubkey — first 8 bytes of its SHA-256 as
+    `xxxx-xxxx-xxxx-xxxx`. The PC and the future phone client MUST compute this identically so the
+    operator can eyeball-match the code the phone shows before authorizing (defeats a key swap)."""
+    short = sha256_hex(pubkey.encode())[:16]
+    return "-".join(short[i:i + 4] for i in range(0, 16, 4))
+
+
+def _mesh_authorize(store, device_id, pubkey, owner_key, *, assume_yes=False, confirm=input):
+    """Authorize a phone device key (owner-signed). Prints the fingerprint and, unless `assume_yes`,
+    makes the operator confirm it matches what the phone displays before writing the ledger record.
+    Returns the record seq, or None if the operator did not confirm."""
+    fp = _device_fingerprint(pubkey)
+    print(f"  device {device_id!r} fingerprint: {fp}")
+    if not assume_yes:
+        ans = confirm(f"  confirm this fingerprint matches what phone {device_id!r} shows? [yes/no] ")
+        if (ans or "").strip().lower() != "yes":
+            print("  aborted — fingerprint not confirmed; device NOT authorized")
+            return None
+    seq = authorize_device(store, device_id, pubkey, owner_key)
+    print(f"  authorized device {device_id!r} (owner-signed, seq {seq}); fingerprint {fp}")
+    return seq
+
+
+def _mesh_revoke(store, device_id, pubkey, owner_key):
+    """Revoke a phone device key (owner-signed). Returns the record seq."""
+    seq = revoke_device(store, device_id, pubkey, owner_key)
+    print(f"  revoked device {device_id!r} (owner-signed, seq {seq}); fingerprint {_device_fingerprint(pubkey)}")
+    return seq
+
+
+def _mesh_list(store, owner_pubkey):
+    """Print the currently-authorized device keys (owner-signed authorize minus later revoke).
+    Returns the set for callers/tests."""
+    devices = authorized_devices(store, owner_pubkey)
+    if not devices:
+        print("  no authorized devices")
+    else:
+        print(f"  {len(devices)} authorized device key(s):")
+        for pub in sorted(devices):
+            print(f"    {pub}  [{_device_fingerprint(pub)}]")
+    return devices
+
+
+def cmd_mesh(a) -> None:
+    """Phase 9 W1-E — the PC-side mesh pairing back-end: authorize / revoke / list phone device keys.
+    Authorizations are owner-signed via the PERSISTED owner identity (never a supplied key); a thin
+    wrapper over the tested mesh ledger. `list-devices` needs no signing (a fail-closed read)."""
+    from .governor.identity import ensure_owner_keypair, owner_pubkey
+    store = SpineStore()
+    if a.action == "list-devices":
+        _mesh_list(store, owner_pubkey())
+        return
+    if not a.device_id or not a.pubkey:
+        print(f"  usage: sigil mesh {a.action} <device-id> <pubkey>", file=sys.stderr)
+        sys.exit(2)
+    owner = ensure_owner_keypair()   # the persisted owner key IS the trusted signer (doctrine)
+    if a.action == "authorize":
+        _mesh_authorize(store, a.device_id, a.pubkey, owner, assume_yes=a.yes)
+    elif a.action == "revoke":
+        _mesh_revoke(store, a.device_id, a.pubkey, owner)
+
+
 def cmd_serve(a) -> None:
     """Start the loopback glass-cockpit UI. Mints a fresh session token (printed here); every
     request needs it and no web page can read it. Read plane is GET-only; the owner-signed action
@@ -369,6 +434,21 @@ def cmd_serve(a) -> None:
 
     from .ui.server import serve
     serve(token=secrets.token_urlsafe(24), port=a.port)
+
+
+def cmd_bridge_serve(a) -> None:
+    """Phase 9 W1-D — start the WireGuard-bound phone bridge transport. Binds a `bind_ok` address
+    (loopback or a PRIVATE WireGuard IP) — FAIL-CLOSED (exit 2) on a public/unspecified addr, minting
+    no cert — and, unless --no-tls, wraps it in an owner-pinned self-signed TLS cert so the phone gets
+    the secure context a PWA needs to install + register a service worker (pin the printed fingerprint
+    once). Mirrors `cmd_mesh` / `cmd_serve`."""
+    from .bridge.daemon import bind_ok
+    if not bind_ok(a.addr):
+        print(f"  refusing to bind {a.addr!r}: the bridge binds loopback or a PRIVATE (WireGuard) "
+              f"address only — never 0.0.0.0 / an unspecified / a public address", file=sys.stderr)
+        sys.exit(2)
+    from .bridge.server import serve
+    serve(addr=a.addr, port=a.port, tls=not a.no_tls)
 
 
 def cmd_verify(a) -> None:
@@ -492,6 +572,20 @@ def main(argv=None) -> None:
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])
     ph.set_defaults(fn=cmd_host)
+    pm = sub.add_parser("mesh", help="authorize/revoke/list phone device keys (mesh pairing back-end)")
+    pm.add_argument("action", choices=["authorize", "revoke", "list-devices"])
+    pm.add_argument("device_id", nargs="?", default=None, help="device id (authorize/revoke)")
+    pm.add_argument("pubkey", nargs="?", default=None, help="device Ed25519 public key b64 (authorize/revoke)")
+    pm.add_argument("--yes", action="store_true",
+                    help="skip the interactive fingerprint confirmation (authorize)")
+    pm.set_defaults(fn=cmd_mesh)
+    pb = sub.add_parser("bridge", help="the WireGuard-bound phone bridge transport (owner-pinned self-signed TLS)")
+    pb.add_argument("action", choices=["serve"])
+    pb.add_argument("--addr", required=True, help="bind address — loopback or a PRIVATE WireGuard IP (bind_ok)")
+    pb.add_argument("--port", type=int, default=8734, help="TCP port (default 8734)")
+    pb.add_argument("--no-tls", dest="no_tls", action="store_true",
+                    help="plain HTTP (degraded: no PWA install / no service worker) — TLS is the default")
+    pb.set_defaults(fn=cmd_bridge_serve)
     psc = sub.add_parser("scrape", help="SCRIBE grounded web research (public, scope-gated, robots-respecting)")
     psc.add_argument("--question", default=None)
     psc.add_argument("--seed", action="append", help="seed URL (repeatable)")

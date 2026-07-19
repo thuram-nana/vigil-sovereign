@@ -15,16 +15,19 @@ from typing import List, Optional
 from ..spine.store import SpineStore
 
 
+_CGNAT4 = ipaddress.ip_network("100.64.0.0/10")   # carrier-grade NAT — the range Tailscale assigns tailnet IPs
+
+
 def bind_ok(addr: str) -> bool:
-    """True iff `addr` is safe to bind: loopback or a PRIVATE (e.g. WireGuard) address — never
-    0.0.0.0 / a public / an unspecified address."""
+    """True iff `addr` is safe to bind: loopback, a PRIVATE (e.g. WireGuard) address, or the CGNAT range
+    Tailscale uses — never 0.0.0.0 / a public / an unspecified address."""
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
     if ip.is_unspecified:                          # 0.0.0.0 / :: → refuse
         return False
-    return ip.is_loopback or ip.is_private
+    return ip.is_loopback or ip.is_private or (ip.version == 4 and ip in _CGNAT4)
 
 
 class BridgeDaemon:
@@ -44,6 +47,19 @@ class BridgeDaemon:
         items = pending(self.store, self.trusted_pubkey, extra_pubkeys=self._authorized())
         return [{"seq": r.seq, "tier": r.payload.get("tier"), "kind": r.kind} for r in items]
 
+    def recall(self, subject: str) -> Optional[dict]:
+        """Read-only remote RECALL — "where did I last see X?" — answered from the owner's own
+        GROUNDED on-screen OCR history. Returns the perception-recall provenance dict VERBATIM
+        (seq/entry_hash/when/frame_sha256/quote) or None: A0, read-only, no VLM and no paraphrase —
+        the served `quote` is the owner's verbatim captured OCR line, never an advisory VLM lead.
+
+        This surfaces the owner's own on-screen text over the tunnel, so it leaks MORE than
+        `pending()`'s minimal {seq,tier,kind} fields. The network SERVER (a later slice) MUST
+        therefore gate this behind an authorized-device (device-signed) read request; this daemon
+        method is only the read-only core."""
+        from ..perception.recall import recall
+        return recall(self.store, subject)
+
     def submit_device_approval(self, payload: dict) -> int:
         """Append a DEVICE-signed approval the phone produced — ONLY if the signing device is
         currently authorized AND the signature verifies (fail-closed). A rogue/revoked device or a
@@ -60,9 +76,49 @@ class BridgeDaemon:
             raise ValueError("signing device is not authorized")
         if not verify_approval(_Rec(payload), self.trusted_pubkey, extra_pubkeys=authorized):
             raise ValueError("approval signature invalid")
+        sig, tgt = payload.get("sig"), payload.get("target_seq")
+        # Best-effort dedup OUTSIDE the append lock (a rare concurrent double-record is benign; holding the
+        # lock across an O(spine) scan would stall every other writer). Scan the full spine (not from tgt —
+        # an out-of-range target_seq must not skip the scan and re-open the bloat sink).
+        for r in self.store.iter_records():
+            p = r.payload
+            if p.get("signal") == APPROVAL_SIGNAL and p.get("pubkey") == payload.get("pubkey") and p.get("sig") == sig:
+                return r.seq                            # already recorded — idempotent
         return self.store.append(kind="event", source="mesh", actor="DEVICE",
-                                 payload={**payload, "tier": "A0", "decision": "auto"},
-                                 supersedes_id=payload.get("target_seq"))
+                                 payload={**payload, "tier": "A0", "decision": "auto"}, supersedes_id=tgt)
+
+    def submit_arm_request(self, request: dict) -> int:
+        """Record a DEVICE-signed gesture arm request (the transport layer) — ONLY if the signing device
+        is authorized AND the signature verifies (fail-closed, mirrors submit_device_approval). The live
+        SessionGate RE-VERIFIES and enforces freshness / kill-switch / single-session / TTL when it
+        consumes this via `arm_by_device`, so recording is necessary-but-not-sufficient to arm."""
+        from ..gesture.session import ARM_REQUEST, _ARM_CORE, arm_request_message
+        from ..reuse import verify_one
+        authorized = self._authorized()
+        if request.get("signal") != ARM_REQUEST:
+            raise ValueError("not an arm request")
+        pub = request.get("pubkey")
+        if pub not in authorized:
+            raise ValueError("signing device is not authorized")
+        core = {k: request.get(k) for k in _ARM_CORE}
+        try:                                            # verify_one RAISES on a malformed-length sig — refuse cleanly
+            ok = verify_one(pub, arm_request_message(core), request.get("sig", ""))
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            raise ValueError("arm request signature invalid")
+        sig = request.get("sig")
+        # Best-effort dedup OUTSIDE the append lock (see submit_device_approval) — a captured body can't flood.
+        for r in self.store.iter_records():
+            p = r.payload
+            if p.get("signal") == ARM_REQUEST and p.get("pubkey") == pub and p.get("sig") == sig:
+                return r.seq                            # already recorded — idempotent, no spine bloat
+        # record ONLY the signed core + pubkey + sig (never `**request` — no unsigned extras persisted)
+        return self.store.append(kind="event", source="mesh", actor="DEVICE",
+                                 payload={"signal": ARM_REQUEST, "device_id": core["device_id"],
+                                          "nonce": core["nonce"], "ts": core["ts"],
+                                          "ttl_seconds": core["ttl_seconds"], "pubkey": pub, "sig": sig,
+                                          "tier": "A0", "decision": "auto"})
 
     def panic_engage(self, *, by: str = "phone") -> int:
         """Halt the mesh from the phone. ANY engage halts (fail-safe) — no signature needed for the

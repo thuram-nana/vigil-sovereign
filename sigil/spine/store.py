@@ -10,12 +10,34 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Iterator
 
 from ..config import SCOPE, SPINE_PATH
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
 from .models import SpineRecord, now_iso
+
+try:
+    import fcntl  # POSIX advisory file lock — cross-PROCESS append serialization
+except ImportError:  # pragma: no cover — non-POSIX
+    fcntl = None  # type: ignore[assignment]
+
+_LOCKS_GUARD = threading.Lock()
+_LOCKS: dict[str, "threading.RLock"] = {}
+
+
+def spine_lock(path: Path | str) -> "threading.RLock":
+    """A process-wide RE-ENTRANT lock per resolved spine path. Serializes `append` (read-tip → write)
+    across threads so concurrent writers can't fork the hash chain, and — being re-entrant — lets a
+    caller make a check-then-append atomic (e.g. the nonce replay gate) while its inner `append` still
+    acquires the same lock. Cross-PROCESS serialization is added by an flock inside `append`."""
+    key = str(Path(path).resolve())
+    with _LOCKS_GUARD:
+        lk = _LOCKS.get(key)
+        if lk is None:
+            lk = _LOCKS[key] = threading.RLock()
+        return lk
 
 
 def _last_nonempty_line(path: Path) -> str | None:
@@ -56,14 +78,25 @@ class SpineStore:
             "payload": payload, "parent_id": parent_id, "supersedes_id": supersedes_id,
         }
         cert_digest = digest_payload(content)  # wallclock-free
-        entry = append_entry([self._last], cert_digest) if self._last else build_chain([cert_digest])[0]
-        record = {
-            "seq": entry.seq, **content, "ts": ts or now_iso(),
-            "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
-        }
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._last = entry
+        # Serialize the whole read-tip → write so concurrent writers (threaded bridge server, gesture
+        # daemon) can't both fork off a stale tip and break the chain. Re-read the TRUE tip from disk
+        # under the lock — `self._last` may be stale if another instance/process appended.
+        with spine_lock(self.path):
+            with self.path.open("a", encoding="utf-8") as f:
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)   # cross-process guard (advisory)
+                    except OSError:  # pragma: no cover
+                        pass
+                last = self._read_last_entry()
+                entry = append_entry([last], cert_digest) if last else build_chain([cert_digest])[0]
+                record = {
+                    "seq": entry.seq, **content, "ts": ts or now_iso(),
+                    "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                f.flush()
+            self._last = entry
         return entry.seq
 
     # --- read ---------------------------------------------------------------------

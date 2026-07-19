@@ -168,6 +168,42 @@ def test_bind_guard_refuses_public_and_unspecified():
     assert not bind_ok("8.8.8.8") and not bind_ok("1.2.3.4"), "public addresses refused"
 
 
+def test_bind_ok_allows_tailscale_cgnat():   # Phase 9 sweep LOW-9
+    assert bind_ok("100.64.1.1") and bind_ok("100.127.255.254"), "Tailscale CGNAT (100.64.0.0/10) may bind"
+    assert not bind_ok("99.255.255.255") and not bind_ok("100.128.0.1"), "addresses just outside CGNAT are refused"
+
+
+def test_submit_arm_request_dedups_replayed_bodies():   # Phase 9 sweep MED-5 (spine-bloat sink)
+    import time as _t
+
+    from sigil.gesture.session import sign_arm_request
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, dev = generate_keypair(), generate_keypair()
+    authorize_device(s, "d", dev.public_key_b64, owner)
+    d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
+    req = sign_arm_request(dev, device_id="d", nonce=1, ts=_t.time(), ttl_seconds=120.0)
+    seqs = {d.submit_arm_request(req) for _ in range(5)}   # one captured body, replayed 5x
+    assert len(seqs) == 1, "a replayed arm body records ONCE (deduped) — not a spine-bloat sink"
+    n = sum(1 for r in s.iter_records() if r.payload.get("signal") == "gesture.arm_request")
+    assert n == 1, f"exactly one gesture.arm_request record after 5 replays, got {n}"
+
+
+def test_approval_dedup_holds_for_out_of_range_target_seq():   # re-check FINDING-3 (dedup bypass)
+    from sigil.agents.approvals import _approval_message
+    from sigil.reuse import sha256_hex, sign
+    s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
+    owner, dev = generate_keypair(), generate_keypair()
+    authorize_device(s, "d", dev.public_key_b64, owner)
+    d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
+    tgt = 10 ** 18                                         # a target_seq far PAST the tip
+    msg = _approval_message(tgt, "approved", "device")
+    appr = {"signal": "governor.approval", "approval": "approved", "target_seq": tgt, "approver": "device",
+            "pubkey": dev.public_key_b64, "sig": sign(dev.private_key_b64, msg),
+            "msg_digest": sha256_hex(msg), "device": True}
+    seqs = {d.submit_device_approval(appr) for _ in range(3)}
+    assert len(seqs) == 1, "a replayed approval with an out-of-range target_seq is STILL deduped (full-range scan)"
+
+
 def test_authorized_device_authorizes_operator_execution():
     # BLOCK-1 fix: a device approval must authorize a real EXECUTION gate, not just a queue view.
     import tempfile as tf

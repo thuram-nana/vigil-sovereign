@@ -14,6 +14,27 @@ def _fresh(n=5):
     return p, s
 
 
+def test_concurrent_appends_do_not_fork_the_chain():   # Phase 9 sweep HIGH-2 (threaded bridge server exposes it)
+    import threading
+    p = tempfile.mktemp(suffix=".jsonl")
+    SpineStore(p).append(kind="event", source="t", actor="u", payload={"seed": True})
+    barrier = threading.Barrier(8)
+
+    def w(i):
+        barrier.wait()
+        SpineStore(p).append(kind="event", source="t", actor="u", payload={"i": i})   # FRESH instance per thread
+
+    threads = [threading.Thread(target=w, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    seqs = [r.seq for r in SpineStore(p).iter_records()]
+    assert len(seqs) == len(set(seqs)) == 9, f"8 concurrent appends produce distinct seqs (no fork): {sorted(seqs)}"
+    ok, reason = SpineStore(p).verify()
+    assert ok, f"the hash chain stays intact after concurrent appends: {reason}"
+
+
 def test_clean_verifies():
     _, s = _fresh()
     ok, _ = s.verify()
