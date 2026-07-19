@@ -45,6 +45,16 @@ def _req(kp=DEV, *, device_id="phone1", nonce=1, ts=None, ttl=120.0):
     return sign_arm_request(kp, device_id=device_id, nonce=nonce, ts=ts if ts is not None else time.time(), ttl_seconds=ttl)
 
 
+def _record_arm(store, req):
+    """Append an arm-request record DIRECTLY (as `submit_arm_request` does, but bypassing its record-time
+    freshness gate) — to simulate a request that was recorded fresh and has since AGED past freshness by
+    the time the gesture daemon consumes it."""
+    core = {k: req.get(k) for k in ("device_id", "nonce", "ts", "ttl_seconds")}
+    return store.append(kind="event", source="mesh", actor="DEVICE",
+                        payload={"signal": "gesture.arm_request", **core, "pubkey": req["pubkey"],
+                                 "sig": req["sig"], "tier": "A0", "decision": "auto"})
+
+
 # ---- happy path + TTL clamp ----------------------------------------------------------------------
 def test_authorized_device_arms_and_ttl_is_clamped():
     s = _store(); _authorize(s); g = _gate(s)
@@ -222,7 +232,7 @@ def test_older_valid_arm_is_not_starved_by_a_newer_stale_one():   # re-check FIN
     d = BridgeDaemon(s, trusted_pubkey=OP)
     now = time.time()
     d.submit_arm_request(_req(nonce=1, ts=now))              # R1: valid + fresh, recorded FIRST (older seq)
-    d.submit_arm_request(_req(nonce=2, ts=now + 10_000))     # R2: stale (future ts), recorded SECOND (newer seq)
+    _record_arm(s, _req(nonce=2, ts=now - 10_000))           # R2: aged/stale, recorded SECOND (newer seq)
     b = RecordingInputBackend()
     g = SessionGate(s, b, classifier=FakeCls(), trusted_pubkey=OP)
     run_gesture(store=s, source=ScriptedFrameSource([None] * 3), landmarker=ScriptedLandmarker([[]] * 3),
@@ -256,7 +266,7 @@ def test_run_gesture_device_arm_does_not_respam_a_stale_request():   # fix-intro
     from sigil.gesture.run import run_gesture
     from sigil.perception.camera_stream import ScriptedFrameSource
     s = _store(); _authorize(s)
-    BridgeDaemon(s, trusted_pubkey=OP).submit_arm_request(_req(nonce=1, ts=time.time() - 10_000))  # STALE
+    _record_arm(s, _req(nonce=1, ts=time.time() - 10_000))   # a recorded request that has AGED past freshness
     b = RecordingInputBackend()
     g = SessionGate(s, b, classifier=FakeCls(), trusted_pubkey=OP)
     run_gesture(store=s, source=ScriptedFrameSource([None] * 6), landmarker=ScriptedLandmarker([[]] * 6),
@@ -266,6 +276,16 @@ def test_run_gesture_device_arm_does_not_respam_a_stale_request():   # fix-intro
                    if r.payload.get("signal") == "gesture.arm_request" and r.payload.get("decision") == "refused")
     assert refusals <= 1, f"a stale recorded request is attempted at most ONCE (no per-frame refusal spam), got {refusals}"
     assert not any(r.payload.get("armed_by") == "device" for r in s.iter_records()), "the stale request never armed"
+
+
+def test_killswitch_rescan_triggers_on_spine_growth():           # tightening #1 (panic latency)
+    s = _store(); _authorize(s); b = RecordingInputBackend(); g = _gate(s, b)
+    g.arm_by_device(_req(ts=time.time()), now=time.time())
+    now = time.time()
+    assert g._killswitch_engaged(now) is False, "not engaged initially (fresh scan)"
+    BridgeDaemon(s, trusted_pubkey=OP).panic_engage(by="test")   # a panic APPENDS → the spine file grows
+    assert g._killswitch_engaged(now + 1.0) is True, \
+        "spine growth (a panic append) invalidates the cache → the halt is detected on the next frame, not after a fixed TTL"
 
 
 if __name__ == "__main__":

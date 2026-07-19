@@ -120,6 +120,32 @@ class SpineStore:
                 break
         return None
 
+    def tail(self, n: int) -> list[SpineRecord]:
+        """The last `n` records, seek-from-end (O(n) bytes, NOT O(file)) — for a bounded RECENT-window
+        read on a large spine. Fewer than `n` if the spine is shorter. NOTE: a bounded window collapses
+        a RAPID (recent) replay flood, but does NOT bound AGGREGATE replay bloat — a rotated pool of
+        distinct bodies larger than the window each ages out and re-records. Only pair `tail()`-based
+        dedup with a record-time freshness gate (or an independent bound); do not rely on it alone to
+        close a bloat sink."""
+        if n <= 0 or not self.path.exists():
+            return []
+        with self.path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            buf = b""
+            while pos > 0 and buf.count(b"\n") <= n:
+                step = min(65536, pos)
+                pos -= step
+                f.seek(pos)
+                buf = f.read(step) + buf
+        recs: list[SpineRecord] = []
+        for ln in [x for x in buf.split(b"\n") if x.strip()][-n:]:
+            try:
+                recs.append(SpineRecord.from_dict(json.loads(ln)))
+            except (ValueError, KeyError, TypeError):
+                continue
+        return recs
+
     @property
     def next_seq(self) -> int:
         return (self._last.seq + 1) if self._last else 0

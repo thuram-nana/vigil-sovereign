@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-_KS_CACHE_TTL = 0.5    # bound the per-intent kill-switch consult to ≤2 spine scans/sec (never per-frame at 30fps)
+_KS_MIN_RESCAN = 0.05  # re-scan the kill-switch at most ~20x/s even on a churning spine (a cost floor)
 
 from ..agents.base import Tier
 from ..reuse import sha256_hex
@@ -100,7 +100,8 @@ class SessionGate:
         self._trusted_pubkey = trusted_pubkey
         self.session: Optional[Session] = None
         self._ks_engaged = False
-        self._ks_checked_at = -1e9        # forces a fresh check on the first consult
+        self._ks_size = -1                # last-scanned spine size; -1 forces a fresh check on the first consult
+        self._ks_checked_at = -1e9
 
     def _trusted(self):
         if self._trusted_pubkey is None:
@@ -109,12 +110,21 @@ class SessionGate:
         return self._trusted_pubkey
 
     def _killswitch_engaged(self, now: float) -> bool:
-        """Kill-switch state, cached for ≤_KS_CACHE_TTL so a 30fps `handle` loop does not re-scan the
-        append-only spine per frame (that scan is O(spine) — a self-DoS). Panic latency is bounded by
-        the TTL. The arm path checks the kill-switch FRESH (uncached), so arming can never race a halt."""
-        if now - self._ks_checked_at >= _KS_CACHE_TTL:
+        """Kill-switch state for the per-intent gate. Re-scans the AUTHORITATIVE `KillSwitch` (which
+        verifies the owner-signed release — never re-implemented here) ONLY when the append-only spine
+        has GROWN since the last scan: a panic APPENDS a record → the file grows → the halt is honored
+        within ~1-2 frames (≤ the rescan floor + one frame, ≈66 ms worst case), not a fixed 0.5 s. A
+        pure-movement gesture appends nothing, so this is
+        O(1) (a `stat`) with NO scan at all. A short `_KS_MIN_RESCAN` floor stops a churning spine from
+        forcing a per-frame O(spine) scan (worst-case latency ≤ the floor). The arm path checks FRESH."""
+        try:
+            size = self.store.path.stat().st_size
+        except OSError:
+            size = self._ks_size
+        if size != self._ks_size and (now - self._ks_checked_at) >= _KS_MIN_RESCAN:
             from ..governor.killswitch import KillSwitch
             self._ks_engaged = KillSwitch(self.store).is_engaged()
+            self._ks_size = size
             self._ks_checked_at = now
         return self._ks_engaged
 
@@ -233,8 +243,9 @@ class SessionGate:
             self.disarm()
             return {"injected": False, "reason": "hand lost — session disarmed"}
         # An owner halt (incl. a phone panic_engage) neuters injection mid-session — critical for a
-        # device-armed session the owner may not be watching. Cached (≤_KS_CACHE_TTL) so a 30fps loop
-        # never re-scans the spine per frame; panic latency is bounded by the TTL.
+        # device-armed session the owner may not be watching. `_killswitch_engaged` only re-scans when the
+        # spine GREW (a panic appends → detected within ~1-2 frames), so a 30fps movement loop never
+        # re-scans per frame; latency is bounded by the rescan floor, not a fixed TTL.
         if self._killswitch_engaged(time.time()):
             self.disarm()
             return {"injected": False, "reason": "kill-switch engaged — session disarmed"}
