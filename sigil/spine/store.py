@@ -21,7 +21,7 @@ from typing import Any, Iterator
 
 from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
-from .atomicio import fsync_dir
+from .atomicio import atomic_write_text, fsync_dir
 from .manifest import (
     Manifest,
     Segment,
@@ -640,6 +640,7 @@ class SpineStore:
             plain = self._layout.segments_dir / segment_filename(seg.id, "none")
             try:
                 plain.unlink(missing_ok=True)
+                plain.with_name(plain.name + ".idx").unlink(missing_ok=True)   # its now-stale Slice-5 sidecar
             except OSError:                          # in use on a non-POSIX FS -> the next compact() retries
                 pass
 
@@ -983,8 +984,69 @@ class SpineStore:
                         self._purge_segment(ps)
                         self._scan_segment(ps, p, 0, size)
                 elif scanned < size:                                 # sealed: immutable → index once
-                    self._scan_segment(ps, p, scanned, size)
+                    self._index_sealed(ps, p, size)
             self._index_epoch = tok
+
+    def _index_sealed(self, ps: str, p: Path, size: int) -> None:
+        """Index a SEALED (immutable) segment. First try its persisted `.idx` sidecar (Slice 5) so a cold
+        start LOADS the seq→offset map instead of re-scanning up to a full segment (a gz segment would
+        otherwise decompress fully). On a miss/stale/corrupt sidecar, scan the segment and write a fresh one
+        (best-effort). The sidecar is a pure CACHE derived from the segment bytes — never a tamper input —
+        validated against the segment's current size on load, so a changed segment regenerates it. MUST hold
+        `_index_lock`."""
+        if self._load_sidecar(ps, p):
+            return
+        self._scan_segment(ps, p, self._seg_scanned.get(ps, 0), size)
+        self._write_sidecar(ps, p)
+
+    def _load_sidecar(self, ps: str, p: Path) -> bool:
+        """Populate `_offsets` for a sealed segment from its `.idx` sidecar iff it exists and matches the
+        segment's current byte size. Returns True if loaded. A stale/corrupt/absent sidecar → False (the
+        caller scans + rewrites)."""
+        idx = p.with_name(p.name + ".idx")
+        try:
+            if not idx.exists():
+                return False
+            d = json.loads(idx.read_text(encoding="utf-8"))
+            if d.get("v") != 1 or d.get("seg_bytes") != p.stat().st_size:
+                return False                                 # different segment bytes → the sidecar is stale
+            first, offsets = int(d["first_seq"]), d["offsets"]
+            if not isinstance(offsets, list):
+                return False
+            # Cheap validity spot-check: the first offset must point to the record with seq == first_seq.
+            # Catches a wholesale-wrong / shifted / tampered sidecar without re-scanning (one read; a gz
+            # decompresses cheaply to its start). The sidecar only ACCELERATES a seek — verify()/count()/the
+            # security state-scanners full-scan WITHOUT the index, and get() re-checks rec.seq==seq per
+            # lookup, so a bad sidecar can at worst slow a read, never make a floor under-count.
+            if offsets:
+                with self._open_segment(p) as f:
+                    f.seek(int(offsets[0]))
+                    rec = SpineRecord.from_dict(json.loads(f.readline()))
+                    if rec.seq != first:
+                        return False
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        for i, off in enumerate(offsets):
+            seq = first + i
+            self._offsets[seq] = (ps, int(off))
+            if seq > self._max_seq:
+                self._max_seq = seq
+        self._seg_scanned[ps] = p.stat().st_size             # mark fully indexed → the reconcile skips it
+        return True
+
+    def _write_sidecar(self, ps: str, p: Path) -> None:
+        """Persist a sealed segment's seq→offset map as `<segment>.idx` (best-effort, atomic). Offsets are
+        collected from `_offsets` in seq order — a segment holds a CONTIGUOUS seq range, so only the offset
+        array + first_seq are stored. Validated on load against the segment size. MUST hold `_index_lock`."""
+        entries = sorted((seq, off) for seq, (q, off) in self._offsets.items() if q == ps)
+        if not entries:
+            return
+        try:
+            data = json.dumps({"v": 1, "first_seq": entries[0][0], "seg_bytes": p.stat().st_size,
+                               "offsets": [off for _, off in entries]}, separators=(",", ":"))
+            atomic_write_text(p.with_name(p.name + ".idx"), data, prefix=".idx-")
+        except OSError:                                      # read-only FS etc. — the index still works by scanning
+            pass
 
     def _purge_segment(self, ps: str) -> None:
         """Drop a segment's offsets (the active shrank in place — a truncation). MUST hold `_index_lock`."""
