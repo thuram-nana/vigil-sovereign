@@ -190,6 +190,14 @@ def test_non_finite_nonce_is_a_clean_refusal_not_a_crash():       # re-check BLO
             pass          # clean ValueError — NOT an uncaught OverflowError crashing the handler
 
 
+def test_non_string_device_is_a_clean_refusal_not_a_crash():     # re-check RED-PEN-DELTA-1(b)
+    s, dev, auth = _authed()
+    for bad_device in (["x"], {"k": "v"}, 5):                     # an unhashable/non-str device would crash `in authorized`
+        ok, _reason = verify_envelope({"device": bad_device, "sig": "AAAA", "action": "read:pending",
+                                       "nonce": 1, "ts": 1, "v": 1}, auth)
+        assert ok is False, f"a non-str device ({bad_device!r}) is a clean refusal, never a TypeError crash"
+
+
 def test_nonce_zero_is_a_valid_first_value():                     # sweep LOW-7
     s, dev, auth = _authed()
     consume(s, sign_envelope(dev, build_core(dev.public_key_b64, "panic", {}, 0, 1700000000)), auth, effectful=True)

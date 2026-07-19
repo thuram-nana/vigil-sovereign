@@ -60,8 +60,8 @@ def verify_envelope(payload, authorized: Set[str]) -> Tuple[bool, Union[dict, st
     p = payload.payload if hasattr(payload, "payload") else payload
     sig = p.get("sig")
     device = p.get("device")
-    if not sig or not device:
-        return False, "missing signature or device"
+    if not sig or not device or not isinstance(device, str):   # a non-str device would crash the `in authorized` set test
+        return False, "missing/invalid signature or device"
     if device not in authorized:                       # trust pinned to owner-minted device keys
         return False, "device is not authorized"
     core = {k: v for k, v in p.items() if k != "sig"}

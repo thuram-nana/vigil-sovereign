@@ -305,6 +305,22 @@ def test_replayed_relay_envelope_is_refused():
         srv.shutdown()
 
 
+def test_relay_with_non_dict_args_does_not_crash_the_handler():   # re-check RED-PEN-DELTA-1(a)
+    import sigil.voice.dispatch as D
+    _real = D.KernelDispatch
+    D.KernelDispatch = lambda: type("_K", (), {"send": staticmethod(lambda text: f"kernel:{text}")})()
+    p = _spine()
+    srv, port = _serve(p)
+    try:
+        dev = _authorize(p)
+        for n, bad_args in enumerate([["a"], "hello", 5, True], start=1):
+            code = _post(port, "/api/relay", None, env=_env(dev, "relay", bad_args, nonce=n))[0]
+            assert code == 200, f"a signed non-dict args ({bad_args!r}) is handled cleanly (2xx), never a crash — got {code}"
+    finally:
+        D.KernelDispatch = _real
+        srv.shutdown()
+
+
 # ---- the anti-DNS-rebinding gate on the action plane ----------------------------------------------
 def test_action_plane_refuses_rebinding_host_and_cross_origin():
     p = _spine()

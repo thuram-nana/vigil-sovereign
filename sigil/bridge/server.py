@@ -362,7 +362,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if action == "panic":
             return self._json({"ok": True, "seq": self.server.daemon().panic_engage(by="phone")})
-        text = str((core.get("args") or {}).get("text", ""))     # the relayed command is INSIDE the signed core
+        a = core.get("args")                                     # the relayed command is INSIDE the signed core;
+        text = str(a.get("text", "")) if isinstance(a, dict) else ""   # signed args may be ANY JSON type — guard
         return self._json({"ok": True, "reply": self.server.daemon().relay(text)})
 
     def _device_action(self, body_bytes):
