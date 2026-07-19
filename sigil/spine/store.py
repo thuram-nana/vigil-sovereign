@@ -13,19 +13,13 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..config import (
-    SCOPE,
-    SPINE_PATH,
-    SPINE_SEG_MAX_BYTES,
-    SPINE_SEG_MAX_RECORDS,
-    SPINE_TRASH_GRACE_SEC,
-)
+from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
 from .atomicio import fsync_dir
 from .manifest import (
@@ -563,9 +557,12 @@ class SpineStore:
         """Compress every SEALED plaintext segment to gzip. Retain-all: no record is removed, and a `.gz` is
         byte-decompress-identical, so verify()/the signed head are unaffected. Reclaims ~5-8x on JSONL. The
         heavy gzip runs LOCK-FREE (a sealed segment is immutable — no append is blocked); only the tiny
-        per-segment manifest codec-flip takes the flock. The superseded plaintext is MOVED to trash/ (never
-        unlinked under a reader), and a reaper deletes trash older than the read-grace. Idempotent (a no-op
-        on already-gzip / legacy). Returns the number compressed."""
+        per-segment manifest codec-flip takes the flock. After the flip the superseded plaintext is UNLINKED
+        (immediate reclaim). Readers are protected NOT by lingering the plaintext but by (a) POSIX open-fd
+        survival for a reader mid-scan, and (b) the manifest-reread retry in iter_records/tail/get for a
+        reader that resolved the path but opens it after the unlink. On a non-POSIX FS where unlinking an
+        in-use file fails, the unlink is deferred to the next compact() (no crash). Idempotent. Returns the
+        number compressed."""
         m = read_manifest(self._layout)
         if m is None:
             return 0
@@ -573,15 +570,14 @@ class SpineStore:
         for seg in m.sealed_in_order():
             if seg.codec == "none" and self._compress_one_sealed(seg.id):
                 n += 1
-        self._trash_orphan_plaintext()               # backstop: a crash between flip and move leaves plaintext
-        self._reap_trash()
+        self._remove_superseded_plaintext()          # immediate reclaim + backstop for a crash before this
         return n
 
     def _compress_one_sealed(self, seg_id: int) -> bool:
         """P1 (lock-free gzip of the immutable sealed segment) + P2 (brief-locked manifest codec flip).
-        Crash-safe: the .gz is built to a temp then atomically renamed; the codec flip is the atomic commit;
-        the plaintext is left for _trash_orphan_plaintext. A crash before the flip leaves an orphan .gz that
-        the next run overwrites; the plaintext (still referenced) is never at risk."""
+        Crash-safe: the .gz is built to a UNIQUE temp (so two concurrent compactors never clobber a shared
+        temp) then atomically renamed; the codec flip is the atomic commit. A crash before the flip leaves an
+        orphan .gz the next run overwrites — the plaintext (still referenced) is never at risk."""
         m = read_manifest(self._layout)
         seg = next((s for s in (m.segments if m else []) if s.id == seg_id and s.sealed and s.codec == "none"), None)
         if seg is None:
@@ -591,12 +587,22 @@ class SpineStore:
             return False
         gz_rel = self._layout.segment_rel(seg_id, "gzip")
         gz_abs = self._layout.spine_dir / gz_rel
-        tmp = gz_abs.with_name(gz_abs.name + ".tmp")
-        with plain.open("rb") as fin, gzip.open(tmp, "wb", compresslevel=6) as fout:
-            shutil.copyfileobj(fin, fout)
-        with open(tmp, "rb") as f:
-            os.fsync(f.fileno())
-        os.replace(tmp, gz_abs)
+        fd, tmp_name = tempfile.mkstemp(dir=str(self._layout.segments_dir),
+                                        prefix=f".{segment_filename(seg_id)}.", suffix=".gz.tmp")
+        os.close(fd)                                 # unique temp per process — no shared-temp clobber
+        tmp = Path(tmp_name)
+        try:
+            with plain.open("rb") as fin, gzip.open(tmp, "wb", compresslevel=6) as fout:
+                shutil.copyfileobj(fin, fout)
+            with open(tmp, "rb") as f:
+                os.fsync(f.fileno())
+            os.replace(tmp, gz_abs)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         fsync_dir(self._layout.segments_dir)
         with spine_lock(self.path):
             with self._crossproc_lock():
@@ -619,11 +625,12 @@ class SpineStore:
                     self._index_epoch = None         # segment path+codec changed -> reconcile offsets
         return True
 
-    def _trash_orphan_plaintext(self) -> None:
-        """Move to trash any plaintext seg-k.jsonl whose manifest entry is now GZIP — i.e. the superseded
-        plaintext after a codec flip (or one stranded by a crash between the flip and this move). Moving
-        (not unlinking) preserves reader-grace: a reader with an open fd keeps reading, and a reader that
-        ENOENTs on the vanished path re-resolves via the iter_records retry. Idempotent."""
+    def _remove_superseded_plaintext(self) -> None:
+        """Unlink the plaintext seg-k.jsonl of every segment the manifest now marks GZIP — the superseded
+        copy after a codec flip (or one stranded by a crash between the flip and this call). Immediate disk
+        reclaim. A reader mid-read keeps its POSIX open-fd; a reader that resolved the path re-resolves via
+        the read-path retry. On a non-POSIX FS an in-use unlink raises and is deferred to the next compact().
+        Idempotent."""
         m = read_manifest(self._layout)
         if m is None:
             return
@@ -631,25 +638,9 @@ class SpineStore:
             if seg.codec != "gzip":
                 continue
             plain = self._layout.segments_dir / segment_filename(seg.id, "none")
-            if plain.exists():
-                self._layout.trash_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.replace(plain, self._layout.trash_dir / f"{plain.name}.{seg.id}")
-                except OSError:
-                    pass
-
-    def _reap_trash(self) -> None:
-        """Delete trashed plaintext older than the read-grace (SPINE_TRASH_GRACE_SEC), which must exceed the
-        longest lock-free read so no reader is ever ENOENT'd."""
-        td = self._layout.trash_dir
-        if not td.exists():
-            return
-        cutoff = time.time() - SPINE_TRASH_GRACE_SEC
-        for f in td.iterdir():
             try:
-                if f.is_file() and f.stat().st_mtime < cutoff:
-                    f.unlink()
-            except OSError:
+                plain.unlink(missing_ok=True)
+            except OSError:                          # in use on a non-POSIX FS -> the next compact() retries
                 pass
 
     # --- write --------------------------------------------------------------------
@@ -774,9 +765,11 @@ class SpineStore:
         raise SpineError("spine segments kept moving during read (compaction churn) — giving up")
 
     def get(self, seq: int) -> SpineRecord | None:
-        """A single record by seq — O(1) via the segment-aware index (resolves the OWNING segment + offset),
-        byte-identical to a full scan. Falls back to a bounded forward scan (which spans segments) when the
-        seq is not indexed (beyond the tip, or a corrupt line was skipped)."""
+        """A single record by seq via the segment-aware index (resolves the OWNING segment + offset),
+        byte-identical to a full scan. O(1) for a plaintext segment; for a gzip-sealed segment the offset is
+        a DECOMPRESSED offset, so `gzip.seek()` decompresses up to it (bounded by the seal threshold — not a
+        full-spine scan). Falls back to a bounded forward scan (spanning segments) when the seq is not
+        indexed (beyond the tip, or a corrupt line was skipped)."""
         if seq < 0:
             return None
         self._ensure_index()
@@ -808,23 +801,33 @@ class SpineStore:
         bound AGGREGATE replay bloat — pair `tail()`-based dedup with a record-time freshness gate."""
         if n <= 0:
             return []
-        recs: list[SpineRecord] = []
-        for p in reversed(self._segments_in_order()):
-            recs = self._read_segment_tail(p, n - len(recs)) + recs
-            if len(recs) >= n:
-                break
-        return recs[-n:]
+        for _attempt in range(6):                        # D2 reader-grace: a concurrent compaction may
+            try:                                         # unlink a plaintext between resolve and read
+                recs: list[SpineRecord] = []
+                for p in reversed(self._segments_in_order()):
+                    recs = self._read_segment_tail(p, n - len(recs)) + recs
+                    if len(recs) >= n:
+                        break
+                return recs[-n:]
+            except FileNotFoundError:
+                _log.debug("spine: a segment moved during tail() (compaction); re-resolving")
+                continue
+        raise SpineError("spine segments kept moving during tail() (compaction churn) — giving up")
 
     def _read_segment_tail(self, p: Path, k: int) -> list[SpineRecord]:
         """The last `k` records of a single segment. Plaintext: seek-from-end (O(k) bytes). Gzip: decompress
-        (bounded by the seal threshold) and take the last k lines — no random access into a gz stream."""
-        if k <= 0 or not p.exists():
+        (bounded by the seal threshold) and take the last k lines — no random access into a gz stream.
+        Opening a segment that was resolved from the manifest but has since VANISHED (a concurrent
+        compaction unlinked the plaintext) RAISES FileNotFoundError so tail() re-resolves — NOT a silent []
+        (which would drop a whole segment from the window and hole the chain; the arm replay-dedup gate
+        depends on a complete window)."""
+        if k <= 0:
             return []
         if p.suffix == ".gz":
-            with gzip.open(p, "rb") as f:
+            with gzip.open(p, "rb") as f:                # raises FileNotFoundError if it vanished -> tail() retries
                 lines = [x for x in f.read().split(b"\n") if x.strip()]
         else:
-            with p.open("rb") as f:
+            with p.open("rb") as f:                      # raises FileNotFoundError if it vanished -> tail() retries
                 f.seek(0, os.SEEK_END)
                 pos = f.tell()
                 buf = b""

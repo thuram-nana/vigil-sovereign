@@ -487,11 +487,12 @@ def test_compact_gzips_sealed_and_reads_transparently():
     s.migrate()
     for i in range(180):
         s.append(kind="event", source="t", actor="a", payload={"n": i, "text": "lorem ipsum dolor sit amet " * 3})
-    before = sum(f.stat().st_size for f in lay.segments_dir.glob("*.jsonl"))
+    before_total = sum(f.stat().st_size for f in lay.segments_dir.iterdir() if f.is_file())
     n = s.compact()
     assert n >= 3, f"expected several sealed segments compressed, got {n}"
-    after = sum(f.stat().st_size for f in lay.segments_dir.glob("*.gz"))
-    assert after < before, f"gzip must reclaim disk: {after} !< {before}"
+    after_total = sum(f.stat().st_size for f in lay.segments_dir.iterdir() if f.is_file())
+    assert after_total < before_total, f"compact must reclaim disk IMMEDIATELY: {after_total} !< {before_total}"
+    assert len(list(lay.segments_dir.glob("*.jsonl"))) == 1, "only the ACTIVE stays plaintext (no lingering copy)"
     codecs = {x["id"]: x["codec"] for x in s.segment_info()}
     assert all(codecs[i] == "gzip" for i in codecs if i != max(codecs)), "all sealed segments gzip"
     assert codecs[max(codecs)] == "none", "active segment stays plaintext"
@@ -550,22 +551,67 @@ def test_reader_grace_during_concurrent_compact():
     assert not errors, errors[:3]
 
 
-def test_reap_trash_respects_grace(monkeypatch):
-    import sigil.spine.store as store_mod
-
-    d = _fresh_dir("sigil-reap-")
+def test_tail_contiguous_during_concurrent_compact():
+    """Review BLOCK-1: tail() must stay a contiguous window under a concurrent compaction that unlinks a
+    plaintext (its feeds the device-arm replay-dedup gate). The read-path retry must re-resolve, never
+    silently drop a segment and hole the window."""
+    d = _fresh_dir("sigil-tailrace-")
     p = d / "spine.jsonl"
-    lay = SpineLayout.for_path(p)
-    s = SpineStore(p, seg_max_bytes=0, seg_max_records=5)
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=15)
     s.migrate()
-    _append_n(s, 12)
-    s.compact()
-    assert list(lay.trash_dir.iterdir()), "compact trashes superseded plaintext"
-    s._reap_trash()                                         # default grace (1h) => young trash survives
-    assert list(lay.trash_dir.iterdir()), "trash within the read-grace is NOT reaped"
-    monkeypatch.setattr(store_mod, "SPINE_TRASH_GRACE_SEC", -1)
-    s._reap_trash()                                         # grace -1 => everything is past grace
-    assert not list(lay.trash_dir.iterdir()), "trash past the grace is reaped"
+    _append_n(s, 120)
+    errors: list[str] = []
+    stop = threading.Event()
+
+    def tailer():
+        r = SpineStore(p)
+        while not stop.is_set():
+            try:
+                got = [rec.seq for rec in r.tail(40)]
+            except Exception as e:                          # noqa: BLE001
+                errors.append(f"tail raised {e!r}")
+                return
+            if got != list(range(got[0], got[0] + len(got))) or (len(got) >= 40 and got[-1] - got[0] != 39):
+                errors.append(f"tail window non-contiguous: {got}")
+                return
+
+    threads = [threading.Thread(target=tailer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for _ in range(30):
+        s.compact()
+        time.sleep(0.003)
+    stop.set()
+    for t in threads:
+        t.join(timeout=10)
+    assert not errors, errors[:3]
+
+
+def test_two_concurrent_compactors_no_crash():
+    """Review BLOCK-2: two compactors on the same spine must not clobber a shared temp and crash — each
+    uses a unique temp; both complete (or no-op), and the spine verifies."""
+    d = _fresh_dir("sigil-2compact-")
+    p = d / "spine.jsonl"
+    s = SpineStore(p, seg_max_bytes=0, seg_max_records=8)
+    s.migrate()
+    _append_n(s, 120)
+    errors: list[str] = []
+
+    def compactor():
+        try:
+            SpineStore(p).compact()
+        except Exception as e:                              # noqa: BLE001
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=compactor) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    assert not errors, errors
+    ok, reason = SpineStore(p).verify()
+    assert ok, reason
+    assert [r.seq for r in SpineStore(p).iter_records()] == list(range(120))
 
 
 def test_compact_recovers_from_crash_before_codec_flip():
@@ -588,19 +634,19 @@ def test_compact_recovers_from_crash_before_codec_flip():
     assert ok, reason
 
 
-def test_compact_sweeps_orphan_plaintext_after_flip():
-    """Crash after the codec flip but before the plaintext move: an orphan plaintext beside the gz. The
-    next compact()'s orphan-sweep trashes it."""
+def test_compact_removes_orphan_plaintext_after_flip():
+    """Crash after the codec flip but before the plaintext unlink: an orphan plaintext beside the gz. The
+    next compact()'s sweep removes it (immediate reclaim)."""
     d = _fresh_dir("sigil-ccrash2-")
     p = d / "spine.jsonl"
     lay = SpineLayout.for_path(p)
     s = SpineStore(p, seg_max_bytes=0, seg_max_records=5)
     s.migrate()
     _append_n(s, 12)
-    s.compact()                                            # seg-0 -> gzip, plaintext trashed
+    s.compact()                                            # seg-0 -> gzip, plaintext unlinked
     (lay.segments_dir / "seg-00000000.jsonl").write_bytes(b'{"stale":true}\n')   # crash-stranded plaintext
-    s.compact()                                            # orphan-sweep must trash it
-    assert not (lay.segments_dir / "seg-00000000.jsonl").exists(), "orphan plaintext swept to trash"
+    s.compact()                                            # sweep must remove it
+    assert not (lay.segments_dir / "seg-00000000.jsonl").exists(), "orphan plaintext removed"
     ok, reason = SpineStore(p).verify()
     assert ok, reason
 
