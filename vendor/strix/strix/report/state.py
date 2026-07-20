@@ -623,6 +623,16 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
             continue
         if isinstance(value, int | float) and value > 0:
             return float(value)
+
+    # VIGIL: LiteLLM's cost map may not know a newer Claude model, returning nothing above and
+    # silently DISARMING the budget governor (a $0 spend never trips the cap). Fall back to the
+    # Anthropic price table so the accumulated cost is nonzero and the budget still enforces.
+    # Every real provider-reported cost path (handled by the callers above) takes precedence.
+    from .anthropic_pricing import estimate_anthropic_cost
+
+    fallback = estimate_anthropic_cost(model, usage_payload)
+    if fallback is not None and fallback > 0:
+        return fallback
     return None
 
 

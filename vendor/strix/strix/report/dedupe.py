@@ -258,14 +258,81 @@ def _parse_dedupe_response(content: str) -> dict[str, Any]:
 
 
 def _extract_text(response: ModelResponse) -> str:
+    # 1) OpenAI Responses shape: output -> ResponseOutputMessage -> content chunks with .text
     parts: list[str] = []
-    for item in response.output:
+    for item in getattr(response, "output", None) or []:
         if not isinstance(item, ResponseOutputMessage):
             continue
-        for chunk in item.content:
+        for chunk in getattr(item, "content", None) or []:
             text = getattr(chunk, "text", None)
             if text:
                 parts.append(text)
+    if parts:
+        return "".join(parts)
+
+    # The Responses shape yielded nothing. On the Claude/LiteLLM route the SDK can hand back a
+    # chat-completions-shaped response, so a Responses-only extractor silently returns "" and the
+    # LLM-judge dedup no-ops. Fall through progressively robust shapes.
+
+    # 2) SDK convenience aggregate, if present.
+    agg = getattr(response, "output_text", None)
+    if isinstance(agg, str) and agg.strip():
+        return agg
+
+    # 3) chat-completions shape: choices[].message.content (str, or Anthropic content blocks).
+    chat = _extract_chat_completions_text(response)
+    if chat:
+        return chat
+
+    # 4) Last resort: any output item exposing a str .text or .content (duck-typed).
+    for item in getattr(response, "output", None) or []:
+        t = getattr(item, "text", None)
+        if isinstance(t, str) and t:
+            parts.append(t)
+            continue
+        content = getattr(item, "content", None)
+        if isinstance(content, str) and content:
+            parts.append(content)
+    return "".join(parts)
+
+
+def _blocks_to_text(content: Any) -> str:
+    """Text from a chat-completions ``message.content`` that is a str or a list of content blocks
+    (``{"type": "text", "text": ...}`` or objects with ``.text``)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+            else:
+                text = getattr(block, "text", None)
+            if isinstance(text, str) and text:
+                out.append(text)
+        return "".join(out)
+    return ""
+
+
+def _extract_chat_completions_text(response: Any) -> str:
+    choices = getattr(response, "choices", None)
+    if choices is None and isinstance(response, dict):
+        choices = response.get("choices")
+    if not choices:
+        return ""
+    parts: list[str] = []
+    for choice in choices:
+        message = getattr(choice, "message", None)
+        if message is None and isinstance(choice, dict):
+            message = choice.get("message")
+        if message is None:
+            continue
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        text = _blocks_to_text(content)
+        if text:
+            parts.append(text)
     return "".join(parts)
 
 

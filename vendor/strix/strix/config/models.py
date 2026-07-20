@@ -206,7 +206,31 @@ def model_supports_reasoning(model_name: str) -> bool:
     entry = litellm.model_cost.get(name)
     if entry is None and "/" in name:
         entry = litellm.model_cost.get(name.rsplit("/", 1)[1])
-    return bool(entry and entry.get("supports_reasoning"))
+    if entry and entry.get("supports_reasoning"):
+        return True
+    # VIGIL: LiteLLM's cost map may not yet list a newer Claude model, which would silently DROP
+    # reasoning_effort for a model that DOES support extended thinking. Recognise the known
+    # Anthropic thinking-capable families so reasoning is still applied on the anthropic/ route.
+    return _anthropic_supports_thinking(name)
+
+
+# Claude extended-thinking families (Opus 4.x, Sonnet 4.x/5, Sonnet 3.7, Haiku 4.x). The older
+# Haiku 3/3.5 and Sonnet <=3.5 do NOT support extended thinking and are deliberately excluded,
+# so reasoning_effort is applied only where the model can actually use it.
+_ANTHROPIC_THINKING_MARKERS = (
+    "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-sonnet-5",
+    "claude-3-7-sonnet",
+    "claude-haiku-4",
+)
+
+
+def _anthropic_supports_thinking(name: str) -> bool:
+    n = name.strip().lower()
+    if "claude" not in n and "anthropic" not in n:
+        return False
+    return any(marker in n for marker in _ANTHROPIC_THINKING_MARKERS)
 
 
 def is_recommended_or_frontier_model(model_name: str) -> bool:
