@@ -1,0 +1,13 @@
+# Source distribution contents.
+#
+# The WARDEN kernel is a Rust crate compiled at build time by setuptools-rust (see pyproject.toml
+# [[tool.setuptools-rust.bins]]). An sdist MUST therefore carry the crate SOURCE — otherwise
+# `pip install sigil` from the sdist fails at `build_rust` with "can't find manifest ... kernel/Cargo.toml".
+# `graft kernel` pulls in Cargo.toml, Cargo.lock, and src/*.rs; `prune kernel/target` drops the (large,
+# regenerable) compiled artifacts so they never bloat or stale-poison the distribution.
+graft kernel
+prune kernel/target
+
+# Housekeeping: never ship compiled Python or caches.
+global-exclude *.py[cod]
+global-exclude __pycache__

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Rust
+/kernel/target/
+target/
+
+# SIGIL runtime data lives OUTSIDE the repo (~/.sigil): spine, keys, vectors, graph, env.
+# Never commit runtime state or secrets even if a stray copy lands in-tree.
+*.env
+*.key
+*.pem
+.sigil/

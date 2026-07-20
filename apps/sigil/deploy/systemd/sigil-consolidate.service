@@ -1,0 +1,44 @@
+# SIGIL nightly memory consolidation — systemd USER service (oneshot)
+# =====================================================================
+# Runs `sigil consolidate --provider heuristic`: OFFLINE extraction only
+# (no frontier / API spend). Triggered by sigil-consolidate.timer; not
+# meant to be started by hand except for a manual run:
+#
+#     systemctl --user start sigil-consolidate.service
+#     journalctl --user -u sigil-consolidate -e
+#
+# INSTALL (paired with the timer):
+#   cp deploy/systemd/sigil-consolidate.{service,timer} ~/.config/systemd/user/
+#   cp deploy/bridge.env.example ~/.sigil/bridge.env    # shared env (if not already)
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sigil-consolidate.timer
+
+[Unit]
+Description=SIGIL nightly memory consolidation (heuristic, offline, no spend)
+Documentation=file:%h/sigil/RUNBOOK.md
+
+[Service]
+Type=oneshot
+
+EnvironmentFile=-%h/.sigil/bridge.env
+Environment=SIGIL_LOG_LEVEL=INFO
+
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil consolidate --provider heuristic
+# Alternative if the `sigil` console script is not installed:
+# ExecStart=%h/.sigil/venv/bin/python -m sigil consolidate --provider heuristic
+
+# --- hardening (same posture as the bridge) --------------------------------
+# It appends promoted memories to the spine and re-signs the head, so it needs
+# write access to ~/.sigil; nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set (would break it): ProtectHome (hides the spine), PrivateNetwork
+# (harmless here but unnecessary), MemoryDenyWriteExecute (native-lib safety).
