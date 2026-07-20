@@ -113,6 +113,8 @@ def build_signed_statement(
 
 
 def _decoded_payload(ss: SignedStatement) -> Optional[bytes]:
+    if not isinstance(ss.payload_b64, str):
+        return None  # a non-str payload (e.g. DSSE "payload": null) → fail closed, never raise
     try:
         return base64.b64decode(ss.payload_b64, validate=True)
     except (ValueError, binascii.Error):
@@ -136,8 +138,17 @@ def verify_signed_statement(ss: SignedStatement, *, trust_root: TrustRoot) -> bo
 
 def statement_digest(ss: SignedStatement) -> str:
     """The transparency-log leaf identity of a signed statement: sha256 over its canonical DSSE
-    envelope (type + payload + the exact signatures as registered)."""
-    return sha256_hex(canonical_json(ss.to_envelope()))
+    envelope (type + payload + signatures). Signatures are sorted by (keyid, sig) so the digest is
+    stable regardless of signature order — a genuine statement always binds its own receipt."""
+    envelope = {
+        "payloadType": ss.payload_type,
+        "payload": ss.payload_b64,
+        "signatures": sorted(
+            ({"keyid": s.key_id, "sig": s.signature_b64} for s in ss.signatures),
+            key=lambda d: (d["keyid"], d["sig"]),
+        ),
+    }
+    return sha256_hex(canonical_json(envelope))
 
 
 # --- RFC 6962 Merkle transparency log ----------------------------------------------------------
@@ -241,12 +252,23 @@ class StatementLog:
 
 
 def verify_receipt(
-    receipt: Receipt, statement: SignedStatement, *, trust_root: TrustRoot
+    receipt: Receipt,
+    statement: SignedStatement,
+    *,
+    trust_root: TrustRoot,
+    expected_root: str,
 ) -> tuple[bool, str]:
     """Offline: the statement's m-of-n signature verifies, the receipt binds THIS statement, and the
-    inclusion proof reconstructs the log root. Fail-closed with a reason."""
-    if not isinstance(receipt, Receipt) or not verify_signed_statement(statement, trust_root=trust_root):
-        return False, "statement signature invalid or malformed receipt"
+    inclusion proof reconstructs a log root that MATCHES the ``expected_root`` the verifier
+    independently trusts. ``expected_root`` is REQUIRED — a receipt carries its own ``root``, so
+    without pinning it to a root you obtained out-of-band (a witnessed I2 checkpoint, or a trusted
+    log operator) an attacker could self-manufacture a receipt over their own root. Fail-closed."""
+    if not isinstance(receipt, Receipt):
+        return False, "malformed receipt"
+    if not isinstance(expected_root, str) or receipt.root != expected_root:
+        return False, "receipt root does not match the pinned (independently trusted) root"
+    if not verify_signed_statement(statement, trust_root=trust_root):
+        return False, "statement signature invalid"
     digest = statement_digest(statement)
     if receipt.statement_digest != digest:
         return False, "receipt does not bind this statement"
@@ -257,7 +279,7 @@ def verify_receipt(
         return False, "malformed receipt proof material"
     if not verify_inclusion(bytes.fromhex(digest), receipt.leaf_index, receipt.tree_size, path, root):
         return False, "merkle inclusion proof invalid"
-    return True, "offline-verified: signed statement included in the transparency log"
+    return True, "offline-verified: signed statement included under the pinned log root"
 
 
 def verify_anchored_receipt(
@@ -271,13 +293,19 @@ def verify_anchored_receipt(
     """The full offline story: the receipt verifies (signature + inclusion) AND the log root it
     proves against is exactly the ``merkle_root`` of an I2 checkpoint that a split-view-resistant
     witness quorum countersigned. Ties SCITT provenance to the transparency log's tamper-evidence."""
-    ok, reason = verify_receipt(receipt, statement, trust_root=trust_root)
-    if not ok:
-        return False, reason
     if not isinstance(witnessed, WitnessedCheckpoint) or not isinstance(witnessed.checkpoint, Checkpoint):
         return False, "malformed witnessed checkpoint"
-    if witnessed.checkpoint.merkle_root != receipt.root:
-        return False, "checkpoint does not anchor this log root"
-    if not verify_split_view_resistant(witnessed, witness_trust_root=witness_trust_root):
+    try:
+        resistant = verify_split_view_resistant(witnessed, witness_trust_root=witness_trust_root)
+    except Exception:
+        return False, "malformed witness material — fail closed"
+    if not resistant:
         return False, "checkpoint is not backed by a split-view-resistant witness quorum"
+    # the pinned root IS the witness-attested checkpoint root — verify_receipt compares receipt.root
+    # to it, so a receipt over any other (self-manufactured) root is refused.
+    ok, reason = verify_receipt(
+        receipt, statement, trust_root=trust_root, expected_root=witnessed.checkpoint.merkle_root
+    )
+    if not ok:
+        return False, reason
     return True, "offline-verified: statement included in a witness-anchored transparency log"

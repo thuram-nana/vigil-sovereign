@@ -129,11 +129,26 @@ def test_receipt_verifies_and_does_not_bind_a_different_statement():
     log.register(a)
     ib = log.register(b)
     rb = log.receipt(ib)
-    ok, _ = verify_receipt(rb, b, trust_root=GOV)
+    ok, _ = verify_receipt(rb, b, trust_root=GOV, expected_root=log.root())
     assert ok is True
     # the receipt for b does not verify statement a (digest mismatch)
-    bad, reason = verify_receipt(rb, a, trust_root=GOV)
+    bad, reason = verify_receipt(rb, a, trust_root=GOV, expected_root=log.root())
     assert bad is False and "bind" in reason
+
+
+def test_bare_receipt_requires_a_pinned_root_and_rejects_a_fabricated_root():
+    # BLOCK-1: verify_receipt trusts the caller-PINNED root, not receipt.root. An attacker who
+    # self-manufactures a receipt over its own root cannot pass when the verifier pins the real root.
+    real = StatementLog()
+    ss = _signed()
+    i = real.register(ss)
+    real.register(_signed(_cert(finding_ref="other")))
+    assert verify_receipt(real.receipt(i), ss, trust_root=GOV, expected_root=real.root())[0] is True
+    fake = StatementLog()
+    j = fake.register(ss)  # a 1-leaf tree over ss alone → a different root
+    assert fake.receipt(j).root != real.root()
+    ok, reason = verify_receipt(fake.receipt(j), ss, trust_root=GOV, expected_root=real.root())
+    assert ok is False and "pinned" in reason
 
 
 def test_receipt_with_a_broken_proof_fails():
@@ -144,7 +159,7 @@ def test_receipt_with_a_broken_proof_fails():
     r = log.receipt(i)
     tampered = Receipt(r.statement_digest, r.leaf_index, r.tree_size,
                        (hashlib.sha256(b"x").hexdigest(),) + r.audit_path[1:], r.root)
-    ok, reason = verify_receipt(tampered, ss, trust_root=GOV)
+    ok, reason = verify_receipt(tampered, ss, trust_root=GOV, expected_root=log.root())
     assert ok is False and "inclusion" in reason
 
 
@@ -152,8 +167,21 @@ def test_receipt_over_an_unsigned_statement_fails():
     log = StatementLog()
     ss = _signed(signers=[("g0", G0.private_key_b64)])  # below threshold
     i = log.register(ss)
-    ok, reason = verify_receipt(log.receipt(i), ss, trust_root=GOV)
+    ok, reason = verify_receipt(log.receipt(i), ss, trust_root=GOV, expected_root=log.root())
     assert ok is False and "signature" in reason
+
+
+def test_statement_digest_is_signature_order_stable():
+    # LOW-1 fix: reordering a statement's signatures must not change its transparency-log identity.
+    ss = _signed()
+    reordered = SignedStatement(ss.payload_type, ss.payload_b64, tuple(reversed(ss.signatures)))
+    assert statement_digest(reordered) == statement_digest(ss)
+
+
+def test_non_str_payload_fails_closed_not_raises():
+    # MED-1: a DSSE envelope carrying "payload": null → verify returns False, never raises.
+    bad = SignedStatement(OPENVEX_MEDIA_TYPE, None, _signed().signatures)  # type: ignore[arg-type]
+    assert verify_signed_statement(bad, trust_root=GOV) is False
 
 
 # --- anchored to the I2 witnessed transparency log ---------------------------------------------
@@ -198,7 +226,20 @@ def test_anchored_receipt_rejects_a_checkpoint_over_a_different_root():
         tuple(w.cosign(Checkpoint(last_seq=1, entry_count=1, head_hash="h", merkle_root="deadbeef" * 8))
               for w in ws))
     ok, reason = verify_anchored_receipt(receipt, ss, wrong, trust_root=GOV, witness_trust_root=wtr)
-    assert ok is False and "anchor" in reason
+    assert ok is False and "pinned" in reason  # the checkpoint's root != the receipt's root
+
+
+def test_anchored_receipt_fails_closed_on_malformed_witness_material():
+    # HIGH-1: a bad witness signature must return False out of the offline verifier, never raise.
+    ws, wtr = _witnesses(3)
+    log = StatementLog()
+    ss = _signed()
+    i = log.register(ss)
+    cp = Checkpoint(last_seq=log.size(), entry_count=log.size(), head_hash="h", merkle_root=log.root())
+    bad = WitnessedCheckpoint(cp, (Signature(key_id="w0", signature_b64="not-base64!!"),
+                                   Signature(key_id="w1", signature_b64="also-not-base64!!")))
+    ok, reason = verify_anchored_receipt(log.receipt(i), ss, bad, trust_root=GOV, witness_trust_root=wtr)
+    assert ok is False and "fail closed" in reason
 
 
 def test_anchored_receipt_rejects_a_non_resistant_witness_quorum():
