@@ -187,19 +187,24 @@ def sign_authorization(
 
 def _well_formed(action, signed) -> str:
     """Return "" if the inputs are structurally sound, else a deny reason. Guards every field that
-    reaches canonical_json / verify_threshold so a type-confused input becomes a DENY, not a raise."""
-    if not isinstance(action, DestructiveAction) or not isinstance(signed, SignedDestructionAuthorization):
+    reaches canonical_json / verify_threshold so a type-confused input becomes a DENY, not a raise.
+
+    Uses EXACT-type checks (``type(x) is C``), not ``isinstance``: a caller-supplied subclass could
+    override ``matches``/``signing_payload`` to decouple the action-binding or dead-man's-switch from
+    the signed bytes, so only the concrete records are accepted (worker request data must be
+    deserialized into concrete final types, never a behavior-overriding subclass)."""
+    if type(action) is not DestructiveAction or type(signed) is not SignedDestructionAuthorization:
         return "malformed action or authorization"
     auth = signed.authorization
-    if not isinstance(auth, DestructionAuthorization):
+    if type(auth) is not DestructionAuthorization:
         return "malformed authorization"
     for name in ("action_id", "engagement_slug", "target", "blast_class", "nonce"):
-        if not isinstance(getattr(auth, name), str):
+        if type(getattr(auth, name)) is not str:
             return f"authorization field {name!r} is not a string"
     if not _is_real(auth.not_before) or not _is_real(auth.not_after):
         return "authorization window is not numeric"
-    if not isinstance(signed.signatures, tuple) or not all(
-        isinstance(s, Signature) for s in signed.signatures
+    if type(signed.signatures) is not tuple or not all(
+        type(s) is Signature for s in signed.signatures
     ):
         return "malformed signature list"
     return ""
@@ -277,8 +282,10 @@ def require_destruction_authorization(
     **kwargs,
 ) -> str:
     """Raise :class:`DestructionRefused` fail-closed unless ``action`` is threshold-authorized.
-    Returns the nonce to record as consumed. This is the call the offense worker makes immediately
-    before an irreversible action — it MUST NOT be wrapped in a bare ``except``."""
+    Returns the nonce to record as consumed. This is called by the PRIVILEGED EXECUTOR (the trusted
+    host-side call site that holds the deployment ``authority``) immediately before an irreversible
+    action — NOT by the injectable agent, which only proposes the action. It MUST NOT be wrapped in a
+    bare ``except``. ``authority`` must come from immutable deployment config, never from the request."""
     decision = authorize_destruction(action, signed, **kwargs)
     if not decision.authorized:
         raise DestructionRefused(decision.reason)

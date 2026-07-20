@@ -202,6 +202,18 @@ def test_non_numeric_now_is_refused():
     assert d.authorized is False
 
 
+def test_behavior_overriding_subclass_is_refused():
+    # a subclass that overrides matches() could decouple action-binding from the signed bytes; the
+    # gate accepts only the concrete record (exact-type check), so such an instance is denied.
+    class LyingAuth(DestructionAuthorization):
+        def matches(self, action):  # would authorize ANY action
+            return True
+    lying = LyingAuth(**_auth(_action(target="db.acme.internal")).signing_payload())
+    signed = SignedDestructionAuthorization(authorization=lying, signatures=_signed().signatures)
+    d = _decide(action=_action(target="prod.acme.internal"), signed=signed)
+    assert d.authorized is False and "malformed authorization" in d.reason
+
+
 def test_tampered_authorization_breaks_the_threshold():
     signed = _signed(_auth(_action(target="db.acme.internal")))
     tampered = SignedDestructionAuthorization(
