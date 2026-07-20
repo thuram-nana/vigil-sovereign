@@ -58,6 +58,14 @@ def _finding_ref(finding: dict) -> str:
     )
 
 
+def _kind_str(kind: Any) -> str:
+    """The oracle kind's canonical ``.value`` string. OracleKind is ``(str, Enum)``, NOT a
+    ``StrEnum``, so ``str(kind)`` yields the repr ``'OracleKind.X'`` — which the CRUCIBLE
+    reproduction / ``verify_certificate`` layer (it compares against ``kind.value``) rejects as
+    tampered, and which ``_oracle_version`` cannot resolve. Always store the ``.value``."""
+    return getattr(kind, "value", None) or str(kind)
+
+
 def confirm_and_certify(
     finding: dict,
     *,
@@ -70,6 +78,11 @@ def confirm_and_certify(
     mapped finding, mint + sign a proof-carrying certificate. ``signers`` = [(key_id, priv_b64)]
     (governance authorisers). Returns a ``fact`` (with SignedEvidence) or a labelled ``lead``.
     """
+    if not signers:
+        raise ValueError(
+            "confirm_and_certify requires governance signers to mint a signed fact; it will not "
+            "label an unsigned (zero-signature) certificate a 'fact' (fail-closed)."
+        )
     # Lazy CRUCIBLE imports — offense-side only; keeps the module import-clean for the sovereign env.
     from framework.v2.evidence.certify import build_certificate, sign_certificate
     from framework.v2.verify.confirmation import confirm_finding
@@ -91,17 +104,17 @@ def confirm_and_certify(
     if not is_known_bug_class(confirmed_class):
         return AdapterResult(
             "lead",
-            f"confirmed by {confirmed.confirmed_by} but {confirmed_class!r} has no deterministic "
+            f"confirmed by {_kind_str(confirmed.confirmed_by)} but {confirmed_class!r} has no deterministic "
             f"oracle mapping — retained as a labelled lead, not a signed fact",
             confirmed_class, _finding_ref(finding),
-            confirmed_by=str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
+            confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
         )
 
     # 3. mint + sign the proof-carrying certificate over the exact confirmed evidence.
     enriched = {
         **finding,
         "bug_class": confirmed_class,
-        "confirmed_by": str(confirmed.confirmed_by),
+        "confirmed_by": _kind_str(confirmed.confirmed_by),
         "confidence": float(confirmed.confidence),
         "oracle_context": oracle_context,
     }
@@ -109,7 +122,7 @@ def confirm_and_certify(
     signed = sign_certificate(cert, signers)
     return AdapterResult(
         "fact",
-        f"oracle-confirmed by {confirmed.confirmed_by} and signed (proof-carrying certificate)",
+        f"oracle-confirmed by {_kind_str(confirmed.confirmed_by)} and signed (proof-carrying certificate)",
         confirmed_class, cert.finding_ref, signed=signed,
-        confirmed_by=str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
+        confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
     )
