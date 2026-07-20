@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vigil-gateway"
+version = "0.1.0"
+description = "Host-side deny-default egress gate for the VIGIL offense sandbox (FATAL-1 fix)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = []  # stdlib only at runtime; reuses CRUCIBLE's ethics via path bootstrap
+
+[project.scripts]
+vigil-gateway = "vigil_gateway.cli:main"
+
+[project.optional-dependencies]
+docker = ["docker>=7.0"]
+test = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["vigil_gateway"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
