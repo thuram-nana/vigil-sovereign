@@ -59,17 +59,40 @@ def _dep_names(pyproject: pathlib.Path) -> list[str]:
     deps = list(project.get("dependencies", []) or [])
     for extra in (project.get("optional-dependencies", {}) or {}).values():
         deps.extend(extra or [])
+    # also the runtime dependency-groups (PEP 735) and build requirements — an offense
+    # package smuggled in as a build/group requirement must not evade the check.
+    for group in (data.get("dependency-groups", {}) or {}).values():
+        deps.extend(g for g in (group or []) if isinstance(g, str))
+    deps.extend(data.get("build-system", {}).get("requires", []) or [])
     return deps
 
 
-def test_no_sovereign_member_declares_offense_dependency():
-    # Always runs — no venv, no ambient interpreter state. The declared dependency graph of
-    # every sovereign member must be free of crucible/framework/strix.
-    members = {
+def _sovereign_members() -> dict[str, pathlib.Path]:
+    """The sovereign member set, read from the root pyproject so this proof cannot silently
+    drift from the declared boundary (falls back to the known three if the key is absent)."""
+    fallback = {
         "vigil_core": _VIGIL_CORE / "pyproject.toml",
         "apps/sigil": _SOVEREIGN / "pyproject.toml",
         "integration": _INTEGRATION / "pyproject.toml",
     }
+    root = _REPO / "pyproject.toml"
+    if not root.is_file():
+        return fallback
+    data = tomllib.loads(root.read_text(encoding="utf-8"))
+    members = (
+        data.get("tool", {}).get("vigil", {}).get("environments", {})
+        .get("sovereign", {}).get("members")
+    )
+    if not members:
+        return fallback
+    return {m: _REPO / m / "pyproject.toml" for m in members}
+
+
+def test_no_sovereign_member_declares_offense_dependency():
+    # Always runs — no venv, no ambient interpreter state. The declared dependency graph of
+    # every sovereign member (read from the root pyproject) must be free of crucible/framework/strix.
+    members = _sovereign_members()
+    assert members, "no sovereign members declared"
     for name, pp in members.items():
         assert pp.is_file(), f"{name} pyproject missing at {pp}"
         for dep in _dep_names(pp):
@@ -104,7 +127,12 @@ def test_real_sovereign_venv_cannot_reach_offense(tmp_path):
     # apps/sigil on PYTHONPATH so sigil.reuse loads (it needs only vigil_core, which IS installed);
     # framework/strix are neither installed in this venv nor on the path.
     env["PYTHONPATH"] = str(_SOVEREIGN)
-    proc = subprocess.run([str(py), "-c", _PROBE], capture_output=True, text=True, env=env, timeout=60)
+    # Pin cwd to the clean tmp dir: Python puts cwd on sys.path[0], so running from a dir that
+    # happens to contain a top-level framework/ or strix/ would let the probe import it (fail-safe
+    # — it would raise, never falsely pass — but pinning removes the ambiguity).
+    proc = subprocess.run(
+        [str(py), "-c", _PROBE], capture_output=True, text=True, env=env, timeout=60, cwd=str(tmp_path)
+    )
     assert proc.returncode == 0, f"stderr:\n{proc.stderr}"
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert out["guard"] == "passed"
