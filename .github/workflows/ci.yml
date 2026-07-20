@@ -129,13 +129,18 @@ jobs:
         run: |
           pip install -e packages/core/vigil_core \
             "pydantic>=2.10,<3" structlog httpx requests PyYAML "cryptography>=42" packaging pytest
-      - name: offense gate + hardening (killswitch/promotion/approval regressions)
+      - name: offense gate + hardening + finding receiver (P7 governance + P10 two-anchor ingest)
         env:
           SIGIL_HOME: /tmp/sigil-ci
         run: |
           mkdir -p /tmp/sigil-ci
           if [ -f apps/sigil/tests/test_offense_gate.py ]; then
-            PYTHONPATH=apps/sigil python -m pytest apps/sigil/tests/test_offense_gate.py apps/sigil/tests/test_hardening.py -q
+            # integration on the path for the P10 finding-receiver (it uses vigil_integration.inert_finding,
+            # which is sovereign-safe = vigil_core only, so no offense engine is pulled).
+            PYTHONPATH=apps/sigil:integration python -m pytest \
+              apps/sigil/tests/test_offense_gate.py \
+              apps/sigil/tests/test_hardening.py \
+              apps/sigil/tests/test_finding_receiver.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi
