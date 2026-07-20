@@ -1,0 +1,15 @@
+{
+  "id": "reflected-xss",
+  "bug_class": "xss",
+  "title": "Reflected cross-site scripting",
+  "severity": "High",
+  "applies_when": {"always": true},
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "reflection",
+    "payload_template": "\"'><x{marker}>"
+  },
+  "references": ["CWE-79", "CAPEC-591"],
+  "remediation": "Contextually output-encode all user-controlled data on render (HTML, attribute, JS, URL contexts) and set a strict Content-Security-Policy. Prefer frameworks that auto-escape by default.",
+  "payload_family": "html-breakout"
+}

@@ -1,0 +1,396 @@
+# =============================================================================
+# CRUCIBLE — .gitignore
+# =============================================================================
+# This file enforces the single most important opsec rule of an offensive
+# engagement: nothing that could compromise a target, expose a victim, or
+# burn an operator ever leaves the host it was generated on.
+#
+# Three classes of artifact must NEVER be committed:
+#
+#   1.  LOOT       — anything obtained from the target. Credentials, tokens,
+#                    session cookies, dumped data, exfil samples. Even one
+#                    leaked record is a breach. Treat loot/ as radioactive.
+#
+#   2.  EVIDENCE   — request/response pairs, screenshots, recordings,
+#                    network captures. These contain target hostnames,
+#                    internal IPs, employee names, headers, sometimes
+#                    cookies. They are NOT for public consumption.
+#
+#   3.  IDENTITY   — operator credentials, infra keys, C2 configs, VPN
+#                    profiles. Compromise here means the next engagement
+#                    starts already burned.
+#
+# The framework/ tree itself is shareable. The targets/ tree is not.
+# When in doubt, do not commit. Add it here, then commit the .gitignore.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Per-engagement working data — these directories live under targets/<name>/
+# and contain everything that could possibly identify, expose, or harm a
+# real target. We ignore them by pattern so a freshly-cloned repo gets the
+# template scaffolding but never inherits another engagement's artifacts.
+# -----------------------------------------------------------------------------
+
+# Archived engagements — preserved for reference but never published.
+targets/.archive/
+
+targets/*/loot/**
+targets/*/evidence/**
+targets/*/recon/raw/**
+targets/*/recon/**/*.json
+targets/*/recon/**/*.xml
+targets/*/recon/**/*.txt
+targets/*/recon/**/*.csv
+targets/*/recon/**/*.html
+targets/*/recon/**/screenshots/
+targets/*/source/**
+
+# Findings and reports often contain sanitized but still-sensitive material
+# (CVEs scoped to a private codebase, internal endpoint names, hash samples).
+# Block the populated outputs but keep the README scaffolding visible.
+targets/*/findings/FINDING-*.md
+targets/*/findings/CHAIN-*.md
+targets/*/reports/*.pdf
+targets/*/reports/*.docx
+targets/*/reports/draft-*.md
+targets/*/reports/final-*.md
+
+# Engagement notes contain raw working memory — hypotheses tested, payloads
+# tried, dead ends, dialogue with the client. Sensitive by default.
+targets/*/notes/command-log.md
+targets/*/notes/engagement-log.md
+targets/*/notes/endpoints.md
+targets/*/notes/role-matrix.md
+targets/*/notes/test-artifacts.md
+targets/*/notes/hypotheses.md
+
+# Signed charter pages contain wet signatures, government IDs, real names,
+# legal entity addresses. These NEVER leave the engagement folder.
+targets/*/charter-signed.pdf
+targets/*/charter-signed.png
+targets/*/charter-signed-*.pdf
+targets/*/authorization-letter.pdf
+targets/*/get-out-of-jail.pdf
+
+# The _template directory IS supposed to ship — its files are scaffolding,
+# not data. Whitelist the template explicitly so the patterns above don't
+# strip it.
+!targets/_template/
+!targets/_template/**
+
+# Per-target README.md, charter.md, threat-model.md, attack-tree.md are
+# the entry points for the engagement and should usually be tracked
+# (sanitized scope is fine to commit). Anything more sensitive than that
+# goes in the directories blocked above. Whitelist these explicitly:
+!targets/*/README.md
+!targets/*/charter.md
+!targets/*/threat-model.md
+!targets/*/attack-tree.md
+!targets/*/recon/README.md
+!targets/*/findings/README.md
+!targets/*/evidence/README.md
+!targets/*/loot/README.md
+!targets/*/reports/README.md
+!targets/*/notes/README.md
+
+
+# -----------------------------------------------------------------------------
+# Credentials, keys, secrets — anywhere in the tree, no exceptions.
+# These patterns are deliberately broad. False positives are recoverable;
+# a leaked private key is not.
+# -----------------------------------------------------------------------------
+*.key
+*.pem
+*.p12
+*.pfx
+*.pkcs12
+*.jks
+*.keystore
+*.crt
+*.csr
+*.cer
+*.der
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+*_rsa
+*_ed25519
+*_ecdsa
+known_hosts
+authorized_keys
+
+# Secret-bearing config files
+.env
+.env.*
+*.env
+secrets.yaml
+secrets.yml
+secrets.json
+secrets.toml
+credentials
+credentials.*
+*credentials*.json
+*credentials*.yaml
+*credentials*.yml
+.netrc
+.pgpass
+.aws/
+.azure/
+.gcloud/
+gcloud-key.json
+service-account*.json
+firebase-adminsdk*.json
+
+# Cookie jars, session files, token caches
+cookies.txt
+cookies.jar
+*.cookies
+session.json
+sessions/
+tokens.json
+*.token
+.bearer
+authn-cache/
+
+
+# -----------------------------------------------------------------------------
+# Tool output — wordlists, scan results, intermediate caches. These are
+# generated, not authored, and frequently contain target-identifying data.
+# -----------------------------------------------------------------------------
+framework/wordlists/*.txt
+framework/wordlists/*.lst
+framework/wordlists/SecLists/
+framework/wordlists/PayloadsAllTheThings/
+framework/wordlists/seclists/
+framework/wordlists/cache/
+
+# Local installs of tooling — don't pollute the repo with binaries
+framework/tools/bin/
+framework/tools/opt/
+framework/tools/.cache/
+framework/tools/go/
+framework/tools/venv/
+framework/tools/node_modules/
+
+# Common scanner output formats anywhere in the tree
+*.nessus
+*.nmap
+*.gnmap
+*.xml.bak
+nuclei-output/
+ffuf-output/
+gobuster-output/
+amass-output/
+subfinder-output/
+httpx-output/
+zap-report.*
+burp-state.*
+*.burpstate
+
+# Recon raw dumps anywhere — belt and braces with the targets/ rules
+**/recon-raw/
+**/raw-dumps/
+**/breach-data/
+**/dehashed/
+**/intelx/
+**/leakcheck/
+
+
+# -----------------------------------------------------------------------------
+# Standard development noise — Python, Node, OS, editors. Listed last
+# because the security-relevant entries above are what actually matter.
+# -----------------------------------------------------------------------------
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+virtualenv/
+
+# Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.yarn/
+.pnp.*
+.yarnclean
+package-lock.json.bak
+
+# Go
+go.sum.bak
+*.test
+*.out
+vendor/
+
+# Rust
+target/
+Cargo.lock.bak
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# Compiled / archives that shouldn't normally be tracked
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.iso
+*.dmg
+
+# OS-specific noise
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~
+.netrwhist
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+.vim/
+.nvim/
+
+# Logs
+*.log
+logs/
+log/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+*.tmp
+*.bak
+*.backup
+*.old
+*.orig
+*.rej
+.cache/
+
+
+# -----------------------------------------------------------------------------
+# CRUCIBLE v2 — sensitive engagement state.
+# Memory store, dryrun prompt captures, planner state, intake fixtures
+# captured from real targets, structured engagement logs, and the
+# operator-attested authorization ledger.  None of this is for the repo.
+# -----------------------------------------------------------------------------
+framework/v2/.memory/
+framework/v2/.dryrun/
+framework/v2/.blackboard/
+framework/v2/.intake-authorizations.txt
+framework/v2/.crucible-v2.log
+# Entitlement material (Pillar 2): trust root, signed grant, revocation
+# list. Operator-provisioned, never committed. Authoriser PRIVATE keys
+# must never touch a runtime host or the repo at all.
+framework/v2/.entitlement/
+# SIL (Pillar 3) working area: mined gaps and drafted proposals. Review
+# artifacts, not canon — regenerated per engagement.
+framework/v2/.improve/
+# Engagement authority + kill-switch state. Operator/runtime state, never
+# committed. The .halt file is the persistent hard stop.
+framework/v2/.authority/
+framework/v2/.console/
+framework/v2/intake/tests/fixtures/*
+# Session 3 regression fixtures from live URK runs ARE tracked.
+!framework/v2/intake/tests/fixtures/live-run/
+# Session 8.5 — first real engagement captures (mrbeanpanel) contain
+# real-target HTTP traffic logs. Not for the public repo. Operator
+# can move sanitised fragments to a tracked path later if needed.
+framework/v2/planner/tests/fixtures/live-run/mrbeanpanel-*/
+targets/*/.crucible-v2.log
+targets/*/.planner-state.json
+targets/*/recon/fingerprint.json
+targets/*/charter.draft.md
+targets/*/postmortem.md
+# UTI versioned scaffold outputs (threat-model.md.uti-<date>, attack-tree.md.uti-<date>)
+# — engagement-specific URK drafts; operator decides what to publish.
+targets/*/threat-model.md.uti-*
+targets/*/attack-tree.md.uti-*
+# UTI's host-derived parallel-scaffold folders (e.g. mrbeanpanel-com/) when
+# the operator already has a canonical engagement folder under a different slug.
+targets/mrbeanpanel-com/
+
+
+# -----------------------------------------------------------------------------
+# Final safety net — anything explicitly named "private", "internal",
+# "do-not-commit", or "sensitive" is blocked. If you have to name a file
+# that, you already know it shouldn't be committed.
+# -----------------------------------------------------------------------------
+*private*
+*PRIVATE*
+*do-not-commit*
+*DO-NOT-COMMIT*
+*do_not_commit*
+*sensitive*
+*SENSITIVE*
+*confidential*
+*CONFIDENTIAL*
+internal-only/
+internal_only/
+# Joern CPG workspace output (created by importCode). Never committed.
+workspace/
+framework/v2/workspace/
+**/workspace/

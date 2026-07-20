@@ -1,0 +1,34 @@
+{
+  "name": "webgoat",
+  "role": "vulnerable",
+  "image": "webgoat/webgoat",
+  "container_port": 8080,
+  "host_port": 8080,
+  "health_path": "/WebGoat/login",
+  "health_statuses": [
+    200,
+    302
+  ],
+  "health_timeout_s": 180,
+  "seed_path": "/WebGoat/login",
+  "env": {
+    "WEBGOAT_HOST": "0.0.0.0",
+    "WEBGOAT_PORT": "8080"
+  },
+  "ground_truth": {
+    "kind": "none"
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "JSON_VALUE"
+    ],
+    "drop_timing": true,
+    "enable_oob": false,
+    "use_library": true,
+    "max_pages": 40,
+    "max_depth": 4
+  },
+  "heavy": false,
+  "notes": "UNVERIFIED in this build environment \u2014 no network access here to pull or run the image; the port, health path, binding, and startup time must be confirmed on first real launch. Canonical image: OWASP WebGoat on Docker Hub (webgoat/webgoat). The related webgoat/goatandwolf tag additionally bundles WebWolf (port 9090) for lessons needing an out-of-band client; either can be substituted. WebGoat is a deliberately-vulnerable Java Spring Boot security-training app (role=vulnerable). It requires user REGISTRATION then LOGIN before any lesson is reachable, and lesson state is STATEFUL/session-bound (many lessons are multi-step and only become 'vulnerable' after prior steps), so an unauthenticated black-box scanner will only reach /WebGoat/login and the registration form and cannot exercise the vulnerable lesson endpoints without an authenticated, cookie-bearing, JS-capable client. Lesson endpoints are largely AJAX/JSON driven by a JS front-end (SPA-like), which a non-browser crawler will not discover. For these reasons ground_truth.kind=none: we deliberately DO NOT ship curated param-level bug locations, because stable locations behind auth+state would be low-confidence and version-fragile; this app instead measures false-positive count, crawl/discovery behavior, and performance rather than recall. Newer WebGoat builds bind to 127.0.0.1 inside the container by default, so env WEBGOAT_HOST=0.0.0.0 (and WEBGOAT_PORT=8080) is set to make the app reachable from the host \u2014 confirm the chosen image tag honors these vars. Context path is /WebGoat with login at /WebGoat/login (root / typically 302-redirects to it); Spring Boot cold start can take 30-90s, hence the generous health_timeout_s. To actually assess WebGoat's planted vulnerabilities an operator must register/login and drive it with an authenticated, browser-capable tool, which is outside the default black-box harness run."
+}

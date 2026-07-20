@@ -1,0 +1,25 @@
+{
+  "id": "m2-inj-nosql-js-tautology",
+  "bug_class": "nosqli",
+  "title": "NoSQL JavaScript boolean tautology injection",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "query_value",
+    "body_form_value",
+    "json_value"
+  ],
+  "oracle": {
+    "kind": "differential",
+    "benign": "crucible-benign-term",
+    "probe": "' || '1'=='1"
+  },
+  "references": [
+    "CWE-943",
+    "CAPEC-676"
+  ],
+  "remediation": "Treat request data as opaque values, never query operators. Reject or coerce objects where a scalar is expected (so {'$ne':..}/{'$gt':..} can never reach the query), cast types before building the filter, and use a query builder that parameterises operands. Disable server-side JS ($where/mapReduce) unless required.",
+  "payload_family": "nosql-js-tautology"
+}

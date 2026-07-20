@@ -1,0 +1,26 @@
+{
+  "id": "m2-sqli-pg-time-concat-pg-sleep",
+  "bug_class": "time_based_sqli",
+  "title": "PostgreSQL time-based blind SQLi (string concat pg_sleep)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "query_value",
+    "body_form_value"
+  ],
+  "oracle": {
+    "kind": "timing",
+    "benign": "1",
+    "sleep_payload": "'||pg_sleep(3)--",
+    "injected_ms": 3000
+  },
+  "references": [
+    "CWE-89",
+    "CAPEC-66",
+    "note: PostgreSQL pg_sleep(3) spliced via '||' string concatenation"
+  ],
+  "remediation": "Use parameterised queries / prepared statements so request data is bound as a value and can never alter query structure. Never build SQL by string concatenation; apply least-privilege DB accounts and disable stacked queries as defence in depth.",
+  "payload_family": "postgres-time"
+}

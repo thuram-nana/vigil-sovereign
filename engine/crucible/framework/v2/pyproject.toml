@@ -1,0 +1,72 @@
+[project]
+name = "crucible-v2"
+version = "2.0.0a1"
+description = "CRUCIBLE v2 — autonomous, learning offensive-intelligence platform layered onto v1"
+requires-python = ">=3.11"
+authors = [{name = "OBSIDIAN-FORGE"}]
+# Dual-licensed: GNU AGPL-3.0-or-later OR a Commercial License. See ../../LICENSE and ../../LICENSING.md.
+license = {text = "AGPL-3.0-or-later"}
+readme = "README.md"
+classifiers = [
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+]
+
+dependencies = [
+  "pydantic>=2.10,<3",
+  "structlog>=25.0,<26",
+  "httpx>=0.28,<1",
+  "requests>=2.32,<3",
+  "PyYAML>=6,<7",
+  "beautifulsoup4>=4.12,<5",
+  "Jinja2>=3.1,<4",
+  "cryptography>=42,<50",
+  "packaging>=23",           # PEP 440 version parsing (verify.version); was an undeclared hard dep
+]
+
+# OPTIONAL, feature-flagged extras (WS-G). None are hard deps: every import is
+# try/except-guarded with a pure-Python/stdlib fallback, and the default
+# (extras-absent) path is byte-identical + deterministic. Probe availability
+# via framework.v2.common.capabilities (has_z3/has_semantic/has_numpy).
+[project.optional-dependencies]
+anthropic   = ["anthropic>=0.40,<1"]
+embeddings  = ["sentence-transformers>=2,<6"]  # semantic embedder (opt-in; lexical is default)
+analysis    = ["semgrep>=1.100"]               # DAA real taint/dataflow analysis
+smt         = ["z3-solver>=4.12,<5"]           # bounded SMT / path-condition feasibility (analysis.smt)
+numerics    = ["numpy>=1.26,<3"]               # opt-in fast integer numerics (CRUCIBLE_FAST_NUMERICS)
+saml        = ["signxml>=5,<6"]                # opt-in cryptographic SAML XML-DSig verification (pulls lxml + cryptography)
+dev         = ["pytest>=8,<11", "mypy>=1.10,<2"]
+
+[tool.mypy]
+python_version            = "3.11"
+strict_optional           = true
+no_implicit_optional      = true
+disallow_untyped_defs     = true
+ignore_missing_imports    = true
+# Relaxed: sqlite3.Row indexing trips warn_return_any unhelpfully, and
+# cross-platform conditional imports leave the occasional dead # type: ignore.
+warn_return_any           = false
+warn_unused_ignores       = false
+exclude                   = ['/tests/', '/benchmark/', '/corpus/']
+
+[tool.pytest.ini_options]
+testpaths        = [
+  "common/tests",
+  "kernel/tests",
+  "memory/tests",
+  "intake/tests",
+  "agents/tests",
+  "planner/tests",
+  "entitlement/tests",
+  "eval/tests",
+  "improve/tests",
+  "defender/tests",
+  "analysis/tests",
+  "authority/tests",
+  "socialdefense/tests",
+  "report/tests",
+]
+python_files     = ["test_*.py"]
+python_functions = ["test_*"]
+addopts          = "-q -ra"

@@ -1,0 +1,36 @@
+{
+  "name": "wordpress",
+  "role": "real-enterprise",
+  "image": "wordpress:latest",
+  "container_port": 80,
+  "host_port": 8080,
+  "env": {
+    "WORDPRESS_DB_HOST": "db:3306",
+    "WORDPRESS_DB_USER": "wordpress",
+    "WORDPRESS_DB_PASSWORD": "wordpress",
+    "WORDPRESS_DB_NAME": "wordpress"
+  },
+  "health_path": "/",
+  "health_statuses": [
+    200,
+    301,
+    302
+  ],
+  "health_timeout_s": 120,
+  "seed_path": "",
+  "ground_truth": {
+    "kind": "none"
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE"
+    ],
+    "drop_timing": true,
+    "max_pages": 60,
+    "max_depth": 3,
+    "enable_oob": false,
+    "use_library": true
+  },
+  "heavy": false,
+  "notes": "UNVERIFIED in this build environment: there is no network here to pull the image or stand the app up, so port/health/behavior below are from documented WordPress defaults, not observed in-place. Canonical image: `wordpress:latest` from Docker Official Images (https://hub.docker.com/_/wordpress). REQUIRES A DATABASE: WordPress needs a MySQL/MariaDB backend the operator must wire as a companion container (e.g. `mariadb:11` or `mysql:8` reachable at WORDPRESS_DB_HOST=db:3306) with matching WORDPRESS_DB_USER/PASSWORD/NAME env; the single app image alone will not become healthy without it. INSTALL STEP: on first boot the app is uninstalled \u2014 the root `/` returns a 302 redirect to `/wp-admin/install.php` (the install wizard), which is why health accepts 200/301/302; to exercise authenticated/admin surface the operator must complete the 5-minute install wizard (set site title, admin user/password) and then log in at `/wp-login.php`. Give it a generous startup window (health_timeout_s=120) because the container waits on the DB to be ready. GROUND TRUTH: kind=none \u2014 this is real, unmodified production CMS software with no planted bugs, so we are NOT measuring recall; we are measuring false-positive count, crawl/discovery behavior, and performance against a realistic app. This target is chosen for fingerprinting, version/exposure detection (e.g. /wp-json, /readme.html, /wp-login.php, /xmlrpc.php, meta generator tag), and passive coverage \u2014 hence use_library=true. Any confirmed \"vulnerability\" the scanner reports against a clean stock install should be treated as a candidate false positive unless the operator has intentionally installed a vulnerable plugin/theme (not done here). drop_timing=true since no timing-based checks are needed for FP/discovery measurement. REVIEW (honesty/plausibility): verified canonical image, container_port=80 + health_path=/ with 200/301/302 all correct for the stock image's install-redirect behavior; ground_truth.kind=none so no curated-location/bug_class vocabulary check applies; notes honestly disclose unverified-in-build-env, DB + install-wizard/auth needs, and the FP/curation caveat; heavy=false is correct (WordPress is not in the heavy set of owasp-benchmark/gitlab-ce/mattermost). No corrections required."
+}

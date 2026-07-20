@@ -1,0 +1,25 @@
+{
+  "id": "w4b-ldapi-filter-paren",
+  "bug_class": "ldap_injection",
+  "title": "LDAP injection via an unbalanced search-filter (error-based)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "query_value",
+    "body_form_value",
+    "json_value"
+  ],
+  "oracle": {
+    "kind": "error_signature",
+    "error_probe": ")(cn=*))(|(cn=*",
+    "benign": "crucible-benign-term"
+  },
+  "references": [
+    "CWE-90",
+    "CAPEC-136"
+  ],
+  "remediation": "Escape LDAP special characters ( ) * \\ / NUL per RFC 4515 before building a search filter, or use a parameterised directory API. A distinctive directory/parser error (LDAPException / Invalid DN syntax) present for the malformed filter but ABSENT from the benign control is attributable proof the input reached the filter parser.",
+  "payload_family": "ldap-filter-break"
+}

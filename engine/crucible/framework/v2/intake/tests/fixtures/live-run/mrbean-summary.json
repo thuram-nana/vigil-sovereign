@@ -1,0 +1,13 @@
+{
+  "backend": "claude-code",
+  "model": "haiku",
+  "target": "https://mrbeanpanel.com",
+  "elapsed_seconds": 173,
+  "request_count": 9,
+  "archetype": "php-smarty-smm-panel-fork",
+  "score": 0.745,
+  "threat_model_lines": 208,
+  "threat_model_is_skeleton": false,
+  "threat_model_is_dryrun_render": false,
+  "threat_model_is_live_urk": true
+}

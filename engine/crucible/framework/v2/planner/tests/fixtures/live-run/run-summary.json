@@ -1,0 +1,31 @@
+{
+  "backend": "claude-code",
+  "model": "haiku",
+  "intake_archetype": "php-smarty-smm-panel-fork",
+  "intake_score": 0.7374999999999999,
+  "planner_steps": 10,
+  "planner_dispatched": 10,
+  "planner_succeeded": 1,
+  "planner_halt_reason": "max_steps=10",
+  "planner_seconds": 60,
+  "tree_stats": {
+    "open": 42,
+    "claimed": 0,
+    "in_progress": 0,
+    "succeeded": 1,
+    "failed": 9,
+    "pruned": 0,
+    "deferred": 0,
+    "total": 52,
+    "leaves": 48
+  },
+  "blackboard_event_counts": {
+    "observation": 0,
+    "hypothesis": 20,
+    "plan": 10,
+    "action": 10,
+    "result": 10,
+    "finding": 2,
+    "critique": 1
+  }
+}

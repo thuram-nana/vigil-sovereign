@@ -1,0 +1,28 @@
+# CRUCIBLE v2 — runtime dependencies.
+# Install with:
+#   pip install --break-system-packages -r framework/v2/requirements.txt
+# Or in a venv:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r framework/v2/requirements.txt
+#
+# Optional extras (pick what you actually use):
+#   anthropic               # live LLM backend; needs ANTHROPIC_API_KEY
+#   sentence-transformers   # higher-quality embeddings; ~80MB model on first use
+#
+# v2 ships in DryRun mode by default — no network and no GPU required.
+# See V2-LIMITATIONS.md for what dry-run sacrifices.
+
+pydantic>=2.10,<3
+structlog>=25.0,<26
+httpx>=0.28,<1
+requests>=2.32,<3
+PyYAML>=6,<7
+beautifulsoup4>=4.12,<5
+Jinja2>=3.1,<4
+# Ed25519 signatures (entitlement/authority/evidence trust-root + signed certificates).
+cryptography>=42,<50
+
+# Test-only dependency: HttpExecutor unit tests run against a local
+# mock HTTP server fixture (pytest-httpserver) so they never hit a
+# real network. Skip if not running tests.
+pytest-httpserver>=1.1,<2

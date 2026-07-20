@@ -1,0 +1,42 @@
+# CRUCIBLE v2 — hash-pinned dependency lock.
+#
+# OPERATOR REGENERATES THIS FILE before any sovereign deployment.
+# This skeleton is intentionally NOT a real lock — generating one
+# requires reaching PyPI's JSON API, which sovereign-deployment
+# hosts may legitimately have firewalled. Generation is a deliberate
+# operator-run step on a network-permitted CI host.
+#
+# Generation command (run once per sovereign-deployment cut):
+#
+#   pip install pip-tools                                  # build-time tool
+#   pip-compile --generate-hashes \
+#               --output-file=framework/v2/requirements.lock.txt \
+#               framework/v2/requirements.in
+#
+# Verification (run on every CI build):
+#
+#   bash bin/verify-supply-chain.sh
+#
+# The verification script will fail with a clear message until this
+# file is populated. That is correct — sovereign deployments must
+# not ship without a hash-pinned lock.
+#
+# Why this isn't auto-generated this session:
+#
+#   1. The development sandbox firewalls PyPI egress (correctly,
+#      under sovereignty discipline).
+#   2. Generating a lock requires resolving transitive dependencies
+#      across all seven direct runtime deps, which takes pip-tools'
+#      real solver — not a one-line script.
+#   3. A sovereign-deployment operator regenerates this on their
+#      controlled CI infrastructure where their hash-on-disk policy
+#      can be audited.
+#
+# Once populated, every line in this file looks like:
+#
+#   pydantic==2.10.4 \
+#       --hash=sha256:<...> \
+#       --hash=sha256:<...>
+#
+# `pip install --require-hashes -r requirements.lock.txt` then
+# refuses any wheel whose hash does not match.

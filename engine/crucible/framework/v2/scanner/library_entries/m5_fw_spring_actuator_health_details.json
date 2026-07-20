@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-spring-actuator-health-details",
+  "bug_class": "exposure",
+  "title": "Spring Boot Actuator /health details exposed",
+  "severity": "Low",
+  "applies_when": {
+    "category": "java"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/actuator/health",
+    "signature": "diskSpace"
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Set management.endpoint.health.show-details=never for anonymous.",
+  "payload_family": "exposure-spring-actuator-health-details"
+}

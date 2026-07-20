@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-wp-json-users",
+  "bug_class": "exposure",
+  "title": "WordPress REST user enumeration",
+  "severity": "Medium",
+  "applies_when": {
+    "tech": "wordpress"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/wp-json/wp/v2/users",
+    "signature": "\"slug\""
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Disable/authenticate the users REST route; block author enumeration.",
+  "payload_family": "exposure-wp-json-users"
+}

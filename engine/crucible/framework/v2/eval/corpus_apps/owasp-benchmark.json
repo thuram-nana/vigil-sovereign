@@ -1,0 +1,35 @@
+{
+  "name": "owasp-benchmark",
+  "role": "labeled",
+  "image": "owasp-benchmark:1.2",
+  "container_port": 8443,
+  "host_port": 0,
+  "health_path": "/benchmark/",
+  "health_statuses": [
+    200,
+    302
+  ],
+  "health_timeout_s": 300,
+  "seed_path": "/benchmark/",
+  "ground_truth": {
+    "kind": "owasp",
+    "owasp_csv": "expectedresults-1.2.csv",
+    "owasp_dast_only": true
+  },
+  "scan": {
+    "max_pages": 150,
+    "max_depth": 4,
+    "use_library": true,
+    "enable_oob": false,
+    "max_audit_requests": 0,
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "BODY_FORM_VALUE",
+      "COOKIE_VALUE",
+      "HEADER_VALUE"
+    ],
+    "drop_timing": true
+  },
+  "heavy": true,
+  "notes": "UNVERIFIED in this build environment (no network here to build/pull images or fetch the CSV) \u2014 the operator must verify against a live instance. Ground truth is OWASP's OWN published expectedresults-1.2.csv (neutral, independently authored \u2014 NOT our curation); set ground_truth.owasp_csv to that file's path (relative to the corpus base_dir, or absolute). dast_only=true restricts scoring to the honest black-box-reachable categories (cmdi, sqli, xss, pathtraver, ldapi, xpathi); the SAST-only categories (crypto, hash, securecookie, trustbound, weakrand) are intentionally excluded from recall \u2014 score those with a SAST tool. Locations resolve to /benchmark/<test name> (e.g. /benchmark/BenchmarkTest00001), matching the ~2,740 endpoints CRUCIBLE crawls from the seed. Canonical source: there is NO official Docker Hub image; OWASP Benchmark 1.2 is built from source (github.com/OWASP-Benchmark/BenchmarkJava, project home owasp.org/www-project-benchmark) \u2014 the image tag 'owasp-benchmark:1.2' is a LOCALLY-BUILT placeholder the operator produces (runBenchmark.sh compiles the Java suite and serves it under Tomcat). Default deployment is HTTPS with a self-signed cert on 8443 (container_port set to that canonical default); note that the harness's built-in DockerLauncher health check and scanner speak plain HTTP, so the operator must EITHER enable Tomcat's plain-HTTP connector on 8080 and change container_port to 8080, OR supply an HTTPS-aware launcher pointing at the running instance. heavy=true: this is a RAM/CPU-heavy Java/Tomcat build that is never auto-launched \u2014 run_corpus_app refuses to launch it without an operator-provided launcher. No login is required (test pages are unauthenticated) and the suite is self-contained (embedded DB, server-rendered JSP \u2014 no external database or SPA to stand up), but each test case consumes its input via a specific vector \u2014 query string, POST form body, cookie, or header \u2014 hence the broad insertion_kinds; some cases only trigger on POST bodies. max_audit_requests=0 means UNCAPPED audit traffic (0 is the no-budget-limit sentinel, not zero requests), which is what a full recall pass needs. Timing checks are dropped (drop_timing=true) because per-endpoint timing probes across ~2,740 endpoints are infeasibly slow; the DAST-reachable categories are confirmable without them (time-based SQLi still credits the sqli label via boolean/error-based detections under the family class-key). max_pages=150 will not cover all ~2,740 endpoints in one pass \u2014 raise it (and max_depth) for fuller recall at the cost of runtime."
+}

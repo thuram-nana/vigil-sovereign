@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-laravel-log",
+  "bug_class": "exposure",
+  "title": "Laravel debug log exposed",
+  "severity": "High",
+  "applies_when": {
+    "category": "php"
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/storage/logs/laravel.log",
+    "signature": "stacktrace"
+  },
+  "references": [
+    "CWE-532",
+    "CWE-16"
+  ],
+  "remediation": "Block access to storage/logs; disable debug in production.",
+  "payload_family": "exposure-laravel-log"
+}

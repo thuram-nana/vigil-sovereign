@@ -1,0 +1,20 @@
+{
+  "id": "m5-fw-elasticsearch",
+  "bug_class": "exposure",
+  "title": "Elasticsearch cluster exposed",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "oracle": {
+    "kind": "signature",
+    "probe_path": "/",
+    "signature": "\"cluster_name\""
+  },
+  "references": [
+    "CWE-200",
+    "CWE-16"
+  ],
+  "remediation": "Never expose Elasticsearch to the internet; require auth.",
+  "payload_family": "exposure-elasticsearch"
+}

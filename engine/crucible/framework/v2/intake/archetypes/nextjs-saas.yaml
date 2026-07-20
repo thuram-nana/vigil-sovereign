@@ -1,0 +1,42 @@
+name: Next.js SaaS
+slug: nextjs-saas
+description: |
+  Single-page-style SaaS built on Next.js, often paired with a
+  managed back-end (Supabase / Firebase / Hasura) or a custom API
+  in the same repo. Bug surface concentrates on API routes, JWT/
+  session handling, image/proxy SSRF, and prototype-pollution in
+  large client bundles.
+fingerprints_required_any:
+  - framework:nextjs
+fingerprints_optional:
+  - cdn_waf:vercel
+  - cdn_waf:cloudflare
+  - api:rest
+  - api:graphql
+  - auth:jwt
+  - auth:oidc
+  - payment:stripe
+common_vulnerabilities:
+  - IDOR
+  - JWT-confusion
+  - SSRF
+  - server-actions-auth-bypass
+  - prototype-pollution
+  - environment-leak
+  - rate-limit-bypass
+  - cache-poisoning
+playbook_priorities:
+  - 05-api-security
+  - 07-authorization
+  - 06-authentication-identity
+  - 08-injection
+  - 09-client-side
+  - 11-cryptography
+attack_tree_seeds:
+  - Take over an account via JWT/session weakness
+  - SSRF via image proxy or remote-fetch endpoint
+  - Bypass server-action authorization
+  - Leak environment / build secrets via /_next/ artefacts
+notes: |
+  Next.js sourcemaps in production reveal API client code and edge
+  function logic.  Always check /_next/static/.../*.map.

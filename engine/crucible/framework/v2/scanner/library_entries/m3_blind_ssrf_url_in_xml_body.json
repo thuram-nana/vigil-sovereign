@@ -1,0 +1,22 @@
+{
+  "id": "m3-blind-ssrf-url-in-xml-body",
+  "bug_class": "ssrf",
+  "title": "Blind SSRF (URL embedded in XML body)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "body_whole"
+  ],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "<?xml version=\"1.0\"?><request><endpoint>http://{callback}</endpoint></request>"
+  },
+  "references": [
+    "CWE-918",
+    "CAPEC-664"
+  ],
+  "remediation": "Do not let user input drive server-side fetches. Enforce an allowlist of permitted hosts and schemes, block internal/link-local ranges and the cloud metadata endpoint, disable unneeded URL schemes (gopher/dict/ftp/file), resolve-then-pin the destination to defeat DNS rebinding, and never follow redirects into internal space. The inbound callback proves a server-side fetch fired.",
+  "payload_family": "callback-body"
+}

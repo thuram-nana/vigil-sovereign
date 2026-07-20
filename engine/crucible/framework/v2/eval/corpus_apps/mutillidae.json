@@ -1,0 +1,52 @@
+{
+  "name": "mutillidae",
+  "role": "vulnerable",
+  "image": "citizenstig/nowasp",
+  "container_port": 80,
+  "host_port": 8080,
+  "health_path": "/",
+  "health_statuses": [
+    200,
+    302
+  ],
+  "health_timeout_s": 120,
+  "seed_path": "/index.php",
+  "ground_truth": {
+    "kind": "curated",
+    "expected": [
+      {
+        "bug_class": "lfi",
+        "location": "/index.php?page"
+      },
+      {
+        "bug_class": "sqli",
+        "location": "/index.php?page=user-info.php&username"
+      },
+      {
+        "bug_class": "sqli",
+        "location": "/index.php?page=login.php&username"
+      },
+      {
+        "bug_class": "command_injection",
+        "location": "/index.php?page=dns-lookup.php&target_host"
+      },
+      {
+        "bug_class": "xss",
+        "location": "/index.php?page=dns-lookup.php&target_host"
+      }
+    ]
+  },
+  "scan": {
+    "insertion_kinds": [
+      "QUERY_VALUE",
+      "BODY_FORM_VALUE"
+    ],
+    "drop_timing": true,
+    "max_pages": 60,
+    "max_depth": 5,
+    "enable_oob": false,
+    "max_audit_requests": 2000
+  },
+  "heavy": false,
+  "notes": "UNVERIFIED in this build environment \u2014 no network here to pull the image or exercise the app; ports/paths/labels are from documentation and must be verified on first real launch. Canonical image: Docker Hub `citizenstig/nowasp` (OWASP Mutillidae II / \"NOWASP\"), a self-contained PHP app bundling Apache + PHP + MySQL in one container listening on port 80 \u2014 no separate DB container needed. (Alternative `bltsec/mutillidae-docker` is a multi-container compose stack requiring separate MySQL/LDAP services; prefer the single `citizenstig/nowasp` image for auto-launch.)\n\nDB SETUP REQUIRED: on first run the database tables are not built. Browse to the app and click \"reset/setup the DB\" (the setup prompt on the home page, or visit /index.php?page=install.php / the \"Setup/reset the DB\" menu link) to initialize MySQL before scanning; SQLi/auth pages return errors until the schema exists. The home page `/` returns 200 even pre-setup, so it is a valid health signal, but ground-truth injection points need the DB built first. MySQL init can add startup latency \u2014 hence the 120s health timeout.\n\nSECURITY LEVEL: Mutillidae ships at security level 0 (fully insecure) by default, so the curated points are exploitable out of the box; a UI toggle can raise it to level 5 (secured), which would suppress findings \u2014 keep it at level 0 for benchmarking.\n\nAUTH: the five curated points are reachable unauthenticated. The `page` parameter is the classic local-file-inclusion sink (GET/QUERY_VALUE); user-info.php SQLi is a GET form (QUERY_VALUE, `username`/`password`); login.php SQLi/auth-bypass is a POST form (BODY_FORM_VALUE, `username`); dns-lookup.php is a POST form (BODY_FORM_VALUE, `target_host`) vulnerable to both OS command injection (output-reflected `nslookup`) and reflected XSS. Hence insertion_kinds includes both QUERY_VALUE and BODY_FORM_VALUE.\n\nCURATION CAVEAT: the ground_truth labels are OUR curation (co-design), chosen as small/high-confidence/well-documented classic Mutillidae bugs \u2014 they are stable but SHOULD be independently verified against the running build; param names in particular (`page`, `username`, `target_host`) should be confirmed against the deployed version, as menu/page routing has shifted across Mutillidae releases. Deliberately vulnerable app (role=vulnerable), PHP category."
+}

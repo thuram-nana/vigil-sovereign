@@ -1,0 +1,212 @@
+# DAA taint ruleset — Python (semgrep taint mode).
+#
+# These are DATAFLOW rules, not pattern matches: each finding means
+# attacker-controlled input provably reaches a dangerous sink. That is the
+# difference between "regex saw os.system" and "untrusted data reaches
+# os.system". Shipped with the framework so DAA does real semantic
+# analysis offline, without the semgrep.dev registry.
+#
+# Sources are common web-request entry points (Flask/Django/generic
+# request objects). Sinks are the classic injection/SSRF/traversal/exec
+# points. Sanitizers reduce false positives where an obvious validator is
+# applied. Extend per target stack.
+
+rules:
+  - id: daa-py-command-injection
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into an OS command sink (CWE-78).
+    metadata: {cwe: "CWE-78", bug_class: "OS Command Injection"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: flask.request.form.get(...)
+              - pattern: flask.request.values.get(...)
+              - pattern: flask.request.args[...]
+              - pattern: flask.request.form[...]
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+              - pattern: request.args[...]
+              - pattern: request.GET.get(...)
+              - pattern: request.POST.get(...)
+              - pattern: request.get_json(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: os.system(...)
+              - pattern: os.popen(...)
+              - pattern: subprocess.call(...)
+              - pattern: subprocess.run(...)
+              - pattern: subprocess.Popen(...)
+              - pattern: subprocess.check_output(...)
+    pattern-sanitizers:
+      - pattern: shlex.quote(...)
+
+  - id: daa-py-sql-injection
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into a SQL execute sink (CWE-89).
+    metadata: {cwe: "CWE-89", bug_class: "SQL Injection"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: flask.request.form.get(...)
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+              - pattern: request.GET.get(...)
+              - pattern: request.POST.get(...)
+    pattern-sinks:
+      # Dynamic query construction only — concatenation / f-string /
+      # %-format / .format(). A parameterised query
+      # (execute("... ?", (u,))) passes user data as a separate argument
+      # and is NOT matched here. This is the regex-vs-dataflow line: a
+      # naive matcher flags both; taint over these sinks flags only the
+      # query built from untrusted input.
+      - patterns:
+          - pattern-either:
+              - pattern: $CUR.execute(... + ...)
+              - pattern: $CUR.execute(f"...")
+              - pattern: $CUR.execute("...".format(...))
+              - pattern: $CUR.execute("..." % ...)
+              - pattern: $CUR.executescript(... + ...)
+
+  - id: daa-py-ssrf
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into an outbound HTTP/URL fetch (SSRF, CWE-918).
+    metadata: {cwe: "CWE-918", bug_class: "SSRF"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+              - pattern: request.GET.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: requests.get(...)
+              - pattern: requests.post(...)
+              - pattern: requests.request(...)
+              - pattern: httpx.get(...)
+              - pattern: httpx.post(...)
+              - pattern: urllib.request.urlopen(...)
+              - pattern: urllib.urlopen(...)
+
+  - id: daa-py-code-injection
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into a code-evaluation sink (CWE-95).
+    metadata: {cwe: "CWE-95", bug_class: "Code Injection"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval(...)
+              - pattern: exec(...)
+              - pattern: compile(...)
+
+  - id: daa-py-path-traversal
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into a filesystem open (path traversal, CWE-22).
+    metadata: {cwe: "CWE-22", bug_class: "Path Traversal"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: open(...)
+
+  - id: daa-py-ssti
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into server-side template rendering (SSTI, CWE-1336).
+    metadata: {cwe: "CWE-1336", bug_class: "Server-Side Template Injection"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: render_template_string(...)
+              - pattern: flask.render_template_string(...)
+              - pattern: Template(...).render(...)
+
+  - id: daa-py-insecure-deserialization
+    mode: taint
+    severity: ERROR
+    message: Untrusted request data flows into an unsafe deserializer — RCE (CWE-502).
+    metadata: {cwe: "CWE-502", bug_class: "Insecure Deserialization"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: flask.request.args.get(...)
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+              - pattern: request.values.get(...)
+              - pattern: request.data
+              - pattern: request.get_data(...)
+              - pattern: request.get_json(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: pickle.loads(...)
+              - pattern: pickle.load(...)
+              - pattern: cPickle.loads(...)
+              - pattern: yaml.load(...)
+              - pattern: yaml.unsafe_load(...)
+    pattern-sanitizers:
+      - pattern: yaml.safe_load(...)
+
+  - id: daa-py-xxe
+    mode: taint
+    severity: ERROR
+    message: Untrusted XML is parsed by an entity-resolving parser (XXE, CWE-611).
+    metadata: {cwe: "CWE-611", bug_class: "XXE"}
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: request.data
+              - pattern: request.get_data(...)
+              - pattern: flask.request.data
+              - pattern: request.body
+              - pattern: request.args.get(...)
+              - pattern: request.form.get(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: lxml.etree.fromstring(...)
+              - pattern: lxml.etree.parse(...)
+              - pattern: lxml.etree.XML(...)
+              - pattern: etree.fromstring(...)
+              - pattern: etree.parse(...)
+              - pattern: xml.etree.ElementTree.fromstring(...)
+              - pattern: xml.sax.parse(...)

@@ -1,0 +1,25 @@
+{
+  "id": "m2-inj-ldap-wildcard-or",
+  "bug_class": "boolean_sqli",
+  "title": "LDAP filter injection (wildcard OR breakout)",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [
+    "query_value",
+    "body_form_value",
+    "json_value"
+  ],
+  "oracle": {
+    "kind": "differential",
+    "benign": "crucible-benign-term",
+    "probe": "*)(uid=*))(|(uid=*"
+  },
+  "references": [
+    "CWE-90",
+    "CAPEC-136"
+  ],
+  "remediation": "Escape every user-supplied value with the directory library's filter-encoding routine (RFC 4515) so '*', '(', ')', '\\' and NUL cannot alter the filter structure. Prefer parameterised/framework filter builders and bind with least-privilege service accounts.",
+  "payload_family": "ldap-filter-breakout"
+}

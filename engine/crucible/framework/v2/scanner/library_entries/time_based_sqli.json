@@ -1,0 +1,17 @@
+{
+  "id": "time-based-sqli",
+  "bug_class": "time_based_sqli",
+  "title": "Time-based blind SQL injection",
+  "severity": "High",
+  "applies_when": {"always": true},
+  "insertion_kinds": ["query_value", "body_form_value"],
+  "oracle": {
+    "kind": "timing",
+    "benign": "1",
+    "sleep_payload": "1' AND SLEEP(5)-- -",
+    "injected_ms": 5000
+  },
+  "references": ["CWE-89", "CAPEC-7"],
+  "remediation": "Use parameterised queries so injected clauses like a conditional SLEEP() cannot execute. Statistical confirmation (a delay that scales with the injected time) distinguishes a real bug from network jitter.",
+  "payload_family": "sql-sleep"
+}

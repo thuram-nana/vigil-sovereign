@@ -1,0 +1,42 @@
+# CRUCIBLE v2 — runtime dependencies (source spec for pip-compile).
+#
+# This file is the INPUT to pip-compile. The hash-pinned, fully-
+# resolved output lives at requirements.lock.txt. Sovereign
+# deployments install from the lock file; development can install
+# from this file directly.
+#
+# Regenerate the lock with:
+#   pip-compile --generate-hashes --output-file=requirements.lock.txt \
+#               framework/v2/requirements.in
+#
+# The verification script `bin/verify-supply-chain.sh` re-runs this
+# command and exits non-zero on drift. CI must run that script.
+#
+# Optional extras (pick what you actually use, then add to a separate
+# requirements file — never expand this base spec without review):
+#
+#   anthropic                # cloud LLM backend; refused under
+#                            # CRUCIBLE_SOVEREIGN_MODE=1
+#   sentence-transformers    # higher-quality embeddings
+#                            # (~80MB model on first use)
+#
+# v2 ships in DryRun mode by default — no network and no GPU required.
+# See V2-LIMITATIONS.md for what dry-run sacrifices.
+
+pydantic>=2.10,<3
+structlog>=25.0,<26
+httpx>=0.28,<1
+requests>=2.32,<3
+PyYAML>=6,<7
+beautifulsoup4>=4.12,<5
+Jinja2>=3.1,<4
+
+# Ed25519 signatures for the governance trust-root, engagement authorities, and
+# signed evidence certificates (entitlement/, authority/, evidence/). pyca; we do
+# not roll our own crypto. Runtime verifies; signing is provisioning-side.
+cryptography>=42,<50
+
+# Test-only: HttpExecutor unit tests run against a local mock HTTP
+# server fixture so they never hit a real network. Sovereign-strict
+# CI omits this entry from the runtime install.
+pytest-httpserver>=1.1,<2

@@ -1,0 +1,39 @@
+name: WordPress + WooCommerce
+slug: wordpress-woocommerce
+description: |
+  WordPress site running WooCommerce as the storefront. Inherits the
+  WordPress archetype's bug surface plus money-flow risks: coupon
+  abuse, order manipulation, payment-gateway plugin flaws, customer
+  PII in stored orders.
+fingerprints_required_any:
+  - cms:woocommerce
+fingerprints_optional:
+  - cms:wordpress
+  - framework:wordpress
+  - cdn_waf:wordfence
+common_vulnerabilities:
+  - plugin-CVE
+  - reflected-XSS
+  - stored-XSS
+  - SQLi
+  - IDOR
+  - coupon-fraud
+  - refund-fraud
+  - order-tampering
+  - file-upload
+  - payment-gateway-plugin-flaw
+playbook_priorities:
+  - 04-web-application
+  - 10-business-logic
+  - 06-authentication-identity
+  - 07-authorization
+  - 11-cryptography
+  - 08-injection
+attack_tree_seeds:
+  - Compromise an admin account
+  - Forge or replay payment confirmations
+  - Abuse coupons, refunds, or order state
+  - Reach RCE via file upload / payment-gateway plugin
+notes: |
+  WooCommerce REST API extends /wp-json/ — test for IDOR on /orders/<id>
+  and on /customers/<id>.

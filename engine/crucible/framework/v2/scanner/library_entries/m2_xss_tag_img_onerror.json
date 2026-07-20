@@ -1,0 +1,21 @@
+{
+  "id": "m2-xss-tag-img-onerror",
+  "bug_class": "xss",
+  "title": "Reflected XSS — <img onerror> element injection from text context",
+  "severity": "High",
+  "applies_when": {
+    "always": true
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "reflection",
+    "payload_template": "<img src=x onerror={marker}>"
+  },
+  "references": [
+    "CWE-79",
+    "CWE-80",
+    "CAPEC-591"
+  ],
+  "remediation": "Context-aware output encoding is the primary fix: HTML-entity-encode in HTML text context, attribute-encode (and always quote attributes) in attribute context, JavaScript/JSON-encode in script context, and allowlist URL schemes (reject javascript:) in URL context. Never build markup by concatenating untrusted data. Prefer a framework that auto-escapes per context, and deploy a strict Content-Security-Policy (no unsafe-inline, nonce/hash script sources) as defense-in-depth so a residual injection cannot execute.",
+  "payload_family": "html-element-event-handler"
+}

@@ -1,0 +1,382 @@
+{
+  "fingerprint": {
+    "target_url": "https://mrbeanpanel.com",
+    "detectors": {
+      "server": {
+        "detector": "server_detection",
+        "detections": [
+          {
+            "label": "nginx",
+            "category": "server",
+            "confidence": 1.0,
+            "evidence": [
+              "Server: nginx (in GET https://mrbeanpanel.com/)",
+              "Server: nginx (in GET https://mrbeanpanel.com/robots.txt)",
+              "Server: nginx (in GET https://mrbeanpanel.com/sitemap.xml)",
+              "Server: nginx (in GET https://mrbeanpanel.com/.well-known/security.txt)",
+              "Server: nginx (in GET https://mrbeanpanel.com/.well-known/openid-configuration)",
+              "Server: nginx (in GET https://mrbeanpanel.com/login)",
+              "Server: nginx (in GET https://mrbeanpanel.com/api/)",
+              "Server: nginx (in GET https://mrbeanpanel.com/wp-login.php)",
+              "Server: nginx (in GET https://mrbeanpanel.com/admin)"
+            ]
+          }
+        ]
+      },
+      "framework": {
+        "detector": "framework_detection",
+        "detections": [
+          {
+            "label": "perfect-panel",
+            "category": "framework",
+            "confidence": 0.99,
+            "evidence": [
+              "Perfect Panel CDN reference (in GET https://mrbeanpanel.com/)",
+              "Perfect Panel CDN reference (in GET https://mrbeanpanel.com/admin)"
+            ]
+          },
+          {
+            "label": "rails",
+            "category": "framework",
+            "confidence": 0.9,
+            "evidence": [
+              "Rails csrf-param meta (in GET https://mrbeanpanel.com/admin)"
+            ]
+          },
+          {
+            "label": "symfony",
+            "category": "framework",
+            "confidence": 0.51,
+            "evidence": [
+              "PHPSESSID (PHP family) (in GET https://mrbeanpanel.com/)",
+              "PHPSESSID (PHP family) (in GET https://mrbeanpanel.com/admin)"
+            ]
+          },
+          {
+            "label": "laravel",
+            "category": "framework",
+            "confidence": 0.4,
+            "evidence": [
+              "CSRF token meta (Laravel pattern) (in GET https://mrbeanpanel.com/admin)"
+            ]
+          }
+        ]
+      },
+      "cms": {
+        "detector": "cms_detection",
+        "detections": [
+          {
+            "label": "perfect-panel",
+            "category": "cms",
+            "confidence": 0.997,
+            "evidence": [
+              "Perfect Panel CDN signature (in GET https://mrbeanpanel.com/)",
+              "Perfect Panel CDN signature (in GET https://mrbeanpanel.com/admin)"
+            ]
+          },
+          {
+            "label": "wordpress",
+            "category": "cms",
+            "confidence": 0.9,
+            "evidence": [
+              "/wp-login.php path (in GET https://mrbeanpanel.com/wp-login.php)"
+            ]
+          },
+          {
+            "label": "smm-panel",
+            "category": "cms",
+            "confidence": 0.5,
+            "evidence": [
+              "SMM-panel marketing copy (in GET https://mrbeanpanel.com/)"
+            ]
+          }
+        ]
+      },
+      "auth": {
+        "detector": "auth_detection",
+        "detections": [
+          {
+            "label": "php-session",
+            "category": "auth",
+            "confidence": 0.978,
+            "evidence": [
+              "PHPSESSID cookie (in GET https://mrbeanpanel.com/)",
+              "PHPSESSID cookie (in GET https://mrbeanpanel.com/admin)"
+            ]
+          },
+          {
+            "label": "oidc",
+            "category": "auth",
+            "confidence": 0.95,
+            "evidence": [
+              "/.well-known/openid-configuration (in GET https://mrbeanpanel.com/.well-known/openid-configuration)"
+            ]
+          },
+          {
+            "label": "mfa",
+            "category": "auth",
+            "confidence": 0.75,
+            "evidence": [
+              "MFA-related copy (in GET https://mrbeanpanel.com/robots.txt)",
+              "MFA-related copy (in GET https://mrbeanpanel.com/admin)"
+            ]
+          }
+        ]
+      },
+      "api": {
+        "detector": "api_detection",
+        "detections": [
+          {
+            "label": "rest",
+            "category": "api",
+            "confidence": 0.7,
+            "evidence": [
+              "/api/ or /vN/ path served (in GET https://mrbeanpanel.com/api/)"
+            ]
+          },
+          {
+            "label": "soap",
+            "category": "api",
+            "confidence": 0.6,
+            "evidence": [
+              "SOAP/XML Content-Type (in GET https://mrbeanpanel.com/sitemap.xml)"
+            ]
+          }
+        ]
+      },
+      "payment": {
+        "detector": "payment_detection",
+        "detections": []
+      },
+      "cdn_waf": {
+        "detector": "cdn_waf_detection",
+        "detections": [
+          {
+            "label": "hsts",
+            "category": "cdn_waf",
+            "confidence": 1.0,
+            "evidence": [
+              "HSTS enabled (in GET https://mrbeanpanel.com/)",
+              "HSTS enabled (in GET https://mrbeanpanel.com/robots.txt)",
+              "HSTS enabled (in GET https://mrbeanpanel.com/sitemap.xml)",
+              "HSTS enabled (in GET https://mrbeanpanel.com/api/)",
+              "HSTS enabled (in GET https://mrbeanpanel.com/admin)"
+            ]
+          },
+          {
+            "label": "csp",
+            "category": "cdn_waf",
+            "confidence": 1.0,
+            "evidence": [
+              "CSP enabled (in GET https://mrbeanpanel.com/)",
+              "CSP enabled (in GET https://mrbeanpanel.com/robots.txt)",
+              "CSP enabled (in GET https://mrbeanpanel.com/sitemap.xml)",
+              "CSP enabled (in GET https://mrbeanpanel.com/api/)",
+              "CSP enabled (in GET https://mrbeanpanel.com/admin)"
+            ]
+          },
+          {
+            "label": "xfo",
+            "category": "cdn_waf",
+            "confidence": 1.0,
+            "evidence": [
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/robots.txt)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/sitemap.xml)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/.well-known/security.txt)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/.well-known/openid-configuration)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/login)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/api/)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/wp-login.php)",
+              "X-Frame-Options set (in GET https://mrbeanpanel.com/admin)"
+            ]
+          }
+        ]
+      }
+    },
+    "security_headers": {
+      "Strict-Transport-Security": "max-age=31536000;",
+      "Content-Security-Policy": "frame-ancestors 'self', frame-ancestors 'self'",
+      "X-Frame-Options": "sameorigin, sameorigin"
+    },
+    "cookies_seen": [
+      "PHPSESSID",
+      "_csrf",
+      "_usid",
+      "_ppref",
+      "_csrf_admin"
+    ],
+    "paths_probed": [
+      "/",
+      "/.well-known/openid-configuration",
+      "/.well-known/security.txt",
+      "/admin",
+      "/api/",
+      "/login",
+      "/robots.txt",
+      "/sitemap.xml",
+      "/wp-login.php"
+    ],
+    "request_count": 9,
+    "notes": []
+  },
+  "classification": {
+    "primary": {
+      "archetype": {
+        "name": "PHP-Smarty SMM-panel fork",
+        "slug": "php-smarty-smm-panel-fork",
+        "description": "PHP-based reseller panel for Social Media Marketing services,\ntypically a fork of the Perfect Panel codebase. Heavy on numeric\nID-bearing URLs, balance-based payments, and a multi-PSP webhook\nsurface (Cryptomus, Coinbase, Payeer, Perfect Money, manual USDT/BTC).\nFrequent ATO targets for credential-stuffers and webhook-forgery\nfraudsters. mrbeanpanel.com is the canonical instance.\n",
+        "fingerprints_required_any": [
+          "cms:perfect-panel",
+          "framework:perfect-panel"
+        ],
+        "fingerprints_optional": [
+          "server:nginx",
+          "framework:php",
+          "framework:smarty",
+          "cms:smm-panel",
+          "payment:cryptomus",
+          "payment:coinbase-commerce",
+          "payment:payeer",
+          "payment:perfect-money",
+          "payment:manual-crypto"
+        ],
+        "common_vulnerabilities": [
+          "webhook-forgery",
+          "IDOR",
+          "mass-assignment",
+          "race",
+          "SQLi",
+          "vertical-privesc",
+          "source-disclosure",
+          "reset-token"
+        ],
+        "playbook_priorities": [
+          "05-api-security",
+          "07-authorization",
+          "06-authentication-identity",
+          "10-business-logic",
+          "11-cryptography",
+          "04-web-application",
+          "12-network-infrastructure"
+        ],
+        "attack_tree_seeds": [
+          "Take over a customer account",
+          "Manipulate balance / orders without paying",
+          "Take over the platform itself"
+        ],
+        "notes": "This archetype's worst-case loss is unbounded balance creation via\nunsigned webhook callbacks. Treat the PSP webhook handlers as the\nhighest-priority surface.\n"
+      },
+      "score": 0.7454500000000001,
+      "matched_required": [
+        "cms:perfect-panel",
+        "framework:perfect-panel"
+      ],
+      "matched_optional": [
+        "server:nginx",
+        "cms:smm-panel"
+      ]
+    },
+    "runners_up": [
+      {
+        "archetype": {
+          "name": "Ruby on Rails monolith",
+          "slug": "rails-monolith",
+          "description": "Classic Rails application \u2014 server-rendered ERB / Hotwire, sometimes\nwith a JSON API for mobile or SPA clients. Bug surface: strong-\nparams bypass, mass-assignment, ActionController open-redirect,\nYAML.load deserialization, ActiveStorage URL-fetch SSRF.\n",
+          "fingerprints_required_any": [
+            "framework:rails",
+            "framework:phusion"
+          ],
+          "fingerprints_optional": [
+            "server:puma",
+            "server:unicorn",
+            "auth:rails-session",
+            "api:rest"
+          ],
+          "common_vulnerabilities": [
+            "IDOR",
+            "mass-assignment",
+            "SQLi-via-where-string",
+            "SSTI-erb",
+            "YAML-deserialization",
+            "SSRF-activestorage",
+            "open-redirect",
+            "csrf-token-missing-on-api"
+          ],
+          "playbook_priorities": [
+            "05-api-security",
+            "07-authorization",
+            "04-web-application",
+            "08-injection",
+            "06-authentication-identity"
+          ],
+          "attack_tree_seeds": [
+            "Take over an account or escalate privilege",
+            "Inject SQL via where(\"...\") string interpolation",
+            "Reach RCE via YAML deserialization / Marshal",
+            "Abuse open-redirect on login / oauth callback"
+          ],
+          "notes": "Permit a parameter list explicitly per controller \u2014 implicit permit\nis the canonical Rails mass-assignment bug.\n"
+        },
+        "score": 0.3675,
+        "matched_required": [
+          "framework:rails"
+        ],
+        "matched_optional": [
+          "api:rest"
+        ]
+      },
+      {
+        "archetype": {
+          "name": "WordPress CMS",
+          "slug": "wordpress-cms",
+          "description": "Generic WordPress installation. Bug surface dominated by plugins\nand themes; core itself is reasonably hardened against common\nclasses. Authentication via wp-login; xmlrpc historically a\nbrute-force target. WP REST API at /wp-json/.\n",
+          "fingerprints_required_any": [
+            "cms:wordpress",
+            "framework:wordpress"
+          ],
+          "fingerprints_optional": [
+            "server:apache",
+            "server:nginx",
+            "server:litespeed",
+            "cdn_waf:wordfence",
+            "cdn_waf:sucuri",
+            "cdn_waf:cloudflare"
+          ],
+          "common_vulnerabilities": [
+            "plugin-CVE",
+            "reflected-XSS",
+            "stored-XSS",
+            "SQLi",
+            "file-upload",
+            "wp-config-disclosure",
+            "xmlrpc-bruteforce",
+            "rest-api-enum"
+          ],
+          "playbook_priorities": [
+            "04-web-application",
+            "06-authentication-identity",
+            "08-injection",
+            "09-client-side",
+            "12-network-infrastructure",
+            "15-cicd-supply-chain"
+          ],
+          "attack_tree_seeds": [
+            "Take over an admin account",
+            "Compromise a published plugin / theme",
+            "Reach RCE via file upload / known plugin CVE",
+            "Enumerate users via REST / xmlrpc"
+          ],
+          "notes": "Always run wpscan with a paid token if available. /wp-json/wp/v2/users\noften leaks usernames anonymously.\n"
+        },
+        "score": 0.365,
+        "matched_required": [
+          "cms:wordpress"
+        ],
+        "matched_optional": [
+          "server:nginx"
+        ]
+      }
+    ]
+  }
+}

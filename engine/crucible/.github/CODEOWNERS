@@ -1,0 +1,9 @@
+# CODEOWNERS — CRUCIBLE
+#
+# Junior Thuram Nana is the sole maintainer and code owner of this repository.
+# Every pull request that changes ANY path requires review and approval by the
+# code owner before it can be merged into a protected branch.
+#
+# (If the owner's GitHub handle changes, update the handle below.)
+
+*       @thuram-nana

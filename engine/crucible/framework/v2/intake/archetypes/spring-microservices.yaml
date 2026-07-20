@@ -1,0 +1,39 @@
+name: Spring Boot microservices
+slug: spring-microservices
+description: |
+  JVM microservices running Spring Boot, fronted by an API gateway
+  (Kong / Tyk / Spring Cloud Gateway). Bug surface: Spring
+  Security mis-config, IDOR on REST endpoints, SSRF via service-
+  to-service URL fetches, exposed Actuator endpoints, deserialization
+  via Jackson default typing.
+fingerprints_required_any:
+  - framework:spring
+fingerprints_optional:
+  - auth:java-session
+  - api:rest
+  - api:openapi
+  - cdn_waf:cloudflare
+common_vulnerabilities:
+  - IDOR
+  - actuator-exposure
+  - JWT-confusion
+  - SSRF
+  - jackson-deserialization
+  - spel-injection
+  - security-misconfig
+  - service-to-service-auth-bypass
+playbook_priorities:
+  - 05-api-security
+  - 07-authorization
+  - 16-microservices
+  - 13-cloud-native
+  - 06-authentication-identity
+  - 11-cryptography
+attack_tree_seeds:
+  - Take over an account or escalate privilege at the gateway
+  - Reach internal services via SSRF / service mesh
+  - Exploit exposed Actuator endpoints
+  - Reach RCE via deserialization or SpEL injection
+notes: |
+  /actuator/heapdump and /actuator/env are the highest-impact
+  configuration mistakes; check explicitly.

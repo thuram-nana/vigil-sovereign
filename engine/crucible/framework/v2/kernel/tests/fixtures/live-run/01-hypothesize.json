@@ -1,0 +1,85 @@
+{
+  "ok": true,
+  "elapsed_s": 50.6,
+  "trace": {
+    "backend": "claude-code",
+    "is_dryrun": false,
+    "cognitive_doc": "framework/cognitive/hypothesis-driven.md",
+    "cognitive_sections": [
+      "1-the-hypothesis-form",
+      "2-generating-hypotheses-forcing-breadth",
+      "3-cheap-test-design",
+      "4-falsifiability-what-evidence-would-change-my-mind"
+    ],
+    "tokens_in": 48250,
+    "tokens_out": 5889,
+    "latency_ms": 50567.84448500184,
+    "timestamp": "2026-05-04T21:32:21+00:00"
+  },
+  "parsed": {
+    "observation": "GET /api/v2/orders/123 returned 200 with another user's order body; my session is for user_id=1, the response body shows user_id=2",
+    "hypotheses": [
+      {
+        "id": "H-001",
+        "surface": "/api/v2/orders/{id}",
+        "bug_class": "IDOR",
+        "given": "Authenticated session for user_id=1; order 123 is known to belong to user_id=2",
+        "if": "I send GET /api/v2/orders/123 with my session cookie",
+        "then": "The response body contains the order data with user_id=2 shown explicitly",
+        "because": "The endpoint checks authentication (session is valid) but not authorization (does not verify the requesting user owns the order); it serves the requested object regardless of ownership",
+        "refute_on": "Server returns 403 Forbidden or 404 Not Found when accessing another user's order; or response contains only the requesting user's orders",
+        "cheap_test": "curl -s -H 'Cookie: session=USER1_SESSION' 'https://target/api/v2/orders/124' | grep -q 'user_id.*[^1]' && echo VULNERABLE || echo SAFE",
+        "confidence": 0.5
+      },
+      {
+        "id": "H-002",
+        "surface": "/api/v2/orders/{id}",
+        "bug_class": "cache-poisoning",
+        "given": "A reverse proxy or CDN caches responses; order 123 was previously requested by user_id=2",
+        "if": "I request the same order ID while a cached response from another user exists",
+        "then": "I receive the cached response containing user_id=2 data despite my session being user_id=1",
+        "because": "The cache key is derived only from the URL path/query, not from user context (session, User-ID header); the proxy serves the same cached object to all users",
+        "refute_on": "Response includes Vary header covering auth context; or Cache-Control: private/no-cache is present; or requesting with Cache-Control: no-cache returns the correct user's order",
+        "cheap_test": "curl -s -H 'Cookie: session=USER1_SESSION' -H 'Cache-Control: no-cache' 'https://target/api/v2/orders/123' | grep -q 'user_id.*[^1]' && echo CACHE_ISSUE || echo SAFE",
+        "confidence": 0.5
+      },
+      {
+        "id": "H-003",
+        "surface": "/api/v2/orders/{id}",
+        "bug_class": "mass-assignment",
+        "given": "The endpoint accepts additional query parameters or request body fields",
+        "if": "I send GET /api/v2/orders/123?user_id=2 or include a user_id field in the request",
+        "then": "The parameter overrides the authorization logic and the endpoint returns user_id=2 data",
+        "because": "Mass assignment or insufficient parameter filtering allows injecting sensitive fields; the authorization layer uses the injected parameter instead of the session user",
+        "refute_on": "Extra parameters are silently ignored; authorization still validates against session user_id; response shows only the requesting user's data",
+        "cheap_test": "curl -s -H 'Cookie: session=USER1_SESSION' 'https://target/api/v2/orders/123?user_id=2' | grep -q 'user_id.*2' && echo VULNERABLE || echo SAFE",
+        "confidence": 0.5
+      },
+      {
+        "id": "H-004",
+        "surface": "/api/v2/orders/{id}",
+        "bug_class": "race",
+        "given": "The authorization check and data fetch are separate operations without atomic locking",
+        "if": "I send two concurrent requests for the same order from the same session",
+        "then": "One or both requests bypass the ownership check due to a race condition between validation and retrieval",
+        "because": "A TOCTOU (Time-of-check-time-of-use) window exists; between the moment authorization is checked and the moment data is fetched, the request or session context can be manipulated or the check can be skipped",
+        "refute_on": "All concurrent requests consistently succeed with correct authorization or consistently fail; adding timing delays does not change the outcome; data is always correct for the requester",
+        "cheap_test": "seq 10 | xargs -P 5 -I{} curl -s -H 'Cookie: session=USER1_SESSION' 'https://target/api/v2/orders/123' | grep -c 'user_id.*2' | grep -q '[1-9]' && echo VULNERABLE || echo SAFE",
+        "confidence": 0.5
+      },
+      {
+        "id": "H-005",
+        "surface": "/api/v2/orders/{id}",
+        "bug_class": "auth-bypass",
+        "given": "The application accepts multiple authentication/authorization signals (session + header)",
+        "if": "I send GET /api/v2/orders/123 with my session (user_id=1) AND a custom header like X-User-ID: 2",
+        "then": "The response contains user_id=2 data, indicating the header was used for authorization instead of the session",
+        "because": "The endpoint has overlapping authentication mechanisms with conflicting precedence; the custom header is trusted more than the session or is not validated against it",
+        "refute_on": "The custom header is ignored; authorization always uses the session user; response contains only the requesting user's data; server returns 400 or rejects the custom header",
+        "cheap_test": "curl -s -H 'Cookie: session=USER1_SESSION' -H 'X-User-ID: 2' 'https://target/api/v2/orders/123' | grep -q 'user_id.*2' && echo VULNERABLE || echo SAFE",
+        "confidence": 0.5
+      }
+    ],
+    "notes": "All five hypotheses explain the core observation (accessing user_id=2 data while authenticated as user_id=1). They span different bug classes (IDOR, cache-poisoning, mass-assignment, race, auth-bypass) to avoid tunnel vision and satisfy the forcing function in \u00a7 2 of hypothesis-driven.md. The cheap tests use minimal curl invocations with grep patterns to detect user_id=2 in responses. Each refute_on clause specifies the observation that would disprove the hypothesis and guide the next iteration of the model.\""
+  }
+}
