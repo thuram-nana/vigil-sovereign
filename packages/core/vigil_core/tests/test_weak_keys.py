@@ -34,17 +34,42 @@ def _point(y: int, sign_bit: int) -> str:
     return _b64((y | (sign_bit << 255)).to_bytes(32, "little"))
 
 
-IDENTITY = _point(1, 0)      # the neutral element (0, 1)
+IDENTITY = _point(1, 0)      # the neutral element (0, 1), order 1
 IDENTITY_ALT = _point(1, 1)  # SAME identity point, other sign-bit encoding (distinct bytes)
-ZERO = _b64(bytes(32))       # order-4 point
+ZERO = _b64(bytes(32))       # y=0, order 4
 ORDER2 = _b64(b"\xec" + b"\xff" * 31)  # p-1, order 2
 FORGED_SIG = _b64(base64.b64decode(IDENTITY) + bytes(32))  # R = identity || S = 0
+
+# The full edwards25519 8-torsion subgroup (all points of order dividing 8), each in BOTH sign-bit
+# encodings — every one must be rejected, or the keyless forgery survives for that point.
+_ORDER8_A = bytes.fromhex("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05")
+_ORDER8_B = bytes.fromhex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a")
+_TORSION = (
+    bytes(32),                       # y=0, order 4 (sign 0)
+    b"\x00" * 31 + b"\x80",          # y=0, order 4 (sign 1) — sign-agnostic blocklist must still catch
+    b"\x01" + bytes(31),             # identity, order 1 (sign 0)
+    b"\x01" + bytes(30) + b"\x80",   # identity, order 1 (sign 1)
+    b"\xec" + b"\xff" * 31,          # p-1, order 2 (sign 0)
+    b"\xec" + b"\xff" * 30 + b"\x7f",  # p-1, order 2 (sign 1 cleared to 0x7f)
+    _ORDER8_A,                        # order 8 (sign 0)
+    _ORDER8_A[:31] + bytes([_ORDER8_A[31] | 0x80]),   # order 8 (sign 1)
+    _ORDER8_B,                        # order 8 (sign 0)
+    _ORDER8_B[:31] + bytes([_ORDER8_B[31] | 0x80]),   # order 8 (sign 1)
+)
 
 
 def test_low_order_public_keys_are_rejected():
     for key in (IDENTITY, IDENTITY_ALT, ZERO, ORDER2):
         with pytest.raises(IntegrityError, match="low-order"):
             load_public_key(key)
+
+
+def test_the_entire_8_torsion_subgroup_is_rejected():
+    # explicit completeness: every low-order point (orders 1,2,4,8), both sign encodings, is barred.
+    for raw in _TORSION:
+        assert len(raw) == 32
+        with pytest.raises(IntegrityError, match="low-order"):  # all have canonical y<p → low-order
+            load_public_key(_b64(raw))
 
 
 def test_the_keyless_forgery_is_refused_before_verification():
