@@ -144,12 +144,17 @@ def test_tampered_charter_hash_breaks_the_signature():
     assert _gate(s).is_open(charter_id=CID, charter_hash=DIFF_HASH, now=NOW) is False
 
 
-def test_malformed_signature_fails_closed_without_raising():
-    # BLOCK-2 regression: a garbage sig must fold to CLOSED, never raise IntegrityError out of state().
+@pytest.mark.parametrize(
+    "bad_sig",
+    ["!!!not-base64!!!", 424242, [1, 2, 3], {"a": 1}, True],  # str (IntegrityError) + non-str (TypeError)
+)
+def test_malformed_signature_fails_closed_without_raising(bad_sig):
+    # BLOCK-2 regression: a garbage sig of ANY JSON type must fold to CLOSED, never raise out of
+    # state() (the re-check found non-string sigs raised TypeError past the IntegrityError catch).
     s = _store()
     core = {"signal": SIGNAL, "state": "open", "charter_id": CID, "charter_hash": CHASH,
             "not_after": FUTURE, "issued_at": 100.0}
-    payload = {**core, "sig": "!!!not-base64!!!", "pubkey": OWNER_PUB, "tier": "A0", "decision": "auto"}
+    payload = {**core, "sig": bad_sig, "pubkey": OWNER_PUB, "tier": "A0", "decision": "auto"}
     s.append(kind="event", source="governor", actor="WARDEN", payload=payload)
     assert _gate(s).is_open(charter_id=CID, charter_hash=CHASH, now=NOW) is False  # no exception
 
