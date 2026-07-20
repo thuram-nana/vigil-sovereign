@@ -25,6 +25,7 @@ import enum
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from vigil_core import AuthorizerKey, Signature, TrustRoot
 
 
 # ---------------------------------------------------------------------------
@@ -74,40 +75,6 @@ class CapabilityTier(str, enum.Enum):
 # ---------------------------------------------------------------------------
 # Trust root
 # ---------------------------------------------------------------------------
-
-
-class AuthorizerKey(BaseModel):
-    """One governance authoriser's Ed25519 public key. `public_key_b64`
-    is the standard-base64 encoding of the 32-byte raw public key."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    key_id: str = Field(min_length=1, description="Stable authoriser id.")
-    name: str = Field(min_length=1, description="Human-readable authoriser name.")
-    public_key_b64: str = Field(min_length=1, description="base64(32-byte Ed25519 pubkey).")
-
-
-class TrustRoot(BaseModel):
-    """The authoriser set and threshold a deployment trusts. A valid
-    entitlement needs signatures from at least `threshold` distinct
-    authorisers in `authorizers`."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    threshold: int = Field(ge=1, description="m in m-of-n. 1 also covers FROST group keys.")
-    authorizers: list[AuthorizerKey] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _check(self) -> "TrustRoot":
-        ids = [a.key_id for a in self.authorizers]
-        if len(set(ids)) != len(ids):
-            raise ValueError("trust root has duplicate authoriser key_ids")
-        if self.threshold > len(self.authorizers):
-            raise ValueError(
-                f"threshold {self.threshold} exceeds authoriser count {len(self.authorizers)}"
-            )
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -184,15 +151,6 @@ class EntitlementDocument(BaseModel):
         if self.not_after <= self.not_before:
             raise ValueError("not_after must be strictly after not_before")
         return self
-
-
-class Signature(BaseModel):
-    """One authoriser signature over a canonicalised document."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    key_id: str = Field(min_length=1)
-    signature_b64: str = Field(min_length=1, description="base64(64-byte Ed25519 signature).")
 
 
 class SignedEntitlement(BaseModel):

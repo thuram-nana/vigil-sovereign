@@ -11,6 +11,8 @@ recoverable in code.
 
 from __future__ import annotations
 
+from vigil_core import IntegrityError  # the shared integrity-error base (raised by the shared crypto layer)
+
 
 class CrucibleError(Exception):
     """Root of v2's exception hierarchy."""
@@ -126,9 +128,11 @@ class CapabilityNotGranted(EntitlementViolation):
     capability tier does not include the requested capability."""
 
 
-class EntitlementError(CrucibleError):
+class EntitlementError(CrucibleError, IntegrityError):
     """Recoverable entitlement-layer error (file parse, store I/O) that
-    is NOT itself an authorization decision. Distinct from
+    is NOT itself an authorization decision. Also a vigil_core `IntegrityError`
+    so the shared crypto layer's raises and CRUCIBLE's `except CrucibleError`
+    both catch it. Distinct from
     EntitlementViolation so loaders can surface a clear cause without
     implying a capability was denied."""
 

@@ -19,10 +19,10 @@ existing oracle_context, and the runtime only ever VERIFIES (signing is provisio
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+from vigil_core import ChainEntry, Signature, SignedChainHead
 
-from ..entitlement.models import Signature
 
-_GENESIS_PREV: str = "0" * 64
+from vigil_core.models import _GENESIS_PREV  # shared genesis
 
 
 class ReportClaim(BaseModel):
@@ -179,27 +179,3 @@ class PathCertificate(BaseModel):
         return digest_payload(self.model_dump(mode="json"))
 
 
-class ChainEntry(BaseModel):
-    """One link in the tamper-evident evidence log. ``entry_hash`` chains prev+cert+seq;
-    a break anywhere is detectable by recomputation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    seq: int = Field(ge=0)
-    prev_hash: str = _GENESIS_PREV
-    cert_digest: str
-    entry_hash: str
-
-
-class SignedChainHead(BaseModel):
-    """The signed anchor of the evidence chain. ``head_hash`` is the last entry's hash;
-    ``last_seq`` is monotonic (anti-rollback). Signed by the governance trust root."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = 1
-    engagement_slug: str = ""
-    last_seq: int = Field(ge=0)
-    entry_count: int = Field(ge=0)
-    head_hash: str
-    signatures: list[Signature] = Field(default_factory=list)

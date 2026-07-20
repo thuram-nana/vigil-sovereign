@@ -6,9 +6,9 @@ import base64
 
 import pytest
 
-from ...common.errors import EntitlementError
+from vigil_core import IntegrityError
 from .. import crypto
-from ..models import Signature, TrustRoot, AuthorizerKey
+from ..models import AuthorizerKey, Signature, TrustRoot
 
 
 def _authorizer(key_id: str) -> tuple[AuthorizerKey, str]:
@@ -40,14 +40,14 @@ def test_verify_rejects_wrong_key() -> None:
 
 
 def test_malformed_public_key_raises() -> None:
-    with pytest.raises(EntitlementError):
+    with pytest.raises(IntegrityError):
         crypto.verify_one("not-base64!!", b"m", base64.b64encode(b"x" * 64).decode())
 
 
 def test_malformed_signature_length_raises() -> None:
     kp = crypto.generate_keypair()
     short_sig = base64.b64encode(b"too short").decode()
-    with pytest.raises(EntitlementError):
+    with pytest.raises(IntegrityError):
         crypto.verify_one(kp.public_key_b64, b"m", short_sig)
 
 
