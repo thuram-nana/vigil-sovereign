@@ -195,17 +195,21 @@ def test_build_offense_gate_engages_the_destruction_conjunct(monkeypatch):
     gate = build_offense_gate(slug="acme", trust_root=tr, classify=lambda n: "A0", floor="A0",
                               ceiling="A3", now=50, destruction_authority=authority,
                               is_consumed=lambda n: False)
-    # destructive + owner-inclusive quorum → allow (the conjunct is genuinely engaged in production)
-    assert gate("shell.exec", "http://twin/x", destructive=True,
+    # destructive + owner-inclusive quorum, target/engagement matching the gate → allow
+    assert gate("shell.exec", "db", destructive=True,
                 destruction_action=action, destruction_signed=good).outcome == "allow"
     # destructive + worker-only quorum → deny through the same wiring
-    assert gate("shell.exec", "http://twin/x", destructive=True,
+    assert gate("shell.exec", "db", destructive=True,
                 destruction_action=action, destruction_signed=only_worker).outcome == "deny"
+    # cross-binding: an authorization for a DIFFERENT target than the gate is scoping → deny
+    v = gate("shell.exec", "OTHER-TARGET", destructive=True,
+             destruction_action=action, destruction_signed=good)
+    assert v.outcome == "deny" and "does not match the gate" in v.reason
     # destructive with NO threshold material → deny (fail-closed: the trap the red-pen flagged is gone)
-    v = gate("shell.exec", "http://twin/x", destructive=True)
+    v = gate("shell.exec", "db", destructive=True)
     assert v.outcome == "deny" and "threshold-destruction gate" in v.reason
     # non-destructive still allows without any destruction material (2-gate path unchanged)
-    assert gate("http.get", "http://twin/x", destructive=False).outcome == "allow"
+    assert gate("http.get", "db", destructive=False).outcome == "allow"
 
 
 def test_end_to_end_with_the_real_destruction_gate():

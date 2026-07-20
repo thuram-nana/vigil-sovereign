@@ -182,11 +182,26 @@ def build_offense_gate(
                 and destruction_signed is not None and is_consumed is not None:
             from .destruction_gate import authorize_destruction
 
-            def destruction_authorize() -> Any:  # type: ignore[misc]
-                return authorize_destruction(
-                    destruction_action, destruction_signed,
-                    authority=destruction_authority, now=now, is_consumed=is_consumed,
-                )
+            # Cross-bind the two halves: the quorum-authorized action MUST be the SAME target and
+            # engagement the CRUCIBLE half is scoping (and the executor will act on). Without this a
+            # single ALLOW could pair an in-envelope scope check for target A with a quorum that only
+            # authorized destruction of target B. Fail-closed on any divergence.
+            if (getattr(destruction_action, "target", None) != target_url
+                    or getattr(destruction_action, "engagement_slug", None) != slug):
+                def destruction_authorize() -> Any:  # type: ignore[misc]
+                    return DestructionOutcome(
+                        authorized=False,
+                        reason=(f"authorization target/engagement "
+                                f"({getattr(destruction_action, 'engagement_slug', None)!r}/"
+                                f"{getattr(destruction_action, 'target', None)!r}) does not match the "
+                                f"gate ({slug!r}/{target_url!r})"),
+                    )
+            else:
+                def destruction_authorize() -> Any:  # type: ignore[misc]
+                    return authorize_destruction(
+                        destruction_action, destruction_signed,
+                        authority=destruction_authority, now=now, is_consumed=is_consumed,
+                    )
 
         return conjunctive_decide(
             crucible_authorize=crucible_authorize,
