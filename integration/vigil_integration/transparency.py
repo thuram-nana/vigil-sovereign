@@ -166,9 +166,11 @@ def is_split_view_resistant(witness_trust_root: TrustRoot) -> bool:
     Fail-closed on an EMPTY set and, crucially, on any DUPLICATE authorizer public key: quorum
     intersection is a property of distinct keys, but ``TrustRoot`` dedups key_ids only (two key_ids
     can share one public key), so the same operator key registered twice would otherwise forge a
-    'strict majority' by itself. Deduplication is over the CANONICAL DECODED 32-byte key (not the
-    base64 string): Ed25519 base64 is malleable in its trailing bits, so one key has several
-    non-canonical encodings — comparing decoded keys collapses them. Malformed key material also
+    'strict majority' by itself. Deduplication is over the DECODED 32-byte key (not the base64
+    string): Ed25519 base64 is malleable in its trailing bits, so one key has several base64
+    encodings — comparing decoded keys collapses them. ``load_public_key`` additionally rejects
+    non-canonical (y >= p) and low-order Ed25519 points (a low-order key admits a keyless signature
+    forgery), so every accepted key here is a canonical, distinct point; any such weak/malformed key
     fails closed."""
     try:
         distinct_keys = {
@@ -176,7 +178,7 @@ def is_split_view_resistant(witness_trust_root: TrustRoot) -> bool:
             for a in witness_trust_root.authorizers
         }
     except IntegrityError:
-        return False  # malformed authorizer key material — cannot reason about the set, fail closed
+        return False  # non-canonical / low-order / malformed authorizer key — fail closed
     n = len(distinct_keys)
     if n != len(witness_trust_root.authorizers):
         return False  # a duplicate/shared witness key (any encoding) defeats intersection — fail closed

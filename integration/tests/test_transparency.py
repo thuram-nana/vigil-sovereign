@@ -247,6 +247,21 @@ def test_malformed_authorizer_key_fails_closed():
     assert is_split_view_resistant(tr) is False  # unparseable key material → cannot reason → fail closed
 
 
+def test_low_order_witness_key_is_not_split_view_resistant():
+    # a low-order Ed25519 point admits a KEYLESS signature forgery — one such key under two key_ids
+    # would forge a strict majority. The core rejects low-order keys, so a witness set containing one
+    # is not split-view-resistant (fail-closed via IntegrityError from load_public_key).
+    import base64
+    identity = base64.b64encode((1).to_bytes(32, "little")).decode()
+    identity_alt = base64.b64encode((1 | (1 << 255)).to_bytes(32, "little")).decode()  # same point
+    real = generate_keypair()
+    tr = TrustRoot(threshold=2, authorizers=[
+        AuthorizerKey(key_id="w0", name="w0", public_key_b64=identity),
+        AuthorizerKey(key_id="w1", name="w1", public_key_b64=identity_alt),
+        AuthorizerKey(key_id="w2", name="w2", public_key_b64=real.public_key_b64)])
+    assert is_split_view_resistant(tr) is False
+
+
 def test_split_view_resistance_predicate_is_strict_majority():
     _, root = _witnesses(4)
     assert is_split_view_resistant(root(3)) is True     # 6 > 4 — strict majority
