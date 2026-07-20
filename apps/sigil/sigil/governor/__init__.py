@@ -25,7 +25,14 @@ from .budget import (  # noqa: E402
 )
 from .core import Decision, Governor, Outcome  # noqa: E402
 from .killswitch import KillSwitch  # noqa: E402
+from .offense_gate import (  # noqa: E402
+    OffenseGate,
+    OffenseGateClosed,
+    OffenseGateState,
+    assert_offense_gated,
+)
 from .promotion import PromotionPolicy  # noqa: E402
 
 __all__ = ["Governor", "Decision", "Outcome", "KillSwitch", "BudgetCaps", "BudgetLedger",
-           "Spend", "Usage", "load_prices", "DEFAULT_PRICES", "PromotionPolicy"]
+           "Spend", "Usage", "load_prices", "DEFAULT_PRICES", "PromotionPolicy",
+           "OffenseGate", "OffenseGateClosed", "OffenseGateState", "assert_offense_gated"]
