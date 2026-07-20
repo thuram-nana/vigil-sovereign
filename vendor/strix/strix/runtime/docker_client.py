@@ -11,8 +11,10 @@ deltas:
    ``docker-entrypoint.sh`` actually run — without it, ``caido-cli`` never
    starts inside the container and ``bootstrap_caido`` retries against a
    dead port.
-2. Append NET_ADMIN/NET_RAW to ``cap_add`` (required by ``nmap -sS`` and
-   other raw-socket tools).
+2. Append the sandbox network capabilities to ``cap_add`` — NET_RAW only by
+   default (required by ``nmap -sS`` and other raw-socket tools). VIGIL P6
+   (FATAL-1) drops NET_ADMIN so the sandbox cannot rewrite its own firewall;
+   override via STRIX_SANDBOX_NET_CAPS. See ``_sandbox_net_caps``.
 3. Add ``host.docker.internal`` → host-gateway to ``extra_hosts`` so the
    agent can reach host-served apps.
 
@@ -52,11 +54,29 @@ logger = logging.getLogger(__name__)
 
 
 _SANDBOX_NETWORK_ENV = "STRIX_DOCKER_SANDBOX_NETWORK"
+_SANDBOX_NET_CAPS_ENV = "STRIX_SANDBOX_NET_CAPS"
 
 
 def _sandbox_network() -> str | None:
     value = os.environ.get(_SANDBOX_NETWORK_ENV, "").strip()
     return value or None
+
+
+def _sandbox_net_caps() -> list[str]:
+    """The network capabilities added to the sandbox container.
+
+    VIGIL hardening (P6 / FATAL-1): the sandbox no longer receives ``NET_ADMIN`` by
+    default. With ``NET_ADMIN`` a container can rewrite its own netfilter/routing — a
+    defence-in-depth we remove, since the host-side egress gate (vigil-gateway) is the real
+    boundary and must not be second-guessable from inside the box. Only ``NET_RAW`` is
+    added by default (needed for ``nmap -sS`` / raw-socket tools). Override with
+    ``STRIX_SANDBOX_NET_CAPS`` as a comma-separated list: ``NET_RAW`` (default),
+    ``NET_RAW,NET_ADMIN`` to restore the old behaviour, or ``""`` for none.
+    """
+    raw = os.environ.get(_SANDBOX_NET_CAPS_ENV)
+    if raw is None:
+        return ["NET_RAW"]
+    return [c.strip().upper() for c in raw.split(",") if c.strip()]
 
 
 def _apply_sandbox_network(create_kwargs: dict[str, Any]) -> None:
@@ -212,7 +232,7 @@ class StrixDockerSandboxClient(DockerSandboxClient):
         if not isinstance(cap_add, list):
             cap_add = list(cap_add)
             create_kwargs["cap_add"] = cap_add
-        for cap in ("NET_ADMIN", "NET_RAW"):
+        for cap in _sandbox_net_caps():
             if cap not in cap_add:
                 cap_add.append(cap)
 
