@@ -14,6 +14,7 @@ KINDS = frozenset({
     "event", "finding", "interaction", "draft",  # the agent mesh (Phase 3, §4): SENTINEL/BASTION/ENVOY
     "report", "pr",             # Phase 4: SCHOLAR sourced research reports, ARTIFICER PR proposals
     "web_page", "operation",    # Phase 7/8: SCRIBE fetched-page provenance; OPERATOR plan/execute records
+    "snapshot",                 # cold-archive hard-prune: the owner-signed folded summary of a pruned prefix
 })
 
 

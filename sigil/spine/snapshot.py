@@ -167,7 +167,11 @@ def _verified_prune_boundary(store) -> tuple[int, int]:
 # modules import THIS module).
 # ======================================================================================================
 def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
-          base_seq: int, snapshot_seq: int) -> SnapshotState:
+          base_seq: int, snapshot_seq: int, seed: Optional["SnapshotState"] = None) -> SnapshotState:
+    """Fold `records` into a SnapshotState. With `seed` (a prior snapshot), the fold STARTS from the prior
+    state — i.e. fold(prior, delta) — which is the multi-prune fold-of-fold: build(prior_folded, delta[K_prev
+    ..K)) == build(empty, [0..K)) because every fold is associative. Without a seed, starts from the empty
+    identity (the first prune / the Slice-C equivalence tests)."""
     from ..agents.actor_scope import _origin
     from ..bridge.envelope import RECEIPT_SIGNAL
     from ..consolidate.grounding import CONSOLIDATE_SOURCE
@@ -179,18 +183,21 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     # iterable — an out-of-order input must never flip a latch or pick the wrong last-write.
     records = sorted(records, key=lambda r: r.seq)
     tp = trusted_pubkey or ""
-    nonce: dict[str, int] = {}
-    ks_engaged = False
-    creation: dict[tuple[Optional[str], Optional[str]], int] = {}
-    capability: dict[Any, dict] = {}    # host_id key kept verbatim (may be non-str; mirrors the scan)
-    mesh_dev: dict[Any, str] = {}       # device_pubkey key kept verbatim (may be non-str)
-    promo: dict[tuple[Optional[str], Optional[str]], str] = {}
-    arm: set = set()
-    dedup: dict[tuple[Optional[str], Optional[str]], int] = {}
-    warden: dict[str, tuple[int, str, int]] = {}
-    view: dict[int, dict] = {}
-    grounded: set[str] = set()
-    refused: set[str] = set()
+    s = seed
+    nonce: dict[str, int] = dict(s.nonce_highwater) if s else {}
+    ks_engaged = s.killswitch_engaged if s else False
+    creation: dict[tuple[Optional[str], Optional[str]], int] = dict(s.creation_counter()) if s else {}
+    capability: dict[Any, dict] = dict(s.capability_map) if s else {}   # list-of-rows -> dict (keys verbatim)
+    mesh_dev: dict[Any, str] = dict(s.mesh_dev_state) if s else {}
+    promo: dict[tuple[Optional[str], Optional[str]], str] = dict(s.promotion_map()) if s else {}
+    arm: set = set(s.arm_set()) if s else set()
+    dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
+    warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
+                                               if s else {})
+    view: dict[int, dict] = ({dataclasses.asdict(r)["seq"]: dataclasses.asdict(r)
+                              for r in s.archivist_records_of(None)} if s else {})
+    grounded: set[str] = set(s.grounded_keys) if s else set()
+    refused: set[str] = set(s.refused_keys) if s else set()
 
     for r in records:
         p = r.payload

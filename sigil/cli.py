@@ -518,6 +518,31 @@ def cmd_spine(a) -> None:
         print(f"  backup:        {rep.get('backup', '(skipped)')}")
         print(f"  migrated:      {rep['migrated']} | compacted {rep['compacted']} segment(s)")
         print(f"  verify after:  OK ({rep['count_after']} records — every record preserved)")
+    elif a.action == "prune-plan":
+        # DRY-RUN: validate a prune boundary K against the §7 referential guards + show what WOULD archive.
+        # Archives nothing, drops nothing. (The cutover is Slice E.)
+        from .spine.prune import PruneUnsafe, check_prune_safe, open_workflow_floor, snapshot_payload
+        if a.boundary is None:
+            print("prune-plan needs -K <segment-aligned boundary>; open-workflow referential floor is "
+                  f"{open_workflow_floor(store)} (K must be <= this)", file=sys.stderr)
+            sys.exit(2)
+        try:
+            arch_segs = check_prune_safe(store, a.boundary)
+            pay = snapshot_payload(store, a.boundary)
+        except PruneUnsafe as e:
+            print(f"prune UNSAFE at K={a.boundary}: {e}", file=sys.stderr)
+            sys.exit(2)
+        print(f"prune-plan K={a.boundary}: would archive {len(arch_segs)} whole sealed segment(s) "
+              f"[0..{a.boundary}) | base_count={pay['base_count']} | delta_merkle={pay['delta_merkle_root'][:16]}… "
+              f"| cumulative={pay['cumulative_merkle_root'][:16]}… (DRY-RUN — nothing archived or dropped)")
+        return
+    elif a.action == "verify-archive":
+        from pathlib import Path as _P
+        from .spine.prune import verify_with_archive
+        adir = _P(a.archive) if a.archive else None
+        ok, msg = verify_with_archive(store, adir=adir)
+        print(("OK: " if ok else "FAILED: ") + msg)
+        sys.exit(0 if ok else 2)
     elif a.action == "status":
         segs = store.segment_info()
         if not segs:
@@ -703,8 +728,12 @@ def main(argv=None) -> None:
     pfl.add_argument("action", choices=["status", "reset"])
     pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")
     pfl.set_defaults(fn=cmd_floor)
-    psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact (gzip); convert (backup+migrate+compact); status")
-    psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status"])
+    psp = sub.add_parser("spine", help="segment rotation: migrate; rotate; compact; convert; status; prune-plan; verify-archive")
+    psp.add_argument("action", choices=["migrate", "rotate", "compact", "convert", "status",
+                                        "prune-plan", "verify-archive"])
+    psp.add_argument("-K", "--boundary", type=int, default=None,
+                     help="prune-plan: the segment-aligned boundary K (dry-run — checks §7 guards, archives NOTHING)")
+    psp.add_argument("--archive", default=None, help="verify-archive: the archive dir (default SIGIL_HOME/spine/archive)")
     psp.set_defaults(fn=cmd_spine)
     psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
     psv.add_argument("--port", type=int, default=8733)
