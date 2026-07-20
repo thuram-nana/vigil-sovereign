@@ -43,6 +43,19 @@ def _signed_envelope(cert=None, *, signer=ROOT, key_id="root0"):
     return build_envelope(cert, [{"key_id": key_id, "signature_b64": sig}])
 
 
+ROOT1 = generate_keypair()
+TRUST2 = TrustRoot(threshold=2, authorizers=[
+    AuthorizerKey(key_id="root0", name="root0", public_key_b64=ROOT.public_key_b64),
+    AuthorizerKey(key_id="root1", name="root1", public_key_b64=ROOT1.public_key_b64)])
+
+
+def _multi_signed_envelope(signers, cert=None):
+    cert = cert or _cert()
+    msg = evidence_signing_bytes(cert)
+    sigs = [{"key_id": kid, "signature_b64": sign(kp.private_key_b64, msg)} for kid, kp in signers]
+    return build_envelope(cert, sigs)
+
+
 def _store():
     return SpineStore(tempfile.mktemp(suffix=".jsonl"))
 
@@ -117,3 +130,57 @@ def test_ingesting_a_finding_pulls_no_offense_engine():
     assert_no_offense()  # would raise if framework/strix were loaded
     assert not any(m == "framework" or m.startswith("framework.")
                    or m == "strix" or m.startswith("strix.") for m in sys.modules)
+
+
+# --- m-of-n coverage (the substance of the governance-signature claim) -----------------------
+
+def test_m_of_n_two_distinct_signers_appends():
+    s = _store()
+    seq = ingest_finding(s, _multi_signed_envelope([("root0", ROOT), ("root1", ROOT1)]),
+                         crucible_trust_root=TRUST2)
+    assert s.get(seq).kind == "finding"
+
+
+def test_m_of_n_below_threshold_refused():
+    s = _store()
+    with pytest.raises(InertFindingError, match="anchor 1"):
+        ingest_finding(s, _multi_signed_envelope([("root0", ROOT)]), crucible_trust_root=TRUST2)
+    assert _findings(s) == []
+
+
+def test_m_of_n_duplicate_signer_does_not_meet_threshold():
+    s = _store()
+    with pytest.raises(InertFindingError, match="anchor 1"):  # same signer twice != 2 distinct
+        ingest_finding(s, _multi_signed_envelope([("root0", ROOT), ("root0", ROOT)]),
+                       crucible_trust_root=TRUST2)
+    assert _findings(s) == []
+
+
+def test_empty_signatures_refused():
+    import json
+    env = json.loads(_signed_envelope())
+    env["signatures"] = []
+    s = _store()
+    with pytest.raises(InertFindingError):
+        ingest_finding(s, json.dumps(env), crucible_trust_root=TRUST)
+    assert _findings(s) == []
+
+
+def test_malformed_signature_material_raises_inert_finding_error():
+    # a non-base64 sig with the owner key_id would raise IntegrityError inside verify; ingest must
+    # normalise it to InertFindingError (its documented contract) and write nothing.
+    import json
+    env = json.loads(_signed_envelope())
+    env["signatures"][0]["signature_b64"] = "!!!not-base64!!!"
+    s = _store()
+    with pytest.raises(InertFindingError):
+        ingest_finding(s, json.dumps(env), crucible_trust_root=TRUST)
+    assert _findings(s) == []
+
+
+def test_chain_verifies_after_ingest():
+    # anchor 2 substrate: the appended finding is part of a valid hash-chain (the owner head anchors it)
+    s = _store()
+    ingest_finding(s, _signed_envelope(), crucible_trust_root=TRUST)
+    ok, reason = s.verify()
+    assert ok, reason

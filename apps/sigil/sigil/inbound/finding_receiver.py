@@ -56,7 +56,16 @@ class FindingReceiver:
         written to the spine. Only a structurally-valid, governance-signed finding is admitted.
         """
         vf = validate_inert_finding(envelope)  # inert-data validation (json-only, bounded, shaped)
-        if not vf.verify_signature(self.crucible_trust_root):
+        try:
+            verified = vf.verify_signature(self.crucible_trust_root)
+        except Exception as exc:
+            # malformed signature/key material (e.g. non-base64 sig, empty sig field) can raise
+            # from the crypto/model layer — normalise to InertFindingError so ingest's contract holds
+            # and a caller catching only InertFindingError still fails closed. Nothing is written.
+            raise InertFindingError(
+                f"finding {vf.finding_ref!r}: signature material is malformed — {exc} (anchor 1 failed)"
+            ) from exc
+        if not verified:
             raise InertFindingError(
                 f"finding {vf.finding_ref!r}: CRUCIBLE m-of-n governance signature does not satisfy "
                 f"the trust root — refusing to spine-sign an unverified finding (anchor 1 failed)"
