@@ -1,0 +1,43 @@
+name: vigil-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  vigil-core:
+    name: vigil_core — shared integrity substrate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install vigil_core
+        run: pip install -e packages/core/vigil_core pytest
+      - name: migration-safety tests (v1 byte-identical signing, threshold, tamper)
+        run: pytest packages/core/vigil_core/tests -q
+
+  crucible-core:
+    name: CRUCIBLE core on vigil_core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install engine deps + vigil_core
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
+      - name: evidence + entitlement + verify + worldmodel + confidence + authority
+        working-directory: engine/crucible
+        env:
+          PYTHONPATH: .
+        run: |
+          pytest framework/v2/evidence framework/v2/entitlement framework/v2/common \
+                 framework/v2/verify framework/v2/confidence framework/v2/worldmodel \
+                 framework/v2/calibration framework/v2/authority -q
