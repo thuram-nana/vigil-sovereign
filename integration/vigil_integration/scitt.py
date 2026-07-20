@@ -272,12 +272,16 @@ def verify_receipt(
     digest = statement_digest(statement)
     if receipt.statement_digest != digest:
         return False, "receipt does not bind this statement"
+    if (not isinstance(receipt.leaf_index, int) or isinstance(receipt.leaf_index, bool)
+            or not isinstance(receipt.tree_size, int) or isinstance(receipt.tree_size, bool)):
+        return False, "malformed receipt index/size"
     try:
         path = [bytes.fromhex(p) for p in receipt.audit_path]
         root = bytes.fromhex(receipt.root)
+        included = verify_inclusion(bytes.fromhex(digest), receipt.leaf_index, receipt.tree_size, path, root)
     except (ValueError, TypeError):
         return False, "malformed receipt proof material"
-    if not verify_inclusion(bytes.fromhex(digest), receipt.leaf_index, receipt.tree_size, path, root):
+    if not included:
         return False, "merkle inclusion proof invalid"
     return True, "offline-verified: signed statement included under the pinned log root"
 

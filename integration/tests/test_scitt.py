@@ -163,6 +163,22 @@ def test_receipt_with_a_broken_proof_fails():
     assert ok is False and "inclusion" in reason
 
 
+def test_malformed_receipt_index_or_size_fails_closed_not_raises():
+    # residual fail-closed gap: leaf_index/tree_size flow into the inclusion comparison; None/str
+    # must be a deny, never an uncaught TypeError out of the offline verifier.
+    log = StatementLog()
+    ss = _signed()
+    i = log.register(ss)
+    log.register(_signed(_cert(finding_ref="other")))
+    r = log.receipt(i)
+    for bad in (Receipt(r.statement_digest, None, r.tree_size, r.audit_path, r.root),
+                Receipt(r.statement_digest, r.leaf_index, None, r.audit_path, r.root),
+                Receipt(r.statement_digest, "0", r.tree_size, r.audit_path, r.root),
+                Receipt(r.statement_digest, r.leaf_index, "2", r.audit_path, r.root)):
+        ok, reason = verify_receipt(bad, ss, trust_root=GOV, expected_root=log.root())
+        assert ok is False and ("index/size" in reason or "proof material" in reason)
+
+
 def test_receipt_over_an_unsigned_statement_fails():
     log = StatementLog()
     ss = _signed(signers=[("g0", G0.private_key_b64)])  # below threshold
