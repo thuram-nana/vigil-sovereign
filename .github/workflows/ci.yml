@@ -73,16 +73,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: install vigil_core (+ best-effort sigil for the boundary proof)
+      - name: install vigil_core + CRUCIBLE deps (for the oracle-adapter test) (+ best-effort sigil)
         run: |
-          pip install -e packages/core/vigil_core "pydantic>=2.10,<3" "cryptography>=42" pytest
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
           # apps/sigil builds the Rust WARDEN kernel; best-effort so the structural boundary
           # proof runs when it succeeds and skips (not fails) when the toolchain is unavailable.
           pip install -e apps/sigil || echo "apps/sigil build skipped — boundary test will skip"
-      - name: integration tests (inert receiver, keyless worker, structural boundary)
+      - name: integration tests (inert receiver, keyless worker, boundary, oracle adapter)
         run: |
           if [ -d integration/tests ]; then
-            PYTHONPATH=integration python -m pytest integration/tests -q
+            # framework (offense) and sigil.governor (sovereign) CANNOT co-load in one process —
+            # assert_no_offense refuses it (the P5 boundary, working). So run the framework-
+            # dependent oracle-adapter test in its OWN process, separate from the sigil-importing tests.
+            PYTHONPATH=integration python -m pytest integration/tests \
+              --ignore=integration/tests/test_oracle_adapter.py -q
+            PYTHONPATH=integration:engine/crucible python -m pytest \
+              integration/tests/test_oracle_adapter.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"
           fi
