@@ -44,12 +44,26 @@ class CrucibleResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class DestructionOutcome:
+    """The minimal shape the composition needs from the threshold-destruction half. The concrete
+    ``destruction_gate.DestructionDecision`` (``.authorized`` + ``.reason``) satisfies this duck-type,
+    so the composition stays decoupled from that module and is testable in isolation."""
+    authorized: bool
+    reason: str
+
+
 def conjunctive_decide(
     *,
     crucible_authorize: Callable[[], CrucibleResult],
     warden_decide: Callable[[], ToolDecision],
+    destructive: bool = False,
+    destruction_authorize: Callable[[], Any] | None = None,
 ) -> GateVerdict:
-    """Compose the two gates, first-failure-wins, fail-closed. Both halves are thunks."""
+    """Compose the gates, first-failure-wins, fail-closed. Both core halves are thunks. For a
+    DESTRUCTIVE action a THIRD conjunct is required — the m-of-n threshold-destruction authorization
+    (``destruction_authorize`` returns an object with ``.authorized`` + ``.reason``); a destructive
+    action with no destruction gate wired, an errored gate, or an unauthorized result is a DENY."""
     # 1. CRUCIBLE first — its killswitch step is the absolute stop. Any deny OR error => DENY.
     try:
         cru = crucible_authorize()
@@ -63,8 +77,33 @@ def conjunctive_decide(
         war = warden_decide()
     except Exception as exc:
         return GateVerdict(False, "deny", f"WARDEN gate error (fail-closed): {exc}", True, None)
+
+    # 3. Threshold-destruction gate — a HARD extra conjunct for destructive/high-blast actions. It is
+    #    orthogonal to WARDEN's tier approval: an autonomous worker must not perform an irreversible
+    #    action without the owner-inclusive m-of-n quorum, even if WARDEN would auto-allow the class.
+    if destructive:
+        if destruction_authorize is None:
+            return GateVerdict(
+                False, "deny",
+                "destructive action requires a threshold-destruction gate, but none was wired "
+                "(fail-closed)", True, war,
+            )
+        try:
+            dz = destruction_authorize()
+        except Exception as exc:
+            return GateVerdict(False, "deny", f"destruction gate error (fail-closed): {exc}", True, war)
+        if not getattr(dz, "authorized", False):
+            return GateVerdict(
+                False, "deny",
+                f"destructive action not threshold-authorized: {getattr(dz, 'reason', 'refused')}",
+                True, war,
+            )
+
     if war.outcome == "auto":
-        return GateVerdict(True, "allow", "both gates allow: CRUCIBLE in-envelope AND WARDEN auto", True, war)
+        note = "both gates allow: CRUCIBLE in-envelope AND WARDEN auto"
+        if destructive:
+            note += " AND destruction threshold-authorized"
+        return GateVerdict(True, "allow", note, True, war)
     if war.outcome == "queue":
         return GateVerdict(False, "queue", f"in envelope, but WARDEN needs owner approval: {war.reason}", True, war)
     # "deny" OR any unrecognised WARDEN outcome → DENY. Only an explicit "auto" may ALLOW, so a
