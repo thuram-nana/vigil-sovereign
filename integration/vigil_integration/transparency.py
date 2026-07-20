@@ -154,19 +154,31 @@ def verify_witnessed(wc: WitnessedCheckpoint, *, witness_trust_root: TrustRoot) 
 
 
 def is_split_view_resistant(witness_trust_root: TrustRoot) -> bool:
-    """True iff the witness set is a STRICT MAJORITY quorum (``2*threshold > n``), the condition
-    under which split-view PREVENTION holds: any two quorums must then share >=1 witness, and an
-    honest stateful witness refuses to countersign a second, conflicting fork. Below this (incl. the
-    trust model's blessed ``threshold == 1`` with n>1) disjoint quorums make prevention impossible —
-    only detection (``is_split``) and per-witness non-equivocation remain. Fail-closed on empty set."""
-    n = len(witness_trust_root.authorizers)
+    """True iff the witness set is a STRICT MAJORITY quorum of INDEPENDENT (distinctly-keyed)
+    witnesses (``2*threshold > n`` over ``n`` distinct public keys) — the condition under which
+    split-view PREVENTION holds: any two quorums must then share >=1 witness, and an honest stateful
+    witness refuses to countersign a second, conflicting fork. Below this (incl. the trust model's
+    blessed ``threshold == 1`` with n>1) disjoint quorums make prevention impossible — only detection
+    (``is_split``) and per-witness non-equivocation remain.
+
+    Fail-closed on an EMPTY set and, crucially, on any DUPLICATE authorizer public key: quorum
+    intersection is a property of distinct keys, but ``TrustRoot`` dedups key_ids only (two key_ids
+    can share one public key), so the same operator key registered twice would otherwise forge a
+    'strict majority' by itself. Counting distinct public keys closes that."""
+    distinct_keys = {a.public_key_b64 for a in witness_trust_root.authorizers}
+    n = len(distinct_keys)
+    if n != len(witness_trust_root.authorizers):
+        return False  # a duplicate/shared witness key defeats the intersection guarantee — fail closed
     return n > 0 and 2 * witness_trust_root.threshold > n
 
 
 def verify_split_view_resistant(wc: WitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
     """The full transparency guarantee, fail-closed: a trusted quorum signed THIS checkpoint AND the
-    witness set is strict-majority, so the operator cannot have obtained a competing same-height
-    quorum without a witness equivocating. Returns False if either condition fails."""
+    witness set is a strict-majority of DISTINCTLY-KEYED witnesses, so the operator cannot have
+    obtained a competing same-height quorum without a witness equivocating. Returns False if either
+    condition fails. TRUST ASSUMPTION (uncheckable by code): the distinct keys are held by INDEPENDENT
+    parties — if one party custodies a majority of witness keys, split-view resistance is void by
+    definition, as in any threshold-witness scheme."""
     return is_split_view_resistant(witness_trust_root) and verify_witnessed(
         wc, witness_trust_root=witness_trust_root
     )

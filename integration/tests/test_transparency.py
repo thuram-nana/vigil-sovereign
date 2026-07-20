@@ -185,6 +185,29 @@ def test_strict_majority_forces_an_honest_witness_to_refuse_the_second_fork():
     for w in (ws[0], ws[1]):
         with pytest.raises(ConsistencyError):
             w.cosign(fb)  # can't get a second quorum without an equivocation the witness refuses
+    # sufficiency: the BEST fb quorum the operator can assemble is w2 alone — below threshold 2, so
+    # no valid competing same-height quorum can form (not merely "some witnesses refused").
+    best_fb = WitnessedCheckpoint(fb, (ws[2].cosign(fb),))
+    assert verify_witnessed(best_fb, witness_trust_root=tr) is False
+
+
+def test_duplicate_authorizer_key_is_not_split_view_resistant():
+    # a shared/duplicate witness PUBLIC KEY defeats quorum intersection: TrustRoot dedups key_ids
+    # only, so one operator key registered under two key_ids would forge a 'strict majority' alone.
+    # is_split_view_resistant must count DISTINCT KEYS and fail closed on a duplicate.
+    shared, other = generate_keypair(), generate_keypair()
+    tr = TrustRoot(threshold=2, authorizers=[
+        AuthorizerKey(key_id="w0", name="w0", public_key_b64=shared.public_key_b64),
+        AuthorizerKey(key_id="w1", name="w1", public_key_b64=shared.public_key_b64),  # SAME key as w0
+        AuthorizerKey(key_id="w2", name="w2", public_key_b64=other.public_key_b64)])
+    assert is_split_view_resistant(tr) is False  # 2*2 > 3 arithmetically, but a dup key → fail closed
+    # the operator's single key signs as BOTH w0 and w1 (distinct key_ids) to "meet" threshold 2...
+    old = _cp(10, 10, "h-old")
+    fa = _cp(20, 20, "head-A", prev=checkpoint_hash(old))
+    wa, wb = Witness("w0", shared.private_key_b64), Witness("w1", shared.private_key_b64)
+    q = WitnessedCheckpoint(fa, (wa.cosign(fa), wb.cosign(fa)))
+    assert verify_witnessed(q, witness_trust_root=tr) is True            # ...verify_witnessed is fooled
+    assert verify_split_view_resistant(q, witness_trust_root=tr) is False  # but the full guarantee is not
 
 
 def test_split_view_resistance_predicate_is_strict_majority():
