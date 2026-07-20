@@ -71,6 +71,16 @@ def test_no_tokens_returns_none():
     assert ap.estimate_anthropic_cost("claude-opus-4-8", {"prompt_tokens": 0, "completion_tokens": 0}) is None
 
 
+def test_pathological_token_counts_do_not_crash():
+    # int(float('inf')) would raise OverflowError; _int must absorb it (red-pen P8 finding 2).
+    cost = ap.estimate_anthropic_cost(
+        "claude-opus-4-8", {"prompt_tokens": float("inf"), "completion_tokens": 10}
+    )
+    assert isinstance(cost, float)  # bounded number, never a crash
+    # negatives absorbed to zero → no tokens → None, not an exception
+    assert ap.estimate_anthropic_cost("claude-opus-4-8", {"prompt_tokens": -5, "completion_tokens": -1}) is None
+
+
 def test_is_anthropic_model():
     assert ap.is_anthropic_model("anthropic/claude-opus-4-8")
     assert ap.is_anthropic_model("claude-3-5-sonnet")

@@ -62,7 +62,8 @@ def _match_prices(model: str) -> tuple[float, float, float, float] | None:
 def _int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError guards int(float('inf')); real provider token counts are always finite.
         return 0
 
 

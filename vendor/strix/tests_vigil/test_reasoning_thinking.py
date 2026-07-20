@@ -17,9 +17,11 @@ def test_anthropic_thinking_families_recognised():
     assert f("claude-sonnet-5")
     assert f("claude-sonnet-4")
     assert f("claude-3-7-sonnet")
+    assert f("claude-haiku-4-5")                     # Haiku 4.5 DOES support extended thinking
+    assert f("anthropic/claude-haiku-4-5-20251001")
     # families WITHOUT extended thinking must not be misreported
     assert not f("claude-3-5-sonnet")
-    assert not f("claude-3-5-haiku")
+    assert not f("claude-3-5-haiku")                 # Haiku 3.5: no extended thinking
     assert not f("claude-3-haiku")
     assert not f("gpt-4o")
     assert not f("")

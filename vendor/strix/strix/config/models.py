@@ -214,13 +214,15 @@ def model_supports_reasoning(model_name: str) -> bool:
     return _anthropic_supports_thinking(name)
 
 
-# Claude extended-thinking families (Opus 4.x, Sonnet 4.x/5, Sonnet 3.7). Haiku and <=3.5 Sonnet
-# do not support extended thinking, so they are deliberately excluded.
+# Claude extended-thinking families (Opus 4.x, Sonnet 4.x/5, Sonnet 3.7, Haiku 4.x). The older
+# Haiku 3/3.5 and Sonnet <=3.5 do NOT support extended thinking and are deliberately excluded,
+# so reasoning_effort is applied only where the model can actually use it.
 _ANTHROPIC_THINKING_MARKERS = (
     "claude-opus-4",
     "claude-sonnet-4",
     "claude-sonnet-5",
     "claude-3-7-sonnet",
+    "claude-haiku-4",
 )
 
 
