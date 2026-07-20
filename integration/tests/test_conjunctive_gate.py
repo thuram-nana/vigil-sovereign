@@ -3,7 +3,13 @@ fail-closed. Both halves injected as thunks, so the composition is tested withou
 
 from __future__ import annotations
 
-from vigil_integration.conjunctive_gate import CrucibleResult, conjunctive_decide
+import pytest
+
+from vigil_integration.conjunctive_gate import (
+    CrucibleResult,
+    build_offense_gate,
+    conjunctive_decide,
+)
 from vigil_integration.warden_gate import ToolDecision
 
 
@@ -65,3 +71,18 @@ def test_warden_error_fails_closed():
 
     v = conjunctive_decide(crucible_authorize=_cru(True), warden_decide=war)
     assert v.outcome == "deny" and v.crucible_allowed is True and v.warden is None
+
+
+def test_only_auto_allows_unknown_warden_outcome_fails_closed():
+    # BLOCK-3 regression: an unexpected WARDEN outcome must DENY, never default to ALLOW.
+    for bad in ("allow", "", "maybe", "APPROVE"):
+        v = conjunctive_decide(crucible_authorize=_cru(True), warden_decide=_war(bad))
+        assert v.outcome == "deny" and v.allowed is False, f"outcome {bad!r} must fail closed"
+    # and the ONLY outcome that allows is exactly "auto"
+    assert conjunctive_decide(crucible_authorize=_cru(True), warden_decide=_war("auto")).outcome == "allow"
+
+
+def test_build_offense_gate_refuses_none_trust_root():
+    # BLOCK-4 regression: a None trust_root would load the authority UNSIGNED -> refuse to build.
+    with pytest.raises(ValueError, match="trust_root"):
+        build_offense_gate(slug="acme", trust_root=None, classify=lambda n: "A3")

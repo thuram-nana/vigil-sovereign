@@ -36,8 +36,12 @@ from .identity import owner_keypair, owner_pubkey
 SIGNAL = "governor.offense_gate"
 
 # Only these fields are authenticated by the owner signature. ``not_after`` and ``charter_hash``
-# MUST be here or an attacker could rewrite the expiry / charter binding without breaking the sig.
-_CORE = ("signal", "state", "charter_id", "charter_hash", "not_after")
+# MUST be here or an attacker could rewrite the expiry/charter without breaking the sig; and
+# ``issued_at`` MUST be here so a captured OPEN cannot be REPLAYED to reverse a later CLOSE — the
+# fold rejects any OPEN whose ``issued_at`` does not strictly exceed the highest already seen, so a
+# byte-identical replay (same issued_at) after a close is refused. ``issued_at`` is an owner-set,
+# strictly-increasing value (unix time; use a fresh, larger value for every open).
+_CORE = ("signal", "state", "charter_id", "charter_hash", "not_after", "issued_at")
 
 
 class OffenseGateClosed(RuntimeError):
@@ -66,10 +70,13 @@ class OffenseGate:
     # -- owner transitions (both A0/auto so they are never themselves offense-gated) ----------
 
     def open_gate(
-        self, *, charter_id: str, charter_hash: str, not_after: float, by: str = "owner", reason: str = ""
+        self, *, charter_id: str, charter_hash: str, not_after: float, issued_at: float,
+        by: str = "owner", reason: str = "",
     ) -> int:
-        """Owner-signed OPEN, bound to one charter (id+hash) and expiring at ``not_after`` (unix
-        seconds). Only the owner key produces a signature the fold will honour."""
+        """Owner-signed OPEN, bound to one charter (id+hash), expiring at ``not_after`` (unix
+        seconds). ``issued_at`` is a strictly-increasing owner-set value (unix time) that anti-
+        replay binds this open — use a fresh, larger value than any prior open. Only the owner key
+        produces a signature the fold will honour."""
         if not charter_id or not charter_hash:
             raise ValueError("open_gate requires a charter_id and charter_hash to bind to")
         core = {
@@ -78,6 +85,7 @@ class OffenseGate:
             "charter_id": str(charter_id),
             "charter_hash": str(charter_hash),
             "not_after": float(not_after),
+            "issued_at": float(issued_at),
         }
         payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason,
                    "tier": "A0", "decision": "auto"}
@@ -85,7 +93,8 @@ class OffenseGate:
 
     def close_gate(self, *, by: str = "owner", reason: str = "") -> int:
         """CLOSE offense (the fail-safe direction — honoured whoever signs it, like kill engage)."""
-        core = {"signal": SIGNAL, "state": "closed", "charter_id": "", "charter_hash": "", "not_after": 0.0}
+        core = {"signal": SIGNAL, "state": "closed", "charter_id": "", "charter_hash": "",
+                "not_after": 0.0, "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason,
                    "tier": "A0", "decision": "auto"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
@@ -99,6 +108,7 @@ class OffenseGate:
         is_open = False
         reason = "default-closed: no owner-signed open on the spine"
         na = 0.0
+        max_issued = float("-inf")  # anti-replay high-water: each honoured open must exceed it
         for record in self.store.iter_records():
             payload = record.payload if isinstance(record.payload, dict) else {}
             if payload.get("signal") != SIGNAL:
@@ -112,6 +122,10 @@ class OffenseGate:
                     continue  # forged/unsigned open — no effect
                 if payload.get("charter_id") != charter_id or payload.get("charter_hash") != charter_hash:
                     continue  # open for a DIFFERENT charter — no effect on this one
+                issued = _as_float(payload.get("issued_at"))
+                if issued <= max_issued:
+                    continue  # REPLAY (or stale re-append) of an already-seen open — reject, no effect
+                max_issued = issued  # consume this issued_at so its replay is refused hereafter
                 signed_na = _as_float(payload.get("not_after"))
                 if now < signed_na:
                     is_open, reason, na = True, "owner-signed open, charter-bound, unexpired", signed_na

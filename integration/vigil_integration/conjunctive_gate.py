@@ -63,12 +63,13 @@ def conjunctive_decide(
         war = warden_decide()
     except Exception as exc:
         return GateVerdict(False, "deny", f"WARDEN gate error (fail-closed): {exc}", True, None)
-    if war.outcome == "deny":
-        return GateVerdict(False, "deny", f"WARDEN denied tool {war.tool!r}: {war.reason}", True, war)
+    if war.outcome == "auto":
+        return GateVerdict(True, "allow", "both gates allow: CRUCIBLE in-envelope AND WARDEN auto", True, war)
     if war.outcome == "queue":
         return GateVerdict(False, "queue", f"in envelope, but WARDEN needs owner approval: {war.reason}", True, war)
-
-    return GateVerdict(True, "allow", "both gates allow: CRUCIBLE in-envelope AND WARDEN auto", True, war)
+    # "deny" OR any unrecognised WARDEN outcome → DENY. Only an explicit "auto" may ALLOW, so a
+    # new/unexpected outcome string can never silently open the gate (fail-closed conjunction).
+    return GateVerdict(False, "deny", f"WARDEN refused tool {war.tool!r} (outcome={war.outcome!r}): {war.reason}", True, war)
 
 
 def build_offense_gate(
@@ -87,7 +88,15 @@ def build_offense_gate(
     Offense-side only: imports ``framework`` lazily (this module never runs in the sovereign env).
     ``trust_root`` MUST be the governance TrustRoot — the CRUCIBLE authority is loaded verified,
     so a tampered scope/window/destructive-flag is rejected at load (the map's biggest fail-open).
+    A ``None`` trust_root is refused: it would load the authority UNSIGNED, so it fails closed here.
     """
+    if trust_root is None:
+        raise ValueError(
+            "build_offense_gate requires the governance trust_root: a None trust_root loads the "
+            "CRUCIBLE authority UNSIGNED/unverified, so a tampered scope/window/destructive flag "
+            "would pass the gate. Fail-closed refusal."
+        )
+
     def gate(tool_name: str, target_url: str, destructive: bool = False) -> GateVerdict:
         def crucible_authorize() -> CrucibleResult:
             # Lazy import keeps the module import-clean; only reachable in env-offense.

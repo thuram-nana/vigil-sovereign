@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-from ..reuse import canonical_json, sign, verify_one
+from ..reuse import IntegrityError, canonical_json, sign, verify_one
 
 
 def _canon(core: dict) -> bytes:
@@ -32,4 +32,9 @@ def verify_signed(payload: dict, core_fields: Sequence[str], trusted_pubkey: Opt
     if not sig or payload.get("pubkey") != trusted_pubkey:
         return False
     core = {k: payload.get(k) for k in core_fields}
-    return verify_one(trusted_pubkey, _canon(core), sig)
+    try:
+        return verify_one(trusted_pubkey, _canon(core), sig)
+    except IntegrityError:
+        # malformed base64 / wrong-length sig or key material → NOT authentic (honour the
+        # fail-closed contract; a hostile append-only event must not raise out of the fold).
+        return False
