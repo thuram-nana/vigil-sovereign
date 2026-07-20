@@ -50,6 +50,9 @@ STATUS_UNDER_INVESTIGATION = "under_investigation"  # an honest lead, never asse
 # conceivable log (2**64 leaves) and caps _rebuild_root recursion well under the interpreter limit.
 _MAX_PROOF_DEPTH = 64
 
+# The certificate fields the OpenVEX statement needs; a cert missing any is refused (fail-closed).
+_REQUIRED_CERT_FIELDS = ("engagement_slug", "finding_ref", "bug_class", "oracle_context_digest", "confidence")
+
 
 # --- OpenVEX finding vocabulary ----------------------------------------------------------------
 
@@ -321,3 +324,33 @@ def verify_anchored_receipt(
     if not ok:
         return False, reason
     return True, "offline-verified: statement included in a witness-anchored transparency log"
+
+
+def mint_finding_statement(
+    cert: dict,
+    signers: Iterable[tuple[str, str]],
+    *,
+    confirmed: bool,
+    author: str,
+    timestamp: str,
+    log: "Optional[StatementLog]" = None,
+) -> "tuple[SignedStatement, Optional[Receipt]]":
+    """The bridge from a confirmed-finding certificate to a registered, offline-verifiable SCITT
+    statement: build the OpenVEX statement (``confirmed`` drives affected vs under_investigation — the
+    honesty invariant), sign it m-of-n as a DSSE statement, and (when a ``log`` is given) register it
+    and return an inclusion receipt. Fail-closed: a non-dict cert, a cert missing a required field, or
+    empty signers is refused. ``timestamp`` is caller-supplied (no wallclock — deterministic)."""
+    if not isinstance(cert, dict):
+        raise TypeError("cert must be a dict of certificate fields")
+    missing = [f for f in _REQUIRED_CERT_FIELDS if f not in cert]
+    if missing:
+        raise ValueError(f"certificate missing required field(s): {missing}")
+    signer_list = list(signers)
+    if not signer_list:
+        raise ValueError("mint_finding_statement requires governance signers (m-of-n)")
+    statement = openvex_statement(cert, author=author, timestamp=timestamp, confirmed=confirmed)
+    signed = build_signed_statement(statement, signer_list)
+    if log is None:
+        return signed, None
+    index = log.register(signed)
+    return signed, log.receipt(index)
