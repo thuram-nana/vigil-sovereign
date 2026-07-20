@@ -15,7 +15,19 @@ METADATA_FORMS = [
     "::ffff:a9fe:a9fe",             # IPv4-mapped IPv6, hex form
     "2002:a9fe:a9fe::",             # 6to4 embedding
     "64:ff9b::169.254.169.254",     # NAT64 well-known prefix
+    "64:ff9b:1::169.254.169.254",   # NAT64 RFC 8215 local /48
+    "::169.254.169.254",            # deprecated IPv4-compatible ::/96 (red-pen BLOCK-2)
 ]
+
+
+@pytest.mark.parametrize(
+    "ip",
+    ["::127.0.0.1", "::10.0.0.5", "::192.168.1.1", "::255.255.255.255", "::0.0.0.0"],
+)
+def test_ipv4_compatible_forms_of_local_addresses_denied(ip):
+    # ::a.b.c.d (::/96) unwraps to a.b.c.d and inherits its verdict — loopback/private/reserved.
+    denied, _ = denylist.is_egress_denied(ip)
+    assert denied
 
 
 @pytest.mark.parametrize("ip", METADATA_FORMS)

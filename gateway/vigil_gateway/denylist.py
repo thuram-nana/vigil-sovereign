@@ -94,6 +94,13 @@ _PRIVATE_NETS: tuple[IPv4Network | IPv6Network, ...] = tuple(
 
 # NAT64 well-known prefix — not exposed by ipaddress, handled explicitly.
 _NAT64 = IPv6Network("64:ff9b::/96")
+# NAT64 RFC 8215 network-specific well-known /48 (the WKP twin); embeds IPv4 in its low bits.
+_NAT64_LOCAL = IPv6Network("64:ff9b:1::/48")
+# Deprecated IPv4-compatible form ``::a.b.c.d`` (``::/96``): the low 32 bits are an IPv4
+# address, so ``::169.254.169.254`` must be unwrapped and re-checked or it evades the v6 rules.
+_IPV4_COMPAT = IPv6Network("::/96")
+_V6_UNSPEC = IPv6Address("::")
+_V6_LOOPBACK = IPv6Address("::1")
 
 
 def hard_deny_cidrs() -> list[str]:
@@ -107,10 +114,12 @@ def private_cidrs() -> list[str]:
 
 
 def _embedded_ipv4(ip: IPv4Address | IPv6Address) -> IPv4Address | None:
-    """The IPv4 address embedded in an IPv6 form (mapped / 6to4 / NAT64), else None.
+    """The IPv4 address embedded in an IPv6 form, else None.
 
-    Without this, ``::ffff:169.254.169.254`` (IPv4-mapped) or ``2002:a9fe:a9fe::``
-    (6to4 of 169.254.169.254) would evade an IPv6-only metadata check.
+    Covers every embedding that carries a v4 destination: IPv4-mapped ``::ffff:a.b.c.d``,
+    6to4 ``2002::/16``, NAT64 well-known ``64:ff9b::/96`` and its RFC 8215 local twin
+    ``64:ff9b:1::/48``, and the deprecated IPv4-compatible ``::a.b.c.d`` (``::/96``). Without
+    these, ``::ffff:169.254.169.254`` OR ``::169.254.169.254`` would evade the v6 metadata check.
     """
     if not isinstance(ip, IPv6Address):
         return None
@@ -118,7 +127,10 @@ def _embedded_ipv4(ip: IPv4Address | IPv6Address) -> IPv4Address | None:
         return ip.ipv4_mapped
     if ip.sixtofour is not None:  # 2002::/16
         return ip.sixtofour
-    if ip in _NAT64:
+    if ip in _NAT64 or ip in _NAT64_LOCAL:
+        return IPv4Address(int(ip) & 0xFFFFFFFF)
+    # IPv4-compatible ::/96, excluding :: and ::1 (unspecified/loopback are hard-denied already).
+    if ip in _IPV4_COMPAT and ip != _V6_UNSPEC and ip != _V6_LOOPBACK:
         return IPv4Address(int(ip) & 0xFFFFFFFF)
     return None
 
