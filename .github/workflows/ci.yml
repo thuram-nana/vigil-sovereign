@@ -95,8 +95,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: install pytest (pricing test is dependency-free; reasoning/dedup skip w/o SDK)
-        run: pip install pytest
+      - name: install pytest + best-effort SDK (so reasoning/dedup tests run, not just skip)
+        run: |
+          pip install pytest
+          # openai-agents[litellm] + openai let the reasoning/dedup tests actually execute
+          # (red-pen P8 finding 3). Best-effort: if it can't resolve, those two importorskip.
+          pip install "openai-agents[litellm]" openai || echo "SDK unavailable — reasoning/dedup tests will skip"
       - name: strix vigil tests (Anthropic price table + reasoning + dedup fallback)
         run: |
           if [ -d vendor/strix/tests_vigil ]; then
