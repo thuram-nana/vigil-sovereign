@@ -41,3 +41,66 @@ jobs:
           pytest framework/v2/evidence framework/v2/entitlement framework/v2/common \
                  framework/v2/verify framework/v2/confidence framework/v2/worldmodel \
                  framework/v2/calibration framework/v2/authority -q
+
+  gateway:
+    name: gateway egress gate (P6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install nftables
+        run: sudo apt-get update && sudo apt-get install -y nftables
+      - name: install deps (vigil_core + framework scope reuse)
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
+            "cryptography>=42" packaging pytest
+      - name: gateway tests (denylist, proxy socket refusals, nft render + netns ruleset load)
+        run: |
+          if [ -d gateway/tests ]; then
+            PYTHONPATH=gateway python -m pytest gateway/tests -q
+          else
+            echo "gateway/ not present on this ref (pre-merge) — nothing to test"
+          fi
+
+  integration:
+    name: integration two-env boundary (P5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install vigil_core (+ best-effort sigil for the boundary proof)
+        run: |
+          pip install -e packages/core/vigil_core "pydantic>=2.10,<3" "cryptography>=42" pytest
+          # apps/sigil builds the Rust WARDEN kernel; best-effort so the structural boundary
+          # proof runs when it succeeds and skips (not fails) when the toolchain is unavailable.
+          pip install -e apps/sigil || echo "apps/sigil build skipped — boundary test will skip"
+      - name: integration tests (inert receiver, keyless worker, structural boundary)
+        run: |
+          if [ -d integration/tests ]; then
+            PYTHONPATH=integration python -m pytest integration/tests -q
+          else
+            echo "integration/ not present on this ref (pre-merge) — nothing to test"
+          fi
+
+  strix-vigil:
+    name: strix Claude-runtime (P8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install pytest (pricing test is dependency-free; reasoning/dedup skip w/o SDK)
+        run: pip install pytest
+      - name: strix vigil tests (Anthropic price table + reasoning + dedup fallback)
+        run: |
+          if [ -d vendor/strix/tests_vigil ]; then
+            PYTHONPATH=vendor/strix python -m pytest vendor/strix/tests_vigil -q
+          else
+            echo "vendor/strix/tests_vigil not present on this ref (pre-merge) — nothing to test"
+          fi
