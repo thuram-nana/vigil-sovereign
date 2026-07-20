@@ -5,7 +5,7 @@ from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 
-from strix.telemetry import posthog, scarf
+from strix.telemetry import sink as telemetry
 from strix.utils.resource_paths import get_strix_resource_path
 
 
@@ -185,8 +185,7 @@ def _track_skill_loaded(skill_name: str, file_path: Path) -> None:
         skill_name = "custom"
 
     def _send() -> None:
-        posthog.skill_loaded(skill_name)
-        scarf.skill_loaded(skill_name)
+        telemetry.skill_loaded(skill_name)
 
     threading.Thread(target=_send, daemon=True).start()
 

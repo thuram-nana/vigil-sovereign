@@ -1,0 +1,10 @@
+Strix (https://github.com/usestrix/strix) — Copyright (c) Strix, licensed under Apache-2.0 (see LICENSE).
+
+This copy is vendored into the VIGIL monorepo and MODIFIED from upstream. Modifications so far:
+  - Telemetry: the upstream phone-home modules strix/telemetry/{posthog,scarf}.py (which POSTed
+    scan/finding/skill events to us.i.posthog.com and strix.gateway.scarf.sh) are DELETED and replaced
+    by strix/telemetry/sink.py, a local-only sink with no network transport. Default telemetry = OFF.
+  - Removed the OpenRouter attribution headers (HTTP-Referer/X-Title) from strix/config/models.py.
+  - Default model set to anthropic/claude-opus-4-8 (Claude-everywhere migration).
+Further VIGIL modifications (governance gates, oracle-confirmation, Claude-native runtime) are tracked
+in the monorepo git history under vendor/strix/.

@@ -53,7 +53,7 @@ from strix.interface.utils import (
 )
 from strix.report.state import get_global_report_state
 from strix.report.writer import read_run_record, write_run_record
-from strix.telemetry import posthog, scarf
+from strix.telemetry import sink as telemetry
 from strix.telemetry.logging import configure_dependency_logging
 
 
@@ -912,8 +912,7 @@ def main() -> None:
         "interactive": not args.non_interactive,
         "has_instructions": bool(args.instruction),
     }
-    posthog.start(**_telemetry_start_kwargs)
-    scarf.start(**_telemetry_start_kwargs)
+    telemetry.start(**_telemetry_start_kwargs)
 
     exit_reason = "user_exit"
     try:
@@ -925,8 +924,7 @@ def main() -> None:
         exit_reason = "interrupted"
     except Exception:
         exit_reason = "error"
-        posthog.error("unhandled_exception")
-        scarf.error("unhandled_exception")
+        telemetry.error("unhandled_exception")
         raise
     finally:
         report_state = get_global_report_state()
@@ -936,8 +934,7 @@ def main() -> None:
                 "stopped",
             )
             report_state.cleanup(status=status)
-            posthog.end(report_state, exit_reason=exit_reason)
-            scarf.end(report_state, exit_reason=exit_reason)
+            telemetry.end(report_state, exit_reason=exit_reason)
 
     results_path = run_dir_for(args.run_name)
     display_completion_message(args, results_path)

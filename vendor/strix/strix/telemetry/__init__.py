@@ -1,7 +1,6 @@
-from . import posthog, scarf
+from . import sink
 
 
 __all__ = [
-    "posthog",
-    "scarf",
+    "sink",
 ]

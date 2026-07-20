@@ -20,7 +20,7 @@ _BASE_CONFIG = SettingsConfigDict(
 class LlmSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
-    model: str | None = Field(default=None, alias="STRIX_LLM")
+    model: str | None = Field(default="anthropic/claude-opus-4-8", alias="STRIX_LLM")
     api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),
@@ -63,7 +63,9 @@ class RuntimeSettings(BaseSettings):
 class TelemetrySettings(BaseSettings):
     model_config = _BASE_CONFIG
 
-    enabled: bool = Field(default=True, alias="STRIX_TELEMETRY")
+    # VIGIL sovereign default: OFF. The upstream phone-home transports (posthog/scarf) are deleted; the
+    # remaining local sink honors this flag and never leaves the host regardless.
+    enabled: bool = Field(default=False, alias="STRIX_TELEMETRY")
 
 
 class IntegrationSettings(BaseSettings):
