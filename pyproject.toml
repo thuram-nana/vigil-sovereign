@@ -1,0 +1,32 @@
+# VIGIL monorepo — uv workspace root.
+#
+# The workspace declares every member package. Crucially, VIGIL is NOT one flat environment:
+# the offense-free guarantee (FATAL-2) requires TWO isolated environments that never share an
+# interpreter — env-sovereign (personal core, offense-free) and env-offense (the autonomous
+# offense side). uv workspaces resolve to a single lock, so the two isolated locks are built
+# from the member sets in envs/ (envs/sovereign.txt, envs/offense.txt); see envs/README.md.
+# This root exists so `uv` (when present) can discover members and for repo-wide tooling.
+
+[tool.uv.workspace]
+members = [
+    "packages/core/vigil_core",
+    "apps/sigil",
+    "engine/crucible",
+    "vendor/strix",
+    "gateway",
+    "integration",
+]
+
+# The two isolated environments, as documentation of the boundary (built via envs/):
+#   env-sovereign : vigil_core + apps/sigil + integration      (NEVER framework.* or strix.*)
+#   env-offense   : vigil_core + engine/crucible + vendor/strix + gateway + integration
+# The structural proof that the sovereign env cannot import the offense members lives in
+# integration/tests/test_two_env_boundary.py.
+
+[tool.vigil.environments.sovereign]
+members = ["packages/core/vigil_core", "apps/sigil", "integration"]
+forbids = ["framework", "strix"]
+
+[tool.vigil.environments.offense]
+members = ["packages/core/vigil_core", "engine/crucible", "vendor/strix", "gateway", "integration"]
+owner_key = false   # the offense worker runs with NO owner signing key (keyless trust domain)

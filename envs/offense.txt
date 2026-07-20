@@ -1,0 +1,14 @@
+# env-offense — the autonomous offense side (CRUCIBLE engine + Strix agent body) over the shared
+# integrity substrate. This environment runs as a separate process that holds an engagement-scoped
+# store handle and NO owner signing key (see integration/vigil_integration/offense_worker.py), so it
+# cannot forge a sovereign governance event even though it can import the offense engine.
+#
+# Build:  python -m venv .venv-offense && . .venv-offense/bin/activate && pip install -r envs/offense.txt
+# (vendor/strix pulls heavy deps — openai-agents[litellm], docker, textual; install as needed to run
+#  a live scan. The gateway + integration + vigil_core are lightweight.)
+
+-e ./packages/core/vigil_core
+-e ./engine/crucible
+-e ./vendor/strix
+-e ./gateway
+-e ./integration

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vigil-integration"
+version = "0.1.0"
+description = "The inert, signed data seam between the VIGIL offense engine and the sovereign personal core (FATAL-2)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = ["vigil-core"]  # sovereign-safe: vigil_core only; never framework.* or strix.*
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["vigil_integration"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

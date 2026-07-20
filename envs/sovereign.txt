@@ -1,0 +1,12 @@
+# env-sovereign — the offense-free personal core (SIGIL) over the shared integrity substrate.
+#
+# INVARIANT: this environment must NEVER contain engine/crucible (framework.*) or vendor/strix
+# (strix.*). That absence is what makes sigil.reuse.assert_no_offense() hold by construction, not
+# by discipline. Proven by integration/tests/test_two_env_boundary.py.
+#
+# Build:  python -m venv .venv-sovereign && . .venv-sovereign/bin/activate && pip install -r envs/sovereign.txt
+# (apps/sigil builds the Rust WARDEN kernel via setuptools-rust — a Rust toolchain is required.)
+
+-e ./packages/core/vigil_core
+-e ./apps/sigil
+-e ./integration
