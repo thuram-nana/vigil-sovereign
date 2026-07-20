@@ -7,12 +7,23 @@ third party — a regulator, a client, a court — can trust the log without tru
 
   * A WITNESS independently checks that a new checkpoint CONSISTENTLY EXTENDS the prior one
     (append-only: record count and last_seq only grow, and the checkpoint meta-chain links back),
-    then COUNTERSIGNS it. A QUORUM of independent witnesses over a checkpoint makes a split view —
-    showing head A to one party and a different head B (at the same size) to another — detectable:
-    an honest witness only ever countersigns one consistent extension of the chain it tracks, so the
-    operator cannot obtain a quorum for two forks at the same height.
+    then COUNTERSIGNS it. An honest, single, stateful witness only ever countersigns one consistent
+    extension of the chain it tracks — so it never EQUIVOCATES (never vouches for two forks).
+  * Split-view resistance is a QUORUM-INTERSECTION property and is CONDITIONAL, not automatic. An
+    operator is prevented from obtaining a witness quorum for two forks at the same height ONLY when
+    the witness set is a STRICT MAJORITY (``2*threshold > n`` — see ``is_split_view_resistant``):
+    then any two quorums must share at least one witness, and that shared honest witness refuses to
+    sign the second fork. Below strict majority (in particular ``threshold == 1``, which the trust
+    model blesses), two DISJOINT quorums can each countersign a different fork with NO witness
+    equivocating — quorum-level prevention does NOT hold; only per-witness non-equivocation and
+    DETECTION remain. ``verify_witnessed`` proves a quorum signed; ``verify_split_view_resistant``
+    additionally proves the set is strict-majority; ``is_split`` lets any client that holds two
+    checkpoints prove a fork after the fact.
   * Consistency proof: a client that saw checkpoint M can verify that checkpoint N (N after M) is a
     pure append-only EXTENSION of M — never a rewrite/rollback — by walking the checkpoint chain.
+    (``consistent`` is a PAIRWISE check; it forbids a fork at ``old``'s exact height and any
+    rollback, but the full no-fork guarantee comes from each witness's per-tip state, not from
+    ``consistent`` alone.)
 
 The checkpoint is a PUBLIC summary of the head (its identity fields), so witnessing needs no access
 to the spine contents — only its signed head. OpenTimestamps Bitcoin anchoring of a checkpoint hash
@@ -87,7 +98,10 @@ def checkpoint_hash(cp: Checkpoint) -> str:
 
 
 def consistent(old: Checkpoint, new: Checkpoint) -> tuple[bool, str]:
-    """Is ``new`` a valid append-only EXTENSION of ``old``? Fail-closed on any rollback/fork."""
+    """Is ``new`` a valid append-only EXTENSION of ``old``? Fail-closed on record-count shrink,
+    last_seq rollback, a broken checkpoint-chain link, and a same-height fork. This is a PAIRWISE
+    check: two different ``new`` checkpoints at a HIGHER count both linking to ``old`` each pass it —
+    forbidding that multi-height fork is the job of each witness's per-tip state, not of this check."""
     if new.entry_count < old.entry_count:
         return False, "record count shrank — rewrite/rollback, not an append-only extension"
     if new.last_seq < old.last_seq:
@@ -130,11 +144,32 @@ class ConsistencyError(RuntimeError):
 
 
 def verify_witnessed(wc: WitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
-    """True iff a QUORUM of trusted witnesses (m-of-n) countersigned this exact checkpoint. That
-    quorum is what makes a split view detectable. Fail-closed."""
+    """True iff a QUORUM of trusted witnesses (m-of-n) countersigned THIS EXACT checkpoint.
+    Fail-closed. NOTE: this proves a quorum signed — it does NOT by itself prove the operator did
+    not equivocate. At a sub-majority threshold (``2*threshold <= n``) two disjoint quorums can each
+    sign a different fork; use ``verify_split_view_resistant`` for the full transparency guarantee."""
     return verify_threshold(
         _signing_bytes(wc.checkpoint), list(wc.witness_signatures), witness_trust_root
     ).satisfied
+
+
+def is_split_view_resistant(witness_trust_root: TrustRoot) -> bool:
+    """True iff the witness set is a STRICT MAJORITY quorum (``2*threshold > n``), the condition
+    under which split-view PREVENTION holds: any two quorums must then share >=1 witness, and an
+    honest stateful witness refuses to countersign a second, conflicting fork. Below this (incl. the
+    trust model's blessed ``threshold == 1`` with n>1) disjoint quorums make prevention impossible —
+    only detection (``is_split``) and per-witness non-equivocation remain. Fail-closed on empty set."""
+    n = len(witness_trust_root.authorizers)
+    return n > 0 and 2 * witness_trust_root.threshold > n
+
+
+def verify_split_view_resistant(wc: WitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
+    """The full transparency guarantee, fail-closed: a trusted quorum signed THIS checkpoint AND the
+    witness set is strict-majority, so the operator cannot have obtained a competing same-height
+    quorum without a witness equivocating. Returns False if either condition fails."""
+    return is_split_view_resistant(witness_trust_root) and verify_witnessed(
+        wc, witness_trust_root=witness_trust_root
+    )
 
 
 def verify_log(checkpoints: "list[Checkpoint]") -> tuple[bool, str]:

@@ -16,7 +16,9 @@ from vigil_integration.transparency import (
     checkpoint_of,
     consistent,
     is_split,
+    is_split_view_resistant,
     verify_log,
+    verify_split_view_resistant,
     verify_witnessed,
 )
 
@@ -120,11 +122,75 @@ def test_verify_log_walks_the_chain():
     assert verify_log(broken)[0] is False
 
 
-def test_split_view_is_detectable_across_two_witnessed_forks():
-    # each fork can be individually witnessed, but same-height + different-content IS the split proof
-    x = _cp(100, 100, "head-X")
-    y = _cp(100, 100, "head-Y")  # a fork at the same height
-    assert is_split(x, y) is True
-    # a genuine extension is not a split
-    z = _cp(200, 200, "head-Z", prev=checkpoint_hash(x))
-    assert is_split(x, z) is False
+def _witnesses(n):
+    """n independent witnesses + a strict m-of-n trust root over their public keys."""
+    kps = [generate_keypair() for _ in range(n)]
+    ws = [Witness(f"w{i}", kp.private_key_b64) for i, kp in enumerate(kps)]
+    def root(m):
+        return TrustRoot(threshold=m, authorizers=[
+            AuthorizerKey(key_id=f"w{i}", name=f"w{i}", public_key_b64=kp.public_key_b64)
+            for i, kp in enumerate(kps)])
+    return ws, root
+
+
+def test_split_view_is_detectable_across_two_actually_witnessed_forks():
+    # DRIVE real witnesses: a shared history, then two forks at the same height, each countersigned
+    # by a (sub-majority) disjoint quorum — then prove is_split flags them and each quorum verifies.
+    ws, root = _witnesses(4)
+    tr = root(2)  # 2-of-4 — sub-majority
+    old = _cp(10, 10, "h-old")
+    for w in ws:
+        w.cosign(old)  # shared honest history
+    fa = _cp(20, 20, "head-A", prev=checkpoint_hash(old))
+    fb = _cp(20, 20, "head-B", prev=checkpoint_hash(old))
+    qa = WitnessedCheckpoint(fa, (ws[0].cosign(fa), ws[1].cosign(fa)))   # {w0,w1} see only fork A
+    qb = WitnessedCheckpoint(fb, (ws[2].cosign(fb), ws[3].cosign(fb)))   # {w2,w3} see only fork B
+    assert verify_witnessed(qa, witness_trust_root=tr) is True           # each quorum is valid...
+    assert verify_witnessed(qb, witness_trust_root=tr) is True
+    assert is_split(fa, fb) is True                                      # ...and the fork is detectable
+    # no witness equivocated: each stateful witness tracked exactly one side
+    assert (ws[0]._last.head_hash, ws[2]._last.head_hash) == ("head-A", "head-B")
+
+
+def test_sub_majority_quorum_is_not_split_view_resistant():
+    # the honest contract: at 2m<=n, verify_witnessed passes for two forks but the FULL guarantee
+    # (verify_split_view_resistant) is False — the module does not overclaim prevention here.
+    ws, root = _witnesses(4)
+    tr = root(2)  # 2*2 == 4, NOT > 4 → not strict majority
+    old = _cp(10, 10, "h-old")
+    for w in ws:
+        w.cosign(old)
+    fa = _cp(20, 20, "head-A", prev=checkpoint_hash(old))
+    qa = WitnessedCheckpoint(fa, (ws[0].cosign(fa), ws[1].cosign(fa)))
+    assert is_split_view_resistant(tr) is False
+    assert verify_witnessed(qa, witness_trust_root=tr) is True
+    assert verify_split_view_resistant(qa, witness_trust_root=tr) is False  # fail-closed on config
+
+
+def test_strict_majority_forces_an_honest_witness_to_refuse_the_second_fork():
+    # the ENFORCED guarantee: at strict majority any second quorum must reuse a witness, and that
+    # witness (stateful, honest) REFUSES the conflicting fork — so the operator cannot form it.
+    ws, root = _witnesses(3)
+    tr = root(2)  # 2*2 == 4 > 3 → strict majority
+    assert is_split_view_resistant(tr) is True
+    old = _cp(10, 10, "h-old")
+    for w in ws:
+        w.cosign(old)
+    fa = _cp(20, 20, "head-A", prev=checkpoint_hash(old))
+    qa = WitnessedCheckpoint(fa, (ws[0].cosign(fa), ws[1].cosign(fa)))
+    assert verify_split_view_resistant(qa, witness_trust_root=tr) is True
+    fb = _cp(20, 20, "head-B", prev=checkpoint_hash(old))  # a competing fork at the same height
+    # any 2-of-3 quorum for fb must include w0, w1, or w2; w0 and w1 already tracked fork A, and w2
+    # after tracking fb still needs a second signer — every candidate refuses to equivocate.
+    for w in (ws[0], ws[1]):
+        with pytest.raises(ConsistencyError):
+            w.cosign(fb)  # can't get a second quorum without an equivocation the witness refuses
+
+
+def test_split_view_resistance_predicate_is_strict_majority():
+    _, root = _witnesses(4)
+    assert is_split_view_resistant(root(3)) is True     # 6 > 4 — strict majority
+    assert is_split_view_resistant(root(2)) is False    # 4 == 4, not strict
+    assert is_split_view_resistant(root(1)) is False    # 2 < 4 — the blessed threshold=1 is NOT resistant
+    _, solo_root = _witnesses(1)
+    assert is_split_view_resistant(solo_root(1)) is True  # 2 > 1 — a lone witness can't be bypassed
