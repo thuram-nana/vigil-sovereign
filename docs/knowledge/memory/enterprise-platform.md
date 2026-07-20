@@ -1,0 +1,20 @@
+---
+name: enterprise-platform
+description: "CRUCIBLE enterprise cyber-ops platform — 4 frontiers (evidence integrity, attack-path decision support, operator UX, cloud/OSINT graph) all MERGED to main"
+metadata:
+  node_type: memory
+  type: project
+  originSessionId: 7758e121-f349-47d5-886b-6bb5a1d60e27
+---
+
+After the Intelligence Engine, the operator asked to advance CRUCIBLE toward a production-grade **authorized** assessment platform along legitimate frontiers. **DECLINED (held firm across insistence):** detection-evasion / identity-rotation / staying-hidden-from-defenders — anti-defender tradecraft, directly misusable, and contradicts CRUCIBLE's own correlatable/authorized doctrine (constitution §VI: "you are not evading them"). The constructive mirror offered instead: purple-team detection-EFFICACY (measure+report coverage, improve the blue team). Then built all four legitimate frontiers, each as its own reviewed PR to main, grounded by 3 Explore agents first (most primitives already existed — the work was mostly WIRING).
+
+**P1 — Cryptographic evidence integrity (PR #35).** New `framework/v2/evidence/` package: signed, hash-linked, independently-replayable certificates. Reuses `entitlement/crypto.py` (Ed25519 m-of-n `verify_threshold`) + domain-separated canonical bytes (new tag `crucible-evidence-v1\x00`) + `verify/reverify`. `EvidenceCertificate` = finding id + oracle_context DIGEST + per-file sha256 artifact manifest; `verify_certificate` proves 4 layers (authentic/bound/artifacts_ok/reproduced); `chain.py` hash-links certs under a governance-signed head (monotonic anti-rollback). CLI `evidence keygen|certify|verify`. Declared the previously-undeclared `cryptography` dep. 5-dim adversarial review found **6 fail-open defects** (0/3 refuted) — all fixed: artifact-integrity fail-CLOSED without evidence_root; `verify_bundle` binds cert SET to chain (blocks silent cert suppression → exit 2); CLI anti-rollback high-water wired; verify_manifest path-traversal confinement (is_within, reject absolute/`..`) + size cap.
+
+**P2 — Attack-path decision support (PR #36).** ONLY gap was business-impact value (was constant 1.0). `worldmodel/impact.py`: `ImpactModel` (id>kind>default from optional `targets/<slug>/impact.yaml`, uniform default → byte-identical); feeds `AttackPath.value` (which `anneal_path_portfolio.value_of` already reads → mission-aware portfolio for free); `rank_choke_points` (impact-weighted, reuses `choke_points`); `what_if_remediate` (counterfactual, reuses `pathsearch._reaches`, read-only). Choke-points / portfolio / counterfactual-reachability all ALREADY existed. NOTE: `Edge.key` is a TUPLE (src,dst,kind), not a string.
+
+**P3 — Operator experience (PR #37).** Read-only/loopback console screens surfacing P1+P2+temporal, reusing the SPA screen-registry + `graph.js` + `_safe` providers. `console/api.py` `evidence(run_id)` (reverify a run's certs offline → Evidence Browser) + route `/api/evidence/`; `worldmodel(run_id)` now emits `first_seen`/`last_seen` (Timeline replay) + path `value` + impact-ranked chokes. 3 screens: Evidence Browser, Timeline (seq slider), mission-ranked Attack Graph.
+
+**P4 — Asset/cloud/OSINT graph (PR #38).** Offline-first (operator-provided exports; NO live cloud scraping). `intel/from_cloud.py` (cloud/IAM inventory → PRINCIPAL/CLOUD_RESOURCE/DATASTORE + CAN_ASSUME/MEMBER_OF/HAS_GRANT — the EXACT shapes the existing `knowledge/catalog*` IAM chaining operators consume → chainable with zero new reasoning) + `intel/from_sbom.py` (SBOM normalized/CycloneDX → PACKAGE + DEPENDS_ON). New enums NodeKind.PACKAGE, EdgeKind.DEPENDS_ON. CLI `intel ingest-cloud/ingest-sbom`.
+
+**Workflow rhythm (per phase):** 3-agent Explore grounding → build → full-suite gate → adversarial review (find→3-refuters→survive-if-<2-refute) for the high-risk phases (P1) → fix → commit → PR → merge to main. P2/P3/P4 were additive/read-only/default-off enough to rely on tests. All merged to main; final tip c8e5325. See also [[intel-engine]].
