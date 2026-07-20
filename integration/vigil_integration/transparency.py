@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from vigil_core import (
+    IntegrityError,
     Signature,
     TrustRoot,
     canonical_json,
@@ -45,6 +46,7 @@ from vigil_core import (
     sign,
     verify_threshold,
 )
+from vigil_core.crypto import load_public_key
 
 # Domain tag so a witness signature can never be replayed as a spine-head / evidence / authority sig.
 _WITNESS_DOMAIN = b"vigil-transparency-checkpoint-v1\x00"
@@ -164,11 +166,20 @@ def is_split_view_resistant(witness_trust_root: TrustRoot) -> bool:
     Fail-closed on an EMPTY set and, crucially, on any DUPLICATE authorizer public key: quorum
     intersection is a property of distinct keys, but ``TrustRoot`` dedups key_ids only (two key_ids
     can share one public key), so the same operator key registered twice would otherwise forge a
-    'strict majority' by itself. Counting distinct public keys closes that."""
-    distinct_keys = {a.public_key_b64 for a in witness_trust_root.authorizers}
+    'strict majority' by itself. Deduplication is over the CANONICAL DECODED 32-byte key (not the
+    base64 string): Ed25519 base64 is malleable in its trailing bits, so one key has several
+    non-canonical encodings — comparing decoded keys collapses them. Malformed key material also
+    fails closed."""
+    try:
+        distinct_keys = {
+            load_public_key(a.public_key_b64).public_bytes_raw()
+            for a in witness_trust_root.authorizers
+        }
+    except IntegrityError:
+        return False  # malformed authorizer key material — cannot reason about the set, fail closed
     n = len(distinct_keys)
     if n != len(witness_trust_root.authorizers):
-        return False  # a duplicate/shared witness key defeats the intersection guarantee — fail closed
+        return False  # a duplicate/shared witness key (any encoding) defeats intersection — fail closed
     return n > 0 and 2 * witness_trust_root.threshold > n
 
 

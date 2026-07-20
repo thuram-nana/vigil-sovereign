@@ -210,6 +210,43 @@ def test_duplicate_authorizer_key_is_not_split_view_resistant():
     assert verify_split_view_resistant(q, witness_trust_root=tr) is False  # but the full guarantee is not
 
 
+def _noncanonical_b64(pubkey_b64):
+    """A different base64 STRING that decodes to the SAME Ed25519 key (trailing bits are malleable)."""
+    import base64
+    raw = base64.b64decode(pubkey_b64, validate=True)
+    for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/":
+        cand = pubkey_b64[:-2] + c + "="
+        if cand != pubkey_b64 and base64.b64decode(cand, validate=True) == raw:
+            return cand
+    raise AssertionError("no non-canonical variant found")
+
+
+def test_encoding_variant_of_one_key_is_not_split_view_resistant():
+    # the SAME operator key encoded two DIFFERENT ways (non-canonical base64) must not forge a strict
+    # majority — dedup is over the decoded key, not the string. (Byte-identical dup is the easy case;
+    # this is the malleable-encoding case a deliberate adversary would use.)
+    op, other = generate_keypair(), generate_keypair()
+    alt = _noncanonical_b64(op.public_key_b64)
+    assert alt != op.public_key_b64  # a genuinely different string...
+    tr = TrustRoot(threshold=2, authorizers=[
+        AuthorizerKey(key_id="w0", name="w0", public_key_b64=op.public_key_b64),
+        AuthorizerKey(key_id="w1", name="w1", public_key_b64=alt),          # ...for the SAME key
+        AuthorizerKey(key_id="w2", name="w2", public_key_b64=other.public_key_b64)])
+    assert is_split_view_resistant(tr) is False  # decoded-key dedup catches the encoding variant
+    old = _cp(10, 10, "h-old")
+    fa = _cp(20, 20, "head-A", prev=checkpoint_hash(old))
+    q = WitnessedCheckpoint(fa, (Witness("w0", op.private_key_b64).cosign(fa),
+                                 Witness("w1", op.private_key_b64).cosign(fa)))
+    assert verify_witnessed(q, witness_trust_root=tr) is True                # one key signs as w0 & w1
+    assert verify_split_view_resistant(q, witness_trust_root=tr) is False     # guarantee fails closed
+
+
+def test_malformed_authorizer_key_fails_closed():
+    tr = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="w0", name="w0", public_key_b64="!!!not-base64!!!")])
+    assert is_split_view_resistant(tr) is False  # unparseable key material → cannot reason → fail closed
+
+
 def test_split_view_resistance_predicate_is_strict_majority():
     _, root = _witnesses(4)
     assert is_split_view_resistant(root(3)) is True     # 6 > 4 — strict majority
