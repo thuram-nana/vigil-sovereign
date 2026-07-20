@@ -1,35 +1,12 @@
-"""Deterministic canonical bytes + digests for spine integrity.
+"""Compatibility shim — `sigil.reuse.canonical` is now `vigil_core.canonical` (the shared integrity core).
 
-VENDORED VERBATIM from CRUCIBLE `framework/v2/evidence/canonical.py` (owner's own work).
-Copied — not imported — so SIGIL owns its integrity primitives, fully decoupled from the
-offensive engine's environment (sovereignty doctrine). Behaviour is byte-identical.
+Re-exports the FULL module namespace (public API + private helpers such as `_head_payload`, `_GENESIS_PREV`,
+`_entry_hash`, `_EVIDENCE_DOMAIN`) so every existing `from ..reuse.canonical import X` in SIGIL keeps resolving
+against the single source of truth. No integrity primitive is defined twice.
 """
 from __future__ import annotations
 
-import hashlib
-import json
-from typing import Any, Final
+from vigil_core import canonical as _src
 
-# Never change without a schema bump + migration (invalidates all existing signatures).
-_EVIDENCE_DOMAIN: Final[bytes] = b"crucible-evidence-v1\x00"
-
-
-def canonical_json(payload: Any) -> bytes:
-    """Deterministic UTF-8 JSON: sorted keys (recursive), compact separators."""
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-    ).encode("utf-8")
-
-
-def sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def digest_payload(payload: Any) -> str:
-    """sha256 of a JSON-serialisable payload in canonical form."""
-    return sha256_hex(canonical_json(payload))
-
-
-def evidence_signing_bytes(certificate_payload: dict[str, Any]) -> bytes:
-    """The exact bytes signed/verified (canonical JSON under the domain tag)."""
-    return _EVIDENCE_DOMAIN + canonical_json(certificate_payload)
+globals().update({_k: _v for _k, _v in vars(_src).items() if not _k.startswith("__")})
+del _src
