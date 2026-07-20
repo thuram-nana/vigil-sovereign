@@ -46,6 +46,10 @@ OPENVEX_MEDIA_TYPE = "application/vnd.openvex+json"  # the DSSE payloadType
 STATUS_AFFECTED = "affected"                  # oracle-confirmed
 STATUS_UNDER_INVESTIGATION = "under_investigation"  # an honest lead, never asserted affected
 
+# A valid RFC-6962 inclusion proof for a tree of size n has ceil(log2(n)) siblings; 64 bounds any
+# conceivable log (2**64 leaves) and caps _rebuild_root recursion well under the interpreter limit.
+_MAX_PROOF_DEPTH = 64
+
 
 # --- OpenVEX finding vocabulary ----------------------------------------------------------------
 
@@ -275,11 +279,15 @@ def verify_receipt(
     if (not isinstance(receipt.leaf_index, int) or isinstance(receipt.leaf_index, bool)
             or not isinstance(receipt.tree_size, int) or isinstance(receipt.tree_size, bool)):
         return False, "malformed receipt index/size"
+    # A valid proof has depth ceil(log2(tree_size)); anything past _MAX_PROOF_DEPTH is implausible for
+    # any real log (2**64 leaves) and would only recurse _rebuild_root toward RecursionError — deny it.
+    if not isinstance(receipt.audit_path, (tuple, list)) or len(receipt.audit_path) > _MAX_PROOF_DEPTH:
+        return False, "receipt proof is malformed or implausibly deep"
     try:
         path = [bytes.fromhex(p) for p in receipt.audit_path]
         root = bytes.fromhex(receipt.root)
         included = verify_inclusion(bytes.fromhex(digest), receipt.leaf_index, receipt.tree_size, path, root)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return False, "malformed receipt proof material"
     if not included:
         return False, "merkle inclusion proof invalid"

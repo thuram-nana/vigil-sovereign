@@ -171,12 +171,25 @@ def test_malformed_receipt_index_or_size_fails_closed_not_raises():
     i = log.register(ss)
     log.register(_signed(_cert(finding_ref="other")))
     r = log.receipt(i)
-    for bad in (Receipt(r.statement_digest, None, r.tree_size, r.audit_path, r.root),
-                Receipt(r.statement_digest, r.leaf_index, None, r.audit_path, r.root),
-                Receipt(r.statement_digest, "0", r.tree_size, r.audit_path, r.root),
-                Receipt(r.statement_digest, r.leaf_index, "2", r.audit_path, r.root)):
+    for bad_idx in (None, "0", 1.5, True, False, [0], {"i": 0}):
+        bad = Receipt(r.statement_digest, bad_idx, r.tree_size, r.audit_path, r.root)
         ok, reason = verify_receipt(bad, ss, trust_root=GOV, expected_root=log.root())
-        assert ok is False and ("index/size" in reason or "proof material" in reason)
+        assert ok is False and "index/size" in reason
+    for bad_size in (None, "2", 2.0, True, [2]):
+        bad = Receipt(r.statement_digest, r.leaf_index, bad_size, r.audit_path, r.root)
+        ok, reason = verify_receipt(bad, ss, trust_root=GOV, expected_root=log.root())
+        assert ok is False and "index/size" in reason
+
+
+def test_implausibly_deep_proof_fails_closed_not_recursionerror():
+    # a pathologically long audit_path must deny (bounded depth), never raise RecursionError.
+    log = StatementLog()
+    ss = _signed()
+    i = log.register(ss)
+    deep = tuple("aa" * 32 for _ in range(5000))
+    bad = Receipt(log.receipt(i).statement_digest, 0, 2 ** 5001, deep, log.root())
+    ok, reason = verify_receipt(bad, ss, trust_root=GOV, expected_root=log.root())
+    assert ok is False and "deep" in reason
 
 
 def test_receipt_over_an_unsigned_statement_fails():
