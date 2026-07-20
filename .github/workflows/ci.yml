@@ -108,3 +108,26 @@ jobs:
           else
             echo "vendor/strix/tests_vigil not present on this ref (pre-merge) — nothing to test"
           fi
+
+  sigil-governor:
+    name: SIGIL governor gates (P7 — offense gate + authn)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install vigil_core + SIGIL deps (governor tests are pure-Python; no Rust kernel needed)
+        run: |
+          pip install -e packages/core/vigil_core \
+            "pydantic>=2.10,<3" structlog httpx requests PyYAML "cryptography>=42" packaging pytest
+      - name: offense gate + hardening (killswitch/promotion/approval regressions)
+        env:
+          SIGIL_HOME: /tmp/sigil-ci
+        run: |
+          mkdir -p /tmp/sigil-ci
+          if [ -f apps/sigil/tests/test_offense_gate.py ]; then
+            PYTHONPATH=apps/sigil python -m pytest apps/sigil/tests/test_offense_gate.py apps/sigil/tests/test_hardening.py -q
+          else
+            echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
+          fi
