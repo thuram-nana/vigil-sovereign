@@ -57,7 +57,7 @@ jobs:
           pip install -e packages/core/vigil_core \
             "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
             "cryptography>=42" packaging pytest
-      - name: gateway tests (denylist, proxy sockets, nft render, netns drop-proof)
+      - name: gateway tests (denylist, proxy socket refusals, nft render + netns ruleset load)
         run: |
           if [ -d gateway/tests ]; then
             PYTHONPATH=gateway python -m pytest gateway/tests -q
