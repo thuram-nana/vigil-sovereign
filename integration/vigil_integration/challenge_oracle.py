@@ -25,6 +25,7 @@ Pure/stdlib-only and import-clean (no framework.*/strix.*): the challenge token 
 from __future__ import annotations
 
 import hmac
+import json
 import secrets
 from dataclasses import dataclass
 from enum import Enum
@@ -51,6 +52,13 @@ def _default_token() -> str:
     return secrets.token_hex(16)
 
 
+_MIN_TOKEN_LEN = 16  # reject a degenerate low-entropy token (>=64 bits) even if a weak factory is injected
+
+
+def _valid_token(token: object) -> bool:
+    return isinstance(token, str) and len(token) >= _MIN_TOKEN_LEN
+
+
 class ChallengeOracle:
     """A randomized-challenge oracle for one finding class. Subclasses implement ``_satisfied``."""
 
@@ -62,7 +70,8 @@ class ChallengeOracle:
     def verify(self, challenge: Challenge, response: object) -> Verdict:
         """VERIFIED iff ``response`` satisfies EXACTLY ``challenge`` (this class's rule); else ABSTAIN.
         Fail-closed: a wrong-kind challenge, or missing/None response, abstains."""
-        if not isinstance(challenge, Challenge) or challenge.kind != self.kind or not challenge.token:
+        if (not isinstance(challenge, Challenge) or challenge.kind != self.kind
+                or not _valid_token(challenge.token)):
             return Verdict.ABSTAIN
         try:
             return Verdict.VERIFIED if self._satisfied(challenge.token, response) else Verdict.ABSTAIN
@@ -132,13 +141,21 @@ class MintedVerdict:
 
 
 def _mac(challenge: Challenge, *, oracle_key: bytes) -> str:
-    msg = f"{challenge.kind}:{challenge.token}:{Verdict.VERIFIED.value}".encode()
+    # Canonical, unambiguous message (a JSON-escaped list) so no (kind, token) pair can collide with
+    # another via delimiter confusion — JSON escapes any ':'/'"' inside a field.
+    msg = json.dumps(
+        ["vigil.i1.verdict", challenge.kind, challenge.token, Verdict.VERIFIED.value],
+        separators=(",", ":"), ensure_ascii=False,
+    ).encode()
     return hmac.new(oracle_key, msg, sha256).hexdigest()
 
 
 def mint(verdict: Verdict, challenge: Challenge, *, oracle_key: bytes) -> MintedVerdict:
     """Bind a verdict to its challenge. A VERIFIED verdict carries an HMAC only the holder of
     ``oracle_key`` can produce, so 'Verified' cannot be forged by a non-oracle (LLM/critic)."""
+    # Never mint VERIFIED over a degenerate low-entropy token, even if a caller bypasses verify().
+    if verdict is Verdict.VERIFIED and not _valid_token(challenge.token):
+        verdict = Verdict.ABSTAIN
     mac = _mac(challenge, oracle_key=oracle_key) if verdict is Verdict.VERIFIED else ""
     return MintedVerdict(verdict=verdict, challenge=challenge, mac=mac)
 

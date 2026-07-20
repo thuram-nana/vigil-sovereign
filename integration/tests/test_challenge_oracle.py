@@ -124,3 +124,24 @@ def test_bug_class_to_challenge_mapping():
     assert isinstance(oracle_for("memory_safety"), ValueControlOracle)
     assert oracle_for("unknown-class") is None
     assert set(challenge_kinds()) == {"nonce-echo", "canary-leak", "oob-token", "value-control"}
+
+
+def test_low_entropy_token_is_rejected_even_with_a_weak_factory():
+    # hardening: a degenerate token must not trivially substring-match, even if a weak token_factory
+    # is injected (defence-in-depth beyond the CSPRNG default).
+    o = NonceEchoOracle()
+    weak = o.issue(token_factory=lambda: "a")
+    assert o.verify(weak, "aaa contains a") is Verdict.ABSTAIN
+    mv = mint(Verdict.VERIFIED, weak, oracle_key=KEY)  # mint refuses to Verify a weak token
+    assert not mv.is_verified and not verify_minted(mv, oracle_key=KEY)
+    strong = o.issue()  # a real 128-bit token still verifies
+    assert o.verify(strong, strong.token) is Verdict.VERIFIED
+
+
+def test_mac_message_is_delimiter_unambiguous():
+    # hardening: (kind="a", token="b:verified") vs (kind="a:b", token="verified") must NOT collide.
+    from vigil_integration.challenge_oracle import _mac
+
+    a = Challenge(kind="a", token="b:verified" + "z" * 16)
+    b = Challenge(kind="a:b", token="verified" + "z" * 16)
+    assert _mac(a, oracle_key=KEY) != _mac(b, oracle_key=KEY)
