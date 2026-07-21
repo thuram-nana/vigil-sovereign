@@ -9,6 +9,7 @@ from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
 from vigil_integration.transparency import (
     GENESIS_LINK,
     Checkpoint,
+    CheckpointEmitter,
     ConsistencyError,
     Witness,
     WitnessedCheckpoint,
@@ -131,6 +132,37 @@ def _witnesses(n):
             AuthorizerKey(key_id=f"w{i}", name=f"w{i}", public_key_b64=kp.public_key_b64)
             for i, kp in enumerate(kps)])
     return ws, root
+
+
+class _Head:
+    """A duck-typed SignedChainHead: checkpoint_of reads these attrs via getattr."""
+    def __init__(self, last_seq, entry_count, head_hash, merkle):
+        self.last_seq, self.entry_count = last_seq, entry_count
+        self.head_hash, self.cumulative_merkle_root = head_hash, merkle
+
+
+def test_checkpoint_emitter_produces_a_verifiable_witnessed_chain():
+    ws, root = _witnesses(3)  # 2-of-3 strict majority
+    tr = root(2)
+    em = CheckpointEmitter()
+    assert em.head is None
+    chain = []
+    for i in range(1, 5):
+        wc = em.emit(_Head(i * 10, i * 10, f"h{i}", f"m{i}"), ws)
+        assert verify_witnessed(wc, witness_trust_root=tr) is True
+        assert verify_split_view_resistant(wc, witness_trust_root=tr) is True
+        chain.append(wc.checkpoint)
+    assert verify_log(chain)[0] is True            # the checkpoints form a valid append-only log
+    assert chain[0].prev_checkpoint_hash == GENESIS_LINK  # first links to genesis
+    assert em.head == chain[-1]
+
+
+def test_checkpoint_emitter_refuses_a_regressed_head():
+    ws, _ = _witnesses(3)
+    em = CheckpointEmitter()
+    em.emit(_Head(20, 20, "h2", "m2"), ws)
+    with pytest.raises(ConsistencyError):
+        em.emit(_Head(10, 10, "h1", "m1"), ws)  # entry_count shrank → refused before witnessing
 
 
 def test_split_view_is_detectable_across_two_actually_witnessed_forks():

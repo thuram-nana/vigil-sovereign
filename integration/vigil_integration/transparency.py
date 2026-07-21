@@ -145,6 +145,38 @@ class ConsistencyError(RuntimeError):
     """A checkpoint is not an append-only extension of the tracked chain — a witness refuses it."""
 
 
+class CheckpointEmitter:
+    """Operational counterpart to the verifiers: turns a sequence of signed spine heads into a
+    LINKED, witness-countersigned checkpoint chain. It maintains the ``prev_checkpoint_hash``
+    meta-chain (first links to ``GENESIS_LINK``), refuses to emit a checkpoint that is not an
+    append-only extension of the last one it emitted (so a regressed/forked head never becomes a
+    checkpoint), and collects each witness's countersignature. The emitted ``WitnessedCheckpoint``
+    stream verifies with ``verify_witnessed``/``verify_split_view_resistant`` and the underlying
+    checkpoints form a ``verify_log`` chain."""
+
+    def __init__(self) -> None:
+        self._last: Optional[Checkpoint] = None
+
+    @property
+    def head(self) -> Optional[Checkpoint]:
+        return self._last
+
+    def emit(self, head, witnesses: "list[Witness]") -> WitnessedCheckpoint:
+        """Summarise ``head`` into the next checkpoint (linked to the last), refuse it fail-closed if
+        it does not consistently extend, then gather witness countersignatures. Raises
+        ``ConsistencyError`` on a non-append-only head (emit-side guard, before asking witnesses)."""
+        prev = GENESIS_LINK if self._last is None else checkpoint_hash(self._last)
+        cp = checkpoint_of(head, prev_checkpoint_hash=prev)
+        if self._last is not None:
+            ok, reason = consistent(self._last, cp)
+            if not ok:
+                raise ConsistencyError(f"refusing to emit an inconsistent checkpoint: {reason}")
+        # Each witness independently re-checks consistency against its own tip and may still refuse.
+        signatures = tuple(w.cosign(cp) for w in witnesses)
+        self._last = cp
+        return WitnessedCheckpoint(cp, signatures)
+
+
 def verify_witnessed(wc: WitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
     """True iff a QUORUM of trusted witnesses (m-of-n) countersigned THIS EXACT checkpoint.
     Fail-closed. NOTE: this proves a quorum signed — it does NOT by itself prove the operator did
