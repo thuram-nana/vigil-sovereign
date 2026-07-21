@@ -165,14 +165,18 @@ def _balanced_span(text: str, open_ch: str, close_ch: str) -> Optional[str]:
 
 
 def _repair_json(fragment: str) -> str:
-    """Best-effort repair of common LLM JSON glitches: strip trailing commas before } or ], and
-    close any unclosed braces/brackets (respecting strings)."""
-    s = re.sub(r",\s*([}\]])", r"\1", fragment)  # trailing commas
-    depth_obj = depth_arr = 0
-    in_str = False
-    esc = False
-    for c in s:
+    """Best-effort repair of common LLM JSON glitches, in ONE string-aware pass: drop trailing commas
+    before ``}``/``]`` (never inside a string — ``{"a": "x, ]"}`` is preserved), close an unclosed
+    string, and close unclosed brackets in the CORRECT nesting order (via a bracket stack, so a
+    truncated ``[{"a":1`` closes as ``[{"a":1}]``, not ``[{"a":1]}``). Best-effort: it never claims
+    to make invalid JSON valid — the result is re-parsed and discarded on failure."""
+    out: list[str] = []
+    stack: list[str] = []
+    in_str = esc = False
+    n = len(fragment)
+    for i, c in enumerate(fragment):
         if in_str:
+            out.append(c)
             if esc:
                 esc = False
             elif c == "\\":
@@ -182,17 +186,29 @@ def _repair_json(fragment: str) -> str:
             continue
         if c == '"':
             in_str = True
-        elif c == "{":
-            depth_obj += 1
-        elif c == "}":
-            depth_obj -= 1
+            out.append(c)
+            continue
+        if c == ",":
+            j = i + 1
+            while j < n and fragment[j] in " \t\r\n":
+                j += 1
+            if j < n and fragment[j] in "}]":
+                continue  # trailing comma before a close — drop it
+            out.append(c)
+            continue
+        if c == "{":
+            stack.append("}")
         elif c == "[":
-            depth_arr += 1
-        elif c == "]":
-            depth_arr -= 1
+            stack.append("]")
+        elif c in "}]":
+            if stack and stack[-1] == c:
+                stack.pop()
+        out.append(c)
+    s = "".join(out)
     if in_str:
         s += '"'
-    s += "]" * max(0, depth_arr) + "}" * max(0, depth_obj)
+    while stack:
+        s += stack.pop()
     return s
 
 
@@ -206,19 +222,20 @@ def extract_json(text: str) -> Optional[Any]:
     m = _FENCE_RE.search(text)
     if m:
         candidates.append(m.group(1))
-    for open_ch, close_ch in (("{", "}"), ("[", "]")):
-        start = text.find(open_ch)
-        if start < 0:
-            continue
+    # Order bracket candidates by EARLIEST opener so the outermost/leading structure wins (a truncated
+    # `[{"a":1` recovers as `[{"a":1}]`, not its inner object). A balanced span parses directly; an
+    # unbalanced tail from the opener is handed to _repair_json so a truncated response is recoverable.
+    starts = [(text.find(o), o, c) for o, c in (("{", "}"), ("[", "]")) if text.find(o) >= 0]
+    for start, open_ch, close_ch in sorted(starts):
         span = _balanced_span(text, open_ch, close_ch)
-        # a balanced span parses directly; an UNBALANCED (unclosed) tail from the first opener is
-        # handed to _repair_json below so a truncated LLM response can still be recovered.
         candidates.append(span if span is not None else text[start:])
     for frag in candidates:
         for attempt in (frag, _repair_json(frag)):
             try:
                 return json.loads(attempt)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):
+                # RecursionError: pathologically-nested JSON (an injected LLM could emit it) — treat
+                # as unparseable so parse_proposal honours its fail-closed default instead of crashing.
                 continue
     return None
 
@@ -228,7 +245,6 @@ def parse_proposal(
     validator: Callable[[Any], T],
     *,
     default: Optional[T] = None,
-    _no_default: object = object(),
 ) -> T:
     """Extract JSON from an LLM ``text`` response and validate it into a typed PROPOSAL via
     ``validator`` (e.g. ``MyModel.model_validate`` or any callable that raises on invalid input).

@@ -140,3 +140,18 @@ def test_parse_proposal_no_default_raises():
         parse_proposal("not json", _Decision.validate)
     with pytest.raises(ProposalParseError):
         parse_proposal('{"action": "invalid"}', _Decision.validate)
+
+
+def test_pathological_json_fails_closed_not_recursionerror():
+    # F1 red-pen MED: deeply-nested JSON raised RecursionError past the fail-closed default. It must
+    # now honour the default (an injected LLM could emit pathological nesting).
+    deep = "[" * 20000 + "]" * 20000
+    got = parse_proposal(deep, _Decision.validate, default=_Decision("complete"))
+    assert got.action == "complete"
+
+
+def test_repair_is_string_aware_and_closes_in_nesting_order():
+    # F1 red-pen LOW: a comma/bracket INSIDE a JSON string must be preserved, not treated as trailing
+    assert extract_json('{"a": "x, y]", "b": 2,}') == {"a": "x, y]", "b": 2}
+    # unclosed brackets close in the correct nesting order ( [{ -> }] , not ]} )
+    assert extract_json('[{"a": 1') == [{"a": 1}]

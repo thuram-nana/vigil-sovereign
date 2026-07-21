@@ -33,6 +33,17 @@ _MARKER_PREFIX_RE = re.compile(r"<<<\s*(END_)?UNTRUSTED_", re.IGNORECASE)
 _ZWSP = "​"  # zero-width space: breaks the `<<<` so it can't match a marker
 
 
+_LABEL_RE = re.compile(r"[^A-Z0-9_]")
+
+
+def _safe_label(label: object) -> str:
+    """A marker label must never carry attacker-influenced characters (``>>>``/newlines would break
+    the frame). Coerce to ``[A-Z0-9_]`` uppercase; fall back to ``DATA`` if nothing remains. In F1
+    ``label`` is a trusted constant, but this is safe-by-default for any future caller."""
+    cleaned = _LABEL_RE.sub("", str(label).upper())
+    return cleaned or "DATA"
+
+
 def _neutralize_markers(text: str) -> str:
     return _MARKER_PREFIX_RE.sub(
         lambda m: f"<{_ZWSP}<{_ZWSP}<" + (m.group(1) or "") + "UNTRUSTED_", text
@@ -50,6 +61,7 @@ def wrap_untrusted(text: object, label: str = "TOOL_OUTPUT") -> str:
         text = ""
     elif not isinstance(text, str):
         text = str(text)
+    label = _safe_label(label)
     nonce = secrets.token_hex(8)  # 16 hex chars, unpredictable, per-call
     body = _neutralize_markers(text)
     return (
@@ -70,6 +82,7 @@ def wrap_untrusted_inline(text: object, label: str = "PREVIEW") -> str:
         text = ""
     elif not isinstance(text, str):
         text = str(text)
+    label = _safe_label(label)
     nonce = secrets.token_hex(8)
     body = _neutralize_markers(text).replace("\n", " ").replace("\r", " ")
     return f"<<<UNTRUSTED_{label} id={nonce}>>>{body}<<<END_UNTRUSTED_{label} id={nonce}>>>"

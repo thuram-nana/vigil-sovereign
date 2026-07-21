@@ -18,6 +18,18 @@ Pure stdlib. Import-clean (no ``framework.*``/``strix.*``).
 from __future__ import annotations
 
 import re
+import unicodedata
+from urllib.parse import urlsplit
+
+# Unicode dot homoglyphs a browser/UTS-46 resolves to "." but str.lower() does not — must be folded
+# before matching, or ``un。org`` (U+3002) evades both the exact list and the TLD regex.
+_UNICODE_DOTS = {
+    "。": ".",   # 。 ideographic full stop
+    "．": ".",   # ． fullwidth full stop
+    "｡": ".",   # ｡ halfwidth ideographic full stop
+    "˙": ".",   # ˙ dot above (occasionally abused)
+}
+_UNICODE_DOT_TABLE = str.maketrans(_UNICODE_DOTS)
 
 # TLD suffix patterns (case-insensitive, applied to the full normalized domain).
 _TLD_PATTERNS = [
@@ -111,18 +123,31 @@ class HardBlockError(RuntimeError):
 
 
 def normalize_domain(raw: str) -> str:
-    """Lowercase; strip scheme/path/port/whitespace/trailing-dot. Returns ``""`` on a non-str/empty."""
+    """Canonicalize to the bare host a real HTTP client would connect to. Returns ``""`` on a
+    non-str/empty. Defeats the evasions a scope floor must resist:
+
+      * **userinfo** — ``http://evil@un.org/`` connects to ``un.org``; extracted via
+        ``urlsplit(...).hostname`` so this module AGREES with ``url_guard`` and a browser (previously
+        the ``@`` left ``evil@un.org`` and every exact-list domain fell open — the F1 red-pen BLOCK).
+      * **unicode dot homoglyphs** — ``un。org`` (U+3002) folded to ``un.org`` (NFKC + explicit table).
+      * scheme / path / port / brackets / case / trailing-dot.
+
+    Fold BEFORE host extraction so ``urlsplit`` sees canonical dots."""
     if not isinstance(raw, str):
         return ""
-    d = raw.strip().lower()
-    for prefix in ("https://", "http://"):
-        if d.startswith(prefix):
-            d = d[len(prefix):]
-    d = d.split("/")[0]      # strip path
-    # strip an IPv6 literal's brackets before the port split, then the port
-    d = d.strip("[]")
-    d = d.split(":")[0]      # strip port (safe post-bracket-strip for hostnames)
-    return d.rstrip(".")
+    s = unicodedata.normalize("NFKC", raw.strip()).translate(_UNICODE_DOT_TABLE).lower()
+    if not s:
+        return ""
+    probe = s if "://" in s else "http://" + s
+    host = ""
+    try:
+        host = urlsplit(probe).hostname or ""
+    except ValueError:
+        host = ""
+    if not host:
+        # Fallback: manual strip (a scheme without an authority, e.g. mailto:, yields no hostname).
+        host = s.split("/", 1)[0].strip("[]").split(":")[0]
+    return host.strip("[]").rstrip(".")
 
 
 def is_hard_blocked(domain: str) -> tuple[bool, str]:

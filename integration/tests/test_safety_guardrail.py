@@ -54,6 +54,23 @@ def test_normalization_defeats_evasion():
         assert is_hard_blocked(evasion)[0] is True, evasion
 
 
+def test_userinfo_and_unicode_dot_evasions_are_blocked():
+    # F1 red-pen BLOCK: userinfo (user@host) and unicode-dot homoglyphs must not smuggle a blocked
+    # target past the floor — normalize_domain extracts the real host and folds unicode dots.
+    for evasion in ("http://evil@un.org/", "https://x:y@europa.eu/path", "attacker@iso.org",
+                    "un。org", "un．org", "un｡org", "http://a@whitehouse.gov", "http://z@army.mil"):
+        assert is_hard_blocked(evasion)[0] is True, evasion
+    assert normalize_domain("http://evil@un.org/x") == "un.org"   # agrees with a real client's host
+    assert normalize_domain("un。org") == "un.org"
+
+
+def test_lookalike_domains_are_not_false_positives():
+    # the fixed normalizer must not over-block ordinary lookalikes
+    for ok in ("notun.org", "un.org.evil.com", "mygov.com", "example.go.dev", "governance.io",
+               "myunion.org", "education.example.com"):
+        assert is_hard_blocked(ok)[0] is False, ok
+
+
 def test_assert_raises_on_blocked_and_passes_on_allowed():
     with pytest.raises(HardBlockError):
         assert_not_hard_blocked("defense.gov")
