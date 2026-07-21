@@ -6,7 +6,11 @@ that attests that root. A confirmed finding is 'affected'; a lead is never asser
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
+
+import pytest
 
 from vigil_core import AuthorizerKey, TrustRoot, evidence_signing_bytes, generate_keypair, sign
 from vigil_integration.scitt import (
@@ -20,6 +24,7 @@ from vigil_integration.scitt import (
     _audit_path,
     _mth,
     build_signed_statement,
+    mint_finding_statement,
     openvex_statement,
     statement_digest,
     verify_anchored_receipt,
@@ -287,6 +292,41 @@ def test_anchored_receipt_rejects_a_non_resistant_witness_quorum():
     ok, reason = verify_anchored_receipt(receipt, ss, witnessed, trust_root=GOV,
                                          witness_trust_root=non_resistant)
     assert ok is False and "resistant" in reason
+
+
+# --- the finding -> SCITT bridge (mint_finding_statement) --------------------------------------
+
+def _payload(ss):
+    return json.loads(base64.b64decode(ss.payload_b64))
+
+
+def test_mint_confirmed_finding_is_affected_and_registers_with_a_receipt():
+    log = StatementLog()
+    ss, receipt = mint_finding_statement(_cert(), _GOV_SIGNERS, confirmed=True, author="vigil:oracle",
+                                         timestamp="2026-07-20T00:00:00Z", log=log)
+    assert verify_signed_statement(ss, trust_root=GOV) is True
+    assert _payload(ss)["statements"][0]["status"] == STATUS_AFFECTED
+    ok, _ = verify_receipt(receipt, ss, trust_root=GOV, expected_root=log.root())
+    assert ok is True
+
+
+def test_mint_lead_is_under_investigation_and_no_log_means_no_receipt():
+    ss, receipt = mint_finding_statement(_cert(), _GOV_SIGNERS, confirmed=False, author="a", timestamp="t")
+    assert _payload(ss)["statements"][0]["status"] == STATUS_UNDER_INVESTIGATION
+    assert receipt is None
+
+
+def test_mint_fails_closed_on_bad_cert_or_signers():
+    with pytest.raises(ValueError, match="missing required"):
+        mint_finding_statement({"engagement_slug": "x"}, _GOV_SIGNERS, confirmed=True, author="a", timestamp="t")
+    with pytest.raises(ValueError, match="signers"):
+        mint_finding_statement(_cert(), [], confirmed=True, author="a", timestamp="t")
+    with pytest.raises(TypeError):
+        mint_finding_statement("not-a-dict", _GOV_SIGNERS, confirmed=True, author="a", timestamp="t")
+    # a NULL required field is refused too (no null-provenance statement)
+    with pytest.raises(ValueError, match="absent or null"):
+        mint_finding_statement({**_cert(), "oracle_context_digest": None}, _GOV_SIGNERS,
+                               confirmed=True, author="a", timestamp="t")
 
 
 def test_import_clean_no_offense_modules():

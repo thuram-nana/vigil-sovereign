@@ -126,3 +126,33 @@ def confirm_and_certify(
         confirmed_class, cert.finding_ref, signed=signed,
         confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
     )
+
+
+def certify_to_scitt(
+    result: AdapterResult,
+    signers: "list[tuple[str, str]]",
+    *,
+    author: str,
+    timestamp: str,
+    log: Any = None,
+) -> Any:
+    """Bridge a CONFIRMED :class:`AdapterResult` to the standards-native, offline-verifiable SCITT
+    form of its proof-carrying certificate: an OpenVEX ``affected`` statement, DSSE-signed m-of-n and
+    (with a ``log``) registered with an inclusion receipt. Only a FACT (oracle-confirmed + oracle-
+    mapped + signed) is minted — a lead has no signed certificate, so it is refused fail-closed
+    (claiming a lead is 'affected' would be the hallucination the pipeline exists to kill).
+
+    Returns ``(SignedStatement, Receipt|None)``. Import-clean seam: ``scitt`` is vigil_core-only, so
+    the minted statement is sovereign-verifiable; this function reads the CRUCIBLE cert offense-side.
+    """
+    from .scitt import mint_finding_statement
+
+    if not getattr(result, "is_fact", False) or result.signed is None:
+        raise ValueError(
+            "certify_to_scitt only mints a confirmed fact — a lead has no signed certificate to "
+            "express as an OpenVEX 'affected' statement (fail-closed honesty invariant)."
+        )
+    cert = result.signed.certificate.model_dump(mode="json")
+    return mint_finding_statement(
+        cert, signers, confirmed=True, author=author, timestamp=timestamp, log=log
+    )

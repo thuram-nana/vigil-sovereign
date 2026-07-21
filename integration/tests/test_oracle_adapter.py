@@ -91,3 +91,37 @@ def test_tampering_a_signed_fact_breaks_its_signature():
     forged = res.signed.certificate.model_copy(update={"bug_class": "rce"})  # relabel after signing
     msg = evidence_signing_bytes(forged.model_dump(mode="json"))
     assert verify_threshold(msg, res.signed.signatures, TRUST).satisfied is False
+
+
+# --- the confirmed-fact -> SCITT bridge (offline-verifiable standards-native cert) ------------
+
+def test_certify_to_scitt_mints_an_offline_verifiable_statement_from_a_fact():
+    import base64
+    import json
+
+    from vigil_integration.oracle_adapter import certify_to_scitt
+    from vigil_integration.scitt import StatementLog, verify_receipt, verify_signed_statement
+
+    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS)
+    assert res.is_fact
+    log = StatementLog()
+    ss, receipt = certify_to_scitt(res, SIGNERS, author="vigil:oracle",
+                                   timestamp="2026-07-20T00:00:00Z", log=log)
+    # the standards-native statement verifies m-of-n against the SAME governance root, OFFLINE, and
+    # its inclusion receipt reconstructs the log root — the confirmed fact is now offline-verifiable.
+    assert verify_signed_statement(ss, trust_root=TRUST) is True
+    ok, _ = verify_receipt(receipt, ss, trust_root=TRUST, expected_root=log.root())
+    assert ok is True
+    payload = json.loads(base64.b64decode(ss.payload_b64))
+    assert payload["statements"][0]["status"] == "affected"  # confirmed → affected (honesty invariant)
+
+
+def test_certify_to_scitt_refuses_a_lead():
+    from vigil_integration.oracle_adapter import certify_to_scitt
+
+    # a non-firing context (true == false → no inference) yields a lead, which has no signed cert
+    lead_ctx = {"bug_class": "sqli", "probe_rounds": [{"true": _NONE, "false_a": _NONE, "false_b": _NONE}]}
+    res = confirm_and_certify(_finding("sqli", ctx=lead_ctx), engagement_slug="acme", signers=SIGNERS)
+    assert res.status == "lead"
+    with pytest.raises(ValueError, match="confirmed fact"):
+        certify_to_scitt(res, SIGNERS, author="a", timestamp="t")
