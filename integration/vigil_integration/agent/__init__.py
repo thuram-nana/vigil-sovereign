@@ -13,6 +13,22 @@ action-edge authorization + the oracle interposition. Later slices wire the live
 spine-snapshot checkpointing, tool execution, and fireteam.
 """
 
+from .cognition import (
+    GovernanceVerdict,
+    audit_productivity_claim,
+    compute_productivity_score,
+    deep_think_is_novel,
+    detect_state_growth,
+    detect_uniform_response_anomaly,
+    downgrade_verdict_to_no_progress,
+    extract_axis,
+    axis_key,
+    axis_unproductive_count,
+    governance_decision,
+    record_axis_attempt,
+    tier_for_score,
+    update_stall_counters,
+)
 from .phases import can_transition, is_escalation, phase_tier, tool_tier
 from .react import (
     EdgeSpec,
@@ -39,4 +55,10 @@ __all__ = [
     "phase_tier", "tool_tier", "can_transition", "is_escalation",
     "parse_decision", "classify_edge", "authorize_edge", "EdgeSpec", "EdgeVerdict",
     "intake_result", "apply_intake", "IntakeResult",
+    # F5 — non-authoritative cognition governors (budget/scheduling only)
+    "GovernanceVerdict", "governance_decision", "compute_productivity_score", "tier_for_score",
+    "audit_productivity_claim", "downgrade_verdict_to_no_progress",
+    "detect_uniform_response_anomaly", "detect_state_growth", "update_stall_counters",
+    "extract_axis", "axis_key", "axis_unproductive_count", "record_axis_attempt",
+    "deep_think_is_novel",
 ]
