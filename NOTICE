@@ -17,9 +17,15 @@ the tested-axes ledger, and the deep-think novelty guard — from redamon's
 `productivity.py`), the MCP-server manifest layer (pydantic models, trust-tiered
 `validate_servers`, secret redaction, and phase-view — from redamon's
 `mcp_registry.py`, re-inverted to least-privilege / deny-by-default and
-subordinated to VIGIL's WARDEN tier + conjunctive gate), and (in later phases) the
-live MCP client binding, the attack-chain memory, the AI-Gauntlet adapters, and
-the workspace/job tooling.
+subordinated to VIGIL's WARDEN tier + conjunctive gate), the attack-chain graph
+memory (the EvoGraph node/edge schema and the cross-session `query_prior_chains`
+retrieval — from redamon's `chain_graph_writer.py`, reimplemented as a
+projection-only, rebuildable read-model of the signed spine with a confirmed/lead
+split, spine-hash provenance, and bi-temporal invalidate-not-delete so the graph
+can never launder an unproven claim into a fact), and (in later phases) the live
+MCP client binding, the AI-Gauntlet adapters, and the workspace/job tooling. The
+bi-temporal (valid/invalid) memory model is a design reference from pentagi's
+Graphiti, reimplemented in Python (see the pentagi note below).
 These are adapted to VIGIL's sovereign, provable architecture (routed through the
 deterministic oracle, the signed spine, and the governance gates; fail-open
 defaults inverted to deny-by-default) rather than used verbatim.
