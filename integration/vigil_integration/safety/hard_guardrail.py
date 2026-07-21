@@ -121,31 +121,19 @@ class HardBlockError(RuntimeError):
     Raised fail-closed; must not be caught-and-continued (it is a categorical refusal)."""
 
 
-def normalize_domain(raw: str) -> str:
-    """Canonicalize to the bare host **a real HTTP client actually connects to** — NOT what
-    ``urlsplit`` alone reports (they diverge, and a scope floor must track the client). Returns ``""``
-    on a non-str/empty. Defeats the evasions a scope floor must resist:
-
-      * **backslash authority-confusion** — ``https://un.org\\@evil.com/`` : ``urlsplit`` reads the
-        host as ``evil.com`` (splits userinfo on the last ``@``), but WHATWG browsers and
-        ``requests``/``urllib3`` treat ``\\`` as a path separator and connect to ``un.org``. We fold
-        ``\\``→``/`` FIRST (matching the client) so the real host ``un.org`` is seen (the F1 re-check
-        BLOCK — ``urlsplit`` cannot be trusted for the host).
-      * **userinfo** — the connection host is the part AFTER the last ``@`` (``evil@un.org``→``un.org``;
-        ``un.org@evil.com``→``evil.com``), stripped even when the URL is malformed enough that
-        ``urlsplit`` would raise.
-      * **unicode dot homoglyphs** — ``un。org`` (U+3002) folded to ``un.org`` (NFKC + explicit table).
-      * scheme / path / query / fragment / port / IPv6-brackets / case / trailing-dot.
-
-    Implemented as a manual authority parser (no ``urlsplit``) precisely because ``urlsplit`` and the
-    fetch client disagree; this keeps the floor aligned with what is actually reached."""
+def _prefold(raw: str) -> str:
+    """Lowercase + NFKC + unicode-dot fold. Returns ``""`` on non-str/empty."""
     if not isinstance(raw, str):
         return ""
-    s = unicodedata.normalize("NFKC", raw.strip()).translate(_UNICODE_DOT_TABLE).lower()
-    if not s:
-        return ""
-    s = s.replace("\\", "/")            # WHATWG / requests treat backslash as a path separator
-    if "://" in s:                      # strip scheme
+    return unicodedata.normalize("NFKC", raw.strip()).translate(_UNICODE_DOT_TABLE).lower()
+
+
+def _authority_host(base: str, *, fold_backslash: bool) -> str:
+    """Extract the connection host from an already-prefolded string under one client interpretation.
+    ``fold_backslash=True`` is the requests/urllib3/WHATWG reading (``\\`` is a path separator);
+    ``False`` is the httpx reading (``\\`` stays in the authority)."""
+    s = base.replace("\\", "/") if fold_backslash else base
+    if "://" in s:
         s = s.split("://", 1)[1]
     elif s.startswith("//"):
         s = s[2:]
@@ -157,16 +145,38 @@ def normalize_domain(raw: str) -> str:
         s = s.rsplit("@", 1)[1]
     if s.startswith("[") and "]" in s:  # bracketed IPv6 literal → inside the brackets (not a domain)
         s = s[1:s.index("]")]
-    elif s.count(":") == 1:             # host:port (an IPv6 literal has many colons and is handled above)
+    elif s.count(":") == 1:             # host:port (an IPv6 literal has many colons, handled above)
         s = s.split(":", 1)[0]
     return s.strip("[]").rstrip(".")
 
 
-def is_hard_blocked(domain: str) -> tuple[bool, str]:
-    """Deterministic ``(blocked, reason)`` — is this domain a government/military/educational/
-    intergovernmental target? No LLM, network, or settings. IP targets are not hard-blocked here
-    (an IP has no meaningful TLD); callers gate IPs via the charter + egress denylist instead."""
-    d = normalize_domain(domain or "")
+def normalize_domain(raw: str) -> str:
+    """The bare host under the **requests/urllib3/WHATWG** reading (``\\``→``/``, userinfo after the
+    last ``@``, unicode-dots folded, scheme/path/query/fragment/port stripped). Returns ``""`` on
+    non-str/empty. For the categorical block, :func:`is_hard_blocked` checks EVERY client reading via
+    :func:`candidate_hosts` — this is the single-host convenience view."""
+    base = _prefold(raw)
+    return _authority_host(base, fold_backslash=True) if base else ""
+
+
+def candidate_hosts(raw: str) -> list[str]:
+    """Every host a mainstream HTTP client might actually connect to — the requests/WHATWG reading
+    (fold ``\\``→``/``) AND the httpx reading (keep ``\\`` in the authority), which **disagree** on
+    backslash authority-confusion (``https://x\\@un.org/`` reaches ``x`` under requests but ``un.org``
+    under httpx). A deny-only scope floor must be CLIENT-INDEPENDENT: block if any reading reaches a
+    protected host (the F1 re-check BLOCK — folding to match one client left the other bypassable)."""
+    base = _prefold(raw)
+    if not base:
+        return []
+    out: list[str] = []
+    for fold in (True, False):
+        h = _authority_host(base, fold_backslash=fold)
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def _host_is_blocked(d: str) -> tuple[bool, str]:
     if not d:
         return False, ""
     if d in _EXACT_BLOCKED_DOMAINS:
@@ -179,6 +189,20 @@ def is_hard_blocked(domain: str) -> tuple[bool, str]:
     if _COMPILED_TLD_RE.search(d):
         return True, (f"'{d}' belongs to a government, military, educational, or international "
                       "organization TLD — categorically out of scope, permanently blocked.")
+    return False, ""
+
+
+def is_hard_blocked(domain: str) -> tuple[bool, str]:
+    """Deterministic ``(blocked, reason)`` — is this target a government/military/educational/
+    intergovernmental host under ANY mainstream client interpretation? No LLM, network, or settings.
+    Client-independent: blocks if either the requests/WHATWG or the httpx host reading is protected,
+    so backslash/userinfo authority-confusion cannot smuggle a protected host past whichever client
+    the fetcher happens to use. IP targets are not hard-blocked here (no meaningful TLD); callers gate
+    IPs via the charter + egress denylist."""
+    for h in candidate_hosts(domain or ""):
+        blocked, reason = _host_is_blocked(h)
+        if blocked:
+            return True, reason
     return False, ""
 
 

@@ -65,11 +65,16 @@ def test_userinfo_and_unicode_dot_evasions_are_blocked():
 
 
 def test_backslash_and_bracket_authority_confusion_is_blocked():
-    # F1 re-check BLOCK: urlsplit and the real fetch client (requests/browser) disagree on '\' and on
-    # malformed authorities; the floor must track the CLIENT (which folds \->/ and connects to un.org).
-    for evasion in ("https://un.org\\@evil.com/", "http://un.org\\@evil.com",
-                    "http://[evil@un.org", "http://[::1]@un.org", "https://x@un.org:8443/",
-                    "http://EVIL@UN。ORG/"):
+    # F1 re-check BLOCKs: requests/WHATWG and httpx DISAGREE on '\' authority-confusion. The floor is
+    # client-independent — it blocks if EITHER reading reaches a protected host.
+    for evasion in (
+        # requests/WHATWG reading reaches the protected host (fold \->/):
+        "https://un.org\\@evil.com/", "http://un.org\\@evil.com",
+        # httpx reading reaches the protected host (keep \ in authority, split on @):
+        "https://x\\@un.org/", "http://benign\\@whitehouse.gov", "https://a\\@army.mil/x",
+        # malformed authority that urlsplit would choke on, plus userinfo/port/unicode:
+        "http://[evil@un.org", "http://[::1]@un.org", "https://x@un.org:8443/", "http://EVIL@UN。ORG/",
+    ):
         assert is_hard_blocked(evasion)[0] is True, evasion
 
 
