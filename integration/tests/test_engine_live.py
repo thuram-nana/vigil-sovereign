@@ -1,0 +1,160 @@
+"""
+test_engine_live — WS-5 live validation of the unified engine against the REAL sovereign seams.
+
+Unlike test_engine.py (injected fakes), this drives :func:`live.wiring.build_engine` with the REAL
+CRUCIBLE gate (over a freshly-provisioned signed authority) and the REAL oracle
+(:func:`oracle_adapter.confirm_and_certify`). It proves, live:
+
+  * the run is attestation-first — a signed usage-attestation is minted + durably recorded before any
+    action, and the ledger verifies;
+  * the real gate ALLOWS an in-scope 127.0.0.1 tool call and DENIES an out-of-scope host;
+  * the real oracle — not the LLM — mints the FACT: a scripted ``exploit_succeeded`` carrying a FIRING
+    SQLi ``oracle_context`` becomes a signed FACT; an identical claim with a NON-firing context stays a
+    LEAD;
+  * a state checkpoint is written to the real signed spine.
+
+Framework co-loads the offense env, so this module SKIPS where ``framework.v2`` is not importable (the
+main integration pytest process / the sovereign env); it runs in the offense process
+(``PYTHONPATH=integration:engine/crucible``). A deterministic echo runner replaces the live Kali
+subprocess so the gate/oracle/spine wiring is exercised without the binaries present — the
+gate/oracle/egress checks are byte-identical either way.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("framework.v2.authority.charter", reason="CRUCIBLE (offense) not importable here")
+
+from vigil_integration.agent.state import (  # noqa: E402
+    ActionType,
+    LLMDecision,
+    OutputAnalysis,
+    ToolCall,
+)
+from vigil_integration.attestation.identity import operator_key_resolver  # noqa: E402
+from vigil_integration.attestation.ledger import read_ledger, verify_ledger  # noqa: E402
+from vigil_integration.conjunctive_gate import build_offense_gate  # noqa: E402
+from vigil_integration.live.think_claude import ReplayThinker  # noqa: E402
+from vigil_integration.live.wiring import (  # noqa: E402
+    EngineConfig,
+    build_engine,
+    default_classify,
+    provision_authority,
+)
+
+LOOPBACK = "http://127.0.0.1:18080/search?q=1"
+
+# a boolean-SQLi oracle_context that FIRES (true differs from both falses, falses agree) — the exact
+# shape the BOOLEAN_INFERENCE oracle re-fires over (from the framework's own oracle-adapter fixture).
+_MANY = {"status": 200, "body": "id=1\nid=2\nid=3\nid=4\nid=5 (all rows)"}
+_NONE = {"status": 200, "body": "no results"}
+_FIRING_SQLI = {"bug_class": "sqli",
+                "probe_rounds": [{"true": _MANY, "false_a": _NONE, "false_b": _NONE} for _ in range(24)]}
+_NONFIRING_SQLI = {"bug_class": "sqli",
+                   "probe_rounds": [{"true": _NONE, "false_a": _NONE, "false_b": _NONE} for _ in range(24)]}
+
+
+def _echo_runner(argv, *, timeout=0, output_cap=1 << 20):
+    """A deterministic stand-in for the live subprocess: returns fixed output, never spawns anything."""
+    return SimpleNamespace(exit_code=0, stdout="id=1 id=2 id=3 (rows)", stderr="",
+                           timed_out=False, truncated=False)
+
+
+def _use_tool(*, oracle_context=None, tool="httpx"):
+    info = {}
+    if oracle_context is not None:
+        info = {"oracle_context": oracle_context, "bug_class": "sqli",
+                "check_id": "sqli-loopback-001", "insertion_point": "q"}
+    return LLMDecision(
+        action=ActionType.USE_TOOL,
+        tool=ToolCall(tool_name=tool, tool_args={"target": LOOPBACK}),
+        output_analysis=OutputAnalysis(exploit_succeeded=oracle_context is not None, extracted_info=info),
+    )
+
+
+def _complete():
+    return LLMDecision(action=ActionType.COMPLETE, summary="done")
+
+
+@pytest.fixture()
+def hermetic_root(tmp_path, monkeypatch):
+    """Point the CRUCIBLE authority store at a throwaway dir so provisioning is hermetic."""
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(tmp_path / "crucible-root"))
+    return tmp_path
+
+
+def _engine(tmp_path, replay, *, owner_approves=True):
+    prov = provision_authority(slug="loopback", scope=["127.0.0.1"])
+    # owner_approves_offense=True: the operator's STANDING approval (the human leg of the conjunctive
+    # gate) to run queued offense tools against their own chartered loopback. CRUCIBLE scope is still
+    # enforced, so an out-of-scope target is denied even with approval granted.
+    cfg = EngineConfig(slug="loopback", base_dir=str(tmp_path / "live"), replay=replay,
+                       provisioned=prov, runner=_echo_runner, max_iterations=6,
+                       owner_approves_offense=owner_approves)
+    return build_engine(cfg), prov, cfg
+
+
+# --- the real gate ---------------------------------------------------------------------------------
+
+
+def test_real_gate_in_scope_is_in_envelope_out_of_scope_denies(hermetic_root):
+    # The sovereign posture: an in-scope offense tool is IN-ENVELOPE but QUEUES for the owner (an
+    # autonomous agent may never auto-fire an offense tool >= A2); an out-of-scope host is a hard DENY
+    # by the CRUCIBLE scope gate (approval can never widen scope).
+    prov = provision_authority(slug="loopback", scope=["127.0.0.1"])
+    gate = build_offense_gate(slug="loopback", trust_root=prov.trust_root, classify=default_classify)
+    in_scope = gate("httpx", "127.0.0.1", False)
+    out_scope = gate("httpx", "example.com", False)
+    assert getattr(in_scope, "outcome", "") == "queue"          # in-envelope, needs owner approval
+    assert getattr(in_scope, "crucible_allowed", None) is True  # CRUCIBLE scope PASSED
+    assert getattr(out_scope, "outcome", "") == "deny"          # out of scope → hard deny
+    assert getattr(out_scope, "crucible_allowed", None) is False
+
+
+# --- the full attestation-first loop, live -----------------------------------------------------------
+
+
+def test_live_run_is_attestation_first_and_ledger_verifies(hermetic_root, tmp_path):
+    engine, prov, cfg = _engine(tmp_path, ReplayThinker([_complete()]))
+    report = engine.engage(LOOPBACK, objective="loopback smoke")
+    assert report.refused is False
+    assert report.attestation_ref                                  # a real attestation was minted
+    # the durable ledger exists and VERIFIES under the box's own operator key.
+    records = read_ledger(str(tmp_path / "live" / "usage-ledger.jsonl"))
+    assert len(records) >= 1
+    resolver = operator_key_resolver(keypair_path=str(tmp_path / "live" / "operator.key"))
+    assert verify_ledger(records, resolve_key=resolver).ok is True
+
+
+def test_live_oracle_mints_the_fact_not_the_llm(hermetic_root, tmp_path):
+    # in-scope tool call whose claim carries a FIRING SQLi context ⇒ the deterministic oracle re-fires
+    # ⇒ a signed FACT. The LLM's say-so alone never sufficed.
+    engine, prov, cfg = _engine(tmp_path, ReplayThinker([_use_tool(oracle_context=_FIRING_SQLI),
+                                                         _complete()]))
+    report = engine.engage(LOOPBACK)
+    assert any(t.outcome == "ran" for t in report.tool_calls)      # the gate ALLOWED the in-scope call
+    assert report.fact_count == 1
+    fact = report.facts[0]
+    assert fact.status == "fact" and fact.evidence_ref            # signed evidence reference present
+    assert report.checkpoints                                      # state checkpointed to the real spine
+
+
+def test_live_nonfiring_context_stays_a_lead(hermetic_root, tmp_path):
+    engine, prov, cfg = _engine(tmp_path, ReplayThinker([_use_tool(oracle_context=_NONFIRING_SQLI),
+                                                         _complete()]))
+    report = engine.engage(LOOPBACK)
+    assert report.fact_count == 0                                  # the oracle did not fire ⇒ no FACT
+    assert any("UNCONFIRMED" in (ld.title or "") for ld in report.leads)
+
+
+def test_live_without_owner_approval_the_offense_tool_queues(hermetic_root, tmp_path):
+    # the fail-closed default: no operator approval ⇒ the queued offense tool never runs.
+    engine, prov, cfg = _engine(tmp_path, ReplayThinker([_use_tool(oracle_context=_FIRING_SQLI)]),
+                                owner_approves=False)
+    report = engine.engage(LOOPBACK)
+    assert report.paused == "awaiting_approval"
+    assert report.queued_edges and not any(t.outcome == "ran" for t in report.tool_calls)
+    assert report.fact_count == 0

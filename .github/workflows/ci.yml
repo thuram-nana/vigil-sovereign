@@ -90,9 +90,14 @@ jobs:
             # gateway is on the path so the F1 url_guard SSRF pre-filter can reuse vigil_gateway.denylist
             # (single source of truth for the always-denied ranges — a pure, offense-free module).
             PYTHONPATH=integration:gateway python -m pytest integration/tests \
-              --ignore=integration/tests/test_oracle_adapter.py -q
-            PYTHONPATH=integration:engine/crucible python -m pytest \
-              integration/tests/test_oracle_adapter.py -q
+              --ignore=integration/tests/test_oracle_adapter.py \
+              --ignore=integration/tests/test_engine_live.py -q
+            # The offense-process suite: the framework-dependent oracle-adapter test AND the WS-5 live
+            # engine validation (the unified engine over the REAL CRUCIBLE gate + oracle). gateway is on
+            # the path because the live executor reuses vigil_gateway.denylist (the loopback egress pin).
+            PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
+              integration/tests/test_oracle_adapter.py \
+              integration/tests/test_engine_live.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"
           fi
