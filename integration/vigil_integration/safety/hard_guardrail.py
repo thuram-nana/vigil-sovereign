@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from urllib.parse import urlsplit
 
 # Unicode dot homoglyphs a browser/UTS-46 resolves to "." but str.lower() does not — must be folded
 # before matching, or ``un。org`` (U+3002) evades both the exact list and the TLD regex.
@@ -123,31 +122,44 @@ class HardBlockError(RuntimeError):
 
 
 def normalize_domain(raw: str) -> str:
-    """Canonicalize to the bare host a real HTTP client would connect to. Returns ``""`` on a
-    non-str/empty. Defeats the evasions a scope floor must resist:
+    """Canonicalize to the bare host **a real HTTP client actually connects to** — NOT what
+    ``urlsplit`` alone reports (they diverge, and a scope floor must track the client). Returns ``""``
+    on a non-str/empty. Defeats the evasions a scope floor must resist:
 
-      * **userinfo** — ``http://evil@un.org/`` connects to ``un.org``; extracted via
-        ``urlsplit(...).hostname`` so this module AGREES with ``url_guard`` and a browser (previously
-        the ``@`` left ``evil@un.org`` and every exact-list domain fell open — the F1 red-pen BLOCK).
+      * **backslash authority-confusion** — ``https://un.org\\@evil.com/`` : ``urlsplit`` reads the
+        host as ``evil.com`` (splits userinfo on the last ``@``), but WHATWG browsers and
+        ``requests``/``urllib3`` treat ``\\`` as a path separator and connect to ``un.org``. We fold
+        ``\\``→``/`` FIRST (matching the client) so the real host ``un.org`` is seen (the F1 re-check
+        BLOCK — ``urlsplit`` cannot be trusted for the host).
+      * **userinfo** — the connection host is the part AFTER the last ``@`` (``evil@un.org``→``un.org``;
+        ``un.org@evil.com``→``evil.com``), stripped even when the URL is malformed enough that
+        ``urlsplit`` would raise.
       * **unicode dot homoglyphs** — ``un。org`` (U+3002) folded to ``un.org`` (NFKC + explicit table).
-      * scheme / path / port / brackets / case / trailing-dot.
+      * scheme / path / query / fragment / port / IPv6-brackets / case / trailing-dot.
 
-    Fold BEFORE host extraction so ``urlsplit`` sees canonical dots."""
+    Implemented as a manual authority parser (no ``urlsplit``) precisely because ``urlsplit`` and the
+    fetch client disagree; this keeps the floor aligned with what is actually reached."""
     if not isinstance(raw, str):
         return ""
     s = unicodedata.normalize("NFKC", raw.strip()).translate(_UNICODE_DOT_TABLE).lower()
     if not s:
         return ""
-    probe = s if "://" in s else "http://" + s
-    host = ""
-    try:
-        host = urlsplit(probe).hostname or ""
-    except ValueError:
-        host = ""
-    if not host:
-        # Fallback: manual strip (a scheme without an authority, e.g. mailto:, yields no hostname).
-        host = s.split("/", 1)[0].strip("[]").split(":")[0]
-    return host.strip("[]").rstrip(".")
+    s = s.replace("\\", "/")            # WHATWG / requests treat backslash as a path separator
+    if "://" in s:                      # strip scheme
+        s = s.split("://", 1)[1]
+    elif s.startswith("//"):
+        s = s[2:]
+    for sep in ("/", "?", "#"):         # authority ends at the first path/query/fragment delimiter
+        i = s.find(sep)
+        if i != -1:
+            s = s[:i]
+    if "@" in s:                        # userinfo → the real host is after the LAST '@'
+        s = s.rsplit("@", 1)[1]
+    if s.startswith("[") and "]" in s:  # bracketed IPv6 literal → inside the brackets (not a domain)
+        s = s[1:s.index("]")]
+    elif s.count(":") == 1:             # host:port (an IPv6 literal has many colons and is handled above)
+        s = s.split(":", 1)[0]
+    return s.strip("[]").rstrip(".")
 
 
 def is_hard_blocked(domain: str) -> tuple[bool, str]:

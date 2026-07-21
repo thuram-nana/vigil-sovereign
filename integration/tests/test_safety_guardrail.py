@@ -64,6 +64,24 @@ def test_userinfo_and_unicode_dot_evasions_are_blocked():
     assert normalize_domain("un。org") == "un.org"
 
 
+def test_backslash_and_bracket_authority_confusion_is_blocked():
+    # F1 re-check BLOCK: urlsplit and the real fetch client (requests/browser) disagree on '\' and on
+    # malformed authorities; the floor must track the CLIENT (which folds \->/ and connects to un.org).
+    for evasion in ("https://un.org\\@evil.com/", "http://un.org\\@evil.com",
+                    "http://[evil@un.org", "http://[::1]@un.org", "https://x@un.org:8443/",
+                    "http://EVIL@UN。ORG/"):
+        assert is_hard_blocked(evasion)[0] is True, evasion
+
+
+def test_username_only_is_not_a_false_positive():
+    # a blocked domain used only as the USERNAME (real host is after the last @) must NOT block
+    assert normalize_domain("http://un.org@evil.com/") == "evil.com"
+    assert is_hard_blocked("http://un.org@evil.com/")[0] is False
+    # authority ends at the fragment/query — text after '#' is not the host
+    assert normalize_domain("http://evil.com#@un.org") == "evil.com"
+    assert is_hard_blocked("http://evil.com#@un.org")[0] is False
+
+
 def test_lookalike_domains_are_not_false_positives():
     # the fixed normalizer must not over-block ordinary lookalikes
     for ok in ("notun.org", "un.org.evil.com", "mygov.com", "example.go.dev", "governance.io",

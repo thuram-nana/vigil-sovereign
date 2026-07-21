@@ -57,6 +57,16 @@ def test_denied_if_any_resolved_ip_is_denied():
     assert is_safe_url("https://x/", resolve=_r("93.184.216.34", "169.254.169.254"))[0] is False
 
 
+def test_backslash_authority_confusion_matches_the_real_client():
+    # F1 re-check: `http://<metadata>\@allowed/` connects to the metadata IP (requests folds \->/).
+    # url_guard must fold \->/ too, see the metadata IP literal, and deny — not be fooled by 'allowed'.
+    # (No resolve injection: the folded host is an IP literal, so _resolve_ips returns it directly.)
+    ok, reason = is_safe_url("http://169.254.169.254\\@allowed.com/")
+    assert ok is False and "denied" in reason
+    # a bare metadata IP with a trailing backslash-path is likewise denied
+    assert is_safe_url("https://169.254.169.254\\x/")[0] is False
+
+
 def test_assert_raises_and_passes():
     with pytest.raises(UnsafeURLError):
         assert_safe_url("https://x/", resolve=_r("169.254.169.254"))

@@ -91,8 +91,12 @@ def is_safe_url(
     for tests. Fail-closed on every ambiguity."""
     if not isinstance(url, str) or not url.strip():
         return False, "empty or non-string URL (fail-closed)"
+    # Fold backslash → slash BEFORE parsing: WHATWG browsers and requests/urllib3 treat "\" as a path
+    # separator, so `http://169.254.169.254\@allowed/` connects to the metadata IP, not to `allowed`.
+    # urlsplit alone would read the host as `allowed` and wave it past this pre-filter (the netns
+    # egress gate still drops it at L3/L4, but the pre-filter must agree with the real client).
     try:
-        parts = urlsplit(url.strip())
+        parts = urlsplit(url.strip().replace("\\", "/"))
     except ValueError as exc:
         return False, f"unparseable URL: {exc} (fail-closed)"
     scheme = (parts.scheme or "").lower()
