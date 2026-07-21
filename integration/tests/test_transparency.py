@@ -165,6 +165,42 @@ def test_checkpoint_emitter_refuses_a_regressed_head():
         em.emit(_Head(10, 10, "h1", "m1"), ws)  # entry_count shrank → refused before witnessing
 
 
+def test_checkpoint_emitter_is_idempotent_on_a_no_progress_head():
+    # a no-progress re-emit must NOT mint a second same-height checkpoint (which would falsely trip
+    # is_split); it returns the existing witnessed checkpoint. Guards a poll-and-emit loop.
+    ws, root = _witnesses(3)
+    tr = root(2)
+    em = CheckpointEmitter()
+    wc1 = em.emit(_Head(10, 10, "h1", "m1"), ws)
+    wc2 = em.emit(_Head(10, 10, "h1", "m1"), ws)  # SAME head → no progress
+    assert wc2 is wc1 and em.head == wc1.checkpoint
+    assert is_split(wc1.checkpoint, wc2.checkpoint) is False  # no fabricated fork
+    # a genuine advance still works and links correctly
+    wc3 = em.emit(_Head(20, 20, "h2", "m2"), ws)
+    assert verify_split_view_resistant(wc3, witness_trust_root=tr) is True
+    assert verify_log([wc1.checkpoint, wc3.checkpoint])[0] is True
+
+
+def test_checkpoint_emitter_gather_is_atomic_a_dissenting_witness_does_not_brick_it():
+    # a witness desynced to a fork must NOT corrupt the others: the emitter gathers a quorum from the
+    # willing witnesses, keeps making progress, and the dissenter is simply absent from the sigs.
+    ws, root = _witnesses(3)
+    tr = root(2)  # 2-of-3
+    em = CheckpointEmitter()
+    a = em.emit(_Head(10, 10, "h1", "m1"), ws).checkpoint
+    # desync w2 onto a fork off `a` (out-of-band), so it will refuse the emitter's real next head
+    fork = Checkpoint(last_seq=20, entry_count=20, head_hash="FORK", merkle_root="mX",
+                      prev_checkpoint_hash=checkpoint_hash(a))
+    ws[2].cosign(fork)
+    wc = em.emit(_Head(20, 20, "h2", "m2"), ws)  # w0,w1 sign; w2 (on the fork) is skipped
+    assert {s.key_id for s in wc.witness_signatures} == {"w0", "w1"}
+    assert verify_split_view_resistant(wc, witness_trust_root=tr) is True  # quorum still met
+    # w0/w1 advanced only to the COMMITTED checkpoint — the chain keeps going, not bricked
+    wc2 = em.emit(_Head(30, 30, "h3", "m3"), ws)
+    assert verify_split_view_resistant(wc2, witness_trust_root=tr) is True
+    assert verify_log([a, wc.checkpoint, wc2.checkpoint])[0] is True
+
+
 def test_split_view_is_detectable_across_two_actually_witnessed_forks():
     # DRIVE real witnesses: a shared history, then two forks at the same height, each countersigned
     # by a (sub-majority) disjoint quorum — then prove is_split flags them and each quorum verifies.

@@ -130,13 +130,20 @@ class Witness:
         self._priv = private_key_b64
         self._last: Optional[Checkpoint] = None
 
+    def would_accept(self, checkpoint: Checkpoint) -> tuple[bool, str]:
+        """Check-only (NO mutation): would this witness co-sign ``checkpoint`` as a consistent
+        extension of its tracked tip? Lets an emitter determine the willing set atomically — decide
+        who signs before anyone mutates state, so a partial failure can't advance some witnesses."""
+        if self._last is None:
+            return True, "first checkpoint"
+        return consistent(self._last, checkpoint)
+
     def cosign(self, checkpoint: Checkpoint) -> Signature:
         """Verify consistency against this witness's tracked tip, then sign the checkpoint. Raises
         ``ConsistencyError`` (refusing to sign) on any inconsistency — the honest-witness contract."""
-        if self._last is not None:
-            ok, reason = consistent(self._last, checkpoint)
-            if not ok:
-                raise ConsistencyError(f"witness {self.key_id} refuses to co-sign: {reason}")
+        ok, reason = self.would_accept(checkpoint)
+        if not ok:
+            raise ConsistencyError(f"witness {self.key_id} refuses to co-sign: {reason}")
         self._last = checkpoint
         return Signature(key_id=self.key_id, signature_b64=sign(self._priv, _signing_bytes(checkpoint)))
 
@@ -150,31 +157,48 @@ class CheckpointEmitter:
     LINKED, witness-countersigned checkpoint chain. It maintains the ``prev_checkpoint_hash``
     meta-chain (first links to ``GENESIS_LINK``), refuses to emit a checkpoint that is not an
     append-only extension of the last one it emitted (so a regressed/forked head never becomes a
-    checkpoint), and collects each witness's countersignature. The emitted ``WitnessedCheckpoint``
-    stream verifies with ``verify_witnessed``/``verify_split_view_resistant`` and the underlying
-    checkpoints form a ``verify_log`` chain."""
+    checkpoint), is IDEMPOTENT on an unchanged head (a no-progress re-emit returns the existing
+    witnessed checkpoint rather than minting a redundant same-height one — which would falsely trip
+    ``is_split``), and gathers countersignatures ATOMICALLY: it first asks each witness whether it
+    would accept (no mutation), then co-signs only the willing set. A single dissenting/desynced
+    witness is skipped, never fatal, and cannot advance the others past an uncommitted checkpoint.
+
+    The emitted ``WitnessedCheckpoint`` stream and the underlying checkpoints verify with
+    ``verify_witnessed`` / ``verify_split_view_resistant`` / ``verify_log``. The CALLER must check
+    the result meets its quorum (``verify_split_view_resistant``) and HALT if a dissenting quorum
+    signals a fork — the emitter surfaces the witnesses that signed, it does not adjudicate quorum."""
 
     def __init__(self) -> None:
         self._last: Optional[Checkpoint] = None
+        self._last_witnessed: Optional[WitnessedCheckpoint] = None
 
     @property
     def head(self) -> Optional[Checkpoint]:
         return self._last
 
     def emit(self, head, witnesses: "list[Witness]") -> WitnessedCheckpoint:
-        """Summarise ``head`` into the next checkpoint (linked to the last), refuse it fail-closed if
-        it does not consistently extend, then gather witness countersignatures. Raises
-        ``ConsistencyError`` on a non-append-only head (emit-side guard, before asking witnesses)."""
+        """Summarise ``head`` into the next checkpoint (linked to the last) and gather witness
+        countersignatures. Idempotent on an unchanged head. Raises ``ConsistencyError`` on a
+        non-append-only head (emit-side guard, before asking any witness)."""
         prev = GENESIS_LINK if self._last is None else checkpoint_hash(self._last)
         cp = checkpoint_of(head, prev_checkpoint_hash=prev)
         if self._last is not None:
+            # Idempotent no-op: an unchanged head must NOT mint a second same-height checkpoint (that
+            # differs only in prev_checkpoint_hash and would falsely trip is_split). Return the cached one.
+            if (cp.entry_count == self._last.entry_count and cp.head_hash == self._last.head_hash
+                    and cp.last_seq == self._last.last_seq and cp.merkle_root == self._last.merkle_root):
+                assert self._last_witnessed is not None
+                return self._last_witnessed
             ok, reason = consistent(self._last, cp)
             if not ok:
                 raise ConsistencyError(f"refusing to emit an inconsistent checkpoint: {reason}")
-        # Each witness independently re-checks consistency against its own tip and may still refuse.
-        signatures = tuple(w.cosign(cp) for w in witnesses)
+        # Atomic gather: decide the willing set WITHOUT mutating any witness, then co-sign exactly
+        # those. A witness whose tip conflicts is skipped (not fatal) — no partial advance, no brick.
+        willing = [w for w in witnesses if w.would_accept(cp)[0]]
+        signatures = tuple(w.cosign(cp) for w in willing)
         self._last = cp
-        return WitnessedCheckpoint(cp, signatures)
+        self._last_witnessed = WitnessedCheckpoint(cp, signatures)
+        return self._last_witnessed
 
 
 def verify_witnessed(wc: WitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
