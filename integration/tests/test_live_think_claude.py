@@ -264,7 +264,10 @@ def test_key_present_builds_live_client_secret_free(state, monkeypatch, caplog):
             self.exc = None
             self.captured = {}
 
-    import anthropic
+    # The live-client-build path is only exercisable where the Anthropic SDK is installed; the
+    # replay/proposal path (tested elsewhere in this file) never depends on it. Skip cleanly when
+    # absent — the provable layer never depends on the model.
+    anthropic = pytest.importorskip("anthropic")
     monkeypatch.setattr(anthropic, "Anthropic", _FakeAnthropic)
 
     with caplog.at_level(logging.DEBUG, logger="vigil.live.think_claude"):
@@ -289,7 +292,7 @@ def test_env_key_triggers_live_path(state, monkeypatch):
             self.exc = None
             self.captured = {}
 
-    import anthropic
+    anthropic = pytest.importorskip("anthropic")
     monkeypatch.setattr(anthropic, "Anthropic", _FakeAnthropic)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-KEY")
 
