@@ -284,9 +284,12 @@ def is_split(a: Checkpoint, b: Checkpoint) -> bool:
     HEAD. A client that obtains two (witnessed) checkpoints compares them with this — a positive is
     cryptographic proof the log presented two forks, even if each was individually witness-signed.
 
-    Keyed on ``head_hash`` (the live tip), NOT the whole checkpoint identity: at a fixed
-    ``(entry_count, head_hash)`` the live entry chain is identical (immutable, hash-linked), so a
-    differing ``merkle_root`` is only a different PRUNE BOUNDARY (how much history moved to the
-    cumulative-root base) — an honest operator choice, not a fork. Keying on the full hash would flag
-    a benign prune as equivocation (a false accusation), so a fork requires a different head."""
+    Keyed on ``head_hash`` (the live tip), NOT the whole checkpoint identity: ``head_hash`` is the
+    authoritative fork commitment — it hash-links the entire ordered entry chain, so two genuinely
+    different logs at the same ``entry_count`` MUST differ in ``head_hash``. A differing
+    ``merkle_root`` at the same head is NOT a fork this primitive adjudicates: it is un-decidable from
+    the 5-field summary alone (an honest re-prune boundary looks identical to a fabricated root), and
+    the ``cumulative_merkle_root`` is authenticated elsewhere — by the owner-signed head and the
+    archive-anchored chain verification — not here. Keying on the full hash would flag a benign prune
+    as equivocation (a false accusation), so a fork requires a different head."""
     return a.entry_count == b.entry_count and a.head_hash != b.head_hash
