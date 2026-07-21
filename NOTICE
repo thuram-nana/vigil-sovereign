@@ -1,0 +1,61 @@
+VIGIL — third-party attributions
+================================
+
+This repository incorporates or adapts code and design ideas from third-party
+open-source projects. Their licenses are retained and reproduced below.
+
+--------------------------------------------------------------------------------
+redamon — https://github.com/samugit83/redamon  (MIT License)
+--------------------------------------------------------------------------------
+
+Portions of the VIGIL-FUSION program adapt Python source from redamon (an
+AI-powered agentic red-team framework). Adapted modules currently include the
+untrusted-input framing, the deterministic scope guardrail, the transient-error
+classifier + parameter self-heal, and (in later phases) the MCP registry, the
+attack-chain memory, the AI-Gauntlet adapters, and the workspace/job tooling.
+These are adapted to VIGIL's sovereign, provable architecture (routed through the
+deterministic oracle, the signed spine, and the governance gates; fail-open
+defaults inverted to deny-by-default) rather than used verbatim.
+
+    MIT License
+
+    Copyright (c) 2025 redamon contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+--------------------------------------------------------------------------------
+pentagi — https://github.com/vxcontrol/pentagi  (MIT License + EULA)
+--------------------------------------------------------------------------------
+
+pentagi (an autonomous-pentest platform, written in Go) is used as DESIGN
+REFERENCE ONLY. Its ideas (Chain-AST / Chain-Summary context engineering, the
+mentor-supervision loop, bi-temporal knowledge-graph memory, the agent role
+taxonomy, and one-identity observability) are reimplemented in Python for VIGIL;
+its Go source, configuration, and documentation prose are NOT vendored. pentagi's
+source is MIT-licensed but its EULA restricts use to lawful penetration testing
+and bars redistribution of derivatives — reimplementing the ideas in original
+Python avoids any derivative-of-source question while honoring the design credit.
+
+--------------------------------------------------------------------------------
+AI-Gauntlet subprocess tools (later phases)
+--------------------------------------------------------------------------------
+
+The offensive-LLM testing tools (garak — Apache-2.0; PyRIT — MIT; Giskard;
+promptfoo) are invoked as SUBPROCESSES, not imported, so their dependencies and
+licenses remain outside VIGIL's process. Each retains its own upstream license.
