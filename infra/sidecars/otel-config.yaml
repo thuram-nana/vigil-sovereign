@@ -1,0 +1,26 @@
+# VIGIL-LIVE OTel collector — receives OTLP over HTTP (loopback), logs spans/observations to stdout.
+# Internal-only: the container binds 127.0.0.1:4318 on the host. No external exporter, secret-free.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
