@@ -11,8 +11,11 @@ redamon — https://github.com/samugit83/redamon  (MIT License)
 Portions of the VIGIL-FUSION program adapt Python source from redamon (an
 AI-powered agentic red-team framework). Adapted modules currently include the
 untrusted-input framing, the deterministic scope guardrail, the transient-error
-classifier + parameter self-heal, and (in later phases) the MCP registry, the
-attack-chain memory, the AI-Gauntlet adapters, and the workspace/job tooling.
+classifier + parameter self-heal, the non-authoritative cognition governors
+(productivity scoring, the honesty audit, the uniform-response anomaly detector,
+the tested-axes ledger, and the deep-think novelty guard — from redamon's
+`productivity.py`), and (in later phases) the MCP registry, the attack-chain
+memory, the AI-Gauntlet adapters, and the workspace/job tooling.
 These are adapted to VIGIL's sovereign, provable architecture (routed through the
 deterministic oracle, the signed spine, and the governance gates; fail-open
 defaults inverted to deny-by-default) rather than used verbatim.
