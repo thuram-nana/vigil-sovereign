@@ -134,7 +134,7 @@ def _bridge_hosts(target_type: str, value: str) -> list[str]:
     if label == NodeLabel.HOST:
         return [v.lower()]
     if label == NodeLabel.ENDPOINT:
-        return list({_authority_host(v, fold_backslash=True), _authority_host(v, fold_backslash=False)})
+        return sorted({_authority_host(v, fold_backslash=True), _authority_host(v, fold_backslash=False)})
     if label == NodeLabel.PORT:
         if v.startswith("["):                                # [ipv6]:port
             end = v.find("]")
