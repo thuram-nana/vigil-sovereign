@@ -159,10 +159,16 @@ class GraphView(BaseModel):
         existing.provenance = merged_conf
         # RESURRECTION: an oracle confirmation lands on a node that a NON-oracle-grounded (bare) refute
         # retired → clear the retirement (a proven fact must not stay suppressed by an unauthenticated
-        # opinion recorded before the proof). An oracle-GROUNDED retirement is NOT auto-resurrected.
+        # opinion recorded before the proof), AND reactivate the edges retired by that same refute so the
+        # resurrected fact is fully connected (else successful_tools/traversal under-reports it). An
+        # oracle-GROUNDED retirement is NOT auto-resurrected.
         if (merged_conf.confirmation == ConfirmationStatus.CONFIRMED
                 and existing.invalid_from is not None and not existing.invalid_grounded):
+            retired_at = existing.invalid_from
             existing.invalid_from = None
+            for e in self.edges:
+                if (e.src == existing.id or e.dst == existing.id) and e.invalid_from == retired_at:
+                    e.invalid_from = None
         if node.invalid_from is not None:
             existing.invalid_from = node.invalid_from
         return existing

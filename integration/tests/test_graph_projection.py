@@ -205,6 +205,19 @@ def test_confirmation_resurrects_a_lead_retired_by_a_bare_refute():
     assert view2.confirmed_findings() == [] and not view2.get("finding:z").is_active
 
 
+def test_resurrected_fact_reconnects_its_edges():
+    # RE-CHECK MEDIUM: a resurrected fact must be fully connected — its producing tool must reappear in
+    # successful_tools (not left disconnected by the earlier refute).
+    view = project([
+        SpineRecord(seq=1, hash="s1", kind="step", step_id="S", props={"tool": "sqlmap"}),
+        _finding_rec(2, "a", ref="z", status="lead", parent_step_id="S"),
+        SpineRecord(seq=3, hash="r", kind="refute", refutes_id="finding:z"),           # bare refute
+        _finding_rec(4, "c", ref="z", status="fact", evidence_ref="cert", signature_ref="sig",
+                     parent_step_id="S"),                                              # oracle confirms
+    ])
+    assert successful_tools(view) == ["sqlmap"]     # the producing tool is not dropped
+
+
 def test_refute_retires_touching_edges():
     view = project([
         SpineRecord(seq=1, hash="c1", kind="chain", chain_id="C"),
