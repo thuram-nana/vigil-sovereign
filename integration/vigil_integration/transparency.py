@@ -130,19 +130,86 @@ class Witness:
         self._priv = private_key_b64
         self._last: Optional[Checkpoint] = None
 
+    def would_accept(self, checkpoint: Checkpoint) -> tuple[bool, str]:
+        """Check-only (NO mutation): would this witness co-sign ``checkpoint`` as a consistent
+        extension of its tracked tip? Lets an emitter determine the willing set atomically — decide
+        who signs before anyone mutates state, so a partial failure can't advance some witnesses."""
+        if self._last is None:
+            return True, "first checkpoint"
+        return consistent(self._last, checkpoint)
+
     def cosign(self, checkpoint: Checkpoint) -> Signature:
         """Verify consistency against this witness's tracked tip, then sign the checkpoint. Raises
         ``ConsistencyError`` (refusing to sign) on any inconsistency — the honest-witness contract."""
-        if self._last is not None:
-            ok, reason = consistent(self._last, checkpoint)
-            if not ok:
-                raise ConsistencyError(f"witness {self.key_id} refuses to co-sign: {reason}")
+        ok, reason = self.would_accept(checkpoint)
+        if not ok:
+            raise ConsistencyError(f"witness {self.key_id} refuses to co-sign: {reason}")
         self._last = checkpoint
         return Signature(key_id=self.key_id, signature_b64=sign(self._priv, _signing_bytes(checkpoint)))
 
 
 class ConsistencyError(RuntimeError):
     """A checkpoint is not an append-only extension of the tracked chain — a witness refuses it."""
+
+
+class CheckpointEmitter:
+    """Operational counterpart to the verifiers: turns a sequence of signed spine heads into a
+    LINKED, witness-countersigned checkpoint chain. It maintains the ``prev_checkpoint_hash``
+    meta-chain (first links to ``GENESIS_LINK``), refuses to emit a checkpoint that is not an
+    append-only extension of the last one it emitted (so a regressed/forked head never becomes a
+    checkpoint), is IDEMPOTENT on an unchanged head (a no-progress re-emit returns the existing
+    witnessed checkpoint rather than minting a redundant same-height one — which would falsely trip
+    ``is_split``), and gathers countersignatures ATOMICALLY: it first asks each witness whether it
+    would accept (no mutation), then co-signs only the willing set. A single dissenting/desynced
+    witness is skipped, never fatal, and cannot advance the others past an uncommitted checkpoint.
+
+    The emitted ``WitnessedCheckpoint`` stream and the underlying checkpoints verify with
+    ``verify_witnessed`` / ``verify_split_view_resistant`` / ``verify_log``. The CALLER must check
+    the result meets its quorum (``verify_split_view_resistant``) and HALT if a dissenting quorum
+    signals a fork — the emitter surfaces the witnesses that signed, it does not adjudicate quorum."""
+
+    def __init__(self) -> None:
+        self._last: Optional[Checkpoint] = None
+        self._last_witnessed: Optional[WitnessedCheckpoint] = None
+
+    @property
+    def head(self) -> Optional[Checkpoint]:
+        return self._last
+
+    def emit(self, head, witnesses: "list[Witness]") -> WitnessedCheckpoint:
+        """Summarise ``head`` into the next checkpoint (linked to the last) and gather witness
+        countersignatures. Idempotent on an unchanged head. Raises ``ConsistencyError`` on a
+        non-append-only head (emit-side guard, before asking any witness)."""
+        prev = GENESIS_LINK if self._last is None else checkpoint_hash(self._last)
+        cp = checkpoint_of(head, prev_checkpoint_hash=prev)
+        if self._last is not None:
+            # Idempotent no-op: an unchanged POSITION must NOT mint a second checkpoint. Position is
+            # (last_seq, entry_count, head_hash) — the live tip; merkle_root is DELIBERATELY excluded,
+            # because a prune (records move live→base) advances merkle_root at an unchanged position,
+            # and minting a second same-height checkpoint for it would be redundant. Return the cached
+            # one; the prune's merkle_root is captured by the next real advance (the root is monotonic).
+            if (cp.entry_count == self._last.entry_count and cp.head_hash == self._last.head_hash
+                    and cp.last_seq == self._last.last_seq):
+                assert self._last_witnessed is not None
+                return self._last_witnessed
+            ok, reason = consistent(self._last, cp)
+            if not ok:
+                raise ConsistencyError(f"refusing to emit an inconsistent checkpoint: {reason}")
+        # Atomic gather, de-duplicated by key_id: decide the willing set WITHOUT mutating any witness,
+        # then co-sign exactly those once each. A witness whose tip conflicts is skipped (not fatal) —
+        # no partial advance, no brick; a duplicate/aliased witness is not co-signed twice (the second
+        # cosign would see its own just-committed tip and raise mid-loop).
+        willing, seen = [], set()
+        for w in witnesses:
+            if w.key_id in seen:
+                continue
+            seen.add(w.key_id)
+            if w.would_accept(cp)[0]:
+                willing.append(w)
+        signatures = tuple(w.cosign(cp) for w in willing)
+        self._last = cp
+        self._last_witnessed = WitnessedCheckpoint(cp, signatures)
+        return self._last_witnessed
 
 
 def verify_witnessed(wc: WitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
@@ -213,7 +280,16 @@ def verify_log(checkpoints: "list[Checkpoint]") -> tuple[bool, str]:
 
 
 def is_split(a: Checkpoint, b: Checkpoint) -> bool:
-    """True iff ``a`` and ``b`` are a SPLIT VIEW: the SAME height (entry_count) but different content.
-    A client that obtains two (witnessed) checkpoints compares them with this — a positive is
-    cryptographic proof the log presented two forks, even if each was individually witness-signed."""
-    return a.entry_count == b.entry_count and checkpoint_hash(a) != checkpoint_hash(b)
+    """True iff ``a`` and ``b`` are a SPLIT VIEW: the SAME height (``entry_count``) but a DIFFERENT
+    HEAD. A client that obtains two (witnessed) checkpoints compares them with this — a positive is
+    cryptographic proof the log presented two forks, even if each was individually witness-signed.
+
+    Keyed on ``head_hash`` (the live tip), NOT the whole checkpoint identity: ``head_hash`` is the
+    authoritative fork commitment — it hash-links the entire ordered entry chain, so two genuinely
+    different logs at the same ``entry_count`` MUST differ in ``head_hash``. A differing
+    ``merkle_root`` at the same head is NOT a fork this primitive adjudicates: it is un-decidable from
+    the 5-field summary alone (an honest re-prune boundary looks identical to a fabricated root), and
+    the ``cumulative_merkle_root`` is authenticated elsewhere — by the owner-signed head and the
+    archive-anchored chain verification — not here. Keying on the full hash would flag a benign prune
+    as equivocation (a false accusation), so a fork requires a different head."""
+    return a.entry_count == b.entry_count and a.head_hash != b.head_hash
