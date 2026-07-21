@@ -342,9 +342,11 @@ def mint_finding_statement(
     empty signers is refused. ``timestamp`` is caller-supplied (no wallclock — deterministic)."""
     if not isinstance(cert, dict):
         raise TypeError("cert must be a dict of certificate fields")
-    missing = [f for f in _REQUIRED_CERT_FIELDS if f not in cert]
+    # presence AND non-null: a null oracle_context_digest/finding_ref would mint a signed statement
+    # with null provenance (honest-but-useless) — refuse it so the statement is always meaningful.
+    missing = [f for f in _REQUIRED_CERT_FIELDS if cert.get(f) is None]
     if missing:
-        raise ValueError(f"certificate missing required field(s): {missing}")
+        raise ValueError(f"certificate missing required field(s) (absent or null): {missing}")
     signer_list = list(signers)
     if not signer_list:
         raise ValueError("mint_finding_statement requires governance signers (m-of-n)")

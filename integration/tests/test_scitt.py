@@ -323,6 +323,10 @@ def test_mint_fails_closed_on_bad_cert_or_signers():
         mint_finding_statement(_cert(), [], confirmed=True, author="a", timestamp="t")
     with pytest.raises(TypeError):
         mint_finding_statement("not-a-dict", _GOV_SIGNERS, confirmed=True, author="a", timestamp="t")
+    # a NULL required field is refused too (no null-provenance statement)
+    with pytest.raises(ValueError, match="absent or null"):
+        mint_finding_statement({**_cert(), "oracle_context_digest": None}, _GOV_SIGNERS,
+                               confirmed=True, author="a", timestamp="t")
 
 
 def test_import_clean_no_offense_modules():
