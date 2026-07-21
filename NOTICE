@@ -14,8 +14,12 @@ untrusted-input framing, the deterministic scope guardrail, the transient-error
 classifier + parameter self-heal, the non-authoritative cognition governors
 (productivity scoring, the honesty audit, the uniform-response anomaly detector,
 the tested-axes ledger, and the deep-think novelty guard — from redamon's
-`productivity.py`), and (in later phases) the MCP registry, the attack-chain
-memory, the AI-Gauntlet adapters, and the workspace/job tooling.
+`productivity.py`), the MCP-server manifest layer (pydantic models, trust-tiered
+`validate_servers`, secret redaction, and phase-view — from redamon's
+`mcp_registry.py`, re-inverted to least-privilege / deny-by-default and
+subordinated to VIGIL's WARDEN tier + conjunctive gate), and (in later phases) the
+live MCP client binding, the attack-chain memory, the AI-Gauntlet adapters, and
+the workspace/job tooling.
 These are adapted to VIGIL's sovereign, provable architecture (routed through the
 deterministic oracle, the signed spine, and the governance gates; fail-open
 defaults inverted to deny-by-default) rather than used verbatim.
