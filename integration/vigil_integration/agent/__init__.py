@@ -13,6 +13,16 @@ action-edge authorization + the oracle interposition. Later slices wire the live
 spine-snapshot checkpointing, tool execution, and fireteam.
 """
 
+from .checkpoint import (
+    GENESIS_PREV,
+    SnapshotRecord,
+    head_hash,
+    rebuild,
+    rebuild_from,
+    serialize,
+    verify_chain,
+    write_checkpoint,
+)
 from .cognition import (
     GovernanceVerdict,
     audit_productivity_claim,
@@ -55,6 +65,9 @@ __all__ = [
     "phase_tier", "tool_tier", "can_transition", "is_escalation",
     "parse_decision", "classify_edge", "authorize_edge", "EdgeSpec", "EdgeVerdict",
     "intake_result", "apply_intake", "IntakeResult",
+    # F2 §5 C1 — append-only signed spine-snapshot checkpointing (replaces MemorySaver/Postgres)
+    "SnapshotRecord", "serialize", "rebuild", "rebuild_from", "write_checkpoint",
+    "head_hash", "verify_chain", "GENESIS_PREV",
     # F5 — non-authoritative cognition governors (budget/scheduling only)
     "GovernanceVerdict", "governance_decision", "compute_productivity_score", "tier_for_score",
     "audit_productivity_claim", "downgrade_verdict_to_no_progress",
