@@ -185,10 +185,13 @@ def authorize_edge(
         verdict = gate(decision.tool.tool_name, spec.target, spec.destructive)  # type: ignore[union-attr]
     except Exception as exc:  # noqa: BLE001 — any gate error is a DENY, never caught-and-continued
         return EdgeVerdict(False, "deny", f"gate error (fail-closed): {exc}", spec.tier)
-    outcome = getattr(verdict, "outcome", "deny")
-    allowed = getattr(verdict, "allowed", False) is True and outcome == "allow"
-    return EdgeVerdict(allowed, outcome if outcome in ("allow", "queue", "deny") else "deny",
-                       getattr(verdict, "reason", ""), spec.tier, requires_signed_approval=spec.destructive)
+    raw_outcome = getattr(verdict, "outcome", "deny")
+    allowed = getattr(verdict, "allowed", False) is True and raw_outcome == "allow"
+    # Derive the EdgeVerdict outcome from `allowed` so a malformed gate (allowed=False but
+    # outcome=="allow") can never present as "allow" to a downstream consumer keying on outcome.
+    outcome = "allow" if allowed else ("queue" if raw_outcome == "queue" else "deny")
+    return EdgeVerdict(allowed, outcome, getattr(verdict, "reason", ""), spec.tier,
+                       requires_signed_approval=spec.destructive)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -250,7 +253,7 @@ def intake_result(
                 evidence_ref = None
         exploit = Finding(ref=f"exploit:{source or 'claim'}", bug_class="", title="claimed exploit",
                           source=source)
-        if evidence_ref:
+        if evidence_ref and str(evidence_ref).strip():   # a whitespace/garbage ref mints NO fact
             exploit.status = "fact"
             exploit.evidence_ref = str(evidence_ref)
             facts.append(exploit)

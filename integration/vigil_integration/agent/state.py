@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Phase(str, Enum):
@@ -111,6 +111,17 @@ class Finding(BaseModel):
     evidence_ref: str = ""        # spine record hash / SCITT cert id when status == "fact"
     source: str = ""              # which tool/step proposed it
 
+    @model_validator(mode="after")
+    def _fact_needs_evidence(self) -> "Finding":
+        """Enforce the sovereign invariant at the TYPE level: a FACT-status finding MUST carry a
+        non-whitespace signed evidence reference. This closes the deserialization/checkpoint path —
+        ``Finding.model_validate({"status": "fact", "evidence_ref": ""})`` is refused, so an untrusted
+        or replayed record can never construct an evidence-less fact even without going through
+        ``AgentState.record_fact``."""
+        if self.status == "fact" and not (self.evidence_ref or "").strip():
+            raise ValueError("a FACT finding requires a non-empty signed evidence reference")
+        return self
+
 
 class AgentState(BaseModel):
     """The run state carried across ReAct turns. ``facts`` and ``leads`` are SEPARATE stores: the LLM
@@ -134,9 +145,9 @@ class AgentState(BaseModel):
         self.leads.append(finding)
 
     def record_fact(self, finding: Finding, *, evidence_ref: str) -> None:
-        """Only the oracle-confirmation path in ``agent.react`` calls this; a FACT MUST carry a signed
-        evidence reference."""
-        if not evidence_ref:
+        """Only the oracle-confirmation path in ``agent.react`` calls this; a FACT MUST carry a
+        non-whitespace signed evidence reference."""
+        if not (evidence_ref or "").strip():
             raise ValueError("a FACT requires a signed evidence reference (oracle-confirmed only)")
         finding.status = "fact"
         finding.evidence_ref = evidence_ref

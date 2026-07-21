@@ -216,6 +216,37 @@ def test_agent_state_roundtrips_json():
     assert back.phase == Phase.EXPLOITATION and back.iteration == 3 and back.leads[0].ref == "l1"
 
 
+def test_whitespace_oracle_ref_mints_no_fact():
+    # LOW: a buggy oracle returning a truthy-but-garbage ref must NOT launder a fact
+    for junk in ("   ", "\t\n", ""):
+        r = intake_result("admin=true", OutputAnalysis(exploit_succeeded=True),
+                          oracle=lambda raw, an, j=junk: j)
+        assert r.facts == [] and len(r.leads) == 1 and "UNCONFIRMED" in r.leads[0].title
+
+
+def test_malformed_gate_never_presents_as_allow():
+    # LOW: a gate returning outcome="allow" but allowed omitted/False must yield a DENY EdgeVerdict
+    class _Malformed:
+        def __call__(self, *a, **k):
+            return type("V", (), {"outcome": "allow"})()   # no .allowed attribute
+    d = LLMDecision(action=ActionType.USE_TOOL, tool=ToolCall(tool_name="nmap", tool_args={"target": "h"}))
+    v = authorize_edge(d, _st(), gate=_Malformed())
+    assert v.allowed is False and v.outcome == "deny"
+
+
+def test_fact_finding_requires_evidence_at_the_type_level():
+    # LOW: enforce fact-needs-evidence in the TYPE so deserialization/checkpoint can't build an
+    # evidence-less fact even without going through record_fact
+    Finding.model_validate({"ref": "x", "status": "fact", "evidence_ref": "spine:z"})  # ok
+    with pytest.raises(Exception):
+        Finding.model_validate({"ref": "x", "status": "fact", "evidence_ref": ""})
+    with pytest.raises(Exception):
+        Finding.model_validate({"ref": "x", "status": "fact", "evidence_ref": "   "})
+    with pytest.raises(Exception):
+        AgentState.model_validate({"engagement_slug": "a",
+                                   "facts": [{"ref": "x", "status": "fact", "evidence_ref": ""}]})
+
+
 def test_import_clean_no_offense_modules():
     import sys
     import vigil_integration.agent  # noqa: F401
