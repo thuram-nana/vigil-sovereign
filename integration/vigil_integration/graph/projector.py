@@ -110,35 +110,58 @@ _FINDING_BRIDGE_EDGE: dict[NodeLabel, EdgeType] = {
 ScopeGate = Callable[[str], bool]
 
 
-def _bridge_host(target_type: str, value: str) -> str:
-    """The host component to scope-check for a bridge target. A HOST is the value itself; an ENDPOINT
-    (``https://host/path``) and a PORT (``host:22``) carry a host that must be gated too, so an
-    out-of-scope host cannot re-enter the world-model wearing an endpoint/port label."""
+def _authority_host(url: str, *, fold_backslash: bool) -> str:
+    """The host of a URL authority, computed client-INDEPENDENTLY on backslash: with ``fold_backslash``
+    a ``\\`` terminates the authority (WHATWG/browser), without it the ``\\`` stays in the authority
+    (RFC/urllib) — the caller gates BOTH readings so ``https://evil.tld\\@in-scope.tld`` can't smuggle a
+    host past one client's parse. Bracketed IPv6 (``[::1]:8080``) yields the inner address, not ``""``."""
+    if not isinstance(url, str):
+        return ""
+    s = url.replace("\\", "/") if fold_backslash else url
+    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]*)", s) or re.match(r"^([^/?#]*)", s)
+    auth = (m.group(1) if m else "").rsplit("@", 1)[-1]       # strip userinfo (last @)
+    if auth.startswith("["):                                  # bracketed IPv6: [host]:port
+        end = auth.find("]")
+        return (auth[1:end] if end != -1 else auth[1:]).strip().lower()
+    return auth.split(":", 1)[0].strip().lower()              # host[:port]
+
+
+def _bridge_hosts(target_type: str, value: str) -> list[str]:
+    """The candidate host(s) to scope-check for a bridge target. A list so an ENDPOINT's two
+    client-independent readings are BOTH gated. Empty ⇒ the bridge carries no host (cve/technology)."""
     label = _BRIDGE_LABELS.get(target_type)
+    v = value.strip() if isinstance(value, str) else ""
     if label == NodeLabel.HOST:
-        return value
+        return [v.lower()]
     if label == NodeLabel.ENDPOINT:
-        m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://([^/?#]+)", value)
-        host = m.group(1) if m else value
-        return host.rsplit("@", 1)[-1].split(":", 1)[0].strip("[]")   # strip userinfo + :port + ipv6 []
+        return list({_authority_host(v, fold_backslash=True), _authority_host(v, fold_backslash=False)})
     if label == NodeLabel.PORT:
-        return value.rsplit(":", 1)[0].strip("[]") if ":" in value else value
-    return ""   # cve / technology carry no host
+        if v.startswith("["):                                # [ipv6]:port
+            end = v.find("]")
+            return [(v[1:end] if end != -1 else v[1:]).strip().lower()]
+        return [v.rsplit(":", 1)[0].strip().lower()] if ":" in v else [v.lower()]
+    return []   # cve / technology carry no host
 
 
 def _host_in_scope(target_type: str, value: str, scope_gate: Optional[ScopeGate]) -> bool:
-    """A bridge that carries a host (host / endpoint / port) must clear the injected scope gate — only
-    in-scope hosts become nodes, whatever label they wear. cve/technology are not host-scoped. No gate
-    ⇒ trust the spine's pre-gating (the action that produced the record already cleared the live gate)."""
-    host = _bridge_host(target_type, value)
-    if not host:                 # no host component (cve/tech) → not host-scoped
+    """A bridge carrying a host (host/endpoint/port) is admitted only if EVERY candidate host clears the
+    gate — an out-of-scope host cannot re-enter under any label or client reading. An UNEXTRACTABLE host
+    is fail-closed (denied when a gate is present). cve/technology carry no host. No gate ⇒ trust the
+    spine's pre-gating."""
+    hosts = _bridge_hosts(target_type, value)
+    if not hosts:
         return True
     if scope_gate is None:
         return True
-    try:
-        return bool(scope_gate(host))
-    except Exception:            # noqa: BLE001 — a gate error is fail-closed (host excluded)
-        return False
+    for h in hosts:
+        if not h:                    # extraction failed → fail-closed (never silently admit)
+            return False
+        try:
+            if not scope_gate(h):
+                return False
+        except Exception:            # noqa: BLE001 — a gate error is fail-closed
+            return False
+    return True
 
 
 def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[ScopeGate]) -> None:
@@ -146,11 +169,14 @@ def _project_record(view: GraphView, rec: SpineRecord, scope_gate: Optional[Scop
     if kind == "refute":
         if rec.refutes_id:
             target = view.get(rec.refutes_id)
+            grounded = _is_oracle_grounded_refutation(rec)
             # a confirmed, oracle-signed fact can be demoted ONLY by an oracle-grounded refutation —
             # an unauthenticated refute silently dropping a proven finding is the mirror of laundering.
-            if target is not None and target.is_confirmed and not _is_oracle_grounded_refutation(rec):
+            if target is not None and target.is_confirmed and not grounded:
                 return
-            view.retire_node(rec.refutes_id, rec.seq)
+            # a bare (non-grounded) refute of a LEAD is resurrectable: a later oracle confirmation of the
+            # same finding clears it (see GraphView.upsert_node), so an opinion can't suppress a proof.
+            view.retire_node(rec.refutes_id, rec.seq, grounded=grounded)
         return
 
     if kind == "chain":
@@ -264,8 +290,16 @@ def project(records: list[SpineRecord], *, group_id: str = "",
     view = GraphView(group_id=group_id)
     clean = [r for r in (records or []) if isinstance(r, SpineRecord)]   # pre-filter → total on garbage
     # total order: (seq, hash, canonical body) so two records sharing (seq, hash) still sort
-    # deterministically — the same record set rebuilds a byte-identical view in ANY input order.
-    for rec in sorted(clean, key=lambda r: (r.seq, r.hash, r.model_dump_json())):
+    # deterministically. The canonical body is computed DEFENSIVELY — a typed record carrying a
+    # non-JSON-serializable prop value must not crash the sort (totality over the whole record LIST).
+    def _sort_key(r: SpineRecord) -> tuple[int, str, str]:
+        try:
+            body = r.model_dump_json()
+        except Exception:   # noqa: BLE001
+            body = repr(sorted((str(k) for k in (r.props or {}))))
+        return (r.seq, r.hash, body)
+
+    for rec in sorted(clean, key=_sort_key):
         try:
             _project_record(view, rec, scope_gate)
         except Exception:   # noqa: BLE001 — a malformed record must not abort the whole projection

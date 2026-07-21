@@ -151,6 +151,60 @@ def test_scope_gate_blocks_out_of_scope_host_under_any_label():
     assert {n.label for n in v2.active_nodes()} >= {NodeLabel.HOST, NodeLabel.ENDPOINT, NodeLabel.PORT}
 
 
+def test_ipv6_and_backslash_endpoints_cannot_smuggle_a_host(monkeypatch):
+    # RE-CHECK S1 (HIGH): a bracketed IPv6 endpoint must NOT collapse to an empty host that bypasses the
+    # gate — incl. the IPv4-mapped-IPv6 metadata-smuggle. RE-CHECK S2: a backslash-authority endpoint is
+    # client-independent (gated under BOTH readings).
+    smuggles = [
+        {"type": "endpoint", "value": "https://[::ffff:169.254.169.254]/latest/meta-data/"},
+        {"type": "endpoint", "value": "https://[::1]:8080/"},
+        {"type": "endpoint", "value": "https://[::]/"},
+        {"type": "endpoint", "value": "https://evil.tld\\@in-scope.tld/"},   # backslash authority-confusion
+        {"type": "port", "value": "[::1]:22"},
+    ]
+    for t in smuggles:
+        v = project([_finding_rec(1, "h1", ref="f", status="fact", evidence_ref="c", signature_ref="s",
+                                  targets=[t])], scope_gate=lambda h: h == "in-scope.tld")
+        assert v.active_nodes(NodeLabel.ENDPOINT) == [] and v.active_nodes(NodeLabel.PORT) == [], t
+    # a genuinely in-scope endpoint (incl. its IPv6 loopback) is admitted when the gate allows the host
+    v_ok = project([_finding_rec(1, "h1", ref="f", status="fact", evidence_ref="c", signature_ref="s",
+                                 targets=[{"type": "endpoint", "value": "https://[::1]:9/x"}])],
+                   scope_gate=lambda h: h == "::1")
+    assert len(v_ok.active_nodes(NodeLabel.ENDPOINT)) == 1
+
+
+def test_projection_total_on_nonjson_prop_value():
+    # RE-CHECK S3: a typed SpineRecord carrying a non-JSON-serializable prop must not crash the sort/rebuild.
+    class Unser:
+        pass
+    recs = [SpineRecord(seq=1, hash="h", kind="finding", finding_ref="f", status="lead",
+                        props={"x": Unser()}),
+            SpineRecord(seq=2, hash="h2", kind="finding", finding_ref="g", status="fact",
+                        evidence_ref="c", signature_ref="s", props={"y": b"\xff\xfe", "ref": "g"})]
+    view = project(recs)     # must not raise
+    assert {n.id for n in view.confirmed_findings()} == {"finding:g"}
+
+
+def test_confirmation_resurrects_a_lead_retired_by_a_bare_refute():
+    # RE-CHECK S4: lead → BARE refute (retires) → oracle CONFIRMS later. The proven fact must NOT stay
+    # suppressed by the earlier unauthenticated opinion.
+    view = project([
+        _finding_rec(1, "a", ref="z", status="lead"),
+        SpineRecord(seq=2, hash="r", kind="refute", refutes_id="finding:z"),           # bare opinion
+        _finding_rec(3, "c", ref="z", status="fact", evidence_ref="cert", signature_ref="sig"),  # oracle proof
+    ])
+    assert {n.id for n in view.confirmed_findings()} == {"finding:z"}     # resurrected as a confirmed fact
+    assert view.get("finding:z").is_active
+    # but an ORACLE-GROUNDED refute is NOT auto-resurrected by a later confirm (contradiction stays retired)
+    view2 = project([
+        _finding_rec(1, "a", ref="z", status="lead"),
+        SpineRecord(seq=2, hash="r", kind="refute", refutes_id="finding:z",
+                    evidence_ref="rc", signature_ref="rs"),              # signed refutation
+        _finding_rec(3, "c", ref="z", status="fact", evidence_ref="cert", signature_ref="sig"),
+    ])
+    assert view2.confirmed_findings() == [] and not view2.get("finding:z").is_active
+
+
 def test_refute_retires_touching_edges():
     view = project([
         SpineRecord(seq=1, hash="c1", kind="chain", chain_id="C"),

@@ -99,6 +99,7 @@ class GraphNode(BaseModel):
     provenance: Provenance = Field(default_factory=Provenance)
     valid_from: int = 0                     # spine sequence the node was projected at
     invalid_from: Optional[int] = None      # spine sequence a refutation retired it (never deleted)
+    invalid_grounded: bool = False          # was the retiring refutation oracle-grounded (signed)?
 
     @property
     def is_active(self) -> bool:
@@ -156,6 +157,12 @@ class GraphView(BaseModel):
                 else existing.provenance
         existing.props.update(node.props)
         existing.provenance = merged_conf
+        # RESURRECTION: an oracle confirmation lands on a node that a NON-oracle-grounded (bare) refute
+        # retired → clear the retirement (a proven fact must not stay suppressed by an unauthenticated
+        # opinion recorded before the proof). An oracle-GROUNDED retirement is NOT auto-resurrected.
+        if (merged_conf.confirmation == ConfirmationStatus.CONFIRMED
+                and existing.invalid_from is not None and not existing.invalid_grounded):
+            existing.invalid_from = None
         if node.invalid_from is not None:
             existing.invalid_from = node.invalid_from
         return existing
@@ -171,13 +178,15 @@ class GraphView(BaseModel):
     def get(self, node_id: str) -> Optional[GraphNode]:
         return self.nodes.get(node_id)
 
-    def retire_node(self, node_id: str, at_seq: int) -> bool:
+    def retire_node(self, node_id: str, at_seq: int, *, grounded: bool = False) -> bool:
         """Bi-temporal retire: set ``invalid_from`` on the node and every edge touching it. Never
-        deletes. Returns True if the node existed and was active."""
+        deletes. ``grounded`` records whether the retiring refutation was oracle-grounded (a non-grounded
+        retirement is resurrectable by a later oracle confirmation). Returns True if the node was active."""
         node = self.nodes.get(node_id)
         if node is None or node.invalid_from is not None:
             return False
         node.invalid_from = at_seq
+        node.invalid_grounded = grounded
         for e in self.edges:
             if (e.src == node_id or e.dst == node_id) and e.invalid_from is None:
                 e.invalid_from = at_seq
