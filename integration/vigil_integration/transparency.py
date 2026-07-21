@@ -183,18 +183,29 @@ class CheckpointEmitter:
         prev = GENESIS_LINK if self._last is None else checkpoint_hash(self._last)
         cp = checkpoint_of(head, prev_checkpoint_hash=prev)
         if self._last is not None:
-            # Idempotent no-op: an unchanged head must NOT mint a second same-height checkpoint (that
-            # differs only in prev_checkpoint_hash and would falsely trip is_split). Return the cached one.
+            # Idempotent no-op: an unchanged POSITION must NOT mint a second checkpoint. Position is
+            # (last_seq, entry_count, head_hash) — the live tip; merkle_root is DELIBERATELY excluded,
+            # because a prune (records move live→base) advances merkle_root at an unchanged position,
+            # and minting a second same-height checkpoint for it would be redundant. Return the cached
+            # one; the prune's merkle_root is captured by the next real advance (the root is monotonic).
             if (cp.entry_count == self._last.entry_count and cp.head_hash == self._last.head_hash
-                    and cp.last_seq == self._last.last_seq and cp.merkle_root == self._last.merkle_root):
+                    and cp.last_seq == self._last.last_seq):
                 assert self._last_witnessed is not None
                 return self._last_witnessed
             ok, reason = consistent(self._last, cp)
             if not ok:
                 raise ConsistencyError(f"refusing to emit an inconsistent checkpoint: {reason}")
-        # Atomic gather: decide the willing set WITHOUT mutating any witness, then co-sign exactly
-        # those. A witness whose tip conflicts is skipped (not fatal) — no partial advance, no brick.
-        willing = [w for w in witnesses if w.would_accept(cp)[0]]
+        # Atomic gather, de-duplicated by key_id: decide the willing set WITHOUT mutating any witness,
+        # then co-sign exactly those once each. A witness whose tip conflicts is skipped (not fatal) —
+        # no partial advance, no brick; a duplicate/aliased witness is not co-signed twice (the second
+        # cosign would see its own just-committed tip and raise mid-loop).
+        willing, seen = [], set()
+        for w in witnesses:
+            if w.key_id in seen:
+                continue
+            seen.add(w.key_id)
+            if w.would_accept(cp)[0]:
+                willing.append(w)
         signatures = tuple(w.cosign(cp) for w in willing)
         self._last = cp
         self._last_witnessed = WitnessedCheckpoint(cp, signatures)
@@ -269,7 +280,13 @@ def verify_log(checkpoints: "list[Checkpoint]") -> tuple[bool, str]:
 
 
 def is_split(a: Checkpoint, b: Checkpoint) -> bool:
-    """True iff ``a`` and ``b`` are a SPLIT VIEW: the SAME height (entry_count) but different content.
-    A client that obtains two (witnessed) checkpoints compares them with this — a positive is
-    cryptographic proof the log presented two forks, even if each was individually witness-signed."""
-    return a.entry_count == b.entry_count and checkpoint_hash(a) != checkpoint_hash(b)
+    """True iff ``a`` and ``b`` are a SPLIT VIEW: the SAME height (``entry_count``) but a DIFFERENT
+    HEAD. A client that obtains two (witnessed) checkpoints compares them with this — a positive is
+    cryptographic proof the log presented two forks, even if each was individually witness-signed.
+
+    Keyed on ``head_hash`` (the live tip), NOT the whole checkpoint identity: at a fixed
+    ``(entry_count, head_hash)`` the live entry chain is identical (immutable, hash-linked), so a
+    differing ``merkle_root`` is only a different PRUNE BOUNDARY (how much history moved to the
+    cumulative-root base) — an honest operator choice, not a fork. Keying on the full hash would flag
+    a benign prune as equivocation (a false accusation), so a fork requires a different head."""
+    return a.entry_count == b.entry_count and a.head_hash != b.head_hash
