@@ -11,6 +11,9 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = ["vigil-core"]  # sovereign-safe: vigil_core only; never framework.* or strix.*
 
+[project.scripts]
+vigil = "vigil_integration.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 
