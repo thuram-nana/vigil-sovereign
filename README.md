@@ -177,7 +177,7 @@ flowchart TB
 - **The Detection Mirror** reads the target's *own* logs and proves, defensively, what the attack looked like — pairing every offensive fact with a matching detection fact.
 - **The signed spine** records all of it, append-only. From there, evidence becomes an **offline-verifiable certificate**, and confirmed findings cross the **two-environment boundary** into your personal core as inert signed data only.
 
-> 📊 **Want the deep version?** A highly-detailed, interactive, dark-theme architecture diagram (7 layers plus an overview, 118 components, every major subsystem mapped) lives at [`docs/architecture/vigil-architecture.html`](docs/architecture/vigil-architecture.html) — open it in any browser.
+> 📊 **Want the deep version?** A highly-detailed, dark-theme architecture reference (7 layers plus an overview, 118 components, every major subsystem mapped) lives as an interactive page at [`docs/architecture/vigil-architecture.html`](docs/architecture/vigil-architecture.html) (open in any browser) and as a print-ready [**PDF**](docs/architecture/vigil-architecture.pdf) — each diagram on its own full page.
 
 ---
 
