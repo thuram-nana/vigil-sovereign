@@ -615,10 +615,40 @@ def cmd_doctor(a) -> None:
     for name, ok, detail in doctor():
         ok_all = ok_all and ok
         print(f"  [{'OK' if ok else '!!'}] {name:16} {detail}")
+    # at-rest sealing status (audit G1). UNSEALED is a prominent WARNING, not a hard doctor failure —
+    # the box works either way; provisioning is the operator's one-time choice.
+    from .platform.vault import owner_vault
+    _v = owner_vault()
+    print(f"  [{'OK' if _v.enabled() else '**'}] {'vault':16} {_v.status()}")
     print("\neffective config (secrets redacted):")
     for k, v in effective_config().items():
         print(f"  {k:18} {v}")
     _sys.exit(0 if ok_all else 1)
+
+
+def cmd_vault(a) -> None:
+    """At-rest sealing of the trust root under a TPM-sealed KEK (audit G1): `status` | `provision`."""
+    import sys as _sys
+
+    from vigil_core.kek import KekError
+
+    from .platform.vault import owner_vault
+    v = owner_vault()
+    if getattr(a, "vault_cmd", "status") == "provision":
+        if v.enabled():
+            print("vault already provisioned (a TPM-sealed KEK is present) — nothing to do.")
+            return
+        try:
+            v.provision()
+        except KekError as e:
+            print(f"!! could not provision the TPM-sealed KEK: {e}")
+            print("   one-time setup on this machine:")
+            print("     sudo apt install tpm2-tools && sudo usermod -aG tss $USER   (then log out/in)")
+            _sys.exit(1)
+        print("vault provisioned — a fresh KEK is now TPM-sealed to this machine.")
+        print("Trust-root keys + secrets seal at rest transparently on their next read/write.")
+    else:
+        print(f"vault: {v.status()}")
 
 
 def main(argv=None) -> None:
@@ -627,6 +657,9 @@ def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="sigil")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("doctor", help="self-check the install (SIGIL_HOME, kernel, Qdrant, keyring, claude)").set_defaults(fn=cmd_doctor)
+    pvault = sub.add_parser("vault", help="at-rest sealing of the trust root (TPM-sealed KEK): status | provision")
+    pvault.add_argument("vault_cmd", choices=["status", "provision"], nargs="?", default="status")
+    pvault.set_defaults(fn=cmd_vault)
     pi = sub.add_parser("ingest")
     pi.add_argument("--reset", action="store_true", help="clear spine+cursor+vectors and rebuild")
     pi.add_argument("--docs", action="store_true", help="also ingest curated memory/*.md")

@@ -147,7 +147,8 @@ jobs:
             PYTHONPATH=apps/sigil:integration python -m pytest \
               apps/sigil/tests/test_offense_gate.py \
               apps/sigil/tests/test_hardening.py \
-              apps/sigil/tests/test_finding_receiver.py -q
+              apps/sigil/tests/test_finding_receiver.py \
+              apps/sigil/tests/test_vault.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi

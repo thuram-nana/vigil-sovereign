@@ -12,7 +12,6 @@ added later by raising the trust-root threshold.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 _MAX_HEAD_SCHEMA = 2   # head schema versions this build understands; a higher one -> "upgrade sigil"
@@ -43,13 +42,18 @@ def _atomic_write_text(path: Path, data: str) -> None:
 
 
 def _owner_keys() -> tuple[str, str]:
-    if not _PRIV.exists():
+    # Owner PRIVATE key routes through the vault (audit G1): plaintext-unchanged until the operator
+    # provisions a TPM-sealed KEK, then transparently sealed at rest. The PUBLIC key stays plaintext.
+    from ..platform.vault import OWNER_PRIV_CONTEXT, owner_vault
+    vault = owner_vault()
+    priv = vault.read_text_secret(_PRIV, context=OWNER_PRIV_CONTEXT)
+    if priv is None:
         KEYS_DIR.mkdir(parents=True, exist_ok=True)
         kp = generate_keypair()
-        _PRIV.write_text(kp.private_key_b64, encoding="utf-8")
-        os.chmod(_PRIV, 0o600)
+        vault.write_text_secret(_PRIV, kp.private_key_b64, context=OWNER_PRIV_CONTEXT)
         _PUB.write_text(kp.public_key_b64, encoding="utf-8")
-    return _PRIV.read_text(encoding="utf-8").strip(), _PUB.read_text(encoding="utf-8").strip()
+        priv = kp.private_key_b64
+    return priv, _PUB.read_text(encoding="utf-8").strip()
 
 
 def trust_root() -> TrustRoot:
