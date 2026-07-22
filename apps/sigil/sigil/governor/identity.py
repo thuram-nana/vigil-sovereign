@@ -8,7 +8,6 @@ trust). `ensure_owner_keypair()` is for owner-initiated SIGNING actions (CLI eng
 it generates+persists the anchor once if absent, mirroring the checkpoint's `_owner_keys()`."""
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 from ..config import KEYS_DIR
@@ -26,28 +25,29 @@ def owner_pubkey() -> Optional[str]:
 
 
 def owner_keypair() -> Optional[KeyPair]:
+    # Private key via the vault (audit G1): plaintext until a TPM-sealed KEK is provisioned, then sealed.
+    from ..platform.vault import OWNER_PRIV_CONTEXT, VaultLocked, owner_vault
     try:
-        priv = _PRIV.read_text(encoding="utf-8").strip()
         pub = _PUB.read_text(encoding="utf-8").strip()
     except OSError:
         return None
+    try:
+        priv = owner_vault().read_text_secret(_PRIV, context=OWNER_PRIV_CONTEXT)
+    except VaultLocked:
+        return None  # sealed but the TPM cannot unseal → fail-closed (nothing forged is ever trusted)
     return KeyPair(public_key_b64=pub, private_key_b64=priv) if priv and pub else None
 
 
 def ensure_owner_keypair() -> KeyPair:
     """Return the persisted owner keypair, generating+persisting it once if absent (owner signing
     path only). Same key material the checkpoint uses, so governance and the spine head share one
-    owner identity."""
+    owner identity. The private key is sealed at rest when the vault is provisioned (audit G1)."""
     kp = owner_keypair()
     if kp is not None:
         return kp
+    from ..platform.vault import OWNER_PRIV_CONTEXT, owner_vault
     KEYS_DIR.mkdir(parents=True, exist_ok=True)
     kp = generate_keypair()
-    _PRIV.write_text(kp.private_key_b64, encoding="utf-8")
+    owner_vault().write_text_secret(_PRIV, kp.private_key_b64, context=OWNER_PRIV_CONTEXT)
     _PUB.write_text(kp.public_key_b64, encoding="utf-8")
-    for f in (_PRIV,):
-        try:
-            os.chmod(f, 0o600)
-        except OSError:
-            pass
     return kp
