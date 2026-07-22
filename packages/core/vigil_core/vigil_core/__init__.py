@@ -19,10 +19,12 @@ from .canonical import canonical_json, digest_payload, evidence_signing_bytes, s
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from .crypto import IntegrityError, KeyPair, generate_keypair, sign, verify_one, verify_threshold
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
+from .sealing import SealError, is_sealed, new_kek, seal, unseal
 
 __all__ = [
     "canonical_json", "digest_payload", "evidence_signing_bytes", "sha256_hex",
     "append_entry", "build_chain", "sign_head", "verify_chain", "verify_head",
     "generate_keypair", "sign", "verify_one", "verify_threshold", "KeyPair", "IntegrityError",
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
+    "seal", "unseal", "new_kek", "is_sealed", "SealError",
 ]
