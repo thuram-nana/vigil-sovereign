@@ -1,17 +1,543 @@
-# VIGIL — sovereign, provable, autonomous security + personal-AI (monorepo)
+<div align="center">
 
-> Working name. Fuses SIGIL (sovereign signed-spine + WARDEN governance), CRUCIBLE/AEGIS
-> (oracle-authority offensive/defensive engine), and Strix (Claude-powered agentic Kali sandbox)
-> into one Claude-powered tool. See the approved plan for architecture + phases.
+# 🛡️ VIGIL
 
-## Layout (product fusion, isolated cores)
-- `packages/core/vigil_core/` — shared signed-chain + canonical + crypto + trust-root (imports NO framework.*/strix.*)
-- `apps/sigil/`     — SIGIL personal orchestrator (offense-free by construction) + Rust WARDEN kernel
-- `engine/crucible/`— CRUCIBLE offensive engine + AEGIS defensive dual (framework.v2)
-- `vendor/strix/`   — Strix autonomous AI-hacker (Apache-2.0, Claude-migrated)
-- `gateway/`        — host-side deny-default egress firewall + scope_gate forward-proxy (FATAL-1 fix)
-- `integration/`    — OracleConfirmationAdapter, WardenGateHooks, the inert signed-data seam
+### A Claude-powered security system that never lets an AI's word become a fact.
 
-Two isolated build environments share `vigil_core`: env-sovereign (vigil_core+sigil) and
-env-offense (vigil_core+crucible+strix). Offense runs as a separate no-owner-key process; findings
-cross to the personal spine as inert signed data only.
+**Sovereign · Provable · Autonomous — security testing and a personal AI assistant, on hardware you own.**
+
+</div>
+
+---
+
+VIGIL is one system that does two very different jobs on machines **you** control:
+
+1. **An autonomous security tester** — an AI that hunts for real vulnerabilities in systems you're authorized to test.
+2. **A sovereign personal AI assistant** — one that remembers your whole working life and can act on your files, terminal, screen, and accounts, always with your permission.
+
+What makes it *one* system, and what makes it different from every other "AI hacker," is a single rule that runs through everything:
+
+> **Nothing the AI says is treated as true, and no action the AI wants to take is allowed to happen, unless a separate, deterministic (non-AI) checker proves it — and every proof and every action is cryptographically signed and written to a record that can never be secretly edited.**
+
+The AI is only ever allowed to *propose*. A separate "oracle" must *prove*. A gate must *authorize*. Everything is *signed and logged*. You keep the keys. That's the whole idea — and this README explains all of it, in plain language, from top to bottom.
+
+> ⚠️ **Authorized use only.** VIGIL includes autonomous *offensive* security tooling. Use it **only** against systems you own or have **explicit written permission** to test. Unauthorized access to computer systems is illegal (e.g. the US CFAA, the UK Computer Misuse Act, and equivalents worldwide). The software is provided **"as is," without warranty**; **you are solely responsible** for how you use it. See [`engine/crucible/DISCLAIMER.md`](engine/crucible/DISCLAIMER.md) and [`engine/crucible/LICENSING.md`](engine/crucible/LICENSING.md).
+
+---
+
+## Table of contents
+
+- [What VIGIL is](#what-vigil-is)
+- [Why it exists](#why-it-exists)
+- [The one idea that makes it work](#the-one-idea-that-makes-it-work)
+- [How it's different](#how-its-different)
+- [Architecture at a glance](#architecture-at-a-glance)
+- [The parts of the system](#the-parts-of-the-system)
+- [Feature highlights](#feature-highlights)
+- [How it works, end to end](#how-it-works-end-to-end)
+- [What's live vs. what's still deferred](#whats-live-vs-whats-still-deferred)
+- [Setup](#setup)
+- [Running it](#running-it)
+- [Repository layout](#repository-layout)
+- [Security & trust model](#security--trust-model)
+- [Glossary](#glossary)
+- [Status & roadmap](#status--roadmap)
+- [License & attribution](#license--attribution)
+
+---
+
+## What VIGIL is
+
+Think of VIGIL as a very disciplined, very honest security team that happens to be made of software.
+
+- The **"thinking" part** is Claude (Anthropic's AI). It reads a target, reasons about it, and suggests what to try next — the same way a smart human tester would brainstorm.
+- But — and this is the crucial part — **Claude is never believed.** When Claude says "I found a SQL-injection bug" (a classic web attack that tricks a website into handing over the contents of its database), VIGIL does not write that down as a fact. Instead a small, dumb, deterministic program — an **oracle** — independently re-runs a real test against the real target. Only if that program fires does the finding become a **fact**, and only then is it cryptographically signed.
+- Everything VIGIL does — every attempt, every proof, every decision — is written to an **append-only record** it calls the **spine**: a log where entries can be added but never quietly changed or deleted. Any tampering is always detectable.
+- The same discipline powers the **personal-assistant** side (called **SIGIL**): a local-first AI that remembers your work and can act on your behalf, but *only* with a provable authorization, and with **zero** offensive capability by design.
+
+You run it on your own hardware. Your data, your memory, and your signing keys never leave your machine unless *you* explicitly, verifiably approve it.
+
+---
+
+## Why it exists
+
+Two real, well-documented problems with today's AI security tools.
+
+### Problem 1 — AI security tools lie (they "hallucinate")
+
+Point a large language model (an **LLM** — the AI's underlying text-prediction engine) at a website and ask "did you find a bug?", and it will confidently report vulnerabilities that **aren't real**. This isn't a rare glitch; it's the default failure mode. Industry tools that "trust the LLM's judgment for the verdict" have been measured at **35–90% false-positive rates**. It got bad enough that **curl ended its bug-bounty program in January 2026 over the flood of AI "slop,"** and bug-bounty triage teams are drowning in fake reports. *(Figures from our own survey, [`docs/research/FRONTIER.md`](docs/research/FRONTIER.md).)*
+
+**VIGIL's answer:** the AI only *proposes*. A finding never becomes a "fact" on the AI's say-so — a separate deterministic program must independently re-prove it against data the real target produced, and only then is it signed. And VIGIL is honest about its own limits: only bug types it *actually has a checker for* can become signed facts; everything else is demoted to a clearly-labelled **lead**. In VIGIL's own words: *"claiming otherwise would be the very hallucination this system exists to kill."*
+
+### Problem 2 — autonomous AI agents do dangerous things on their own
+
+An AI agent that can run code and reach the network can — if it's tricked (prompt-injected) or simply misaligned — reach far beyond its target: your home network, a cloud provider's secret "metadata" server, or an innocent third party. This isn't hypothetical: in Anthropic's own research, *all 16 frontier models took harmful, self-directed action* under a pressure scenario.
+
+**VIGIL's answer:** every action the agent wants to take must pass **real gates enforced in code and on the network wire** — not by politely asking the model to behave. The guiding phrase is *"permission is infrastructure, not prompt."* By design, the hacking sandbox's only route to the network is a deny-by-default firewall pinned to the one authorized target (see [the egress gate](#the-governance-spine--the-four-gatekeepers)); in the validated loopback run, egress was additionally enforced at the application layer by an executor that refuses any non-target address before a single byte is sent.
+
+### And it's *sovereign* — your hardware, your keys
+
+The personal side is built to run entirely on machines you own. Its five founding laws:
+
+1. **Every action carries a proof of authorization** — nothing runs without a check it can show you.
+2. **Memory is append-only** — the record is added to, never rewritten.
+3. **Local-first** — it runs on your own machine by default.
+4. **Cascade, not monolith** — it's built from many small, independently-checked parts rather than one big black box.
+5. **Prove, don't guess** — the same oracle discipline as the security side.
+
+And, non-negotiably, **it has no offensive capability at all.** Your data, keys, and memory live on your machine; the local AI can run on your own CPU with no external service; and anything that *would* leave your box for a cloud model is itself a gated, you-approved event. Even your phone companion holds only *its own* device key — **your master "owner" key never leaves your desktop.**
+
+---
+
+## The one idea that makes it work
+
+Everything in VIGIL is an expression of a single rule (an **invariant** — a rule that always holds), which we call **the governing invariant**:
+
+> **The AI and every tool only PROPOSE. Only a deterministic oracle mints a signed FACT. Only the conjunctive gate authorizes an action. Only the egress gate lets a packet leave.**
+
+- The **conjunctive gate** is one checkpoint that must pass several safety checks *at the same time*.
+- The **egress gate** is the firewall that decides whether any network data (a "packet") may leave the machine.
+
+Four separate authorities — and **none of them is the AI**. No AI, no "helpfulness" score, no memory graph, no second AI acting as a judge is *ever* allowed to be the thing that decides something is true or that an action may happen.
+
+That leads to the most important distinction in the whole system:
+
+| | **FACT** | **LEAD** |
+|---|---|---|
+| **What it is** | A claim a deterministic checker actually *proved* | An unproven proposal (from the AI or a tool) |
+| **Is it signed?** | Yes — carries cryptographic evidence | No |
+| **Can you rely on it?** | Yes — re-verifiable by anyone, offline, forever | No — it's kept and labelled, but never presented as true |
+
+Other tools hand you a flat list of "findings" you can't trust. VIGIL splits every claim into a proven **FACT** and an honest **LEAD**, and it never blurs the line.
+
+---
+
+## How it's different
+
+In our own survey of existing tools ([`docs/research/FRONTIER.md`](docs/research/FRONTIER.md)), everyone else builds the *AI-proposes-and-decides* loop, while the design that actually holds up is *AI proposes → deterministic oracle confirms → signed, re-runnable certificate.* Five properties matter, and in that survey **no existing tool combined more than two of them**:
+
+1. **Oracle-confirmed findings on live web / API (app-to-app interface) / cloud targets** — not just toy sandboxed memory bugs.
+2. **Cryptographically signed evidence** — which our survey found to be an open gap: other tools don't sign their findings.
+3. **Scope enforced at the network / operating-system layer** — so prompt injection can't break the AI out of bounds.
+4. **Sovereign / air-gappable** — runs on your hardware, under your key, offline-capable.
+5. **Claude reasoning across the entire lifecycle** — *while never trusting Claude for the verdict.*
+
+The other headline differentiators a newcomer should take away:
+
+- **The two-environment boundary.** The hacking side and the personal side run as *separate* programs joined only by an inert, signed, data-only channel. The hacking side **holds no owner key**, so it physically cannot forge a trusted record — findings cross to your personal record only as signed data, never as running code.
+- **The always-on usage record.** VIGIL can always prove — in a way no one can later deny — *who* used it, *when*, and *against what*. The timestamp is tied to a counter that never runs backwards (a secure-hardware clock when your machine has one, otherwise a software counter), so a record can't be back-dated.
+- **Everything is offline-verifiable, forever.** A finding becomes a certificate a client, a regulator, or a court can check *offline, with no network and no trust in VIGIL* — the same tamper-evident, append-only logging that regimes such as the EU AI Act (Article 12) call for.
+
+---
+
+## Architecture at a glance
+
+Here is the whole system in one picture. Read it top to bottom: the operator authorizes an engagement, the AI *proposes*, the gates and oracle *decide*, and everything is *signed* to the record. (GitHub renders this diagram automatically.)
+
+```mermaid
+flowchart TB
+    OP(["Operator — owns the hardware and the keys"])
+
+    subgraph OFFENSE["OFFENSE ENVIRONMENT · a separate program that holds NO owner key"]
+      direction TB
+      ATTEST[["Usage record (attestation)<br/>records WHO / WHEN / WHAT — first<br/>no attestation ⇒ no run"]]
+      THINK["AI agent body (Claude)<br/>PROPOSES one action — never decides truth"]
+      GATE{{"Conjunctive gate<br/>danger tier · in-scope authority · owner approval"}}
+      EGRESS{{"Egress gate<br/>deny-by-default, pinned to the target only"}}
+      EXEC["Governed tool executor<br/>nmap · httpx · sqlmap · …"]
+      TARGET[/"Authorized target<br/>e.g. 127.0.0.1 loopback"/]
+      ORACLE[["Deterministic oracle<br/>re-proves over the REAL output<br/>the ONLY thing that mints a FACT"]]
+      DET["Detection Mirror<br/>proves the attack from the target's own logs"]
+      SPINE[("Signed, append-only spine / record<br/>Ed25519 hash-chain")]
+    end
+
+    SIGIL[["SIGIL personal core<br/>offense-free · on your machine · under your key"]]
+    EVID["Offline-verifiable evidence<br/>transparency log + SCITT-style / OpenVEX certificates"]
+
+    OP --> ATTEST --> THINK --> GATE
+    GATE -- "allow / owner-approved" --> EGRESS --> EXEC --> TARGET
+    GATE -- "deny / out of scope" --> SPINE
+    TARGET -- "raw output" --> ORACLE
+    ORACLE -- "confirmed ⇒ signed FACT" --> SPINE
+    ORACLE -- "unconfirmed ⇒ honest LEAD" --> SPINE
+    TARGET -- "access / auth logs" --> DET --> SPINE
+    SPINE -. "loop: next proposal" .-> THINK
+    SPINE --> EVID
+    SPINE == "inert, signed data only" ==> SIGIL
+```
+
+**Reading the diagram in plain English:**
+
+- **The operator** (you) starts an engagement. Before *anything* runs, VIGIL writes a signed "usage" record — the always-on attestation. No record, no run.
+- **The AI agent body** proposes one next step. It's a suggestion, nothing more.
+- **The conjunctive gate** checks three things at once: is this target in the authorized scope right now? What danger tier is this action, and does the owner need to approve it? For destructive actions, is there a multi-person sign-off? Any failure = a hard stop.
+- **The egress gate** is a deny-by-default firewall: the sandbox's *only* route to the network is pinned to the authorized target, so it can't reach your home network, a third party, or a cloud metadata server.
+- **The tool executor** runs the real security tool (e.g. `nmap`, `sqlmap`) against the target and captures its raw output.
+- **The oracle** re-examines that raw output and independently proves (or fails to prove) the finding. A pass becomes a **signed FACT**; anything else stays a **LEAD**.
+- **The Detection Mirror** reads the target's *own* logs and proves, defensively, what the attack looked like — pairing every offensive fact with a matching detection fact.
+- **The signed spine** records all of it, append-only. From there, evidence becomes an **offline-verifiable certificate**, and confirmed findings cross the **two-environment boundary** into your personal core as inert signed data only.
+
+> 📊 **Want the deep version?** A highly-detailed, interactive, dark-theme architecture diagram (7 layers plus an overview, 118 components, every major subsystem mapped) lives at [`docs/architecture/vigil-architecture.html`](docs/architecture/vigil-architecture.html) — open it in any browser.
+
+---
+
+## The parts of the system
+
+Every subsystem, with its real location in the repo. *This is the detailed tour* — it names real files and a few technical terms (each glossed on the way), so a reader who only wants the big picture can skip to [Feature highlights](#feature-highlights).
+
+### The signed core — `packages/core/vigil_core/`
+The tiny, trusted foundation both halves stand on. It holds the tamper-evident-record building blocks: the hash-chain, canonical (byte-stable) JSON (a plain-text data format), the Ed25519 cryptography (the digital-signature scheme), and the "trust root" (the set of keys allowed to sign). It depends on almost nothing and deliberately imports *no* offensive or personal code — that purity is exactly what lets the personal side stay offense-free while sharing this one foundation. It's version-safe: adopting it breaks no previously-signed record.
+
+### The governance spine — the four gatekeepers
+- **WARDEN tiers (A0–A3).** Every action the AI wants to take is classified into four danger levels: **A0** observe/answer (automatic), **A1** reversible internal change (automatic + logged), **A2** externally-visible (queued for your one-tap approval), **A3** destructive/financial/security (explicit owner approval, never auto-promoted). The **Rust program at `apps/sigil/kernel/`** does the classification — *danger-first* and by whole words, so `overwrite` is not mistaken for `write`, and **anything unknown falls to the strictest tier (A3)**. Inside the hacking loop, **`integration/vigil_integration/warden_gate.py`** adds the rule that makes offense safe: it raises every offensive tool to a tier *above* the auto-approve line, so **an autonomous agent can never fire an offensive tool by itself — it always queues for your approval.**
+- **The conjunctive gate** — `integration/vigil_integration/conjunctive_gate.py`. The single checkpoint every target-touching action must clear: *authority* (in scope, not halted, within budget) **and** *WARDEN tier* (approved for this danger level) **and**, for destructive actions, a *multi-person threshold sign-off*. First failure wins; any error at all = deny.
+- **The egress gate** — `gateway/`. A deny-by-default host firewall plus a scope-checking proxy that is the sandbox's *only* exit. It blocks the special internal addresses attackers use to hop into your cloud account or onto other machines on your network (including the sneaky IPv6 forms of them), resolves each web address once and refuses if it points anywhere on the block-list (defeating "DNS rebinding," a bait-and-switch trick), and removes the sandbox's ability to rewrite its own firewall.
+- **The destruction gate** — `integration/vigil_integration/destruction_gate.py`. For irreversible, high-impact actions: a proper *m-of-n* ("m out of n people") threshold approval, with a mandatory owner signer fixed at deployment, action-binding, a dead-man's-switch time window, and single-use tokens.
+- **Challenge oracles** — `integration/vigil_integration/challenge_oracle.py`. Each proof uses a fresh, unpredictable one-time challenge, so a recorded or replayed "attack" can never be reused to fake a finding.
+
+### The oracle + the veracity firewall — the truth layer
+- **The deterministic oracle** — `engine/crucible/framework/v2/verify/`. The set of small proof programs (no network, no clock, no randomness) that alone can turn a claim into a fact. It knows how to *prove* real bug classes — blind SQL injection (tricking a database into leaking data, confirmed by a statistical test), reflected cross-site scripting (sneaking code into a page another user sees, confirmed by where the payload actually lands), server-side template injection, timing-based bugs, and more. A proof fires only at high confidence and carries its re-runnable context with it.
+- **The veracity firewall** — `engine/crucible/framework/v2/veracity/`. Sits at every boundary and *re-executes* a claim's cited proof before letting it through. If it re-fires, the claim is grounded; if it won't reproduce, the claim is demoted. **It can only ever demote, never promote.**
+- **The oracle bridge** — `integration/vigil_integration/oracle_adapter.py`. The exact place where an AI proposal becomes a signed fact: it turns a proposal into a **FACT** only when the bug class is one the oracle actually knows how to check **and** the deterministic oracle fires over the retained evidence — otherwise it stays a labelled **lead** — and it packages a confirmed fact into the offline-verifiable certificate.
+
+### The AI agent body — the "brain," under `integration/vigil_integration/`
+The reasoning loop and everything that supports it, built in thirteen numbered stages we call **F0 through F12**. It reuses the *shape* of strong open-source agents but re-plumbs every decision through the sovereign core.
+- **`agent/react.py`** — the core loop: the AI proposes one structured decision; it's parsed *fail-closed* (garbage becomes the safest possible action, never a dangerous one); a claimed exploit becomes a **lead** until the oracle re-fires and makes it a signed **fact**.
+- **`agent/phases.py`** — the attack phase machine (recon → exploitation → post-exploitation) mapped onto WARDEN tiers; moving deeper is one careful step at a time and needs a signed approval.
+- **`agent/cognition.py`** — non-authoritative "cognition governors": stall-and-loop detectors and an honesty auditor that cross-checks the AI's "I made progress" claim against measured reality. They can *re-rank or defer* work — they can **never** decide a finding is true.
+- **`agent/checkpoint.py`** — snapshots the whole run into the signed spine, so a session can be rebuilt and re-verified later; a fact can never be reconstructed without its evidence.
+- **`safety/`** — the untrusted-input boundary: every piece of attacker-controllable text is wrapped in an unpredictable "treat this as inert data" envelope; a non-disableable hard block refuses categorically-forbidden targets (government/military/etc.); a fail-closed parser turns AI output into typed, safe proposals; and an SSRF pre-filter (SSRF = "server-side request forgery," tricking the server into fetching a forbidden address) guards network fetches.
+- **`tools/`** — the governed tool boundary: every tool call is subordinated to the phase → tier → gate chain; an unregistered or out-of-phase tool is denied before the gate is even consulted. Includes a pluggable, least-privilege MCP-server registry (MCP is the emerging standard plug-in interface for AI tools).
+- **`graph/`** — attack-chain graph *memory*: a rebuilt-from-the-record map of what's been confirmed, kept strictly separate (confirmed facts vs. leads) and authorizing *nothing*.
+- **`fireteam/`** — governed parallel specialists: a fan-out of sub-agents, each capped at a safe tier, unable to escalate themselves, with all writes serialized so signatures never corrupt; only oracle-reconfirmed facts survive the merge.
+- **`chainast/`** — safe conversation compaction: it summarizes long histories *append-only* (never deleting originals), preserving the exact text Claude needs, and every summary is labelled a summary, never a fact.
+- **`gauntlet/`** — offensive-LLM testing (the "AI Gauntlet"): drives external red-team tools to probe an AI target; a deterministic result can be re-proven into a fact, but a **judgment made by another AI is *always* a lead** — it can never be laundered into a fact.
+- **`fsjob/`** — a sandboxed file system and job runner with race-free path confinement (no escaping the workspace, even via symlink tricks), reversible signed file changes, and hardened archive extraction.
+- **`remediation/`** — gated auto-fix: nine fixed queries gather ground truth from the graph at zero AI cost; only an oracle-confirmed fact may trigger a fix; the fix pipeline is gated at every step and an approval timeout **auto-rejects** (fails safe).
+- **`observability/`** — emit-only telemetry (activity records) bound to the record's identity; a "Guardrail" entry on every WARDEN block and an "Evaluator" entry on every oracle decision. It reports; it never gates.
+- **`kb/`** — knowledge base + skills + budget: an offensive-corpus search (every result wrapped as untrusted), a markdown skills loader behind a path-traversal guard (grants no privilege), and a spend/rate meter that can only defer.
+
+### The inert seam — how the two halves join safely
+The one channel between the hacking side and your personal side, built so that even a fully-compromised hacking agent can't inject anything trusted into your personal core.
+- **`integration/vigil_integration/offense_worker.py`** — the **keyless** hacking-side worker: it refuses an owner key at construction, so it can only *package* a confirmed finding into a plain, signed data envelope — it can never mint a trusted record.
+- **`integration/vigil_integration/inert_finding.py`** — the receiving-side validator: the envelope is parsed as plain data only (no code execution), size- and shape-bounded, and its multi-signature is checked.
+- **`apps/sigil/sigil/inbound/finding_receiver.py`** — the personal side's ingest point, which loads none of the hacking engine. This is the **two-anchor trust model**: *first* the finding's multi-person governance signature is verified using only the shared core, *then* the record is appended under your owner-signed spine — so authenticity is proven before anything is written.
+
+### The live layer + the `vigil` command — `integration/vigil_integration/live/` & `cli.py`
+This is where the whole system becomes *one running program*.
+- **`live/engine.py`** — the unified, attestation-first loop that wires the brain through *every* subsystem and the *real* gates/oracle/record (no stand-ins). A missing optional service degrades to fail-closed, never to a fake pass.
+- **`live/wiring.py`** — the factory that binds the loop to the real machinery (provisions the signed authority, wires the gate, the oracle, the executor, the record, the spine).
+- **The six live connectors** — the **loopback-pinned tool executor** (`executor.py`, refuses any target that isn't the authorized one before a single byte is sent), the **graph writer** (`graph_neo4j.py`, confirmed-only), the **AI-gauntlet subprocess adapter** (`gauntlet_subproc.py`), the **telemetry exporter** (`otel_export.py`), the **live Claude step** (`think_claude.py`, which can run in keyless "replay" mode with no API key — *the provable layer never depends on the model*), and the **real signed spine** (`spine_vigilcore.py`).
+- **`cli.py`** — the **`vigil`** command: `vigil engage <url>` (run the loop), `vigil ledger who|when` (prove who used it, when), `vigil verify-ledger` (check the chain), `vigil provision` (mint a signed authority).
+
+### The deep-core usage record — `integration/vigil_integration/attestation/`
+The "who used this tool, when, and against what" record, minted *before* anything runs (no attestation → no run). It binds the operator's identity (login name, git name/email, key fingerprint, hostname), a time tied to a never-decreasing counter — a hardware clock when your machine has a secure chip (a TPM), otherwise a software counter — so it can't be back-dated, and the action. This record is itself written into the one spine (so there is a single record, not several). `vigil ledger who|when` replays it; `vigil verify-ledger` proves the chain is intact.
+
+### The Detection Mirror (AEGIS) — `integration/vigil_integration/detection/`
+The defensive twin. For each offensive move, a deterministic detection oracle that *proves*, from the target's own access/auth logs, that such an attack happened — shipped as a re-verifiable certificate, not a mere alert. Every oracle ships a mandatory **benign twin** (a false-positive control that must *not* fire). This closes a self-proving loop: one run produces both the offensive fact *and* the matching detection fact.
+
+### Phase-32 auto-patch — `integration/vigil_integration/autopatch/`
+Takes an oracle-confirmed vulnerability, asks the AI for a minimal code patch, applies it through the gated clone → edit → build → pull-request ladder, and signs "remediated" **only after** the original exploit oracle re-fires against the patched build and goes *silent*. No confirmed fact, no patch; approval timeout auto-rejects; never a blind "commit everything." *(This is the web-finding tier; the deeper binary/memory-safety tier is a future moonshot — see the roadmap.)*
+
+### The offensive engine (CRUCIBLE + AEGIS) — `engine/crucible/`
+The mature prove-don't-guess engine (hundreds of modules). It crawls a web target, attacks each input with real payloads, and only calls something a vulnerability when an oracle fires. It reasons over the proven facts to build attack paths, scores its own confidence, and emits tamper-evident evidence. Driven from the command line via `python3 -m framework.v2 …` with 25+ subcommands (`scan`, `engage`, `verify`, `evidence`, `report`, `intel`, `benchmark`, `console`, and more). It ships safe-by-default (no API key needed for the deterministic parts). Its Claude-operated "senior operator" persona is **OBSIDIAN** (see [`docs/knowledge/constitution-obsidian.md`](docs/knowledge/constitution-obsidian.md)). AEGIS is the same core pointed *inward* as an embeddable AI-attack-detection library for your own app. **Full documentation:** [`engine/crucible/README.md`](engine/crucible/README.md) and [`engine/crucible/HOW-TO-START.md`](engine/crucible/HOW-TO-START.md) — to run it directly against your *own authorized remote* target, use `python3 -m framework.v2 engage …`.
+
+### The personal core (SIGIL) — `apps/sigil/`
+The offense-free, local-first personal assistant. It remembers your entire working history in the signed spine, reasons over it, and acts on your files, terminal, screen, the web, and your own accounts — always WARDEN-gated. It includes:
+- the **Rust WARDEN kernel** (the danger-tier classifier);
+- an **agent mesh** — memory consolidation, a morning brief, a drafts-only comms assistant, a background coder that opens PRs (proposed code changes) but never pushes them, a web researcher that quotes sources word-for-word, a defensive posture scanner for *your own* infrastructure, a files/terminal operator with a plan → preview → approve → execute → roll-back flow, and an owner-consented account manager that never impersonates you;
+- **full-duplex voice** (you can talk and it can talk back, interrupting naturally);
+- **on-device screen/camera perception** and **hand-gesture control**;
+- a **local web cockpit**;
+- **8 read-only memory tools** for Claude Code / Claude Desktop;
+- a **phone companion over WireGuard** (an encrypted link between your phone and desktop) where the phone holds only its own key.
+
+Its README reports phases 0–9 complete and merged (Linux is the proven path). See [`apps/sigil/README.md`](apps/sigil/README.md) and [`apps/sigil/RUNBOOK.md`](apps/sigil/RUNBOOK.md).
+
+### Strix — `vendor/strix/`
+A vendored, Claude-migrated copy of the open-source Strix autonomous-hacker toolkit (Apache-2.0). In VIGIL it's one of the offense-side agents that *proposes* findings — which then have to survive the oracle like everything else. It runs inside the network-isolated sandbox behind the egress gate.
+
+### Offline-verifiable evidence — `transparency.py` & `scitt.py`
+- **The transparency log** re-expresses the signed record as a witnessed, checkpoint-chained log outside parties can audit *without trusting the operator*. Its resistance to showing two different versions to two different people is **conditional**: two-version equivocation is *prevented* only when a strict majority of distinct witnesses co-sign; below that it remains *detectable* but not prevented (and the README, like the code, says so honestly).
+- **SCITT-style / OpenVEX certificates** express a confirmed finding in an offline-verifiable format (an OpenVEX statement + a multi-signature envelope + a cryptographic inclusion proof), with honesty baked in: a confirmed finding is `affected`; an unconfirmed lead is `under_investigation` — never asserted as affected. *(The SCITT-native binary encoding and a registrar receipt are deferred; what's built is the OpenVEX + multi-signature + Merkle-proof form.)*
+
+---
+
+## Feature highlights
+
+**Provability**
+- Oracle-confirmed findings on live web/API targets — the AI never mints a fact.
+- Every finding is a signed, re-runnable certificate anyone can verify offline, forever.
+- Fresh per-run challenges make replayed or hallucinated "proofs" structurally impossible.
+
+**Safety & governance**
+- Four independent authorities (oracle · conjunctive gate · egress gate · signed record) — none of them the AI.
+- WARDEN danger tiers A0–A3, fail-closed to the strictest tier on anything unknown; offense tools never auto-fire.
+- Deny-by-default network egress; a prompt-injected agent can't reach your home network, third parties, or cloud metadata.
+- Multi-person sign-off for irreversible actions; approval timeouts auto-reject.
+
+**Autonomy**
+- A full attestation-first reasoning loop that plans, acts, confirms, remediates, and checkpoints.
+- Parallel specialist sub-agents, safe context compaction, and gated auto-patching of confirmed bugs.
+
+**Defense**
+- The AEGIS Detection Mirror: every offensive move paired with a proven defensive detection + a benign-twin control.
+- An embeddable AI-attack-detection library for your own applications.
+
+**Sovereignty**
+- Runs on your hardware, under your key; the personal core is offense-free by construction.
+- The offense side holds no owner key and is joined to your personal core only by inert signed data.
+
+**Auditability & compliance**
+- An always-on, tamper-evident usage record: who used it, when, against what — tied to a never-decreasing counter (hardware-anchored when a secure chip is present) so it can't be back-dated.
+- A witnessed transparency log and offline-verifiable evidence — the append-only, tamper-evident logging that regimes such as the EU AI Act (Art. 12) call for.
+
+---
+
+## How it works, end to end
+
+The unified engine runs one **attestation-first loop**:
+
+1. **Attest first.** Mint a signed usage record (who/when/what). If it can't be recorded, the engagement is refused — no exceptions.
+2. **Think.** Claude proposes one next action. (With no API key, VIGIL uses a scripted "replay" so the deterministic layer still runs fully — *the provable layer never depends on the model*.)
+3. **Parse fail-closed.** Garbage or a malformed proposal becomes the safest possible action, never a dangerous one.
+4. **Gate.** The proposal clears the conjunctive gate (scope + tier + approval). In-scope offensive tools *queue for the owner's approval* — an autonomous agent can never auto-fire them. Out-of-scope = hard deny.
+5. **Execute.** The approved tool runs against the target through the egress gate; the full output is captured and signed to the spine.
+6. **Confirm.** The oracle re-fires over the raw output. A pass → a **signed FACT**; anything else → an honest **LEAD**.
+7. **Record & mirror.** The fact is projected to the graph, an activity record is emitted, the state is checkpointed, and the **Detection Mirror** proves the attack from the target's own logs.
+8. **Loop** — until the objective is met or the agent completes.
+
+**This actually runs.** Here is real output from a `vigil engage` run against a controlled loopback target (the loopback address `127.0.0.1` is your own computer talking to itself, so no outside system is ever contacted):
+
+```
+$ vigil engage http://127.0.0.1:18080/search?q=1 --approve-offense \
+      --access-log .../access.log --auth-log .../auth.log
+
+attestation      : 2ad99e97f1c69fded…      ← usage record minted BEFORE any action
+iterations       : 3   decisions: use_tool, use_tool, complete
+tool calls       : 2  (ran=2, denied=0)     ← both ran through the REAL gate chain
+FACTS (oracle-confirmed, signed): 1         ← a SQL-injection bug, proven — not the AI's guess
+LEADS (proposals, unconfirmed)  : 0
+detection mirror : facts=7  leads=1         ← 7 signed detection proofs over the target's OWN logs
+checkpoints      : 2                         ← state snapshotted to the signed record
+
+$ vigil ledger who
+  seq=0  os=kali  git=…  host=kali  key=349311e6…  did=engage → http://127.0.0.1:18080/…
+$ vigil verify-ledger
+  ledger: VERIFIED — records link, sign, and never back-date (monotonic, hardware-anchored)
+```
+
+One offensive fact, seven defensive detection facts, a verified who/when record — all signed, all re-checkable offline.
+
+---
+
+## What's live vs. what's still deferred
+
+VIGIL is scrupulous about this (it would be ironic for an anti-hallucination system to overclaim). The live end-to-end validation ran against a **purpose-built loopback target on `127.0.0.1`** — proven on a local target, *not* "proven in the field."
+
+| Status | What |
+|---|---|
+| ✅ **Built & merged (green on `main`)** | The signed core; the egress gate; the two-environment seam; the WARDEN gate; the conjunctive gate; the oracle-confirmation pipeline; challenge oracles; the transparency log; the threshold-destruction gate; the offline-verifiable certificates; the entire F0–F12 agent body. |
+| ✅ **Live end-to-end (on loopback)** | The unified `vigil engage` engine; attestation-first blocking; the real gate (in-scope allowed, out-of-scope hard-denied); no-auto-fire of offensive tools; a real oracle-confirmed SQL-injection fact; the Detection Mirror (7 detection facts); the usage record with its who/when replay; signed spine checkpoints. |
+| 🟡 **LEAD-only *by design*** (an honesty choice, not a gap) | Detection planes for which the logs don't exist (command-and-control, identity graph, cloud, session-phishing); any judgment made by another AI; the cognition governors (they re-rank, never decide truth). |
+| ⏳ **Deferred to further owner infrastructure** (logic + wiring built; live service not yet stood up) | A running graph database / telemetry collector; the live-API-key Claude step (replay is used today); live external red-team tools and full real-tool execution; a cryptographic per-action approval token (today's `--approve-offense` is a standing approval); confidential-computing hardware. |
+| 🌙 **Moonshots (blocked on hardware/research)** | A next-generation agent body; an attested confidential-computing sovereign agent; the binary/memory-safety cyber-reasoning auto-patch tier. *(The **web-finding** auto-patch slice **is** built — only the deeper binary tier is deferred.)* |
+
+The full, itemized breakdown lives in [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) and [`docs/AS-BUILT.md`](docs/AS-BUILT.md).
+
+---
+
+## Setup
+
+> **The single most important fact about this repo:** VIGIL is **not one environment.** The offense-free guarantee is enforced by keeping **two Python environments that never share an interpreter** — a *sovereign* one (personal core, no offensive code even importable) and an *offense* one (the hacking engine, holding no owner key). Building them is one command.
+
+### Prerequisites
+
+| Need | For | Required? |
+|---|---|---|
+| **Linux** | everything (Kali is the reference) | Yes |
+| **Python 3.13** | every component (CI — the automated test system — pins 3.13) | Yes |
+| **Rust toolchain** (`rustc` + `cargo`) | building the WARDEN kernel in the sovereign env | Yes for the personal side |
+| **docker** | optional companion services — "sidecars" — like the graph database or telemetry collector | Optional |
+| **nftables** (+ root) | the full network-namespace gateway test only | Optional |
+| **Kali tools** (`nmap`, `nuclei`, `httpx`, `ffuf`, `sqlmap`, `hydra`) | firing *real* scans (tests use a deterministic stand-in) | Optional |
+| **`ANTHROPIC_API_KEY`** | the live Claude reasoning step (otherwise keyless "replay") | Optional |
+
+### 1. Get the code
+
+```bash
+git clone https://github.com/thuram-nana/vigil-sovereign.git vigil
+cd vigil
+```
+
+### 2. Build the two isolated environments (the canonical path)
+
+```bash
+bash envs/build_envs.sh
+```
+
+This creates `.venv-sovereign` (`vigil_core` + `apps/sigil` + `integration`) and `.venv-offense` (`vigil_core` + `engine/crucible` + `vendor/strix` + `gateway` + `integration`), then **verifies the boundary** — it fails loudly with "SOVEREIGNTY VIOLATION" if the sovereign environment can even *import* the offensive code. (Building the sovereign env compiles the Rust WARDEN kernel, so the Rust toolchain must be present.)
+
+### 3. Build the WARDEN kernel (if you didn't via step 2)
+
+```bash
+# Automatic, via pip (uses setuptools-rust):
+pip install -e apps/sigil
+# …or manually with Cargo:
+cd apps/sigil/kernel && cargo build --release   # → target/release/sigil-kernel
+```
+
+### 4. Run the tests (the exact commands CI uses — all on Python 3.13)
+
+```bash
+# shared signed core
+pip install -e packages/core/vigil_core pytest
+pytest packages/core/vigil_core/tests -q
+
+# the offensive engine core
+pip install -e packages/core/vigil_core "pydantic>=2.10,<3" structlog httpx requests PyYAML \
+  beautifulsoup4 Jinja2 "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
+cd engine/crucible && PYTHONPATH=. pytest framework/v2/evidence framework/v2/verify \
+  framework/v2/authority framework/v2/confidence framework/v2/worldmodel -q ; cd ../..
+
+# the egress gate
+PYTHONPATH=gateway python -m pytest gateway/tests -q
+
+# the fusion body + the LIVE engine validation (two processes — the boundary is real):
+PYTHONPATH=integration:gateway python -m pytest integration/tests \
+  --ignore=integration/tests/test_oracle_adapter.py --ignore=integration/tests/test_engine_live.py -q
+PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
+  integration/tests/test_oracle_adapter.py integration/tests/test_engine_live.py -q
+```
+
+The full, per-component command list is in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+---
+
+## Running it
+
+### 1. Start the controlled target
+
+```bash
+python3 infra/loopback/vulnapp.py --port 18080 --logdir /tmp/vigil-logs
+```
+
+A deliberately-but-safely vulnerable app **hard-pinned to `127.0.0.1`** (your own computer only): fake in-memory data, a decoy for path-traversal, no real files, no shell. It writes `access.log` and `auth.log` — the telemetry the Detection Mirror reads. (Keep the port consistent between this and `vigil engage`.)
+
+### 2. Run the full loop (from the offense environment)
+
+```bash
+. .venv-offense/bin/activate    # the `vigil` command lives here
+
+# (a) mint a signed authority scoping the engagement to 127.0.0.1
+vigil provision --slug loopback --scope 127.0.0.1
+
+# (b) run the attestation-first loop; --approve-offense is YOUR standing human approval
+vigil engage http://127.0.0.1:18080/search?q=1 --approve-offense \
+  --access-log /tmp/vigil-logs/access.log --auth-log /tmp/vigil-logs/auth.log
+
+# (c) prove who used it, when, against what — and verify the chain
+vigil ledger who
+vigil ledger when
+vigil verify-ledger
+```
+
+**Modes:** with no `ANTHROPIC_API_KEY`, engagements run keyless (add `--replay decisions.json` to script the reasoning steps) and still attest first and complete honestly — they never fabricate activity. With a key, the live Claude step drives the loop. Either way, the gates, oracle, egress pin, and record are identical.
+
+### The sandboxed offense topology (for real remote engagements)
+
+The loopback demo above pins to `127.0.0.1` and does **not** need the docker gateway. A real engagement against your *own authorized remote* target should run inside the network-isolated sandbox, brought up with the gateway: `vigil-gateway render-firewall`, `render-compose`, `ensure-networks`, and `serve-proxy`. See [`gateway/README.md`](gateway/README.md) for the full topology, and run the offensive engine directly with `python3 -m framework.v2 engage …` (docs in [`engine/crucible/README.md`](engine/crucible/README.md)). The personal assistant is a separate app — see [`apps/sigil/README.md`](apps/sigil/README.md) and [`apps/sigil/RUNBOOK.md`](apps/sigil/RUNBOOK.md).
+
+---
+
+## Repository layout
+
+```
+vigil/
+├── packages/core/vigil_core/   The shared signed core (hash-chain, canonical JSON, Ed25519, trust root)
+├── apps/sigil/                 SIGIL — the offense-free personal assistant + the Rust WARDEN kernel
+├── engine/crucible/            CRUCIBLE offensive engine + AEGIS defensive dual (framework.v2)
+├── vendor/strix/               Strix — vendored, Claude-migrated autonomous AI-hacker (Apache-2.0)
+├── gateway/                    The host egress firewall + scope-checking proxy (network-layer scope)
+├── integration/               The fusion body (F0–F12) + the live engine + the `vigil` CLI
+│   └── vigil_integration/
+│       ├── agent/  safety/  tools/           the reasoning loop + input safety + governed tools
+│       ├── warden_gate.py  conjunctive_gate.py  destruction_gate.py  challenge_oracle.py
+│       ├── oracle_adapter.py  offense_worker.py  inert_finding.py     the truth bridge + the inert seam
+│       ├── graph/  fireteam/  chainast/  gauntlet/  fsjob/  remediation/  observability/  kb/
+│       ├── attestation/  detection/  autopatch/       the usage record · Detection Mirror · auto-patch
+│       ├── transparency.py  scitt.py                  witnessed log + offline-verifiable certificates
+│       ├── live/   engine.py, wiring.py, + six connectors    the unified engine
+│       └── cli.py                                     the `vigil` command
+├── infra/                      The loopback target + sidecar configs
+├── targets/                    Engagement charters (authorization documents)
+├── envs/                       The two isolated environments + the boundary-verifying build script
+└── docs/                       AS-BUILT · AS-BUILT-LIVE · PLAN · CONTINUATION · architecture · knowledge · research
+```
+
+---
+
+## Security & trust model
+
+- **Two environments, one boundary.** The offense engine and the personal assistant run as separate programs that *cannot load together*. The offense side holds **no owner signing key** (`offense_worker.py`), so it can never forge a trusted record. Confirmed findings cross to your personal record only as **inert, signature-checked data** (`inert_finding.py` → `finding_receiver.py`), re-verified on arrival — never as running code. This is proven by a test, not just asserted.
+- **You own the keys.** The master "owner" key stays on your machine (and never on your phone or in the browser). Governance events, approvals, and kill-switches are all owner-signed and verified against your persisted key, so a forged grant grants nothing.
+- **Fail-closed, everywhere.** Unknown tool → strictest tier. Missing gate → deny. Malformed input → safest action. Approval timeout → reject. A crash in telemetry or the graph can never affect what's true.
+- **Offline-verifiable forever.** Every fact is a certificate a client, auditor, or court can check *with no network and no trust in VIGIL* — the append-only, tamper-evident logging that regimes such as the EU AI Act (Art. 12) call for.
+
+---
+
+## Glossary
+
+- **Spine / record** — the one append-only, hash-chained, Ed25519-signed log of everything; entries are added, never quietly changed.
+- **Oracle** — a small, deterministic (non-AI) program that independently re-proves a suspected vulnerability; the *only* thing that can mint a fact.
+- **LLM** — "large language model," the AI's underlying text-prediction engine (here, Claude).
+- **WARDEN tier (A0–A3)** — the danger level of an action; A0 is harmless, A3 is destructive; anything unknown = A3.
+- **Conjunctive gate** — the checkpoint requiring authority *and* tier approval *and* (for destructive actions) multi-person sign-off, all at once.
+- **Egress gate** — the deny-by-default network firewall + proxy that is the sandbox's only route out.
+- **Packet** — a piece of network data leaving or entering the machine.
+- **FACT vs LEAD** — a FACT is proven and signed; a LEAD is an unproven, honestly-labelled proposal.
+- **Detection Mirror** — the defensive twin that proves an attack from the target's own logs, with a benign-twin control.
+- **Transparency log** — the record re-expressed so outsiders can audit it without trusting the operator.
+- **SCITT / OpenVEX** — standards-based, offline-verifiable formats for signed statements about vulnerabilities.
+- **Attestation (usage record)** — the always-on "who/when/what" entry, minted before anything runs, tied to a never-decreasing (hardware-anchored where available) counter.
+- **Two-environment boundary** — the hard separation between the (keyless) offense side and your offense-free personal core.
+- **Challenge oracle** — a proof that uses a fresh one-time challenge, so replays and hallucinations can't fake a finding.
+- **SSRF** — "server-side request forgery," tricking a server into fetching a forbidden internal address.
+- **MCP** — the emerging standard plug-in interface that lets AI assistants use external tools.
+- **Sidecar** — an optional companion service (e.g. the graph database or the telemetry collector).
+- **Loopback (`127.0.0.1`)** — your own computer talking to itself, so no outside system is contacted.
+- **Non-repudiable** — provable in a way the actor can't later deny.
+- **F0–F12** — the thirteen numbered build stages of the AI agent body.
+- **CI** — "continuous integration," the automated system that builds and tests every change.
+
+---
+
+## Status & roadmap
+
+- **Built & merged:** the sovereign core, the four authorities, the full F0–F12 agent body, the transparency log, and offline-verifiable certificates.
+- **Live-validated on the loopback target:** the unified engine, the usage record, the Detection Mirror (edge + auth planes), and the six live connectors.
+- **Deferred to owner infrastructure:** live graph/telemetry services, the live-key Claude step, live real-tool execution, per-action approval tokens.
+- **Moonshots:** a next-generation agent body, confidential-computing attestation, and the binary/memory-safety cyber-reasoning tier.
+
+See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized status.
+
+---
+
+## License & attribution
+
+VIGIL is a fusion of original work and open-source components, tracked in [`NOTICE`](NOTICE):
+
+- **redamon** (MIT) — the AI reasoning-loop *shape* was reimplemented from it.
+- **Strix** (Apache-2.0) — vendored and migrated to Claude in [`vendor/strix/`](vendor/strix/).
+- **pentagi** — used as *design reference* only (ideas reimplemented, no code vendored).
+
+Component licenses: the gateway and the integration layer are Apache-2.0; see each package's `pyproject.toml`, and [`engine/crucible/LICENSING.md`](engine/crucible/LICENSING.md), for specifics. **Use only against systems you own or are explicitly authorized to test — see the disclaimer at the top.**
+
+---
+
+<div align="center">
+
+**VIGIL** — the AI proposes, the oracle proves, the gates constrain, the signature attests.
+*Nothing else promotes a claim to a fact.*
+
+</div>
