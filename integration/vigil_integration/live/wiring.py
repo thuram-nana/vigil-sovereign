@@ -185,8 +185,12 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     prov = config.provisioned or provision_authority(slug=config.slug, scope=config.scope)
 
     # -- attestation (WS-6): operator identity + signer + durable ledger writer ---------------------
+    # The operator key seals at rest under the offense-worker's own TPM-sealed vault (audit G1) once
+    # provisioned; unprovisioned (default) it is plaintext — unchanged, non-bricking.
+    from vigil_core.vault import Vault
+    op_vault = Vault(base / "vault")
     op_kp = config.operator_keypair or load_or_create_operator_keypair(
-        path=str(base / "operator.key"))
+        path=str(base / "operator.key"), vault=op_vault)
     operator = resolve_operator(keypair=op_kp)
     op_signer = operator_signer(keypair=op_kp)
     ledger_path = str(base / "usage-ledger.jsonl")
