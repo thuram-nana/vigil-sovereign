@@ -1,17 +1,22 @@
-"""SecretStore (Phase 7, WS-D D-ii) — keyring-first secret handling. Reads/writes API keys via the
-OS keyring (macOS Keychain / Windows Credential Manager / libsecret) when the `keyring` package is
-present; otherwise falls back to the plaintext `~/.sigil/sigil.env` that `config._load_env_file`
-already loads. Secrets NEVER enter the append-only spine, a log, or a network payload — this is
-owner-local plumbing that keeps them off the plaintext file and off the wire (WS-D transport carries
-only `{seq,tier,kind}`)."""
+"""SecretStore (Phase 7, WS-D D-ii; hardened in audit G1) — tiered secret handling. Reads/writes API
+keys and service passwords via, in order: the OS keyring (macOS Keychain / Windows Credential Manager /
+libsecret) when the `keyring` package is present; else a **TPM-sealed store** when the owner vault has
+been provisioned (`sigil vault provision`) — an AEAD-sealed JSON blob under SIGIL_HOME, so secrets rest
+as ciphertext, closing the audit's plaintext-at-rest gap; else, only when NEITHER is available, the
+legacy plaintext `~/.sigil/sigil.env` that `config._load_env_file` loads (unchanged, non-bricking).
+Secrets NEVER enter the append-only spine, a log, or a network payload."""
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional
 
 from ..config import SIGIL_HOME
 
 _SERVICE = "sigil"
+# The sealed key-value secret store (one AEAD-sealed JSON blob) + its purpose-binding AEAD context.
+_SEALED_FILE = SIGIL_HOME / "secrets.sealed"
+_SEALED_CONTEXT = b"sigil/secrets.kv"
 
 
 class SecretStore:
@@ -19,12 +24,46 @@ class SecretStore:
         try:
             import keyring
             self._kr = keyring
-        except Exception:  # noqa: BLE001 — no keyring backend → env fallback only
+        except Exception:  # noqa: BLE001 — no keyring backend → sealed/env fallback
             self._kr = None
+
+    # --- the TPM-sealed key-value tier (used only when the owner vault is provisioned) ------------
+
+    @staticmethod
+    def _vault():
+        from .vault import owner_vault
+        return owner_vault()
+
+    def _sealed_available(self) -> bool:
+        try:
+            return self._vault().enabled()
+        except Exception:  # noqa: BLE001 — vault/config not resolvable → treat as unavailable
+            return False
+
+    def _sealed_read_all(self) -> dict:
+        from .vault import VaultLocked
+        try:
+            raw = self._vault().read_text_secret(_SEALED_FILE, context=_SEALED_CONTEXT)
+        except VaultLocked:
+            return {}  # sealed store present but TPM locked → no secrets surfaced (fail-closed)
+        if not raw:
+            return {}
+        try:
+            d = json.loads(raw)
+            return d if isinstance(d, dict) else {}
+        except Exception:  # noqa: BLE001 — a corrupt sealed store yields no secrets, never a crash
+            return {}
+
+    def _sealed_write(self, key: str, value: str) -> None:
+        d = self._sealed_read_all()
+        d[key] = value
+        self._vault().write_text_secret(_SEALED_FILE, json.dumps(d), context=_SEALED_CONTEXT)
 
     @property
     def backend(self) -> str:
-        return "keyring" if self._kr is not None else "envfile"
+        if self._kr is not None:
+            return "keyring"
+        return "sealed" if self._sealed_available() else "envfile"
 
     def get(self, key: str) -> Optional[str]:
         if self._kr is not None:
@@ -34,11 +73,15 @@ class SecretStore:
                     return v
             except Exception:  # noqa: BLE001
                 pass
+        if self._sealed_available():
+            v = self._sealed_read_all().get(key)
+            if v is not None:
+                return v
         return os.environ.get(key)                    # sigil.env is loaded into env at config import
 
     def set(self, key: str, value: str) -> str:
-        """Store a secret. Returns the backend used. Prefers the keyring; falls back to sigil.env
-        (0600). Never writes the value anywhere else."""
+        """Store a secret. Returns the backend used. Prefers the keyring; else the TPM-sealed store when
+        the vault is provisioned (never plaintext); else the legacy sigil.env (0600, unchanged)."""
         if self._kr is not None:
             try:
                 self._kr.set_password(_SERVICE, key, value)
@@ -46,6 +89,10 @@ class SecretStore:
                 return "keyring"
             except Exception:  # noqa: BLE001
                 pass
+        if self._sealed_available():
+            self._sealed_write(key, value)
+            os.environ[key] = value                   # live this process; the at-rest copy is sealed
+            return "sealed"
         self._env_upsert(key, value)
         os.environ[key] = value
         return "envfile"
