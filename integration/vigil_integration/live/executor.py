@@ -68,6 +68,7 @@ from pydantic import BaseModel, Field
 from vigil_gateway.denylist import is_egress_denied
 
 from ..agent.state import Phase
+from ..agent.targets import extract_target
 from ..tools import authorize_tool_call
 from ..tools.mcp_registry import _redact_arg_list, _redact_str
 
@@ -76,9 +77,6 @@ __all__ = ["ExecResult", "ExecRecord", "RunOutcome", "execute", "subprocess_runn
 # Defaults — generous but bounded. A live tool must never hang the loop or fill the spine.
 DEFAULT_TIMEOUT: float = 120.0        # seconds; wall-time budget for the whole subprocess
 DEFAULT_OUTPUT_CAP: int = 1_000_000   # chars of stdout/stderr retained (per stream) before truncation
-
-# The keys under which the LLM's proposed target host/url may appear (mirrors the F3 gate target probe).
-_TARGET_KEYS = ("target", "url", "target_url", "host", "domain")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -274,16 +272,6 @@ class _Pinned:
     path: str            # url path (host-free by urlsplit), may be ""
     query: str           # url query (host-free by urlsplit), may be ""
     raw_host: str        # the original hostname (host-free), for the record/reason only
-
-
-def _extract_target(tool_args: Any) -> str:
-    if not isinstance(tool_args, dict):
-        return ""
-    for k in _TARGET_KEYS:
-        v = tool_args.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
 
 
 def _resolve_loopback(target: str) -> tuple[Optional[_Pinned], str]:
@@ -617,16 +605,19 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
 
     # (1) Loopback pin — resolve the target and refuse anything not IPv4 loopback, BEFORE authorization
     #     and BEFORE any subprocess. A smuggled second host resolves to a non-loopback address and dies here.
-    pinned, why = _resolve_loopback(_extract_target(tool_args))
+    pinned, why = _resolve_loopback(extract_target(tool_args))
     if pinned is None:
         return _deny(name, why)
     disp = _display_target(pinned)
 
     # (2) Authorization — phase→WARDEN tier ∧ the injected conjunctive gate ∧ destructive→m-of-n leg.
     #     Proceed ONLY on allow (a missing/erroring gate, out-of-phase, or an unmet m-of-n all DENY here).
+    #     AUDIT G4: the gate scopes on `disp` (the loopback-RESOLVED target we just pinned), NOT on the
+    #     LLM's proposed tool_args string — the sovereign scope/egress/destruction decision is made
+    #     against the exact host the subprocess will reach.
     verdict = authorize_tool_call(tool_name, tool_args, phase, gate=gate,
                                   view=view if isinstance(view, dict) else {},
-                                  destructive_view=destructive_view, now=now)
+                                  destructive_view=destructive_view, resolved_target=disp, now=now)
     if not getattr(verdict, "allowed", False):
         return _deny(name, f"authorization denied: {getattr(verdict, 'reason', '')}",
                      tier=getattr(verdict, "tier", "A0"),

@@ -314,9 +314,18 @@ def _approval_gate(real_gate: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def _build_oracle(prov: Provisioned) -> Callable[[str, Any], Optional[str]]:
-    """The CRUCIBLE oracle seam. The LLM's inline ``analysis.extracted_info['oracle_context']`` is the
-    RETAINED replayable context the deterministic oracle re-fires over; a signed certificate's finding
-    ref is returned ONLY on a real confirmation (else None ⇒ the claim stays a LEAD)."""
+    """The CRUCIBLE oracle seam. The deterministic oracle re-fires over an ``oracle_context`` and a signed
+    certificate's finding ref is returned ONLY on a real confirmation (else None ⇒ the claim stays a LEAD).
+
+    AUDIT G4 — the sovereign anti-hallucination gate: the context here is the model's own
+    ``analysis.extracted_info['oracle_context']`` — LLM-PROVENANCED — so it is passed with
+    ``provenance="llm"`` and ``confirm_and_certify`` demotes it to a LEAD even when the oracle fires. A
+    crafted-but-firing context therefore CANNOT mint a signed FACT (the exact route this gate closes).
+    Minting a FACT from this seam requires REPRODUCING the finding from the ``raw_output`` argument (the
+    executor-captured, non-LLM tool output) via a class translator, or a scope-gated live re-drive of the
+    target — passed as ``provenance="reproduced"``/``"live_redrive"``. That reproduce-from-raw path is the
+    documented follow-up (see ``oracle_adapter`` module docstring); until it lands this seam yields LEADs,
+    which is the correct fail-closed disposition, not a regression of a sound FACT."""
 
     def oracle(raw_output: str, analysis: Any) -> Optional[str]:
         info = getattr(analysis, "extracted_info", None) or {}
@@ -332,7 +341,10 @@ def _build_oracle(prov: Provisioned) -> Callable[[str, Any], Optional[str]]:
             "oracle_context": octx,
         }
         try:
-            res = confirm_and_certify(finding, engagement_slug=prov.slug, signers=prov.signers)
+            # provenance="llm": the deterministic oracle still runs (the LEAD is honestly labelled with
+            # what fired), but an LLM-emitted context is never signed into a FACT.
+            res = confirm_and_certify(finding, engagement_slug=prov.slug, signers=prov.signers,
+                                      provenance="llm")
         except Exception:  # noqa: BLE001 — an oracle/cert error confirms nothing (fail-closed)
             return None
         return res.finding_ref if getattr(res, "is_fact", False) else None
