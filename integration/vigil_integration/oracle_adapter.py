@@ -16,12 +16,16 @@ responses, probe rounds, timing samples, OOB hits that a real target produced):
      KNOWN oracle-mapped class (``is_known_bug_class`` → in ``BUG_CLASS_ORACLES``). A fire from a
      generic oracle on an unmapped class stays a **labelled lead**, never a signed fact — claiming
      otherwise would be the very hallucination this system exists to kill.
-  3. On a confirmed, oracle-mapped finding, mint a proof-carrying ``EvidenceCertificate`` (binding
-     the ``oracle_context_digest``) and sign it with the governance authorisers (m-of-n). The
+  2b. Provenance gate (audit G4): a signed FACT ALSO requires the ``oracle_context`` to be REPRODUCED
+     from a non-LLM channel (``provenance`` ∈ {``reproduced``, ``live_redrive``}). A context the model
+     emitted (its ``extracted_info``, ``provenance="llm"`` — the default) stays a **labelled lead** even
+     when the oracle fires, because a crafted-but-firing context is an LLM-influenced route to a FACT.
+  3. On a confirmed, oracle-mapped, REPRODUCED finding, mint a proof-carrying ``EvidenceCertificate``
+     (binding the ``oracle_context_digest``) and sign it with the governance authorisers (m-of-n). The
      ``SignedEvidence`` is what later crosses the P5 inert seam to the sovereign spine (P10).
 
-Anything not confirmed, or confirmed-but-unmapped, is returned as a ``lead`` with the reason —
-retained, honest, replayable, but never asserted as a machine-verified fact.
+Anything not confirmed, confirmed-but-unmapped, or confirmed-but-LLM-provenanced is returned as a
+``lead`` with the reason — retained, honest, replayable, but never asserted as a machine-verified fact.
 
 Offense-side: it drives ``framework.v2`` (CRUCIBLE). The ``framework`` imports are LAZY so this
 module stays import-clean and does not break the sovereign env's offense-free boundary (which
@@ -36,9 +40,17 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# Provenance of the oracle_context — WHERE the evidence the oracle re-fires over came from. Only a
+# context REPRODUCED from a non-LLM channel (the executor-captured raw tool output, or a live re-drive of
+# the scope-gated target) may back a signed FACT; a context the LLM emitted (its ``extracted_info``) is a
+# LEAD no matter how confidently the deterministic oracle fires over it — a crafted context that fires is
+# exactly the LLM-influenced route to a FACT this gate exists to close (audit G4).
+_REPRODUCED_PROVENANCE = frozenset({"reproduced", "live_redrive"})
+
+
 @dataclass(frozen=True)
 class AdapterResult:
-    status: str            # "fact" (oracle-confirmed + oracle-mapped + signed) | "lead"
+    status: str            # "fact" (oracle-confirmed + oracle-mapped + reproduced + signed) | "lead"
     reason: str
     bug_class: str
     finding_ref: str
@@ -73,10 +85,20 @@ def confirm_and_certify(
     signers: "list[tuple[str, str]]",
     seq: int = 0,
     verifier: Any = None,
+    provenance: str = "llm",
 ) -> AdapterResult:
-    """Drive CRUCIBLE's oracle over ``finding['oracle_context']`` and, on a confirmed + oracle-
-    mapped finding, mint + sign a proof-carrying certificate. ``signers`` = [(key_id, priv_b64)]
+    """Drive CRUCIBLE's oracle over ``finding['oracle_context']`` and, on a confirmed + oracle-mapped +
+    REPRODUCED finding, mint + sign a proof-carrying certificate. ``signers`` = [(key_id, priv_b64)]
     (governance authorisers). Returns a ``fact`` (with SignedEvidence) or a labelled ``lead``.
+
+    ``provenance`` (audit G4 — the sovereign anti-hallucination gate): WHERE the ``oracle_context`` came
+    from. A signed FACT is minted ONLY when ``provenance`` is a non-LLM channel
+    (``"reproduced"`` = built from the executor-captured raw tool output; ``"live_redrive"`` = re-driven
+    against the scope-gated target). The DEFAULT ``"llm"`` — the context is the model's own
+    ``extracted_info`` — is demoted to a LEAD even if the deterministic oracle fires, because a crafted
+    context that fires is an LLM-influenced route to a FACT. Every caller that cannot prove reproduction
+    from a non-LLM channel gets a LEAD (fail-closed); the deterministic oracle still runs, so the LEAD is
+    honestly labelled with what fired.
     """
     if not signers:
         raise ValueError(
@@ -106,6 +128,20 @@ def confirm_and_certify(
             "lead",
             f"confirmed by {_kind_str(confirmed.confirmed_by)} but {confirmed_class!r} has no deterministic "
             f"oracle mapping — retained as a labelled lead, not a signed fact",
+            confirmed_class, _finding_ref(finding),
+            confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
+        )
+
+    # 2b. sovereign anti-hallucination gate (audit G4) — a signed FACT requires the oracle_context to be
+    #     REPRODUCED from a non-LLM channel. An LLM-provenanced context (the model's own extracted_info)
+    #     that fires is retained as a labelled LEAD, never signed — a crafted-but-firing context must not
+    #     mint a FACT. This mirrors the is_known_bug_class demotion above: demote BEFORE build/sign.
+    if provenance not in _REPRODUCED_PROVENANCE:
+        return AdapterResult(
+            "lead",
+            f"confirmed by {_kind_str(confirmed.confirmed_by)} but the oracle_context is LLM-provenanced "
+            f"({provenance!r}) — a signed FACT requires reproduction from a non-LLM channel (executor-"
+            f"captured raw output / live re-drive); retained as a labelled lead",
             confirmed_class, _finding_ref(finding),
             confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
         )

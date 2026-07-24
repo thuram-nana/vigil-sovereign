@@ -129,17 +129,19 @@ def test_live_run_is_attestation_first_and_ledger_verifies(hermetic_root, tmp_pa
     assert verify_ledger(records, resolve_key=resolver).ok is True
 
 
-def test_live_oracle_mints_the_fact_not_the_llm(hermetic_root, tmp_path):
-    # in-scope tool call whose claim carries a FIRING SQLi context ⇒ the deterministic oracle re-fires
-    # ⇒ a signed FACT. The LLM's say-so alone never sufficed.
+def test_live_llm_crafted_firing_context_stays_a_lead_not_a_fact(hermetic_root, tmp_path):
+    # AUDIT G4 (sovereign invariant): a FIRING SQLi context that arrives via the model's extracted_info is
+    # LLM-PROVENANCED — the deterministic oracle re-fires over it, but it is the model's PROPOSAL, not a
+    # reproduction from a non-LLM channel, so it is retained as a LEAD and NEVER minted into a signed FACT.
+    # A crafted-but-firing context can no longer route to a fact. (Minting requires reproduction from the
+    # executor-captured raw output / a live re-drive — the documented follow-up.)
     engine, prov, cfg = _engine(tmp_path, ReplayThinker([_use_tool(oracle_context=_FIRING_SQLI),
                                                          _complete()]))
     report = engine.engage(LOOPBACK)
     assert any(t.outcome == "ran" for t in report.tool_calls)      # the gate ALLOWED the in-scope call
-    assert report.fact_count == 1
-    fact = report.facts[0]
-    assert fact.status == "fact" and fact.evidence_ref            # signed evidence reference present
-    assert report.checkpoints                                      # state checkpointed to the real spine
+    assert report.fact_count == 0                                  # LLM-provenanced context ⇒ NO signed FACT
+    assert report.leads                                            # retained as a labelled lead
+    assert report.checkpoints                                      # state still checkpointed to the real spine
 
 
 def test_live_nonfiring_context_stays_a_lead(hermetic_root, tmp_path):

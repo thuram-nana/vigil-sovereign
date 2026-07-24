@@ -50,7 +50,10 @@ def _finding(bug_class="sqli", ctx=None):
 def test_confirmed_finding_becomes_a_fact_that_passes_verify_certificate():
     from framework.v2.evidence.certify import verify_certificate
 
-    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS)
+    # provenance="reproduced": the context is the real target's baseline/probe responses (the executor-
+    # captured, non-LLM channel), so a firing + oracle-mapped finding mints a signed FACT (audit G4).
+    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS,
+                              provenance="reproduced")
     assert res.is_fact and res.confirmed_by == "boolean_inference"  # the .value, not the enum repr
     # THE contract: the minted cert survives CRUCIBLE's own layered verifier — authentic + bound +
     # REPRODUCED. This is what the P10 inert seam will re-check; a repr-form confirmed_by fails it.
@@ -86,8 +89,21 @@ def test_malformed_oracle_context_fails_closed():
             {"bug_class": "sqli", "oracle_context": "not-a-dict"}, engagement_slug="acme", signers=SIGNERS)
 
 
+def test_llm_provenanced_context_is_a_lead_even_when_the_oracle_fires():
+    # AUDIT G4: the SAME genuinely-firing context, but declared LLM-provenanced (the default), must NOT
+    # mint a signed FACT — a crafted-but-firing extracted_info is the exact route this gate closes.
+    res_default = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS)
+    assert res_default.status == "lead" and res_default.signed is None
+    assert "LLM-provenanced" in res_default.reason
+    assert res_default.confirmed_by == "boolean_inference"     # the oracle DID fire — honestly labelled
+    res_llm = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS,
+                                  provenance="llm")
+    assert res_llm.status == "lead" and res_llm.signed is None
+
+
 def test_tampering_a_signed_fact_breaks_its_signature():
-    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS)
+    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS,
+                              provenance="reproduced")
     forged = res.signed.certificate.model_copy(update={"bug_class": "rce"})  # relabel after signing
     msg = evidence_signing_bytes(forged.model_dump(mode="json"))
     assert verify_threshold(msg, res.signed.signatures, TRUST).satisfied is False
@@ -102,7 +118,8 @@ def test_certify_to_scitt_mints_an_offline_verifiable_statement_from_a_fact():
     from vigil_integration.oracle_adapter import certify_to_scitt
     from vigil_integration.scitt import StatementLog, verify_receipt, verify_signed_statement
 
-    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS)
+    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS,
+                              provenance="reproduced")
     assert res.is_fact
     log = StatementLog()
     ss, receipt = certify_to_scitt(res, SIGNERS, author="vigil:oracle",

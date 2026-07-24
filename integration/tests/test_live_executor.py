@@ -157,6 +157,48 @@ def test_malformed_or_unresolvable_targets_denied(target):
     assert res.ran is False and not fr.calls
 
 
+# ================================================================================================
+# audit G4 seam #1 — the gate scopes on the EXECUTOR-RESOLVED target, not the LLM's proposed string
+# ================================================================================================
+
+
+def _recording_gate(seen: list):
+    def _g(tool_name, target, destructive):
+        seen.append(target)
+        return SimpleNamespace(outcome="allow", allowed=True, reason="ok")
+    return _g
+
+
+def test_gate_scopes_on_executor_resolved_target_not_llm_string():
+    # the LLM proposes a full URL (scheme + path + query); the executor pins it to host:port. The gate
+    # must be handed the pinned host:port ("127.0.0.1:18080"), NOT the raw LLM url string — proving the
+    # sovereign scope decision is made on the resolved target, not on a string the model controls.
+    seen: list = []
+    res = run_exec("httpx", {"url": "http://127.0.0.1:18080/app?x=1"}, g=_recording_gate(seen))
+    assert res.ran is True
+    assert seen == ["127.0.0.1:18080"]                 # pinned host:port, not "http://127.0.0.1:18080/app?x=1"
+
+
+def test_authorize_denies_empty_resolved_target():
+    # the authoritative caller (executor) only authorizes after a successful loopback pin, so a blank
+    # resolved target means something is wrong → fail-closed DENY, even under an allowing gate.
+    from vigil_integration.tools.governance import authorize_tool_call
+    v = authorize_tool_call("httpx", {"url": "http://127.0.0.1/"}, Phase.INFORMATIONAL,
+                            gate=_recording_gate([]), view=full_view(), destructive_view=dview(),
+                            resolved_target="   ")
+    assert v.outcome == "deny" and not v.allowed
+
+
+def test_authorize_without_resolved_falls_back_to_proposal():
+    # a non-authoritative pre-check (fsjob) passes no resolved_target → the gate sees the proposal string
+    # (it is re-gated authoritatively at execution with the resolved target).
+    from vigil_integration.tools.governance import authorize_tool_call
+    seen: list = []
+    authorize_tool_call("httpx", {"target": "127.0.0.1:5"}, Phase.INFORMATIONAL,
+                        gate=_recording_gate(seen), view=full_view(), destructive_view=dview())
+    assert seen == ["127.0.0.1:5"]
+
+
 def test_unresolvable_host_denied_no_network(monkeypatch):
     def boom(*a, **k):
         raise socket.gaierror("no resolution")

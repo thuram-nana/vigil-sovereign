@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 from ..safety.llm_intake import parse_proposal
 from .phases import can_transition, phase_tier, tool_tier
 from .state import ActionType, AgentState, Finding, LLMDecision, OutputAnalysis, Phase
+from .targets import extract_target
 
 # ---------------------------------------------------------------------------------------------------
 # 1. fail-closed decision parsing
@@ -100,15 +101,10 @@ class EdgeSpec:
 
 
 def _tool_target(tool) -> str:
-    """Best-effort target for a tool call, for the gate/egress check. The tool registry re-derives the
-    authoritative target server-side in F3; this is the proposal."""
-    if tool is None:
-        return ""
-    for key in ("target", "url", "target_url", "host", "domain"):
-        v = tool.tool_args.get(key)
-        if isinstance(v, str) and v:
-            return v
-    return ""
+    """The proposal-triage target for a tool call (the LLM's PROPOSAL). Non-authoritative: the executor
+    re-derives + loopback-pins the authoritative target server-side and the gate scopes on THAT (audit
+    G4). Uses the ONE shared extractor so this path can never drift from the executor/gate on key names."""
+    return extract_target(tool.tool_args) if tool is not None else ""
 
 
 def classify_edge(decision: LLMDecision, phase: Phase) -> EdgeSpec:

@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..agent.phases import tool_tier
 from ..agent.state import Phase
+from ..agent.targets import extract_target
 from .mcp_registry import _is_secret_key, _mask_secret, _redact_arg_list, _redact_str
 
 # Known-dangerous tool NAMES → floor the tier at A3 + require the m-of-n threshold-destruction leg. This
@@ -116,16 +117,10 @@ def tool_call_tier(tool_name: Any, phase: Any, *, destructive: Optional[bool] = 
     return tool_tier(p, destructive=d)
 
 
-def _tool_target(tool_args: Any) -> str:
-    """Best-effort target host/url for the gate/egress check (the LLM's proposal; the executor
-    re-derives the authoritative target server-side in a later slice)."""
-    if not isinstance(tool_args, dict):
-        return ""
-    for key in ("target", "url", "target_url", "host", "domain"):
-        v = tool_args.get(key)
-        if isinstance(v, str) and v:
-            return v
-    return ""
+# NOTE: target extraction lives in the ONE shared helper `agent.targets.extract_target` (audit G4) — the
+# gate no longer keeps its own copy. The AUTHORITATIVE decision uses the executor-RESOLVED target passed
+# as `resolved_target`, not this LLM-proposal string; `extract_target` is only the fallback for a
+# non-authoritative caller that has no resolved target yet (the fsjob pre-check).
 
 
 _MAX_REDACT_DEPTH = 40   # a value nested deeper than this is masked wholesale rather than risking RecursionError
@@ -186,6 +181,7 @@ def authorize_tool_call(
     gate: Optional[Callable[..., Any]] = None,
     view: Any,
     destructive_view: Any = None,
+    resolved_target: Optional[str] = None,
     now: Any = None,
 ) -> ToolCallVerdict:
     """Authorize a single tool call through the sovereign core, fail-closed. Order: (1) the fail-closed
@@ -194,7 +190,17 @@ def authorize_tool_call(
     known-dangerous-name floor raises it further; (3) the injected conjunctive
     ``gate(tool_name, target, destructive)`` — its verdict decides, and any gate error or a missing gate
     is a DENY. A destructive call is flagged ``requires_quorum`` (and the gate is told ``destructive``)
-    so the m-of-n leg is driven. Never raises."""
+    so the m-of-n leg is driven. Never raises.
+
+    ``resolved_target`` (audit G4): the EXECUTOR-RESOLVED target — the loopback-pinned, getaddrinfo-
+    validated host the subprocess will actually reach (``live.executor`` passes ``disp`` here). When
+    supplied, the gate scopes / binds the m-of-n destruction leg on THIS value, NOT on the LLM's proposed
+    ``tool_args`` string — so the CRUCIBLE scope decision is made against ground truth, never against a
+    string the model controls. A caller with no resolved target yet (the fsjob pre-check) omits it and
+    falls back to the proposal string; that path is non-authoritative and is re-gated at execution with
+    the resolved target. An explicitly-empty ``resolved_target`` (the executor supplied one but it is
+    blank) is a DENY — the executor only authorizes after a successful loopback pin, so a blank resolved
+    target means something is wrong."""
     p = _coerce_phase(phase)
     declared = destructive_view.get(tool_name) if isinstance(destructive_view, dict) \
         and isinstance(tool_name, str) else None
@@ -206,7 +212,15 @@ def authorize_tool_call(
                                f"tool {tool_name!r} not permitted in phase {p.value} "
                                "(unregistered or out-of-phase)")
     tier = tool_tier(p, destructive=d)
-    target = _tool_target(tool_args)
+    # AUDIT G4: gate on the executor-resolved target when the authoritative caller supplies one; only a
+    # non-authoritative pre-check (resolved_target is None) falls back to the LLM-proposal string.
+    if resolved_target is not None:
+        if not str(resolved_target).strip():
+            return ToolCallVerdict(False, "deny", tier, d, d,
+                                   "empty executor-resolved target (fail-closed)")
+        target = str(resolved_target).strip()
+    else:
+        target = extract_target(tool_args)
     if gate is None:
         return ToolCallVerdict(False, "deny", tier, d, d,
                                "no conjunctive gate wired — a tool call cannot proceed (fail-closed)")

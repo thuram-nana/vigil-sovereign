@@ -107,6 +107,11 @@ class JobRegistry:
         try:
             # RE-GATE through the identical sovereign boundary a direct tool call uses. This calls
             # is_tool_allowed_in_phase FIRST (out-of-phase ⇒ deny before the gate) then the gate.
+            # This is a PRE-CHECK on the LLM-proposed target (no resolved_target — the target is not
+            # loopback-pinned until execution). It is non-authoritative and does NOT launch the tool.
+            # AUDIT G4 forward-dependency: when a real launcher is added it MUST run the spawned tool
+            # through `live.executor.execute`, which re-gates on the executor-RESOLVED target — never
+            # execute a backgrounded tool on this pre-check alone (it scoped on the LLM string).
             verdict = authorize_tool_call(tool_name, tool_args, phase, gate=gate,
                                           view=self._view, destructive_view=self._dview)
             if not verdict.allowed:
