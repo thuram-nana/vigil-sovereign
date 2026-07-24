@@ -155,7 +155,8 @@ jobs:
               apps/sigil/tests/test_gesture_arm.py \
               apps/sigil/tests/test_spine_envelope.py \
               apps/sigil/tests/test_spine_sealed.py \
-              apps/sigil/tests/test_backup.py -q
+              apps/sigil/tests/test_backup.py \
+              apps/sigil/tests/test_witness_checkpoint.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi
