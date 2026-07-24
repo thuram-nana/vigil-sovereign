@@ -288,6 +288,35 @@ def test_killswitch_rescan_triggers_on_spine_growth():           # tightening #1
         "spine growth (a panic append) invalidates the cache → the halt is detected on the next frame, not after a fixed TTL"
 
 
+# ---- G5: immediate device revocation of an in-flight gesture session ------------------------------
+def test_revoking_the_arming_device_neuters_its_session():       # G5 immediate revocation (integration)
+    s = _store(); _authorize(s); b = RecordingInputBackend(); g = _gate(s, b)
+    g.arm_by_device(_req(ts=time.time()), now=time.time())        # a live device-armed session
+    revoke_device(s, "phone1", DEV.public_key_b64, OWNER)         # owner revokes the arming device
+    v = g.handle(GestureIntent("move", dx=0.5, dy=0.5))           # the next frame re-scans (spine grew)
+    assert not v["injected"] and "revoked" in v["reason"], "a revoked arming device is neutered, injecting nothing"
+    assert g.session is None and b.calls == [], "the session is DISARMED on revocation, not left to run to TTL"
+
+
+def test_revocation_rescan_triggers_on_spine_growth():           # G5 tightening (revocation latency)
+    s = _store(); _authorize(s); b = RecordingInputBackend(); g = _gate(s, b)
+    g.arm_by_device(_req(ts=time.time()), now=time.time())
+    now = time.time()
+    assert g._arming_device_revoked(now) is False, "not revoked initially (fresh scan, device authorized)"
+    revoke_device(s, "phone1", DEV.public_key_b64, OWNER)         # a revoke APPENDS → the spine grows
+    assert g._arming_device_revoked(now + 1.0) is True, \
+        "spine growth (a revoke append) invalidates the cache → revocation is honored on the next frame, not at TTL"
+
+
+def test_owner_armed_session_is_not_device_gated():              # owner arms directly → no device to revoke
+    s = _store(); b = RecordingInputBackend()
+    g = SessionGate(s, b, classifier=FakeCls(), owner_key=OWNER, trusted_pubkey=OP)
+    g.arm(owner_key=OWNER)
+    assert g.session.armed_by_device is None, "an owner-armed session records no arming device"
+    assert g._arming_device_revoked(time.time() + 1.0) is False, "an owner session is never device-revocation-gated"
+    assert g.handle(GestureIntent("move", dx=0.5, dy=0.5))["injected"], "the owner session still injects"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

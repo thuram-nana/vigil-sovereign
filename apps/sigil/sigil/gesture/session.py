@@ -98,6 +98,10 @@ class Session:
     session_id: str
     live: bool = True
     expires_at: float = 0.0            # wallclock deadline — a session is BOUNDED, never indefinite
+    # For a DEVICE-armed session (arm_by_device), the arming device's pubkey. `handle` re-checks that this
+    # key is still owner-authorized every frame (bounded), so an owner `mesh revoke` terminates an in-flight
+    # session immediately — not at TTL. None for an owner-armed session (not device-gated).
+    armed_by_device: Optional[str] = None
 
     def expired(self, now: float) -> bool:
         return self.expires_at > 0.0 and now >= self.expires_at
@@ -114,6 +118,12 @@ class SessionGate:
         self._ks_engaged = False
         self._ks_token: tuple | None = None   # last-scanned spine change token; None forces a fresh check first
         self._ks_checked_at = -1e9
+        # device-revocation rescan cache (mirrors the kill-switch cache) — for a device-armed session, has
+        # the arming device been revoked. `_dev_authorized=True` until the first scan (the device WAS
+        # authorized at arm time); reset on every arm_by_device.
+        self._dev_token: tuple | None = None
+        self._dev_checked_at = -1e9
+        self._dev_authorized = True
 
     def _trusted(self):
         if self._trusted_pubkey is None:
@@ -138,6 +148,29 @@ class SessionGate:
             self._ks_token = token
             self._ks_checked_at = now
         return self._ks_engaged
+
+    def _arming_device_revoked(self, now: float) -> bool:
+        """For a DEVICE-armed session, True once the arming device's key is NO LONGER owner-authorized —
+        so an owner `sigil mesh revoke` terminates an in-flight session within the same ~1-2 frame window
+        as a kill-switch, not at TTL (closing the eventual-revocation gap on the gesture-injection path).
+        Owner-armed sessions (``armed_by_device`` is None) are never device-gated. Bounded by the SAME
+        rotation-aware change-token + rescan floor as the kill-switch: a `device_revoked` record APPENDS →
+        the token moves → the revoke is honored within ~1-2 frames, while a 30fps pure-movement loop
+        appends nothing → the token is unchanged → no re-scan (cheap). Fail-closed: a scan error leaves the
+        cached verdict unchanged (never silently re-authorizes)."""
+        s = self.session
+        if s is None or s.armed_by_device is None:
+            return False
+        token = self.store.change_token()
+        if token != self._dev_token and (now - self._dev_checked_at) >= _KS_MIN_RESCAN:
+            from ..mesh import authorized_devices
+            try:
+                self._dev_authorized = s.armed_by_device in authorized_devices(self.store, self._trusted())
+            except Exception:  # noqa: BLE001 — cannot confirm authorization ⇒ FAIL-CLOSED: treat as revoked
+                self._dev_authorized = False   # a scan failure must never let a possibly-revoked device act
+            self._dev_token = token
+            self._dev_checked_at = now
+        return not self._dev_authorized
 
     def _cls(self):
         if self._classifier is None:
@@ -271,7 +304,11 @@ class SessionGate:
                                    "sig": request.get("sig"), "pubkey": pub, "authorization": "device-signed",
                                    "tier": "A0", "decision": "auto",
                                    "summary": "gesture session ARMED by authorized device (remote)"})
-        self.session = Session(sid, live=True, expires_at=now + ttl)
+        # reset the device-revocation rescan cache for this new session (the device is authorized right
+        # now — we just verified its signature against the authorized set), then record it on the session
+        # so `handle` re-checks its continued authorization every frame.
+        self._dev_token, self._dev_checked_at, self._dev_authorized = None, -1e9, True
+        self.session = Session(sid, live=True, expires_at=now + ttl, armed_by_device=pub)
         return self.session
 
     def _refuse_arm(self, request: dict, reason: str) -> None:
@@ -295,6 +332,12 @@ class SessionGate:
         if self._killswitch_engaged(time.time()):
             self.disarm()
             return {"injected": False, "reason": "kill-switch engaged — session disarmed"}
+        # A revoked arming device neuters its own in-flight session within ~1-2 frames (the 0.05s rescan
+        # floor, bounded exactly like the kill-switch), NOT at TTL — an owner who revokes a lost/
+        # compromised phone stops it almost immediately instead of up to MAX_DEVICE_TTL later.
+        if self._arming_device_revoked(time.time()):
+            self.disarm()
+            return {"injected": False, "reason": "arming device revoked — session disarmed"}
         if self.session is None or not self.session.live:
             return {"injected": False, "reason": "no armed session — injection refused"}
         if self.session.expired(time.time()):             # BLOCK-2: a session is bounded, never indefinite
