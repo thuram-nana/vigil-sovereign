@@ -5,7 +5,6 @@ KERNEL's answer body (the bracketed [T0…]/[WARDEN…] status lines are strippe
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 
 from ..config import kernel_bin as _resolve_kernel_bin
@@ -17,21 +16,30 @@ _log = logging.getLogger(__name__)
 _NO_KERNEL_MSG = ("the SIGIL kernel binary was not found — set SIGIL_KERNEL_BIN, add sigil-kernel "
                   "to PATH, or build kernel/target/release/sigil-kernel.")
 
-
-def _default_bin() -> str:
-    """Resolve the kernel binary via config (env SIGIL_KERNEL_BIN → package-relative build dir →
-    PATH). Kept for `KernelClassifier`, whose doctrine is fail-CLOSED (any error → A3): when the
-    binary is unresolved this returns the bare name so its subprocess ENOENTs into that safe path.
-    `KernelDispatch` instead fails LOUD (see below) rather than run a bare name."""
-    exe = "sigil-kernel.exe" if os.name == "nt" else "sigil-kernel"
-    return _resolve_kernel_bin() or exe
+# spoken/returned when the resolved kernel binary FAILS its owner-signed integrity pin (audit G2) —
+# fail-closed: the binary is NOT run.
+_PIN_FAIL_MSG = ("the SIGIL kernel binary failed its owner-signed integrity pin and was NOT run — "
+                 "re-pin with `sigil kernel pin` if you changed it on purpose.")
 
 
 class KernelDispatch:
     def __init__(self, kernel_bin: str | None = None, timeout: int = 60):
-        # resolve via config; keep None (not a bare name) when unresolved so send() fails LOUD.
-        self.kernel_bin = kernel_bin or _resolve_kernel_bin()
+        # resolve via config; keep None (not a bare name) when unresolved so send() fails LOUD. Only a
+        # None (unset) kernel_bin falls back to the env-resolved path — an explicit '' is honoured as-is
+        # (send() then fails LOUD), so the verified value and the executed value never diverge (symmetry
+        # with KernelClassifier: `'' or _resolve()` would have run the UNVERIFIED env binary).
+        self.kernel_bin = kernel_bin if kernel_bin is not None else _resolve_kernel_bin()
         self.timeout = timeout
+        # G2: verify the resolved binary against the owner-signed pin before it can be `ask`-executed.
+        # A pin mismatch / forged manifest → fail-closed (send() returns the LOUD non-run message, never
+        # runs the binary). An explicit kernel_bin (trusted caller) bypasses the pin.
+        self._pin_blocked = False
+        if kernel_bin is None and self.kernel_bin:
+            from ..governor.integrity import verify_kernel_bin  # lazy: avoids an import cycle
+            verdict = verify_kernel_bin(self.kernel_bin)
+            if not verdict.ok:
+                self._pin_blocked = True
+                _log.error("kernel dispatch refusing to run: %s", verdict.detail)
 
     # exact KERNEL status-line prefixes to strip (so a legitimate answer line that merely starts
     # with '[' is NOT dropped, and a BLOCKED/error is NOT masked as an answer).
@@ -41,6 +49,8 @@ class KernelDispatch:
         text = (text or "").strip()
         if not text:
             return "I didn't catch that."
+        if self._pin_blocked:                         # G2: pin mismatch/forged → never run the binary
+            return _PIN_FAIL_MSG
         if not self.kernel_bin:                       # FAIL LOUD: no bare-name ENOENT, clear message + WARNING log
             _log.warning("kernel dispatch requested but no kernel binary is resolvable")
             return _NO_KERNEL_MSG
