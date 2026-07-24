@@ -704,6 +704,57 @@ def cmd_kernel(a) -> None:
         print(f"config drift  : {warn}")
 
 
+def _backup_passphrase(*, confirm: bool = False) -> str:
+    """The backup passphrase: from env SIGIL_BACKUP_PASSPHRASE (unattended) or an interactive prompt.
+    NEVER echoed, never stored — it is the only key to an off-box backup."""
+    import getpass
+    import os as _os
+    pw = _os.environ.get("SIGIL_BACKUP_PASSPHRASE")
+    if pw:
+        return pw
+    pw = getpass.getpass("backup passphrase: ")
+    if confirm and pw != getpass.getpass("confirm passphrase: "):
+        raise SystemExit("passphrases do not match")
+    return pw
+
+
+def cmd_backup(a) -> None:
+    """Write a portable, passphrase-encrypted OFF-BOX backup of the trust root + spine (audit G3) — the
+    ONLY disaster-recovery path for a TPM-sealed spine (the TPM binds the keys to this box)."""
+    from . import config
+    from .backup import BackupError, create_backup
+    from .governor.identity import ensure_owner_keypair
+    from .platform.vault import owner_vault
+    try:
+        res = create_backup(a.dest, _backup_passphrase(confirm=True), home=config.SIGIL_HOME,
+                            vault=owner_vault(), owner_key=ensure_owner_keypair())
+    except BackupError as e:
+        print(f"!! backup failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"backup written: {res['dest']} ({res['files']} files; owner_key={res['owner_key']}, dek={res['dek']})")
+    print("KEEP THE PASSPHRASE SAFE — it is the ONLY key to this backup (never stored; lose it → unrecoverable).")
+
+
+def cmd_restore(a) -> None:
+    """Restore a `sigil backup` onto a fresh SIGIL_HOME. VERIFIES the manifest owner-signature + every file
+    hash BEFORE writing, and re-verifies the restored spine's chain/binding after; fail-closed on a wrong
+    passphrase or any tamper. (The owner-signed HEAD is confirmed by a follow-up `sigil verify`.)"""
+    from pathlib import Path
+
+    from vigil_core.vault import Vault
+
+    from .backup import BackupError, restore_backup
+    home = Path(a.home)
+    try:
+        res = restore_backup(a.src, home, _backup_passphrase(), vault=Vault(home / "vault"))
+    except BackupError as e:
+        print(f"!! restore failed (nothing trusted): {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"restored to {res['home']} ({res['files']} files; chain verified={res['verified']}).")
+    print(f"next:  SIGIL_HOME={res['home']} sigil verify   # confirms the owner-signed head against the restored key")
+    print(f"then:  SIGIL_HOME={res['home']} sigil vault provision   # re-seals the keys to THIS box's TPM")
+
+
 def main(argv=None) -> None:
     from .obs import configure_logging
     configure_logging()                      # one structured-logging setup at startup (level from SIGIL_LOG_LEVEL)
@@ -716,6 +767,13 @@ def main(argv=None) -> None:
     pkern = sub.add_parser("kernel", help="WARDEN kernel-binary integrity pin (audit G2): status | pin")
     pkern.add_argument("kernel_cmd", choices=["status", "pin"], nargs="?", default="status")
     pkern.set_defaults(fn=cmd_kernel)
+    pbak = sub.add_parser("backup", help="portable, passphrase-encrypted off-box backup of the trust root + spine (audit G3)")
+    pbak.add_argument("dest", help="destination file for the encrypted backup")
+    pbak.set_defaults(fn=cmd_backup)
+    pres = sub.add_parser("restore", help="restore a `sigil backup` onto a fresh SIGIL_HOME (verifies before writing)")
+    pres.add_argument("src", help="the encrypted backup file")
+    pres.add_argument("home", help="a FRESH SIGIL_HOME dir to restore into")
+    pres.set_defaults(fn=cmd_restore)
     pi = sub.add_parser("ingest")
     pi.add_argument("--reset", action="store_true", help="clear spine+cursor+vectors and rebuild")
     pi.add_argument("--docs", action="store_true", help="also ingest curated memory/*.md")
