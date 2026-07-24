@@ -10,7 +10,6 @@ import shutil
 import pytest
 
 from vigil_integration.warden_gate import (
-    ToolDecision,
     WardenDenied,
     WardenGateHooks,
     decide_tool,
@@ -102,3 +101,14 @@ def test_real_kernel_classifies_exec_high_and_read_low():
     assert classify("http.get") in ("A0", "A1")      # read-verb -> low (that's why we floor)
     # and the gate floors the low one up to queue
     assert decide_tool("http.get", classify=classify).outcome == "queue"
+
+
+def test_unresolved_kernel_fails_closed_without_bare_name_exec(monkeypatch):
+    # PATH-plant hardening: with no explicit kernel_bin and none on PATH, the classifier must fail-closed
+    # to A3 WITHOUT exec'ing a bare 'sigil-kernel' (which would resolve an attacker-planted PATH binary).
+    import vigil_integration.warden_gate as wg
+    monkeypatch.setattr(wg.shutil, "which", lambda _n: None)   # nothing on PATH
+    monkeypatch.setattr(wg.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not exec a bare name")))
+    classify = kernel_classifier()                              # kernel_bin=None, unresolved
+    assert classify("exec_command") == "A3"                    # fail-closed, no subprocess

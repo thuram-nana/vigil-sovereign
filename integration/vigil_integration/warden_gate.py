@@ -105,16 +105,27 @@ def decide_tool(
 def kernel_classifier(kernel_bin: str | None = None, *, timeout: float = 15.0) -> Classifier:
     """A classifier backed by the ``sigil-kernel classify`` CLI (env-agnostic subprocess).
 
+    NOTE: this is the OPTIONAL real-kernel classifier. The LIVE offense gate wires the pure in-process
+    ``live.wiring.default_classify`` (no subprocess), so this factory is exercised only when a caller
+    explicitly opts into the Rust kernel. It stays import-clean (no sigil / offense import) by design.
+
     Returns a function name->tier-string. Fail-closed: ANY failure (missing binary, timeout,
     non-zero exit, unparseable output, unknown tier) yields "A3". Results are cached by name
     (classify is pure/deterministic) so a hook gating many tools does not re-shell per call.
-    """
-    resolved = kernel_bin or shutil.which("sigil-kernel") or "sigil-kernel"
+
+    An UNRESOLVED binary (no explicit ``kernel_bin`` and none on PATH) fail-closes to A3 WITHOUT executing
+    a bare ``sigil-kernel`` name — a bare-name exec would resolve via PATH at call time, letting an attacker
+    who plants a ``sigil-kernel`` on PATH control tier decisions (the same verify≠exec footgun the sigil
+    side's kernel pin closes). Verifying the binary's owner-signed pin here is out of scope until this
+    path is wired live (it would need the owner pubkey + manifest plumbed cross-env)."""
+    resolved = kernel_bin or shutil.which("sigil-kernel")   # None if unresolved — NO bare-name fallback
     cache: dict[str, str] = {}
 
     def classify(name: str) -> str:
         if name in cache:
             return cache[name]
+        if not resolved:
+            return "A3"   # unresolved → fail-closed; never bare-name-exec an attacker-planted PATH binary
         tier = "A3"
         try:
             proc = subprocess.run(
