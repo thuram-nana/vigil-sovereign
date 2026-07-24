@@ -19,6 +19,7 @@ _MAX_HEAD_SCHEMA = 2   # head schema versions this build understands; a higher o
 from ..config import HEAD_PATH, KEYS_DIR, OWNER_KEY_ID, SCOPE
 from ..reuse import (
     AuthorizerKey,
+    KeyPair,
     SignedChainHead,
     TrustRoot,
     generate_keypair,
@@ -26,7 +27,15 @@ from ..reuse import (
     verify_head,
 )
 from .atomicio import atomic_write_text
-from .floor import Floor, FloorDowngrade, advance_floor, check_floor, floor_lock, load_floor
+from .floor import (
+    Floor,
+    FloorDowngrade,
+    advance_floor,
+    check_floor,
+    floor_lock,
+    load_floor,
+    verify_floor_signature,
+)
 from .store import SpineStore
 
 _PRIV = KEYS_DIR / "owner.priv"
@@ -81,7 +90,8 @@ def checkpoint(store: SpineStore | None = None, *, force: bool = False) -> Signe
     re-anchors a deliberately SHORTER spine — it skips the monotonic head guard; the caller then
     force-lowers the floor."""
     store = store or SpineStore()
-    priv, _ = _owner_keys()
+    priv, pub = _owner_keys()
+    owner_kp = KeyPair(public_key_b64=pub, private_key_b64=priv)   # G2: sign the durable floor too
     head = sign_head(store.entries(), engagement_slug=SCOPE, signers=[(OWNER_KEY_ID, priv)])
     with floor_lock():                                      # serialize head+floor commit across all callers
         if not force:
@@ -96,7 +106,7 @@ def checkpoint(store: SpineStore | None = None, *, force: bool = False) -> Signe
         # BEST-EFFORT so a floor problem never bricks signing (consolidate + warden-anchor route here too),
         # AND a not-advanced floor only ever REJECTS MORE — never a false-CLEAN — so warning is fail-SAFE.
         try:
-            advance_floor(head, _locked=True)
+            advance_floor(head, owner_key=owner_kp, _locked=True)   # G2: owner-signed floor
         except FloorDowngrade as e:                         # the INTENDED downward-refusal (e.g. post-reset) — benign
             import sys
             print(f"warning: durable anti-rollback floor not advanced ({e}); run `sigil floor reset` after "
@@ -146,6 +156,13 @@ def classify_head(head: SignedChainHead, entries: list, tr: TrustRoot,
     # the UNSIGNED floor.json: the local verify reads the floor fresh from that same attacker-controlled
     # disk, rolling head.json and floor.json back together (see floor.py HONEST LIMIT). No floor -> pass
     # (byte-identical to pre-floor).
+    # G2: the floor's OWN owner-signature, verified against the SAME trust anchor (`tr`) that just verified
+    # the head — a tampered SIGNED floor (content rewritten under a stale sig, or signed by a non-owner key)
+    # is TAMPERING; an UNSIGNED legacy floor is accepted (warned once) so pre-signing spines still verify.
+    if floor is not None:
+        ok_sig, sig_msg = verify_floor_signature(floor, {a.public_key_b64 for a in tr.authorizers})
+        if not ok_sig:
+            return False, f"TAMPERING: {sig_msg}"
     ok_floor, floor_msg = check_floor(head, floor)
     if not ok_floor:
         return False, f"TAMPERING: {floor_msg}"

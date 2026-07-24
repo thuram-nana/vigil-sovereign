@@ -559,6 +559,7 @@ def cmd_floor(a) -> None:
     """The durable external anti-rollback floor (hard-prune C1). `status` prints it (read-only). `reset`
     DELIBERATELY re-seeds it downward to the current spine — the only path that may lower it — for a
     legitimate reset/restore; owner-key-gated (re-signs the spine) + requires --yes."""
+    from .governor.identity import owner_keypair
     from .spine.floor import load_floor, reset_floor
     if a.action == "status":
         try:
@@ -579,7 +580,10 @@ def cmd_floor(a) -> None:
             sys.exit(2)
         store = SpineStore()
         head = checkpoint(store, force=True)  # owner-key-gated: re-sign the current spine (force: allow a
-        fl = reset_floor(head)                # SHORTER head), then force the floor down to that fresh head.
+        # SHORTER head), then force the floor down to that fresh head — OWNER-signed (audit G2) so the
+        # re-seeded floor is not left unsigned. owner_keypair() is None only if the vault is locked → the
+        # floor is written unsigned (non-bricking), re-signed on the next checkpoint.
+        fl = reset_floor(head, owner_key=owner_keypair())
         print(f"durable floor RE-SEEDED to current head: last_seq={fl.last_seq} base_seq={fl.base_seq} "
               f"base_count={fl.base_count}")
 
@@ -620,6 +624,14 @@ def cmd_doctor(a) -> None:
     from .platform.vault import owner_vault
     _v = owner_vault()
     print(f"  [{'OK' if _v.enabled() else '**'}] {'vault':16} {_v.status()}")
+    # kernel-binary integrity pin (audit G2). '**' unpinned is a WARNING (opt-in), '!!' is fail-closed
+    # (a swapped binary / forged manifest — the kernel will NOT run). Any config drift is advisory.
+    from .governor.integrity import config_drift, kernel_pin_status
+    _mark, _detail = kernel_pin_status()
+    print(f"  [{_mark}] {'kernel_pin':16} {_detail}")
+    ok_all = ok_all and _mark != "!!"          # an active kernel tamper (!!) fails doctor; '**' (unpinned) does not
+    for _warn in config_drift():
+        print(f"  [**] {'config_drift':16} {_warn}")
     print("\neffective config (secrets redacted):")
     for k, v in effective_config().items():
         print(f"  {k:18} {v}")
@@ -651,6 +663,47 @@ def cmd_vault(a) -> None:
         print(f"vault: {v.status()}")
 
 
+def cmd_kernel(a) -> None:
+    """WARDEN kernel-binary integrity pin (audit G2): `pin` owner-signs the resolved binary's content
+    hash (+ scope / owner_key_id) into the security manifest; `status` reports the current verdict."""
+    import sys as _sys
+
+    from . import config
+    from .governor.identity import ensure_owner_keypair, owner_keypair, owner_pubkey
+    from .governor.integrity import build_manifest, config_drift, kernel_pin_status, write_manifest
+
+    sub = getattr(a, "kernel_cmd", "status")
+    if sub == "pin":
+        kb = config.kernel_bin()
+        if not kb:
+            print("!! no kernel binary resolved — set SIGIL_KERNEL_BIN, add sigil-kernel to PATH, or "
+                  "build kernel/target/release/sigil-kernel, then re-run `sigil kernel pin`.")
+            _sys.exit(1)
+        kp = owner_keypair()
+        if kp is None:
+            # An existing pubkey with no usable private half = a locked vault → fail-closed, do NOT mint
+            # a new owner identity over the old one. Only a genuine first run (no pubkey) generates one.
+            if owner_pubkey() is not None:
+                print("!! the owner key is present but its private half is unavailable (locked vault) — "
+                      "run `sigil vault provision`/unlock first; refusing to mint a new owner identity.")
+                _sys.exit(1)
+            kp = ensure_owner_keypair()
+        manifest = build_manifest(kb, kp, scope=config.SCOPE, owner_key_id=config.OWNER_KEY_ID)
+        write_manifest(manifest)
+        print(f"pinned kernel binary {kb}")
+        print(f"  sha256      {manifest['kernel_sha256']}")
+        print(f"  scope       {manifest['scope']}")
+        print(f"  owner_key_id {manifest['owner_key_id']}")
+        print("The kernel now fails CLOSED (WARDEN classify → A3) if the binary or manifest is tampered.")
+        return
+    # status
+    mark, detail = kernel_pin_status()
+    print(f"kernel binary : {config.kernel_bin() or '(unresolved)'}")
+    print(f"pin status    : [{mark}] {detail}")
+    for warn in config_drift():
+        print(f"config drift  : {warn}")
+
+
 def main(argv=None) -> None:
     from .obs import configure_logging
     configure_logging()                      # one structured-logging setup at startup (level from SIGIL_LOG_LEVEL)
@@ -660,6 +713,9 @@ def main(argv=None) -> None:
     pvault = sub.add_parser("vault", help="at-rest sealing of the trust root (TPM-sealed KEK): status | provision")
     pvault.add_argument("vault_cmd", choices=["status", "provision"], nargs="?", default="status")
     pvault.set_defaults(fn=cmd_vault)
+    pkern = sub.add_parser("kernel", help="WARDEN kernel-binary integrity pin (audit G2): status | pin")
+    pkern.add_argument("kernel_cmd", choices=["status", "pin"], nargs="?", default="status")
+    pkern.set_defaults(fn=cmd_kernel)
     pi = sub.add_parser("ingest")
     pi.add_argument("--reset", action="store_true", help="clear spine+cursor+vectors and rebuild")
     pi.add_argument("--docs", action="store_true", help="also ingest curated memory/*.md")
