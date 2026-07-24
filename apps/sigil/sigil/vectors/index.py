@@ -146,6 +146,7 @@ class VectorIndex:
             return len(points)
 
         for r in store.iter_records(since_seq=since_seq):
+            r = store.decrypted(r)   # G1 slice-4: plaintext content for embedding (locked vault raises → no garbage)
             if r.kind not in EMBEDDABLE_KINDS or not r.text().strip():
                 continue
             buf.append(r)

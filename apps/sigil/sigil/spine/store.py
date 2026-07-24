@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 from ..config import SCOPE, SPINE_PATH, SPINE_SEG_MAX_BYTES, SPINE_SEG_MAX_RECORDS
 from ..reuse import ChainEntry, append_entry, build_chain, digest_payload, verify_chain
+from . import envelope
 from .atomicio import atomic_write_text, fsync_dir
 from .manifest import (
     Manifest,
@@ -39,6 +40,8 @@ except ImportError:  # pragma: no cover — non-POSIX
     fcntl = None  # type: ignore[assignment]
 
 _log = logging.getLogger(__name__)
+
+_UNSET = object()   # sentinel: the spine-payload DEK has not been loaded yet (distinct from a cached None)
 
 
 class SpineError(Exception):
@@ -193,6 +196,43 @@ class SpineStore:
         self._index_epoch: tuple | None = None           # change_token when the index was last reconciled
         self._max_seq = -1
         self._last: ChainEntry | None = self._read_last_entry()
+        # spine-payload DEK (G1 slice-4), loaded lazily on the first content append / decrypted read.
+        # `_UNSET` until first use; then the 32-byte DEK, or None when the vault is not provisioned
+        # (opt-in passthrough → plaintext, byte-identical to today).
+        self._dek_cache: Any = _UNSET
+
+    # --- payload field encryption (G1 slice-4) ------------------------------------
+    def _spine_dek(self, *, create: bool) -> "bytes | None":
+        """The cached spine-payload DEK. None when the vault is not enabled (payloads stay plaintext).
+        `create=True` (write path, content records only) mints it once; `create=False` (read path) never
+        mints. A locked vault raises `VaultLocked` (fail-closed) — reached only for a content-bearing
+        record, so a pure-metadata / signal append (which never encrypts) is never blocked."""
+        if self._dek_cache is _UNSET or self._dek_cache is None:
+            # re-resolve while None so a vault provisioned mid-process, or a DEK minted by a prior write,
+            # is picked up; a real DEK is cached and never re-read (no per-append TPM unseal).
+            from ..platform.vault import owner_vault
+            self._dek_cache = envelope.load_or_create_dek(owner_vault(), create=create)
+        return self._dek_cache
+
+    def decrypted(self, r: SpineRecord) -> SpineRecord:
+        """Return `r` with its sealed CONTENT FIELDS decrypted — the read PROJECTION for content consumers
+        (search / index / graph / consolidate / display). A record with no sealed field passes through
+        unchanged. A sealed field that cannot be opened raises `SpinePayloadLocked` / `VaultLocked`
+        (fail-closed); the KEYLESS integrity path (`iter_records`/`verify`/`entries`) never calls this — it
+        reads the stored (ciphertext) form, so the chain verifies without the DEK."""
+        import dataclasses
+        plain = envelope.open_payload(self._spine_dek(create=False), r.payload, scope=r.scope, seq=r.seq)
+        return r if plain is r.payload else dataclasses.replace(r, payload=plain)
+
+    def decrypted_or_raw(self, r: SpineRecord) -> SpineRecord:
+        """`decrypted(r)` for a DISPLAY path that must not raise: on a locked / unopenable vault it returns
+        the RAW (sealed) record so the feed degrades to ciphertext rather than crashing. FUNCTIONAL
+        readers (search/index/graph/consolidate/recall) use `decrypted()` instead — they MUST fail closed,
+        never process ciphertext."""
+        try:
+            return self.decrypted(r)
+        except Exception:  # noqa: BLE001 — locked/unopenable vault → show the sealed form (display only)
+            return r
 
     # --- segment layout / manifest ------------------------------------------------
     def _resolve_active_path(self) -> Path:
@@ -650,11 +690,6 @@ class SpineStore:
         parent_id: int | None = None, supersedes_id: int | None = None,
         ts: str | None = None,
     ) -> int:
-        content = {
-            "scope": SCOPE, "kind": kind, "source": source, "actor": actor,
-            "payload": payload, "parent_id": parent_id, "supersedes_id": supersedes_id,
-        }
-        cert_digest = digest_payload(content)  # wallclock-free
         # Serialize the whole read-tip → write so concurrent writers (threaded bridge server, gesture
         # daemon) can't both fork off a stale tip and break the chain. The in-process RLock is keyed on
         # the STABLE `self.path` (unchanged), so the check-then-append gate `envelope.consume` builds on
@@ -678,14 +713,31 @@ class SpineStore:
                         f.truncate(clean_end)
                         _log.warning("spine: truncated a %d-byte torn tail (interrupted write) before append (%s)",
                                      pre_size - clean_end, active)
+                    # Derive the predecessor + seq BEFORE sealing (the field AEAD binds seq) — the SAME chain
+                    # math as append_entry/build_chain, computed one step earlier so seq is known.
                     if last is not None:
-                        entry = append_entry([last], cert_digest)          # extend the active segment's tip
+                        pred, seq = last, last.seq + 1
                     else:
                         # active is EMPTY: seed from the prior sealed segment's boundary if this is a rotated
                         # (non-genesis) segment, else start the genesis chain at seq 0. Never build_chain a
                         # non-genesis segment from GENESIS (that would fork the chain at seq 0 — invariant 13).
                         seam = self._seam_tip_for_active()
-                        entry = append_entry([seam], cert_digest) if seam is not None else build_chain([cert_digest])[0]
+                        pred, seq = (seam, seam.seq + 1) if seam is not None else (None, 0)
+                    # G1 slice-4: seal the CONTENT FIELDS at rest under the spine DEK — metadata (incl.
+                    # signal/decision/usage/promotion_key) stays PLAINTEXT so keyless folds work. The DEK is
+                    # loaded ONLY when the record actually carries a content field, so a pure-metadata /
+                    # signal append is never blocked by a locked vault. `cert_digest` is then over the STORED
+                    # form (metadata + ciphertext), so a keyless verifier still verifies the chain.
+                    dek = self._spine_dek(create=True) if envelope.has_content(payload) else None
+                    stored_payload = envelope.seal_payload(dek, payload, scope=SCOPE, seq=seq)
+                    content = {
+                        "scope": SCOPE, "kind": kind, "source": source, "actor": actor,
+                        "payload": stored_payload, "parent_id": parent_id, "supersedes_id": supersedes_id,
+                    }
+                    cert_digest = digest_payload(content)  # over the STORED (content fields sealed) payload
+                    entry = (append_entry([pred], cert_digest) if pred is not None
+                             else build_chain([cert_digest])[0])
+                    # entry.seq == seq by construction (append_entry([pred]).seq == pred.seq+1; genesis == 0).
                     record = {
                         "seq": entry.seq, **content, "ts": ts or now_iso(),
                         "cert_digest": cert_digest, "prev_hash": entry.prev_hash, "entry_hash": entry.entry_hash,

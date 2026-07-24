@@ -53,6 +53,7 @@ def _accumulate(store: SpineStore):
     commits: dict[str, dict] = {}
     max_seq = -1
     for r in store.iter_records():
+        r = store.decrypted(r)   # G1 slice-4: plaintext content for the graph (locked vault raises before the destructive swap)
         max_seq = r.seq
         proj = normalize_project(r.payload.get("project") or "")
         k = r.kind

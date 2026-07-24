@@ -77,10 +77,13 @@ class Perceptor(Agent):
         one-line summary NEVER serves a bare VLM reading as fact (red-pen RP-PERCEPT-01)."""
         grounded, leads = corroborate(reading, frame.text)
         captured = frame.text.strip()
+        # `summary` is a plaintext label (the C18 audit reads it keyless) — it must NOT carry the raw
+        # screen content (audit G1 slice-4): a NON-content descriptor here; the OCR / VLM reading live only
+        # in the SEALED `text`/`captured_text`/`vision_reading_advisory` fields.
         if captured:
-            summary = captured[:120]
+            summary = f"screen perceived ({len(captured)} chars OCR, {len(grounded)} grounded)"
         elif reading.strip():
-            summary = f"(unverified {source_model} reading) {reading.strip()[:100]}"
+            summary = f"({frame.kind} image — unverified {source_model} reading, no OCR)"
         else:
             summary = f"({frame.kind} image, no text)"
         payload = {

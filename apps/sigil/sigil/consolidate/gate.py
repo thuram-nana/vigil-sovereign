@@ -91,6 +91,8 @@ def admit(cand: CandidateFact, window_seqs: set[int], store: SpineStore) -> Gate
         qn = _norm(qq)
         for s in cand.source_seqs:
             rec = store.get(s)
+            if rec is not None:
+                rec = store.decrypted(rec)   # G1 slice-4: ground against PLAINTEXT content
             if rec is not None and s not in verified and qn in _norm(rec.text()):
                 verified.add(s)
                 spans.append(_real_span(qq, rec.text()) or qq)

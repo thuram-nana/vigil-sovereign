@@ -90,6 +90,7 @@ def episodic_range(start_seq: int = 0, end_seq: int | None = None,
             break
         if kind and r.kind != kind:
             continue
+        r = store.decrypted_or_raw(r)               # G1 slice-4: plaintext content for the episodic display
         out.append({
             "seq": r.seq, "kind": r.kind, "source": r.source, "actor": r.actor,
             "when": r.ts, "session": r.payload.get("session_id"), "project": r.payload.get("project"),

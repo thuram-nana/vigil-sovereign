@@ -84,8 +84,9 @@ class SpineTailer:
                 reason = f"linkage break at seq {r.seq}: prev_hash != last emitted entry_hash (rewind/fork/gap)"
             else:
                 ok = atom_ok
-            out.append(_shape(r, integrity_ok=ok, integrity_reason=reason,
-                              anchored=(r.seq <= self._signed_last_seq)))
+            # verify_record ran over the RAW (stored) record above; decrypt only for the DISPLAY text.
+            out.append(_shape(self.store.decrypted_or_raw(r), integrity_ok=ok, integrity_reason=reason,
+                              anchored=(r.seq <= self._signed_last_seq)))   # G1 slice-4: plaintext for display
             self.cursor = r.seq
             self._last_hash = r.entry_hash
         return out

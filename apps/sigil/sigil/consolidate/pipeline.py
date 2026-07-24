@@ -70,8 +70,8 @@ def run_consolidation(provider: ExtractionProvider | None = None, *, store: Spin
     provider = provider or HeuristicProvider()
     since = since_seq if since_seq is not None else _load_cursor()
     head_before = store.next_seq - 1                       # never feed our own promotions
-    window = [r for r in store.iter_records(since_seq=since)
-              if r.seq <= head_before and r.kind in _FEED_KINDS]
+    window = [store.decrypted(r) for r in store.iter_records(since_seq=since)     # G1 slice-4: extract facts
+              if r.seq <= head_before and r.kind in _FEED_KINDS]                  # from PLAINTEXT content
 
     admitted = []
     for batch in _chunks(window, batch_size):
