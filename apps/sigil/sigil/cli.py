@@ -755,6 +755,178 @@ def cmd_restore(a) -> None:
     print(f"then:  SIGIL_HOME={res['home']} sigil vault provision   # re-seals the keys to THIS box's TPM")
 
 
+def _witness_ctx():
+    """Resolve the config-bound witness inputs (the CLI is the sole config boundary; witness.py is
+    config-free). Returns (W, config, roster_path, tip_path, owner_pub)."""
+    from . import config
+    from .governor.identity import owner_pubkey
+    from .spine import witness as W
+    pub = owner_pubkey()
+    if not pub:
+        print("!! no owner key yet — run `sigil sign` first to establish the trust root", file=sys.stderr)
+        sys.exit(1)
+    roster_path = config.SIGIL_HOME / "witness.trust.json"
+    tip_path = config.HEAD_PATH.parent / "witness-tip.json"
+    return W, config, roster_path, tip_path, pub
+
+
+def _witness_trust_root(W, config, roster_path, owner_pub):
+    roster = W.load_roster(roster_path, owner_pub=owner_pub, scope=config.SCOPE)
+    return roster, W.witness_trust_root(roster, owner_pub=owner_pub, owner_key_id=config.OWNER_KEY_ID)
+
+
+def cmd_checkpoint(a) -> None:
+    """Witnessed anti-rollback checkpoints (audit G3(b)). `emit` produces a portable, witness-co-signed
+    checkpoint of the current head to RETAIN OFF-BOX; `verify --external` proves the current head is an
+    append-only extension of a retained checkpoint (the anti-rollback the local floor cannot give); `cosign`
+    lets an INDEPENDENT witness add its signature on its own box; `witness` manages the trusted set."""
+    from pathlib import Path
+
+    from vigil_integration.transparency import Witness
+
+    from .spine.checkpoint import _read_head_on_disk
+    try:
+        W, config, roster_path, tip_path, owner_pub = _witness_ctx()
+    except SystemExit:
+        raise
+
+    if a.action == "emit":
+        from .governor.identity import owner_keypair
+        head = _read_head_on_disk()
+        if head is None:
+            print("!! no signed spine head — run `sigil sign` first", file=sys.stderr)
+            sys.exit(1)
+        kp = owner_keypair()
+        if kp is None:
+            print("!! no owner key to co-sign with — run `sigil sign` first", file=sys.stderr)
+            sys.exit(1)
+        try:
+            wc = W.emit_checkpoint(head, [Witness(config.OWNER_KEY_ID, kp.private_key_b64)],
+                                   tip_path=tip_path, scope=config.SCOPE)
+        except W.WitnessError as e:
+            print(f"!! emit failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        env = W.dump_witnessed(wc, scope=config.SCOPE)
+        if a.out == "-":
+            print(env)
+        else:
+            out = Path(a.out) if a.out else (config.HEAD_PATH.parent / "checkpoint.witnessed.json")
+            out.write_text(env + "\n")
+            print(f"witnessed checkpoint written: {out} "
+                  f"(count {wc.checkpoint.entry_count}, {len(wc.witness_signatures)} witness sig(s))")
+            print("RETAIN THIS OFF-BOX — a USB stick, another machine, a remote commit, or the paired device.")
+            print("A copy kept only here is rolled back WITH the spine; only an off-box copy is a real anchor.")
+        try:
+            _roster, tr = _witness_trust_root(W, config, roster_path, owner_pub)
+            print(f"guarantee: {W.guarantee_label(tr)}")
+        except W.WitnessError as e:
+            print(f"guarantee: (witness roster error: {e})", file=sys.stderr)
+    elif a.action == "verify":
+        if not a.external:
+            print("!! checkpoint verify needs --external <path|-> (the OFF-BOX retained checkpoint)", file=sys.stderr)
+            sys.exit(2)
+        head = _read_head_on_disk()
+        if head is None:
+            print("!! no local head to verify — run `sigil sign` first", file=sys.stderr)
+            sys.exit(1)
+        data = sys.stdin.read() if a.external == "-" else Path(a.external).read_text()
+        store = SpineStore()
+        cok, cmsg = store.verify()
+        print(("chain OK: " if cok else "chain FAIL: ") + cmsg)
+        hok, hmsg = verify_checkpoint()                       # the CURRENT head must be authentically owner-signed
+        print(("head  OK: " if hok else "head  FAIL: ") + hmsg)
+        try:
+            _roster, tr = _witness_trust_root(W, config, roster_path, owner_pub)
+            ok, msg = W.verify_against_external(data, head=head, entries=store.entries(),
+                                                scope=config.SCOPE, trust_root=tr)
+        except W.WitnessError as e:
+            print(f"anti-rollback FAIL: {e}")
+            sys.exit(2)
+        print(("anti-rollback OK: " if ok else "anti-rollback FAIL: ") + msg)
+        sys.exit(0 if (ok and cok and hok) else 2)
+    elif a.action == "cosign":
+        import os as _os
+        kid = a.cosign_key_id or _os.environ.get("SIGIL_WITNESS_KEY_ID")
+        priv = _os.environ.get("SIGIL_WITNESS_PRIV_B64")
+        if not kid or not priv:
+            print("!! cosign needs an INDEPENDENT witness key: --key-id <id> and $SIGIL_WITNESS_PRIV_B64",
+                  file=sys.stderr)
+            sys.exit(2)
+        if not a.infile:
+            print("!! cosign needs --in <path|-> (the checkpoint envelope to co-sign)", file=sys.stderr)
+            sys.exit(2)
+        data = sys.stdin.read() if a.infile == "-" else Path(a.infile).read_text()
+        try:
+            out_env = W.cosign_envelope(data, witness_key_id=kid, witness_priv_b64=priv)
+        except W.WitnessError as e:
+            print(f"!! cosign failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not a.out or a.out == "-":
+            print(out_env)
+        else:
+            Path(a.out).write_text(out_env + "\n")
+            print(f"cosigned envelope written: {a.out}")
+    elif a.action == "witness":
+        _checkpoint_witness(a, W, config, roster_path, owner_pub)
+
+
+def _checkpoint_witness(a, W, config, roster_path, owner_pub) -> None:
+    from .governor.identity import ensure_owner_keypair
+    sub = a.wsub or "list"
+    try:
+        roster = W.load_roster(roster_path, owner_pub=owner_pub, scope=config.SCOPE)
+    except W.WitnessError as e:
+        print(f"!! witness roster error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    def current_auths() -> list:
+        if roster:
+            return list(roster["authorizers"])
+        return [{"key_id": config.OWNER_KEY_ID, "public_key_b64": owner_pub}]
+
+    def _set(auths, threshold):
+        return W.set_roster(auths, threshold, path=roster_path, owner_key=ensure_owner_keypair(),
+                            scope=config.SCOPE)
+
+    if sub == "list":
+        tr = W.witness_trust_root(roster, owner_pub=owner_pub, owner_key_id=config.OWNER_KEY_ID)
+        print(f"witness roster (scope {config.SCOPE}): threshold {tr.threshold} of {len(tr.authorizers)} witness(es)")
+        for ak in tr.authorizers:
+            print(f"  - {ak.key_id}: {ak.public_key_b64}")
+        print(f"guarantee: {W.guarantee_label(tr)}")
+        if roster is None:
+            print("(default owner-only roster — no witness.trust.json configured yet)")
+    elif sub == "add":
+        if not a.key_id or not a.pubkey:
+            print("!! witness add needs <key_id> <pubkey>", file=sys.stderr)
+            sys.exit(2)
+        auths = [x for x in current_auths() if x["key_id"] != a.key_id]
+        auths.append({"key_id": a.key_id, "public_key_b64": a.pubkey})
+        threshold = a.threshold if a.threshold else (roster["threshold"] if roster else 1)
+        try:
+            core = _set(auths, threshold)
+        except W.WitnessError as e:
+            print(f"!! witness add failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"witness added: {a.key_id}; roster now threshold {core['threshold']} of {len(core['authorizers'])}")
+        tr = W.witness_trust_root(core, owner_pub=owner_pub, owner_key_id=config.OWNER_KEY_ID)
+        print(f"guarantee: {W.guarantee_label(tr)}")
+    elif sub == "remove":
+        if not a.key_id:
+            print("!! witness remove needs <key_id>", file=sys.stderr)
+            sys.exit(2)
+        auths = [x for x in current_auths() if x["key_id"] != a.key_id]
+        if not auths:
+            print("!! refusing to remove the last witness (a roster needs at least one)", file=sys.stderr)
+            sys.exit(2)
+        threshold = min(a.threshold or (roster["threshold"] if roster else 1), len(auths))
+        core = _set(auths, threshold)
+        print(f"witness removed: {a.key_id}; roster now threshold {core['threshold']} of {len(core['authorizers'])}")
+    else:
+        print(f"!! unknown witness sub-action {sub!r} (list|add|remove)", file=sys.stderr)
+        sys.exit(2)
+
+
 def main(argv=None) -> None:
     from .obs import configure_logging
     configure_logging()                      # one structured-logging setup at startup (level from SIGIL_LOG_LEVEL)
@@ -882,6 +1054,18 @@ def main(argv=None) -> None:
                      help="prune-plan: the segment-aligned boundary K (dry-run — checks §7 guards, archives NOTHING)")
     psp.add_argument("--archive", default=None, help="verify-archive: the archive dir (default SIGIL_HOME/spine/archive)")
     psp.set_defaults(fn=cmd_spine)
+    pck = sub.add_parser("checkpoint",
+                         help="witnessed anti-rollback checkpoints (audit G3(b)): emit | verify | cosign | witness")
+    pck.add_argument("action", choices=["emit", "verify", "cosign", "witness"])
+    pck.add_argument("wsub", nargs="?", default=None, help="witness sub-action: list | add | remove")
+    pck.add_argument("key_id", nargs="?", default=None, help="witness key id (witness add/remove)")
+    pck.add_argument("pubkey", nargs="?", default=None, help="witness Ed25519 public key b64 (witness add)")
+    pck.add_argument("--out", default=None, help="emit/cosign output path (- for stdout; emit default: spine/checkpoint.witnessed.json)")
+    pck.add_argument("--external", default=None, help="verify: the OFF-BOX retained witnessed checkpoint (- for stdin)")
+    pck.add_argument("--in", dest="infile", default=None, help="cosign: the checkpoint envelope to co-sign (- for stdin)")
+    pck.add_argument("--key-id", dest="cosign_key_id", default=None, help="cosign: this witness's key id (or $SIGIL_WITNESS_KEY_ID)")
+    pck.add_argument("--threshold", type=int, default=None, help="witness add/remove: the m-of-n witness threshold")
+    pck.set_defaults(fn=cmd_checkpoint)
     psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
     psv.add_argument("--port", type=int, default=8733)
     psv.set_defaults(fn=cmd_serve)
