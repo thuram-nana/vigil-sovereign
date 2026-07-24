@@ -174,7 +174,7 @@ def cmd_agents(a) -> None:
         for seq in res.applied:
             rec = store.get(seq)
             if rec:
-                print("\n" + rec.payload.get("text", ""))
+                print("\n" + store.decrypted_or_raw(rec).payload.get("text", ""))
     elif a.action == "artifice":
         from .agents.artificer import Artificer
         from .spine.store import SpineStore
@@ -200,7 +200,7 @@ def cmd_agents(a) -> None:
         for seq in res.applied:
             rec = store.get(seq)
             if rec:
-                p = rec.payload
+                p = store.decrypted_or_raw(rec).payload
                 print(f"    [{p.get('severity')}] {p.get('summary')}  ({p.get('quote')}, seq {seq})")
     elif a.action == "perceive":
         from .perception import (Frame, MoondreamVision, Perceptor, grab_camera,
@@ -229,7 +229,7 @@ def cmd_agents(a) -> None:
         for seq in res.applied:
             rec = store.get(seq)
             if rec and rec.payload.get("signal") == "perception":
-                print(rec.payload.get("text", ""))
+                print(store.decrypted_or_raw(rec).payload.get("text", ""))
         for q in res.queued:
             print(f"    [{q['tier']} {q['kind']}] {q.get('subject')}  (seq {q['seq']}, awaiting approval)")
 

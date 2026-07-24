@@ -67,7 +67,7 @@ def compose_brief(store, *, date_label: str = "today", lookback: int = 400) -> s
         active.sort(key=lambda r: (order.get(str(r.payload.get("severity")), 4), r.seq))
         lines.append(f"\n## Infrastructure posture (BASTION, {len(active)})")
         for r in active[:8]:
-            p = r.payload
+            p = store.decrypted_or_raw(r).payload   # G1 slice-4: plaintext quote for the brief
             lines.append(f"- [{p.get('severity', '?')}] {p.get('summary')}  "
                          f"({p.get('quote')}, seq {r.seq})")
 

@@ -27,10 +27,14 @@ def consolidation_records(store: SpineStore, kinds: set[str] | None = None) -> I
 
 
 def iter_current(store: SpineStore, kinds: set[str] | None = None) -> list[SpineRecord]:
-    """The live view: consolidation records of `kinds` that nothing later has superseded."""
+    """The live view: consolidation records of `kinds` that nothing later has superseded. Records are
+    DECRYPTED (G1 slice-4) — the served fact's `quote`/`statement` are sealed content fields, so the 3
+    recall tools + the nightly brief that consume this MUST get plaintext; a locked vault fails closed
+    (raises) rather than serving ciphertext. The supersede/grounding filters key only on plaintext
+    metadata, so sealing does not affect them."""
     recs = list(consolidation_records(store, kinds))
     superseded = {r.supersedes_id for r in recs if r.supersedes_id is not None}
-    return [r for r in recs if r.seq not in superseded]
+    return [store.decrypted(r) for r in recs if r.seq not in superseded]
 
 
 def promotion_ledgers(store: SpineStore) -> tuple[set[str], set[str]]:

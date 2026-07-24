@@ -53,6 +53,9 @@ _spine = SIGIL_HOME / "spine"
 SPINE_PATH = _spine / "spine.jsonl"
 HEAD_PATH = _spine / "head.json"
 KEYS_DIR = _spine / "keys"
+# The per-spine DATA KEY (DEK) for field-level payload encryption (audit G1 slice-4), sealed at rest
+# under the TPM KEK (the G1 vault). Absent until `sigil vault provision` + a first content-bearing append.
+SPINE_DEK_PATH = KEYS_DIR / "spine.dek"
 CACHE_DIR = SIGIL_HOME / "cache"
 # Durable external anti-rollback floor (hard-prune C1). At the SIGIL_HOME root, deliberately OUTSIDE
 # `spine/` so `SpineStore.reset()` / `sigil ingest --reset` (which rmtree the spine dir) can NEVER lower

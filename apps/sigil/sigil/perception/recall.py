@@ -35,6 +35,7 @@ def recall(store: SpineStore, subject: str) -> Optional[dict]:
     for r in store.iter_records():
         if r.kind != "event" or r.payload.get("signal") != PERCEPTION_SIGNAL:
             continue
+        r = store.decrypted(r)                # G1 slice-4: captured_text is a sealed content field
         line = _grounded_line(subj, r.payload.get("captured_text") or "")
         if line is not None:                  # subject co-located on a real OCR line → a grounded sighting
             latest, latest_line = r, line     # seq-ascending iteration → last match is most recent
