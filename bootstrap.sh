@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# =============================================================================
+# VIGIL bootstrap — stand up the ENTIRE system on a fresh machine, one command.
+# =============================================================================
+# Put this codebase on a new PC and run:  ./bootstrap.sh
+#
+# It is IDEMPOTENT (re-runnable; every step guards on existing state) and
+# FAIL-CLOSED (a hard-requirement failure stops with a clear remedy; an optional
+# piece missing prints a warning and continues). It NEVER exposes a public
+# listener and NEVER silently weakens a security boundary.
+#
+# What it does:
+#   1. preflight   — Python 3.12/3.13, Rust (for the WARDEN kernel), Docker, git, TPM probe
+#   2. build       — the TWO isolated venvs + the Rust kernel (envs/build_envs.sh) + boundary check
+#   3. services    — start docker-compose services (Qdrant by default), bind 127.0.0.1 only
+#   4. config      — write ~/.sigil/sigil.env + repo .env, launchers, VIGIL_ROOT/CRUCIBLE_ROOT
+#   5. vault       — TPM-seal the keys at rest if a TPM is present; else a loud plaintext warning
+#   6. smoke       — prove the boundary holds, Qdrant is up, and vigil/sigil run
+#
+# Flags / env:
+#   --no-rust            do NOT auto-install rustup; print instructions and stop if Rust is missing
+#   --no-services        skip docker-compose (native-only install; Qdrant runs embedded)
+#   --with-strix         also build the Kali strix sandbox image (needs Docker; large)
+#   --systemd            install the user systemd units (cockpit + consolidate)
+#   --yes                non-interactive: assume "yes" to auto-installs (rustup)
+#   PYTHON=python3.13    pin the interpreter used to build the venvs
+# -----------------------------------------------------------------------------
+set -euo pipefail
+
+cd "$(dirname "$0")"                       # repo root
+REPO="$(pwd)"
+export VIGIL_ROOT="$REPO"
+export CRUCIBLE_ROOT="$REPO/engine/crucible"
+
+# --- flags ---
+NO_RUST=0; NO_SERVICES=0; WITH_STRIX=0; DO_SYSTEMD=0; ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-rust) NO_RUST=1 ;;
+    --no-services) NO_SERVICES=1 ;;
+    --with-strix) WITH_STRIX=1 ;;
+    --systemd) DO_SYSTEMD=1 ;;
+    --yes|-y) ASSUME_YES=1 ;;
+    -h|--help) grep '^#' "$0" | grep -v '^#!' | sed 's/^#\s\{0,1\}//'; exit 0 ;;
+    *) echo "unknown flag: $arg (try --help)"; exit 2 ;;
+  esac
+done
+
+# --- pretty output ---
+c_g="\033[32m"; c_y="\033[33m"; c_r="\033[31m"; c_b="\033[1m"; c_0="\033[0m"
+step() { printf "\n${c_b}==> %s${c_0}\n" "$*"; }
+ok()   { printf "  ${c_g}ok${c_0}   %s\n" "$*"; }
+warn() { printf "  ${c_y}warn${c_0} %s\n" "$*"; }
+die()  { printf "  ${c_r}FAIL${c_0} %s\n" "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+ask()  { # ask "prompt" -> 0 (yes) / 1 (no). Non-interactive or --yes => yes.
+  [ "$ASSUME_YES" = 1 ] && return 0
+  [ -t 0 ] || return 0
+  read -r -p "  $1 [Y/n] " a; [ -z "$a" ] || [ "$a" = y ] || [ "$a" = Y ]
+}
+
+# =============================================================================
+step "1/6 preflight"
+# =============================================================================
+
+# Python 3.12/3.13 — a hard requirement (the venvs + kernel build need it).
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+  for cand in python3.13 python3.12 python3; do have "$cand" && { PY="$cand"; break; }; done
+fi
+[ -n "$PY" ] || die "no Python found. Install Python 3.12 or 3.13 and re-run (or set PYTHON=...)."
+PYVER="$("$PY" -c 'import sys;print("%d.%d"%sys.version_info[:2])')"
+case "$PYVER" in
+  3.12|3.13) ok "Python $PYVER ($PY)" ;;
+  *) die "Python $PYVER is unsupported — need 3.12 or 3.13 (set PYTHON=python3.13)." ;;
+esac
+
+# Rust — needed by setuptools-rust to build the WARDEN kernel (part of the sovereign venv).
+if have cargo && have rustc; then
+  ok "Rust $(rustc --version 2>/dev/null | awk '{print $2}')"
+elif [ "$NO_RUST" = 1 ]; then
+  die "Rust is missing and --no-rust was given. Install it: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+else
+  warn "Rust toolchain not found — it is required to build the WARDEN kernel."
+  if ask "install rustup into ~/.cargo now (user-level, no root)?"; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+    have cargo || die "rustup installed but cargo is not on PATH — open a new shell and re-run."
+    ok "Rust $(rustc --version 2>/dev/null | awk '{print $2}') (freshly installed)"
+  else
+    die "Rust is required. Install it, then re-run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+  fi
+fi
+
+have git || warn "git not found — fine for a build, but you'll need it for updates."
+
+# Docker (optional: Qdrant runs embedded without it; strix + server-mode Qdrant need it).
+DOCKER_OK=0
+if have docker && docker info >/dev/null 2>&1; then
+  DOCKER_OK=1
+  if docker compose version >/dev/null 2>&1; then ok "Docker + compose ready"; else warn "Docker present but 'docker compose' plugin missing — services will be skipped."; DOCKER_OK=0; fi
+elif have docker; then
+  warn "Docker installed but the daemon is unreachable (start it / add yourself to the docker group)."
+else
+  warn "Docker not found — Qdrant will run EMBEDDED (fine for the sovereign core; strix needs Docker)."
+fi
+
+# TPM probe (for at-rest key sealing).
+TPM_OK=0
+if [ -e /dev/tpmrm0 ] || [ -e /dev/tpm0 ]; then
+  if have tpm2_createprimary; then TPM_OK=1; ok "TPM present + tpm2-tools installed (keys will seal at rest)";
+  else warn "TPM device present but tpm2-tools missing — keys stay PLAINTEXT at rest. Remedy: sudo apt install tpm2-tools && sudo usermod -aG tss \$USER"; fi
+else
+  warn "no TPM device — keys will be PLAINTEXT at rest (acceptable on a trusted single-user box)."
+fi
+
+# =============================================================================
+step "2/6 build the two isolated environments + the Rust kernel"
+# =============================================================================
+# envs/build_envs.sh is the SOLE source of the two-venv + kernel + boundary check. Re-runnable.
+PYTHON="$PY" bash envs/build_envs.sh
+[ -x ".venv-sovereign/bin/python" ] || die "the sovereign venv did not build."
+[ -x ".venv-offense/bin/python" ]   || die "the offense venv did not build."
+ok "both venvs built; the offense-free boundary held"
+
+# =============================================================================
+step "3/6 services (docker-compose; 127.0.0.1-bound only)"
+# =============================================================================
+if [ "$NO_SERVICES" = 1 ]; then
+  warn "--no-services: skipping compose (Qdrant will run embedded)."
+elif [ "$DOCKER_OK" = 1 ]; then
+  [ -f .env ] || { cp .env.example .env; chmod 600 .env; ok "wrote .env from .env.example (0600)"; }
+  docker compose --env-file .env up -d qdrant
+  printf "  waiting for Qdrant on 127.0.0.1:6333 "
+  for _ in $(seq 1 30); do
+    if curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1; then printf "\n"; ok "Qdrant is ready"; break; fi
+    printf "."; sleep 1
+  done
+  curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1 || warn "Qdrant did not report ready in 30s — check 'docker compose logs qdrant'."
+  if [ "$WITH_STRIX" = 1 ]; then
+    step "3b build the Kali strix sandbox image (this is large)"
+    docker compose --profile strix build strix-sandbox && ok "built vigil/strix-sandbox:local"
+  fi
+else
+  warn "Docker unavailable — skipping services. Qdrant runs embedded; strix will not work until Docker is up."
+fi
+
+# =============================================================================
+step "4/6 config + launchers"
+# =============================================================================
+SIGIL_HOME="${SIGIL_HOME:-$HOME/.sigil}"
+mkdir -p "$SIGIL_HOME"
+# sigil.env — SIGIL's own KEY=VALUE config (only written if absent; never clobbered).
+if [ ! -f "$SIGIL_HOME/sigil.env" ]; then
+  {
+    echo "# SIGIL config — written by bootstrap.sh $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "SIGIL_HOME=$SIGIL_HOME"
+    [ "$DOCKER_OK" = 1 ] && [ "$NO_SERVICES" != 1 ] && echo "SIGIL_QDRANT_URL=http://127.0.0.1:6333"
+  } > "$SIGIL_HOME/sigil.env"
+  chmod 600 "$SIGIL_HOME/sigil.env"
+  ok "wrote $SIGIL_HOME/sigil.env"
+else
+  ok "$SIGIL_HOME/sigil.env exists (left as-is)"
+fi
+
+# repo .env (compose + wrapper vars) — only if absent.
+[ -f .env ] || { cp .env.example .env; chmod 600 .env; ok "wrote .env (0600)"; }
+
+# the live offense working dir.
+mkdir -p .vigil-live && ok ".vigil-live/ ready"
+
+# systemd canonical layout: ~/.sigil/venv -> the sovereign venv (units reference ~/.sigil/venv/bin/*).
+ln -sfn "$REPO/.venv-sovereign" "$SIGIL_HOME/venv" && ok "symlink $SIGIL_HOME/venv -> .venv-sovereign"
+
+# ~/.local/bin launchers for `vigil` (the unified control plane) and `sigil` (the sovereign core).
+# A symlink into the venv keeps sys.prefix = the venv, so the dispatcher resolves the repo root itself.
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$REPO/.venv-sovereign/bin/vigil" "$HOME/.local/bin/vigil" && ok "launcher ~/.local/bin/vigil"
+ln -sfn "$REPO/.venv-sovereign/bin/sigil" "$HOME/.local/bin/sigil" && ok "launcher ~/.local/bin/sigil"
+case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) warn "add ~/.local/bin to your PATH to use 'vigil'/'sigil' directly.";; esac
+
+if [ "$DO_SYSTEMD" = 1 ]; then
+  step "4b install user systemd units"
+  mkdir -p "$HOME/.config/systemd/user"
+  cp apps/sigil/deploy/systemd/*.service apps/sigil/deploy/systemd/*.timer "$HOME/.config/systemd/user/" 2>/dev/null || true
+  [ -f "$SIGIL_HOME/cockpit.env" ] || cp apps/sigil/deploy/cockpit.env.example "$SIGIL_HOME/cockpit.env"
+  [ -f "$SIGIL_HOME/bridge.env" ]  || cp apps/sigil/deploy/bridge.env.example  "$SIGIL_HOME/bridge.env"
+  systemctl --user daemon-reload 2>/dev/null && ok "installed user units (enable with: systemctl --user enable --now sigil-cockpit)" || warn "systemctl --user unavailable here."
+fi
+
+# =============================================================================
+step "5/6 vault (at-rest key sealing)"
+# =============================================================================
+if [ "$TPM_OK" = 1 ]; then
+  if SIGIL_HOME="$SIGIL_HOME" .venv-sovereign/bin/sigil vault provision; then ok "keys seal to this machine's TPM at rest"; else warn "vault provision failed — see the message above; keys stay plaintext."; fi
+else
+  warn "no usable TPM — keys are PLAINTEXT at rest. On a shared/cloud host, install tpm2-tools then run: sigil vault provision"
+fi
+
+# =============================================================================
+step "6/6 smoke test"
+# =============================================================================
+SMOKE_FAIL=0
+run_smoke() { printf "  %-42s" "$1"; shift; if "$@" >/dev/null 2>&1; then printf "${c_g}ok${c_0}\n"; else printf "${c_r}FAIL${c_0}\n"; SMOKE_FAIL=1; fi; }
+
+# Dependency-free boundary re-check (no pytest needed), mirroring test_two_env_boundary: loading the
+# sovereign surfaces (sigil + vigil_integration) must pull NO offense module, AND framework/strix must not
+# even be resolvable from the sovereign venv's own path. The strong invariant envs/build_envs.sh also proves.
+BOUNDARY_CHECK='import importlib.util as u, sys
+import sigil, vigil_integration  # noqa: F401 — loading these must not pull framework/strix
+from sigil.reuse import assert_no_offense
+assert_no_offense()
+for m in ("framework", "strix"):
+    if u.find_spec(m) is not None:
+        sys.exit("VIOLATION: " + m + " resolvable in the sovereign env")'
+# HARD checks — a failure here means the core install is broken (bootstrap exits non-zero).
+run_smoke "two-env boundary (offense-free sovereign)" .venv-sovereign/bin/python -c "$BOUNDARY_CHECK"
+run_smoke "vigil control plane runs" .venv-sovereign/bin/vigil --help
+run_smoke "sigil sovereign core runs" env SIGIL_HOME="$SIGIL_HOME" .venv-sovereign/bin/sigil --help
+
+# INFORMATIONAL — the full self-check. Missing Claude CLI / Qdrant server / TPM / keyring are OPTIONAL on a
+# fresh box, so `sigil doctor` may report `!!`/`**` rows and exit non-zero; that does NOT fail the bootstrap.
+echo
+echo "  self-check (informational — missing Claude/TPM/Qdrant-server/keyring are optional):"
+env SIGIL_HOME="$SIGIL_HOME" .venv-sovereign/bin/sigil doctor 2>&1 | sed 's/^/    /' || true
+if [ "$DOCKER_OK" = 1 ] && [ "$NO_SERVICES" != 1 ]; then
+  if curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1; then echo "    [ok] Qdrant readyz"; else echo "    [warn] Qdrant not ready (embedded fallback still works)"; fi
+fi
+
+echo
+if [ "$SMOKE_FAIL" = 0 ]; then
+  printf "${c_g}${c_b}VIGIL is ready.${c_0}\n"
+  echo "  • unified CLI:   vigil --help        (offense: engage/verify; sovereign: 'vigil sigil ...')"
+  echo "  • sovereign:     sigil doctor        (self-check)"
+  echo "  • cockpit UI:    sigil serve         (loopback; see apps/sigil/deploy/REMOTE-HOSTING.md for a domain)"
+  echo "  • engage a target you OWN + authorized:  vigil engage <url> --scope <host>"
+  echo "  • docs:          docs/DEPLOY.md"
+  exit 0
+else
+  printf "${c_y}${c_b}Bootstrap finished with smoke-test failures above.${c_0} Review them before use.\n"
+  exit 1
+fi
