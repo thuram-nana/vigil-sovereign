@@ -120,9 +120,18 @@ const A0_TOOLS: &[&str] = &[
 const INPUT_A1: &[&str] = &["hid.pointer.move", "hid.pointer.click", "hid.pointer.scroll", "hid.pointer.drag"];
 const INPUT_A2: &[&str] = &["hid.type", "hid.combo", "hid.app.launch"];
 
-/// Split a tool name into whole tokens on `.`/`_`/`-`/`/` and whitespace, lowercased.
+/// Split a tool name into whole tokens on `.`/`_`/`-`/`/` and whitespace, lowercased. The C0 information
+/// separators U+001C..=U+001F are ALSO split delimiters: `char::is_whitespace()` (Unicode White_Space)
+/// does NOT include them, but they ARE separators — and, critically, they are what the Python port's
+/// `\s`-based tokenizer splits on, so splitting on them here keeps the two classifiers byte-identical
+/// (S2 parity) and closes a hidden-separator evasion (`read.log\x1cdelete` must not hide the `delete`
+/// token behind an invisible control char and auto-run). Every A3/A2/A1/A0 DICTIONARY token is itself
+/// delimiter-free, so more splitting can only ever EXPOSE a danger token, never break one apart or hide it
+/// — danger exposure is MONOTONE, which is the property that closes this evasion. (The golden vectors pin
+/// the boundary.)
 fn tokens(tool: &str) -> Vec<String> {
-    tool.split(|c: char| c == '.' || c == '_' || c == '-' || c == '/' || c.is_whitespace())
+    tool.split(|c: char| c == '.' || c == '_' || c == '-' || c == '/'
+                         || c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'))
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase())
         .collect()
@@ -171,6 +180,21 @@ pub fn gate(tier: Tier) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matches_shared_golden_vectors() {
+        // The SINGLE source of truth (packages/core/vigil_core/vigil_core/warden_golden.json), ALSO loaded
+        // by the Python port's parity test (test_warden_tiers.py). This Rust classifier and the Python
+        // classifier are both pinned to it, so a divergence fails one side's test — they cannot drift (S2).
+        let raw = include_str!("../../../../packages/core/vigil_core/vigil_core/warden_golden.json");
+        let doc: serde_json::Value = serde_json::from_str(raw).expect("golden json parses");
+        let vectors = doc["vectors"].as_array().expect("golden has a 'vectors' array");
+        for v in vectors {
+            let tool = v[0].as_str().expect("golden [tool, tier] — tool is a string");
+            let want = v[1].as_str().expect("golden [tool, tier] — tier is a string");
+            assert_eq!(classify(tool).as_str(), want, "golden mismatch for tool {tool:?}");
+        }
+    }
 
     #[test]
     fn classification_matches_spec_examples() {

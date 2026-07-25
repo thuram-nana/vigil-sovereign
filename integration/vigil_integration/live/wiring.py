@@ -63,9 +63,20 @@ _RECON = {"nmap", "httpx", "nuclei", "ffuf", "curl", "subfinder", "gau", "katana
 
 
 def default_classify(tool_name: str) -> str:
-    """A minimal WARDEN tier classifier: recon → A1, everything else → A2 (destructive is floored to A3
-    by the tool-governance layer independently). The gate's floor/ceiling bound the final decision."""
-    return "A1" if str(tool_name).strip().lower() in _RECON else "A2"
+    """The WARDEN tier of an offense tool, deriving the DANGER determination from the ONE shared classifier
+    of record (``vigil_core.warden_tiers``, the byte-faithful port of the Rust kernel) so it can never drift
+    from the sovereign side. A name carrying an A3 DANGER token (``git.push``, ``data.delete``,
+    ``secrets.read``) classifies A3 IDENTICALLY to the kernel — closing the drift of the old
+    recon→A1/else→A2 stub, which wrongly gave those A2. A curated, danger-FREE recon tool stays auto-eligible
+    A1; every other offense name stays A2 (the pre-S2 offense posture). The gate OUTCOME is unchanged — a
+    dangerous name was A2→queue and is now A3→queue under the A1 ceiling — only the tier LABEL is corrected;
+    the gate's floor/ceiling still bound the final decision."""
+    from vigil_core.warden_tiers import has_danger_token
+    name = str(tool_name).strip()
+    danger = has_danger_token(name)
+    if name.lower() in _RECON and not danger:
+        return "A1"                       # curated danger-free recon → auto-eligible (the floor still decides)
+    return "A3" if danger else "A2"       # dangerous → A3 (matches the kernel); else the offense floor A2
 
 
 def _wallclock_iso() -> str:
