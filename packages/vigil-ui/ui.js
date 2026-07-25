@@ -142,6 +142,8 @@
       key: "M14 7a4 4 0 11-4 4l-6 6v3h3l1-1v-2h2v-2h2l1-1", search: "M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5",
       bolt: "M13 3L4 14h6l-1 7 9-11h-6z", check: "M4 12l5 5L20 6", x: "M6 6l12 12M18 6L6 18",
       dot: "M12 12m-3 0a3 3 0 106 0 3 3 0 10-6 0", play: "M6 4l14 8-14 8z",
+      book: "M4 5a2 2 0 012-2h12v16H6a2 2 0 01-2-2zM18 3v16M8 7h6M8 11h6",
+      info: "M12 8h.01M11 12h1v5h1M12 3a9 9 0 100 18 9 9 0 000-18z",
     };
     return h("span.glyph", { html: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="' + (P[name] || P.dot) + '"/></svg>' });
   }

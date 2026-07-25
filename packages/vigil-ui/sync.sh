@@ -14,7 +14,7 @@ SRC="$(pwd)"
 
 # manifest-driven (kept in sync with manifest.json by hand; asserted below)
 STYLE_PARTS=(tokens.css components.css)
-COPY=(ui.js app.js index.html)
+COPY=(ui.js manual.js app.js index.html)
 TARGETS=("apps/sigil/sigil/ui/static" "engine/crucible/framework/v2/console/static")
 
 for f in "${STYLE_PARTS[@]}" "${COPY[@]}"; do

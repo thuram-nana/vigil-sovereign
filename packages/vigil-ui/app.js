@@ -30,6 +30,9 @@
       { id: "brain", label: "Brain", icon: "brain", phase: "P7" },
       { id: "settings", label: "Settings", icon: "gear", owner: true, phase: "P4" },
     ]},
+    { group: "LEARN", items: [
+      { id: "manual", label: "Manual", icon: "book", ready: true },
+    ]},
   ];
 
   // ---- shell -----------------------------------------------------------------
@@ -131,7 +134,6 @@
     const runs = (ostat && (ostat.active_runs != null ? ostat.active_runs : 0)) || 0;
     app.set({ waiting: waiting, killed: killed, live: runs > 0 ? "live" : "idle",
       counts: { agents: (ostat && ostat.agents) || 0, tools: (ostat && ostat.tools) || 0, findings: findings } });
-    V.mount(V.$("#topbar").parentNode ? V.$("#topbar") : document.createElement("div"), null); // noop guard
     refreshTopbar();
     V.mount(V.$("#home-tiles"), [
       V.tile("Active runs", String(runs), runs ? "in progress" : "nothing running"),
@@ -174,6 +176,41 @@
     renderNav();
   }
 
+  // ---- Manual (in-app documentation; real content, no runtime data) ---------
+  function renderManual(screen) {
+    const sections = window.VIGIL_MANUAL || [];
+    const index = h("div.card", { style: { position: "sticky", top: "0", alignSelf: "start" } },
+      [h("span.label", null, "CONTENTS"),
+       h("div.stack", { style: { gap: "2px", marginTop: "8px" } }, sections.map(function (s) {
+         return h("a.nav-item", { href: "#/manual", onClick: function (e) {
+           e.preventDefault(); const t = document.getElementById("man-" + s.id);
+           if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+         } }, [h("span.txt", null, s.title)]);
+       }))]);
+    const content = h("div.stack", null, sections.map(function (s) {
+      return h("div.card", { id: "man-" + s.id }, [
+        h("h3", { style: { fontSize: "var(--fs-xl)", marginBottom: "12px" } }, s.title),
+        s.blocks.map(function (b) { return manualBlock(b); }),
+      ]);
+    }));
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Manual"),
+        h("span.sub", null, "How every part of VIGIL works — in plain language.")]),
+      h("div", { style: { display: "grid", gridTemplateColumns: "260px 1fr", gap: "24px", alignItems: "start" } },
+        [index, content]),
+    ]);
+  }
+  function manualBlock(b) {
+    if (b.h) return h("h4", { style: { marginTop: "16px", marginBottom: "6px", fontSize: "var(--fs-lg)" } }, b.h);
+    if (b.p) return h("p", { class: "muted", style: { margin: "8px 0", maxWidth: "72ch", lineHeight: "1.6" } }, b.p);
+    if (b.note) return h("div.legend", { style: { margin: "12px 0" } }, [V.icon("info"), b.note]);
+    if (b.list) return h("div.stack", { style: { gap: "10px", margin: "10px 0" } }, b.list.map(function (row) {
+      return h("div", { style: { display: "grid", gridTemplateColumns: "180px 1fr", gap: "14px" } },
+        [h("b", null, row[0]), h("span.muted", null, row[1])]);
+    }));
+    return null;
+  }
+
   // ---- guided stub for not-yet-built screens --------------------------------
   function renderStub(screen, item) {
     V.mount(screen, [
@@ -193,6 +230,7 @@
     renderNav();
     const screen = V.$("#screen"); if (!screen) return;
     if (id === "home") { renderHome(screen); return; }
+    if (id === "manual") { renderManual(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });

@@ -30,11 +30,17 @@ CSRF_HEADER = "X-Requested-With"
 LOOPBACK_BIND_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
-def check_same_origin(headers, server_port: int) -> tuple[bool, str]:
+def check_same_origin(headers, server_port: int,
+                      allowed_hosts=(), allowed_origins=()) -> tuple[bool, str]:
     """Return ``(ok, reason)``. ``ok`` is True only when the request proves same-origin
-    to the loopback API on ``server_port``. ``headers`` is a mapping with a
+    to the loopback API on ``server_port`` — OR its Host/Origin is an exact operator-
+    configured reverse-proxy domain in ``allowed_hosts``/``allowed_origins`` (both empty
+    by default → loopback-only, byte-identical to before). The custom-header +
+    Sec-Fetch-Site proofs still apply regardless. ``headers`` is a mapping with a
     case-insensitive ``.get`` (an ``http.client.HTTPMessage`` / dict). Fail-closed: any
     malformed/missing signal denies. Read-only GET is not routed here."""
+    _allow_hosts = frozenset(h.strip() for h in allowed_hosts if h and h.strip())
+    _allow_origins = frozenset(o.strip().rstrip("/") for o in allowed_origins if o and o.strip())
     # 1. POSITIVE proof: a custom header a cross-site <form> cannot set.
     if not headers.get(CSRF_HEADER):
         return False, f"missing {CSRF_HEADER} (cross-site form / non-API client)"
@@ -64,13 +70,14 @@ def check_same_origin(headers, server_port: int) -> tuple[bool, str]:
     host_hdr = (headers.get("Host", "") or "").strip()
     if not host_hdr:
         return False, "Host missing"
-    if not _authority_ok(host_hdr, 80):
+    if not (_authority_ok(host_hdr, 80) or host_hdr in _allow_hosts):
         return False, f"Host={host_hdr!r}"
 
-    # 4. Origin, when present, must likewise be the loopback API with the exact port.
+    # 4. Origin, when present, must likewise be the loopback API with the exact port, OR an
+    #    exact operator-allowlisted reverse-proxy origin.
     origin = (headers.get("Origin", "") or "").strip()
     if origin:
         scheme_default = 443 if origin.lower().startswith("https:") else 80
-        if not _authority_ok(origin, scheme_default):
+        if not (_authority_ok(origin, scheme_default) or origin.rstrip("/") in _allow_origins):
             return False, f"Origin={origin}"
     return True, ""
