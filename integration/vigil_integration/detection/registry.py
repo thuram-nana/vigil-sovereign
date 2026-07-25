@@ -140,3 +140,46 @@ def facts(detections: Any) -> list:
 def leads(detections: Any) -> list:
     """The honest, non-authoritative suspicions (never a silent block)."""
     return [d for d in (detections or []) if isinstance(d, Detection) and not d.is_fact]
+
+
+# The detection mirror's DECLARED bug-class vocabulary (unification S3) — the ONE place that names every
+# class a detection oracle can emit, with a self-check (``verify_registration``) so a hallucinated/typo'd
+# class can never ship on a detection finding (the defensive analogue of aegis/registry.py). DEFENSIVE
+# detection classes (an attack OBSERVED in telemetry) are a SEPARATE taxonomy from CRUCIBLE's OFFENSIVE
+# confirmation classes and are DELIBERATELY NOT added to CRUCIBLE's ``OracleKind``: a detection oracle is
+# confirmed by its own log re-run (``reverify_certificate``), not by a ``verify/oracles.py`` body, so a
+# detection ``OracleKind`` member would be a BODYLESS kind the verifier could never fire (an unsound
+# "unification"). NAMING: SOME detection classes reuse CRUCIBLE's exact class name where the taxonomy
+# genuinely coincides — ``sqli``, ``xss``, ``path_traversal`` ARE CRUCIBLE bug classes too (one shared name
+# across offense + defense). The rest are detection-SPECIFIC: ``crlf_injection`` and ``cmd_injection`` have
+# NO CRUCIBLE counterpart (CRUCIBLE's is ``command_injection``, deliberately NOT aliased here), and
+# ``recon.*``/``cred.*`` are detection-namespaced. (The deferred cert-fold must therefore alias/rename
+# crlf/cmd, not assume a name match.) A cross-vocabulary test (test_detection_vocabulary.py) asserts this
+# exact shared/specific split AND that importing detection adds NO bodyless ``OracleKind``. This module
+# stays framework-free — the CRUCIBLE cross-reference lives only in the test.
+DETECTION_BUG_CLASSES: frozenset = frozenset({
+    "recon.port_scan", "recon.forced_browsing", "recon.scanner", "recon.cms", "recon.waf_probe",
+    "sqli", "xss", "path_traversal", "crlf_injection", "cmd_injection",
+    "cred.brute_force", "cred.password_spray",
+})
+
+
+def detection_bug_classes() -> frozenset:
+    """The detection mirror's declared, self-checked confirmed-class vocabulary."""
+    return DETECTION_BUG_CLASSES
+
+
+def verify_registration() -> None:
+    """Fail loudly if any registered detection oracle carries an UNDECLARED bug_class, does not resolve by
+    name, or if a declared class has no backing oracle — the self-check the gate test runs, so the detection
+    vocabulary is closed and every detection finding's class is a known, non-hallucinated one."""
+    for name, cls in ORACLE_CLASSES.items():
+        inst = resolve_oracle(name)
+        assert inst is not None, f"detection oracle {name!r} does not resolve"
+        # check BOTH the class attr AND the resolved-instance value — `detect()` emits `self.bug_class`, so a
+        # (future) instance-level override to a hallucinated class must not slip past a class-only check.
+        for bc in (getattr(cls, "bug_class", ""), getattr(inst, "bug_class", "")):
+            assert bc in DETECTION_BUG_CLASSES, f"detection oracle {name!r} has undeclared bug_class {bc!r}"
+    covered = {getattr(cls, "bug_class", "") for cls in ORACLE_CLASSES.values()}
+    orphans = DETECTION_BUG_CLASSES - covered
+    assert not orphans, f"declared detection classes with no backing oracle: {sorted(orphans)}"
