@@ -7,3 +7,7 @@ venv/
 dist/
 build/
 target/
+
+# stray local artifacts (kept on disk, never tracked)
+/img.avif
+/AEGIS-Detection-Mirror-Complete(1).md
