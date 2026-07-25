@@ -39,10 +39,14 @@ from typing import Optional, Sequence
 
 
 def _cmd_provision(args: argparse.Namespace) -> int:
+    from vigil_core.vault import Vault
     from .live.wiring import provision_authority
     scope = [s.strip() for s in str(args.scope).split(",") if s.strip()]
+    # Persist a STABLE governance key under --base-dir (sealed under its vault when provisioned), so a later
+    # `vigil engage --base-dir <same>` reuses the SAME anchor-1 signer and one owner delegation covers it (S7).
     prov = provision_authority(slug=args.slug, scope=scope, environment=args.environment,
-                               duration_hours=args.hours, max_actions=args.max_actions)
+                               duration_hours=args.hours, max_actions=args.max_actions,
+                               base_dir=args.base_dir, vault=Vault(Path(args.base_dir) / "vault"))
     print(f"provisioned signed authority for {prov.slug!r}")
     print(f"  scope         : {', '.join(scope)}")
     print(f"  authority_path: {prov.authority_path}")
@@ -245,6 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--environment", default="twin")
     pp.add_argument("--hours", type=float, default=8.0)
     pp.add_argument("--max-actions", type=int, default=1000)
+    pp.add_argument("--base-dir", default=".vigil-live",
+                    help="engagement home for the STABLE governance key (shared with `vigil engage`)")
     pp.set_defaults(func=_cmd_provision)
 
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")

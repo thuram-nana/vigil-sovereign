@@ -160,3 +160,31 @@ def test_live_without_owner_approval_the_offense_tool_queues(hermetic_root, tmp_
     assert report.paused == "awaiting_approval"
     assert report.queued_edges and not any(t.outcome == "ran" for t in report.tool_calls)
     assert report.fact_count == 0
+
+
+def test_provision_authority_uses_a_stable_governance_key(hermetic_root, tmp_path):
+    # S7: with a base_dir the anchor-1 (governance/authority) key is STABLE across calls, so ONE owner
+    # delegation covers it across runs; without a base_dir it falls back to the legacy per-run ephemeral key.
+    base = str(tmp_path / "home")
+    p1 = provision_authority(slug="loopback", scope=["127.0.0.1"], base_dir=base)
+    p2 = provision_authority(slug="loopback", scope=["127.0.0.1"], base_dir=base)
+    assert p1.keypair.public_key_b64 == p2.keypair.public_key_b64      # same anchor-1 signer across runs
+    e1 = provision_authority(slug="loopback", scope=["127.0.0.1"])
+    e2 = provision_authority(slug="loopback", scope=["127.0.0.1"])
+    assert e1.keypair.public_key_b64 != e2.keypair.public_key_b64      # legacy ephemeral: fresh each call
+
+
+def test_build_engine_persists_a_stable_governance_key_under_base_dir(hermetic_root, tmp_path):
+    # end-to-end: build_engine (with NO pre-provisioned authority) provisions under the engagement home with a
+    # STABLE governance key, and a later provision against the SAME home reuses that identity (file persisted).
+    import json
+    from pathlib import Path
+    base = str(tmp_path / "live2")
+    cfg = EngineConfig(slug="loopback", base_dir=base, replay=ReplayThinker([_complete()]),
+                       runner=_echo_runner, max_iterations=2, owner_approves_offense=True)
+    build_engine(cfg)                                                  # provisioned=None ⇒ provisions here
+    keyfile = Path(base) / "offense-governance.key"
+    assert keyfile.exists()                                            # persisted, not ephemeral
+    persisted = json.loads(keyfile.read_text())["public_key_b64"]
+    prov2 = provision_authority(slug="loopback", scope=["127.0.0.1"], base_dir=base)
+    assert prov2.keypair.public_key_b64 == persisted                  # reuses the SAME anchor-1 signer

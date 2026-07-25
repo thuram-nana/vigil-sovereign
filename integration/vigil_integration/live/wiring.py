@@ -40,6 +40,7 @@ from ..detection.registry import run_all_detections
 from ..oracle_adapter import confirm_and_certify
 from .engine import EngineSeams, VigilEngine
 from .executor import execute
+from .governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
 from .spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
 from .spine_vigilcore import VigilCoreSpine
 from .think_claude import think
@@ -113,17 +114,31 @@ def provision_authority(
     environment: str = "twin",
     duration_hours: float = 8.0,
     max_actions: int = 1000,
+    base_dir: Optional[str] = None,
+    vault: Any = None,
 ) -> Provisioned:
     """Create + SIGN a CRUCIBLE authority for ``slug`` scoped to ``scope`` (LITERAL hosts — the scope
     matcher has no CIDR, so pass ``["127.0.0.1"]`` not a block), persist it to the default authority
-    store, and return the shared governance material. Offense-side (lazy ``framework`` import)."""
+    store, and return the shared governance material. Offense-side (lazy ``framework`` import).
+
+    Governance key resolution (S7): an explicit ``keypair`` wins (tests / an externally-managed key);
+    otherwise, when ``base_dir`` is given, a STABLE offense-governance key is loaded-or-provisioned under
+    ``base_dir`` (sealed at rest under ``vault`` when provisioned), so one owner-signed delegation covers the
+    anchor-1 signer across runs; with no ``base_dir`` it falls back to the legacy per-run ephemeral key
+    (unchanged, non-persisting — used by callers that do not supply a home)."""
     from vigil_core import AuthorizerKey, TrustRoot
     from framework.v2.authority.charter import authority_from_scope
     from framework.v2.authority.models import TargetEnvironment
     from framework.v2.authority.signing import sign_authority
     from framework.v2.authority.store import save_signed_authority
 
-    kp = keypair if keypair is not None else generate_keypair()
+    if keypair is not None:
+        kp = keypair
+    elif base_dir is not None:
+        kp = load_or_create_governance_keypair(
+            path=str(Path(base_dir) / DEFAULT_GOVERNANCE_KEY_FILE), vault=vault)
+    else:
+        kp = generate_keypair()   # legacy ephemeral (no home supplied); unchanged
     trust_root = TrustRoot(
         threshold=1,
         authorizers=[AuthorizerKey(key_id=key_id, name=key_id, public_key_b64=kp.public_key_b64)],
@@ -194,13 +209,18 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     base = Path(config.base_dir)
     base.mkdir(parents=True, exist_ok=True)
 
-    prov = config.provisioned or provision_authority(slug=config.slug, scope=config.scope)
-
-    # -- attestation (WS-6): operator identity + signer + durable ledger writer ---------------------
-    # The operator key seals at rest under the offense-worker's own TPM-sealed vault (audit G1) once
-    # provisioned; unprovisioned (default) it is plaintext — unchanged, non-bricking.
+    # The offense worker's own TPM-sealed vault (audit G1): built FIRST so both the operator key and the
+    # STABLE governance key (S7) seal under one provisioned KEK. Unprovisioned (default) they are plaintext
+    # at rest — unchanged, non-bricking.
     from vigil_core.vault import Vault
     op_vault = Vault(base / "vault")
+
+    # S7: provision the authority under a STABLE, sealed governance key (base_dir + vault), so one owner
+    # delegation covers the anchor-1 signer across runs. A caller-supplied provisioned authority still wins.
+    prov = config.provisioned or provision_authority(
+        slug=config.slug, scope=config.scope, base_dir=config.base_dir, vault=op_vault)
+
+    # -- attestation (WS-6): operator identity + signer + durable ledger writer ---------------------
     op_kp = config.operator_keypair or load_or_create_operator_keypair(
         path=str(base / "operator.key"), vault=op_vault)
     operator = resolve_operator(keypair=op_kp)
