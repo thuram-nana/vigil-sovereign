@@ -1,0 +1,48 @@
+# SIGIL cockpit — Caddy reverse proxy (automatic HTTPS via Let's Encrypt/ZeroSSL)
+# ==============================================================================
+# The cockpit NEVER binds a public interface. It binds loopback (or a private
+# WireGuard/Tailscale IP) and this proxy — which DOES terminate TLS for your
+# domain — forwards to it. The tunnel/proxy is the network boundary; the cockpit
+# stays non-public and fails closed on a public bind (see REMOTE-HOSTING.md).
+#
+# 1) Run the cockpit privately, teaching it the domain it will be reached by
+#    (added to the anti-DNS-rebinding Host/Origin allowlist):
+#
+#      SIGIL_UI_ALLOWED_HOSTS=cockpit.example.com \
+#      SIGIL_UI_ALLOWED_ORIGINS=https://cockpit.example.com \
+#      sigil serve --host 127.0.0.1 --port 8733
+#
+#    (or: sigil serve --host 127.0.0.1 --port 8733 \
+#           --allow-host cockpit.example.com \
+#           --allow-origin https://cockpit.example.com)
+#
+# 2) Point DNS A/AAAA for cockpit.example.com at THIS proxy host, then run Caddy
+#    with this file. Caddy obtains + renews the certificate automatically.
+#
+# NOTE: Caddy preserves the incoming Host header to the upstream by default, so
+# the cockpit receives `Host: cockpit.example.com` — exactly what its allowlist
+# expects. Do not rewrite the Host.
+
+cockpit.example.com {
+	encode zstd gzip
+
+	# Server-Sent Events (/api/stream): disable response buffering so events flush
+	# immediately, and keep the connection long-lived.
+	@sse path /api/stream
+	reverse_proxy @sse 127.0.0.1:8733 {
+		flush_interval -1
+	}
+
+	# Everything else (read plane, owner-signed action plane, static assets).
+	reverse_proxy 127.0.0.1:8733
+
+	# Optional belt-and-braces: only accept the exact host this site serves.
+	@badhost not host cockpit.example.com
+	respond @badhost 421
+
+	header {
+		# The cockpit already sets its own CSP/nosniff/referrer headers; add HSTS at the edge.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}

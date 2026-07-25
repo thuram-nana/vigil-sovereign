@@ -538,13 +538,36 @@ def cmd_mesh(a) -> None:
 
 
 def cmd_serve(a) -> None:
-    """Start the loopback glass-cockpit UI. Mints a fresh session token (printed here); every
-    request needs it and no web page can read it. Read plane is GET-only; the owner-signed action
-    plane is CSRF/Host/Origin-gated."""
+    """Start the glass-cockpit UI. Mints a fresh session token (printed here); every request needs it
+    and no web page can read it. Read plane is GET-only; the owner-signed action plane is
+    CSRF/Host/Origin-gated. Binds loopback by default; `--host`/`$SIGIL_UI_BIND` may bind a PRIVATE
+    (WireGuard/Tailscale) address to sit behind a reverse proxy — FAIL-CLOSED (exit 2) on a public/
+    unspecified bind, minting no token. To serve a real domain add its Host/Origin to the anti-rebind
+    allowlist via `--allow-host`/`--allow-origin` (or `$SIGIL_UI_ALLOWED_HOSTS`/`$SIGIL_UI_ALLOWED_ORIGINS`)
+    and terminate TLS at the proxy (see apps/sigil/deploy/REMOTE-HOSTING.md). Mirrors `cmd_bridge_serve`."""
+    import os as _os
     import secrets
 
+    from .bridge.daemon import bind_ok
+
+    def _multi(flag_vals, env_name):
+        # union of a repeatable flag and a comma-separated env var; blanks dropped
+        out: list[str] = list(flag_vals or [])
+        out += [s.strip() for s in _os.environ.get(env_name, "").split(",") if s.strip()]
+        return tuple(dict.fromkeys(out))   # de-dup, order-preserving
+
+    host = a.host or _os.environ.get("SIGIL_UI_BIND", "127.0.0.1")
+    if not bind_ok(host):
+        print(f"  refusing to bind {host!r}: the cockpit binds loopback or a PRIVATE (WireGuard/Tailscale) "
+              f"address only — never 0.0.0.0 / an unspecified / a public address. Put a reverse proxy in "
+              f"front to serve a real domain (deploy/REMOTE-HOSTING.md).", file=sys.stderr)
+        sys.exit(2)
+    allowed_hosts = _multi(a.allow_host, "SIGIL_UI_ALLOWED_HOSTS")
+    allowed_origins = _multi(a.allow_origin, "SIGIL_UI_ALLOWED_ORIGINS")
+
     from .ui.server import serve
-    serve(token=secrets.token_urlsafe(24), port=a.port)
+    serve(token=secrets.token_urlsafe(24), host=host, port=a.port,
+          allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
 
 def cmd_bridge_serve(a) -> None:
@@ -1165,8 +1188,18 @@ def main(argv=None) -> None:
     pck.add_argument("--key-id", dest="cosign_key_id", default=None, help="cosign: this witness's key id (or $SIGIL_WITNESS_KEY_ID)")
     pck.add_argument("--threshold", type=int, default=None, help="witness add/remove: the m-of-n witness threshold")
     pck.set_defaults(fn=cmd_checkpoint)
-    psv = sub.add_parser("serve", help="start the loopback glass-cockpit UI")
+    psv = sub.add_parser("serve", help="start the glass-cockpit UI (loopback default; private bind + "
+                                       "reverse proxy for a domain)")
     psv.add_argument("--port", type=int, default=8733)
+    psv.add_argument("--host", default=None,
+                     help="bind address ($SIGIL_UI_BIND; default 127.0.0.1). Loopback or a PRIVATE "
+                          "(WireGuard/Tailscale) IP only — never 0.0.0.0/public (fail-closed exit 2)")
+    psv.add_argument("--allow-host", action="append", default=[],
+                     help="reverse-proxy Host to accept, e.g. cockpit.example.com (repeatable; also "
+                          "$SIGIL_UI_ALLOWED_HOSTS, comma-separated). Anti-DNS-rebinding allowlist")
+    psv.add_argument("--allow-origin", action="append", default=[],
+                     help="reverse-proxy Origin to accept, e.g. https://cockpit.example.com (repeatable; "
+                          "also $SIGIL_UI_ALLOWED_ORIGINS, comma-separated)")
     psv.set_defaults(fn=cmd_serve)
     ph = sub.add_parser("host", help="this host's mesh capability descriptor")
     ph.add_argument("action", nargs="?", default="caps", choices=["caps"])

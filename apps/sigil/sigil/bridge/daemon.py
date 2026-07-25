@@ -17,19 +17,29 @@ from ..spine.store import SpineStore
 
 
 _CGNAT4 = ipaddress.ip_network("100.64.0.0/10")   # carrier-grade NAT — the range Tailscale assigns tailnet IPs
+_ULA6 = ipaddress.ip_network("fc00::/7")          # IPv6 unique-local (Tailscale fd7a::/48, WireGuard fd…/…)
+_LINKLOCAL6 = ipaddress.ip_network("fe80::/10")   # IPv6 link-local
 _DEDUP_WINDOW = 2048                               # bound the replay-dedup scan to the most recent N records
 
 
 def bind_ok(addr: str) -> bool:
-    """True iff `addr` is safe to bind: loopback, a PRIVATE (e.g. WireGuard) address, or the CGNAT range
-    Tailscale uses — never 0.0.0.0 / a public / an unspecified address."""
+    """True iff `addr` is safe to bind: loopback, an IPv4 PRIVATE (RFC1918) / Tailscale-CGNAT address, or an
+    IPv6 unique-local (fc00::/7) / link-local (fe80::/10) address — i.e. a WireGuard/Tailscale tunnel or LAN
+    address. NEVER 0.0.0.0/:: (unspecified) and NEVER a globally-routable address.
+
+    For IPv6 we use a POSITIVE allowlist rather than ``is_private``: Python classifies the globally-routable
+    transition ranges Teredo (2001::/32) and 6to4 (2002::/16) as private, so trusting ``is_private`` would let
+    an AF_INET6 caller bind a routable address. Only loopback / ULA / link-local (the ranges a real tunnel
+    uses) are permitted; everything else — global unicast, Teredo, 6to4, IPv4-mapped, documentation — refused."""
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
     if ip.is_unspecified:                          # 0.0.0.0 / :: → refuse
         return False
-    return ip.is_loopback or ip.is_private or (ip.version == 4 and ip in _CGNAT4)
+    if ip.version == 6:
+        return ip.is_loopback or ip in _ULA6 or ip in _LINKLOCAL6
+    return ip.is_loopback or ip.is_private or ip in _CGNAT4
 
 
 class BridgeDaemon:

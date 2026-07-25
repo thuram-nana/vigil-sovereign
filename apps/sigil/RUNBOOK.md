@@ -118,10 +118,16 @@ registration in step 5 above (stdio, read-only, loopback). Nothing to
 enable/start; if recall stops working, re-check the JSON registration and that
 the `command`/`env` paths are correct, then restart the Claude client.
 
-### 2d. Local cockpit (optional, on demand)
+### 2d. Cockpit (optional, on demand)
 
-`sigil serve` starts a loopback-only web UI and prints a one-time token; it is
-interactive, not a managed service. Run it when you want the cockpit.
+`sigil serve` starts the provenance-first web UI and prints a one-time token; it
+is interactive, not a managed service (or run it as `sigil-cockpit.service`).
+It binds **loopback by default** and fails closed (exit 2) on a public/`0.0.0.0`
+bind. To reach it by a real domain, bind a private WireGuard/Tailscale IP (or
+keep loopback with a co-located proxy) and put a TLS-terminating reverse proxy in
+front, adding the domain to the anti-rebind allowlist — see
+[`deploy/REMOTE-HOSTING.md`](deploy/REMOTE-HOSTING.md). The tunnel/proxy, not the
+transport, is the network boundary; the cockpit is never a public listener.
 
 ---
 

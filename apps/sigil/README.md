@@ -155,10 +155,12 @@ Everything below is built and tested. Where something is a documented seam or of
   an app.
 
 ### Interfaces
-- **Local web cockpit** (`sigil/ui/`) — a loopback, provenance-first "glass cockpit": every on-screen
-  atom click-throughs to a **live-re-verified** spine hash; a live SSE feed; a knowledge-graph map; a
-  ⌘K palette showing the predicted WARDEN tier before acting; and a CSRF-proof, owner-signed action
-  plane (the private key never enters the browser).
+- **Web cockpit** (`sigil/ui/`) — a provenance-first "glass cockpit" (loopback by default; private-bind +
+  reverse proxy to reach it by a domain, **never** a public listener — see
+  [`deploy/REMOTE-HOSTING.md`](deploy/REMOTE-HOSTING.md)): every on-screen atom click-throughs to a
+  **live-re-verified** spine hash; a live SSE feed; a knowledge-graph map; a ⌘K palette showing the
+  predicted WARDEN tier before acting; and a CSRF-proof, owner-signed action plane (the private key never
+  enters the browser).
 - **Cross-platform + mobile** (`sigil/platform/`, `sigil/mesh/`, `sigil/bridge/`) — per-OS backends
   (Linux real; macOS/Windows/Android honest-degrading), OS-keyring secrets, an owner-signed
   device-authorization ledger, and the **phone companion** below.
@@ -285,7 +287,9 @@ always queue; owner disarm/panic/revoke always wins) intact over the wire.
 - **Secrets off the spine.** Credentials and keys live in the OS keyring / 0700 files, never in the
   append-only log, a network payload, or a UA/Referer header.
 - **Local-first & sovereign.** Data leaving the box for a frontier model is a WARDEN-gated, owner-approved
-  egress event. The cockpit is loopback-only; the phone bridge binds a WireGuard-private address only
+  egress event. The cockpit binds loopback by default and **never** a public interface (a public bind
+  fails closed; reach it by a domain via a private bind + TLS reverse proxy — `deploy/REMOTE-HOSTING.md`);
+  the phone bridge binds a WireGuard-private address only
   (never `0.0.0.0`/public), authenticates by per-request Ed25519 signature (no wire bearer secret), and
   the owner trust-root never leaves the PC.
 - **Offense-free by construction.** `assert_no_offense()` at import; no impersonation, no CAPTCHA/bot

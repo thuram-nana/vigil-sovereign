@@ -1,0 +1,70 @@
+# SIGIL glass-cockpit UI — systemd USER service
+# =============================================================================
+# Runs `sigil serve`, the read + owner-signed-action cockpit. Bind + allowlist
+# come from the env file so the unit itself is generic.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │  THE COCKPIT NEVER BINDS A PUBLIC INTERFACE.                               │
+# │                                                                            │
+# │  SIGIL_UI_BIND must be loopback (default 127.0.0.1) or a PRIVATE           │
+# │  WireGuard/Tailscale IP. `sigil serve` fails closed (exit 2) on a public / │
+# │  0.0.0.0 / unspecified bind — no token is minted. To reach the cockpit by  │
+# │  a real domain, run a reverse proxy (deploy/reverse-proxy/) that           │
+# │  terminates TLS and forwards to this private bind, and add the domain to   │
+# │  SIGIL_UI_ALLOWED_HOSTS / SIGIL_UI_ALLOWED_ORIGINS. The tunnel/proxy, not  │
+# │  the transport, is the network boundary.                                   │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# INSTALL (user-level, no root):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/sigil-cockpit.service ~/.config/systemd/user/
+#   cp deploy/cockpit.env.example           ~/.sigil/cockpit.env    # then edit
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sigil-cockpit
+#   # keep it running after logout (optional): loginctl enable-linger "$USER"
+#
+# The session token is minted at startup and written to the journal — read it with:
+#   journalctl --user -u sigil-cockpit -n 5 --no-pager
+# Logs → the journal:  journalctl --user -u sigil-cockpit -f
+
+[Unit]
+Description=SIGIL glass-cockpit UI
+Documentation=file:%h/sigil/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Bind + port + allowlist + SIGIL_HOME come from the env file (the leading '-'
+# means a missing file does not fail the unit; the cockpit defaults to loopback).
+EnvironmentFile=-%h/.sigil/cockpit.env
+Environment=SIGIL_LOG_LEVEL=INFO
+
+WorkingDirectory=%h/.sigil
+ExecStart=%h/.sigil/venv/bin/sigil serve --host ${SIGIL_UI_BIND} --port ${SIGIL_UI_PORT}
+# Alternative if the `sigil` console script is not installed:
+# ExecStart=%h/.sigil/venv/bin/python -m sigil serve --host ${SIGIL_UI_BIND} --port ${SIGIL_UI_PORT}
+
+# --- lifecycle -------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- hardening (least privilege without cutting off what the cockpit needs) --
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.sigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE — deliberately NOT set (would break the daemon):
+#   PrivateNetwork=yes  → hides a WireGuard interface; a private bind would fail.
+#   ProtectHome=yes     → hides ~/.sigil (spine + keys); everything would fail.
+
+[Install]
+WantedBy=default.target

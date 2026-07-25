@@ -1,29 +1,40 @@
-"""The SIGIL glass-cockpit server (Phase 7, WS-C) — a loopback-only, two-plane HTTP server (stdlib
+"""The SIGIL glass-cockpit server (Phase 7, WS-C) — a NON-PUBLIC, two-plane HTTP server (stdlib
 only, minimal auditable surface). Mirrors the MCP server's posture: read-only over the spine +
 provenance on every atom, plus a CSRF-proof owner-signed action plane.
 
 Security model (the red-pen keystone):
-  • binds 127.0.0.1 ONLY (never 0.0.0.0/public).
+  • binds a `bind_ok` address ONLY — loopback (default) or a PRIVATE (WireGuard/Tailscale) address.
+    NEVER 0.0.0.0 / an unspecified / a public address (the constructor raises otherwise). To reach the
+    cockpit by a real domain, put a reverse proxy in front that terminates TLS and forwards to this
+    private bind — the tunnel/proxy is the network boundary, not a public listener (see
+    apps/sigil/deploy/REMOTE-HOSTING.md).
   • a session TOKEN is minted at startup and PRINTED TO THE TERMINAL (so only someone at the machine
     can drive it, and no web page can read it). The served page embeds it; a cross-origin page cannot.
   • READ plane (GET /api/*): requires the token (header `X-SIGIL-Token`, or `?token=` for SSE which
     can't set headers). Read/query only — EXCEPT `/api/ask`, which DISPATCHES a WARDEN-gated KERNEL
     query (a subprocess), so it carries the FULL action gate (token + Origin + Host), not just token.
-  • ACTION plane (POST /api/action): requires the token AND an EXACT-MATCH loopback `Origin`/`Referer`
-    AND a `Host` in the allowlist (defeats DNS-rebinding). Routes ONLY the closed owner-signed action
-    set. The private key never touches the browser — the server signs (see `ui.actions`).
+  • ACTION plane (POST /api/action): requires the token AND an EXACT-MATCH `Origin`/`Referer` in the
+    allowlist AND a `Host` in the allowlist (defeats DNS-rebinding). The allowlist is derived from the
+    REAL bound address (plus the loopback pair when bound to loopback) UNIONED with the operator's
+    explicitly-configured domain Host/Origin (`allowed_hosts`/`allowed_origins`) — so a reverse proxy
+    forwarding `Host: cockpit.example.com` + `Origin: https://cockpit.example.com` is accepted while
+    every other cross-origin request is still refused. Routes ONLY the closed owner-signed action set.
+    The private key never touches the browser — the server signs (see `ui.actions`).
   • Static assets + the index bootstrap are token-free (they carry no secret; the token is injected
     into the page as a data attribute, unreadable cross-origin). A strict CSP + external `self` JS/CSS
     keeps the page functional AND locked down."""
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
+import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from ..bridge.daemon import bind_ok
 from ..config import SPINE_PATH
 from ..spine.store import SpineStore
 from ..spine.tail import SpineTailer
@@ -37,13 +48,38 @@ _CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors
 class UIServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, addr, handler, *, token: str, spine_path: Path):
+    def __init__(self, addr, handler, *, token: str, spine_path: Path,
+                 extra_hosts=(), extra_origins=()):
+        host = addr[0]
+        if not bind_ok(host):
+            raise ValueError(
+                f"refusing to bind {host!r}: the cockpit binds loopback or a PRIVATE (WireGuard/"
+                f"Tailscale) address only — never 0.0.0.0 / an unspecified / a public address. To serve "
+                f"a real domain, run a reverse proxy in front (see deploy/REMOTE-HOSTING.md).")
+        ip = ipaddress.ip_address(host)             # bind_ok already proved this parses
+        if ip.version == 6:                         # bind an IPv6 tunnel (WireGuard/Tailscale) address
+            self.address_family = socket.AF_INET6   # (instance attr read by TCPServer.__init__ below)
         super().__init__(addr, handler)
         self.token = token
         self.spine_path = spine_path
         port = self.server_address[1]              # the ACTUAL bound port (correct even for port 0)
-        self.allowed_hosts = frozenset({f"127.0.0.1:{port}", f"localhost:{port}"})
-        self.allowed_origins = frozenset({f"http://127.0.0.1:{port}", f"http://localhost:{port}"})
+        # Anti-DNS-rebinding allowlist: the REAL bound address, plus the loopback pair only when bound to
+        # loopback (dev convenience — never added for a private/WG bind), UNIONED with the operator's
+        # explicitly-configured reverse-proxy domain Host/Origin. Empty/blank extras are dropped. IPv6
+        # literals are bracketed to match the Host-header/Origin form a browser sends (`[::1]:port`).
+        def _hp(h: str) -> str:
+            return f"[{h}]:{port}" if ":" in h else f"{h}:{port}"
+
+        hosts = {_hp(host)}
+        origins = {f"http://{_hp(host)}"}
+        if ip.is_loopback:
+            lit = "::1" if ip.version == 6 else "127.0.0.1"
+            hosts |= {_hp(lit), f"localhost:{port}"}
+            origins |= {f"http://{_hp(lit)}", f"http://localhost:{port}"}
+        hosts |= {h.strip() for h in extra_hosts if h and h.strip()}
+        origins |= {o.strip().rstrip("/") for o in extra_origins if o and o.strip()}
+        self.allowed_hosts = frozenset(hosts)
+        self.allowed_origins = frozenset(origins)
 
     def store(self) -> SpineStore:
         return SpineStore(self.spine_path)         # fresh read each request (cheap, current)
@@ -233,15 +269,32 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(400, f"action failed: {str(e)[:200]}")
 
 
-def build_server(*, token: str, port: int = 8733, spine_path=None) -> UIServer:
-    return UIServer(("127.0.0.1", port), Handler, token=token,
-                    spine_path=Path(spine_path) if spine_path else SPINE_PATH)
+def build_server(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
+                 allowed_hosts=(), allowed_origins=()) -> UIServer:
+    """Build (do not run) the cockpit bound to ``host:port`` (asserted ``bind_ok`` — never public).
+    ``allowed_hosts``/``allowed_origins`` are the operator's reverse-proxy domain forms (e.g.
+    ``cockpit.example.com`` / ``https://cockpit.example.com``) unioned into the anti-rebind allowlist."""
+    return UIServer((host, port), Handler, token=token,
+                    spine_path=Path(spine_path) if spine_path else SPINE_PATH,
+                    extra_hosts=allowed_hosts, extra_origins=allowed_origins)
 
 
-def serve(*, token: str, port: int = 8733, spine_path=None) -> None:
-    srv = build_server(token=token, port=port, spine_path=spine_path)
-    print(f"  SIGIL cockpit → http://127.0.0.1:{port}/?token={token}")
-    print("  (loopback only; the token gates every request — keep it to yourself)")
+def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=None,
+          allowed_hosts=(), allowed_origins=()) -> None:
+    srv = build_server(token=token, host=host, port=port, spine_path=spine_path,
+                       allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
+    bound = srv.server_address
+    bip = ipaddress.ip_address(bound[0])
+    disp = f"[{bound[0]}]" if bip.version == 6 else bound[0]     # bracket IPv6 in the URL
+    print(f"  SIGIL cockpit → http://{disp}:{bound[1]}/?token={token}")
+    if bip.is_loopback:
+        print("  (loopback only; the token gates every request — keep it to yourself)")
+    else:
+        print(f"  (private bind {bound[0]} — reach it via a reverse proxy / tunnel, never a public listener)")
+    # the operator-configured reverse-proxy domains (printed from the inputs, not reverse-engineered)
+    extras = ", ".join(sorted({h.strip() for h in allowed_hosts if h and h.strip()}))
+    if extras:
+        print(f"  (reverse-proxy Host allowlist: {extras})")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
