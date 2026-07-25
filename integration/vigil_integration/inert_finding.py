@@ -59,6 +59,13 @@ class ValidatedFinding:
     def oracle_context_digest(self) -> str:
         return str(self.certificate.get("oracle_context_digest", ""))
 
+    @property
+    def engagement_slug(self) -> str:
+        """The engagement scope the finding declares in its own SIGNED certificate. Empty string if the
+        cert omits it. The sovereign receiver binds this to the owner-delegated scope so a delegation for
+        one engagement cannot launder findings under another engagement's label (S4)."""
+        return str(self.certificate.get("engagement_slug", ""))
+
     def verify_signature(self, trust_root: TrustRoot) -> bool:
         """True iff the CRUCIBLE governance root's m-of-n threshold signed this certificate.
 

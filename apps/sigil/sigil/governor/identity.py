@@ -38,6 +38,17 @@ def owner_keypair() -> Optional[KeyPair]:
     return KeyPair(public_key_b64=pub, private_key_b64=priv) if priv and pub else None
 
 
+def delegate_offense_governance(owner_key, *, authorizers, threshold: int, scope: str, not_after: int):
+    """Owner-sign a delegation authorizing an offense-governance TrustRoot ``(authorizers, threshold)`` for
+    ``scope`` until ``not_after`` (unix seconds) — the cryptographic tie (S4) that lets the sovereign
+    finding-receiver DERIVE the governance root it trusts from the OWNER, instead of blindly trusting a
+    handed-in root. Only the owner (holder of the sovereign key) can mint one. Returns a ``DelegationCert``
+    (inert signed data that crosses the boundary)."""
+    from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE, sign_delegation
+    return sign_delegation(owner_key, role=OFFENSE_GOVERNANCE_ROLE, scope=scope,
+                           authorizers=authorizers, threshold=int(threshold), not_after=int(not_after))
+
+
 def ensure_owner_keypair() -> KeyPair:
     """Return the persisted owner keypair, generating+persisting it once if absent (owner signing
     path only). Same key material the checkpoint uses, so governance and the spine head share one
