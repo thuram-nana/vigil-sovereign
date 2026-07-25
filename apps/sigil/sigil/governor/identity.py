@@ -49,16 +49,20 @@ def delegate_offense_governance(owner_key, *, authorizers, threshold: int, scope
                            authorizers=authorizers, threshold=int(threshold), not_after=int(not_after))
 
 
-def delegate_offense_spine(owner_key, *, authorizers, scope: str, not_after: int, threshold: int = 1):
+def delegate_offense_spine(owner_key, *, authorizers, scope: str, not_after: int):
     """Owner-sign a delegation authorizing the STABLE offense engagement-spine identity (S5) for ``scope``
     until ``not_after`` — the cryptographic tie that lets a verifier chain an offense spine head back to the
     owner (offense-spine head → verify_delegation(role="offense-spine") → owner root), while the owner
-    private key stays sovereign-side and the offense side holds only its own stable spine key. The spine
-    identity is a single key (threshold 1 by default), distinct from the m-of-n governance authority so the
-    two signing surfaces never merge. Returns a ``DelegationCert`` (inert signed data that crosses the seam)."""
+    private key stays sovereign-side and the offense side holds only its own stable spine key.
+
+    Threshold is FIXED at 1: the offense spine is SINGLE-SIGNER (one key signs every line), so a threshold>1
+    delegation would be cryptographically unsatisfiable — and accepting it would let a verifier silently
+    downgrade the owner's intent to 1-of-n. 1-of-n over multiple authorizers (key rotation) is the intended
+    shape and is exactly what threshold=1 gives. The spine identity is distinct from the m-of-n governance
+    authority so the two signing surfaces never merge. Returns a ``DelegationCert`` (inert signed data)."""
     from vigil_core.delegation import OFFENSE_SPINE_ROLE, sign_delegation
     return sign_delegation(owner_key, role=OFFENSE_SPINE_ROLE, scope=scope,
-                           authorizers=authorizers, threshold=int(threshold), not_after=int(not_after))
+                           authorizers=authorizers, threshold=1, not_after=int(not_after))
 
 
 def ensure_owner_keypair() -> KeyPair:
