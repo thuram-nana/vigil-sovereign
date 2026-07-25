@@ -49,6 +49,18 @@ def delegate_offense_governance(owner_key, *, authorizers, threshold: int, scope
                            authorizers=authorizers, threshold=int(threshold), not_after=int(not_after))
 
 
+def delegate_offense_spine(owner_key, *, authorizers, scope: str, not_after: int, threshold: int = 1):
+    """Owner-sign a delegation authorizing the STABLE offense engagement-spine identity (S5) for ``scope``
+    until ``not_after`` — the cryptographic tie that lets a verifier chain an offense spine head back to the
+    owner (offense-spine head → verify_delegation(role="offense-spine") → owner root), while the owner
+    private key stays sovereign-side and the offense side holds only its own stable spine key. The spine
+    identity is a single key (threshold 1 by default), distinct from the m-of-n governance authority so the
+    two signing surfaces never merge. Returns a ``DelegationCert`` (inert signed data that crosses the seam)."""
+    from vigil_core.delegation import OFFENSE_SPINE_ROLE, sign_delegation
+    return sign_delegation(owner_key, role=OFFENSE_SPINE_ROLE, scope=scope,
+                           authorizers=authorizers, threshold=int(threshold), not_after=int(not_after))
+
+
 def ensure_owner_keypair() -> KeyPair:
     """Return the persisted owner keypair, generating+persisting it once if absent (owner signing
     path only). Same key material the checkpoint uses, so governance and the spine head share one

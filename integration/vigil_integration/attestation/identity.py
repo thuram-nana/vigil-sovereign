@@ -26,14 +26,13 @@ from __future__ import annotations
 import base64
 import getpass
 import hashlib
-import json
-import os
 import socket
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
-from vigil_core.crypto import KeyPair, generate_keypair, load_public_key, sign, verify_one
+from vigil_core.crypto import KeyPair, sign
+from vigil_core.keystore import load_or_create_sealed_keypair
 from vigil_core.models import Signature
 
 from .anchor import DEFAULT_STATE_DIR
@@ -69,81 +68,12 @@ def fingerprint(public_key_b64: str) -> str:
 def load_or_create_operator_keypair(*, path: Optional[str] = None, vault: object = None) -> KeyPair:
     """Load the persisted operator keypair, or generate and persist one (0600) on first use.
 
-    A loaded public key is validated through ``load_public_key`` (rejecting non-canonical / low-order weak
-    keys); a private key is validated by round-tripping a signature it must verify. Any problem — missing
-    file, corrupt JSON, weak/invalid key — falls through to generating a FRESH keypair, so the operator
-    always ends up with a sound signing identity. Persistence is best-effort (a fresh keypair is usable in
-    memory this run even if the disk write fails).
-
-    At-rest sealing (audit G1): if ``vault`` (a :class:`vigil_core.vault.Vault`) is supplied AND
-    provisioned, the keypair file is AEAD-sealed at rest (else plaintext, unchanged). A sealed file that
-    the TPM cannot unseal raises ``VaultLocked`` (fail-closed) rather than silently minting a NEW divergent
-    operator identity."""
-    p = Path(path) if path else DEFAULT_KEYPAIR_FILE
-    loaded = _try_load_keypair(p, vault)
-    if loaded is not None:
-        return loaded
-    kp = generate_keypair()
-    _persist_keypair(p, kp, vault)
-    return kp
-
-
-def _try_load_keypair(p: Path, vault: object = None) -> Optional[KeyPair]:
-    """Read + validate a persisted keypair, total. Returns None on any missing/corrupt/weak material. A
-    sealed-but-unopenable file (locked TPM) propagates ``VaultLocked`` — fail-closed, never a silent new key."""
-    if vault is not None:
-        text = vault.read_text_secret(p, context=OPERATOR_KEYPAIR_CONTEXT)  # VaultLocked propagates
-        if text is None:
-            return None
-        try:
-            data = json.loads(text)
-        except Exception:  # noqa: BLE001 — corrupt sealed/plaintext JSON → regenerate
-            return None
-    else:
-        try:
-            data = json.loads(p.read_text())
-        except Exception:  # noqa: BLE001 — no file / unreadable / non-JSON → regenerate
-            return None
-    if not isinstance(data, dict):
-        return None
-    pub = data.get("public_key_b64")
-    priv = data.get("private_key_b64")
-    if not isinstance(pub, str) or not isinstance(priv, str) or not pub or not priv:
-        return None
-    try:
-        load_public_key(pub)                       # rejects non-canonical / low-order weak keys
-        probe = sign(priv, b"vigil-attestation-keypair-probe")  # validates the private key material
-    except Exception:  # noqa: BLE001 — weak/invalid persisted key → regenerate rather than trust it
-        return None
-    if not verify_one(pub, b"vigil-attestation-keypair-probe", probe):
-        return None                                # pub/priv are not a matched pair → regenerate
-    return KeyPair(public_key_b64=pub, private_key_b64=priv)
-
-
-def _persist_keypair(p: Path, kp: KeyPair, vault: object = None) -> None:
-    """Atomically persist the keypair at 0600, best-effort (a disk failure never breaks minting). When a
-    provisioned ``vault`` is supplied the keypair is AEAD-sealed at rest; else plaintext (unchanged)."""
-    payload = json.dumps({"public_key_b64": kp.public_key_b64,
-                          "private_key_b64": kp.private_key_b64})
-    if vault is not None:
-        try:
-            vault.write_text_secret(p, payload, context=OPERATOR_KEYPAIR_CONTEXT)  # sealed iff enabled
-        except Exception:  # noqa: BLE001 — best-effort; the in-memory keypair still works this run
-            pass
-        return
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_name(p.name + ".tmp")
-        # create the temp file 0600 from the start so the private key is never briefly world-readable.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, payload.encode("utf-8"))
-        finally:
-            os.close(fd)
-        os.replace(tmp, p)
-        os.chmod(p, 0o600)
-    except Exception:  # noqa: BLE001 — best-effort persistence; the in-memory keypair still works this run
-        pass
+    Thin wrapper over the shared :func:`vigil_core.keystore.load_or_create_sealed_keypair` (the ONE reviewed
+    load/validate/persist/seal implementation), bound to the operator AEAD context so an operator blob can
+    never be opened as another secret. Validation (weak-key rejection + priv/pub round-trip), best-effort
+    persistence, and fail-closed-on-locked-TPM behaviour are exactly as before — unchanged."""
+    p = str(path) if path else str(DEFAULT_KEYPAIR_FILE)
+    return load_or_create_sealed_keypair(path=p, context=OPERATOR_KEYPAIR_CONTEXT, vault=vault)
 
 
 def _os_login() -> str:

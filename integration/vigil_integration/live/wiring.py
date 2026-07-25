@@ -40,6 +40,7 @@ from ..detection.registry import run_all_detections
 from ..oracle_adapter import confirm_and_certify
 from .engine import EngineSeams, VigilEngine
 from .executor import execute
+from .spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
 from .spine_vigilcore import VigilCoreSpine
 from .think_claude import think
 
@@ -225,7 +226,12 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     gate = _build_gate(prov, ceiling=config.offense_ceiling)
 
     # -- spine signer + checkpoint (F2b) -------------------------------------------------------------
-    spine_kp = config.spine_keypair or generate_keypair()
+    # S5: a STABLE offense-spine identity (persisted + sealed under the offense vault), not the old
+    # per-run ephemeral key — so the spine is verifiable across runs and can be owner-delegated
+    # (OFFENSE_SPINE_ROLE). config.spine_keypair stays injectable for tests. Reuses op_vault so both
+    # offense secrets seal under one provisioned KEK (distinct AEAD contexts keep the blobs separate).
+    spine_kp = config.spine_keypair or load_or_create_spine_keypair(
+        path=str(base / DEFAULT_SPINE_KEY_FILE), vault=op_vault)
     spine = VigilCoreSpine(spine_kp, str(base / f"{config.slug}.spine"))
 
     def exec_signer(message: bytes) -> str:
