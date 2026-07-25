@@ -16,104 +16,29 @@ First failure wins; ANY error in any half is a DENY (never caught-and-continued)
 is the conjunction: ALLOW only if CRUCIBLE in-envelope AND WARDEN auto AND (if destructive) threshold-
 authorized; QUEUE if in-envelope + destruction-satisfied but WARDEN needs owner approval; DENY otherwise.
 
-The composition core (:func:`conjunctive_decide`) is pure — both halves are injected as thunks —
-so it is fully testable without CRUCIBLE or the kernel. :func:`build_offense_gate` wires the real
-CRUCIBLE ``authorize_action`` (loaded via the governance trust root — the seam map flagged a
-``None`` trust root as the biggest fail-open) and the real WARDEN classifier; its ``framework``
-import is LAZY so this module stays import-clean for the sovereign side (which never calls it).
+The composition core (:func:`conjunctive_decide`) is pure — both halves are injected as thunks — so it is
+fully testable without CRUCIBLE or the kernel. As of unification S6 that pure core (``conjunctive_decide`` +
+``GateVerdict``/``CrucibleResult``/``DestructionOutcome``) lives in the neutral shared ``vigil_core.gate`` so
+BOTH processes import the SAME gate-of-record primitive; this module RE-EXPORTS it (back-compat for every
+existing importer of ``vigil_integration.conjunctive_gate``) and adds the OFFENSE wrapper.
+:func:`build_offense_gate` wires the real CRUCIBLE ``authorize_action`` (loaded via the governance trust root
+— the seam map flagged a ``None`` trust root as the biggest fail-open) and the real WARDEN classifier; its
+``framework`` import is LAZY so this module stays import-clean for the sovereign side (which never calls it).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Callable
+
+# The pure gate-of-record composition now lives in the neutral shared core (S6). Re-exported here so every
+# existing `from vigil_integration.conjunctive_gate import ...` keeps working, byte-identical semantics.
+from vigil_core.gate import CrucibleResult, DestructionOutcome, GateVerdict, conjunctive_decide
 
 from .warden_gate import DEFAULT_CEILING, DEFAULT_FLOOR, ToolDecision, decide_tool
 
-
-@dataclass(frozen=True)
-class GateVerdict:
-    allowed: bool          # may this action auto-run right now?
-    outcome: str           # "allow" | "queue" | "deny"
-    reason: str
-    crucible_allowed: bool | None      # CRUCIBLE in-envelope? (None if it errored)
-    warden: ToolDecision | None        # the WARDEN tool decision (None if not reached/errored)
-
-
-@dataclass(frozen=True)
-class CrucibleResult:
-    """The minimal shape the composition needs from the CRUCIBLE authority half."""
-    allowed: bool
-    reason: str
-
-
-@dataclass(frozen=True)
-class DestructionOutcome:
-    """The minimal shape the composition needs from the threshold-destruction half. The concrete
-    ``destruction_gate.DestructionDecision`` (``.authorized`` + ``.reason``) satisfies this duck-type,
-    so the composition stays decoupled from that module and is testable in isolation."""
-    authorized: bool
-    reason: str
-
-
-def conjunctive_decide(
-    *,
-    crucible_authorize: Callable[[], CrucibleResult],
-    warden_decide: Callable[[], ToolDecision],
-    destructive: bool = False,
-    destruction_authorize: Callable[[], Any] | None = None,
-) -> GateVerdict:
-    """Compose the gates, first-failure-wins, fail-closed. Both core halves are thunks. For a
-    DESTRUCTIVE action a THIRD conjunct is required — the m-of-n threshold-destruction authorization
-    (``destruction_authorize`` returns an object with ``.authorized`` + ``.reason``); a destructive
-    action with no destruction gate wired, an errored gate, or an unauthorized result is a DENY."""
-    # 1. CRUCIBLE first — its killswitch step is the absolute stop. Any deny OR error => DENY.
-    try:
-        cru = crucible_authorize()
-    except Exception as exc:  # a raised EthicsViolation (halted/expired/out-of-scope/…) or any error
-        return GateVerdict(False, "deny", f"CRUCIBLE gate error/refusal (fail-closed): {exc}", None, None)
-    if not cru.allowed:
-        return GateVerdict(False, "deny", f"CRUCIBLE denied: {cru.reason}", False, None)
-
-    # 2. WARDEN tool gate.
-    try:
-        war = warden_decide()
-    except Exception as exc:
-        return GateVerdict(False, "deny", f"WARDEN gate error (fail-closed): {exc}", True, None)
-
-    # 3. Threshold-destruction gate — a HARD extra conjunct for destructive/high-blast actions. It is
-    #    orthogonal to WARDEN's tier approval: an autonomous worker must not perform an irreversible
-    #    action without the owner-inclusive m-of-n quorum, even if WARDEN would auto-allow the class.
-    if destructive:
-        if destruction_authorize is None:
-            return GateVerdict(
-                False, "deny",
-                "destructive action requires a threshold-destruction gate, but none was wired "
-                "(fail-closed)", True, war,
-            )
-        try:
-            dz = destruction_authorize()
-        except Exception as exc:
-            return GateVerdict(False, "deny", f"destruction gate error (fail-closed): {exc}", True, war)
-        if getattr(dz, "authorized", False) is not True:
-            # strict `is True` (not truthiness): a buggy/adversarial gate returning a truthy-but-not-
-            # bool authorized (e.g. "no", 1, a non-empty list) must NOT open the irreversible-action gate.
-            return GateVerdict(
-                False, "deny",
-                f"destructive action not threshold-authorized: {getattr(dz, 'reason', 'refused')}",
-                True, war,
-            )
-
-    if war.outcome == "auto":
-        note = "both gates allow: CRUCIBLE in-envelope AND WARDEN auto"
-        if destructive:
-            note += " AND destruction threshold-authorized"
-        return GateVerdict(True, "allow", note, True, war)
-    if war.outcome == "queue":
-        return GateVerdict(False, "queue", f"in envelope, but WARDEN needs owner approval: {war.reason}", True, war)
-    # "deny" OR any unrecognised WARDEN outcome → DENY. Only an explicit "auto" may ALLOW, so a
-    # new/unexpected outcome string can never silently open the gate (fail-closed conjunction).
-    return GateVerdict(False, "deny", f"WARDEN refused tool {war.tool!r} (outcome={war.outcome!r}): {war.reason}", True, war)
+__all__ = [
+    "GateVerdict", "CrucibleResult", "DestructionOutcome", "conjunctive_decide", "build_offense_gate",
+]
 
 
 def build_offense_gate(
