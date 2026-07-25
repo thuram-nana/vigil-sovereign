@@ -88,8 +88,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         # a loopback JSON API is not a browser resource; deny embedding/sniffing.
+        self.send_header("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -158,7 +160,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         # 1. same-origin / CSRF guard (loopback + custom header + Host/Origin proof).
-        ok, why = check_same_origin(self.headers, self.server.server_address[1])
+        ok, why = check_same_origin(self.headers, self.server.server_address[1],
+                                    getattr(self.server, "allowed_hosts", ()),
+                                    getattr(self.server, "allowed_origins", ()))
         if not ok:
             self._json({"error": f"cross-site POST refused ({why})"}, status=403)
             return
@@ -208,7 +212,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8799, *, registry=None,
-          import_store_factory=None, api_key: str | None = None) -> ThreadingHTTPServer:
+          import_store_factory=None, api_key: str | None = None,
+          allowed_hosts=(), allowed_origins=()) -> ThreadingHTTPServer:
     """Create (but do not block on) the loopback external API server. The caller runs
     ``serve_forever()``. Refuses any non-loopback host — the API is a single-operator,
     on-host surface by design (sovereignty), same as the console.
@@ -230,4 +235,7 @@ def serve(host: str = "127.0.0.1", port: int = 8799, *, registry=None,
     httpd.import_store_factory = import_store_factory
     # None → load from CRUCIBLE_API_KEY; blank/unset → None → the default no-op.
     httpd.api_key = load_api_key(api_key)
+    # operator reverse-proxy domain allowlist (empty default = loopback-only, unchanged).
+    httpd.allowed_hosts = frozenset(h.strip() for h in allowed_hosts if h and h.strip())
+    httpd.allowed_origins = frozenset(o.strip().rstrip("/") for o in allowed_origins if o and o.strip())
     return httpd
