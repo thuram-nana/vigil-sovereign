@@ -11,6 +11,9 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
     ``vigil ledger when``           tool, WHEN, against WHAT — non-repudiably, after verifying the chain.
   * ``vigil verify-ledger``       — verify the ledger's signatures + hash-chain (fail-closed).
   * ``vigil provision --slug S``  — mint + sign a CRUCIBLE authority for a loopback slug.
+  * ``vigil detect --access-log`` — run the Detection Mirror (defensive oracle plane) over log files;
+                                    each fire is certificate-re-verified before it counts as a FACT.
+                                    (Distinct from ``vigil aegis detect`` — the AEGIS-app firewall verdict.)
 
 SUBSYSTEM verbs (S1 control plane — forwarded to the subsystem's own console-script, EXEC'd in its OWN
 environment so the two trust domains are never co-loaded in one interpreter):
@@ -125,6 +128,36 @@ def _cmd_verify_ledger(args: argparse.Namespace) -> int:
     return 0 if ok else 3
 
 
+def _cmd_detect(args: argparse.Namespace) -> int:
+    """Run the Detection Mirror standalone over log files (unification S3) — the DEFENSIVE oracle plane
+    surfaced as a first-class `vigil` verb (previously reachable only INSIDE `vigil engage`). Each fire is
+    re-verified (its certificate re-runs the named detection oracle over the embedded evidence) before it
+    counts as a FACT; unproven fires degrade to LEADs. Framework-free + offense-free (reads telemetry,
+    wields nothing). Note: this is DISTINCT from `vigil aegis detect` (the AEGIS-the-app single
+    TelemetryEnvelope firewall verdict) — this runs the log-plane oracle set over access/auth/conn logs."""
+    from vigil_core import generate_keypair, sign
+    from .detection.registry import detection_bug_classes, facts, leads, run_all_detections
+
+    def _read(path: str) -> str:
+        return Path(path).read_text(encoding="utf-8", errors="replace") if path else ""
+
+    kp = generate_keypair()   # an ephemeral signer so a FACT-grade fire mints a re-verifiable certificate
+    dets = run_all_detections(
+        access_log=_read(args.access_log), conn_log=_read(args.conn_log), auth_log=_read(args.auth_log),
+        signer=lambda msg: sign(kp.private_key_b64, msg), verify_key=kp.public_key_b64, key_id="vigil-detect")
+    f, ll = facts(dets), leads(dets)
+    print("=== vigil detect (detection mirror) ===")
+    print(f"logs: access={args.access_log or '-'}  auth={args.auth_log or '-'}  conn={args.conn_log or '-'}")
+    print(f"vocabulary: {len(detection_bug_classes())} declared detection classes")
+    print(f"FACTS (oracle-proven, certificate re-verified): {len(f)}")
+    for d in f:
+        print(f"    • [{d.bug_class}] {getattr(d.finding, 'title', '') or d.summary}")
+    print(f"LEADS (suspicions, non-blocking): {len(ll)}")
+    for d in ll:
+        print(f"    • [{d.bug_class}] {getattr(d.finding, 'title', '') or d.summary}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -166,6 +199,12 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--hours", type=float, default=8.0)
     pp.add_argument("--max-actions", type=int, default=1000)
     pp.set_defaults(func=_cmd_provision)
+
+    pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
+    pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")
+    pd.add_argument("--auth-log", default="", help="an auth log (credential oracles)")
+    pd.add_argument("--conn-log", default="", help="a connection/flow log (port-scan oracle)")
+    pd.set_defaults(func=_cmd_detect)
 
     return p
 
