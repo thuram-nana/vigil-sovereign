@@ -101,7 +101,9 @@ DOMAINS: tuple[SpineDomain, ...] = (
         trust_domain=OFFENSE, signer_role=OFFENSE_GOVERNANCE_ROLE, owner_rooted=True, file_backed=True,
         location="integration/.../inert_finding.py cert -> apps/sigil/.../inbound/finding_receiver.py",
         note="Anchor-1 m-of-n governance signature over a finding; owner-delegated per S4. The consumer "
-             "FUNCTION (from_delegation) is production code; daemon/CLI wiring of it is still pending (S7).",
+             "FUNCTION (from_delegation) is production code; S7b adds the MANUAL owner-tie ceremony "
+             "(`vigil identity` -> `sigil delegate-offense`) that mints+publishes the governance delegation; "
+             "wiring the receiver to auto-load it in a daemon remains out of scope.",
         owner_tie_consumer="apps/sigil/sigil/inbound/finding_receiver.py:from_delegation -> "
                            "verify_delegation(OFFENSE_GOVERNANCE_ROLE)",
     ),
@@ -112,8 +114,8 @@ DOMAINS: tuple[SpineDomain, ...] = (
         note="One stable offense key signs the checkpoint spine, exec records, and detection certs. S5a made "
              "it STABLE + owner-DELEGATABLE (OFFENSE_SPINE_ROLE); S5b's `vigil verify` is the live CONSUMER — it "
              "derives the trusted offense-spine key from an owner-signed delegation and checks the spine under "
-             "it. Like the finding anchor-1, the consumer FUNCTION exists; auto-provisioning of the delegation "
-             "(owner mints + publishes) is still pending (S7).",
+             "it. S7b adds the MANUAL owner-tie ceremony (`vigil identity` -> `sigil delegate-offense` -> "
+             "`vigil verify --delegation`); genuinely-automatic (daemon) provisioning remains out of scope.",
         owner_tie_consumer="integration/.../live/spine_verify.py:verify_offense_spine -> "
                            "verify_delegation(OFFENSE_SPINE_ROLE)",
     ),
