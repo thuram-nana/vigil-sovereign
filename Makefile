@@ -13,6 +13,7 @@ setup: ## full one-command setup on a fresh machine (venvs + kernel + services +
 	./bootstrap.sh
 
 up: ## start the default backend services (Qdrant), bound to 127.0.0.1
+	@[ -f .env ] || { cp .env.example .env && chmod 600 .env && echo "wrote .env (0600)"; }
 	docker compose --env-file .env up -d qdrant
 
 down: ## stop all compose services (data volumes are preserved)
@@ -32,8 +33,9 @@ envs: ## (re)build only the two isolated venvs + the Rust kernel
 
 smoke: ## run the boundary + core smoke checks (no pytest needed)
 	.venv-sovereign/bin/python -c "import importlib.util as u, sys, sigil, vigil_integration, sigil.reuse; sigil.reuse.assert_no_offense(); [sys.exit('VIOLATION: '+m+' resolvable') for m in ('framework','strix') if u.find_spec(m)]; print('boundary ok')"
-	.venv-sovereign/bin/vigil --help >/dev/null && echo "vigil ok"
-	SIGIL_HOME=$${SIGIL_HOME:-$$HOME/.sigil} .venv-sovereign/bin/sigil doctor
+	@T=$$(mktemp -d); : > $$T/CLAUDE.md; CRUCIBLE_ROOT=$$T .venv-offense/bin/vigil provision --slug make-smoke --scope 127.0.0.1 --base-dir $$T >/dev/null && echo "vigil (offense native verb) ok"; rm -rf $$T
+	@echo "self-check (informational — missing Claude/TPM/keyring are optional):"
+	SIGIL_HOME=$${SIGIL_HOME:-$$HOME/.sigil} .venv-sovereign/bin/sigil doctor || true
 
 clean-services: ## stop services AND delete their data volumes (destructive)
 	docker compose down -v

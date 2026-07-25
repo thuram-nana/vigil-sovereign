@@ -53,9 +53,10 @@ ok()   { printf "  ${c_g}ok${c_0}   %s\n" "$*"; }
 warn() { printf "  ${c_y}warn${c_0} %s\n" "$*"; }
 die()  { printf "  ${c_r}FAIL${c_0} %s\n" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
-ask()  { # ask "prompt" -> 0 (yes) / 1 (no). Non-interactive or --yes => yes.
+ask()  { # ask "prompt" -> 0 (yes) / 1 (no). --yes => yes; NON-interactive without --yes => NO (fail-closed,
+         # so a headless run never fetch-and-executes a third-party installer without explicit consent).
   [ "$ASSUME_YES" = 1 ] && return 0
-  [ -t 0 ] || return 0
+  [ -t 0 ] || return 1
   read -r -p "  $1 [Y/n] " a; [ -z "$a" ] || [ "$a" = y ] || [ "$a" = Y ]
 }
 
@@ -89,7 +90,7 @@ else
     have cargo || die "rustup installed but cargo is not on PATH — open a new shell and re-run."
     ok "Rust $(rustc --version 2>/dev/null | awk '{print $2}') (freshly installed)"
   else
-    die "Rust is required. Install it, then re-run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    die "Rust is required. Install it (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh) and re-run — or re-run with --yes to auto-install it non-interactively."
   fi
 fi
 
@@ -122,7 +123,12 @@ step "2/6 build the two isolated environments + the Rust kernel"
 PYTHON="$PY" bash envs/build_envs.sh
 [ -x ".venv-sovereign/bin/python" ] || die "the sovereign venv did not build."
 [ -x ".venv-offense/bin/python" ]   || die "the offense venv did not build."
-ok "both venvs built; the offense-free boundary held"
+# The console scripts must be installed (offense.txt/sovereign.txt install `-e ./integration` + the
+# subsystems). Their absence means a PARTIAL build — catch it here, not at a confusing later step.
+[ -x ".venv-offense/bin/vigil" ]    || die "the offense 'vigil' console script is missing — offense env build incomplete (re-run envs/build_envs.sh)."
+[ -x ".venv-sovereign/bin/sigil" ]  || die "the sovereign 'sigil' console script is missing — sovereign env build incomplete (re-run envs/build_envs.sh)."
+.venv-offense/bin/python -c "import framework.v2.authority.gate" 2>/dev/null || die "framework is not importable in the offense venv — engine/crucible did not install (re-run envs/build_envs.sh)."
+ok "both venvs built (with console scripts + framework); the offense-free boundary held"
 
 # =============================================================================
 step "3/6 services (docker-compose; 127.0.0.1-bound only)"
@@ -131,13 +137,18 @@ if [ "$NO_SERVICES" = 1 ]; then
   warn "--no-services: skipping compose (Qdrant will run embedded)."
 elif [ "$DOCKER_OK" = 1 ]; then
   [ -f .env ] || { cp .env.example .env; chmod 600 .env; ok "wrote .env from .env.example (0600)"; }
-  docker compose --env-file .env up -d qdrant
-  printf "  waiting for Qdrant on 127.0.0.1:6333 "
-  for _ in $(seq 1 30); do
-    if curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1; then printf "\n"; ok "Qdrant is ready"; break; fi
-    printf "."; sleep 1
-  done
-  curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1 || warn "Qdrant did not report ready in 30s — check 'docker compose logs qdrant'."
+  # Qdrant is OPTIONAL (SIGIL has an embedded fallback), so a compose failure (port already bound, offline
+  # image pull) must NOT abort the whole bootstrap — warn and continue to config/launchers/vault.
+  if docker compose --env-file .env up -d qdrant; then
+    printf "  waiting for Qdrant on 127.0.0.1:6333 "
+    for _ in $(seq 1 30); do
+      if curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1; then printf "\n"; ok "Qdrant is ready"; break; fi
+      printf "."; sleep 1
+    done
+    curl -fsS http://127.0.0.1:6333/readyz >/dev/null 2>&1 || warn "Qdrant did not report ready in 30s — check 'docker compose logs qdrant'. Embedded mode still works."
+  else
+    warn "docker compose could not start Qdrant (port in use / image pull) — continuing; SIGIL will use its embedded vector store."
+  fi
   if [ "$WITH_STRIX" = 1 ]; then
     step "3b build the Kali strix sandbox image (this is large)"
     docker compose --profile strix build strix-sandbox && ok "built vigil/strix-sandbox:local"
@@ -173,11 +184,20 @@ mkdir -p .vigil-live && ok ".vigil-live/ ready"
 # systemd canonical layout: ~/.sigil/venv -> the sovereign venv (units reference ~/.sigil/venv/bin/*).
 ln -sfn "$REPO/.venv-sovereign" "$SIGIL_HOME/venv" && ok "symlink $SIGIL_HOME/venv -> .venv-sovereign"
 
-# ~/.local/bin launchers for `vigil` (the unified control plane) and `sigil` (the sovereign core).
-# A symlink into the venv keeps sys.prefix = the venv, so the dispatcher resolves the repo root itself.
+# ~/.local/bin launchers. CRITICAL trust-domain wiring (see docs/architecture/S8-control-plane.md):
+#   • `vigil` MUST come from .venv-OFFENSE: its native verbs (engage/provision/verify/identity/detect) run
+#     IN-PROCESS and import framework.*, which lives ONLY in the offense venv; passthrough verbs (sigil/…)
+#     re-exec into their own venv regardless, so the offense `vigil` reaches BOTH domains correctly.
+#   • `sigil` MUST come from .venv-SOVEREIGN (the owner-key core).
+# A symlink into a venv keeps sys.prefix = that venv, so the dispatcher resolves the repo root itself.
 mkdir -p "$HOME/.local/bin"
-ln -sfn "$REPO/.venv-sovereign/bin/vigil" "$HOME/.local/bin/vigil" && ok "launcher ~/.local/bin/vigil"
-ln -sfn "$REPO/.venv-sovereign/bin/sigil" "$HOME/.local/bin/sigil" && ok "launcher ~/.local/bin/sigil"
+install_launcher() {  # name  target
+  local name="$1" target="$2" dest="$HOME/.local/bin/$1"
+  [ -e "$dest" ] && [ ! -L "$dest" ] && warn "replacing an existing non-symlink $dest"
+  ln -sfn "$target" "$dest" && ok "launcher ~/.local/bin/$name -> ${target##*/.venv-}"
+}
+install_launcher vigil "$REPO/.venv-offense/bin/vigil"
+install_launcher sigil "$REPO/.venv-sovereign/bin/sigil"
 case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) warn "add ~/.local/bin to your PATH to use 'vigil'/'sigil' directly.";; esac
 
 if [ "$DO_SYSTEMD" = 1 ]; then
@@ -216,8 +236,16 @@ for m in ("framework", "strix"):
         sys.exit("VIOLATION: " + m + " resolvable in the sovereign env")'
 # HARD checks — a failure here means the core install is broken (bootstrap exits non-zero).
 run_smoke "two-env boundary (offense-free sovereign)" .venv-sovereign/bin/python -c "$BOUNDARY_CHECK"
-run_smoke "vigil control plane runs" .venv-sovereign/bin/vigil --help
-run_smoke "sigil sovereign core runs" env SIGIL_HOME="$SIGIL_HOME" .venv-sovereign/bin/sigil --help
+# Exercise a NATIVE offense verb THROUGH THE INSTALLED LAUNCHER: `provision` mints+signs a CRUCIBLE authority,
+# which imports framework.* — so this fails loudly if ~/.local/bin/vigil is wired to the wrong (sovereign)
+# venv (`verify`/`--help` would NOT — they need no framework). CRUCIBLE_ROOT + base-dir point at a throwaway
+# dir (with a CLAUDE.md sentinel) so BOTH the governance key and the signed authority land there and are
+# removed — the smoke leaves no residue.
+SMOKE_TMP="$(mktemp -d)"; : > "$SMOKE_TMP/CLAUDE.md"
+run_smoke "vigil native offense verb (via launcher)" \
+  env CRUCIBLE_ROOT="$SMOKE_TMP" "$HOME/.local/bin/vigil" provision --slug bootstrap-smoke --scope 127.0.0.1 --base-dir "$SMOKE_TMP"
+rm -rf "$SMOKE_TMP"
+run_smoke "sigil sovereign core runs (via launcher)" env SIGIL_HOME="$SIGIL_HOME" "$HOME/.local/bin/sigil" --help
 
 # INFORMATIONAL — the full self-check. Missing Claude CLI / Qdrant server / TPM / keyring are OPTIONAL on a
 # fresh box, so `sigil doctor` may report `!!`/`**` rows and exit non-zero; that does NOT fail the bootstrap.
