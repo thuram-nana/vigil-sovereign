@@ -1,0 +1,20 @@
+# Keep build contexts small + never ship local state/secrets into an image layer.
+.git
+.github
+.venv
+.venv-sovereign
+.venv-offense
+.vigil-live
+.vigil-data
+.strix
+.env
+**/__pycache__
+**/*.pyc
+*.egg-info
+.coverage
+.pytest_cache
+.ruff_cache
+dist
+build
+graphify-out
+targets/*/evidence

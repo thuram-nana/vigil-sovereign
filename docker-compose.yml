@@ -1,0 +1,74 @@
+# VIGIL services — the stateful backends the two native venvs talk to.
+# =============================================================================
+# The SOVEREIGN and OFFENSE processes run NATIVELY in their own venvs (see
+# envs/build_envs.sh) — they are NOT containerized here, because the offense side
+# must drive the host Docker daemon for strix, and putting it in a container would
+# require handing it the host docker socket (root-equivalent), WEAKENING the
+# two-process boundary. So this file provides only the backing services.
+#
+# EVERY host port is published on 127.0.0.1 ONLY — never 0.0.0.0. Reach anything
+# remotely via a tunnel + reverse proxy (apps/sigil/deploy/REMOTE-HOSTING.md).
+#
+# Profiles:
+#   (default)        qdrant            — the vector store (Qdrant); SIGIL also has an embedded fallback
+#   graph            neo4j             — the knowledge graph (optional)
+#   observability    otel-collector    — OTLP receiver → stdout (optional)
+#   strix            strix-sandbox     — BUILD-ONLY: the Kali sandbox image strix runs targets in
+#
+# Usage:
+#   docker compose up -d qdrant                       # the default backend
+#   docker compose --profile graph up -d              # + neo4j
+#   docker compose --profile strix build strix-sandbox
+# =============================================================================
+
+services:
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"          # REST/readyz
+      - "127.0.0.1:6334:6334"          # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    # Readiness is polled from the host (bootstrap.sh) at http://127.0.0.1:6333/readyz
+    # — the Qdrant image ships no shell/curl for an in-container HEALTHCHECK.
+
+  neo4j:
+    image: neo4j:5-community
+    profiles: ["graph"]
+    restart: unless-stopped
+    environment:
+      # override in .env; the default password below is for a LOCAL loopback-only dev graph.
+      NEO4J_AUTH: "${NEO4J_AUTH:-neo4j/vigil-local-dev}"
+      NEO4J_server_default__listen__address: "0.0.0.0"   # inside the container only; host-bound to loopback
+    ports:
+      - "127.0.0.1:7474:7474"          # HTTP browser
+      - "127.0.0.1:7687:7687"          # Bolt
+    volumes:
+      - neo4j-data:/data
+
+  otel-collector:
+    image: otel/opentelemetry-collector:${OTEL_VERSION:-latest}
+    profiles: ["observability"]
+    restart: unless-stopped
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./infra/sidecars/otel-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:4318:4318"          # OTLP/HTTP (the config's receiver endpoint)
+
+  # BUILD-ONLY. strix runs each engagement in its OWN throwaway Kali container via the
+  # Docker SDK; this service just builds the local sandbox image so nothing is pulled at
+  # run time. Build it with:  docker compose --profile strix build strix-sandbox
+  # Then set STRIX_IMAGE=vigil/strix-sandbox:local in .env.
+  strix-sandbox:
+    image: vigil/strix-sandbox:local
+    profiles: ["strix"]
+    build:
+      context: ./vendor/strix/containers
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/true"]          # never meant to `up`; an accidental up exits cleanly
+
+volumes:
+  qdrant-data:
+  neo4j-data:

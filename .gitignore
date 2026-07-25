@@ -8,6 +8,16 @@ dist/
 build/
 target/
 
+# the two isolated environments (built by envs/build_envs.sh / bootstrap.sh)
+.venv-sovereign/
+.venv-offense/
+
+# local runtime state + secrets — NEVER commit these
+.env
+.vigil-live/
+.vigil-data/
+.strix/
+
 # stray local artifacts (kept on disk, never tracked)
 /img.avif
 /AEGIS-Detection-Mirror-Complete(1).md
