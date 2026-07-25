@@ -92,6 +92,16 @@ _PRIVATE_NETS: tuple[IPv4Network | IPv6Network, ...] = tuple(
     ip_network(c) for c in (*_PRIVATE_V4, *_PRIVATE_V6)
 )
 
+# Loopback is a SPECIAL member of Tier-1: hard-denied for the gateway/sandbox (its default), but a caller
+# that OWNS the host (the offense executor engaging a loopback target the owner's charter authorizes) may
+# opt in to lifting it — see ``is_egress_denied(..., loopback_allowed_if_scoped=True)``. The metadata /
+# link-local / multicast / reserved floor below is NEVER liftable. Splitting loopback out keeps
+# ``_ALWAYS_DENY_NETS`` (and thus ``is_hard_denied`` / ``hard_deny_cidrs`` / the nftables drop set) unchanged.
+_LOOPBACK_NETS: tuple[IPv4Network | IPv6Network, ...] = (ip_network("127.0.0.0/8"), ip_network("::1/128"))
+_ALWAYS_DENY_NONLOOPBACK_NETS: tuple[IPv4Network | IPv6Network, ...] = tuple(
+    n for n in _ALWAYS_DENY_NETS if n not in _LOOPBACK_NETS
+)
+
 # NAT64 well-known prefix — not exposed by ipaddress, handled explicitly.
 _NAT64 = IPv6Network("64:ff9b::/96")
 # NAT64 RFC 8215 network-specific well-known /48 (the WKP twin); embeds IPv4 in its low bits.
@@ -166,12 +176,19 @@ def _coerce_allowed(allowed_ips: Iterable[str] | None) -> frozenset[str]:
 def is_egress_denied(
     ip_str: str,
     allowed_ips: Iterable[str] | None = None,
+    *,
+    loopback_allowed_if_scoped: bool = False,
 ) -> tuple[bool, str]:
-    """Return ``(denied, reason)`` for letting sandbox egress reach ``ip_str``.
+    """Return ``(denied, reason)`` for letting egress reach ``ip_str``.
 
     Fail-closed: an unparseable address is denied. ``allowed_ips`` is the set of
     charter-authorized concrete IPs (typically the resolved in-scope hosts); it can
-    lift the *private* tier for an exactly-matching IP but never the *hard-deny* tier.
+    lift the *private* tier (and, only with ``loopback_allowed_if_scoped``, the *loopback*
+    tier) for an exactly-matching IP, but NEVER the metadata/link-local/reserved floor.
+
+    ``loopback_allowed_if_scoped`` (default False, keyword-only) is the offense executor's
+    opt-in: the operator engaging a loopback target their signed charter authorizes. The
+    gateway/proxy/nftables path never sets it, so loopback stays hard-denied there.
     """
     raw = (ip_str or "").strip().strip("[]")
     try:
@@ -181,14 +198,22 @@ def is_egress_denied(
 
     allowed = _coerce_allowed(allowed_ips)
     cands = _candidates(ip)
-
-    # Tier 1 — hard deny wins over everything, including the allowlist.
-    for c in cands:
-        if _in_any(c, _ALWAYS_DENY_NETS):
-            return True, f"{c} is in an always-denied range (metadata/loopback/link-local/reserved)"
-
-    # An IP that authorises itself must still not be hard-denied (checked above).
+    # An IP that authorises itself must still not be hit the never-liftable floor (checked next).
     self_authorized = any(str(c) in allowed for c in cands)
+
+    # Tier 1a — the ABSOLUTE floor (metadata/link-local/multicast/reserved/unspecified): never liftable by
+    # any scope or opt-in. Checked FIRST, before loopback, so 169.254.169.254 etc. can never be authorised.
+    for c in cands:
+        if _in_any(c, _ALWAYS_DENY_NONLOOPBACK_NETS):
+            return True, f"{c} is in an always-denied range (metadata/link-local/reserved)"
+
+    # Tier 1b — loopback: hard-denied by default; liftable ONLY for an opted-in caller whose signed
+    # allow-set contains the exact resolved loopback IP (mirrors the Tier-2 exact-IP lift below).
+    for c in cands:
+        if _in_any(c, _LOOPBACK_NETS):
+            if loopback_allowed_if_scoped and self_authorized:
+                return False, f"allowed ({c} is a charter-authorized loopback target)"
+            return True, f"{c} is loopback (denied for egress)"
 
     # Tier 2 — private is denied unless the exact IP is charter-authorized.
     for c in cands:

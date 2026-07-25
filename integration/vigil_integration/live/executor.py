@@ -274,13 +274,22 @@ class _Pinned:
     raw_host: str        # the original hostname (host-free), for the record/reason only
 
 
-def _resolve_loopback(target: str) -> tuple[Optional[_Pinned], str]:
-    """Parse + resolve ``target`` and REFUSE unless every resolved address is IPv4 loopback (127.0.0.0/8).
+def _resolve_scoped_target(target: str, *, scope: Any = None,
+                           allowed_ips: Optional[frozenset] = None) -> tuple[Optional[_Pinned], str]:
+    """Parse + resolve ``target`` and pin the EXACT resolved IP, refusing anything outside the AUTHORIZED
+    egress. Total/fail-closed: any parse/resolve failure, malformed port, empty/unresolvable host → (None, r).
 
-    Total: any parse/resolve failure, a malformed port, an empty target, an unresolvable host, or ANY
-    resolved address outside 127.0.0.0/8 (including IPv6 ``::1`` — the pin is IPv4-only per the validation
-    charter) returns ``(None, reason)``. The non-loopback branch consults ``is_egress_denied`` for the
-    precise reason (metadata/link-local/private); it is a second, independent refusal, never the allow."""
+    Two modes:
+      * ``scope is None`` (default — every direct caller / unit test): LEGACY loopback-only — refuse unless
+        every resolved address is IPv4 loopback ``127.0.0.0/8`` (IPv6 ``::1`` refused; IPv4-only per the
+        validation charter). The fail-closed default stays loopback, never wider.
+      * ``scope`` provided (production, threaded from the SIGNED authority via wiring): the target host must
+        be in the signed authority scope (the scope the gate enforces — signature-verified against the
+        engagement's governance trust root; owner-tied only when the ``sigil delegate-offense`` ceremony has
+        blessed that key) AND every resolved IP must clear the egress floor
+        (``is_egress_denied(..., loopback_allowed_if_scoped=True)``); then pin the EXACT resolved IP
+        (resolve-once-pin-exact-IP = TOCTOU/DNS-rebind defence). Loopback is reachable ONLY when the signed
+        scope authorises it; the metadata/link-local/reserved floor is never liftable by any scope."""
     raw = (target or "").strip()
     if not raw:
         return None, "no target host/url in tool_args (fail-closed)"
@@ -310,29 +319,63 @@ def _resolve_loopback(target: str) -> tuple[Optional[_Pinned], str]:
             ips.append(sockaddr[0].split("%")[0])   # drop any IPv6 zone id
     if not ips:
         return None, f"target host {host!r} resolved to no address (fail-closed)"
+
+    if scope is None:
+        # LEGACY loopback-only path — behaviour byte-identical to the pre-remote pin (fail-closed default).
+        for ip in ips:
+            try:
+                addr = ip_address(ip)
+            except ValueError:
+                return None, f"resolved address {ip!r} is unparseable (fail-closed)"
+            if addr.version == 4 and addr.is_loopback:
+                continue
+            if addr.is_loopback:   # IPv6 ::1 — loopback, but outside the IPv4 127.0.0.0/8 pin
+                return None, (f"REFUSED: {host!r} resolved to IPv6 loopback {ip}; "
+                              "egress pinned to IPv4 127.0.0.0/8 only")
+            denied, why = is_egress_denied(ip)
+            reason = why if denied else f"non-loopback {ip}"
+            return None, f"REFUSED: {host!r} resolved to {reason}; egress pinned to 127.0.0.0/8 only"
+        pin_host = sorted(ips, key=ip_address)[0]  # deterministic; every ip here is IPv4 loopback
+        return _Pinned(host=pin_host, port=port, scheme=scheme, path=path, query=query, raw_host=host), "ok"
+
+    # SCOPED path — signed authority scope + the never-liftable egress floor (remote/LAN/loopback-when-scoped).
+    if not scope.matches(host):
+        return None, f"REFUSED: {host!r} is not in the signed authority scope (fail-closed)"
+    allowed = allowed_ips if allowed_ips is not None else scope.resolved_allowed_ips()
     for ip in ips:
-        try:
-            addr = ip_address(ip)
-        except ValueError:
-            return None, f"resolved address {ip!r} is unparseable (fail-closed)"
-        if addr.version == 4 and addr.is_loopback:
-            continue
-        if addr.is_loopback:   # IPv6 ::1 — loopback, but outside the IPv4 127.0.0.0/8 pin
-            return None, (f"REFUSED: {host!r} resolved to IPv6 loopback {ip}; "
-                          "egress pinned to IPv4 127.0.0.0/8 only")
-        denied, why = is_egress_denied(ip)
-        reason = why if denied else f"non-loopback {ip}"
-        return None, f"REFUSED: {host!r} resolved to {reason}; egress pinned to 127.0.0.0/8 only"
-    pin_host = sorted(ips, key=ip_address)[0]      # deterministic; every ip here is IPv4 loopback
+        denied, why = is_egress_denied(ip, allowed, loopback_allowed_if_scoped=True)
+        if denied:
+            return None, f"REFUSED: {host!r} resolved to {ip} — {why}"
+    # every ip cleared the floor and is in-scope; pin the exact resolved IP (TOCTOU/rebind defence). Sort by
+    # string for a DETERMINISTIC record on multi-homed hosts (plain str sort avoids the v4/v6 ip_address
+    # comparison error while still pinning one of the already-cleared, in-scope addresses).
+    pin_host = sorted(ips)[0]
     return _Pinned(host=pin_host, port=port, scheme=scheme, path=path, query=query, raw_host=host), "ok"
 
 
+def _fmt_host(host: str) -> str:
+    """Bracket a bare IPv6 literal for use in a netloc/URL; IPv4 + hostnames pass through unchanged.
+    (Loopback IPv4 output is byte-identical to before — the bracketing only affects remote IPv6 targets.)"""
+    return f"[{host}]" if (":" in host and not host.startswith("[")) else host
+
+
 def _display_target(p: _Pinned) -> str:
-    return f"{p.host}:{p.port}" if p.port is not None else p.host
+    h = _fmt_host(p.host)
+    return f"{h}:{p.port}" if p.port is not None else h
+
+
+def _scope_target(p: _Pinned) -> str:
+    """The scope-facing target passed to the gate (AUDIT-G4): the VALIDATED hostname (the urlsplit host,
+    userinfo-stripped) + port — NOT the resolved IP. For a loopback IP-literal target ``raw_host == host`` so
+    this is byte-identical to ``_display_target``; for a hostname/remote target it is the hostname, which is
+    what the authority scope (``host_matches_scope``) matches on (the resolved IP never would)."""
+    h = _fmt_host(p.raw_host)
+    return f"{h}:{p.port}" if p.port is not None else h
 
 
 def _netloc(p: _Pinned) -> str:
-    return f"{p.host}:{p.port}" if p.port is not None else p.host
+    h = _fmt_host(p.host)
+    return f"{h}:{p.port}" if p.port is not None else h
 
 
 def _pinned_url(p: _Pinned, *, default_scheme: str = "http", ensure_path: str = "/") -> str:
@@ -572,24 +615,27 @@ def execute(
     now: Any = 0,
     timeout: float = DEFAULT_TIMEOUT,
     output_cap: int = DEFAULT_OUTPUT_CAP,
+    scope: Any = None,
+    allowed_ips: Optional[frozenset] = None,
 ) -> ExecResult:
-    """Run a governed live Kali tool, fail-closed at every stage. Order (no subprocess until BOTH the
-    loopback pin AND the gate pass): (1) resolve+pin the target to 127.0.0.0/8; (2) authorize via
-    ``authorize_tool_call`` (phase→tier ∧ conjunctive gate ∧ m-of-n leg for destructive); (3) build a
-    host-pinned argv LIST + run it via the injected ``run`` (no shell); (4) write a signed, redacted
-    ``ExecRecord`` and return the RAW output for the oracle. Never raises — any unexpected condition is a
-    DENY. With no ``signer`` wired the call is refused BEFORE any spawn (an execution must be recordable)."""
+    """Run a governed live Kali tool, fail-closed at every stage. Order (no subprocess until BOTH the egress
+    guard AND the gate pass): (1) resolve+pin the target — to the SIGNED authority ``scope`` when provided (the
+    metadata/link-local floor is never liftable), else loopback-only (fail-closed default); (2) authorize via
+    ``authorize_tool_call`` (phase→tier ∧ conjunctive gate ∧ m-of-n leg for destructive), scoped on the
+    validated hostname; (3) build a host-pinned argv LIST + run it via the injected ``run`` (no shell);
+    (4) write a signed, redacted ``ExecRecord`` and return the RAW output for the oracle. Never raises — any
+    unexpected condition is a DENY. With no ``signer`` wired the call is refused BEFORE any spawn."""
     try:
         return _execute(tool_name, tool_args, phase, gate=gate, view=view,
                         destructive_view=destructive_view, run=run, signer=signer, seq=seq, now=now,
-                        timeout=timeout, output_cap=output_cap)
+                        timeout=timeout, output_cap=output_cap, scope=scope, allowed_ips=allowed_ips)
     except Exception:  # noqa: BLE001 — total on untrusted input; an internal error is a DENY, never a raise
         name = tool_name if isinstance(tool_name, str) else ""
         return _deny(name, "internal error while executing the tool call (fail-closed)")
 
 
 def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destructive_view, run, signer,
-             seq, now, timeout, output_cap) -> ExecResult:
+             seq, now, timeout, output_cap, scope=None, allowed_ips=None) -> ExecResult:
     name = tool_name.strip().lower() if isinstance(tool_name, str) else ""
     if not name:
         return _deny("", "empty/invalid tool name (fail-closed)")
@@ -603,21 +649,23 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
     if builder is None:
         return _deny(name, f"no argv builder for tool {name!r} — unknown/unsupported tool denied (fail-closed)")
 
-    # (1) Loopback pin — resolve the target and refuse anything not IPv4 loopback, BEFORE authorization
-    #     and BEFORE any subprocess. A smuggled second host resolves to a non-loopback address and dies here.
-    pinned, why = _resolve_loopback(extract_target(tool_args))
+    # (1) Egress guard — resolve+pin the target, BEFORE authorization and BEFORE any subprocess. With a
+    #     signed `scope` the target must be in-scope AND clear the never-liftable floor; else loopback-only
+    #     (fail-closed default). A smuggled second host resolves out-of-scope / to a denied IP and dies here.
+    pinned, why = _resolve_scoped_target(extract_target(tool_args), scope=scope, allowed_ips=allowed_ips)
     if pinned is None:
         return _deny(name, why)
-    disp = _display_target(pinned)
+    disp = _display_target(pinned)          # the exact resolved host:port dialed (record/deny ground truth)
 
     # (2) Authorization — phase→WARDEN tier ∧ the injected conjunctive gate ∧ destructive→m-of-n leg.
     #     Proceed ONLY on allow (a missing/erroring gate, out-of-phase, or an unmet m-of-n all DENY here).
-    #     AUDIT G4: the gate scopes on `disp` (the loopback-RESOLVED target we just pinned), NOT on the
-    #     LLM's proposed tool_args string — the sovereign scope/egress/destruction decision is made
-    #     against the exact host the subprocess will reach.
+    #     AUDIT G4: the gate scopes on the executor-VALIDATED hostname (`_scope_target`), NOT on the LLM's
+    #     proposed tool_args string — so the sovereign scope/destruction decision is made against the host
+    #     the authority actually authorises (for a loopback IP-literal this equals `disp`).
     verdict = authorize_tool_call(tool_name, tool_args, phase, gate=gate,
                                   view=view if isinstance(view, dict) else {},
-                                  destructive_view=destructive_view, resolved_target=disp, now=now)
+                                  destructive_view=destructive_view, resolved_target=_scope_target(pinned),
+                                  now=now)
     if not getattr(verdict, "allowed", False):
         return _deny(name, f"authorization denied: {getattr(verdict, 'reason', '')}",
                      tier=getattr(verdict, "tier", "A0"),

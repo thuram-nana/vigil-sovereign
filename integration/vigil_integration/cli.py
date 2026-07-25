@@ -63,8 +63,10 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         decisions = json.loads(Path(args.replay).read_text(encoding="utf-8"))
         replay = ReplayThinker(decisions)
 
+    scope = [s.strip() for s in str(getattr(args, "scope", "") or "").split(",") if s.strip()]
     cfg = EngineConfig(
         slug=args.slug, base_dir=args.base_dir, replay=replay, api_key=None,
+        scope=tuple(scope) or ("127.0.0.1",),   # --scope is signed into the authority + enforced end-to-end
         access_log=args.access_log, auth_log=args.auth_log, conn_log=args.conn_log,
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
     )
@@ -243,10 +245,16 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
 
-    pe = sub.add_parser("engage", help="run an engagement against a loopback target")
+    pe = sub.add_parser("engage", help="run an engagement against an owner-authorized target (loopback or remote)")
     pe.add_argument("url")
     pe.add_argument("--slug", default="loopback")
     pe.add_argument("--objective", default="")
+    pe.add_argument("--scope", default="127.0.0.1",
+                    help="comma-separated LITERAL hosts / *.wildcards the engagement is authorized for (no "
+                         "CIDR); signed into the CRUCIBLE authority and enforced end-to-end. PREFER literal "
+                         "hosts — a *.wildcard is a deliberate BROAD grant: it authorizes reaching whatever "
+                         "public IP any matching subdomain currently resolves to (the metadata/LAN floor still "
+                         "holds). Default 127.0.0.1")
     pe.add_argument("--base-dir", default=".vigil-live")
     pe.add_argument("--replay", default="", help="a JSON file of scripted decisions (keyless-live)")
     pe.add_argument("--access-log", default="")

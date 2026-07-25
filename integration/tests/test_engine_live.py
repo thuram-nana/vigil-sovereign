@@ -100,6 +100,30 @@ def _engine(tmp_path, replay, *, owner_approves=True):
 # --- the real gate ---------------------------------------------------------------------------------
 
 
+def test_live_remote_in_scope_tool_runs_end_to_end(hermetic_root, tmp_path, monkeypatch):
+    # WS-A e2e: a SIGNED REMOTE scope threads build_engine → executor; an in-scope remote tool call RUNS,
+    # pinned to the resolved public IP. Hermetic DNS (no real network); the echo runner never spawns.
+    import socket
+    REMOTE = "http://scanme.example.com/search?q=1"
+
+    def _fake_getaddrinfo(host, port, *a, **k):
+        if host == "scanme.example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 0))]
+        raise socket.gaierror("name does not resolve")
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)   # patches executor + scope_source both
+
+    replay = ReplayThinker([
+        LLMDecision(action=ActionType.USE_TOOL,
+                    tool=ToolCall(tool_name="httpx", tool_args={"target": REMOTE}),
+                    output_analysis=OutputAnalysis(exploit_succeeded=False, extracted_info={})),
+        _complete()])
+    prov = provision_authority(slug="acme", scope=["scanme.example.com"])
+    cfg = EngineConfig(slug="acme", base_dir=str(tmp_path / "live"), replay=replay, provisioned=prov,
+                       runner=_echo_runner, max_iterations=4, owner_approves_offense=True)
+    report = build_engine(cfg).engage(REMOTE)
+    assert any(t.outcome == "ran" for t in report.tool_calls)      # the remote in-scope tool actually ran
+
+
 def test_real_gate_in_scope_is_in_envelope_out_of_scope_denies(hermetic_root):
     # The sovereign posture: an in-scope offense tool is IN-ENVELOPE but QUEUES for the owner (an
     # autonomous agent may never auto-fire an offense tool >= A2); an out-of-scope host is a hard DENY

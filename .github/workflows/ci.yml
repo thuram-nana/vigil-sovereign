@@ -91,13 +91,16 @@ jobs:
             # (single source of truth for the always-denied ranges — a pure, offense-free module).
             PYTHONPATH=integration:gateway python -m pytest integration/tests \
               --ignore=integration/tests/test_oracle_adapter.py \
-              --ignore=integration/tests/test_engine_live.py -q
-            # The offense-process suite: the framework-dependent oracle-adapter test AND the WS-5 live
-            # engine validation (the unified engine over the REAL CRUCIBLE gate + oracle). gateway is on
-            # the path because the live executor reuses vigil_gateway.denylist (the loopback egress pin).
+              --ignore=integration/tests/test_engine_live.py \
+              --ignore=integration/tests/test_executor_scoped.py -q
+            # The offense-process suite: framework-dependent tests run in their OWN process. The
+            # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
+            # vigil_gateway.scope_source → CRUCIBLE host_matches_scope, so it belongs here (it would load
+            # `framework` into the sovereign-path process above and trip its import-clean assertions).
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_engine_live.py \
+              integration/tests/test_executor_scoped.py \
               integration/tests/test_detection_vocabulary.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"

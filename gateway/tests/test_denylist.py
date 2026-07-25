@@ -103,3 +103,50 @@ def test_cidr_helpers_nonempty_and_parseable():
         ipaddress.ip_network(c)
     # the metadata /16 is in the hard-deny set
     assert any("169.254" in c for c in denylist.hard_deny_cidrs())
+
+
+# --- WS-A: the loopback opt-in (executor-only; default-off) -----------------------------------------
+
+def test_loopback_denied_by_default_liftable_only_when_scoped_and_opted_in():
+    # DEFAULT (gateway/proxy/nftables path): loopback is hard-denied.
+    assert denylist.is_egress_denied("127.0.0.1")[0] is True
+    assert denylist.is_egress_denied("::1")[0] is True
+    # opt-in AND the exact resolved IP in the signed allow-set → lifted (the offense executor engaging a
+    # loopback target the owner's charter authorizes).
+    assert denylist.is_egress_denied(
+        "127.0.0.1", allowed_ips={"127.0.0.1"}, loopback_allowed_if_scoped=True)[0] is False
+    assert denylist.is_egress_denied(
+        "::1", allowed_ips={"::1"}, loopback_allowed_if_scoped=True)[0] is False
+    # opt-in but NOT in the allow-set → still denied (the opt-in alone never opens loopback).
+    assert denylist.is_egress_denied(
+        "127.0.0.1", allowed_ips=set(), loopback_allowed_if_scoped=True)[0] is True
+
+
+def test_metadata_floor_never_liftable_even_with_the_loopback_optin():
+    # the absolute floor stays absolute even with the opt-in AND the IP allowlisted. Cover the plain forms,
+    # every embedded-IPv4 spelling of the metadata address (so a future _candidates refactor can't silently
+    # reopen the SSRF-to-credentials path), and the other never-liftable ranges (unspecified/reserved/multicast/
+    # link-local/IPv6-ULA-metadata).
+    floor = (
+        "169.254.169.254", "169.254.1.1",           # IPv4 link-local / metadata
+        "::ffff:169.254.169.254", "::ffff:a9fe:a9fe",  # IPv4-mapped IPv6 (dotted + hex)
+        "::169.254.169.254",                         # deprecated IPv4-compatible ::/96
+        "2002:a9fe:a9fe::",                          # 6to4 embedding
+        "64:ff9b::169.254.169.254", "64:ff9b:1::169.254.169.254",  # NAT64 WKP + RFC 8215 /48
+        "fe80::1",                                   # IPv6 link-local
+        "fd00:ec2::254",                             # AWS IMDS-over-IPv6 (hard-deny within ULA)
+        "224.0.0.1", "ff02::1",                      # multicast (v4 + v6)
+        "0.0.0.0", "::",                             # unspecified
+        "240.0.0.1", "255.255.255.255",              # reserved / broadcast
+    )
+    for ip in floor:
+        denied, _ = denylist.is_egress_denied(
+            ip, allowed_ips={ip}, loopback_allowed_if_scoped=True)
+        assert denied is True, ip
+
+
+def test_hard_deny_set_unchanged_by_the_split():
+    # is_hard_denied / the nftables drop set still include loopback — the opt-in is executor-only.
+    assert denylist.is_hard_denied("127.0.0.1") is True
+    assert denylist.is_hard_denied("::1") is True
+    assert "127.0.0.0/8" in denylist.hard_deny_cidrs()
