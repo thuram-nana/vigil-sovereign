@@ -27,6 +27,7 @@
     ]},
     { group: "MANAGE", items: [
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, phase: "P4" },
+      { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", phase: "P7" },
       { id: "settings", label: "Settings", icon: "gear", owner: true, phase: "P4" },
     ]},
@@ -211,6 +212,112 @@
     return null;
   }
 
+  // ---- Tools (offense host CLIs, probed LIVE via /offense/api/tools) ---------
+  // Six-state status maps onto the shared badge system: installed→confirmed (green),
+  // missing→idle, failed→blocked (red), unsupported→refuted. No hardcoded tool data — every
+  // row comes from the endpoint, which resolves PATH at request time (never invented status).
+  const TOOL_BADGE = { installed: "confirmed", missing: "idle", failed: "blocked", unsupported: "refuted" };
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () { V.toast("Copied install command"); },
+        function () { V.toast(text); });
+    } else {
+      V.toast(text);
+    }
+  }
+
+  function toolBadge(status) {
+    // reuse the .st/.st-<state> styling but keep the HONEST status word as the label.
+    return h("span.st.st-" + (TOOL_BADGE[status] || "idle"), null, [h("span.dot"), status || "unknown"]);
+  }
+
+  function installHint(t) {
+    return h("div", { style: { marginTop: "10px", display: "flex", gap: "8px", alignItems: "stretch" } }, [
+      h("pre.code", { style: { flex: "1", margin: "0" } }, t.install_hint || "(install manually)"),
+      h("button.btn", { title: "Copy the install command",
+        onClick: function () { copyText(t.install_hint || ""); } }, "Copy"),
+    ]);
+  }
+
+  function toolCard(t) {
+    const missing = t.status === "missing" || t.status === "failed";
+    return h("div.card", null, [
+      h("div", { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" } }, [
+        toolBadge(t.status),
+        h("b.mono", null, t.name),
+        V.pill(t.optional ? "optional" : "core", t.optional ? "" : "danger", null),
+        t.version ? h("span.muted.mono", { style: { marginLeft: "auto", fontSize: "var(--fs-xs)" } }, t.version) : null,
+      ]),
+      h("div.muted", { style: { marginTop: "6px", maxWidth: "80ch", lineHeight: "1.5" } }, t.purpose || ""),
+      t.path ? h("div.muted.mono", { style: { marginTop: "4px", fontSize: "var(--fs-micro)" } }, t.path) : null,
+      missing ? installHint(t) : null,
+    ]);
+  }
+
+  function renderToolsData(d) {
+    const s = d.summary || {};
+    const plat = d.platform || {};
+    const tools = d.tools || [];
+    const supported = !!plat.supported;
+    const osName = plat.pretty_name || plat.system || "this system";
+
+    V.mount(V.$("#tools-summary"), [
+      V.tile("Installed", String(s.installed || 0), "on PATH", "up"),
+      V.tile("Missing", String(s.missing || 0), "not installed", s.missing ? "down" : ""),
+      V.tile("Failed", String(s.failed || 0), "install failed", s.failed ? "down" : ""),
+      V.tile("Required missing", String(s.required_missing || 0), "offense-core", s.required_missing ? "down" : "up"),
+    ]);
+    if (app.get().counts.tools !== (s.installed || 0)) {
+      app.set({ counts: Object.assign({}, app.get().counts, { tools: s.installed || 0 }) });
+      refreshTopbar();
+    }
+
+    const header = supported
+      ? h("div.legend", null, [V.icon("info"),
+          (s.installed || 0) + " of " + (s.total || 0) + " offensive tools installed on " + osName +
+          " — these are Linux packages, probed live (command -v + a version check)."])
+      : h("div.legend", null, [V.icon("info"),
+          "Host tools are Linux packages; " + (plat.system || "this OS") +
+          " is unsupported — nothing is installed or probed here. Run the offense engine on Linux (Kali/Ubuntu/Debian)."]);
+
+    const body = [header];
+    if (d.error) body.push(h("div.empty", null, ["Could not probe tools: " + d.error]));
+    body.push(h("div.stack", { style: { marginTop: "12px" } }, tools.map(toolCard)));
+
+    // Strix sandbox — informational, clearly separated (never host-installed).
+    const sb = d.sandbox || {};
+    const sbTools = sb.tools || [];
+    if (sbTools.length) {
+      body.push(V.card("Strix sandbox tools", "NOT HOST-INSTALLED",
+        h("div", null, [
+          h("p.muted", { style: { margin: "0 0 10px", maxWidth: "80ch", lineHeight: "1.5" } },
+            "Provided by the " + (sb.image || "strix") + " container image and run inside the sandbox per " +
+            "engagement — neither probed nor installed on this host. Listed for reference only."),
+          h("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" } }, sbTools.map(function (st) {
+            return h("span.pill", { title: st.purpose || "" }, st.name);
+          })),
+        ]), false));
+    }
+    V.mount(V.$("#tools-body"), body);
+  }
+
+  function renderTools(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Tools"),
+        h("span.sub", null, "External security tools the offense engine runs on this host — installed live.")]),
+      h("div.grid.cols-4#tools-summary"),
+      h("div#tools-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Probing host tools…")),
+    ]);
+    V.getJSON(OFF("/api/tools")).then(renderToolsData).catch(function () {
+      V.mount(V.$("#tools-body"), h("div.empty", null, [
+        h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not reach the offense console to probe host tools. Start it (vigil up / the console server) and reload."),
+      ]));
+    });
+  }
+
   // ---- guided stub for not-yet-built screens --------------------------------
   function renderStub(screen, item) {
     V.mount(screen, [
@@ -231,6 +338,7 @@
     const screen = V.$("#screen"); if (!screen) return;
     if (id === "home") { renderHome(screen); return; }
     if (id === "manual") { renderManual(screen); return; }
+    if (id === "tools") { renderTools(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });

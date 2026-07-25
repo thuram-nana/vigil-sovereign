@@ -403,6 +403,34 @@ def reports_data(slug: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# external host tools (WS-TOOLS)
+# ---------------------------------------------------------------------------
+
+
+def tools_data() -> dict[str, Any]:
+    """The offense engine's external host CLIs, probed LIVE (WS-TOOLS): for every tool —
+    installed / missing / failed, its resolved path + a cheap version, its purpose, and a
+    copyable install hint; plus the informational Strix-sandbox roster and the host platform.
+
+    Real data only: :func:`..tools.registry.probe_tools` resolves PATH at call time and never
+    invents a status; 'failed' is layered from the installer's optional hint file and the live
+    probe always overrides it. Safe on any box (a non-Linux host reports every tool
+    ``unsupported``). Read-only — issues no traffic and installs nothing."""
+    def _read() -> dict[str, Any]:
+        from ..tools.registry import probe_tools
+        return probe_tools()
+
+    return _safe(_read, default={
+        "platform": {"system": None, "supported": False, "debian_family": False},
+        "tools": [],
+        "summary": {"total": 0, "installed": 0, "missing": 0, "failed": 0,
+                    "unsupported": 0, "required_missing": 0},
+        "sandbox": {"image": None, "tools": []},
+        "error": "could not probe host tools",
+    })
+
+
+# ---------------------------------------------------------------------------
 # intelligence & reconnaissance (Intelligence Engine)
 # ---------------------------------------------------------------------------
 
