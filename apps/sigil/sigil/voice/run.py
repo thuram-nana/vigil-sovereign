@@ -64,13 +64,23 @@ def run_mic(*, asr: str = "elevenlabs", wake: str = "energy", tts: str = "eleven
             tts_voice: str | None = None) -> None:
     """Live full-duplex loop (needs a working mic + speaker). ASR/TTS default to ElevenLabs (the
     owner's choice); wake=openWakeWord if `wake=oww`, else the energy-onset stand-in."""
+    from ..governor.capability import CapabilityGate
+    from ..spine.store import SpineStore
     from .backends import EnergyVad, EnergyWake, MicAudioSource, OpenWakeWord, SpeakerSink
     from .dispatch import KernelDispatch
 
+    # governed voice-capability latch: refuse to even START the live mic loop when voice is disabled.
+    if not CapabilityGate(SpineStore()).is_enabled("voice"):
+        print("SIGIL voice: capability disabled (governed latch) — re-enable from the cockpit "
+              "or run `sigil capability voice on`")
+        return
     vad = EnergyVad()
     wake_c = OpenWakeWord() if wake == "oww" else EnergyWake(vad)
     sink = SpeakerSink()
-    p = VoicePipeline(vad, wake_c, _make_asr(asr), _make_tts(tts, tts_voice), sink, KernelDispatch())
+    # voice_channel=True → this live pipeline's dispatch is gated by the `voice` latch (belt-and-suspenders
+    # with the entry guard above, so a mid-session disable also stops dispatch).
+    p = VoicePipeline(vad, wake_c, _make_asr(asr), _make_tts(tts, tts_voice), sink,
+                      KernelDispatch(voice_channel=True))
     print("SIGIL voice: listening (Ctrl-C to stop) …")
     try:
         p.run(MicAudioSource().frames())

@@ -10,7 +10,9 @@ from typing import Optional
 from ..spine.store import SpineStore
 
 # the closed set of gated actions the plane will route (fail-closed: anything else is refused)
-ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke"})
+_CAP_ACTIONS = frozenset({"disable_gesture", "enable_gesture", "disable_voice", "enable_voice",
+                          "disable_both", "enable_both"})
+ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke"}) | _CAP_ACTIONS
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) -> dict:
@@ -39,4 +41,12 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         agent, scope = str(params["agent"]), str(params.get("scope", "*"))
         out = pp.grant(agent, scope) if action == "promote" else pp.revoke(agent, scope)
         return {"ok": out is not None, "action": action, "agent": agent, "scope": scope, "recorded_seq": out}
+    if action in _CAP_ACTIONS:
+        from ..governor import CAPABILITIES, CapabilityGate
+        cg = CapabilityGate(store, owner_key=owner)
+        verb, _, which = action.partition("_")          # ("disable","","gesture") / ("enable","","both")
+        caps = sorted(CAPABILITIES) if which == "both" else [which]
+        seqs = {c: (cg.disable(c, reason=reason) if verb == "disable" else cg.enable(c, reason=reason))
+                for c in caps}
+        return {"ok": True, "action": action, "capabilities": caps, "recorded_seqs": seqs}
     raise ValueError(f"unhandled action: {action!r}")   # unreachable (ACTIONS-gated)

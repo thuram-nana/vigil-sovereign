@@ -22,8 +22,20 @@ _PIN_FAIL_MSG = ("the SIGIL kernel binary failed its owner-signed integrity pin 
                  "re-pin with `sigil kernel pin` if you changed it on purpose.")
 
 
+_VOICE_DISABLED_MSG = ("voice control is disabled — re-enable it (owner-signed) from the SIGIL cockpit "
+                       "or run `sigil capability voice on`.")
+
+
 class KernelDispatch:
-    def __init__(self, kernel_bin: str | None = None, timeout: int = 60):
+    def __init__(self, kernel_bin: str | None = None, timeout: int = 60, *,
+                 voice_channel: bool = False, store=None):
+        # `voice_channel=True` marks THIS dispatch as the live voice pipeline's channel, which alone is
+        # gated by the `voice` capability latch. The default (False) leaves the cockpit `/api/ask` box and
+        # the phone relay — which build a plain KernelDispatch() and also call send() — UNGATED, so
+        # disabling voice control never breaks typed asks. `store` is lazily resolved only when the gate
+        # actually needs to read the latch (so /api/ask never constructs a SpineStore for nothing).
+        self.voice_channel = voice_channel
+        self._store = store
         # resolve via config; keep None (not a bare name) when unresolved so send() fails LOUD. Only a
         # None (unset) kernel_bin falls back to the env-resolved path — an explicit '' is honoured as-is
         # (send() then fails LOUD), so the verified value and the executed value never diverge (symmetry
@@ -41,6 +53,20 @@ class KernelDispatch:
                 self._pin_blocked = True
                 _log.error("kernel dispatch refusing to run: %s", verdict.detail)
 
+    def _voice_enabled(self) -> bool:
+        """Is the `voice` capability latch enabled? Fail-closed toward DISABLED on any error (so a broken
+        store never leaves voice control silently on). Lazily resolves a SpineStore only for the voice
+        channel."""
+        try:
+            store = self._store
+            if store is None:
+                from ..spine.store import SpineStore
+                store = SpineStore()
+            from ..governor.capability import CapabilityGate
+            return CapabilityGate(store).is_enabled("voice")
+        except Exception:  # noqa: BLE001 — cannot resolve the latch ⇒ fail-closed toward disabled
+            return False
+
     # exact KERNEL status-line prefixes to strip (so a legitimate answer line that merely starts
     # with '[' is NOT dropped, and a BLOCKED/error is NOT masked as an answer).
     _STATUS = ("[t0", "[warden", "[blocked", "[direct", "[dispatch")
@@ -49,6 +75,8 @@ class KernelDispatch:
         text = (text or "").strip()
         if not text:
             return "I didn't catch that."
+        if self.voice_channel and not self._voice_enabled():  # governed latch — only the voice channel is gated
+            return _VOICE_DISABLED_MSG
         if self._pin_blocked:                         # G2: pin mismatch/forged → never run the binary
             return _PIN_FAIL_MSG
         if not self.kernel_bin:                       # FAIL LOUD: no bare-name ENOENT, clear message + WARNING log
