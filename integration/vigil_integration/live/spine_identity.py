@@ -29,6 +29,13 @@ SPINE_KEYPAIR_CONTEXT = b"vigil/offense-spine.key"
 # Default persisted spine keypair filename under the offense engagement base_dir.
 DEFAULT_SPINE_KEY_FILE = "offense-spine.key"
 
+# The canonical key_id for the offense-spine identity — used EVERYWHERE the spine key signs (the checkpoint
+# spine, executor ExecRecords, detection certificates) and as the authorizer key_id in an owner-signed
+# OFFENSE_SPINE_ROLE delegation. ONE key_id so a detection FACT's signature matches the delegated spine
+# authorizer at anchor-1 (S4's dup-pubkey guard forbids two authorizers sharing the spine pubkey, so the
+# id cannot diverge per signing surface — S7c).
+SPINE_KEY_ID = "offense-spine"
+
 
 def load_or_create_spine_keypair(*, path: str, vault: object = None) -> KeyPair:
     """Load the persisted stable offense-spine keypair, or generate + persist one (``0600``) on first use,

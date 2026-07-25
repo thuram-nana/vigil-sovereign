@@ -174,6 +174,23 @@ def test_provision_authority_uses_a_stable_governance_key(hermetic_root, tmp_pat
     assert e1.keypair.public_key_b64 != e2.keypair.public_key_b64      # legacy ephemeral: fresh each call
 
 
+def test_wiring_mints_detection_under_the_spine_key_id(hermetic_root, tmp_path, monkeypatch):
+    # S7c pin: the live detect seam MUST stamp detection certs with SPINE_KEY_ID so they match the owner-
+    # delegated offense-spine authorizer at anchor-1. Capture the key_id the wiring passes; reverting
+    # wiring.py's literal to the old "vigil-detection" fails HERE (the seam-tests alone would stay green).
+    from vigil_integration.live import wiring as W
+    from vigil_integration.live.spine_identity import SPINE_KEY_ID
+    captured: dict = {}
+
+    def _fake_run_all(**kw):
+        captured.update(kw)
+        return []
+    monkeypatch.setattr(W, "run_all_detections", _fake_run_all)
+    engine, _prov, _cfg = _engine(tmp_path, ReplayThinker([_complete()]))
+    engine.seams.detect()
+    assert captured.get("key_id") == SPINE_KEY_ID
+
+
 def test_build_engine_persists_a_stable_governance_key_under_base_dir(hermetic_root, tmp_path):
     # end-to-end: build_engine (with NO pre-provisioned authority) provisions under the engagement home with a
     # STABLE governance key, and a later provision against the SAME home reuses that identity (file persisted).

@@ -26,12 +26,19 @@ from vigil_core import Signature, TrustRoot, evidence_signing_bytes, verify_thre
 SCHEMA = "vigil.inert-finding.v1"
 MAX_ENVELOPE_BYTES = 256 * 1024  # a finding envelope larger than this is refused (DoS bound)
 
-# The certificate identity fields the sovereign side requires. It does NOT re-impose CRUCIBLE's
-# full schema — the certificate is opaque, signed DATA; the signature (not a local schema) is the
-# integrity anchor. These two just let the record be addressed/deduped on the spine.
+# The certificate identity fields the sovereign side requires. It does NOT re-impose the full schema —
+# the certificate is opaque, signed DATA; the signature (not a local schema) is the integrity anchor.
+# These just let the record be addressed/deduped on the spine. A FINDING (CRUCIBLE oracle, m-of-n
+# governance-signed) uses finding_ref+oracle_context_digest; a DETECTION FACT (Detection Mirror,
+# offense-spine-signed) uses oracle+evidence_digest_hex (S7c). Both cross the SAME inert seam.
 _REQUIRED_CERT_FIELDS = ("finding_ref", "oracle_context_digest")
+_DETECTION_REQUIRED_FIELDS = ("oracle", "evidence_digest_hex")
 
-_ALLOWED_TOP = {"schema", "certificate", "signatures"}
+# Per-PROFILE top-level allowlists. The FINDING set is byte-identical to the pre-S7c seam (NO "kind" — a
+# finding envelope carrying an unexpected "kind" is still rejected); DETECTION adds a REQUIRED "kind":"detection"
+# so the two envelope shapes are structurally distinct and "kind" is authoritative, not decorative.
+_FINDING_ALLOWED_TOP = {"schema", "certificate", "signatures"}
+_DETECTION_ALLOWED_TOP = {"schema", "kind", "certificate", "signatures"}
 _ALLOWED_SIG_KEYS = {"key_id", "signature_b64"}
 
 
@@ -91,13 +98,80 @@ class ValidatedFinding:
         }
 
 
-def validate_inert_finding(blob: "str | bytes") -> ValidatedFinding:
-    """Parse + validate an inbound finding envelope as INERT DATA. Fail-closed on anything off.
+@dataclass(frozen=True)
+class ValidatedDetection:
+    """A structurally-validated, inert DETECTION-FACT envelope (S7c), ready to verify + append. Same seam and
+    same anchor-1 verify as a finding — the certificate is opaque signed DATA — but its identity fields are
+    the Detection Mirror's (``oracle`` + ``evidence_digest_hex``) and its anchor-1 signer is the owner-
+    delegated OFFENSE-SPINE identity (the Detection PCF signer), not the m-of-n governance authority."""
 
-    Guarantees on success: the input was decoded as UTF-8 and parsed with ``json.loads`` only (no
-    code can execute), was within the size bound, and is a JSON object with exactly the top-level
-    keys ``{schema, certificate, signatures}``, a certificate object carrying non-empty string
-    identity fields, and a non-empty list of ``{key_id, signature_b64}`` string signatures.
+    certificate: dict
+    signatures: tuple[dict, ...]
+    raw: dict
+
+    @property
+    def oracle(self) -> str:
+        return str(self.certificate.get("oracle", ""))
+
+    @property
+    def evidence_digest_hex(self) -> str:
+        return str(self.certificate.get("evidence_digest_hex", ""))
+
+    @property
+    def bug_class(self) -> str:
+        return str(self.certificate.get("bug_class", ""))
+
+    @property
+    def engagement_slug(self) -> str:
+        """The engagement scope the detection FACT declares in its own SIGNED certificate (empty if absent).
+        Bound to the owner-delegated scope by the receiver, exactly like a finding (S4/S7b)."""
+        return str(self.certificate.get("engagement_slug", ""))
+
+    def verify_signature(self, trust_root: TrustRoot) -> bool:
+        """True iff the owner-delegated OFFENSE-SPINE root signed this certificate — the SAME anchor-1 check
+        (``verify_threshold`` over ``evidence_signing_bytes(certificate)``, vigil_core only) as a finding; only
+        the trust root differs (the delegated spine key, not the governance m-of-n)."""
+        sigs = [Signature(key_id=s["key_id"], signature_b64=s["signature_b64"]) for s in self.signatures]
+        return verify_threshold(evidence_signing_bytes(self.certificate), sigs, trust_root).satisfied
+
+    def to_spine_payload(self) -> dict:
+        """The inert payload for ``spine.append(kind="detection", ...)`` on the sovereign side."""
+        return {
+            "schema": SCHEMA,
+            "oracle": self.oracle,
+            "evidence_digest_hex": self.evidence_digest_hex,
+            "bug_class": self.bug_class,
+            "certificate": self.certificate,
+            "signatures": [dict(s) for s in self.signatures],
+        }
+
+
+def validate_inert_finding(blob: "str | bytes") -> ValidatedFinding:
+    """Parse + validate an inbound FINDING envelope as INERT DATA (CRUCIBLE oracle; m-of-n governance-signed).
+    Fail-closed on anything off. See :func:`_parse_envelope` for the guarantees."""
+    cert, sigs, env = _parse_envelope(blob, required_fields=_REQUIRED_CERT_FIELDS,
+                                      allowed_top=_FINDING_ALLOWED_TOP)
+    return ValidatedFinding(certificate=cert, signatures=sigs, raw=env)
+
+
+def validate_inert_detection(blob: "str | bytes") -> "ValidatedDetection":
+    """Parse + validate an inbound DETECTION-FACT envelope as INERT DATA (Detection Mirror; offense-spine-
+    signed, S7c). Same seam, same fail-closed guarantees — the required certificate fields differ
+    (``oracle``+``evidence_digest_hex`` vs a finding's ``finding_ref``+``oracle_context_digest``) AND a
+    ``kind:"detection"`` top-level tag is REQUIRED, so a finding envelope can never be mis-parsed as a detection."""
+    cert, sigs, env = _parse_envelope(blob, required_fields=_DETECTION_REQUIRED_FIELDS,
+                                      allowed_top=_DETECTION_ALLOWED_TOP, expect_kind="detection")
+    return ValidatedDetection(certificate=cert, signatures=sigs, raw=env)
+
+
+def _parse_envelope(blob: "str | bytes", *, required_fields: "tuple[str, ...]",
+                    allowed_top: "set[str]", expect_kind: "str | None" = None) -> "tuple[dict, tuple[dict, ...], dict]":
+    """Parse + validate an inbound inert envelope; return ``(certificate, signatures, raw)``. Fail-closed.
+
+    Guarantees on success: the input was decoded as UTF-8 and parsed with ``json.loads`` only (no code can
+    execute), was within the size bound, and is a JSON object with ONLY the ``allowed_top`` keys (per profile —
+    findings forbid "kind", detections require ``kind == expect_kind``), a certificate object carrying the
+    non-empty string ``required_fields``, and a non-empty list of ``{key_id, signature_b64}`` string signatures.
     """
     # A non-(str|bytes) input (e.g. someone passing a live/pickled object) is refused outright.
     if isinstance(blob, (bytes, bytearray)):
@@ -124,16 +198,18 @@ def validate_inert_finding(blob: "str | bytes") -> ValidatedFinding:
 
     if not isinstance(env, dict):
         _reject("envelope must be a JSON object")
-    extra = set(env) - _ALLOWED_TOP
+    extra = set(env) - allowed_top
     if extra:
         _reject(f"unexpected top-level keys: {sorted(extra)}")
+    if expect_kind is not None and env.get("kind") != expect_kind:
+        _reject(f"kind must be {expect_kind!r}, got {env.get('kind')!r}")
     if env.get("schema") != SCHEMA:
         _reject(f"schema must be {SCHEMA!r}, got {env.get('schema')!r}")
 
     cert = env.get("certificate")
     if not isinstance(cert, dict):
         _reject("certificate must be a JSON object")
-    for fld in _REQUIRED_CERT_FIELDS:
+    for fld in required_fields:
         val = cert.get(fld)
         if not isinstance(val, str) or not val:
             _reject(f"certificate.{fld} must be a non-empty string")
@@ -151,7 +227,7 @@ def validate_inert_finding(blob: "str | bytes") -> ValidatedFinding:
             _reject(f"signatures[{i}] key_id and signature_b64 must both be strings")
         norm.append({"key_id": s["key_id"], "signature_b64": s["signature_b64"]})
 
-    return ValidatedFinding(certificate=cert, signatures=tuple(norm), raw=env)
+    return cert, tuple(norm), env
 
 
 def build_envelope(certificate: dict, signatures: "list[dict]") -> str:
@@ -163,6 +239,22 @@ def build_envelope(certificate: dict, signatures: "list[dict]") -> str:
     """
     env = {
         "schema": SCHEMA,
+        "certificate": certificate,
+        "signatures": [
+            {"key_id": s["key_id"], "signature_b64": s["signature_b64"]} for s in signatures
+        ],
+    }
+    return json.dumps(env, ensure_ascii=False, sort_keys=True)
+
+
+def build_detection_envelope(certificate: dict, signatures: "list[dict]") -> str:
+    """Build the inert JSON envelope for a DETECTION FACT (S7c). Identical shape to a finding envelope plus a
+    self-describing ``kind="detection"``; ``certificate`` is the DetectionCertificate's ``signing_payload()``
+    (the signed bytes) so the sovereign receiver re-derives ``evidence_signing_bytes`` byte-identically and
+    verifies the offense-spine signature. Sovereign-safe (no ``framework`` import)."""
+    env = {
+        "schema": SCHEMA,
+        "kind": "detection",
         "certificate": certificate,
         "signatures": [
             {"key_id": s["key_id"], "signature_b64": s["signature_b64"]} for s in signatures

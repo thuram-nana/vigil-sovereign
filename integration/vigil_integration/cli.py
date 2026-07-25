@@ -177,7 +177,7 @@ def _cmd_identity(args: argparse.Namespace) -> int:
 
     from vigil_core.vault import Vault
     from .live.governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
-    from .live.spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
+    from .live.spine_identity import DEFAULT_SPINE_KEY_FILE, SPINE_KEY_ID, load_or_create_spine_keypair
     from .live.wiring import DEFAULT_KEY_ID
     base = Path(args.base_dir)
     base.mkdir(parents=True, exist_ok=True)
@@ -186,15 +186,17 @@ def _cmd_identity(args: argparse.Namespace) -> int:
     gov = load_or_create_governance_keypair(path=str(base / DEFAULT_GOVERNANCE_KEY_FILE), vault=vault)
     identity = {
         "schema": 1,
-        # key_ids the delegation authorizers use. governance MUST match the anchor-1 signer's key_id
-        # (provision_authority signs finding certs under DEFAULT_KEY_ID), or a delegated finding won't verify.
-        "spine": {"key_id": "offense-spine", "public_key_b64": spine.public_key_b64},
+        # key_ids the delegation authorizers use. The governance authorizer MUST match the anchor-1 finding
+        # signer's key_id (DEFAULT_KEY_ID). The spine authorizer uses SPINE_KEY_ID: the checkpoint spine and
+        # ExecRecords verify by PUBKEY (they carry no key_id), but the DETECTION cert stamps a key_id and the
+        # seam matches it by key_id — S7c set that to SPINE_KEY_ID so a detection FACT matches this authorizer.
+        "spine": {"key_id": SPINE_KEY_ID, "public_key_b64": spine.public_key_b64},
         "governance": {"key_id": DEFAULT_KEY_ID, "public_key_b64": gov.public_key_b64},
     }
     out = base / "offense-identity.json"
     out.write_text(json.dumps(identity, indent=2, sort_keys=True), encoding="utf-8")
     print(f"offense identity exported (PUBLIC keys only) → {out}")
-    print(f"  spine      : {spine.public_key_b64[:16]}…  (key_id 'offense-spine')")
+    print(f"  spine      : {spine.public_key_b64[:16]}…  (key_id {SPINE_KEY_ID!r})")
     print(f"  governance : {gov.public_key_b64[:16]}…  (key_id {DEFAULT_KEY_ID!r})")
     print("next (sovereign side): sigil delegate-offense "
           f"--offense-identity {out} --scope <slug> --hours <N>")
