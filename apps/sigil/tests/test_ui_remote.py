@@ -135,10 +135,16 @@ def test_ipv6_private_bind_is_supported_with_a_bracketed_allowlist():
     # allowlist carries the BRACKETED Host/Origin form a browser sends — proving the "any system" claim
     # is honest for IPv6 tunnels, not just IPv4. Skips only if the runner has no IPv6 loopback at all.
     import socket as _socket
+    # Probe IPv6-loopback availability with a RAW socket so the skip is about the RUNNER, not the code.
+    # A broad `except OSError` around build_server would also swallow socket.gaierror — the exact error a
+    # regression that drops the AF_INET6 selection raises — silently turning a real failure into a skip.
     try:
-        srv = build_server(token=TOKEN, host="::1", port=0, spine_path=_spine())
+        _probe = _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM)
+        _probe.bind(("::1", 0))
+        _probe.close()
     except OSError:
         pytest.skip("no IPv6 loopback on this runner")
+    srv = build_server(token=TOKEN, host="::1", port=0, spine_path=_spine())   # a code regression here FAILS
     try:
         assert srv.address_family == _socket.AF_INET6
         port = srv.server_address[1]

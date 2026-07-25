@@ -63,13 +63,17 @@ over the tunnel.
 Internet ──TLS──▶ nginx (public host) ──WireGuard──▶ 10.13.13.2:8733 (sigil serve --host 10.13.13.2)
 ```
 
-`bind_ok` permits loopback, RFC1918 private, IPv6 ULA/link-local, and the
-Tailscale CGNAT range (`100.64.0.0/10`) — never a globally-routable address. The
-cockpit binds `AF_INET6` automatically when you give it an IPv6 literal, so a
-Tailscale/WireGuard **IPv6** address (`fd7a:…`, `fd…`) works as well as its IPv4
-one. Public IPv4 and IPv6 are refused before any socket is created (a public bind
-is rejected by classification; even so, the guarantee rests on both the `bind_ok`
-classification and the socket layer).
+`bind_ok` permits loopback, RFC1918 private, and the Tailscale CGNAT range
+(`100.64.0.0/10`) for IPv4, and — for IPv6 — **only** loopback, unique-local
+(`fc00::/7`, which is where Tailscale `fd7a:…` and WireGuard `fd…` addresses
+live), and link-local (`fe80::/10`). The cockpit binds `AF_INET6` automatically
+when you give it an IPv6 literal, so a Tailscale/WireGuard **IPv6** address works
+as well as its IPv4 one. Globally-routable addresses are refused for **both**
+families before any socket is created — including the IPv6 transition ranges
+Teredo (`2001::/32`) and 6to4 (`2002::/16`), which Python's `is_private`
+mis-labels as private (we use a positive IPv6 allowlist instead of trusting it).
+The guarantee rests on both the `bind_ok` classification and the socket layer (a
+public address the host does not own also fails to bind).
 
 > **⚠ A private *interface* is not the same as a private *network*.** `bind_ok`
 > only checks that the bind address is non-public. If you bind a LAN address
