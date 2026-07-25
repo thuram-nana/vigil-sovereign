@@ -33,7 +33,12 @@ envs: ## (re)build only the two isolated venvs + the Rust kernel
 
 smoke: ## run the boundary + core smoke checks (no pytest needed)
 	.venv-sovereign/bin/python -c "import importlib.util as u, sys, sigil, vigil_integration, sigil.reuse; sigil.reuse.assert_no_offense(); [sys.exit('VIOLATION: '+m+' resolvable') for m in ('framework','strix') if u.find_spec(m)]; print('boundary ok')"
-	@T=$$(mktemp -d); : > $$T/CLAUDE.md; CRUCIBLE_ROOT=$$T .venv-offense/bin/vigil provision --slug make-smoke --scope 127.0.0.1 --base-dir $$T >/dev/null && echo "vigil (offense native verb) ok"; rm -rf $$T
+	@T=$$(mktemp -d); : > $$T/CLAUDE.md; \
+	if CRUCIBLE_ROOT=$$T .venv-offense/bin/vigil provision --slug make-smoke --scope 127.0.0.1 --base-dir $$T >/dev/null; then \
+	  rm -rf $$T; echo "vigil (offense native verb) ok"; \
+	else \
+	  rm -rf $$T; echo "vigil native verb FAILED (offense venv / framework wiring)" >&2; exit 1; \
+	fi
 	@echo "self-check (informational — missing Claude/TPM/keyring are optional):"
 	SIGIL_HOME=$${SIGIL_HOME:-$$HOME/.sigil} .venv-sovereign/bin/sigil doctor || true
 
