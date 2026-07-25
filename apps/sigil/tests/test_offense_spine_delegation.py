@@ -33,6 +33,17 @@ def test_owner_delegates_the_spine_identity_and_it_verifies():
     assert root.authorizers[0].public_key_b64 == SPINE.public_key_b64
 
 
+def test_spine_delegation_threshold_is_fixed_at_one():
+    # The offense spine is single-signer; delegate_offense_spine FIXES threshold=1 (1-of-n over multiple
+    # authorizers = key rotation), so an owner cannot mint an unsatisfiable threshold>1 spine delegation.
+    other = generate_keypair()
+    cert = delegate_offense_spine(
+        OWNER, authorizers=[SPINE_AUTH, AuthorizerKey(key_id="k2", name="k2",
+                                                      public_key_b64=other.public_key_b64)],
+        scope="loopback", not_after=NOT_AFTER)
+    assert cert.threshold == 1
+
+
 def test_a_spine_delegation_does_not_authorize_governance():
     spine_cert = delegate_offense_spine(OWNER, authorizers=[SPINE_AUTH], scope="loopback", not_after=NOT_AFTER)
     with pytest.raises(DelegationError, match="role"):

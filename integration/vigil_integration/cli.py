@@ -128,6 +128,42 @@ def _cmd_verify_ledger(args: argparse.Namespace) -> int:
     return 0 if ok else 3
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """S5b: the boundary-safe per-segment verification VIEW over the offense spine. Reads only PUBLIC keys +
+    inert bytes; establishes the OWNER TIE for the offense spine by CONSUMING an owner-signed offense-spine
+    delegation (OFFENSE_SPINE_ROLE — this is that role's first live consumer). The sovereign spine is verified
+    separately (`vigil sigil verify`): a single process cannot co-load both trust domains (the two-env
+    boundary). Exit 3 iff any present segment FAILS integrity; absent/unverifiable segments are not failures."""
+    import time
+
+    from .live.spine_verify import FAILED, verify_offense_home
+    delegation = None
+    if args.delegation:
+        try:
+            from vigil_core.delegation import DelegationCert
+            delegation = DelegationCert.model_validate_json(
+                Path(args.delegation).read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 — an unreadable/invalid cert → refuse (no forged owner tie)
+            print(f"delegation: could not load {args.delegation!r}: {exc}")
+            return 2
+    verdicts = verify_offense_home(
+        args.base_dir, owner_pubkey=(args.owner_pubkey or None), delegation=delegation,
+        now=int(time.time()), scope=args.scope, slug=(args.slug or None))
+    print(f"=== vigil verify — offense segments under {args.base_dir} ===")
+    print("(the sovereign spine is verified separately: `vigil sigil verify`)")
+    failed = 0
+    for v in verdicts:
+        tie = "owner-rooted" if v.owner_rooted else "not-owner-rooted"
+        mark = {"verified": "OK  ", "failed": "FAIL", "absent": "--  ",
+                "unverifiable": "??  "}.get(v.status, "??  ")
+        if v.status == FAILED:
+            failed += 1
+        print(f"  [{mark}] {v.segment:<26} {v.status:<13} {tie:<16} {v.detail}")
+    print(f"--- {failed} segment(s) FAILED integrity ---" if failed
+          else "--- all present segments verified ---")
+    return 3 if failed else 0
+
+
 def _cmd_detect(args: argparse.Namespace) -> int:
     """Run the Detection Mirror standalone over log files (unification S3) — the DEFENSIVE oracle plane
     surfaced as a first-class `vigil` verb (previously reachable only INSIDE `vigil engage`). Each fire is
@@ -191,6 +227,17 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--path", default=".vigil-live/usage-ledger.jsonl")
     pv.add_argument("--base-dir", default=".vigil-live")
     pv.set_defaults(func=_cmd_verify_ledger)
+
+    pver = sub.add_parser("verify", help="verify the offense spine segments (per-segment, owner-tie-aware)")
+    pver.add_argument("--base-dir", default=".vigil-live")
+    pver.add_argument("--slug", default="", help="verify only {slug}.spine (default: every *.spine)")
+    pver.add_argument("--owner-pubkey", default="",
+                      help="the pinned owner PUBLIC key (base64) — the trust anchor for the delegation")
+    pver.add_argument("--delegation", default="",
+                      help="a JSON file holding an owner-signed offense-spine DelegationCert (establishes the "
+                           "owner tie; without it the spine is integrity-only, not owner-rooted)")
+    pver.add_argument("--scope", default="*", help="the engagement scope the delegation must cover")
+    pver.set_defaults(func=_cmd_verify)
 
     pp = sub.add_parser("provision", help="mint + sign a CRUCIBLE authority for a loopback slug")
     pp.add_argument("--slug", default="loopback")

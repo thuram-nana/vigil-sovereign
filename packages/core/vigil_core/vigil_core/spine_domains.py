@@ -107,11 +107,15 @@ DOMAINS: tuple[SpineDomain, ...] = (
     ),
     SpineDomain(
         name="offense-spine",
-        trust_domain=OFFENSE, signer_role=OFFENSE_SPINE_ROLE, owner_rooted=False, file_backed=True,
+        trust_domain=OFFENSE, signer_role=OFFENSE_SPINE_ROLE, owner_rooted=True, file_backed=True,
         location="integration/.../live/spine_vigilcore.py ({slug}.spine) + executor ExecRecords + detection PCF certs",
-        note="One stable offense key signs the checkpoint spine, exec records, and detection certs. S5 made "
-             "it STABLE (was ephemeral per-run) and owner-DELEGATABLE (OFFENSE_SPINE_ROLE) — but no delegation "
-             "is minted or consumed in the live verify path yet, so its trust is NOT owner-rooted today (S7).",
+        note="One stable offense key signs the checkpoint spine, exec records, and detection certs. S5a made "
+             "it STABLE + owner-DELEGATABLE (OFFENSE_SPINE_ROLE); S5b's `vigil verify` is the live CONSUMER — it "
+             "derives the trusted offense-spine key from an owner-signed delegation and checks the spine under "
+             "it. Like the finding anchor-1, the consumer FUNCTION exists; auto-provisioning of the delegation "
+             "(owner mints + publishes) is still pending (S7).",
+        owner_tie_consumer="integration/.../live/spine_verify.py:verify_offense_spine -> "
+                           "verify_delegation(OFFENSE_SPINE_ROLE)",
     ),
     SpineDomain(
         name="offense-usage-ledger",

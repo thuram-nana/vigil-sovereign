@@ -142,19 +142,23 @@ class VigilCoreSpine:
     unsigned line is ever written. Single-writer append-only: concurrent writers are out of scope (the
     sovereign spine is a single-writer log); this binder assumes it owns the file."""
 
-    def __init__(self, keypair: Any, path: Any) -> None:
+    def __init__(self, keypair: Any, path: Any, *, readonly: bool = False) -> None:
         # Extract key material defensively; never log or persist the private key. A missing/short key just
         # means signing/verification will fail-closed (no fabricated signature, no trusted record).
         self._pub = str(getattr(keypair, "public_key_b64", "") or "")
         self._priv = str(getattr(keypair, "private_key_b64", "") or "")
         self._path = os.fspath(path) if hasattr(path, "__fspath__") else str(path)
+        self._readonly = bool(readonly)
         # Crash recovery: a torn tail (a partial last line with no trailing newline, from a write that
         # crashed before its fsync completed) is TRUNCATED before any new append. Without this, the next
         # append would glue onto the partial bytes and corrupt the new record — the SIGIL write-repair
         # lesson. A complete ack'd record is always newline-terminated + fsync'd, so a non-newline tail is
         # by definition an un-acknowledged partial write and is safe to drop (append-only: no ack'd record
-        # is ever mutated).
-        self._repair_torn_tail()
+        # is ever mutated). A ``readonly`` binder (a pure verifier, S5b) NEVER mutates the file it audits —
+        # verify()/_read_lines are already torn-tail tolerant (they drop the partial final line), so a
+        # read-only audit needs no repair and must not write to a spine it does not own.
+        if not self._readonly:
+            self._repair_torn_tail()
         # Recover the append point from the (repaired) file, so a restart continues the same chain rather
         # than forking a new genesis.
         self._last_entry, self._last_record_hash = self._load_tail()
@@ -194,6 +198,9 @@ class VigilCoreSpine:
         line is appended and ``fsync``'d; nothing existing is mutated. Errors are NOT swallowed (durability
         must surface). The record's own ``signature_ref`` is produced upstream by :meth:`signer`; here we
         add the FILE-chain signature that makes a deletion/reorder unforgeable."""
+        if self._readonly:
+            raise SpineWriteError("refusing to write: this is a READ-ONLY spine binder (a verifier); it "
+                                  "must never mutate a spine it does not own")
         rec = _coerce_snapshot(record)
         if rec is None:
             raise SpineWriteError("refusing to persist a malformed snapshot record (not a SnapshotRecord)")

@@ -32,13 +32,13 @@ def test_lookup_and_helpers():
     assert sd.signer_role("offense-spine") == OFFENSE_SPINE_ROLE
     assert sd.domain("offense-spine").trust_domain == sd.OFFENSE
     owner_rooted = set(sd.owner_rooted_segments())
-    # sovereign spine (owner key directly) and the finding anchor-1 (a real from_delegation consumer exists)
-    # are owner-rooted; the offense SPINE is delegate-ABLE but has no live delegation consumer yet, so it is
-    # honestly NOT owner-rooted — the identical treatment the non-delegated usage ledger gets. (Overclaiming
-    # here was the S5a red-pen BLOCK.)
+    # sovereign spine (owner key directly), the finding anchor-1 (from_delegation consumer), and — as of S5b —
+    # the offense SPINE (its verify_offense_spine consumer derives the trusted key from an owner-signed
+    # delegation) are owner-rooted. The usage ledger (operator key, not owner-delegated) and the CRUCIBLE
+    # blackboard chain (no owner-delegation consumer for its head) are honestly NOT owner-rooted (S7).
     assert "sovereign-spine" in owner_rooted
     assert "offense-finding-anchor1" in owner_rooted
-    assert "offense-spine" not in owner_rooted
+    assert "offense-spine" in owner_rooted
     assert "offense-usage-ledger" not in owner_rooted
     assert "crucible-blackboard-chain" not in owner_rooted
     # but the offense spine IS file-backed (verifiable offline once a verifier + pinned pubkey exist)
@@ -75,11 +75,14 @@ def test_registration_guard_catches_the_whole_class_not_just_one_instance():
         finally:
             sd.DOMAINS = original                  # type: ignore[misc]
 
-    # overclaim: owner_rooted=True with no consumer — for the flagged instance AND its role-sharing sibling
-    for victim in ("offense-spine", "crucible-blackboard-chain", "offense-usage-ledger"):
+    # overclaim: owner_rooted=True with no consumer — for the consumer-LESS segments, crucially including
+    # `crucible-blackboard-chain`, which SHARES OFFENSE_GOVERNANCE_ROLE with the owner-rooted
+    # offense-finding-anchor1. A role-granular guard would let it ride in on the sibling's role; this one
+    # doesn't (it binds the claim to each segment's OWN named consumer).
+    for victim in ("crucible-blackboard-chain", "offense-usage-ledger"):
         _patched_raises(victim, owner_rooted=True)
     # under-claim: a real consumer named but owner_rooted=False is ALSO refused (would leave it unroutable)
-    _patched_raises("sovereign-spine", owner_rooted=False)
+    _patched_raises("offense-spine", owner_rooted=False)
 
 
 def test_unknown_segment_is_fail_closed():
