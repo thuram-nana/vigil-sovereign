@@ -43,6 +43,12 @@ _SCHEMA = 1
 # verifier so a role typo can't silently accept an unintended delegation.
 OFFENSE_GOVERNANCE_ROLE = "offense-governance"
 
+# The well-known role the owner delegates to the STABLE offense engagement-spine identity (S5) — the one
+# key that signs the offense checkpoint spine, the executor ExecRecords, and the detection certificates.
+# Distinct from the governance role so the spine identity and the anchor-1 finding authority stay separate
+# keys with separate, minimal signing surfaces (delegating one never widens the other).
+OFFENSE_SPINE_ROLE = "offense-spine"
+
 
 class DelegationError(Exception):
     """A delegation is absent, malformed, unsigned, by a non-owner key, out of role/scope, expired, or has

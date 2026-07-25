@@ -14,6 +14,7 @@ import pytest
 from vigil_core import AuthorizerKey, TrustRoot, generate_keypair, sign
 from vigil_core.delegation import (
     OFFENSE_GOVERNANCE_ROLE,
+    OFFENSE_SPINE_ROLE,
     DelegationCert,
     DelegationError,
     _msg,
@@ -150,4 +151,18 @@ def test_empty_role_or_scope_refused_at_sign():
     with pytest.raises(DelegationError, match="non-empty scope"):
         sign_delegation(OWNER, role=OFFENSE_GOVERNANCE_ROLE, scope="", authorizers=[GOV_AUTH], threshold=1,
                         not_after=NOT_AFTER)
+
+
+def test_offense_spine_role_verifies_and_is_distinct_from_governance():
+    # S5: the offense-spine identity is delegated under its OWN role. A spine delegation verifies for the
+    # spine role but must NOT verify as a governance delegation (role separation — delegating the spine
+    # identity never authorizes the m-of-n finding authority, and vice-versa).
+    cert = sign_delegation(OWNER, role=OFFENSE_SPINE_ROLE, scope="loopback",
+                           authorizers=[GOV_AUTH], threshold=1, not_after=NOT_AFTER)
+    root = verify_delegation(cert, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
+                             role=OFFENSE_SPINE_ROLE, scope="loopback")
+    assert root.threshold == 1 and root.authorizers[0].public_key_b64 == GOV.public_key_b64
+    with pytest.raises(DelegationError, match="role"):
+        verify_delegation(cert, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
+                          role=OFFENSE_GOVERNANCE_ROLE, scope="loopback")
 
