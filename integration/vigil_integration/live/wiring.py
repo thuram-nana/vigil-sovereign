@@ -203,9 +203,11 @@ class EngineConfig:
 
 
 def _offense_scope_source(slug: str, trust_root: Any):
-    """A ScopeSource over the OWNER-SIGNED authority scope, re-loaded per call (a mid-engagement re-sign is
-    honoured), for the executor's egress guard. Fail-closed: any load/verify failure → empty scope → the
-    executor denies (and, with no scope, falls back to loopback-only). Offense-only; ``framework`` and
+    """A ScopeSource over the SIGNED authority scope (the scope the gate enforces — verified against
+    ``trust_root``, the engagement's governance key; owner-tied only when the ``sigil delegate-offense``
+    ceremony has blessed that key), re-loaded per call (a mid-engagement re-sign is honoured), for the
+    executor's egress guard. Fail-closed: any load/verify failure → ``hosts()`` returns ``[]`` → empty scope →
+    the executor denies EVERY target (including loopback) — strictly closed. Offense-only; ``framework`` and
     ``vigil_gateway`` are imported LAZILY here (neither is a sovereign dependency) so importing
     ``vigil_integration`` in the sovereign env stays clean (the P5 two-env boundary)."""
     from framework.v2.authority.gate import load_authority_for_gate
@@ -265,8 +267,10 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     gate = _build_gate(prov, ceiling=config.offense_ceiling)
 
     # The executor's egress guard is keyed off the SAME signed-authority scope the gate enforces (re-loaded
-    # per call). If the authority can't be loaded/verified, offense_scope stays None → the executor falls
-    # back to loopback-only (fail-closed) — consistent with the gate returning None → deny.
+    # per call). Two distinct fail-closed outcomes: (a) a per-call load/verify failure INSIDE the scope source
+    # yields an empty scope → the executor takes the scoped branch and denies EVERY target incl. loopback
+    # (strictly closed); (b) no trust root, or the lazy framework/gateway import itself failing here, leaves
+    # offense_scope None → the executor falls back to loopback-only. Both are fail-closed; (a) is stricter.
     offense_scope = None
     if getattr(prov, "trust_root", None) is not None:
         try:

@@ -57,13 +57,17 @@ def _fake_addrinfo(mapping):
     return _f
 
 
-def _run(target, *, scope_hosts, addrinfo, tool="httpx"):
+def _run(target, *, scope_hosts, addrinfo, tool="httpx", allowed_ips=None):
+    # allowed_ips, when given, is passed to execute() VERBATIM — bypassing scope.resolved_allowed_ips() — so a
+    # test can pin the exact concrete allow-set the executor guard sees (resolved_allowed_ips binds a default
+    # getaddrinfo at import and would ignore the monkeypatch, so relying on it silently yields an empty set).
     seen: list = []
     fr = _FakeRun()
     res = execute(tool, {"target": target}, Phase.INFORMATIONAL,
                   gate=_allow_gate(seen), view=_view(), destructive_view={tool: False},
                   run=fr, signer=_signer, seq=1, now=7,
-                  scope=StaticScopeSource(list(scope_hosts)))
+                  scope=StaticScopeSource(list(scope_hosts)),
+                  allowed_ips=(frozenset(allowed_ips) if allowed_ips is not None else None))
     return res, fr, seen
 
 
@@ -91,19 +95,28 @@ def test_out_of_scope_public_host_denies_before_spawn(monkeypatch):
 
 
 def test_metadata_denied_even_when_in_scope(monkeypatch):
-    # a scoped hostname that (maliciously or by rebind) resolves to the cloud metadata IP → floor deny
+    # a scoped hostname that (maliciously or by rebind) resolves to the cloud metadata IP → floor deny.
+    # The metadata IP is placed EXPLICITLY in the allow-set: proves the never-liftable floor beats an
+    # allow-set entry at the EXECUTOR layer (not just at the denylist unit), i.e. the opt-in cannot open it.
     monkeypatch.setattr(socket, "getaddrinfo", _fake_addrinfo({"scanme.example.com": "169.254.169.254"}))
-    res, fr, _ = _run("http://scanme.example.com/", scope_hosts=["scanme.example.com"], addrinfo=None)
+    res, fr, _ = _run("http://scanme.example.com/", scope_hosts=["scanme.example.com"], addrinfo=None,
+                      allowed_ips={"169.254.169.254"})
     assert res.outcome == "deny" and "always-denied" in res.reason
     assert fr.calls == []
 
 
 def test_lan_host_runs_only_for_the_exact_authorized_ip(monkeypatch):
+    # The allow-set is the load-bearing gate here: BOTH LAN IPs are in the signed scope by name, but only
+    # 10.0.0.5 is in the concrete allow-set, so 10.0.0.6 is denied by the exact-IP lift (Tier-2 private),
+    # NOT merely by scope.matches — the exact-IP allow-set genuinely authorizes one and refuses its sibling.
     monkeypatch.setattr(socket, "getaddrinfo", _fake_addrinfo({"10.0.0.5": "10.0.0.5", "10.0.0.6": "10.0.0.6"}))
-    ok, fr_ok, _ = _run("http://10.0.0.5/", scope_hosts=["10.0.0.5"], addrinfo=None)
-    assert ok.outcome == "ran" and fr_ok.calls                           # exact private IP lifted by scope
-    bad, fr_bad, _ = _run("http://10.0.0.6/", scope_hosts=["10.0.0.5"], addrinfo=None)
-    assert bad.outcome == "deny" and fr_bad.calls == []                # sibling not authorized
+    ok, fr_ok, _ = _run("http://10.0.0.5/", scope_hosts=["10.0.0.5", "10.0.0.6"], addrinfo=None,
+                        allowed_ips={"10.0.0.5"})
+    assert ok.outcome == "ran" and fr_ok.calls                           # exact private IP lifted by the allow-set
+    bad, fr_bad, _ = _run("http://10.0.0.6/", scope_hosts=["10.0.0.5", "10.0.0.6"], addrinfo=None,
+                          allowed_ips={"10.0.0.5"})
+    assert bad.outcome == "deny" and fr_bad.calls == []                # sibling in-scope-by-name but NOT allowlisted
+    assert "not in the charter-authorized allowlist" in bad.reason
 
 
 def test_loopback_still_runs_when_the_scope_authorizes_it(monkeypatch):

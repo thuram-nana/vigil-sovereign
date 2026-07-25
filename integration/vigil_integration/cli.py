@@ -251,7 +251,10 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--objective", default="")
     pe.add_argument("--scope", default="127.0.0.1",
                     help="comma-separated LITERAL hosts / *.wildcards the engagement is authorized for (no "
-                         "CIDR); signed into the CRUCIBLE authority and enforced end-to-end. Default 127.0.0.1")
+                         "CIDR); signed into the CRUCIBLE authority and enforced end-to-end. PREFER literal "
+                         "hosts — a *.wildcard is a deliberate BROAD grant: it authorizes reaching whatever "
+                         "public IP any matching subdomain currently resolves to (the metadata/LAN floor still "
+                         "holds). Default 127.0.0.1")
     pe.add_argument("--base-dir", default=".vigil-live")
     pe.add_argument("--replay", default="", help="a JSON file of scripted decisions (keyless-live)")
     pe.add_argument("--access-log", default="")

@@ -284,8 +284,10 @@ def _resolve_scoped_target(target: str, *, scope: Any = None,
         every resolved address is IPv4 loopback ``127.0.0.0/8`` (IPv6 ``::1`` refused; IPv4-only per the
         validation charter). The fail-closed default stays loopback, never wider.
       * ``scope`` provided (production, threaded from the SIGNED authority via wiring): the target host must
-        be in the owner-signed scope AND every resolved IP must clear the egress floor
-        (``is_egress_denied(..., loopback_allowed_if_scoped=True)``); then pin the EXACT first resolved IP
+        be in the signed authority scope (the scope the gate enforces — signature-verified against the
+        engagement's governance trust root; owner-tied only when the ``sigil delegate-offense`` ceremony has
+        blessed that key) AND every resolved IP must clear the egress floor
+        (``is_egress_denied(..., loopback_allowed_if_scoped=True)``); then pin the EXACT resolved IP
         (resolve-once-pin-exact-IP = TOCTOU/DNS-rebind defence). Loopback is reachable ONLY when the signed
         scope authorises it; the metadata/link-local/reserved floor is never liftable by any scope."""
     raw = (target or "").strip()
@@ -336,7 +338,7 @@ def _resolve_scoped_target(target: str, *, scope: Any = None,
         pin_host = sorted(ips, key=ip_address)[0]  # deterministic; every ip here is IPv4 loopback
         return _Pinned(host=pin_host, port=port, scheme=scheme, path=path, query=query, raw_host=host), "ok"
 
-    # SCOPED path — owner-signed scope + the never-liftable egress floor (remote/LAN/loopback-when-scoped).
+    # SCOPED path — signed authority scope + the never-liftable egress floor (remote/LAN/loopback-when-scoped).
     if not scope.matches(host):
         return None, f"REFUSED: {host!r} is not in the signed authority scope (fail-closed)"
     allowed = allowed_ips if allowed_ips is not None else scope.resolved_allowed_ips()
@@ -344,7 +346,10 @@ def _resolve_scoped_target(target: str, *, scope: Any = None,
         denied, why = is_egress_denied(ip, allowed, loopback_allowed_if_scoped=True)
         if denied:
             return None, f"REFUSED: {host!r} resolved to {ip} — {why}"
-    pin_host = ips[0]   # every ip cleared the floor; pin the exact resolved IP (preserve family; no v4/v6 sort)
+    # every ip cleared the floor and is in-scope; pin the exact resolved IP (TOCTOU/rebind defence). Sort by
+    # string for a DETERMINISTIC record on multi-homed hosts (plain str sort avoids the v4/v6 ip_address
+    # comparison error while still pinning one of the already-cleared, in-scope addresses).
+    pin_host = sorted(ips)[0]
     return _Pinned(host=pin_host, port=port, scheme=scheme, path=path, query=query, raw_host=host), "ok"
 
 
@@ -614,7 +619,7 @@ def execute(
     allowed_ips: Optional[frozenset] = None,
 ) -> ExecResult:
     """Run a governed live Kali tool, fail-closed at every stage. Order (no subprocess until BOTH the egress
-    guard AND the gate pass): (1) resolve+pin the target — to the owner-SIGNED ``scope`` when provided (the
+    guard AND the gate pass): (1) resolve+pin the target — to the SIGNED authority ``scope`` when provided (the
     metadata/link-local floor is never liftable), else loopback-only (fail-closed default); (2) authorize via
     ``authorize_tool_call`` (phase→tier ∧ conjunctive gate ∧ m-of-n leg for destructive), scoped on the
     validated hostname; (3) build a host-pinned argv LIST + run it via the injected ``run`` (no shell);
