@@ -1,15 +1,25 @@
 """
 vigil — the unified command line for the sovereign engine (VIGIL-LIVE WS-2).
 
-One entry point over the whole fused system:
+One entry point over the whole fused system. NATIVE verbs (handled in-process, offense-side):
 
   * ``vigil engage <url>``        — run the attestation-first OODA loop against a loopback target,
                                     routing every action through the real gate and every claimed
                                     exploit through the real oracle; prints an honest fact/lead report.
+                                    This is THE engage — the raw CRUCIBLE loop is ``vigil crucible engage``.
   * ``vigil ledger who``          — replay the always-on usage-attestation ledger (WS-6): WHO used the
     ``vigil ledger when``           tool, WHEN, against WHAT — non-repudiably, after verifying the chain.
   * ``vigil verify-ledger``       — verify the ledger's signatures + hash-chain (fail-closed).
   * ``vigil provision --slug S``  — mint + sign a CRUCIBLE authority for a loopback slug.
+
+SUBSYSTEM verbs (S1 control plane — forwarded to the subsystem's own console-script, EXEC'd in its OWN
+environment so the two trust domains are never co-loaded in one interpreter):
+
+  * ``vigil sigil …``    → the sovereign personal core (``.venv-sovereign``; holds the owner key)
+  * ``vigil crucible …`` → the raw CRUCIBLE offense arsenal (``.venv-offense``; keyless)
+  * ``vigil aegis …``    → the defensive dual (detect / gateway / demo)
+  * ``vigil strix …``    → the agent body
+  * ``vigil gateway …``  → the host egress gate
 
 Fail-closed and honest: a keyless engagement (no ``ANTHROPIC_API_KEY``, no ``--replay``) still attests
 first and then completes with nothing proposed — it never fabricates activity. Exit code is non-zero on
@@ -116,7 +126,11 @@ def _cmd_verify_ledger(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="vigil", description="the VIGIL sovereign engine")
+    p = argparse.ArgumentParser(
+        prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
+        epilog="subsystem verbs (forwarded to their own venv): sigil · crucible · aegis · strix · gateway  "
+               "(e.g. `vigil sigil status`, `vigil crucible scan …`, `vigil aegis detect …`)",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
 
     pe = sub.add_parser("engage", help="run an engagement against a loopback target")
@@ -157,6 +171,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # S1 control plane: a subsystem verb forwards to that subsystem's console-script, EXEC'd in its OWN
+    # venv (sovereign or offense) — a separate process in the correct trust domain, never co-loaded here.
+    # This intercept runs BEFORE argparse so all remaining args (incl. the sub-CLI's own flags) pass through
+    # opaquely. `dispatch` is pure-stdlib and imports no subsystem, so this path stays boundary-clean.
+    from .dispatch import PASSTHROUGH_VERBS, dispatch
+    if argv and argv[0] in PASSTHROUGH_VERBS:
+        return dispatch(argv[0], argv[1:])
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
