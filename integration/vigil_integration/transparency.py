@@ -35,6 +35,7 @@ Import-clean: ``vigil_core`` only (no ``framework.*``/``strix.*``).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Optional
 
 from vigil_core import (
@@ -129,6 +130,7 @@ class Witness:
         self.key_id = key_id
         self._priv = private_key_b64
         self._last: Optional[Checkpoint] = None
+        self._last_multi: "Optional[MultiSegmentCheckpoint]" = None   # S7c: separate tip for multi-segment
 
     def would_accept(self, checkpoint: Checkpoint) -> tuple[bool, str]:
         """Check-only (NO mutation): would this witness co-sign ``checkpoint`` as a consistent
@@ -146,6 +148,23 @@ class Witness:
             raise ConsistencyError(f"witness {self.key_id} refuses to co-sign: {reason}")
         self._last = checkpoint
         return Signature(key_id=self.key_id, signature_b64=sign(self._priv, _signing_bytes(checkpoint)))
+
+    def would_accept_multi(self, mc: "MultiSegmentCheckpoint") -> tuple[bool, str]:
+        """Check-only: would this witness co-sign the multi-segment checkpoint ``mc`` as a consistent
+        extension of its tracked MULTI tip (separate from the single-segment tip)?"""
+        if self._last_multi is None:
+            return True, "first multi-segment checkpoint"
+        return multi_consistent(self._last_multi, mc)
+
+    def cosign_multi(self, mc: "MultiSegmentCheckpoint") -> Signature:
+        """Verify consistency across ALL segments against this witness's tracked multi tip, then sign the
+        composite. Raises ``ConsistencyError`` on any inconsistency (a fork/segment-set change in any
+        segment) — the honest-witness contract, extended to the whole S5 view (S7c)."""
+        ok, reason = self.would_accept_multi(mc)
+        if not ok:
+            raise ConsistencyError(f"witness {self.key_id} refuses to co-sign multi: {reason}")
+        self._last_multi = mc
+        return Signature(key_id=self.key_id, signature_b64=sign(self._priv, _multi_signing_bytes(mc)))
 
 
 class ConsistencyError(RuntimeError):
@@ -293,3 +312,124 @@ def is_split(a: Checkpoint, b: Checkpoint) -> bool:
     archive-anchored chain verification — not here. Keying on the full hash would flag a benign prune
     as equivocation (a false accusation), so a fork requires a different head."""
     return a.entry_count == b.entry_count and a.head_hash != b.head_hash
+
+
+# ---------------------------------------------------------------------------------------------------
+# Multi-segment transparency (unification S7c) — witness the WHOLE S5 spine-domain view at once.
+#
+# S5 presents the fused system as ONE spine-VIEW over per-domain SEGMENTS (the sovereign spine, the
+# offense spine, …). A single-segment Checkpoint witnesses one head; a MultiSegmentCheckpoint composes
+# the tip of EVERY segment into ONE witnessable object, so a witness quorum co-signs the entire control
+# plane's state in one signature and split-view resistance covers the whole view: a fork in ANY segment,
+# or a segment silently added/dropped between checkpoints, breaks consistency. It is pure DATA over the
+# public per-segment Checkpoint summaries (head_hash/entry_count/…) — no private key, no cross-domain code
+# co-load; an offense-side or neutral witness composes it from the public heads it can read.
+# ---------------------------------------------------------------------------------------------------
+
+_MULTI_MARK = "vigil.multi-segment-checkpoint.v1"
+
+
+def _segment_extends(old: Checkpoint, new: Checkpoint) -> tuple[bool, str]:
+    """The append-only monotonicity of one Checkpoint over another — count/seq non-rollback + no
+    same-height fork — WITHOUT the per-checkpoint chain-link check (used per-segment inside a composite,
+    where chaining lives at the composite level). Mirrors :func:`consistent` minus its prev-link clause."""
+    if new.entry_count < old.entry_count:
+        return False, "record count shrank — rewrite/rollback, not an append-only extension"
+    if new.last_seq < old.last_seq:
+        return False, "last_seq went backwards — anti-rollback violated"
+    if new.entry_count == old.entry_count and new.head_hash != old.head_hash:
+        return False, "same height, different head — two forks at one size (split view)"
+    return True, "append-only extension"
+
+
+@dataclass(frozen=True)
+class MultiSegmentCheckpoint:
+    """A witnessable summary of EVERY S5 spine segment's tip at one moment: ``segments`` maps each
+    segment name (see ``vigil_core.spine_domains``) to that segment's :class:`Checkpoint`, chained to the
+    prior multi-checkpoint. Its signing bytes carry a distinct type marker so a multi-checkpoint witness
+    signature can never be replayed as a single-segment one (or vice-versa)."""
+
+    segments: dict          # segment_name -> Checkpoint  (stored as a read-only MappingProxyType)
+    prev_checkpoint_hash: str = GENESIS_LINK
+
+    def __post_init__(self) -> None:
+        # Defensive immutability (LOW): copy + freeze the mapping so an in-place `segments[k] = …` can never
+        # silently change this tamper-evidence object's hash after a witness has tracked/signed it — matching
+        # the deeply-immutable scalar Checkpoint. object.__setattr__ is the frozen-dataclass idiom.
+        object.__setattr__(self, "segments", MappingProxyType(dict(self.segments)))
+
+    def to_dict(self) -> dict:
+        # sorted by segment name → deterministic bytes regardless of insertion order.
+        return {
+            "type": _MULTI_MARK,
+            "segments": {name: self.segments[name].to_dict() for name in sorted(self.segments)},
+            "prev_checkpoint_hash": self.prev_checkpoint_hash,
+        }
+
+
+def multi_checkpoint_of(heads: dict, *, prev_checkpoint_hash: str = GENESIS_LINK) -> MultiSegmentCheckpoint:
+    """Compose a multi-segment checkpoint from ``{segment_name: SignedChainHead}`` (typically the S5
+    file-backed segments the verifier can read). Each head is summarised via :func:`checkpoint_of`."""
+    return MultiSegmentCheckpoint(
+        segments={name: checkpoint_of(head) for name, head in heads.items()},
+        prev_checkpoint_hash=prev_checkpoint_hash,
+    )
+
+
+def _multi_signing_bytes(mc: MultiSegmentCheckpoint) -> bytes:
+    return _WITNESS_DOMAIN + canonical_json(mc.to_dict())
+
+
+def multi_checkpoint_hash(mc: MultiSegmentCheckpoint) -> str:
+    """The stable identity of a multi-segment checkpoint (what the next one links to, what witnesses sign)."""
+    return sha256_hex(_multi_signing_bytes(mc))
+
+
+def multi_consistent(old: MultiSegmentCheckpoint, new: MultiSegmentCheckpoint) -> tuple[bool, str]:
+    """Is ``new`` a valid append-only extension of ``old`` ACROSS ALL segments? Fail-closed on: a changed
+    segment SET (a segment silently added or dropped is a control-plane split view), any segment that is
+    not itself a consistent append-only extension (:func:`consistent`), or a broken composite-chain link."""
+    if set(old.segments) != set(new.segments):
+        return False, (f"segment set changed ({sorted(old.segments)} -> {sorted(new.segments)}) — "
+                       f"a segment added/dropped is a control-plane split view")
+    if new.prev_checkpoint_hash != multi_checkpoint_hash(old):
+        return False, "multi-checkpoint chain broken — new does not link to old (fork / split view)"
+    # The COMPOSITE is the chained unit (its prev links composites); each segment Checkpoint is a tip
+    # SNAPSHOT, so per-segment we require append-only monotonicity (no count/seq rollback, no same-height
+    # fork) but NOT a per-segment chain link (that would double-chain — the fix for the composite design).
+    for name in sorted(old.segments):
+        ok, reason = _segment_extends(old.segments[name], new.segments[name])
+        if not ok:
+            return False, f"segment {name!r}: {reason}"
+    return True, "consistent append-only extension across all segments"
+
+
+def is_multi_split(a: MultiSegmentCheckpoint, b: MultiSegmentCheckpoint) -> bool:
+    """True iff ``a`` and ``b`` are a SPLIT VIEW in ANY shared segment — cryptographic proof the control
+    plane presented two forks, even if each composite was individually witness-signed."""
+    return any(is_split(a.segments[name], b.segments[name]) for name in (set(a.segments) & set(b.segments)))
+
+
+@dataclass(frozen=True)
+class MultiWitnessedCheckpoint:
+    checkpoint: MultiSegmentCheckpoint
+    witness_signatures: tuple = ()
+
+
+def verify_witnessed_multi(mwc: MultiWitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
+    """True iff a QUORUM of trusted witnesses (m-of-n) countersigned THIS EXACT multi-segment checkpoint.
+    Fail-closed. As with the single-segment case, quorum ≠ non-equivocation below a strict majority — use
+    :func:`verify_split_view_resistant_multi` for the full guarantee."""
+    return verify_threshold(
+        _multi_signing_bytes(mwc.checkpoint), list(mwc.witness_signatures), witness_trust_root
+    ).satisfied
+
+
+def verify_split_view_resistant_multi(mwc: MultiWitnessedCheckpoint, *, witness_trust_root: TrustRoot) -> bool:
+    """The full transparency guarantee over the whole S5 multi-segment view, fail-closed: a trusted quorum
+    signed THIS composite AND the witness set is a strict-majority of distinctly-keyed witnesses (reuses
+    :func:`is_split_view_resistant`), so the operator cannot have obtained a competing same-height quorum
+    for ANY segment without a witness equivocating."""
+    return is_split_view_resistant(witness_trust_root) and verify_witnessed_multi(
+        mwc, witness_trust_root=witness_trust_root
+    )
