@@ -40,6 +40,13 @@ class TrustRoot(BaseModel):
             raise ValueError("trust root has duplicate authoriser key_ids")
         if self.threshold > len(self.authorizers):
             raise ValueError(f"threshold {self.threshold} exceeds authoriser count {len(self.authorizers)}")
+        # NOTE: duplicate PUBLIC KEYS (distinct key_ids, same pubkey) can collapse an m-of-n quorum — a
+        # single keyholder satisfies the threshold. This is NOT rejected here on purpose: the witness
+        # anti-rollback subsystem (spine/witness.py) deliberately CONSTRUCTS such a degenerate roster and
+        # labels its guarantee honestly ("DETECTION only", never prevention). Consumers for which a collapsed
+        # quorum is unacceptable (e.g. owner-delegated offense governance) reject duplicate pubkeys at THEIR
+        # layer — see vigil_core.delegation.{sign,verify}_delegation. A system-wide verify_threshold hardening
+        # is a separate, reviewed change (it must not break the witness subsystem's intentional semantics).
         return self
 
 

@@ -11,7 +11,10 @@ OWNER among them. The plan's shape (§6): offense-worker key + owner YubiKey/HSM
 Five properties, all fail-closed (first failure wins; any error or malformed input is a DENY):
 
   1. **m-of-n threshold** — admitted only if a quorum of DISTINCT trusted authorizers signed it
-     (``vigil_core.verify_threshold``; low-order/duplicate keys already barred at the crypto core).
+     (``vigil_core.verify_threshold``; low-order keys and duplicate key_ids barred at the crypto core.
+     NOTE: distinct key_ids sharing one pubkey are NOT deduped there — see vigil_core.models.TrustRoot —
+     but the destruction ``authority`` trust root is immutable deployment config, never request data, so a
+     quorum-collapsing duplicate pubkey cannot be attacker-injected here).
      This delivers the RFC-9591 *m-of-n authorization* security property; true FROST single-signature
      aggregation is a size/verification refinement that does NOT change the property, deferred like
      the I2 OpenTimestamps anchor.
