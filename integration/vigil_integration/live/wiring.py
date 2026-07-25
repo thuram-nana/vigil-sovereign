@@ -41,7 +41,7 @@ from ..oracle_adapter import confirm_and_certify
 from .engine import EngineSeams, VigilEngine
 from .executor import execute
 from .governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
-from .spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
+from .spine_identity import DEFAULT_SPINE_KEY_FILE, SPINE_KEY_ID, load_or_create_spine_keypair
 from .spine_vigilcore import VigilCoreSpine
 from .think_claude import think
 
@@ -302,7 +302,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         return run_all_detections(
             access_log=_read(config.access_log), auth_log=_read(config.auth_log),
             conn_log=_read(config.conn_log),
-            signer=_cert_signer, verify_key=spine_kp.public_key_b64, key_id="vigil-detection",
+            signer=_cert_signer, verify_key=spine_kp.public_key_b64, key_id=SPINE_KEY_ID,
         )
 
     seams = EngineSeams(
