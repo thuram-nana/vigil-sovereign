@@ -18,6 +18,7 @@ target/
 .vigil-data/
 .strix/
 
-# stray local artifacts (kept on disk, never tracked)
+# stray local artifacts + operator reference images (kept on disk, never tracked)
 /img.avif
+/theme.png
 /AEGIS-Detection-Mirror-Complete(1).md

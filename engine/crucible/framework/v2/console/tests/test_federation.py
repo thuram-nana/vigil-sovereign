@@ -84,6 +84,16 @@ def test_allowlisted_domain_is_accepted_others_still_refused():
                        headers={"Host": "evil.example.com", "Origin": "https://evil.example.com",
                                 "Sec-Fetch-Site": "same-origin"})
         assert st2 == 403
+        # EXACTNESS: a substring/suffix/subdomain of the allowed host must NOT slip through (this is the
+        # exact→substring/suffix regression the match must defeat — the production match is frozenset
+        # membership, i.e. exact). All of these are refused:
+        for bad in ("vigil.example.com.attacker.com",  # allowed host is a substring/prefix
+                    "evilvigil.example.com",             # allowed host is a suffix
+                    "a.vigil.example.com",               # subdomain
+                    "vigil.example.com:8443"):           # wrong port
+            stx, _ = _post(base + "/api/launch/scan",
+                           headers={"Host": bad, "Sec-Fetch-Site": "same-origin"})
+            assert stx == 403, f"exactness: Host {bad!r} must be refused, got {stx}"
         # right Host but wrong Origin → still refused (exact match, no rebinding)
         st3, _ = _post(base + "/api/launch/scan",
                        headers={"Host": "vigil.example.com", "Origin": "https://evil.example.com"})

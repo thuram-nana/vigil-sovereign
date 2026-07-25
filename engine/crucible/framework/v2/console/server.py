@@ -122,7 +122,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", _CTYPES.get(target.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
-        self._sec_headers()
+        # The strict `'self'` CSP is deliberately NOT sent on these STATIC (HTML/SPA) responses: this dir
+        # still serves the LEGACY console SPA (inline handlers/styles/data: icons) that strict CSP would
+        # break. The strict CSP belongs to the CSP-clean unified bundle (packages/vigil-ui) — served by the
+        # `vigil up` reverse proxy (which sets the canonical CSP) or once that bundle retires this SPA. Data
+        # responses (_json/_sse) DO carry the CSP as harmless defense-in-depth (JSON/events render nothing).
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
