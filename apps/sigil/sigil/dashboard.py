@@ -14,7 +14,7 @@ from .spine.store import SpineStore
 
 def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int = 300) -> dict:
     from .agents.approvals import pending
-    from .governor import KillSwitch
+    from .governor import CapabilityGate, KillSwitch
     from .governor.identity import owner_pubkey
     head = store.next_seq - 1
     day = day_iso or datetime.now(timezone.utc).date().isoformat()
@@ -45,6 +45,7 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
     return {
         "head_seq": head,
         "kill_switch": "ENGAGED" if KillSwitch(store).is_engaged() else "released",
+        "capabilities": CapabilityGate(store).state_all(),   # {"gesture": enabled|disabled, "voice": ...}
         "recent_by_agent": dict(per_agent.most_common()),
         "recent_decisions": dict(decisions),
         "pending_approvals": [{"seq": r.seq, "tier": r.payload.get("tier"), "kind": r.kind,

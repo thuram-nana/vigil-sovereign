@@ -339,6 +339,28 @@ def cmd_warden(a) -> None:
         print(f"  revoked promotion for {a.agent}/{a.scope or '*'} (seq {seq})")
 
 
+def cmd_capability(a) -> None:
+    """Enable/disable gesture control or voice control via the owner-signed, tamper-evident capability
+    latch (audit W0). `status` needs no key; toggling is owner-signed. Any disable is fail-safe (takes
+    effect regardless of signature); only an owner-signed enable re-enables."""
+    from .governor import CAPABILITIES, CapabilityGate
+    from .governor.identity import ensure_owner_keypair
+    store = SpineStore()
+    if a.target == "status":
+        st = CapabilityGate(store).state_all()
+        for c in sorted(CAPABILITIES):
+            print(f"  {c}: {st.get(c, 'enabled')}")
+        return
+    if a.state not in ("on", "off"):
+        print("  usage: sigil capability <gesture|voice|both> <on|off> [--reason ...]", file=sys.stderr)
+        sys.exit(2)
+    caps = sorted(CAPABILITIES) if a.target == "both" else [a.target]
+    cg = CapabilityGate(store, owner_key=ensure_owner_keypair())
+    for c in caps:
+        seq = cg.disable(c, reason=a.reason) if a.state == "off" else cg.enable(c, reason=a.reason)
+        print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
+
+
 def cmd_audit(a) -> None:
     from .audit import render_audit, self_audit
     store = SpineStore()
@@ -1028,6 +1050,12 @@ def main(argv=None) -> None:
     pwd.add_argument("--scope", default=None, help="promotion scope (default '*' = all scopes)")
     pwd.add_argument("--reason", default=None, help="reason recorded on the spine")
     pwd.set_defaults(fn=cmd_warden)
+    pcap = sub.add_parser("capability",
+                          help="enable/disable gesture or voice control (owner-signed latch, audit W0)")
+    pcap.add_argument("target", choices=["status", "gesture", "voice", "both"])
+    pcap.add_argument("state", nargs="?", choices=["on", "off"], help="on|off (omit for `status`)")
+    pcap.add_argument("--reason", default="", help="reason recorded on the spine")
+    pcap.set_defaults(fn=cmd_capability)
     pau = sub.add_parser("audit", help="self-audit (C18): what the mesh did and why, from the log")
     pau.add_argument("--agent", default=None, help="filter to one agent")
     pau.set_defaults(fn=cmd_audit)

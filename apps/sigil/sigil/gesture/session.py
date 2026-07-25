@@ -124,6 +124,12 @@ class SessionGate:
         self._dev_token: tuple | None = None
         self._dev_checked_at = -1e9
         self._dev_authorized = True
+        # gesture-capability latch rescan cache (mirrors the kill-switch cache). `_cap_gesture=True` until the
+        # first scan (default enabled); an owner `capability gesture off` APPENDS → the token moves → the
+        # disable is honored within ~1-2 frames, not at TTL.
+        self._cap_gesture = True
+        self._cap_token: tuple | None = None
+        self._cap_checked_at = -1e9
 
     def _trusted(self):
         if self._trusted_pubkey is None:
@@ -148,6 +154,20 @@ class SessionGate:
             self._ks_token = token
             self._ks_checked_at = now
         return self._ks_engaged
+
+    def _cap_gesture_enabled(self, now: float) -> bool:
+        """Gesture-capability latch for the per-intent gate, bounded by the SAME rotation-aware change-token
+        + rescan floor as the kill-switch: an owner `capability gesture off` APPENDS a record → the token
+        moves → the disable is honored within ~1-2 frames, while a 30fps pure-movement loop appends nothing →
+        the token is unchanged → no re-scan (cheap, O(1)). `CapabilityGate.is_enabled` is itself fail-closed
+        (any read/scan error → disabled), so a scan failure here safely resolves toward disabled."""
+        token = self.store.change_token()
+        if token != self._cap_token and (now - self._cap_checked_at) >= _KS_MIN_RESCAN:
+            from ..governor.capability import CapabilityGate
+            self._cap_gesture = CapabilityGate(self.store, trusted_pubkey=self._trusted()).is_enabled("gesture")
+            self._cap_token = token
+            self._cap_checked_at = now
+        return self._cap_gesture
 
     def _arming_device_revoked(self, now: float) -> bool:
         """For a DEVICE-armed session, True once the arming device's key is NO LONGER owner-authorized —
@@ -199,6 +219,15 @@ class SessionGate:
         ok = owner_key if owner_key is not None else (self._owner_key or owner_keypair())
         if ok is None:
             raise RuntimeError("cannot arm a gesture session without the owner key (BLOCK-3)")
+        # gesture-capability latch — a disabled gesture capability refuses even an owner-local arm (loud
+        # refusal, recorded), so the owner's own toggle governs the local path too.
+        from ..governor.capability import CapabilityGate
+        if not CapabilityGate(self.store, trusted_pubkey=self._trusted()).is_enabled("gesture"):
+            self.store.append(kind="refusal", source="gesture", actor="OWNER",
+                              payload={"signal": SESSION_ARMED, "decision": "refused", "tier": "A0",
+                                       "reason": "gesture capability disabled",
+                                       "summary": "gesture arm refused: capability disabled (governed latch)"})
+            raise RuntimeError("gesture capability disabled (governed latch)")
         sid = uuid.uuid4().hex
         core = {"signal": SESSION_ARMED, "session_id": sid}
         self.store.append(kind="event", source="gesture", actor="OWNER",
@@ -228,6 +257,11 @@ class SessionGate:
         # (1) kill-switch FIRST — an owner halt (incl. a phone panic) beats any arm.
         if KillSwitch(self.store).is_engaged():
             self._refuse_arm(request, "kill-switch engaged")
+            return None
+        # (1.5) gesture-capability latch — a disabled gesture capability refuses any (device) arm, fail-safe.
+        from ..governor.capability import CapabilityGate
+        if not CapabilityGate(self.store, trusted_pubkey=self._trusted()).is_enabled("gesture"):
+            self._refuse_arm(request, "gesture capability disabled")
             return None
         # (2) owner-minted device key + valid signature over the signed core (RP-APPROVAL-2: the
         #     authorized set is owner-signed only, so a merely-presented key is never trusted).
@@ -332,6 +366,12 @@ class SessionGate:
         if self._killswitch_engaged(time.time()):
             self.disarm()
             return {"injected": False, "reason": "kill-switch engaged — session disarmed"}
+        # A governed `capability gesture off` latch neuters injection mid-session within the same ~1-2 frame
+        # window (bounded exactly like the kill-switch), so an owner can shut gesture control off from the
+        # cockpit/CLI/phone and it stops almost immediately — not at TTL. Fail-safe: disabled wins.
+        if not self._cap_gesture_enabled(time.time()):
+            self.disarm()
+            return {"injected": False, "reason": "gesture capability disabled (governed latch) — session disarmed"}
         # A revoked arming device neuters its own in-flight session within ~1-2 frames (the 0.05s rescan
         # floor, bounded exactly like the kill-switch), NOT at TTL — an owner who revokes a lost/
         # compromised phone stops it almost immediately instead of up to MAX_DEVICE_TTL later.

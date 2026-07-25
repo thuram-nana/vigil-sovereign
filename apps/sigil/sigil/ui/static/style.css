@@ -41,3 +41,11 @@ button:hover{background:#0d1218}
 .prov{color:var(--dim)} .prov b{color:var(--accent)}
 .empty{color:var(--dim);font-style:italic}
 .mt{margin-top:14px}
+.hint{color:var(--dim);font-size:12px;margin:0 0 10px}
+.caps{display:flex;flex-direction:column;gap:8px}
+.cap-row{display:flex;align-items:center;gap:10px}
+.cap-row>b{color:var(--ink);font-weight:600;min-width:64px;text-transform:capitalize}
+.cap-row .chip{min-width:64px;text-align:center}
+.cap-row button{margin-left:auto}
+.cap-row.both{border-top:1px solid var(--line);padding-top:8px}
+.cap-row.both button{margin-left:0}

@@ -27,6 +27,15 @@ def run_gesture(*, store=None, owner_key=None, source=None, landmarker=None, cla
     if store is None:
         from ..spine.store import SpineStore
         store = SpineStore()
+    # governed gesture-capability latch: a disabled gesture capability refuses to even START the loop
+    # (never arms, injects nothing) — fail-safe, and the daemon can be shut off from the cockpit/CLI/phone.
+    from ..governor.capability import CapabilityGate
+    if not CapabilityGate(store, trusted_pubkey=trusted_pubkey).is_enabled("gesture"):
+        store.append(kind="refusal", source="gesture", actor="OWNER",
+                     payload={"signal": "gesture.refused", "decision": "refused", "tier": "A0",
+                              "reason": "gesture capability disabled (governed latch)",
+                              "summary": "gesture loop refused to start: capability disabled"})
+        return 0  # inject NOTHING; never armed
     if source is None:
         from ..perception.camera_stream import CameraStreamSource
         source = CameraStreamSource()

@@ -56,6 +56,8 @@ class SnapshotState(BaseModel):
 
     nonce_highwater: dict[str, int] = {}
     killswitch_engaged: bool = False
+    capability_latch: list = []       # [[capability, enabled_bool], ...] — governor.capability latch (LWW:
+    #                                   disable=any, enable=owner-verified). Missing capability ⇒ enabled.
     # tuple-keyed / None-tolerant sub-states as list-of-rows (JSON-safe + type-verbatim): a non-str key an
     # owner-signed-but-malformed record could carry (host_id/device_pubkey/agent/scope = None/int) is
     # preserved EXACTLY — the live scans key on p.get(...) with no type guard, so dropping such a key would
@@ -78,6 +80,9 @@ class SnapshotState(BaseModel):
 
     def promotion_map(self) -> dict[tuple[Optional[str], Optional[str]], str]:
         return {(row[0], row[1]): row[2] for row in self.promotion}
+
+    def capability_latch_map(self) -> dict[Optional[str], bool]:
+        return {row[0]: row[1] for row in self.capability_latch}
 
     def arm_set(self) -> set:
         return {(row[0], row[1]) for row in self.consumed_arm_nonces}
@@ -186,6 +191,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     s = seed
     nonce: dict[str, int] = dict(s.nonce_highwater) if s else {}
     ks_engaged = s.killswitch_engaged if s else False
+    cap_latch: dict[Any, bool] = dict(s.capability_latch) if s else {}   # list-of-rows -> {capability: bool}
     creation: dict[tuple[Optional[str], Optional[str]], int] = dict(s.creation_counter()) if s else {}
     capability: dict[Any, dict] = dict(s.capability_map) if s else {}   # list-of-rows -> dict (keys verbatim)
     mesh_dev: dict[Any, str] = dict(s.mesh_dev_state) if s else {}
@@ -221,6 +227,14 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                 ks_engaged = True
             elif state == "released" and verify_signed(p, ("signal", "state"), tp):
                 ks_engaged = False
+        # --- capability latch (disable=any, enable=owner-verified, IN ORDER, per capability). No isinstance
+        #     guard on the key — mirror the scan, which keys on p.get("capability") unconditionally. ---
+        if sig == "governor.capability":
+            state = p.get("state")
+            if state == "disabled":
+                cap_latch[p.get("capability")] = False
+            elif state == "enabled" and verify_signed(p, ("signal", "capability", "state"), tp):
+                cap_latch[p.get("capability")] = True
         # --- creation cap (PAIR-keyed count; account.create applied). Record shape (actor.py): kind="event",
         #     payload{signal:"web.actor.step", step_kind:"account.create", status:"applied", service, url}. ---
         if p.get("signal") == "web.actor.step" and p.get("step_kind") == "account.create" \
@@ -268,6 +282,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         base_seq=base_seq, snapshot_seq=snapshot_seq, trusted_pubkey=tp,
         nonce_highwater=nonce,
         killswitch_engaged=ks_engaged,
+        capability_latch=[[c, e] for c, e in cap_latch.items()],
         creation_created=[[s, o, c] for (s, o), c in creation.items()],
         capability_map=[[h, c] for h, c in capability.items()],
         mesh_dev_state=[[d, s] for d, s in mesh_dev.items()],

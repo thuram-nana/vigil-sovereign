@@ -28,14 +28,33 @@ async function refresh() {
     || '<span class="empty">none</span>';
   const l = s.ingest_lag || {};
   $("#lag").innerHTML = `<b>head</b><span>${l.head_seq}</span><b>since checkpoint</b><span>${l.records_since_checkpoint}</span>`;
+  renderCaps(s.capabilities || {});
 }
 const kv = (o) => Object.entries(o || {}).map(([a, n]) => `<b>${esc(a)}</b><span>${n}</span>`).join("");
 
+// Capabilities panel: a state chip + a toggle button per capability whose data-act flips with state
+// (enabled → "Disable x", disabled → "Enable x"), reusing the delegated button[data-act] → act() path.
+function capRow(name, state) {
+  const on = state === "enabled";
+  const act = (on ? "disable_" : "enable_") + name;
+  return `<div class="cap-row"><b>${esc(name)}</b>
+    <span class="chip ${on ? "ok" : "broken"}">${esc(state)}</span>
+    <button data-act="${act}">${on ? "Disable" : "Enable"} ${esc(name)}</button></div>`;
+}
+function renderCaps(caps) {
+  const rows = ["gesture", "voice"].map((n) => capRow(n, caps[n] || "enabled")).join("");
+  $("#capabilities").innerHTML = rows +
+    `<div class="cap-row both"><button data-act="disable_both">Disable both</button>
+       <button data-act="enable_both">Enable both</button></div>`;
+}
+
 async function act(action, seq) {
+  // capability actions carry no seq (the button has no data-seq → NaN); omit it rather than send null.
+  const body = Number.isNaN(seq) ? { action } : { action, seq };
   const r = await fetch("/api/action", {
     method: "POST",
     headers: { "X-SIGIL-Token": TOKEN, "Content-Type": "application/json" },
-    body: JSON.stringify({ action, seq }),
+    body: JSON.stringify(body),
   });
   const j = await r.json();
   if (!r.ok) alert("action refused: " + (j.error || r.status));
