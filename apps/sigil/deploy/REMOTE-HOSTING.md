@@ -63,8 +63,20 @@ over the tunnel.
 Internet ──TLS──▶ nginx (public host) ──WireGuard──▶ 10.13.13.2:8733 (sigil serve --host 10.13.13.2)
 ```
 
-`bind_ok` permits loopback, RFC1918 private, and the Tailscale CGNAT range
-(`100.64.0.0/10`) — never a public address.
+`bind_ok` permits loopback, RFC1918 private, IPv6 ULA/link-local, and the
+Tailscale CGNAT range (`100.64.0.0/10`) — never a globally-routable address. The
+cockpit binds `AF_INET6` automatically when you give it an IPv6 literal, so a
+Tailscale/WireGuard **IPv6** address (`fd7a:…`, `fd…`) works as well as its IPv4
+one. Public IPv4 and IPv6 are refused before any socket is created (a public bind
+is rejected by classification; even so, the guarantee rests on both the `bind_ok`
+classification and the socket layer).
+
+> **⚠ A private *interface* is not the same as a private *network*.** `bind_ok`
+> only checks that the bind address is non-public. If you bind a LAN address
+> (`192.168.x`, `10.x`) that your router **port-forwards** or that lives on an
+> untrusted LAN, the cockpit is reachable from outside — still token+Origin/Host
+> gated, but exposed. Prefer loopback + a co-located proxy (topology A) or a
+> tunnel IP (topology B); do not port-forward the cockpit directly.
 
 ### C. Tunnel only, no domain
 

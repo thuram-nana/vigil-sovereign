@@ -28,6 +28,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,18 +56,26 @@ class UIServer(ThreadingHTTPServer):
                 f"refusing to bind {host!r}: the cockpit binds loopback or a PRIVATE (WireGuard/"
                 f"Tailscale) address only — never 0.0.0.0 / an unspecified / a public address. To serve "
                 f"a real domain, run a reverse proxy in front (see deploy/REMOTE-HOSTING.md).")
+        ip = ipaddress.ip_address(host)             # bind_ok already proved this parses
+        if ip.version == 6:                         # bind an IPv6 tunnel (WireGuard/Tailscale) address
+            self.address_family = socket.AF_INET6   # (instance attr read by TCPServer.__init__ below)
         super().__init__(addr, handler)
         self.token = token
         self.spine_path = spine_path
         port = self.server_address[1]              # the ACTUAL bound port (correct even for port 0)
         # Anti-DNS-rebinding allowlist: the REAL bound address, plus the loopback pair only when bound to
         # loopback (dev convenience — never added for a private/WG bind), UNIONED with the operator's
-        # explicitly-configured reverse-proxy domain Host/Origin. Empty/blank extras are dropped.
-        hosts = {f"{host}:{port}"}
-        origins = {f"http://{host}:{port}"}
-        if ipaddress.ip_address(host).is_loopback:
-            hosts |= {f"127.0.0.1:{port}", f"localhost:{port}"}
-            origins |= {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+        # explicitly-configured reverse-proxy domain Host/Origin. Empty/blank extras are dropped. IPv6
+        # literals are bracketed to match the Host-header/Origin form a browser sends (`[::1]:port`).
+        def _hp(h: str) -> str:
+            return f"[{h}]:{port}" if ":" in h else f"{h}:{port}"
+
+        hosts = {_hp(host)}
+        origins = {f"http://{_hp(host)}"}
+        if ip.is_loopback:
+            lit = "::1" if ip.version == 6 else "127.0.0.1"
+            hosts |= {_hp(lit), f"localhost:{port}"}
+            origins |= {f"http://{_hp(lit)}", f"http://localhost:{port}"}
         hosts |= {h.strip() for h in extra_hosts if h and h.strip()}
         origins |= {o.strip().rstrip("/") for o in extra_origins if o and o.strip()}
         self.allowed_hosts = frozenset(hosts)
@@ -275,16 +284,16 @@ def serve(*, token: str, host: str = "127.0.0.1", port: int = 8733, spine_path=N
     srv = build_server(token=token, host=host, port=port, spine_path=spine_path,
                        allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
     bound = srv.server_address
-    is_loopback = ipaddress.ip_address(bound[0]).is_loopback
-    print(f"  SIGIL cockpit → http://{bound[0]}:{bound[1]}/?token={token}")
-    if is_loopback:
+    bip = ipaddress.ip_address(bound[0])
+    disp = f"[{bound[0]}]" if bip.version == 6 else bound[0]     # bracket IPv6 in the URL
+    print(f"  SIGIL cockpit → http://{disp}:{bound[1]}/?token={token}")
+    if bip.is_loopback:
         print("  (loopback only; the token gates every request — keep it to yourself)")
     else:
         print(f"  (private bind {bound[0]} — reach it via a reverse proxy / tunnel, never a public listener)")
-    if srv.allowed_hosts - {f"{bound[0]}:{bound[1]}", f"127.0.0.1:{bound[1]}", f"localhost:{bound[1]}"}:
-        extras = ", ".join(sorted(h for h in srv.allowed_hosts
-                                  if h not in {f"{bound[0]}:{bound[1]}", f"127.0.0.1:{bound[1]}",
-                                               f"localhost:{bound[1]}"}))
+    # the operator-configured reverse-proxy domains (printed from the inputs, not reverse-engineered)
+    extras = ", ".join(sorted({h.strip() for h in allowed_hosts if h and h.strip()}))
+    if extras:
         print(f"  (reverse-proxy Host allowlist: {extras})")
     try:
         srv.serve_forever()

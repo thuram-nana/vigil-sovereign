@@ -130,6 +130,44 @@ def test_foreign_host_or_origin_still_refused_even_with_a_domain_configured():
         srv.shutdown()
 
 
+def test_ipv6_private_bind_is_supported_with_a_bracketed_allowlist():
+    # A WireGuard/Tailscale IPv6 (loopback ::1 here, hermetically) binds an AF_INET6 socket and the
+    # allowlist carries the BRACKETED Host/Origin form a browser sends — proving the "any system" claim
+    # is honest for IPv6 tunnels, not just IPv4. Skips only if the runner has no IPv6 loopback at all.
+    import socket as _socket
+    try:
+        srv = build_server(token=TOKEN, host="::1", port=0, spine_path=_spine())
+    except OSError:
+        pytest.skip("no IPv6 loopback on this runner")
+    try:
+        assert srv.address_family == _socket.AF_INET6
+        port = srv.server_address[1]
+        assert f"[::1]:{port}" in srv.allowed_hosts
+        assert f"http://[::1]:{port}" in srv.allowed_origins
+        # live roundtrip over IPv6: the bracketed Host/Origin passes the action gate; a foreign one 403s
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        time.sleep(0.05)
+
+        def _post6(host, origin):
+            req = urllib.request.Request(
+                f"http://[::1]:{port}/api/action", data=json.dumps({"action": "disable_gesture"}).encode(),
+                headers={"X-SIGIL-Token": TOKEN, "Content-Type": "application/json",
+                         "Host": host, "Origin": origin}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+
+        assert _post6(f"[::1]:{port}", f"http://[::1]:{port}") == 200
+        assert _post6("evil.example", "http://evil.example") == 403
+        # public IPv6 is still refused by bind_ok BEFORE any socket work
+        with pytest.raises(ValueError):
+            build_server(token=TOKEN, host="2606:4700:4700::1111", port=0, spine_path=_spine())
+    finally:
+        srv.shutdown()
+
+
 def test_trailing_slash_on_a_configured_origin_is_normalised():
     # operators paste origins with/without a trailing slash; both must land as the exact header form
     srv, port = _serve(_spine(), allowed_hosts=[DOMAIN], allowed_origins=[DOMAIN_ORIGIN + "/"])
