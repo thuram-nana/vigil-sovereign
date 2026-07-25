@@ -168,6 +168,41 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 3 if failed else 0
 
 
+def _cmd_identity(args: argparse.Namespace) -> int:
+    """S7b — export the offense side's STABLE identity PUBLIC keys (spine + governance) as inert JSON, so the
+    owner (sovereign side) can mint an owner-signed delegation over them (`sigil delegate-offense`). Writes
+    ONLY public keys — never a private key crosses. The offense side loads-or-provisions its own stable keys
+    here (unsealing via its vault), so this is the first step of the owner-tie ceremony."""
+    import json
+
+    from vigil_core.vault import Vault
+    from .live.governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
+    from .live.spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
+    from .live.wiring import DEFAULT_KEY_ID
+    base = Path(args.base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    vault = Vault(base / "vault")
+    spine = load_or_create_spine_keypair(path=str(base / DEFAULT_SPINE_KEY_FILE), vault=vault)
+    gov = load_or_create_governance_keypair(path=str(base / DEFAULT_GOVERNANCE_KEY_FILE), vault=vault)
+    identity = {
+        "schema": 1,
+        # key_ids the delegation authorizers use. governance MUST match the anchor-1 signer's key_id
+        # (provision_authority signs finding certs under DEFAULT_KEY_ID), or a delegated finding won't verify.
+        "spine": {"key_id": "offense-spine", "public_key_b64": spine.public_key_b64},
+        "governance": {"key_id": DEFAULT_KEY_ID, "public_key_b64": gov.public_key_b64},
+    }
+    out = base / "offense-identity.json"
+    out.write_text(json.dumps(identity, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"offense identity exported (PUBLIC keys only) → {out}")
+    print(f"  spine      : {spine.public_key_b64[:16]}…  (key_id 'offense-spine')")
+    print(f"  governance : {gov.public_key_b64[:16]}…  (key_id {DEFAULT_KEY_ID!r})")
+    print("next (sovereign side): sigil delegate-offense "
+          f"--offense-identity {out} --scope <slug> --hours <N>")
+    print("NOTE: transport this file to the owner over an AUTHENTICATED channel (or confirm the pubkey "
+          "fingerprints out-of-band) — a swapped file would get an attacker's key owner-blessed.")
+    return 0
+
+
 def _cmd_detect(args: argparse.Namespace) -> int:
     """Run the Detection Mirror standalone over log files (unification S3) — the DEFENSIVE oracle plane
     surfaced as a first-class `vigil` verb (previously reachable only INSIDE `vigil engage`). Each fire is
@@ -252,6 +287,11 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--base-dir", default=".vigil-live",
                     help="engagement home for the STABLE governance key (shared with `vigil engage`)")
     pp.set_defaults(func=_cmd_provision)
+
+    pid = sub.add_parser("identity",
+                         help="export the offense stable identity PUBLIC keys (spine+governance) for owner delegation")
+    pid.add_argument("--base-dir", default=".vigil-live")
+    pid.set_defaults(func=_cmd_identity)
 
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")

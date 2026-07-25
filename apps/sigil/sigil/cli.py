@@ -381,6 +381,68 @@ def cmd_approve(a) -> None:
         print(f"  cannot {a.decision} seq {a.seq}: {e}")
 
 
+def cmd_delegate_offense(a) -> None:
+    """S7b — the OWNER mints + publishes owner-signed delegations over the offense side's stable identity
+    (exported by `vigil identity` as offense-identity.json). This is the sovereign half of the owner-tie
+    ceremony: it reads only the offense PUBLIC keys, signs an offense-spine and an offense-governance
+    DelegationCert with the persisted owner key, and writes them as inert JSON the offense side consumes
+    (`vigil verify --delegation …` and the finding receiver). The owner private key never leaves here.
+
+    TRUST ASSUMPTION (read this): this command signs over WHATEVER public keys are in the identity file — it
+    has no way to authenticate the file's provenance. The identity file must reach you over an authenticated
+    channel, OR you must confirm the printed pubkey fingerprints out-of-band against the offense host BEFORE
+    trusting the delegation. A file swapped in transit would get an attacker's key owner-blessed. The command
+    ECHOES exactly the keys it is about to sign so you can catch a swap in-band."""
+    import json
+    import time
+    from pathlib import Path
+    from .governor.identity import (
+        delegate_offense_governance,
+        delegate_offense_spine,
+        ensure_owner_keypair,
+        owner_pubkey,
+    )
+    from .reuse import AuthorizerKey
+    identity = json.loads(Path(a.offense_identity).read_text(encoding="utf-8"))
+    if identity.get("schema") != 1:
+        print(f"refusing: unsupported offense-identity schema {identity.get('schema')!r} (expected 1)")
+        return
+    try:
+        hours = float(a.hours)
+    except (TypeError, ValueError):
+        print(f"refusing: --hours {a.hours!r} is not a number")
+        return
+    if not (0 < hours <= 24 * 365 * 10) or hours != hours or hours in (float("inf"), float("-inf")):
+        print(f"refusing: --hours must be a finite value in (0, {24 * 365 * 10}] (got {a.hours!r})")
+        return
+    owner = ensure_owner_keypair()
+    not_after = int(time.time()) + int(hours * 3600)
+    sp, gv = identity["spine"], identity["governance"]
+    # ECHO the exact keys being blessed so the owner can catch a swapped/tampered identity file in-band.
+    print("about to owner-sign delegations over these offense keys (verify out-of-band before trusting):")
+    print(f"  spine      key_id={sp['key_id']!r}  pubkey={sp['public_key_b64']}")
+    print(f"  governance key_id={gv['key_id']!r}  pubkey={gv['public_key_b64']}")
+    spine_cert = delegate_offense_spine(
+        owner, scope=a.scope, not_after=not_after,
+        authorizers=[AuthorizerKey(key_id=sp["key_id"], name=sp["key_id"],
+                                   public_key_b64=sp["public_key_b64"])])
+    gov_cert = delegate_offense_governance(
+        owner, scope=a.scope, not_after=not_after, threshold=1,
+        authorizers=[AuthorizerKey(key_id=gv["key_id"], name=gv["key_id"],
+                                   public_key_b64=gv["public_key_b64"])])
+    out_dir = Path(a.out_dir) if a.out_dir else Path(a.offense_identity).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "offense-spine.deleg.json").write_text(spine_cert.model_dump_json(), encoding="utf-8")
+    (out_dir / "offense-governance.deleg.json").write_text(gov_cert.model_dump_json(), encoding="utf-8")
+    print(f"owner-signed offense delegations written → {out_dir}")
+    print(f"  scope={a.scope!r}  not_after={not_after} (unix)")
+    print("  offense-spine.deleg.json       (role offense-spine)")
+    print("  offense-governance.deleg.json  (role offense-governance)")
+    print(f"  PIN this owner pubkey at verify: {owner_pubkey()}")
+    print("verify (offense side): vigil verify --base-dir <home> "
+          f"--owner-pubkey {owner_pubkey()} --delegation <home>/offense-spine.deleg.json --scope {a.scope}")
+
+
 def cmd_dashboard(a) -> None:
     from .dashboard import render_dashboard, snapshot
     print(render_dashboard(snapshot(SpineStore())))
@@ -1056,6 +1118,15 @@ def main(argv=None) -> None:
     pcap.add_argument("state", nargs="?", choices=["on", "off"], help="on|off (omit for `status`)")
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)
+    pdo = sub.add_parser("delegate-offense",
+                         help="owner-sign delegations over the offense identity (S7b owner-tie ceremony)")
+    pdo.add_argument("--offense-identity", required=True,
+                     help="the offense-identity.json exported by `vigil identity`")
+    pdo.add_argument("--scope", required=True, help="the engagement scope/slug the delegation is valid for")
+    pdo.add_argument("--hours", default="24", help="validity window in hours from now (not_after)")
+    pdo.add_argument("--out-dir", default="", help="where to write the .deleg.json (default: beside the identity)")
+    pdo.set_defaults(fn=cmd_delegate_offense)
+
     pau = sub.add_parser("audit", help="self-audit (C18): what the mesh did and why, from the log")
     pau.add_argument("--agent", default=None, help="filter to one agent")
     pau.set_defaults(fn=cmd_audit)

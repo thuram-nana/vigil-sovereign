@@ -57,3 +57,66 @@ def test_a_governance_delegation_does_not_authorize_the_spine():
     with pytest.raises(DelegationError, match="role"):
         verify_delegation(gov_cert, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                           role=OFFENSE_SPINE_ROLE, scope="loopback")
+
+
+def test_cmd_delegate_offense_mints_valid_owner_signed_certs(tmp_path, monkeypatch):
+    """S7b sovereign half: `sigil delegate-offense` reads an offense-identity.json and writes owner-signed
+    offense-spine + offense-governance delegations that verify under the owner key. HERMETIC: the owner-key
+    accessors are monkeypatched to a throwaway keypair, so this NEVER touches the real ~/.sigil owner key
+    regardless of SIGIL_HOME (cmd_delegate_offense imports them at call time, so the patch takes effect)."""
+    import json
+    from types import SimpleNamespace
+
+    import sigil.governor.identity as gid
+    from sigil.cli import cmd_delegate_offense
+    test_owner = generate_keypair()
+    monkeypatch.setattr(gid, "ensure_owner_keypair", lambda: test_owner)
+    monkeypatch.setattr(gid, "owner_pubkey", lambda: test_owner.public_key_b64)
+
+    gov = generate_keypair()
+    idf = tmp_path / "offense-identity.json"
+    idf.write_text(json.dumps({
+        "schema": 1,
+        "spine": {"key_id": "offense-spine", "public_key_b64": SPINE.public_key_b64},
+        "governance": {"key_id": "root0", "public_key_b64": gov.public_key_b64},
+    }), encoding="utf-8")
+    cmd_delegate_offense(SimpleNamespace(offense_identity=str(idf), scope="loopback", hours="24", out_dir=""))
+
+    from vigil_core.delegation import DelegationCert
+    spine_cert = DelegationCert.model_validate_json((tmp_path / "offense-spine.deleg.json").read_text())
+    gov_cert = DelegationCert.model_validate_json((tmp_path / "offense-governance.deleg.json").read_text())
+    # both verify under the (test) owner key for their respective roles, over the exported pubkeys
+    sroot = verify_delegation(spine_cert, trusted_owner_pubkey=test_owner.public_key_b64, now=NOW,
+                              role=OFFENSE_SPINE_ROLE, scope="loopback")
+    groot = verify_delegation(gov_cert, trusted_owner_pubkey=test_owner.public_key_b64, now=NOW,
+                              role=OFFENSE_GOVERNANCE_ROLE, scope="loopback")
+    assert sroot.authorizers[0].public_key_b64 == SPINE.public_key_b64
+    assert groot.authorizers[0].public_key_b64 == gov.public_key_b64
+    assert sroot.threshold == 1 and groot.threshold == 1
+
+
+def test_cmd_delegate_offense_refuses_bad_hours_and_schema(tmp_path, monkeypatch, capsys):
+    """NIT fixes: --hours must be finite/positive (no int(inf) crash), and an unsupported identity schema is
+    refused — both fail closed (no cert written)."""
+    import json
+    from types import SimpleNamespace
+
+    import sigil.governor.identity as gid
+    from sigil.cli import cmd_delegate_offense
+    monkeypatch.setattr(gid, "ensure_owner_keypair", lambda: OWNER)
+    monkeypatch.setattr(gid, "owner_pubkey", lambda: OWNER.public_key_b64)
+    good = {"schema": 1, "spine": {"key_id": "offense-spine", "public_key_b64": SPINE.public_key_b64},
+            "governance": {"key_id": "root0", "public_key_b64": generate_keypair().public_key_b64}}
+    idf = tmp_path / "id.json"
+
+    for bad_hours in ("1e400", "-5", "abc"):
+        idf.write_text(json.dumps(good))
+        cmd_delegate_offense(SimpleNamespace(offense_identity=str(idf), scope="loopback",
+                                             hours=bad_hours, out_dir=""))
+        assert "refusing" in capsys.readouterr().out.lower()
+        assert not (tmp_path / "offense-spine.deleg.json").exists()   # fail-closed: no cert written
+
+    idf.write_text(json.dumps({**good, "schema": 2}))
+    cmd_delegate_offense(SimpleNamespace(offense_identity=str(idf), scope="loopback", hours="24", out_dir=""))
+    assert "unsupported offense-identity schema" in capsys.readouterr().out
+    assert not (tmp_path / "offense-spine.deleg.json").exists()
