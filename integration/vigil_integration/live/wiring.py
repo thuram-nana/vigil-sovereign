@@ -202,6 +202,25 @@ class EngineConfig:
     owner_approves_offense: bool = False
 
 
+def _offense_scope_source(slug: str, trust_root: Any):
+    """A ScopeSource over the OWNER-SIGNED authority scope, re-loaded per call (a mid-engagement re-sign is
+    honoured), for the executor's egress guard. Fail-closed: any load/verify failure → empty scope → the
+    executor denies (and, with no scope, falls back to loopback-only). Offense-only; ``framework`` and
+    ``vigil_gateway`` are imported LAZILY here (neither is a sovereign dependency) so importing
+    ``vigil_integration`` in the sovereign env stays clean (the P5 two-env boundary)."""
+    from framework.v2.authority.gate import load_authority_for_gate
+    from vigil_gateway.scope_source import ScopeSource
+
+    class _AuthorityScope(ScopeSource):
+        def hosts(self) -> list[str]:
+            try:
+                return list(load_authority_for_gate(slug, trust_root=trust_root).scope)
+            except Exception:  # noqa: BLE001 — unverifiable/absent authority ⇒ empty scope ⇒ deny (fail-closed)
+                return []
+
+    return _AuthorityScope()
+
+
 def build_engine(config: EngineConfig) -> VigilEngine:
     """Wire a :class:`live.engine.VigilEngine` to the REAL seams for ``config.slug``. Provisions the
     signed authority if one was not supplied. Fail-closed throughout: a seam whose dependency is absent
@@ -245,6 +264,16 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     # -- gate (F2/F3): the conjunctive gate over the signed authority --------------------------------
     gate = _build_gate(prov, ceiling=config.offense_ceiling)
 
+    # The executor's egress guard is keyed off the SAME signed-authority scope the gate enforces (re-loaded
+    # per call). If the authority can't be loaded/verified, offense_scope stays None → the executor falls
+    # back to loopback-only (fail-closed) — consistent with the gate returning None → deny.
+    offense_scope = None
+    if getattr(prov, "trust_root", None) is not None:
+        try:
+            offense_scope = _offense_scope_source(prov.slug, prov.trust_root)
+        except Exception:  # noqa: BLE001 — lazy import/build failure ⇒ loopback-only fallback (fail-closed)
+            offense_scope = None
+
     # -- spine signer + checkpoint (F2b) -------------------------------------------------------------
     # S5: a STABLE offense-spine identity (persisted + sealed under the offense vault), not the old
     # per-run ephemeral key — so the spine is verifiable across runs and can be owner-delegated
@@ -271,7 +300,8 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         return execute(
             tool.tool_name, tool.tool_args, phase.value,
             gate=active_gate, signer=exec_signer, seq=seq,
-            view=DEFAULT_TOOL_VIEW, destructive_view=DEFAULT_DESTRUCTIVE_VIEW, **kw,
+            view=DEFAULT_TOOL_VIEW, destructive_view=DEFAULT_DESTRUCTIVE_VIEW,
+            scope=offense_scope, **kw,
         )
 
     def approval(decision: Any, state: Any) -> bool:

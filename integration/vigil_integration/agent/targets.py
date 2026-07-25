@@ -5,9 +5,10 @@ on WHICH arg keys name the target — a per-path copy is exactly the "guard the 
 trap.
 
 This returns the LLM's PROPOSAL. It is NOT the authority: the sovereign decision (scope / egress / the
-m-of-n destruction bind) is made on the EXECUTOR-RESOLVED target — the loopback-pinned, getaddrinfo-
-validated host — not on this string. See ``live.executor._resolve_loopback`` and the ``resolved_target``
-parameter of ``tools.governance.authorize_tool_call``.
+m-of-n destruction bind) is made on the EXECUTOR-VALIDATED target — the getaddrinfo-resolved, signed-scope-
+checked host (loopback-only when no scope is threaded) — not on this string. See
+``live.executor._resolve_scoped_target`` and the ``resolved_target`` parameter of
+``tools.governance.authorize_tool_call``.
 """
 from __future__ import annotations
 
