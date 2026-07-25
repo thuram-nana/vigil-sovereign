@@ -33,14 +33,15 @@ jobs:
           pip install -e packages/core/vigil_core \
             "pydantic>=2.10,<3" structlog httpx requests PyYAML beautifulsoup4 Jinja2 \
             "cryptography>=42" packaging pytest pytest-httpserver pytest-asyncio
-      - name: evidence + entitlement + verify + worldmodel + confidence + authority
+      - name: evidence + entitlement + verify + worldmodel + confidence + authority + console/api (UI federation)
         working-directory: engine/crucible
         env:
           PYTHONPATH: .
         run: |
           pytest framework/v2/evidence framework/v2/entitlement framework/v2/common \
                  framework/v2/verify framework/v2/confidence framework/v2/worldmodel \
-                 framework/v2/calibration framework/v2/authority -q
+                 framework/v2/calibration framework/v2/authority \
+                 framework/v2/console framework/v2/api -q
 
   gateway:
     name: gateway egress gate (P6)

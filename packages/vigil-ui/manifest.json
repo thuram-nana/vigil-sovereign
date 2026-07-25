@@ -1,0 +1,12 @@
+{
+  "name": "vigil-ui",
+  "version": "1",
+  "description": "VIGIL COMMAND unified UI bundle — no build, no CDN, strict-CSP native. Vendored into both plane servers by sync.sh; each server derives its static filename allowlist from static_allowlist.",
+  "index": "index.html",
+  "static_allowlist": ["style.css", "ui.js", "manual.js", "app.js"],
+  "build": { "style.css": ["tokens.css", "components.css"] },
+  "targets": [
+    "apps/sigil/sigil/ui/static",
+    "engine/crucible/framework/v2/console/static"
+  ]
+}

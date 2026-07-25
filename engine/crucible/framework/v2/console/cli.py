@@ -8,8 +8,16 @@ neither issues outbound traffic nor touches the scan/engage hot path.
 from __future__ import annotations
 
 import argparse
+import os
 
 from .server import serve
+
+
+def _multi(flag_vals, env_name: str) -> tuple:
+    """Union a repeatable flag with a comma-separated env var; blanks dropped, order kept."""
+    out: list[str] = list(flag_vals or [])
+    out += [s.strip() for s in os.environ.get(env_name, "").split(",") if s.strip()]
+    return tuple(dict.fromkeys(out))
 
 
 def main(argv: list[str]) -> int:
@@ -23,10 +31,18 @@ def main(argv: list[str]) -> int:
                         help="Bind host — loopback only (default 127.0.0.1).")
     parser.add_argument("--open", action="store_true",
                         help="Open the console in a browser after starting.")
+    parser.add_argument("--allow-host", action="append", default=[],
+                        help="reverse-proxy Host to accept for POSTs, e.g. vigil.example.com "
+                             "(repeatable; also $CRUCIBLE_UI_ALLOWED_HOSTS). Default: loopback only.")
+    parser.add_argument("--allow-origin", action="append", default=[],
+                        help="reverse-proxy Origin to accept, e.g. https://vigil.example.com "
+                             "(repeatable; also $CRUCIBLE_UI_ALLOWED_ORIGINS).")
     args = parser.parse_args(argv)
 
     try:
-        httpd = serve(host=args.host, port=args.port)
+        httpd = serve(host=args.host, port=args.port,
+                      allowed_hosts=_multi(args.allow_host, "CRUCIBLE_UI_ALLOWED_HOSTS"),
+                      allowed_origins=_multi(args.allow_origin, "CRUCIBLE_UI_ALLOWED_ORIGINS"))
     except ValueError as e:
         print(f"console refused to start: {e}")
         return 2

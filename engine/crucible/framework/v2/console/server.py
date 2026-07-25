@@ -22,6 +22,10 @@ from urllib.parse import parse_qs, urlsplit
 # X6 — a custom request header the same-origin SPA fetch sets and a cross-site HTML form cannot.
 _CSRF_HEADER = "X-Requested-With"
 
+# Strict Content-Security-Policy (mirrors the sovereign cockpit). Self-contained assets only; no inline
+# script/style trust, no external origins, un-framable. Sent on EVERY response (reads + SSE + actions).
+_CSP = "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
 
 def _is_loopback_host(host: str) -> bool:
     """True for a genuine loopback host: the name ``localhost`` or ANY loopback IP —
@@ -83,12 +87,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     # ---- response helpers -------------------------------------------------
 
+    def _sec_headers(self) -> None:
+        """Strict security headers on every response (parity with the sovereign cockpit)."""
+        self.send_header("Content-Security-Policy", _CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+
     def _json(self, obj, status: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._sec_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -111,6 +122,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", _CTYPES.get(target.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
+        # The strict `'self'` CSP is deliberately NOT sent on these STATIC (HTML/SPA) responses: this dir
+        # still serves the LEGACY console SPA (inline handlers/styles/data: icons) that strict CSP would
+        # break. The strict CSP belongs to the CSP-clean unified bundle (packages/vigil-ui) — served by the
+        # `vigil up` reverse proxy (which sets the canonical CSP) or once that bundle retires this SPA. Data
+        # responses (_json/_sse) DO carry the CSP as harmless defense-in-depth (JSON/events render nothing).
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
@@ -119,6 +136,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
+        self._sec_headers()
         self.end_headers()
         tailer = EventTailer(path)
         last_beat = time.monotonic()
@@ -217,17 +235,26 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             except ValueError:
                 return False
 
-        # Host is mandatory (an HTTP/1.1 request always carries it) + strict (loopback + matching
-        # port) — this refuses a DNS-rebinding domain even if it forged the custom header.
+        # Federation allowlist (default EMPTY → loopback-only, byte-identical to before). When VIGIL runs
+        # behind the unified reverse proxy, the operator adds the proxy's exact domain Host/Origin here so
+        # a same-origin request forwarded by the proxy is accepted; every other Host/Origin is still refused
+        # (the custom-header + Sec-Fetch-Site checks above still apply). The console still BINDS loopback —
+        # the proxy is the only public listener.
+        allow_hosts = getattr(self.server, "allowed_hosts", frozenset())
+        allow_origins = getattr(self.server, "allowed_origins", frozenset())
+
+        # Host is mandatory (an HTTP/1.1 request always carries it) + strict (loopback + matching port, OR
+        # an exact operator-allowlisted domain) — this refuses a DNS-rebinding domain even if it forged the
+        # custom header.
         host_hdr = self.headers.get("Host", "").strip()
         if not host_hdr:
             return False, "Host missing"
-        if not _authority_ok(host_hdr, 80):
+        if not (_authority_ok(host_hdr, 80) or host_hdr in allow_hosts):
             return False, f"Host={host_hdr!r}"                # missing / rebinding / wrong-port / malformed
         origin = self.headers.get("Origin", "").strip()
         if origin:
             scheme_default = 443 if origin.lower().startswith("https:") else 80
-            if not _authority_ok(origin, scheme_default):
+            if not (_authority_ok(origin, scheme_default) or origin.rstrip("/") in allow_origins):
                 return False, f"Origin={origin}"
         return True, ""
 
@@ -259,10 +286,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"error": f"{type(e).__name__}: {e}"}, status=500)
 
 
-def serve(host: str = "127.0.0.1", port: int = 8787) -> ThreadingHTTPServer:
+def serve(host: str = "127.0.0.1", port: int = 8787,
+          allowed_hosts=(), allowed_origins=()) -> ThreadingHTTPServer:
     """Create (but do not block on) the loopback console server. The caller runs
-    ``serve_forever()``. Refuses any non-loopback host — the console is a
-    single-operator, on-host surface by design (sovereignty)."""
+    ``serve_forever()``. Refuses any non-loopback BIND — the console is a
+    single-operator, on-host surface by design (sovereignty); the unified reverse
+    proxy is the only public listener.
+
+    ``allowed_hosts``/``allowed_origins`` are the operator's exact reverse-proxy
+    domain Host/Origin forms (e.g. ``vigil.example.com`` / ``https://vigil.example.com``)
+    unioned into the anti-CSRF/anti-rebind guard so a same-origin request forwarded
+    by the proxy is accepted. Empty (the default) = loopback-only, unchanged."""
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError(f"console binds loopback only, refusing host {host!r}")
-    return ThreadingHTTPServer((host, port), ConsoleHandler)
+    srv = ThreadingHTTPServer((host, port), ConsoleHandler)
+    srv.allowed_hosts = frozenset(h.strip() for h in allowed_hosts if h and h.strip())
+    srv.allowed_origins = frozenset(o.strip().rstrip("/") for o in allowed_origins if o and o.strip())
+    return srv

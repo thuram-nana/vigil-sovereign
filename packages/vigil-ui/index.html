@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <title>VIGIL COMMAND</title>
+  <!-- self-contained, strict-CSP: only same-origin app.js/style.css; no CDN, no inline script -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<!-- the server rewrites these placeholders per deployment (token + federated base paths).
+     Standalone (a single server): base paths are "" (its own /api). Behind `vigil up`'s
+     reverse proxy: data-sovereign="/sovereign" data-offense="/offense". -->
+<body data-token="__VIGIL_TOKEN__" data-sovereign="__VIGIL_SOVEREIGN__" data-offense="__VIGIL_OFFENSE__">
+  <noscript>VIGIL COMMAND requires JavaScript. It runs entirely on your machine (no external calls).</noscript>
+  <script src="ui.js"></script>
+  <script src="manual.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

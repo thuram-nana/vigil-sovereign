@@ -10,8 +10,16 @@ surface issues no traffic.
 from __future__ import annotations
 
 import argparse
+import os
 
 from .server import serve
+
+
+def _multi(flag_vals, env_name: str) -> tuple:
+    """Union a repeatable flag with a comma-separated env var; blanks dropped, order kept."""
+    out: list[str] = list(flag_vals or [])
+    out += [s.strip() for s in os.environ.get(env_name, "").split(",") if s.strip()]
+    return tuple(dict.fromkeys(out))
 
 
 def main(argv: list[str]) -> int:
@@ -24,10 +32,19 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--port", type=int, default=8799, help="Loopback port (default 8799).")
     parser.add_argument("--host", default="127.0.0.1",
                         help="Bind host — loopback only (default 127.0.0.1).")
+    parser.add_argument("--allow-host", action="append", default=[],
+                        help="reverse-proxy Host to accept for POSTs (repeatable; also "
+                             "$CRUCIBLE_UI_ALLOWED_HOSTS). Default: loopback only. Front the API "
+                             "only behind an authenticated proxy — set CRUCIBLE_API_KEY too.")
+    parser.add_argument("--allow-origin", action="append", default=[],
+                        help="reverse-proxy Origin to accept (repeatable; also "
+                             "$CRUCIBLE_UI_ALLOWED_ORIGINS).")
     args = parser.parse_args(argv)
 
     try:
-        httpd = serve(host=args.host, port=args.port)
+        httpd = serve(host=args.host, port=args.port,
+                      allowed_hosts=_multi(args.allow_host, "CRUCIBLE_UI_ALLOWED_HOSTS"),
+                      allowed_origins=_multi(args.allow_origin, "CRUCIBLE_UI_ALLOWED_ORIGINS"))
     except ValueError as e:
         print(f"api refused to start: {e}")
         return 2
