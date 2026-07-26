@@ -340,7 +340,10 @@ def test_cli_open_pr_requires_full_provisioning(tmp_path, capsys):
     owner = generate_keypair()
     keys, auths, _ = _governance()
     ep, dp = _env_and_deleg(tmp_path, owner=owner, keys=keys, auths=auths)
+    # a fresh, un-provisioned base-dir so auto-discovery finds no trust root / signed authorization
+    base = str(tmp_path / "unprovisioned")
     rc = main(["patch", "--finding-envelope", ep, "--owner-pubkey", owner.public_key_b64,
-               "--delegation", dp, "--scope", "acme", "--target-repo", str(tmp_path), "--open-pr"])
+               "--delegation", dp, "--scope", "acme", "--target-repo", str(tmp_path),
+               "--base-dir", base, "--open-pr"])
     err = capsys.readouterr().err
-    assert rc == 2 and "--open-pr requires" in err
+    assert rc == 2 and "--open-pr needs" in err          # nothing provisioned → refuse fail-closed

@@ -19,6 +19,10 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
                                     spine — never raw JSON). Default is a non-destructive propose-only dry
                                     run; ``--apply-edits`` applies into a disposable clone; ``--open-pr`` (off
                                     by default) opens a gated PR under a provisioned m-of-n destruction quorum.
+  * ``vigil provision-destruction`` — mint the m-of-n destruction quorum keys for ``vigil patch --open-pr``
+                                    (prints the signing keys ONCE; writes the public trust root).
+  * ``vigil authorize-destruction`` — sign ONE destructive action (from a ``vigil patch`` dry run) → the
+                                    single-use, window-bounded signed authorization the PR leg consumes.
   * ``vigil up`` / ``vigil down``  — bring the WHOLE unified UI up at ONE origin behind a self-contained
                                     reverse proxy (federating the two trust planes), and stop it. EXEC-
                                     ONLY: spawns the three backends in their own venvs; imports no
@@ -166,23 +170,32 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     #     single-use is durable + ATOMIC via the file-backed nonce ledger (one authorization → one PR).
     quorum = None
     if args.open_pr:
-        missing = [n for n, v in (("--signed-authorization", args.signed_authorization),
-                                  ("--authority-trust-root", args.authority_trust_root),
-                                  ("--mandatory-signer", args.mandatory_signer),
-                                  ("--ledger", args.ledger)) if not v]
+        from .live.destruction_provision import default_paths
+        dp = default_paths(args.base_dir)
+        # Auto-discover the provisioned quorum under --base-dir (from `vigil provision-destruction` +
+        # `vigil authorize-destruction`); explicit flags override. The ledger dir is created on first use.
+        trust_root = args.authority_trust_root or (dp["trust_root"] if Path(dp["trust_root"]).exists() else "")
+        signed_path = args.signed_authorization or (dp["signed"] if Path(dp["signed"]).exists() else "")
+        ledger = args.ledger or dp["ledger"]
+        # provision-destruction's default owner id. Fail-closed: the mandatory id must be registered in the
+        # trust root (DestructionAuthority validates that), and the owner's SIGNATURE must be present — so a
+        # wrong default (e.g. a custom --owner-id) refuses rather than fails open. Operator-supplied (the
+        # trusted caller), never the injectable agent.
+        mandatory = args.mandatory_signer or ["owner"]
+        missing = [n for n, v in (("--signed-authorization", signed_path),
+                                  ("--authority-trust-root", trust_root)) if not v]
         if missing:
-            print(f"vigil patch: --open-pr requires {', '.join(missing)} (the provisioned m-of-n destruction "
-                  "authorization + the single-use ledger). A GITHUB_TOKEN must also be set in the environment.",
-                  file=sys.stderr)
+            print(f"vigil patch: --open-pr needs {', '.join(missing)} — run `vigil provision-destruction` then "
+                  f"`vigil authorize-destruction` (they default under --base-dir {args.base_dir}), or pass the "
+                  "flags explicitly. A GITHUB_TOKEN must also be set in the environment.", file=sys.stderr)
             return 2
         try:
-            authority = load_destruction_authority(trust_root_path=args.authority_trust_root,
-                                                   mandatory_signer_ids=args.mandatory_signer)
-            signed = load_signed_authorization(args.signed_authorization)
+            authority = load_destruction_authority(trust_root_path=trust_root, mandatory_signer_ids=mandatory)
+            signed = load_signed_authorization(signed_path)
         except TrustedFindingError as exc:
             print(f"vigil patch: REFUSED (fail-closed): {exc}", file=sys.stderr)
             return 2
-        quorum = file_backed_quorum(authority=authority, signed=signed, slug=slug, ledger_path=args.ledger)
+        quorum = file_backed_quorum(authority=authority, signed=signed, slug=slug, ledger_path=ledger)
 
     # (3) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
     #     argv); apply_edits/pr_enabled are explicit opt-ins; the GitHub token is read from the child env only.
@@ -203,6 +216,83 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     # Honest exit: non-zero only on an outright refusal (not-confirmed / gate deny). A propose-only or
     # applied-in-clone or opened-PR run is a success; a "no proposal" (e.g. no API key) is reported, not crashed.
     return 1 if str(result.status).startswith("refused") else 0
+
+
+def _cmd_provision_destruction(args: argparse.Namespace) -> int:
+    """Mint the m-of-n destruction quorum keys for `vigil patch --open-pr`. Prints each signer's PRIVATE key
+    ONCE (paste the owner key into Settings; distribute co-signer keys to their holders) and writes the PUBLIC
+    trust root under --base-dir. Off-by-default: nothing is armed until you also authorize AND pass --open-pr."""
+    from .live.destruction_provision import default_paths, generate_authority, write_trust_root
+    try:
+        gen = generate_authority(threshold=args.threshold, worker_count=args.signers, owner_id=args.owner_id)
+    except ValueError as exc:
+        print(f"vigil provision-destruction: {exc}", file=sys.stderr)
+        return 2
+    tr_path = write_trust_root(args.base_dir, gen.trust_root_json)
+    paths = default_paths(args.base_dir)
+    print("=== vigil provision-destruction — m-of-n destruction quorum ===")
+    print(f"threshold          : {gen.threshold}-of-{len(gen.private_keys)}   "
+          f"mandatory signer(s): {', '.join(gen.mandatory_signer_ids)}")
+    print(f"trust root (public): {tr_path}")
+    print(f"nonce ledger       : {paths['ledger']}  (auto-created on first PR)")
+    print()
+    print("PRIVATE SIGNING KEYS — shown ONCE; NOT stored by this command. Save/distribute now:")
+    for kid, priv in gen.private_keys:
+        where = ("→ paste into Settings as VIGIL_DESTRUCTION_OWNER_KEY (or export it)"
+                 if kid in gen.mandatory_signer_ids
+                 else "→ hand to this co-signer; keep it OFF this machine for real separation of duties")
+        print(f"    [{kid}] {priv}")
+        print(f"          {where}")
+    print()
+    print("Then, per fix: (1) `vigil patch --finding-envelope … --target-repo R` (dry run → prints the action);")
+    print("               (2) `vigil authorize-destruction --base-dir "
+          f"{args.base_dir} --action-id … --slug … --target R`;")
+    print("               (3) `vigil patch … --target-repo R --open-pr` (auto-discovers the signed authorization).")
+    if gen.threshold == 1:
+        print()
+        print("NOTE: threshold=1 (solo) — whoever holds the owner key can authorize a PR. For separation of "
+              "duties, re-run with `--signers N --threshold M` (M>1) and keep co-signer keys on other machines.")
+    return 0
+
+
+def _cmd_authorize_destruction(args: argparse.Namespace) -> int:
+    """Sign ONE destructive action (from a `vigil patch` dry run) with the owner key (read from the
+    VIGIL_DESTRUCTION_OWNER_KEY env / Settings — never argv) plus any --worker-key co-signers, producing the
+    single-use, window-bounded signed-authorization.json that `vigil patch --open-pr` consumes."""
+    import os
+    import time
+
+    from .live.destruction_provision import default_paths, fresh_nonce, load_worker_key_file, sign_action
+    owner_priv = os.environ.get("VIGIL_DESTRUCTION_OWNER_KEY", "").strip()
+    if not owner_priv:
+        print("vigil authorize-destruction: no owner signing key — set VIGIL_DESTRUCTION_OWNER_KEY (paste it in "
+              "Settings, or export it). Run `vigil provision-destruction` to mint one.", file=sys.stderr)
+        return 2
+    signers: list = [(args.owner_id, owner_priv)]
+    for spec in (args.worker_key or []):
+        try:
+            signers.append(load_worker_key_file(spec))
+        except ValueError as exc:
+            print(f"vigil authorize-destruction: {exc}", file=sys.stderr)
+            return 2
+    try:
+        doc = sign_action(action_id=args.action_id, engagement_slug=args.slug, target=args.target,
+                          signer_private_keys=signers, now=time.time(), window_s=args.window_s,
+                          nonce=fresh_nonce())
+    except ValueError as exc:
+        print(f"vigil authorize-destruction: {exc}", file=sys.stderr)
+        return 2
+    out = args.out or default_paths(args.base_dir)["signed"]
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)     # single-use auth → owner-only file
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(doc)
+    print(f"=== vigil authorize-destruction — action {args.action_id!r} ===")
+    print(f"signed by : {', '.join(kid for kid, _ in signers)}")
+    print(f"window    : {int(args.window_s)}s  (single-use; within the 900s dead-man's-switch)")
+    print(f"written   : {out}")
+    print(f"Then: vigil patch … --base-dir {args.base_dir} --target-repo {args.target} --open-pr")
+    return 0
 
 
 def _load_and_verify_ledger(path: str, *, base_dir: str) -> tuple[list, object]:
@@ -486,6 +576,35 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the durable single-use nonce ledger DIRECTORY (--open-pr; one authorization → one PR)")
     ppatch.add_argument("--pr-base", default="", help="the PR base branch (default: the repo's default branch)")
     ppatch.set_defaults(func=_cmd_patch)
+
+    pprov = sub.add_parser(
+        "provision-destruction",
+        help="mint the m-of-n destruction quorum keys for `vigil patch --open-pr` (prints keys ONCE)")
+    pprov.add_argument("--base-dir", default=".vigil-live",
+                       help="where the PUBLIC trust root + nonce ledger live (shared with `vigil patch`)")
+    pprov.add_argument("--threshold", type=int, default=1,
+                       help="m in m-of-n — how many signers must sign (default 1 = solo owner)")
+    pprov.add_argument("--signers", type=int, default=0,
+                       help="number of ADDITIONAL co-signer keys beyond the owner (default 0). Use >0 with "
+                            "--threshold >1 and keep co-signer keys off this machine for separation of duties")
+    pprov.add_argument("--owner-id", default="owner", help="the mandatory owner signer's key id")
+    pprov.set_defaults(func=_cmd_provision_destruction)
+
+    pauth = sub.add_parser(
+        "authorize-destruction",
+        help="sign ONE destructive action (from a `vigil patch` dry run) → the single-use signed authorization")
+    pauth.add_argument("--action-id", required=True, help="the pr-<remediation_id> printed by the dry run")
+    pauth.add_argument("--slug", required=True, help="the engagement_slug printed by the dry run")
+    pauth.add_argument("--target", required=True, help="the target repo printed by the dry run (must match)")
+    pauth.add_argument("--base-dir", default=".vigil-live", help="where to write signed-authorization.json")
+    pauth.add_argument("--out", default="", help="output path (default: <base-dir>/signed-authorization.json)")
+    pauth.add_argument("--owner-id", default="owner", help="the owner signer's key id (matches provisioning)")
+    pauth.add_argument("--window-s", type=float, default=600.0,
+                       help="validity window in seconds (single-use; total window must stay ≤900s)")
+    pauth.add_argument("--worker-key", action="append", default=[],
+                       help="a co-signer as key_id=/path/to/keyfile (repeatable; read from FILE, never argv). "
+                            "The owner key comes from VIGIL_DESTRUCTION_OWNER_KEY.")
+    pauth.set_defaults(func=_cmd_authorize_destruction)
 
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")

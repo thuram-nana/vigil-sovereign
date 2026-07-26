@@ -73,7 +73,27 @@ window.VIGIL_MANUAL = [
       { h: "The gated ladder" },
       { p: "An auto-fix follows a ladder of gated steps, each at its own risk tier: clone the repo (A1), apply the AI's proposed edits (A2 — each file needs your explicit approval; a timeout auto-rejects), build in a sandbox (A3), and open a pull request (A3 — a distinct multi-signer approval). Only explicit, path-validated files are ever staged — never a bulk change." },
       { p: "A fix is marked FIXED only when the ORIGINAL exploit oracle is re-run on the patched build and goes SILENT — i.e. the bug can no longer be proven. If it still fires, the pull request still opens but is flagged as a proposal, not a fix. Nothing is merged for you." },
-      { note: "Live auto-application (actually cloning, building, and opening a PR against your repo) is a separate, sovereign-gated capability that must be provisioned and explicitly authorized — the console never runs it on its own. Today the screen shows you the plan and the exact gated process; it does not clone, build, or open anything." },
+      { note: "Live auto-application (actually cloning, editing, sandbox-building, and opening a PR against your repo) runs from the command line as `vigil patch`, and only over a PROVEN finding — never a raw file you hand it. The default is a dry run that touches nothing but a throwaway clone; opening a real PR is off by default and needs the signing key set up below." },
+    ],
+  },
+  {
+    id: "arming-autofix", title: "Arming live auto-patch (opening real PRs)",
+    blocks: [
+      { p: "By default `vigil patch` proposes a fix and applies it inside a throwaway copy of your repo — your real repo is never touched and no pull request is opened. Turning on real PRs (`--open-pr`) is a deliberate, one-time setup because it is the one step that changes something outside VIGIL." },
+      { h: "Why a signing key" },
+      { p: "Opening a PR is gated by an m-of-n signature — “m of n approved keys must sign, and the owner must be one of them.” This is what stops the engine from ever opening a PR on its own: it can only act on an authorization YOU signed, for THAT one repo and finding, that is single-use and expires in minutes." },
+      { h: "One-time setup" },
+      { list: [
+        ["1. Generate the keys", "Run `vigil provision-destruction`. It prints your signing key(s) ONCE and writes a public trust file. Seal the owner key in Settings → “Auto-patch signing key (owner)” for safekeeping, and keep a copy to export for the signing step below."],
+        ["2. (optional) Share duties", "For a team, run `vigil provision-destruction --signers 2 --threshold 2` and give each co-signer their own key, kept on their own machine — then no single machine can authorize a PR alone."],
+      ] },
+      { h: "Per fix" },
+      { list: [
+        ["3. Dry run", "`vigil patch --finding-envelope … --target-repo R` prints the exact action to authorize (an id, the engagement, the repo)."],
+        ["4. Authorize", "In a shell where the owner key is exported (`export VIGIL_DESTRUCTION_OWNER_KEY=…`), run `vigil authorize-destruction --action-id … --slug … --target R`. It signs that one action, producing a single-use, minutes-long authorization. The key is read from the environment, never the command line — so it never lands in your shell history."],
+        ["5. Open the PR", "`vigil patch … --target-repo R --open-pr` finds that authorization automatically and opens the gated pull request. It still needs a GitHub token and never merges anything for you."],
+      ] },
+      { note: "The signing key is deliberately kept OUT of the offense engine — the engine can only CONSUME an authorization you produced, never sign one. Solo setup (the default, one key at threshold 1): whoever holds the owner key can authorize a PR — still single-use, time-boxed, bound to one repo+finding, and off by default. For real separation of duties use more signers and keep their keys on separate machines." },
     ],
   },
   {
@@ -104,8 +124,8 @@ window.VIGIL_MANUAL = [
   {
     id: "settings", title: "Settings — keys & model",
     blocks: [
-      { p: "Add the secrets the system uses here — your AI provider API key, and (for live auto-patch) a GitHub token that lets the fix engine push a branch and open a gated pull request. Each is sealed into your machine's keyring or TPM-backed vault, shown to you only as a redacted fingerprint afterwards, and is NEVER written to the audit log or sent to your browser again. You can also run keyless (deterministic checks only, no AI reasoning)." },
-      { p: "Choose which AI model VIGIL thinks with. Every secret is sealed and delivered to the engine on your machine only — the GitHub token, for example, is what the auto-patch engine uses when you approve opening a fix PR." },
+      { p: "Add the secrets the system uses here — your AI provider API key; a GitHub token (for live auto-patch) that lets the fix engine push a branch and open a gated pull request; and the auto-patch signing key that AUTHORIZES a PR (generate it with `vigil provision-destruction` — see “Arming live auto-patch”). Each is sealed into your machine's keyring or TPM-backed vault, shown to you only as a redacted fingerprint afterwards, and is NEVER written to the audit log or sent to your browser again. All three are optional — you can run keyless (deterministic checks only, no AI reasoning), and you only need the GitHub token and signing key if you open PRs." },
+      { p: "Choose which AI model VIGIL thinks with — the model you pick here is the one the engine actually reasons with (it flows to both engagements and fix proposals). Every secret is sealed and delivered to the engine on your machine only." },
     ],
   },
   {
