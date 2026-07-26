@@ -19,7 +19,7 @@ import hashlib
 import os
 from typing import Optional
 
-from ..config import SIGIL_HOME
+from ..config import SIGIL_HOME, assert_env_value_safe
 from ..platform.secrets import SecretStore
 
 # The one secret the settings plane may seal today: the Anthropic/Claude API key. Stored under the name
@@ -196,26 +196,6 @@ PROVIDER_ENV_VARS = tuple(dict.fromkeys(
 _OFFENSE_EXCLUDED_SECRETS = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY", "ELEVENLABS_API_KEY"})
 _OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n not in _OFFENSE_EXCLUDED_SECRETS)
 
-# Every character str.splitlines() treats as a line boundary. The persisted `~/.sigil/sigil.env` tier is
-# parsed line-by-line, so ANY of these inside a value is an envfile line-injection vector — a value could
-# plant an extra `KEY=value` line (e.g. VIGIL_DESTRUCTION_OWNER_KEY, the auto-patch signing key). An
-# ord<0x20/==0x7f guard MISSES three of them: NEL (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR
-# (U+2029). We reject the full splitlines() set at EVERY settings-plane writer so the class can't recur at
-# one site while another is fixed. (The envfile reader/writer separately parse on "\n" only — defense in
-# depth: even a stray separator that reached the file stays inert inside its value, never re-materialized.)
-_LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
-
-
-def _reject_unsafe_env_value(value: str, what: str, *, maxlen: int) -> None:
-    """Fail-closed if `value` cannot be safely persisted as a single envfile `KEY=value` line: reject a
-    control character (ord < 0x20 or DEL), any Unicode line separator str.splitlines() honors, or an
-    oversize value. The ONE guard every settings-plane writer (model id / provider config / secret) shares."""
-    if len(value) > maxlen:
-        raise ValueError(f"invalid {what}: too long (> {maxlen})")
-    if any(ord(c) < 0x20 or ord(c) == 0x7f or c in _LINE_BREAK_CHARS for c in value):
-        raise ValueError(f"invalid {what}: control or line-break character")
-
-
 def _validate_config_value(env: str, value: str) -> str:
     """A non-secret provider-config value (region/endpoint/project/path). Reject control/line-break chars
     (envfile line-injection) + oversize; light endpoint sanity (the BACKEND does the authoritative host
@@ -223,7 +203,7 @@ def _validate_config_value(env: str, value: str) -> str:
     value = str(value or "").strip()
     if not value:
         return ""
-    _reject_unsafe_env_value(value, f"value for {env}", maxlen=1024)
+    assert_env_value_safe(value, f"value for {env}", maxlen=1024)
     if env == "AZURE_OPENAI_ENDPOINT" and not value.startswith("https://"):
         raise ValueError("AZURE_OPENAI_ENDPOINT must start with https://")
     if env == "CRUCIBLE_SELFHOSTED_ENDPOINT" and not (value.startswith("http://") or value.startswith("https://")):
@@ -245,7 +225,7 @@ def set_provider(provider: str, model: str = "", config: Optional[dict] = None, 
     # model is written into env vars (+ persisted to sigil.env), so it gets the SAME line-injection guard
     # as config/secrets — a newline OR a Unicode line separator (U+0085/U+2028/U+2029, which an ord-only
     # guard misses) could inject an extra `KEY=value` line into the envfile tier. "" is fine (keyless).
-    _reject_unsafe_env_value(model, "model id", maxlen=512)
+    assert_env_value_safe(model, "model id", maxlen=512)
     config = {str(k): str(v) for k, v in (config or {}).items()}
 
     plan = {v: "" for v in PROVIDER_ENV_VARS}          # start by clearing EVERYTHING, then set the chosen subset
@@ -290,6 +270,8 @@ def _persist_env(key: str, value: str) -> None:
     """Upsert (or, when ``value`` is "", REMOVE) a NON-secret var in `~/.sigil/sigil.env` (0600, no
     world-readable window) and mirror the change into this process's env. Clearing leaves no stale line
     and pops the var, so a prior choice's var never lingers to be re-delivered to the offense engine."""
+    if value != "":
+        assert_env_value_safe(value, f"env value for {key}")   # airtight backstop at the write primitive
     f = SIGIL_HOME / "sigil.env"
     SIGIL_HOME.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
@@ -337,7 +319,7 @@ def set_secret(name: str, value: str, *, store, owner_key, reason: str = "") -> 
     # Reject oversize + any char that could break the envfile tier into an extra `KEY=value` line — a
     # newline OR a Unicode line separator (U+0085/U+2028/U+2029). An API key is printable text anyway.
     # Defense-in-depth even for an owner: a value must never be able to plant VIGIL_DESTRUCTION_OWNER_KEY.
-    _reject_unsafe_env_value(value, "secret value", maxlen=_MAX_SECRET_LEN)
+    assert_env_value_safe(value, "secret value", maxlen=_MAX_SECRET_LEN)
     fp = _fingerprint(value)
     backend = SecretStore().set(name, value)          # keyring → sealed → 0600 env file; never the spine
     seq = _record_signed_event(

@@ -303,7 +303,8 @@ def find_voices(query: str = "jarvis", api_key: str | None = None, timeout: int 
 def set_voice(voice_id: str) -> None:
     """Persist the chosen TTS voice_id as SIGIL_TTS_VOICE_ID in ~/.sigil/sigil.env (loaded by
     config at import), so ElevenLabsTts uses it by default everywhere."""
-    from ..config import SIGIL_HOME
+    from ..config import SIGIL_HOME, assert_env_value_safe
+    assert_env_value_safe(voice_id, "voice id", maxlen=256)   # a voice id is written raw into sigil.env
     env_path = SIGIL_HOME / "sigil.env"
     lines = []
     if env_path.exists():
