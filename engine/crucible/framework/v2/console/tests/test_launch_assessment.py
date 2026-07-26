@@ -41,6 +41,9 @@ def stub_launch(tmp_path, monkeypatch):
     which ``launch_assessment`` writes synchronously before it would spawn."""
     monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
     monkeypatch.setattr(actions, "_spawn_background", lambda *a, **k: None)
+    # codebase runs pre-flight Docker; assume it's ready in these deterministic tests (the honest
+    # docker-missing refusal is covered explicitly in test_codebase_*docker* below).
+    monkeypatch.setattr(actions, "_docker_ready", lambda: (True, "docker daemon reachable"))
     def _cmd(run_id):
         meta = json.loads((tmp_path / "runs" / run_id / "meta.json").read_text(encoding="utf-8"))
         return meta["cmd"], meta
@@ -107,6 +110,7 @@ def test_codebase_routes_to_strix_and_validates_path(stub_launch, tmp_path):
     assert r["stream"] == "none"
     cmd, _ = stub_launch(r["run_id"])
     assert cmd[0].endswith("strix") and "--target" in cmd and str(src) in cmd
+    assert "--non-interactive" in cmd  # A4b: headless, or a background/console spawn hangs on the TUI
     assert "--instruction" in cmd  # objective threaded through
     # a non-existent path is refused cleanly
     bad = actions.launch_assessment({"mode": "codebase", "target": str(tmp_path / "nope"), "authorized": True})
@@ -118,7 +122,37 @@ def test_codebase_mount_flag(stub_launch, tmp_path):
     src.mkdir()
     r = actions.launch_assessment({"mode": "codebase", "target": str(src), "mount": True})
     cmd, _ = stub_launch(r["run_id"])
-    assert "--mount" in cmd and "--target" not in cmd
+    assert "--mount" in cmd and "--target" not in cmd and "--non-interactive" in cmd
+
+
+def test_codebase_fails_honestly_when_docker_is_missing(monkeypatch, tmp_path):
+    # A4b: Strix runs in a Docker sandbox and hard-exits without it — a codebase run must refuse honestly
+    # (never hang / spawn). URL targets are unaffected.
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
+    spawned = []
+    monkeypatch.setattr(actions, "_spawn_background", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(actions, "_docker_ready", lambda: (False, "the 'docker' CLI was not found on PATH"))
+    src = tmp_path / "proj"
+    src.mkdir()
+    r = actions.launch_assessment({"mode": "codebase", "target": str(src)})
+    assert "error" in r and "Docker" in r["error"] and "docker" in r["error"].lower()
+    assert not spawned  # nothing was launched
+
+
+def test_docker_ready_probe(monkeypatch):
+    import subprocess as _sp
+    monkeypatch.setattr(actions.shutil, "which", lambda _n: None)
+    ok, why = actions._docker_ready()
+    assert ok is False and "docker" in why.lower()
+    monkeypatch.setattr(actions.shutil, "which", lambda _n: "/usr/bin/docker")
+    monkeypatch.setattr(actions.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 0})())
+    assert actions._docker_ready()[0] is True
+    monkeypatch.setattr(actions.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 1})())
+    assert actions._docker_ready()[0] is False
+    def _boom(*a, **k):
+        raise _sp.TimeoutExpired(cmd="docker", timeout=8)
+    monkeypatch.setattr(actions.subprocess, "run", _boom)
+    assert actions._docker_ready()[0] is False   # a hung daemon → honest False, never raises
 
 
 def test_aegis_detect_routes_and_needs_a_file(stub_launch, tmp_path):

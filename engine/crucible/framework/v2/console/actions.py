@@ -168,6 +168,22 @@ def _slugify(raw: str, *, fallback: str) -> str:
     return s[:48] or fallback
 
 
+def _docker_ready() -> tuple[bool, str]:
+    """Whether the Strix sandbox can run: the ``docker`` CLI is on PATH AND its daemon answers. Strix runs
+    every agent inside a container and HARD-EXITS if docker is missing, so a codebase run must pre-flight
+    this and fail HONESTLY rather than hang or error opaquely. Bounded + never raises."""
+    if not shutil.which("docker"):
+        return False, "the 'docker' CLI was not found on PATH"
+    try:
+        p = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=8)  # noqa: S603,S607
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+        # ValueError covers a UnicodeDecodeError from text=True on non-UTF-8 output — so "never raises" holds.
+        return False, f"the docker daemon did not answer ({type(e).__name__})"
+    if p.returncode == 0:
+        return True, "docker daemon reachable"
+    return False, "the docker daemon is not reachable (is Docker running?)"
+
+
 def _has_charter(slug: str) -> bool:
     """True iff the offense side already holds a signed charter OR authority for ``slug`` — the
     fail-closed pre-flight for a REMOTE engage. The console never mints one; provisioning a charter
@@ -248,14 +264,23 @@ def launch_assessment(body: dict) -> dict:
             "scan_mode": scan_mode, "tools": tools, "apply_fixes": apply_fixes,
             "keyless": keyless, "model": model, "started": time.time()}
 
-    # ---- codebase → strix (path-validated) --------------------------------
+    # ---- codebase → strix (path-validated, headless, Docker pre-flighted) --
     if mode == "codebase":
         p = Path(target).expanduser()
         if not p.exists():
             return {"error": f"codebase path does not exist: {target}"}
+        # Strix runs every agent inside a Docker sandbox and hard-exits without it — pre-flight so a codebase
+        # run fails honestly instead of hanging (operator "a failure always indicates" rule). URL/infra
+        # targets don't need Docker; only the Strix codebase body does.
+        ready, why = _docker_ready()
+        if not ready:
+            return {"error": f"a codebase run uses the Strix sandbox, which needs Docker — {why}. Start "
+                             f"Docker and retry, or give a URL/infra target instead."}
         strix = shutil.which("strix") or "strix"
         mount = bool(body.get("mount", False))
-        cmd = [strix, ("--mount" if mount else "--target"), str(p)]
+        # --non-interactive: run headless (no TUI, exit on completion). WITHOUT it Strix launches its
+        # terminal UI and a background/console spawn hangs forever — the A4a codebase path was broken.
+        cmd = [strix, "--non-interactive", ("--mount" if mount else "--target"), str(p)]
         if objective:
             cmd += ["--instruction", objective]
         slug = _slugify(p.name, fallback="codebase")
