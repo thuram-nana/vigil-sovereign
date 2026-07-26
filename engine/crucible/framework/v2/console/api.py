@@ -202,6 +202,80 @@ def _no_send(_request):  # pragma: no cover - chaining is pure reasoning, never 
     raise RuntimeError("world-model reconstruction must not issue traffic")
 
 
+# ---------------------------------------------------------------------------
+# Fixes / remediation (P6) — the run's fixable findings + the gated remediation ladder-of-record.
+#
+# HONEST SCOPE: this composes REAL CRUCIBLE-native data (the run's oracle-confirmed findings + their
+# per-finding remediation guidance from the report). The gated ladder below is the ACCURATE, documented
+# process the sovereign auto-patch pipeline follows (vigil_integration.remediation) — it is served so the
+# UI hard-codes no process text. Live auto-application (clone / build / open-PR) is a SEPARATE, sovereign-
+# gated capability that must be provisioned + explicitly authorized; this console never runs it.
+# ---------------------------------------------------------------------------
+
+_REMEDIATION_LADDER = (
+    {"stage": "triage", "tier": "—",
+     "what": "Pick what to fix — ONLY an oracle-confirmed FACT with signed evidence is eligible. "
+             "A LEAD (unproven) can never trigger a code change."},
+    {"stage": "clone", "tier": "A1",
+     "what": "Clone the target repo and cut a fix branch. Reversible and internal."},
+    {"stage": "edit", "tier": "A2",
+     "what": "Apply the AI-proposed edits — each file needs YOUR explicit approval; a timeout auto-REJECTS "
+             "(fail-closed). Only explicit, path-validated files are staged — never a bulk `git add -A`."},
+    {"stage": "build", "tier": "A3",
+     "what": "Build the patched code in a sandbox."},
+    {"stage": "open-pr", "tier": "A3 · m-of-n",
+     "what": "Open a pull request — a DISTINCT, explicit multi-signer (m-of-n) approval, separate from the "
+             "per-file approval. Nothing is merged for you."},
+    {"stage": "verify", "tier": "—",
+     "what": "Marked FIXED only when the original exploit oracle goes SILENT on the patched build — i.e. the "
+             "bug can no longer be proven. If it still fires, the PR opens as a proposal marked still-vulnerable."},
+)
+
+
+def remediate_plan(run_id: str) -> dict[str, Any]:
+    """The Fixes view for a run: its oracle-confirmed, fixable findings (each with the report's own
+    remediation guidance) + the gated ladder-of-record any auto-fix would follow. Read-only + resilient;
+    a pending/empty run yields an honest empty state, never fabricated fixes. Whether the operator asked
+    for fixes at launch (`apply_fixes`) is surfaced from the run meta (it is a REQUEST, not an auto-run)."""
+    from . import actions
+
+    meta = _safe(lambda: json.loads((actions.run_dir(run_id) / "meta.json").read_text(encoding="utf-8")),
+                 default={}) or {}
+    doc = _safe(lambda: json.loads((actions.run_dir(run_id) / "report.json").read_text(encoding="utf-8")),
+                default=None)
+    base = {"run_id": run_id, "ladder": list(_REMEDIATION_LADDER),
+            "apply_fixes_requested": bool(meta.get("apply_fixes")),
+            "live_execution": False,
+            "note": ("VIGIL shows what to fix and the exact gated process an auto-fix follows. Live "
+                     "auto-application (clone, build, open a PR) is a separate sovereign-gated capability "
+                     "that must be provisioned and authorized — nothing is cloned, built, or opened here.")}
+    if doc is None:
+        return {**base, "pending": True, "fixable": [], "lead_count": 0,
+                "status": meta.get("status", "unknown")}
+    findings = doc.get("findings", []) if isinstance(doc, dict) else []
+    fixable, leads = [], 0
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        # a finding is FIXABLE only if it is an oracle-confirmed FACT (its own oracle re-fires) — the same
+        # honest gate the Findings hub uses; a lead (unproven) is counted but never offered for auto-fix.
+        if f.get("grounding") == "fact":
+            fixable.append({
+                "title": f.get("title", ""), "bug_class": f.get("bug_class", ""),
+                "severity": f.get("severity", ""), "location": f.get("location", ""),
+                "confirmed_by": f.get("confirmed_by", ""),
+                "remediation": f.get("remediation", "") or "(no per-class remediation text on record)",
+                "references": f.get("references", []) or [],
+            })
+        else:
+            leads += 1
+    # highest severity first (stable), then by bug_class, for a deterministic list
+    _sev = {"critical": 4, "high": 3, "medium": 2, "moderate": 2, "low": 1, "info": 0}
+    fixable.sort(key=lambda x: (-_sev.get(str(x["severity"]).lower(), -1), str(x["bug_class"])))
+    return {**base, "fixable": fixable, "fixable_count": len(fixable), "lead_count": leads,
+            "summary": doc.get("summary", "") if isinstance(doc, dict) else ""}
+
+
 def worldmodel(run_id: str) -> dict[str, Any]:
     """Reconstruct the world-model attack graph for a saved run — a PURE re-run of
     the chaining over the retained ScanReport (no traffic). Returns typed nodes,
