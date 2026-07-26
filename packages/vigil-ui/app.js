@@ -23,7 +23,7 @@
       { id: "live", label: "Live", icon: "live", ready: true },
       { id: "findings", label: "Findings", icon: "find", ready: true },
       { id: "fixes", label: "Fixes", icon: "fixes", phase: "P6" },
-      { id: "defense", label: "Defense (AEGIS)", icon: "shield", phase: "P5" },
+      { id: "defense", label: "Defense (AEGIS)", icon: "shield", ready: true },
     ]},
     { group: "MANAGE", items: [
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
@@ -1889,6 +1889,191 @@
     ]);
   }
 
+  // ---- Defense (AEGIS) screen ------------------------------------------------
+  // Honesty rules baked in (see the manual): in DEFENSE a CONFIRMED verdict is an ATTACK (danger, NOT
+  // the offense green "proven=good"); "clear" is NOT proof of safety; the deployment secret is privacy
+  // pseudonymisation, NOT request auth; canary / prompt-injection detection is the in-process SDK path,
+  // not this reverse proxy. Every value is live from /offense/api/aegis/* — no placeholder data.
+  function defGenSecret() {
+    try {
+      var a = new Uint8Array(24); (window.crypto || window.msCrypto).getRandomValues(a);
+      return Array.prototype.map.call(a, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+    } catch (e) { return ""; }
+  }
+  function defField(label, node, hint) {
+    return h("div.field", null, [h("label", null, label), node, hint ? h("div.hint", null, hint) : null]);
+  }
+
+  function renderDefense(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Defense (AEGIS)"),
+        h("span.sub", null, "Put VIGIL in front of an app you run and watch it prove AI attacks in real time.")]),
+      h("div.legend", null, [V.icon("shield"),
+        h("span", null, "A CONFIRMED verdict here is a PROVEN attack on your app (an oracle fired). A “lead” is a suspicion. “Clear” means nothing was proven — it is NOT proof of safety.")]),
+      h("div.grid.cols-4#def-tiles", { style: { marginTop: "16px" } }),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "4px" } }, [
+        h("div.stack", null, [
+          V.card("Set up your defense", "DEFENSE", h("div#def-setup", null, h("div.empty", null, "Loading…")), false),
+          V.card("Who is attacking (actor beliefs)", "DEFENSE", h("div#def-actors", null, h("div.empty", null, "Loading…")), false),
+        ]),
+        V.card("Live verdicts", "LIVE", h("div.feed#def-feed", null, h("div.empty", null, "Connecting to the verdict stream…")), false),
+      ]),
+    ]);
+    loadDefense();
+  }
+
+  function loadDefense() {
+    function refresh() {
+      V.getJSON(OFF("/api/aegis/status")).then(defDrawStatus).catch(function () {
+        var b = V.$("#def-setup");
+        if (b) V.mount(b, h("div.empty", null, "The offense engine is offline. Start it with `vigil up`."));
+      });
+    }
+    refresh();
+    liveTimers.push(setInterval(refresh, 4000));
+    var feed = V.$("#def-feed");
+    try {
+      liveES = V.sse(OFF("/api/aegis/verdicts"), function (v) {
+        if (!feed) return;
+        var empty = feed.querySelector(".empty"); if (empty) empty.remove();
+        feed.insertBefore(defVerdictRow(v), feed.firstChild);
+        while (feed.childNodes.length > 80) feed.removeChild(feed.lastChild);
+      }, function () { /* no gateway yet / stream ended — the poll keeps status live */ });
+    } catch (e) { /* EventSource unavailable — non-fatal */ }
+  }
+
+  function defDrawStatus(st) {
+    var running = !!st.running;
+    var eff = st.effective_mode || null;
+    var req = st.requested_mode || "observe";
+    var gw = st.gateway || {};
+    var actors = st.actors || [];
+    var tiles = V.$("#def-tiles");
+    if (tiles) V.mount(tiles, [
+      V.tile("Gateway", running ? "RUNNING" : "Stopped", running ? (gw.bind || "") : "not started", running ? "ok" : null),
+      V.tile("Mode", running ? (eff === "enforce" ? "ENFORCE" : "Observe") : "—",
+        running && req === "enforce" && eff !== "enforce" ? "downgraded (no entitlement)" : (eff === "enforce" ? "blocking proven attacks" : "watch-only"),
+        eff === "enforce" ? "warn" : null),
+      V.tile("Upstream", running ? "protected" : "—", running ? (gw.upstream || "") : "point me at your app", null),
+      V.tile("Actors seen", String(st.actor_count || 0), "with a belief", actors.length ? "warn" : null),
+    ]);
+    var setup = V.$("#def-setup");
+    if (setup) { if (running) V.mount(setup, defRunningPanel(gw, eff, req)); else V.mount(setup, defSetupForm()); }
+    var ab = V.$("#def-actors");
+    if (ab) {
+      if (!actors.length) V.mount(ab, h("div.empty", null, running ? "No actors yet — drive some traffic through the gateway." : "Start the gateway to build per-actor beliefs."));
+      else V.mount(ab, h("div.stack", null, actors.slice(0, 24).map(defActorRow)));
+    }
+  }
+
+  function defRunningPanel(gw, eff, req) {
+    return [
+      h("div.set-status.ok", null, [V.icon("check"),
+        h("span", null, "Gateway running — " + (gw.bind || "") + " → " + (gw.upstream || "") + " · mode " + (eff || req))]),
+      req === "enforce" && eff !== "enforce"
+        ? h("div.set-status.off", null, [V.icon("info"), h("span", null, "You requested ENFORCE but it downgraded to observe (the AEGIS_RESPOND entitlement isn’t available here) — nothing is being blocked.")])
+        : null,
+      h("div.acts", { style: { marginTop: "12px" } },
+        h("button.btn.danger", { onClick: function () {
+          V.postJSON(OFF("/api/aegis/stop"), {}).then(function () { V.toast("Gateway stopped."); loadDefense(); })
+            .catch(function (e) { V.toast((e && e.message) || "Could not stop the gateway", true); });
+        } }, [V.icon("x"), "Stop gateway"])),
+      h("div.hint", { style: { marginTop: "10px" } }, "Watch proven attacks in the live verdicts stream. To run this on your real edge, use the production command shown when you started it (bind your routable interface there, never here)."),
+    ];
+  }
+
+  function defSetupForm() {
+    var upstream = h("input", { type: "url", placeholder: "http://127.0.0.1:3000" });
+    var host = h("input", { type: "text", value: "127.0.0.1" });
+    var port = h("input", { type: "text", value: "8080" });
+    var mode = h("select", null, [h("option", { value: "observe" }, "Observe — watch only (default, blocks nothing)"),
+      h("option", { value: "enforce" }, "Enforce — block PROVEN attacks (needs entitlement)")]);
+    var honey = h("input", { type: "text", placeholder: "/__aegis_hp__/… (optional, comma-separated)" });
+    var secretIn = h("input", { type: "text", placeholder: "click Generate", spellcheck: "false", autocomplete: "off" });
+    var genBtn = h("button.btn.sm", { onClick: function () { secretIn.value = defGenSecret(); } }, "Generate");
+    var slug = h("input", { type: "text", value: "aegis-gateway" });
+    var start = h("button.btn.primary", { onClick: function () {
+      var host0 = (host.value || "127.0.0.1").trim();
+      if (host0 !== "127.0.0.1" && host0 !== "localhost" && host0 !== "::1" &&
+          !confirm("Binding " + host0 + " exposes a real data plane to the network. Only do this on an interface you intend to expose. Continue?")) return;
+      var body = { upstream: (upstream.value || "").trim(), host: host0, port: (port.value || "8080").trim(),
+        mode: mode.value, deployment_secret: (secretIn.value || "").trim(), slug: (slug.value || "").trim(),
+        honeypot_paths: (honey.value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean) };
+      start.disabled = true;
+      V.postJSON(OFF("/api/aegis/setup"), body).then(function (r) {
+        start.disabled = false;
+        if (r && r.error) { V.toast(r.error, true); return; }
+        V.toast("Defense gateway started.");
+        if (r && r.production_command) defShowProdCommand(r.production_command, r.warn_public);
+        loadDefense();
+      }).catch(function (e) { start.disabled = false; V.toast((e && e.message) || "Could not start", true); });
+    } }, [V.icon("shield"), "Start defense"]);
+    return [
+      defField("Your app’s URL (upstream)", upstream, "The gateway sits in front of this and forwards to it. Required."),
+      h("div.grid.cols-2", null, [defField("Bind host", host, "Default 127.0.0.1. A routable bind is warned."), defField("Port", port, "Default 8080.")]),
+      defField("Mode", mode, "Observe watches only. Enforce blocks proven attacks and needs the AEGIS_RESPOND entitlement (otherwise it downgrades to observe)."),
+      defField("Honeypot paths", honey, "Decoy paths — any fetch proves automated access. Optional."),
+      defField("Deployment secret", h("div.row-flex", null, [secretIn, genBtn]),
+        "Keys PRIVACY pseudonymisation of actor identifiers (IP/session) — NOT request authentication. Required."),
+      defField("Gateway name (slug)", slug, "Identity for the kill-switch + audit trail."),
+      h("div.legend", { style: { marginTop: "4px" } }, [V.icon("info"),
+        h("span", null, "This reverse proxy detects honeypot hits, automated access, and injection/SSRF/XXE leads over real traffic. Canary / prompt-injection detection for an LLM app is the in-process SDK path (aegis detect / the Aegis SDK), not this proxy.")]),
+      h("div.acts", null, start),
+    ];
+  }
+
+  function defShowProdCommand(cmd, warnPublic) {
+    openDrawer("Run on your edge", [
+      h("div.dsection", null, [
+        h("p", null, "Your local gateway is running for testing. To protect your real deployment, run this on your own routable edge (bind your public interface there):"),
+        h("pre.code", null, cmd),
+        h("button.btn.sm", { onClick: function () { copyText(cmd); } }, "Copy command"),
+        warnPublic ? h("div.set-status.off", { style: { marginTop: "12px" } }, [V.icon("info"), h("span", null, "You bound a routable interface locally — make sure that is intended.")]) : null,
+      ]),
+    ]);
+  }
+
+  function defVerdictRow(v) {
+    var decision = (v && v.decision) || "clear";
+    var cls = decision === "confirmed" ? "danger" : (decision === "lead" ? "warn" : "muted");
+    var label = decision === "confirmed" ? "ATTACK PROVEN" : (decision === "lead" ? "lead" : "clear");
+    var ac = (v && v.attack_class) || "";
+    var conf = (v && typeof v.confidence === "number") ? (" · " + Math.round(v.confidence * 100) + "%") : "";
+    var act = (v && v.action && v.action !== "observe" && v.action !== "allow") ? (" · " + v.action) : "";
+    var row = h("div.feed-row.verdict-" + cls, null, [
+      h("span.vbadge." + cls, null, label),
+      h("span.fr-t", null, [ac ? h("b", null, ac) : "activity", conf, act]),
+      (v && v.certificate) ? h("span.pill.sm", null, "cert") : null,
+    ]);
+    if (v && v.certificate) {
+      row.style.cursor = "pointer";
+      row.addEventListener("click", function () {
+        openDrawer("Attack certificate", [h("div.dsection", null, [
+          h("div.kv", null, [
+            h("div.k", null, "attack"), h("div.v", null, ac || "—"),
+            h("div.k", null, "confirmed by"), h("div.v", null, (v.certificate.confirmed_by) || "oracle"),
+            h("div.k", null, "cert id"), h("div.v.mono", null, (v.certificate.cert_id) || "—"),
+            h("div.k", null, "confidence"), h("div.v", null, conf.replace(" · ", "") || "—"),
+          ]),
+          h("div.legend", { style: { marginTop: "12px" } }, "This verdict is backed by a deterministic oracle that re-fires offline over the evidence. The matched-span detail is kept server-side and not streamed to the browser."),
+        ])]);
+      });
+    }
+    return row;
+  }
+
+  function defActorRow(a) {
+    var mean = (a && typeof a.mean === "number") ? a.mean : 0;
+    var pct = Math.max(0, Math.min(100, Math.round(mean * 100)));
+    var act = (a && a.action) ? a.action : null;
+    return h("div.actor-row", null, [
+      h("div.actor-h", null, [h("span.mono.dim", null, (a && a.id) || "?"),
+        act ? h("span.pill.sm.warn", null, act) : null]),
+      h("div.bar", null, h("div.bar-fill" + (pct >= 66 ? ".hi" : (pct >= 40 ? ".mid" : "")), { style: { width: pct + "%" } })),
+      h("div.actor-meta.dim", null, "belief " + pct + "% · " + ((a && a.n) || 0) + " observations"),
+    ]);
+  }
+
   function renderStub(screen, item) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, item.label),
@@ -1915,6 +2100,7 @@
     if (id === "findings") { renderFindings(screen); return; }
     if (id === "settings") { renderSettings(screen); return; }
     if (id === "safety") { renderSafety(screen); return; }
+    if (id === "defense") { renderDefense(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });

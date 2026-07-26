@@ -65,6 +65,7 @@ _EXACT_ROUTES = {
     "/api/kernel": api.kernel_data,
     "/api/tools": api.tools_data,
     "/api/capabilities": api.capabilities_data,
+    "/api/aegis/status": api.aegis_status,
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -215,6 +216,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         pass
                 self._sse_blackboard(slug, since)
                 return
+            if path == "/api/aegis/verdicts":
+                # the live Defense verdict feed — tail the managed gateway's browser-safe verdicts JSONL
+                # (oracle-context already stripped at the sink). EventTailer is robust to a missing file.
+                vpath = actions.aegis_verdicts_path()
+                if not vpath:
+                    self._json({"error": "no AEGIS gateway is running"}, status=404)
+                    return
+                self._sse(vpath)
+                return
             if path in _EXACT_ROUTES:
                 self._json(_EXACT_ROUTES[path]())
                 return
@@ -334,6 +344,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/killswitch/") and path.endswith("/trip"):
                 slug = path[len("/api/killswitch/"):-len("/trip")].strip("/")
                 self._json(actions.trip_killswitch(slug, str(body.get("reason", ""))))
+                return
+            if path == "/api/aegis/setup":
+                # launch the managed AEGIS gateway (the SAME gated `aegis gateway` CLI). CSRF/rebind-gated
+                # above; validated fail-closed in actions.aegis_setup before any spawn.
+                self._json(actions.aegis_setup(body))
+                return
+            if path == "/api/aegis/stop":
+                self._json(actions.aegis_stop(body))
                 return
             self._json({"error": "unknown action"}, status=404)
         except Exception as e:

@@ -14,14 +14,85 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import threading
+import time
 
 from .boundary import BoundaryError
 from .guard import LLMGuard
-from .models import ActorRef, AegisConfig, Surface
+from .models import ActorRef, AegisConfig
 from .pipeline import detect
 
 _DEMO_SECRET = "aegis-demo-deployment-secret"
+
+
+def _ui_safe_verdict(v: object) -> dict:
+    """A browser-safe projection of a Verdict: DROP the certificate's ``oracle_context``, which for some
+    classes holds a redacted matched-span PLAINTEXT + the sentinel (mildly sensitive) — not for a live UI
+    stream. cert_id / bug_class / confirmed_by / confidence stay so the UI can show + link the proof."""
+    d = v.model_dump(mode="json")  # type: ignore[attr-defined]
+    cert = d.get("certificate")
+    if isinstance(cert, dict):
+        cert.pop("oracle_context", None)
+    return d
+
+
+def _make_file_verdict_sink(path: str):
+    """A thread-safe ``on_verdict`` appending one UI-safe JSON verdict per line. The gateway calls the
+    sink from MANY threads, so the append is serialised under a lock; a stamped monotonic counter + a
+    wallclock ts (telemetry only — never the deterministic learning path) orders the stream for the UI.
+    A sink error NEVER perturbs the data plane (fail-open, swallowed)."""
+    lock = threading.Lock()
+    counter = {"n": 0}
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))  # 0600 up-front
+
+    def sink(v: object) -> None:
+        try:
+            rec = _ui_safe_verdict(v)
+            with lock:
+                counter["n"] += 1
+                line = json.dumps({"n": counter["n"], "ts": time.time(), **rec}, ensure_ascii=False)
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+        except Exception:  # noqa: BLE001 — a telemetry sink must never take the data plane down
+            pass
+
+    return sink
+
+
+def _start_status_writer(httpd: object, path: str, *, interval: float = 2.0) -> threading.Event:
+    """A daemon thread snapshotting the gateway's EFFECTIVE mode + per-actor beliefs to ``path`` (0600)
+    as JSON, so the loopback console (a SEPARATE process) can render a live Defense status. Reads the
+    ActorGraph under the gateway's belief lock (consistent). Telemetry-only; all errors swallowed."""
+    from .response_policy import graduated_action
+    stop = threading.Event()
+
+    def _write_once() -> None:
+        s = httpd.settings  # type: ignore[attr-defined]
+        with s._belief_lock:
+            actors = [{"id": aid, "mean": b.mean, "lcb": b.lcb, "n": b.n_observations,
+                       "action": graduated_action(b)} for aid, b in s.actor_graph.snapshot()]
+        snap = {"ts": time.time(), "effective_mode": "enforce" if s.enforce else "observe",
+                "requested_mode": s.config.mode, "slug": getattr(s, "slug", ""),
+                "actors": actors, "actor_count": len(actors)}
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(snap, ensure_ascii=False))
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            try:
+                _write_once()
+            except Exception:  # noqa: BLE001
+                pass
+
+    try:
+        _write_once()   # an immediate first snapshot so the UI has state at once
+    except Exception:  # noqa: BLE001
+        pass
+    threading.Thread(target=_loop, daemon=True).start()
+    return stop
 
 
 def _cmd_detect(args: argparse.Namespace) -> int:
@@ -54,8 +125,12 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
+    # A live-UI deployment (`--verdicts-out`) streams browser-safe verdicts to a JSONL the loopback
+    # console tails; otherwise the classic stderr log. `--status-out` publishes a periodic status snapshot.
+    on_verdict = _make_file_verdict_sink(args.verdicts_out) if args.verdicts_out else _log_verdict
     httpd = serve_gateway(args.upstream, config=config, host=args.host, port=args.port,
-                          slug=args.slug, on_verdict=_log_verdict)
+                          slug=args.slug, on_verdict=on_verdict)
+    status_stop = _start_status_writer(httpd, args.status_out) if args.status_out else None
     active = "ENFORCE — blocking PROVEN attacks" if httpd.settings.enforce else "observe — read-only"
     if args.mode == "enforce" and not httpd.settings.enforce:
         active += " (downgraded: AEGIS_RESPOND entitlement not available in this governed deployment)"
@@ -72,6 +147,8 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if status_stop is not None:
+            status_stop.set()       # stop the status snapshot thread
         httpd.settings.stop_oob()   # clean shutdown of the loopback OOB receiver
         httpd.server_close()
     return 0
@@ -124,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="a seeded honeypot path a fetch of which proves automation (repeatable)")
     g.add_argument("--slug", default="aegis-gateway",
                    help="gateway identity for the kill-switch + audit trail")
+    g.add_argument("--verdicts-out", default=None, metavar="PATH",
+                   help="append each verdict (browser-safe: no oracle-context) as JSON-lines to PATH, "
+                        "for a live UI feed (the loopback console tails it)")
+    g.add_argument("--status-out", default=None, metavar="PATH",
+                   help="periodically snapshot effective mode + per-actor beliefs to PATH (JSON), "
+                        "for a live UI status view")
     g.add_argument("--oob-canary", default=None, metavar="URL",
                    help="OPT-IN passive OOB belief elevation: the operator-planted STATIC canary URL "
                         "(a host you control that tunnels back to a loopback receiver AND trips AEGIS's "

@@ -76,8 +76,13 @@ window.VIGIL_MANUAL = [
   {
     id: "defense", title: "Defense — AEGIS",
     blocks: [
-      { p: "AEGIS sits in front of an app you run and watches for AI attacks. You set up two kinds of bait: canaries (secret sentinel text — if it ever leaks, a prompt-leak is proven) and honeypots (resources no real user would touch)." },
-      { p: "The dashboard streams verdicts as they happen — Confirmed attack (oracle-proven, with a certificate), Lead (suspicious, not proven), or Clear (with the honest note that clear is not the same as safe). An actor view shows how likely each source is hostile, based on what it has actually done." },
+      { p: "AEGIS sits in front of an app you run (as a reverse proxy) and watches real traffic for AI attacks. From the Defense screen you point it at your app's URL, choose a mode, optionally seed honeypot paths (decoy URLs no real user would touch — a fetch proves automated access), and give it a deployment secret. Start it, and it protects your app while streaming what it sees." },
+      { note: "The deployment secret keys PRIVACY pseudonymisation of who's who (IP/session) — it is not a request password. Canary / prompt-injection detection for an LLM app is a separate in-process path (the Aegis SDK / `aegis detect`), not this reverse proxy — the screen says so where it matters." },
+      { h: "Observe vs Enforce" },
+      { p: "Observe (the default) watches and proves attacks but blocks nothing. Enforce blocks PROVEN attacks — and only proven ones — but needs a specific entitlement; without it, it safely downgrades to observe and the screen tells you so. Everything fails open: if inspection ever errors, your traffic still flows." },
+      { h: "Reading the verdicts" },
+      { p: "The live feed streams verdicts as they happen. Here a CONFIRMED verdict is a PROVEN attack on your app (an oracle fired, with an offline-re-verifiable certificate) — shown in red, the opposite of the offense side where proven is good. A Lead is a suspicion, not proof. Clear means nothing was proven — which is NOT the same as safe. An actor view shows how likely each source is hostile (a belief that rises with corroboration), and the graduated response it warrants." },
+      { p: "The screen also gives you the exact command to run the same gateway on your own edge for production — VIGIL's loopback console is for watching and configuring, not for being your public edge." },
     ],
   },
   {

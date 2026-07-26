@@ -54,6 +54,18 @@ class ActorGraph:
         return BeliefRef(mean=node.belief_mean, lcb=node.belief_lcb(),
                          n_observations=self._counts.get(actor_id, 0))
 
+    def snapshot(self) -> list[tuple[str, BeliefRef]]:
+        """Every tracked actor paired with its current belief, LRU order (most-recently-updated last).
+        A read-only accessor for a status view — the alternative to reaching into the private ``_counts``.
+        The caller holds any concurrency lock; the gateway serialises belief updates under its own
+        ``_belief_lock``, so a snapshot taken under that lock is consistent."""
+        out: list[tuple[str, BeliefRef]] = []
+        for actor_id in list(self._counts.keys()):
+            b = self.belief(actor_id)
+            if b is not None:
+                out.append((actor_id, b))
+        return out
+
     def _evict(self) -> None:
         while len(self._counts) > self._max_actors:
             actor_id, _ = self._counts.popitem(last=False)  # least-recently-updated actor
