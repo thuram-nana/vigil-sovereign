@@ -27,6 +27,7 @@
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", ready: true },
     ]},
     { group: "MANAGE", items: [
+      { id: "activity", label: "Activity", icon: "live", ready: true },
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
       { id: "apikeys", label: "API Keys", icon: "key", owner: true, ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
@@ -1022,6 +1023,207 @@
       }).concat([h("span.row-flex", { style: { gap: "5px", marginLeft: "auto" } },
         [h("span.shield", { style: { padding: "1px 6px" } }, "FACT"), h("span.muted", { style: { fontSize: "var(--fs-xs)" } }, "= oracle-confirmed")])]));
     container.appendChild(leg);
+  }
+
+  // ---- Activity: the background-activity screen (A4e-2) -----------------------
+  // A READ-ONLY window on "how things are working in the background" across both
+  // planes. It reuses only existing read endpoints — nothing here mutates:
+  //   · OFF("/api/runs")      → active/recent runs (Watch-live links into #/live)
+  //   · SOV("/api/snapshot")  → SIGIL agent mesh (recent_by_agent), budget_today,
+  //                             ingest_lag, spine head_seq, kill-switch
+  //   · SOV("/api/stream")    → the live spine SSE (the "background" event feed)
+  // Two-env boundary: SOV for sovereign, OFF for offense — never crossed. The
+  // per-run offense reasoning spine is intentionally NOT streamed here (the Live
+  // screen owns that); a single sovereign EventSource keeps teardownLive() clean.
+  function renderBackground(screen) {
+    teardownLive();   // close any stream/timers from the previous screen
+    const B = { runs: [], snap: null, offOnline: null, sovOnline: null, seen: {}, eventCount: 0, streamAttached: false };
+
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Activity"),
+        h("span.sub", null, "How VIGIL is working in the background — active runs, the SIGIL agent mesh, spine activity, and a live event stream.")]),
+      h("div.card#bg-status", { style: { marginTop: "4px" } }, h("div.empty", null, "Checking both planes…")),
+      h("div.legend", { style: { marginTop: "12px" } }, [V.icon("info"),
+        "A read-only view across both planes — nothing here changes anything. To act, use Live, Approvals & Safety, or New Assessment."]),
+      h("div.grid.cols-4#bg-tiles", { style: { marginTop: "16px" } }),
+      h("div.grid.cols-2", { style: { marginTop: "4px", alignItems: "start" } }, [
+        h("div.stack", null, [
+          V.card("Active work", "OFFENSE", h("div#bg-runs", null, h("div.empty", null, "Loading runs…")), false),
+          V.card("Agent mesh & spine", "SOVEREIGN", h("div#bg-mesh", null, h("div.empty", null, "Loading…")), false),
+        ]),
+        V.card("Live event stream", "LIVE", h("div.feed#bg-feed", null, h("div.empty", null, "Connecting to the background event stream…")), false),
+      ]),
+    ]);
+
+    // -- one run row: status/mode/target + elapsed (derived from started) + link --
+    function runRow(r) {
+      const running = r.status === "running";
+      const started = typeof r.started === "number" ? r.started : parseFloat(r.started);
+      const elapsed = (started && !isNaN(started)) ? fmtElapsed((Date.now() / 1000) - started) : "—";
+      return h("div.card", { style: { padding: "12px" } }, [
+        h("div", { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } }, [
+          running ? V.pill("running", "live", null) : V.pill(r.status || "done", r.status === "error" ? "danger" : "idle", null),
+          h("span.pill.sm", null, r.mode || "url"),
+          h("b.mono", null, r.target || r.slug || r.run_id),
+          h("span.muted", { style: { marginLeft: "auto" } }, [V.icon("live"), " ", elapsed]),
+        ]),
+        h("div.muted", { style: { marginTop: "6px", fontSize: "var(--fs-sm)" } },
+          (r.slug ? ("slug " + r.slug + " · ") : "") +
+          (r.findings != null ? (r.findings + " findings · ") : "") +
+          "stream: " + (r.stream || "none")),
+        h("div", { style: { marginTop: "8px" } },
+          h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(r.run_id); } },
+            [V.icon("live"), "Watch live"])),
+      ]);
+    }
+
+    // -- the SIGIL agent mesh + spine, straight from the sovereign snapshot ------
+    function meshBody(snap) {
+      const rba = snap.recent_by_agent || {};
+      const bud = snap.budget_today || {};
+      const lag = snap.ingest_lag || {};
+      const names = Object.keys(rba);
+      Object.keys(bud).forEach(function (n) { if (names.indexOf(n) < 0) names.push(n); });
+      names.sort(function (a, b) { return (rba[b] || 0) - (rba[a] || 0); });
+      const rows = names.length ? names.map(function (n) {
+        const b = bud[n] || {};
+        return h("div.cap-row", null, [
+          h("div.cap-l", null, [h("b", null, n),
+            h("span.muted", { style: { fontSize: "var(--fs-xs)" } }, (rba[n] || 0) + " recent record" + ((rba[n] || 0) === 1 ? "" : "s"))]),
+          h("span.muted.mono", { style: { fontSize: "var(--fs-xs)" } },
+            (b.actions || 0) + " action" + ((b.actions || 0) === 1 ? "" : "s") + (b.interrupts ? (" · " + b.interrupts + " interrupts") : "")),
+        ]);
+      }) : [h("div.empty", null, "No agent activity in the recent window.")];
+      const lagLine = h("div.hint", { style: { marginTop: "12px" } },
+        "Spine head " + (snap.head_seq != null ? ("#" + snap.head_seq) : "—") +
+        " · " + (lag.records_since_checkpoint != null ? lag.records_since_checkpoint : "?") + " records since last checkpoint" +
+        (lag.last_consolidation_seq != null ? (" · last consolidation #" + lag.last_consolidation_seq) : ""));
+      return h("div", null, [h("div.stack", null, rows), lagLine]);
+    }
+
+    // -- normalize a sovereign spine record to {kind, actor, summary, seq} -------
+    function normSov(ev) {
+      if (!ev || typeof ev !== "object") return null;
+      const payload = ev.payload || {};
+      return {
+        id: ev.seq != null ? ("s" + ev.seq) : null,   // dedup key across reconnects
+        seq: ev.seq,
+        kind: ev.kind || ev.k || "event",
+        actor: ev.actor || ev.source || ev.agent || "",
+        summary: ev.text || ev.subject || payload.signal || payload.subject || "",
+      };
+    }
+    function feedRowBg(n) {
+      return h("div.feed-row", null, [
+        h("span.pill.sm", null, n.kind),
+        h("span.fr-t", null, [n.actor ? h("b", null, n.actor) : null, n.summary ? (" · " + n.summary) : ""]),
+        h("span.fr-seq.mono.dim", null, n.seq != null ? ("#" + n.seq) : ""),
+      ]);
+    }
+    function addFeedRow(n) {
+      const feed = V.$("#bg-feed"); if (!feed) return;
+      const empty = feed.querySelector(".empty"); if (empty) empty.remove();
+      feed.insertBefore(feedRowBg(n), feed.firstChild);
+      while (feed.childNodes.length > 60) feed.removeChild(feed.lastChild);
+      B.eventCount++;
+    }
+
+    // -- system-status header (both planes + kill-switch) -----------------------
+    function statusBody() {
+      const killed = !!(B.snap && (B.snap.kill_switch === "ENGAGED" || (B.snap.kill_switch && B.snap.kill_switch.engaged)));
+      return h("div", { style: { display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" } }, [
+        B.offOnline === null ? V.pill("Offense: checking…", "idle", null)
+          : (B.offOnline ? V.pill("Offense: online", "live", null) : V.pill("Offense: offline", "danger", null)),
+        B.sovOnline === null ? V.pill("Sovereign: checking…", "idle", null)
+          : (B.sovOnline ? V.pill("Sovereign: online", "live", null) : V.pill("Sovereign: offline", "danger", null)),
+        B.sovOnline ? (killed ? V.pill("Kill-switch: ENGAGED", "danger", null) : V.pill("Kill-switch: released", "idle", null)) : null,
+      ]);
+    }
+
+    // -- drawing (each pull re-renders its own region; fail-soft per plane) ------
+    function drawStatus() { const host = V.$("#bg-status"); if (host) V.mount(host, statusBody()); }
+    function drawTiles() {
+      const host = V.$("#bg-tiles"); if (!host) return;
+      const runsRunning = B.runs.filter(function (r) { return r.status === "running"; }).length;
+      const rba = (B.snap && B.snap.recent_by_agent) || {};
+      const lag = (B.snap && B.snap.ingest_lag) || {};
+      const killed = !!(B.snap && (B.snap.kill_switch === "ENGAGED" || (B.snap.kill_switch && B.snap.kill_switch.engaged)));
+      V.mount(host, [
+        V.tile("Active runs", B.offOnline === false ? "—" : String(runsRunning),
+          B.offOnline === false ? "offense offline" : (runsRunning ? "in progress" : "nothing running"), runsRunning ? "up" : ""),
+        V.tile("Agents active", B.sovOnline === false ? "—" : String(Object.keys(rba).length),
+          B.sovOnline === false ? "sovereign offline" : "recent activity window"),
+        V.tile("Ingest lag", B.sovOnline === false ? "—" : String(lag.records_since_checkpoint != null ? lag.records_since_checkpoint : "—"),
+          "records since checkpoint", (lag.records_since_checkpoint > 0 ? "warn" : "")),
+        V.tile("Kill-switch", B.sovOnline === false ? "—" : (killed ? "ENGAGED" : "Released"),
+          killed ? "mesh halted" : "mesh live", killed ? "danger" : "ok"),
+      ]);
+    }
+    function drawRuns() {
+      const host = V.$("#bg-runs"); if (!host) return;
+      if (B.offOnline === false) {
+        V.mount(host, h("div.empty", null, [h("div.big", null, "Offense engine offline"),
+          h("p", null, "Could not reach the offense console. Start it with `vigil up` and it appears here.")])); return;
+      }
+      if (!B.runs.length) {
+        V.mount(host, h("div.empty", null, [h("div.big", null, "No runs yet"),
+          h("p", null, "Start one from New Assessment and it shows up here, live."),
+          h("button.btn.primary", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"])])); return;
+      }
+      V.mount(host, h("div.stack", null, B.runs.slice(0, 12).map(runRow)));
+    }
+    function drawMesh() {
+      const host = V.$("#bg-mesh"); if (!host) return;
+      if (B.sovOnline === false) { V.mount(host, h("div.empty", null, "The sovereign plane is offline. Start it with `vigil up`.")); return; }
+      if (!B.snap) { V.mount(host, h("div.empty", null, "Loading…")); return; }
+      V.mount(host, meshBody(B.snap));
+    }
+
+    // -- polling (read-only GETs; cleaned up by teardownLive via liveTimers) -----
+    function pollRuns() {
+      V.getJSON(OFF("/api/runs")).then(function (d) {
+        B.runs = (d && d.runs) || []; B.offOnline = true; drawRuns(); drawStatus(); drawTiles();
+      }).catch(function () { B.offOnline = false; drawRuns(); drawStatus(); drawTiles(); });
+    }
+    function pollSnap() {
+      V.getJSON(SOV("/api/snapshot")).then(function (s) {
+        B.snap = s; B.sovOnline = true; drawMesh(); drawStatus(); drawTiles();
+        // keep the shared top bar honest (read-only, exactly as Live/Safety do)
+        const waiting = (s && (s.pending_approvals || []).length) || 0;
+        const killed = !!(s && (s.kill_switch === "ENGAGED" || (s.kill_switch && s.kill_switch.engaged)));
+        if (app.get().waiting !== waiting || app.get().killed !== killed) { app.set({ waiting: waiting, killed: killed }); refreshTopbar(); }
+        // attach the live spine feed ONCE, tailing from the current head so we stream what
+        // happens from now on (not a full replay of the whole spine).
+        if (!B.streamAttached) attachStream(typeof s.head_seq === "number" ? s.head_seq : undefined);
+        const feed = V.$("#bg-feed");
+        if (feed && !B.eventCount) V.mount(feed, h("div.empty", null, "Connected — no background events yet. They will appear here live."));
+      }).catch(function () {
+        B.sovOnline = false; B.snap = null; drawMesh(); drawStatus(); drawTiles();
+        const feed = V.$("#bg-feed");
+        if (feed && !B.eventCount) V.mount(feed, h("div.empty", null, "The sovereign plane is offline — no background events. Start it with `vigil up`."));
+      });
+    }
+
+    // -- live spine feed: ONE sovereign SSE, dedup by seq, native auto-reconnect.
+    //    Tailing from the current head keeps this a LIVE feed (no whole-spine replay).
+    function attachStream(headSeq) {
+      if (B.streamAttached) return;
+      B.streamAttached = true;   // set before the try so a permanently-unavailable EventSource isn't retried each poll
+      const base = SOV("/api/stream");
+      const url = (typeof headSeq === "number" && headSeq >= 0) ? (base + "?since=" + headSeq) : base;
+      try {
+        liveES = V.sse(url, function (ev) {
+          const n = normSov(ev); if (!n) return;
+          if (n.id) { if (B.seen[n.id]) return; B.seen[n.id] = 1; }   // guard reconnect replay
+          addFeedRow(n);
+        }, function () { /* SSE error — auto-reconnects; the polls keep the rest live */ });
+      } catch (e) { /* EventSource unavailable — non-fatal; the polls keep the rest live */ }
+    }
+
+    // the SSE attaches on the first successful snapshot (so it can tail from head_seq)
+    pollRuns(); pollSnap();
+    liveTimers.push(setInterval(pollRuns, 3000));
+    liveTimers.push(setInterval(pollSnap, 4000));
   }
 
   // ==========================================================================
@@ -2686,6 +2888,7 @@
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "chat") { renderChat(screen); return; }
     if (id === "live") { renderLive(screen); return; }
+    if (id === "activity") { renderBackground(screen); return; }
     if (id === "findings") { renderFindings(screen); return; }
     if (id === "settings") { renderSettings(screen); return; }
     if (id === "apikeys") { renderApiKeys(screen); return; }
