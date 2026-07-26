@@ -135,6 +135,19 @@ def test_set_voice_rejects_line_breaks(sep, tmp_path, monkeypatch):
         assert "VIGIL_DESTRUCTION_OWNER_KEY" not in envf.read_text(encoding="utf-8")
 
 
+def test_set_voice_creates_0600_envfile(tmp_path, monkeypatch):
+    """sigil.env also holds sealed secrets on the envfile backend, so set_voice must create it 0600 (no
+    world-readable window) — matching _persist_env/_env_upsert — not with write_text's umask default."""
+    import stat
+    pytest.importorskip("numpy")
+    from sigil.voice import backends as VB
+    monkeypatch.setattr("sigil.config.SIGIL_HOME", tmp_path)
+    VB.set_voice("EXAVITQu4vr4xnSDxMaL")                      # fresh box: set_voice creates the file
+    envf = tmp_path / "sigil.env"
+    assert envf.exists() and "SIGIL_TTS_VOICE_ID=EXAVITQu4vr4xnSDxMaL" in envf.read_text(encoding="utf-8")
+    assert stat.S_IMODE(envf.stat().st_mode) == 0o600        # not world/group readable
+
+
 @pytest.mark.parametrize("sep", ["\x85", "\u2028", "\u2029"])
 def test_envfile_reader_never_rematerializes_a_separator(sep, tmp_path):
     """Defense-in-depth at the READER: even if a NON-newline Unicode line separator somehow reached sigil.env
