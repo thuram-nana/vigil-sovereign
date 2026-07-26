@@ -627,8 +627,11 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                     "--allow-host", authority, "--allow-origin", origin]
     api_argv = [str(crucible_bin), "api", "--port", str(API_PORT),
                 "--allow-host", authority, "--allow-origin", origin]
+    # point the console's chat transcripts at the SAME .vigil-live base the rest of the live plane uses
+    # (the console otherwise defaults to a different root); resolved absolute so cwd can't move it.
+    console_env = {**offense_llm_env, "VIGIL_LIVE_DIR": str(base.resolve())}
     procs.append(("offense-console", _spawn(console_argv, logs / "offense-console.log",
-                                            extra_env=offense_llm_env)))
+                                            extra_env=console_env)))
     procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log",
                                         extra_env=offense_llm_env)))
 

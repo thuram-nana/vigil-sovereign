@@ -20,6 +20,7 @@
     { group: "DO", items: [
       { id: "home", label: "Home", icon: "home", ready: true },
       { id: "assess", label: "New Assessment", icon: "assess", ready: true },
+      { id: "chat", label: "Chat", icon: "brain", ready: true },
       { id: "live", label: "Live", icon: "live", ready: true },
       { id: "findings", label: "Findings", icon: "find", ready: true },
       { id: "fixes", label: "Fixes", icon: "fixes", ready: true },
@@ -2524,6 +2525,143 @@
     }).catch(function () { V.mount(v, offlineEmpty()); });
   }
 
+  // ---- Chat -----------------------------------------------------------------
+  // Tell the agent what to test in plain language. Each turn goes through the SAME gated launcher a
+  // hand-run engagement uses (scope charter-signed, WARDEN approve-then-run, oracle-confirmed findings);
+  // the conversation is saved on the operator's machine (.vigil-live/chats/<id>.jsonl). Model + effort are
+  // owner-plane settings (reused from Settings). Multi-agent "deploy N" arrives with the fireteam slice.
+  function renderChat(screen) {
+    teardownLive();
+    const C = { id: hashQuery().id || "", messages: [], sessions: [], st: null, busy: false };
+
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Chat"),
+        h("span.sub", null, "Ask in plain language what to test — the agent launches gated, oracle-confirmed runs and saves the conversation on your machine.")]),
+      h("div#chat-wrap", { style: { display: "flex", gap: "16px", alignItems: "stretch", marginTop: "12px", minHeight: "60vh" } }, [
+        h("div#chat-sessions", { style: { width: "240px", flex: "0 0 240px", display: "flex", flexDirection: "column", gap: "8px" } }, h("div.empty", null, "…")),
+        h("div#chat-main", { style: { flex: "1 1 auto", display: "flex", flexDirection: "column", minWidth: "0" } }, h("div.empty", null, "Loading…")),
+      ]),
+    ]);
+
+    function load() {
+      V.getJSON(SOV("/api/settings")).then(function (st) { C.st = st; }).catch(function () { C.st = null; })
+        .then(function () { return V.getJSON(OFF("/api/chat/sessions")).then(function (d) { C.sessions = (d && d.sessions) || []; }).catch(function () { C.sessions = []; }); })
+        .then(function () {
+          if (!C.id) { C.messages = []; drawSessions(); drawMain(); return; }
+          return V.getJSON(OFF("/api/chat/session/" + encodeURIComponent(C.id)))
+            .then(function (d) { C.messages = (d && d.messages) || []; }).catch(function () { C.messages = []; })
+            .then(function () { drawSessions(); drawMain(); });
+        });
+    }
+
+    function openSession(id) {
+      C.id = id || ""; C.messages = [];
+      history.replaceState(null, "", "#/chat" + (id ? ("?id=" + encodeURIComponent(id)) : ""));
+      load();
+    }
+
+    function drawSessions() {
+      const host = V.$("#chat-sessions"); if (!host) return;
+      const rows = [h("button.btn.primary", { style: { width: "100%" }, onClick: function () { openSession(""); } }, [V.icon("bolt"), "New chat"])];
+      if (!C.sessions.length) {
+        rows.push(h("div.hint", { style: { marginTop: "8px" } }, "No saved chats yet. Start one above."));
+      } else {
+        C.sessions.forEach(function (s) {
+          const active = s.id === C.id;
+          rows.push(h("button.btn" + (active ? ".owner" : ""), {
+            style: { width: "100%", textAlign: "left", justifyContent: "flex-start", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+            title: s.title, onClick: function () { openSession(s.id); },
+          }, [h("span", null, s.title || "(empty)"), h("span.dim", { style: { marginLeft: "6px", fontSize: "var(--fs-xs)" } }, "· " + s.turns)]));
+        });
+      }
+      V.mount(host, rows);
+    }
+
+    function bubble(m) {
+      const isUser = m.role === "user";
+      const wrap = { style: { display: "flex", justifyContent: isUser ? "flex-end" : "flex-start", margin: "8px 0" } };
+      const box = {
+        style: {
+          maxWidth: "80%", padding: "10px 12px", borderRadius: "var(--r-3)",
+          background: isUser ? "var(--primary-bg)" : "var(--bg-2)",
+          color: isUser ? "var(--primary-fg)" : "var(--text-0)",
+          border: "1px solid var(--border)", whiteSpace: "pre-wrap", wordBreak: "break-word",
+        },
+      };
+      const kids = [h("div", null, String(m.text || ""))];
+      if (m.kind === "launched" && m.run_id) {
+        kids.push(h("div", { style: { marginTop: "8px", display: "flex", gap: "8px", alignItems: "center" } }, [
+          h("button.btn.sm", { onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(m.run_id); } }, [V.icon("live"), "Watch live"]),
+          m.slug ? h("span.pill.sm", null, m.slug) : null,
+        ]));
+      }
+      if (m.kind === "refused" || m.kind === "error") { box.style.borderColor = "var(--sev-high, #e5a13a)"; }
+      return h("div", wrap, h("div", box, kids));
+    }
+
+    function drawMain() {
+      const host = V.$("#chat-main"); if (!host) return;
+      const st = C.st || {};
+      // model + effort quick controls (owner-plane; same actions as Settings). Change here persists and
+      // takes effect on the next `vigil up` run — the honest behavior, mirrored from the Settings screen.
+      const modelSel = h("select.input", { style: { minWidth: "160px" } },
+        (st.models || []).map(function (m) {
+          const o = h("option", { value: m.id }, m.label || m.id);
+          if (m.id === st.selected_model) o.selected = true; return o;
+        }));
+      const effortSel = h("select.input", { style: { minWidth: "130px" } },
+        [h("option", { value: "" }, "Effort: default")].concat((st.effort_levels || ["low", "medium", "high", "xhigh", "max"]).map(function (lv) {
+          const o = h("option", { value: lv }, "Effort: " + lv); if (lv === st.selected_effort) o.selected = true; return o;
+        })));
+      const controls = st.models ? h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "8px", alignItems: "center" } }, [
+        modelSel,
+        h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_model", model: modelSel.value, reason: "set model from Chat" }, "Model set.", load); } }, "Use model"),
+        effortSel,
+        h("button.btn.sm.owner", { onClick: function () { settingsAct({ action: "set_effort", effort: effortSel.value, reason: "set effort from Chat" }, "Effort set.", load); } }, "Apply effort"),
+      ]) : h("div.hint", { style: { marginBottom: "8px" } }, "Model & effort controls need the owner plane (start with `vigil up`).");
+
+      const list = h("div#chat-list", { style: { flex: "1 1 auto", overflowY: "auto", padding: "4px 2px", border: "1px solid var(--border)", borderRadius: "var(--r-3)", background: "var(--bg-1)" } },
+        C.messages.length ? C.messages.map(bubble)
+          : h("div.empty", { style: { padding: "24px" } }, [h("div.big", null, "What should we test?"),
+              h("p", null, "e.g. “scan http://127.0.0.1:8080 for auth bugs”, or paste a codebase path. Findings are oracle-confirmed; target-touching steps wait for your approval.")]));
+
+      const input = h("textarea.input", { rows: "2", placeholder: "Tell the agent what to test… (Enter to send, Shift+Enter for a new line)",
+        style: { resize: "vertical", flex: "1 1 auto", minWidth: "0" } });
+      const target = h("input.input", { placeholder: "target (optional): URL or codebase path", style: { flex: "1 1 auto", minWidth: "0" } });
+      const modeSel = h("select.input", null, [["", "auto"], ["url", "url / API / infra"], ["codebase", "codebase"], ["suite", "suite (autonomous)"], ["tool", "single tool"]].map(function (p) {
+        return h("option", { value: p[0] }, p[1]);
+      }));
+      const send = h("button.btn.primary", { onClick: doSend }, [V.icon("bolt"), "Send"]);
+      input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
+
+      function doSend() {
+        const msg = (input.value || "").trim(); if (!msg || C.busy) return;
+        C.busy = true; send.disabled = true;
+        const payload = { chat_id: C.id || undefined, message: msg, target: (target.value || "").trim(), mode: modeSel.value || undefined };
+        V.postJSON(OFF("/api/chat/send"), payload).then(function (r) {
+          if (r && r.error && !r.reply) { V.toast(r.error, true); }
+          if (r && r.chat_id && !C.id) { C.id = r.chat_id; history.replaceState(null, "", "#/chat?id=" + encodeURIComponent(r.chat_id)); }
+          input.value = ""; target.value = "";
+          return V.getJSON(OFF("/api/chat/session/" + encodeURIComponent(C.id))).then(function (d) { C.messages = (d && d.messages) || []; });
+        }).catch(function (e) { V.toast((e && e.message) || "Send failed — is the offense console up?", true); })
+          .then(function () { C.busy = false; send.disabled = false; drawSessions(); drawMain(); scrollDown(); });
+      }
+
+      V.mount(host, [
+        controls,
+        list,
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "center", flexWrap: "wrap" } }, [target, modeSel]),
+        h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", alignItems: "flex-end" } }, [input, send]),
+        h("div.hint", { style: { marginTop: "6px" } }, "Every run is gated: scope is charter-signed and target-touching steps wait for your approval. The conversation is saved locally under .vigil-live/chats/."),
+      ]);
+      scrollDown();
+    }
+
+    function scrollDown() { const l = V.$("#chat-list"); if (l) l.scrollTop = l.scrollHeight; }
+
+    load();
+  }
+
   function renderStub(screen, item) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, item.label),
@@ -2546,6 +2684,7 @@
     if (id === "manual") { renderManual(screen); return; }
     if (id === "tools") { renderTools(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
+    if (id === "chat") { renderChat(screen); return; }
     if (id === "live") { renderLive(screen); return; }
     if (id === "findings") { renderFindings(screen); return; }
     if (id === "settings") { renderSettings(screen); return; }
