@@ -60,7 +60,9 @@ class CodefixConfig:
     apply_timeout: float = 120.0
     # --- LAP-3 destructive PR leg (OFF by default) ------------------------------------------------
     pr_enabled: bool = False                 # master switch — off ⇒ the gate DENIES the PR + open_pr refuses
-    github_token: str = ""                   # else resolved from GITHUB_TOKEN env; empty ⇒ open_pr refuses
+    # repr=False so a stray repr/log of the config can never expose the token (it is sealed at the Settings
+    # layer; here it is only ever forwarded into the child ENV for git/gh).
+    github_token: str = field(default="", repr=False)   # else resolved from GITHUB_TOKEN env; empty ⇒ refuse
     pr_base: str = ""                        # PR base branch (default: the repo's default branch)
     push_remote: str = "origin"
     gh_bin: str = "gh"
