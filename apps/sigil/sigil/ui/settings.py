@@ -28,16 +28,43 @@ from ..platform.secrets import SecretStore
 # unknown name is refused, so the UI can never seal an arbitrary env var. GITHUB_TOKEN is what the
 # auto-patch engine uses to push a fix branch + open a gated PR (LAP-3); it is sealed + delivered exactly
 # like the LLM key and never returned to the browser.
-SECRET_NAMES = ("ANTHROPIC_API_KEY", "GITHUB_TOKEN", "VIGIL_DESTRUCTION_OWNER_KEY")
-# Friendly labels + one-line purposes the UI shows per managed secret (the UI hard-codes no secret list).
+# The full inventory of secrets the system uses, grouped by category (the UI hard-codes no secret list — it
+# renders whatever settings_status serves). A closed allowlist: an unknown name is refused by set_secret, so
+# the UI can never seal an arbitrary env var. `category` groups the API-keys screen; `probe` flags whether a
+# LIVE health check exists (see platform/secret_probes.py) so a bad/expired key shows as FAILING, not green.
 SECRET_META = {
-    "ANTHROPIC_API_KEY": {"label": "Claude / Anthropic API key",
+    # --- LLM providers (the AI that reasons over your target; bring-your-own-model) ---
+    "ANTHROPIC_API_KEY": {"category": "llm", "probe": True, "label": "Claude / Anthropic API key",
                           "purpose": "Lets the AI reason over your target (engagements, scans, fix proposals)."},
-    "GITHUB_TOKEN": {"label": "GitHub token",
+    "MISTRAL_API_KEY": {"category": "llm", "probe": True, "label": "Mistral API key",
+                        "purpose": "Bring-your-own-model: route the reasoning engine through Mistral."},
+    "OPENAI_API_KEY": {"category": "llm", "probe": True, "label": "OpenAI API key",
+                       "purpose": "Bring-your-own-model for the Strix agent body (OpenAI / Azure OpenAI models)."},
+    "PERPLEXITY_API_KEY": {"category": "llm", "probe": True, "label": "Perplexity API key",
+                           "purpose": "Lets the agent do live web research during a codebase engagement (Strix)."},
+    "AZURE_OPENAI_API_KEY": {"category": "llm", "probe": True, "label": "Azure OpenAI API key",
+                             "purpose": "Bring-your-own-model via Azure OpenAI. Also set the endpoint in Models."},
+    # --- Cloud credentials (read-only; used by cloud/Bedrock + Phase-C cloud pentesting) ---
+    "AWS_ACCESS_KEY_ID": {"category": "cloud", "probe": True, "label": "AWS access key id",
+                          "purpose": "Read-only AWS creds for Bedrock models and cloud posture testing. "
+                                     "Pair with the secret access key below."},
+    "AWS_SECRET_ACCESS_KEY": {"category": "cloud", "probe": False, "label": "AWS secret access key",
+                              "purpose": "The secret half of the AWS credential pair (validated via the access "
+                                         "key id)."},
+    # --- Integrations ---
+    "GITHUB_TOKEN": {"category": "integration", "probe": True, "label": "GitHub token",
                      "purpose": "Lets the auto-patch engine push a fix branch and open a gated pull request. "
                                 "Needs 'repo' + 'pull-request' scope. Optional until you use live auto-patch."},
+    "ELEVENLABS_API_KEY": {"category": "integration", "probe": True, "label": "ElevenLabs API key",
+                           "purpose": "Voice output (JARVIS TTS). Optional."},
+    "CRUCIBLE_API_KEY": {"category": "integration", "probe": False, "label": "Gated-API shared secret",
+                         "purpose": "Protects the offense gated API when you host the cockpit behind a domain. "
+                                    "An internal secret you choose — no external service to check."},
+    "CRUCIBLE_OOB_RELAY_SECRET": {"category": "integration", "probe": False, "label": "OOB relay secret",
+                                  "purpose": "Authenticates out-of-band (OAST) callbacks. Internal secret."},
+    # --- Auto-patch signing (the m-of-n destruction quorum) ---
     "VIGIL_DESTRUCTION_OWNER_KEY": {
-        "label": "Auto-patch signing key (owner)",
+        "category": "destruction", "probe": False, "label": "Auto-patch signing key (owner)",
         "purpose": "The owner key that AUTHORIZES an auto-patch pull request (the m-of-n destruction quorum). "
                    "Generate it with `vigil provision-destruction` and seal it here. Deliberately NOT broadcast "
                    "to the offense engine: the `vigil authorize-destruction` step reads it from the "
@@ -45,6 +72,11 @@ SECRET_META = {
                    "Optional until you open PRs. Solo setups: whoever holds this key can authorize — for "
                    "separation of duties, provision with more signers and keep their keys off this machine."},
 }
+# Ordered allowlist (grouping order preserved for the UI). Only these names may be sealed here.
+SECRET_NAMES = tuple(SECRET_META.keys())
+_SECRET_CATEGORY_ORDER = ("llm", "cloud", "integration", "destruction")
+_SECRET_CATEGORY_LABEL = {"llm": "AI model providers", "cloud": "Cloud credentials",
+                          "integration": "Integrations", "destruction": "Auto-patch signing"}
 _MAX_SECRET_LEN = 8192
 
 # The canonical env vars each plane reads (persisted, non-secret) + delivered to the keyless offense
@@ -155,6 +187,31 @@ def set_secret(name: str, value: str, *, store, owner_key, reason: str = "") -> 
             "backend": backend, "recorded_seq": seq}
 
 
+def check_secret(name: str, *, store, owner_key, reason: str = "") -> dict:
+    """Run a LIVE health probe for one secret (does it actually work?) and record the (non-secret) verdict on
+    the spine. Returns {ok, name, status, reason, checked_at} — never the value. Fail-closed: an unknown name
+    is refused; any probe error is a FAIL, never a false ok."""
+    if name not in SECRET_NAMES:
+        raise ValueError(f"unknown secret {name!r}: only {', '.join(SECRET_NAMES)} may be checked here")
+    from ..platform.secret_probes import check_secret_health
+    verdict = check_secret_health(name)          # {name,status,reason,checked_at}; value never touched
+    seq = _record_signed_event(
+        store, owner_key,
+        {"signal": "governor.secret_checked", "name": name, "status": verdict["status"]}, reason)
+    return {"ok": True, "action": "check_secret", "recorded_seq": seq, **verdict}
+
+
+def check_secrets(*, store, owner_key, reason: str = "") -> dict:
+    """Run live health probes for every SET, probeable secret; record one summary event. Never a value."""
+    from ..platform.secret_probes import check_all
+    results = check_all([n for n in SECRET_NAMES if SECRET_META.get(n, {}).get("probe")])
+    failing = sorted(r["name"] for r in results if r.get("status") == "fail")
+    seq = _record_signed_event(
+        store, owner_key,
+        {"signal": "governor.secrets_checked", "checked": len(results), "failing": len(failing)}, reason)
+    return {"ok": True, "action": "check_secrets", "results": results, "failing": failing, "recorded_seq": seq}
+
+
 def set_model(model: str, *, store, owner_key, reason: str = "") -> dict:
     """Select the primary reasoning model (a closed allowlist). Applies the choice's exact env plan for
     BOTH planes (routing the backend for a keyless choice, setting the model id otherwise, clearing the
@@ -196,15 +253,22 @@ def settings_status() -> dict:
     """The REDACTED settings view for the UI — never a secret value. For each managed secret: whether it
     is set, its fingerprint, and the backend holding it. Plus the current models and the model catalog
     (so the UI hard-codes nothing) and whether the system will run keyless."""
+    from ..platform.secret_probes import cached_health
     ss = SecretStore()
     secrets = []
     key_set = False
+    keys_failing = 0
     for name in SECRET_NAMES:
         val = ss.get(name)
         present = bool(val)
         if name == "ANTHROPIC_API_KEY" and present:
             key_set = True
         meta = SECRET_META.get(name, {})
+        # health = the last cached LIVE verdict ({status: ok|fail|unknown, reason, checked_at}); "unchecked"
+        # if never probed. A SET-but-not-yet-checked probeable secret reads as unchecked (not a false ok).
+        health = cached_health(name) if present else None
+        if present and health and health.get("status") == "fail":
+            keys_failing += 1
         secrets.append({
             "name": name,
             "set": present,
@@ -212,6 +276,9 @@ def settings_status() -> dict:
             "backend": ss.backend,
             "label": meta.get("label", name),
             "purpose": meta.get("purpose", ""),
+            "category": meta.get("category", "integration"),
+            "probeable": bool(meta.get("probe")),
+            "health": (health or {"status": "unchecked", "reason": "", "checked_at": 0}) if present else None,
         })
     # the SELECTED choice is tracked explicitly (a keyless choice sets no model id), so the picker
     # reflects it even for claude-code. offense_model is the HONEST effective routing: a forced backend
@@ -227,6 +294,9 @@ def settings_status() -> dict:
     return {
         "secrets": secrets,
         "secret_backend": ss.backend,
+        "keys_failing": keys_failing,          # drives the top-bar "N keys failing" badge
+        "secret_categories": [{"id": c, "label": _SECRET_CATEGORY_LABEL[c]}
+                              for c in _SECRET_CATEGORY_ORDER],
         "models": list(MODEL_CHOICES),
         "selected_model": selected if selected in _MODEL_IDS else None,
         "offense_backend": forced_backend or "anthropic",

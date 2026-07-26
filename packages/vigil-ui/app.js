@@ -27,6 +27,7 @@
     ]},
     { group: "MANAGE", items: [
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
+      { id: "apikeys", label: "API Keys", icon: "key", owner: true, ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
@@ -59,7 +60,23 @@
         : h("button.safety.clear", { onClick: function () { location.hash = "#/safety"; } }, [V.icon("check"), "Safe · 0 waiting"]));
     const themeBtn = h("button.iconbtn", { title: "Toggle theme", "aria-label": "Toggle light/dark theme", onClick: toggleTheme }, V.icon("dot"));
     const cta = h("button.btn.primary", { onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"]);
-    return h("div#topbar", null, [seg, cmdk, h("div.spacer"), counts, live, safety, themeBtn, cta]);
+    // API-key failure badge — hidden until a live probe reports a failing key (populated by refreshKeysBadge)
+    const keysBadge = h("button.safety.tripped#keys-badge", { style: { display: "none" },
+      title: "One or more API keys are failing", onClick: function () { location.hash = "#/apikeys"; } }, "");
+    return h("div#topbar", null, [seg, cmdk, h("div.spacer"), counts, live, keysBadge, safety, themeBtn, cta]);
+  }
+
+  // Poll the redacted settings status for the failing-key count and show/hide the top-bar badge. Cheap +
+  // owner-plane; silently no-ops if the sovereign plane is offline (badge stays hidden).
+  function refreshKeysBadge() {
+    V.getJSON(SOV("/api/settings")).then(function (st) {
+      var el = V.$("#keys-badge"); if (!el) return;
+      var n = (st && st.keys_failing) || 0;
+      if (n > 0) { el.textContent = ""; el.appendChild(V.icon("info"));
+        el.appendChild(document.createTextNode(" " + n + " API key" + (n === 1 ? "" : "s") + " failing"));
+        el.style.display = ""; }
+      else { el.style.display = "none"; }
+    }).catch(function () {});
   }
 
   function renderNav() {
@@ -1672,12 +1689,15 @@
   function renderSettings(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Settings"),
-        h("span.sub", null, "Your secrets and the model the AI reasons with — sealed on this machine, never shown back to the browser.")]),
+        h("span.sub", null, "The model the AI reasons with. API keys have moved to their own screen.")]),
       ownerBanner("Owner plane — every change is signed with your key on the server. The browser never holds or receives key material."),
-      h("div.grid.cols-2#set-secrets", { style: { alignItems: "start", marginTop: "16px" } },
-        h("div.empty", null, "Loading…")),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
         V.card("Reasoning model", "OWNER", h("div#set-model", null, h("div.empty", null, "Loading…")), true),
+        V.card("API keys", "OWNER", [
+          h("div.hint", null, "Every key the system uses — Claude/other model providers, cloud credentials, integrations — with a live health check so a bad or expired key always shows as failing."),
+          h("div.acts", { style: { marginTop: "12px" } },
+            h("button.btn.owner", { onClick: function () { location.hash = "#/apikeys"; } }, [V.icon("key"), "Manage API keys"])),
+        ], true),
       ]),
     ]);
     loadSettings();
@@ -1687,47 +1707,125 @@
     V.getJSON(SOV("/api/settings")).then(drawSettings).catch(function (e) {
       var msg = (e && e.status === 401) ? "The sovereign plane needs the owner token — open the UI via `vigil up`."
         : "Settings are on the sovereign plane, which is offline. Start it with `vigil up`.";
-      var box = V.$("#set-secrets"); if (box) V.mount(box, h("div.empty", null, msg));
       var box2 = V.$("#set-model"); if (box2) V.mount(box2, h("div.empty", null, msg));
     });
   }
 
   function drawSettings(st) {
-    var host = V.$("#set-secrets");
-    if (host) V.mount(host, (st.secrets || []).map(function (sec) {
-      return V.card(sec.label || sec.name, "OWNER", drawSecretCard(sec, st), true);
-    }));
     drawModelCard(st);
   }
 
-  function drawSecretCard(sec, st) {
+  // A live-health chip for a SET secret: ok (green) / fail (red) / can't-verify (grey) / not-tested.
+  function healthChip(sec) {
+    if (!sec.set) return null;
+    var hs = (sec.health && sec.health.status) || "unchecked";
+    var reason = (sec.health && sec.health.reason) || "";
+    if (hs === "ok") return h("span.pill.sm.ok", { title: reason }, [V.icon("check"), " Working"]);
+    if (hs === "fail") return h("span.pill.sm.danger", { title: reason }, [V.icon("info"), " Failing"]);
+    if (hs === "unknown") return h("span.pill.sm", { title: reason }, [V.icon("info"), " Can't verify"]);
+    return h("span.pill.sm", { title: "Not tested yet — press Test" }, "Not tested");
+  }
+
+  // `reload` is the caller's refresh (loadApiKeys or loadSettings); keeps this card usable on either screen.
+  function drawSecretCard(sec, st, reload) {
+    reload = reload || loadSettings;
     var isKey = sec.name === "ANTHROPIC_API_KEY";
     var statusRow = sec.set
       ? h("div.set-status.ok", null, [V.icon("check"), h("span", null, "Set"),
-          h("span.pill.sm", null, sec.backend), h("span.mono.dim", null, sec.fingerprint)])
+          h("span.pill.sm", null, sec.backend), h("span.mono.dim", null, sec.fingerprint), healthChip(sec)])
       : h("div.set-status.off", null, [V.icon("info"),
           h("span", null, isKey
             ? "No key set — the system runs keyless (deterministic oracles only) until you add one or pick the local Claude Code model."
             : "Not set — optional until you use the feature it enables.")]);
+    // an explicit failure/uncertainty line so a bad key is never silent
+    var healthLine = null;
+    if (sec.set && sec.health && sec.health.status === "fail") {
+      healthLine = h("div.set-status.off", { style: { color: "var(--danger, #e5484d)" } },
+        [V.icon("info"), h("span", null, "This key failed its last live check: " + (sec.health.reason || "rejected") + ". Re-seal a valid value.")]);
+    } else if (sec.set && sec.health && sec.health.status === "unknown" && sec.health.reason) {
+      healthLine = h("div.set-status.off", null, [V.icon("info"), h("span", null, sec.health.reason)]);
+    }
     var input = h("input", { type: "password", autocomplete: "off", spellcheck: "false",
-      placeholder: sec.set ? "Enter a new value to replace it" : (isKey ? "sk-ant-…" : "ghp_… / github_pat_…") });
+      placeholder: sec.set ? "Enter a new value to replace it" : (isKey ? "sk-ant-…" : "paste the key…") });
     var save = h("button.btn.owner", { onClick: function () {
         var v = (input.value || "").trim();
         if (!v) { V.toast("Paste a value first.", true); return; }
         save.disabled = true;
-        settingsAct({ action: "set_secret", name: sec.name, value: v, reason: "set " + sec.name + " from Settings" },
-          (sec.label || sec.name) + " sealed on this machine.", function () { input.value = ""; loadSettings(); })
+        settingsAct({ action: "set_secret", name: sec.name, value: v, reason: "set " + sec.name + " from API Keys" },
+          (sec.label || sec.name) + " sealed on this machine.", function () { input.value = ""; reload(); refreshKeysBadge(); })
           .then(function () { save.disabled = false; });
       } }, [V.icon("key"), "Seal"]);
+    // Test = a live probe. Only offered for a SET, probeable secret; a non-probeable secret has no service to check.
+    var test = (sec.set && sec.probeable) ? h("button.btn", { onClick: function () {
+        test.disabled = true; test.textContent = "Testing…";
+        settingsAct({ action: "check_secret", name: sec.name, reason: "test " + sec.name },
+          "", function (r) {
+            if (r && r.status === "ok") V.toast((sec.label || sec.name) + ": working.");
+            else if (r && r.status === "fail") V.toast((sec.label || sec.name) + ": FAILING — " + (r.reason || ""), true);
+            else V.toast((sec.label || sec.name) + ": " + (r && r.reason || "can't verify"), true);
+            reload(); refreshKeysBadge();
+          }).then(function () { test.disabled = false; test.textContent = "Test"; });
+      } }, "Test") : null;
     return [
       statusRow,
+      healthLine,
       h("div.field", { style: { marginTop: "14px" } }, [
         h("label", null, sec.label || sec.name), input,
         h("div.hint", null, (sec.purpose ? sec.purpose + " " : "")
           + "Sealed to your OS keyring or a TPM-sealed store when available; the value never enters the spine, a log, or any response — only a fingerprint is recorded."),
       ]),
-      h("div.acts", null, save),
+      h("div.acts", null, [save, test]),
     ];
+  }
+
+  // ---- API Keys screen (owner plane) — every secret the system uses, grouped, with LIVE health -------
+  function renderApiKeys(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "API Keys"),
+        h("span.sub", null, "Every key the system uses — sealed on this machine, never shown back to the browser. Press Test to check a key is live; a failing key always shows here.")]),
+      ownerBanner("Owner plane — every change is signed with your key on the server. The browser never holds or receives key material."),
+      h("div.acts", { style: { marginTop: "12px" } },
+        h("button.btn#test-all", { onClick: function () {
+          var b = V.$("#test-all"); if (b) { b.disabled = true; b.textContent = "Testing all…"; }
+          settingsAct({ action: "check_secrets", reason: "test all keys" }, "", function (r) {
+            var f = (r && r.failing) || []; if (f.length) V.toast(f.length + " key(s) failing: " + f.join(", "), true);
+            else V.toast("All set keys checked.");
+            loadApiKeys(); refreshKeysBadge();
+          }).then(function () { var bb = V.$("#test-all"); if (bb) { bb.disabled = false; bb.textContent = "Test all keys"; } });
+        } }, [V.icon("bolt"), "Test all keys"])),
+      h("div#apikeys-body", { style: { marginTop: "8px" } }, h("div.empty", null, "Loading…")),
+    ]);
+    loadApiKeys();
+  }
+
+  function loadApiKeys() {
+    V.getJSON(SOV("/api/settings")).then(drawApiKeys).catch(function (e) {
+      var msg = (e && e.status === 401) ? "The sovereign plane needs the owner token — open the UI via `vigil up`."
+        : "API keys live on the sovereign plane, which is offline. Start it with `vigil up`.";
+      var box = V.$("#apikeys-body"); if (box) V.mount(box, h("div.empty", null, msg));
+    });
+  }
+
+  function drawApiKeys(st) {
+    var host = V.$("#apikeys-body"); if (!host) return;
+    var cats = st.secret_categories || [{ id: "integration", label: "Secrets" }];
+    var secrets = st.secrets || [];
+    var sections = cats.map(function (cat) {
+      var inCat = secrets.filter(function (s) { return (s.category || "integration") === cat.id; });
+      if (!inCat.length) return null;
+      return h("div", { style: { marginTop: "18px" } }, [
+        h("div.screen-head", { style: { marginBottom: "6px" } }, h("h2", null, cat.label)),
+        h("div.grid.cols-2", { style: { alignItems: "start" } }, inCat.map(function (sec) {
+          return V.card(sec.label || sec.name, "OWNER", drawSecretCard(sec, st, loadApiKeys), true);
+        })),
+      ]);
+    }).filter(Boolean);
+    var failing = st.keys_failing || 0;
+    V.mount(host, [
+      failing > 0 ? h("div.set-status.off", { style: { color: "var(--danger, #e5484d)", marginBottom: "8px" } },
+        [V.icon("info"), h("span", null, failing + " key" + (failing === 1 ? " is" : "s are") + " failing a live check — see the red 'Failing' cards below.")]) : null,
+      sections.length ? sections : h("div.empty", null, "No secrets configured."),
+    ]);
   }
 
   function drawModelCard(st) {
@@ -2354,6 +2452,7 @@
     if (id === "live") { renderLive(screen); return; }
     if (id === "findings") { renderFindings(screen); return; }
     if (id === "settings") { renderSettings(screen); return; }
+    if (id === "apikeys") { renderApiKeys(screen); return; }
     if (id === "safety") { renderSafety(screen); return; }
     if (id === "defense") { renderDefense(screen); return; }
     if (id === "fixes") { renderFixes(screen); return; }
@@ -2374,6 +2473,7 @@
     window.addEventListener("hashchange", route);
     if (!location.hash) location.hash = "#/home";
     route();
+    refreshKeysBadge();           // surface any failing API key in the top bar from first paint
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();
