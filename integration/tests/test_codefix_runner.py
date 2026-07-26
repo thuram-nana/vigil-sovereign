@@ -202,6 +202,69 @@ def test_quorum_enforces_m_of_n(tmp_path):
     assert q_low(_Req()).approved is False                     # worker-only = below threshold → DENY
 
 
+def test_nonce_ledger_durable_and_fail_closed(tmp_path):
+    import os
+    import stat
+    from vigil_integration.live.nonce_ledger import NonceLedger
+    led = NonceLedger(str(tmp_path / "nonces"))
+    assert led.is_consumed("") is True                       # blank ⇒ fail-closed consumed
+    assert led.is_consumed("n1") is False
+    led.record("n1")
+    assert led.is_consumed("n1") is True
+    assert NonceLedger(str(tmp_path / "nonces")).is_consumed("n1") is True   # survives a fresh instance
+    assert stat.S_IMODE(os.stat(tmp_path / "nonces").st_mode) == 0o600
+    with pytest.raises(ValueError):
+        led.record("")                                       # refuse recording a blank nonce
+
+
+def test_single_use_authorization_cannot_replay(tmp_path):
+    # THE red-pen HOLD fix: one owner-signed authorization drives exactly ONE destructive run — a replay
+    # (a fresh quorum reading the same ledger + the same signed authorization) is DENIED as consumed.
+    from vigil_integration.autopatch.loop import _derive_remediation_id
+    from vigil_integration.destruction_gate import DestructionAuthority
+    from vigil_integration.live.codefix_runner import file_backed_quorum
+    owner, worker, tr = _keys()
+    authority = DestructionAuthority(trust_root=tr, mandatory_signer_ids={"owner"})
+    f = _fact("git@example.com:o/r.git")
+    rid = _derive_remediation_id("", f)
+    signed = _signed(rid, slug="acme", repo="git@example.com:o/r.git", owner=owner, worker=worker,
+                     signers=[("owner", owner.private_key_b64), ("worker", worker.private_key_b64)])
+    ledger = str(tmp_path / "nonces")
+
+    class _Req:
+        remediation_id = rid
+        target_repo = "git@example.com:o/r.git"
+        finding = f
+    first = file_backed_quorum(authority=authority, signed=signed, slug="acme", ledger_path=ledger)(_Req())
+    assert first.approved is True and first.nonce                       # authorized + nonce surfaced + recorded
+    replay = file_backed_quorum(authority=authority, signed=signed, slug="acme", ledger_path=ledger)(_Req())
+    assert replay.approved is False                                     # single-use: the replay is denied
+
+
+def test_quorum_denies_when_consumption_cannot_be_recorded(tmp_path):
+    # if the nonce can't be marked spent, the quorum must DENY (never authorize an un-recordable destruction).
+    from vigil_integration.autopatch.loop import _derive_remediation_id
+    from vigil_integration.destruction_gate import DestructionAuthority
+    from vigil_integration.live.codefix_runner import build_destruction_quorum
+    owner, worker, tr = _keys()
+    authority = DestructionAuthority(trust_root=tr, mandatory_signer_ids={"owner"})
+    f = _fact("git@example.com:o/r.git")
+    rid = _derive_remediation_id("", f)
+    signed = _signed(rid, slug="acme", repo="git@example.com:o/r.git", owner=owner, worker=worker,
+                     signers=[("owner", owner.private_key_b64), ("worker", worker.private_key_b64)])
+
+    def _boom(_n):
+        raise OSError("ledger unwritable")
+
+    class _Req:
+        remediation_id = rid
+        target_repo = "git@example.com:o/r.git"
+        finding = f
+    q = build_destruction_quorum(authority=authority, signed=signed, slug="acme",
+                                 is_consumed=lambda n: False, record_consumed=_boom)
+    assert q(_Req()).approved is False                                  # record failure ⇒ fail-closed deny
+
+
 def test_open_pr_fail_closed_without_enable_or_token(repo_and_diff, tmp_path, monkeypatch):
     from vigil_integration.live.codefix_runner import CodefixSession
     repo, _diff = repo_and_diff

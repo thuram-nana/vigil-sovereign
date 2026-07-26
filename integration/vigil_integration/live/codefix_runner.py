@@ -85,6 +85,7 @@ class _Quorum:
     approved: bool = False
     reason: str = ""
     signer_ids: list = field(default_factory=list)
+    nonce: str = ""                          # the single-use nonce (surfaced so it can be recorded consumed)
 
 
 def _safe_workdir(base_dir: str, remediation_id: Any) -> Optional[str]:
@@ -328,13 +329,18 @@ class CodefixSession:
 
 
 def build_destruction_quorum(*, authority: Any, signed: Any, slug: str, is_consumed: Callable[[str], bool],
+                             record_consumed: Optional[Callable[[str], None]] = None,
                              now: Optional[Callable[[], float]] = None) -> Callable[[Any], _Quorum]:
     """Build the PR-leg m-of-n quorum callable from a PROVISIONED owner-inclusive SignedDestructionAuthorization
     + DestructionAuthority. It rebuilds the per-request DestructiveAction (action_id 'pr-<remediation_id>',
     target=repo, engagement=slug) and verifies the signed authorization via ``authorize_destruction`` — which
     fail-closed checks well-formedness, the gated class, action match, the not_before/not_after dead-man's-
-    switch window, the mandatory owner, single-use (``is_consumed``), and the m-of-n threshold. Off without
-    provisioning: ``autopatch_live`` defaults the quorum to a hard DENY."""
+    switch window, the mandatory owner, single-use (``is_consumed``), and the m-of-n threshold.
+
+    SINGLE-USE: when ``record_consumed`` is given, the authorized nonce is RECORDED consumed the instant it
+    authorizes (before the PR runs — the replay-safe direction). If recording fails, the quorum DENIES
+    (fail-closed: never authorize a destructive action we cannot mark spent). Off without provisioning:
+    ``autopatch_live`` defaults the quorum to a hard DENY."""
     from ..destruction_gate import DestructiveAction, authorize_destruction
 
     def quorum(request: Any) -> _Quorum:
@@ -347,12 +353,30 @@ def build_destruction_quorum(*, authority: Any, signed: Any, slug: str, is_consu
                 blast_class="destructive")
             d = authorize_destruction(action, signed, authority=authority,
                                       now=_epoch(now() if now else None), is_consumed=is_consumed)
-            return _Quorum(approved=getattr(d, "authorized", False) is True,   # STRICT: only real True
-                           reason=getattr(d, "reason", ""))
+            approved = getattr(d, "authorized", False) is True     # STRICT: only real True
+            nonce = str(getattr(d, "nonce", "") or "")
+            if approved and record_consumed is not None:
+                try:
+                    record_consumed(nonce)                          # spend it now → a replay is denied next time
+                except Exception:  # noqa: BLE001 — cannot mark spent ⇒ refuse (never authorize an un-recordable one)
+                    return _Quorum(approved=False, nonce=nonce,
+                                   reason="could not record single-use consumption — refusing (fail-closed)")
+            return _Quorum(approved=approved, reason=getattr(d, "reason", ""), nonce=nonce)
         except Exception:  # noqa: BLE001 — any error ⇒ deny (fail-closed)
             return _Quorum(approved=False, reason="destruction authorization failed (fail-closed)")
 
     return quorum
+
+
+def file_backed_quorum(*, authority: Any, signed: Any, slug: str, ledger_path: str,
+                       now: Optional[Callable[[], float]] = None) -> Callable[[Any], _Quorum]:
+    """Convenience: a destruction quorum whose single-use is backed by a durable on-disk ``NonceLedger`` —
+    ``is_consumed`` + ``record_consumed`` both read/write ``ledger_path`` (0600, fsync, survives restart), so
+    one owner-signed authorization drives exactly ONE destructive PR even across process restarts."""
+    from .nonce_ledger import NonceLedger
+    ledger = NonceLedger(ledger_path)
+    return build_destruction_quorum(authority=authority, signed=signed, slug=slug,
+                                    is_consumed=ledger.is_consumed, record_consumed=ledger.record, now=now)
 
 
 def _epoch(now_val: Any) -> float:
