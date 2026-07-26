@@ -40,6 +40,7 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 from . import actions, api
+from .blackboard_sse import BlackboardTailer
 from .sse import EventTailer, stream_path
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -63,6 +64,7 @@ _EXACT_ROUTES = {
     "/api/memory": api.memory_data,
     "/api/kernel": api.kernel_data,
     "/api/tools": api.tools_data,
+    "/api/capabilities": api.capabilities_data,
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -158,6 +160,37 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return  # client navigated away — end the stream quietly
 
+    def _sse_blackboard(self, slug: str, since: int) -> None:
+        """SSE over one engagement's append-only blackboard spine (the Live view's 14-kind
+        timeline). Each event is emitted with an ``id:`` line so an EventSource reconnect resumes
+        from ``Last-Event-ID`` — a durable cursor. Read-only; the blackboard stays append-only."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self._sec_headers()
+        self.end_headers()
+        tailer = BlackboardTailer(slug, since_id=since)
+        last_beat = time.monotonic()
+        try:
+            self.wfile.write(b"retry: 3000\n\n")
+            self.wfile.flush()
+            while True:
+                for event_id, ev in tailer.read_new():
+                    payload = json.dumps(ev, ensure_ascii=False, default=str)
+                    self.wfile.write(f"id: {event_id}\ndata: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                now = time.monotonic()
+                if now - last_beat > 15:
+                    self.wfile.write(b": ping\n\n")  # heartbeat keeps the socket open
+                    self.wfile.flush()
+                    last_beat = now
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+        finally:
+            tailer.close()
+
     # ---- routing ----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
@@ -168,6 +201,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 q = parse_qs(parts.query)
                 self._sse(stream_path(run=(q.get("run") or [None])[0],
                                       slug=(q.get("slug") or [None])[0]))
+                return
+            if path == "/api/blackboard":
+                q = parse_qs(parts.query)
+                slug = (q.get("slug") or [""])[0]
+                # durable cursor: the Last-Event-ID reconnect header wins over the ?since= seed.
+                since = 0
+                for src in ((q.get("since") or ["0"])[0], self.headers.get("Last-Event-ID")):
+                    try:
+                        if src is not None:
+                            since = int(src)
+                    except (TypeError, ValueError):
+                        pass
+                self._sse_blackboard(slug, since)
                 return
             if path in _EXACT_ROUTES:
                 self._json(_EXACT_ROUTES[path]())
@@ -260,8 +306,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         return True, ""
 
     def do_POST(self) -> None:  # noqa: N802
-        """The three SAFE actions — the only mutations the console makes. Each is
-        non-destructive and cannot relax scope or bypass a gate."""
+        """The SAFE actions — the only mutations the console makes. Each is non-destructive and
+        cannot relax scope or bypass a gate: launch (scan / assessment) spawns only the already-gated
+        CLIs, re-verify is a pure re-computation, and kill-switch trip is the emergency stop."""
         ok, why = self._same_origin_as_console()
         if not ok:
             self._json({"error": f"cross-site POST refused ({why})"}, status=403)
@@ -274,6 +321,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     str(body.get("target", "")),
                     max_pages=int(body.get("max_pages", 60)),
                 ))
+                return
+            if path == "/api/launch/assessment":
+                # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
+                # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON
+                # refusal (no charter / bad target / CIDR scope) is returned as a normal 200 body.
+                self._json(actions.launch_assessment(body))
                 return
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))

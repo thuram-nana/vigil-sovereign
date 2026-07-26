@@ -169,6 +169,13 @@ def list_runs() -> dict[str, Any]:
                 "target": meta.get("target"),
                 "status": meta.get("status", "unknown"),
                 "started": meta.get("started"),
+                # P2 assessment-run fields (absent for legacy loopback scans → sensible defaults):
+                "mode": meta.get("mode", "url"),
+                "slug": meta.get("slug"),
+                "objective": meta.get("objective", ""),
+                # how the Live view should tail this run: 'blackboard' (engage --spine), 'progress'
+                # (loopback scan --progress-log), or 'none' (strix/aegis — status only).
+                "stream": meta.get("stream", "progress"),
                 "findings": len((report or {}).get("findings", [])) if report else None,
                 "has_report": report is not None,
             })
@@ -428,6 +435,28 @@ def tools_data() -> dict[str, Any]:
         "sandbox": {"image": None, "tools": []},
         "error": "could not probe host tools",
     })
+
+
+def capabilities_data() -> dict[str, Any]:
+    """The ENGAGE capability packs the New-Assessment wizard offers under 'pick tools' — the SINGLE
+    source of truth (``actions.ENGAGE_CAPABILITIES``) that a launch maps a picked id onto a real,
+    already-gated ``engage`` flag. Real config data (not invented), so the UI never hardcodes it and
+    a picked capability can never widen authority beyond the charter/scope/kill-switch/egress stack.
+    The ``flag`` is intentionally NOT exposed — the id is the contract; the mapping lives server-side."""
+    from . import actions
+    return {
+        "capabilities": [
+            {"id": c["id"], "label": c["label"], "tier": c["tier"], "purpose": c["purpose"]}
+            for c in actions.ENGAGE_CAPABILITIES
+        ],
+        "scan_modes": [
+            {"id": "quick", "label": "Quick", "purpose": "Fast, targeted, bounded pages/budget."},
+            {"id": "standard", "label": "Standard", "purpose": "Balanced coverage (default)."},
+            {"id": "deep", "label": "Deep", "purpose": "Widest coverage; more pages/budget/cycles."},
+        ],
+        "note": "Capabilities map to already-gated engage flags. Offensive steps still QUEUE for "
+                "owner approval — nothing fires automatically.",
+    }
 
 
 # ---------------------------------------------------------------------------
