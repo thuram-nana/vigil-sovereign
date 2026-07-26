@@ -119,6 +119,13 @@ def _construct(name: str) -> LLMBackend:
     if name == "mistral":
         from .backends.mistral import MistralBackend
         return MistralBackend()
+    if name == "azure_openai":
+        from .backends.azure_openai import AzureOpenAIBackend
+        return AzureOpenAIBackend()
+    if name in ("self-hosted", "vllm", "llama-cpp", "tgi"):
+        # one OpenAI-compatible backend serves all three declared self-hosted names (+ the generic alias)
+        from .backends.self_hosted import SelfHostedOpenAIBackend
+        return SelfHostedOpenAIBackend(backend_name=name)
     if name == "claude-code":
         from .backends.claude_code import ClaudeCodeBackend
         return ClaudeCodeBackend()

@@ -14,8 +14,8 @@ from ..llm import LLMBackend
 
 _BACKEND_NAMES = (
     "anthropic", "anthropic-zdr",
-    "bedrock", "vertex", "mistral",
-    "claude-code", "ollama", "dryrun",
+    "bedrock", "vertex", "mistral", "azure_openai",
+    "claude-code", "ollama", "self-hosted", "dryrun",
 )
 
 

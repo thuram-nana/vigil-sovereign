@@ -68,6 +68,7 @@ _BACKEND_CLASSIFICATION: dict[str, BackendTier] = {
     "vllm":         "local",
     "llama-cpp":    "local",
     "tgi":          "local",
+    "self-hosted":  "local",
     "dryrun":       "local",
     # --- sovereign cloud ----------------------------------------------
     "bedrock":      "sovereign_cloud",
@@ -78,6 +79,7 @@ _BACKEND_CLASSIFICATION: dict[str, BackendTier] = {
     # --- cloud only (least sovereign) ---------------------------------
     "anthropic":    "cloud_only",
     "claude-code":  "cloud_only",
+    "azure_openai": "cloud_only",   # BYO: permitted at PERMISSIVE / explicit force; not a sovereign tier
 }
 
 
@@ -113,14 +115,14 @@ _TIER_PERMITS: dict[Tier, frozenset[BackendTier]] = {
 # tiers; the lower tiers' preferences are subsets in the same order.
 _TIER_PREFERENCE: dict[Tier, tuple[str, ...]] = {
     Tier.AIR_GAPPED: (
-        "ollama", "vllm", "llama-cpp", "tgi", "dryrun",
+        "ollama", "vllm", "llama-cpp", "tgi", "self-hosted", "dryrun",
     ),
     # Sovereign-cloud prefers Bedrock first (Claude quality with data
     # residency), then Vertex, then Mistral. Local backends are
     # preserved as last-resort sovereign fallbacks.
     Tier.SOVEREIGN_CLOUD: (
         "bedrock", "vertex", "mistral",
-        "ollama", "vllm", "llama-cpp", "tgi", "dryrun",
+        "ollama", "vllm", "llama-cpp", "tgi", "self-hosted", "dryrun",
     ),
     # Trusted-cloud adds Anthropic-ZDR at the top — it's frontier
     # quality with the strongest contractual data-handling guarantee
@@ -128,14 +130,14 @@ _TIER_PREFERENCE: dict[Tier, tuple[str, ...]] = {
     Tier.TRUSTED_CLOUD: (
         "anthropic-zdr",
         "bedrock", "vertex", "mistral",
-        "ollama", "vllm", "llama-cpp", "tgi", "dryrun",
+        "ollama", "vllm", "llama-cpp", "tgi", "self-hosted", "dryrun",
     ),
     # Permissive matches Sessions 1-6 behaviour: cloud first for
     # quality, local fallbacks at the end.
     Tier.PERMISSIVE: (
         "anthropic", "claude-code", "anthropic-zdr",
-        "bedrock", "vertex", "mistral",
-        "ollama", "vllm", "llama-cpp", "tgi", "dryrun",
+        "bedrock", "vertex", "mistral", "azure_openai",
+        "ollama", "vllm", "llama-cpp", "tgi", "self-hosted", "dryrun",
     ),
 }
 
@@ -205,7 +207,7 @@ class SovereigntyPolicy:
         *,
         strict: bool | None = None,
         local_preference_order: tuple[str, ...] = (
-            "ollama", "vllm", "llama-cpp", "tgi", "dryrun",
+            "ollama", "vllm", "llama-cpp", "tgi", "self-hosted", "dryrun",
         ),
         cloud_preference_order: tuple[str, ...] = (
             "anthropic", "claude-code",
@@ -322,10 +324,13 @@ def backend_egress_hosts(backend_name: str) -> tuple[str, ...]:
     all valid regional endpoints.
     """
     name = backend_name.lower()
-    if name in {"ollama", "vllm", "llama-cpp", "tgi"}:
+    if name in {"ollama", "vllm", "llama-cpp", "tgi", "self-hosted"}:
         return ("localhost", "127.0.0.1", "::1")
     if name in {"anthropic", "anthropic-zdr"}:
         return ("api.anthropic.com",)
+    if name == "azure_openai":
+        # the operator's Azure resource resolves to <resource>.openai.azure.com (host-validated at construct)
+        return ("*.openai.azure.com",)
     if name == "bedrock":
         # Wildcard — operator's region resolves to e.g.
         # bedrock-runtime.eu-west-1.amazonaws.com
