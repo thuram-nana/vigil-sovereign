@@ -86,9 +86,10 @@ def console_dir() -> Path:
 
 # A run id is a single, self-generated path component (`_new_run_id` → a timestamp + counter). Anything
 # else — a separator, "..", a leading dot, an absolute/drive form — is refused so a URL-derived run id can
-# never traverse out of the runs dir. Every console read route funnels through run_dir, so this one guard
-# covers report / worldmodel / coverage / evidence / remediate alike (fail-closed: a bad id raises, and the
-# read routes are _safe-wrapped so it surfaces as an honest empty/not-found, never a traversal).
+# never traverse out of the runs dir. Every console read/write route funnels through run_dir, so this one
+# guard covers report / worldmodel / coverage / evidence / remediate / reverify alike (fail-closed: a bad id
+# raises ValueError; remediate_plan _safe-wraps it to an honest empty state, every other route lets it
+# bubble to do_GET/do_POST which map it to a clean 404 — never a 500, never a traversal).
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 

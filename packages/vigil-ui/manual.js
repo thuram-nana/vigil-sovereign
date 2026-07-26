@@ -113,7 +113,7 @@ window.VIGIL_MANUAL = [
     blocks: [
       { p: "The Brain screen is a window into what the system knows and how well it performs. It has tabs:" },
       { list: [
-        ["Memory", "Cross-engagement priors it has learned — e.g. which intel sources have been reliable. Empty until you run assessments; it never fabricates a score."],
+        ["Memory", "Cross-engagement priors it has learned — a per-archetype / bug-class success rate (how often a class of attack actually pans out). Empty until you run assessments; it never fabricates a score."],
         ["Benchmark", "How the engine scores on a fixed corpus of planted bugs AND safe controls: true positives (bugs found), false positives (safe things wrongly flagged), and misses. Honest calibration."],
         ["Catalog", "The searchable list of capabilities the AI can bring to bear, each mapped to an already-gated action and risk tier."],
         ["Intel / Planner", "Per-engagement reconnaissance and the plan tree for a chosen run."],

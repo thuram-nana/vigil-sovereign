@@ -2235,14 +2235,19 @@
         h("div.grid.cols-4", null, [
           V.tile("Engagements", String(s.engagements || 0), "learned from", null),
           V.tile("Findings", String(s.findings || 0), "remembered", null),
-          V.tile("Priors", String(s.priors || 0), "source-reliability", null),
+          V.tile("Priors", String(s.priors || 0), "per-class success", null),
           V.tile("Dead ends", String(s.dead_ends || 0), "won't re-walk", null),
         ]),
         V.card("Learned priors", "MEMORY", priors.length
           ? h("div.stack", null, priors.slice(0, 40).map(function (p) {
-              return h("div.kv", null, [h("div.k", null, String(p.source || p.key || p.name || "prior")),
-                h("div.v", null, JSON.stringify(p.value != null ? p.value : p))]); }))
-          : h("div.empty", null, "No cross-engagement priors learned yet — they accrue as you run assessments; the system never fabricates a score."), false),
+              // real prior shape: {archetype, bug_class, surface, successes, attempts, mean, lower_bound}
+              var label = [p.bug_class, p.archetype, p.surface].filter(Boolean).join(" · ") || "prior";
+              var mean = (typeof p.mean === "number") ? Math.round(p.mean * 100) + "%" : "—";
+              var lb = (typeof p.lower_bound === "number") ? " (lcb " + Math.round(p.lower_bound * 100) + "%)" : "";
+              var n = (p.attempts != null) ? (" · " + (p.successes != null ? p.successes : "?") + "/" + p.attempts) : "";
+              return h("div.kv", null, [h("div.k", null, label),
+                h("div.v", null, "success " + mean + lb + n)]); }))
+          : h("div.empty", null, "No priors learned yet — the system learns a per-archetype/bug-class success rate as you run assessments; it never fabricates a score."), false),
       ]);
     }).catch(function () { V.mount(v, offlineEmpty()); });
   }

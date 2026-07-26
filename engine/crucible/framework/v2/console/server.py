@@ -357,6 +357,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(actions.aegis_stop(body))
                 return
             self._json({"error": "unknown action"}, status=404)
+        except ValueError as e:  # an unsafe run id (run_dir guard) → honest 404, consistent with do_GET
+            self._json({"error": str(e)}, status=404)
         except Exception as e:
             self._json({"error": f"{type(e).__name__}: {e}"}, status=500)
 
