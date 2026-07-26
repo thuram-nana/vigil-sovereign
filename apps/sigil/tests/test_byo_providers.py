@@ -59,6 +59,11 @@ def test_required_config_and_endpoint_validation_fail_closed():
         S.set_provider("self-hosted", "m", {"CRUCIBLE_SELFHOSTED_ENDPOINT": "ftp://x"}, **_sa())
     with pytest.raises(ValueError):
         S.set_provider("not-a-provider", "m", {}, **_sa())          # unknown provider
+    # model must get the SAME control-char/length guard as config/secrets — no envfile line-injection
+    with pytest.raises(ValueError):
+        S.set_provider("anthropic", "x\nVIGIL_DESTRUCTION_OWNER_KEY=planted", {}, **_sa())
+    with pytest.raises(ValueError):
+        S.set_provider("anthropic", "z" * 9000, {}, **_sa())        # oversize
 
 
 def test_set_model_delegates_and_highlight_works():
@@ -92,7 +97,7 @@ def test_delivery_includes_provider_keys_but_never_the_signing_key():
     ss = SecretStore()
     for n, v in (("ANTHROPIC_API_KEY", "sk-ant"), ("MISTRAL_API_KEY", "m"), ("AWS_ACCESS_KEY_ID", "AKIA"),
                  ("AWS_SECRET_ACCESS_KEY", "sss"), ("VIGIL_DESTRUCTION_OWNER_KEY", "OWNERKEY"),
-                 ("GITHUB_TOKEN", "ghp_x")):
+                 ("GITHUB_TOKEN", "ghp_x"), ("ELEVENLABS_API_KEY", "el")):
         ss.set(n, v)
     S.set_provider("bedrock", "anthropic.claude-opus-5", {"CRUCIBLE_BEDROCK_REGION": "eu-west-1"}, **_sa())
     env = S.export_runtime_env(include_secrets=True)
@@ -100,6 +105,7 @@ def test_delivery_includes_provider_keys_but_never_the_signing_key():
     assert env.get("GITHUB_TOKEN")                                             # PR token delivered (LAP)
     assert env.get("CRUCIBLE_BEDROCK_MODEL") and env.get("STRIX_LLM")          # provider vars delivered
     assert "VIGIL_DESTRUCTION_OWNER_KEY" not in env                            # the ONE hard exclusion
+    assert "ELEVENLABS_API_KEY" not in env                                     # voice = sovereign, not offense
 
 
 def test_offense_env_allowlist_excludes_only_the_signing_key():

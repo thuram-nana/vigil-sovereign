@@ -1734,8 +1734,7 @@
     function spec() { return providers.filter(function (p) { return p.id === chosen; })[0] || providers[0]; }
     function render() {
       var p = spec();
-      var modelInput = h("input", { placeholder: (p.models && p.models[0]) || "model / deployment id",
-        value: (p.id === st.selected_provider ? "" : "") });
+      var modelInput = h("input", { placeholder: (p.models && p.models[0]) || "model / deployment id" });
       if (p.model_var && cfg[p.model_var]) modelInput.value = cfg[p.model_var];
       var configInputs = (p.config || []).map(function (c) {
         var inp = h("input", { placeholder: c.placeholder || "", value: cfg[c.env] || "" });

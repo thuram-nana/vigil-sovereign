@@ -188,12 +188,13 @@ _ALL_CONFIG_VARS = tuple(sorted({c["env"] for p in PROVIDERS.values() for c in p
 PROVIDER_ENV_VARS = tuple(dict.fromkeys(
     (_BACKEND_ENV, _ANTHROPIC_MODEL_ENV, _SIGIL_MODEL_ENV, _CHOICE_ENV, *_ALL_MODEL_VARS,
      *_ALL_CONFIG_VARS, *_STRIX_VARS)))
-# The sealed secrets that MAY reach the keyless offense engine: every managed secret EXCEPT the auto-patch
-# signing key. The one hard exclusion is VIGIL_DESTRUCTION_OWNER_KEY — an offense process must never receive
-# the key that AUTHORIZES a destructive PR (it must not be able to self-authorize; A2a red-pen). The GitHub
-# token + LLM/cloud/integration keys are legitimately needed by the offense engine (PR push, model calls,
-# OAST relay, gated API).
-_OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n != "VIGIL_DESTRUCTION_OWNER_KEY")
+# The sealed secrets that MAY reach the keyless offense engine (least-privilege): every managed secret EXCEPT
+# the auto-patch signing key and the voice key. VIGIL_DESTRUCTION_OWNER_KEY must never reach an offense process
+# (it must not be able to self-authorize a destructive PR; A2a red-pen); ELEVENLABS_API_KEY is a sovereign
+# voice-TTS concern the offense engine never reads. The GitHub token + LLM/cloud/OAST/gated-API keys ARE
+# legitimately needed by the offense engine (PR push, model calls, OAST relay, gated API).
+_OFFENSE_EXCLUDED_SECRETS = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY", "ELEVENLABS_API_KEY"})
+_OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n not in _OFFENSE_EXCLUDED_SECRETS)
 
 
 def _validate_config_value(env: str, value: str) -> str:
@@ -223,6 +224,10 @@ def set_provider(provider: str, model: str = "", config: Optional[dict] = None, 
         raise ValueError(f"unknown provider {provider!r}: choose one of {', '.join(sorted(_PROVIDER_IDS))}")
     spec = PROVIDERS[provider]
     model = str(model or "").strip()
+    # model is written into env vars (+ persisted to sigil.env), so it gets the SAME control-char + length
+    # guard as config/secrets — a newline would inject an extra `KEY=value` line into the envfile tier.
+    if len(model) > 512 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in model):
+        raise ValueError("invalid model id (control characters or too long)")
     config = {str(k): str(v) for k, v in (config or {}).items()}
 
     plan = {v: "" for v in PROVIDER_ENV_VARS}          # start by clearing EVERYTHING, then set the chosen subset
@@ -366,9 +371,10 @@ def export_runtime_env(include_secrets: bool = False) -> dict:
     process env, where sigil.env has been loaded) always, and (only when `include_secrets`) the resolved LLM +
     cloud provider keys from the keyring/TPM-sealed/env store. `vigil up` calls this in the SOVEREIGN venv and
     injects the result into the offense children, so the provider/model/key set in the UI reaches the offense
-    plane without it importing sigil. Only non-empty string values are emitted. Deliberately DELIVERS only the
-    llm/cloud keys (via _OFFENSE_LLM_SECRETS) — NOT the destruction signing key or GitHub token, which must
-    never reach an offense process (the uiproxy consumer re-allowlists the same set, defense-in-depth)."""
+    plane without it importing sigil. Only non-empty string values are emitted. Delivers every managed secret
+    via _OFFENSE_DELIVERED_SECRETS EXCEPT the auto-patch signing key + the voice key (_OFFENSE_EXCLUDED_SECRETS)
+    — the signing key must NEVER reach an offense process (A2a red-pen). The GitHub token IS delivered (LAP PR
+    push). The uiproxy consumer re-allowlists the same set (defense-in-depth)."""
     env: dict = {}
     for var in PROVIDER_ENV_VARS:
         val = os.environ.get(var, "").strip()
