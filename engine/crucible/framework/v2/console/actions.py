@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -83,8 +84,24 @@ def console_dir() -> Path:
     return d
 
 
+# A run id is a single, self-generated path component (`_new_run_id` → a timestamp + counter). Anything
+# else — a separator, "..", a leading dot, an absolute/drive form — is refused so a URL-derived run id can
+# never traverse out of the runs dir. Every console read/write route funnels through run_dir, so this one
+# guard covers report / worldmodel / coverage / evidence / remediate / reverify alike (fail-closed: a bad id
+# raises ValueError; remediate_plan _safe-wraps it to an honest empty state, every other route lets it
+# bubble to do_GET/do_POST which map it to a clean 404 — never a 500, never a traversal).
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _safe_run_id(run_id: str) -> str:
+    rid = str(run_id or "")
+    if ".." in rid or not _SAFE_RUN_ID.match(rid):
+        raise ValueError(f"unsafe run id: {run_id!r}")
+    return rid
+
+
 def run_dir(run_id: str) -> Path:
-    return console_dir() / "runs" / run_id
+    return console_dir() / "runs" / _safe_run_id(run_id)
 
 
 def _write_meta(run_id: str, **fields) -> None:

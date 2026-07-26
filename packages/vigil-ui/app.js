@@ -28,7 +28,7 @@
     { group: "MANAGE", items: [
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
-      { id: "brain", label: "Brain", icon: "brain", phase: "P7" },
+      { id: "brain", label: "Brain", icon: "brain", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
     ]},
     { group: "LEARN", items: [
@@ -57,7 +57,7 @@
       : (s.waiting > 0
         ? h("button.safety.waiting", { onClick: function () { location.hash = "#/safety"; } }, [V.icon("key"), s.waiting + " waiting for you"])
         : h("button.safety.clear", { onClick: function () { location.hash = "#/safety"; } }, [V.icon("check"), "Safe · 0 waiting"]));
-    const themeBtn = h("button.iconbtn", { title: "Toggle theme", onClick: toggleTheme }, V.icon("dot"));
+    const themeBtn = h("button.iconbtn", { title: "Toggle theme", "aria-label": "Toggle light/dark theme", onClick: toggleTheme }, V.icon("dot"));
     const cta = h("button.btn.primary", { onClick: function () { location.hash = "#/assess"; } }, [V.icon("bolt"), "New Assessment"]);
     return h("div#topbar", null, [seg, cmdk, h("div.spacer"), counts, live, safety, themeBtn, cta]);
   }
@@ -80,8 +80,12 @@
     const active = current() === it.id;
     const badge = it.id === "safety" && app.get().waiting > 0
       ? h("span.badge-count.owner", null, String(app.get().waiting)) : null;
+    function go() { location.hash = "#/" + it.id; }
     return h("div.nav-item" + (it.owner ? ".owner" : "") + (active ? ".active" : ""),
-      { dataset: { nav: it.id }, onClick: function () { location.hash = "#/" + it.id; } },
+      { dataset: { nav: it.id }, role: "link", tabindex: "0",
+        "aria-current": active ? "page" : null, "aria-label": it.label,
+        onClick: go,
+        onKeydown: function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } } },
       [V.icon(it.icon), h("span.txt", null, it.label), badge]);
   }
   function current() { return (location.hash || "#/home").slice(2).split("?")[0] || "home"; }
@@ -90,11 +94,11 @@
     document.body.appendChild(h("div#app", null, [
       h("div#brand", null, [h("span.logo", null, "V"), h("span.name", null, "VIGIL COMMAND")]),
       topbar(),
-      h("div#nav"),
+      h("div#nav", { role: "navigation", "aria-label": "Primary" }),
       h("div#main", null, h("div.wrap#screen")),
     ]));
     document.body.appendChild(h("div#drawer", null, [h("div.dh", null, [h("h2#drawer-title", null, "Detail"),
-      h("button.iconbtn", { onClick: closeDrawer }, V.icon("x"))]), h("div.db#drawer-body")]));
+      h("button.iconbtn", { "aria-label": "Close detail panel", onClick: closeDrawer }, V.icon("x"))]), h("div.db#drawer-body")]));
     renderNav();
   }
 
@@ -2192,6 +2196,135 @@
     ]);
   }
 
+  // ---- Brain screen (Memory / Benchmark / Catalog / Intel / Planner) ---------
+  // Every tab is REAL data from an existing read endpoint; honest empty states throughout — no fabricated
+  // priors/scores. Reasoning is presented as advisory-only (it never promotes a finding — the oracle does).
+  var BRAIN_TABS = [
+    { id: "memory", label: "Memory" }, { id: "benchmark", label: "Benchmark" },
+    { id: "catalog", label: "Catalog" }, { id: "intel", label: "Intel" }, { id: "planner", label: "Planner" },
+  ];
+  function renderBrain(screen) {
+    var B = { tab: (hashQuery().tab) || "memory", runs: [], run: null, catalogQ: "" };
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Brain"),
+        h("span.sub", null, "What the system has learned, how well it scores, and the capabilities it can bring to bear.")]),
+      h("div.segmented#brain-tabs", { style: { flexWrap: "wrap" } }),
+      h("div#brain-view", { style: { marginTop: "16px" } }),
+    ]);
+    function drawTabs() {
+      V.mount(V.$("#brain-tabs"), BRAIN_TABS.map(function (t) {
+        return h("button" + (B.tab === t.id ? ".on" : ""), { onClick: function () {
+          B.tab = t.id; history.replaceState(null, "", "#/brain?tab=" + t.id); drawTabs(); drawView(); } }, t.label);
+      }));
+    }
+    function drawView() {
+      var v = V.$("#brain-view"); if (!v) return;
+      V.mount(v, h("div.empty", null, "Loading…"));
+      if (B.tab === "memory") brainMemory(v);
+      else if (B.tab === "benchmark") brainBenchmark(v);
+      else if (B.tab === "catalog") brainCatalog(v, B);
+      else brainRunScoped(v, B, B.tab);   // intel / planner (per-engagement)
+    }
+    drawTabs(); drawView();
+  }
+
+  function brainMemory(v) {
+    V.getJSON(OFF("/api/memory")).then(function (m) {
+      var s = m.summary || {}; var priors = m.priors || [];
+      V.mount(v, [
+        h("div.grid.cols-4", null, [
+          V.tile("Engagements", String(s.engagements || 0), "learned from", null),
+          V.tile("Findings", String(s.findings || 0), "remembered", null),
+          V.tile("Priors", String(s.priors || 0), "per-class success", null),
+          V.tile("Dead ends", String(s.dead_ends || 0), "won't re-walk", null),
+        ]),
+        V.card("Learned priors", "MEMORY", priors.length
+          ? h("div.stack", null, priors.slice(0, 40).map(function (p) {
+              // real prior shape: {archetype, bug_class, surface, successes, attempts, mean, lower_bound}
+              var label = [p.bug_class, p.archetype, p.surface].filter(Boolean).join(" · ") || "prior";
+              var mean = (typeof p.mean === "number") ? Math.round(p.mean * 100) + "%" : "—";
+              var lb = (typeof p.lower_bound === "number") ? " (lcb " + Math.round(p.lower_bound * 100) + "%)" : "";
+              var n = (p.attempts != null) ? (" · " + (p.successes != null ? p.successes : "?") + "/" + p.attempts) : "";
+              return h("div.kv", null, [h("div.k", null, label),
+                h("div.v", null, "success " + mean + lb + n)]); }))
+          : h("div.empty", null, "No priors learned yet — the system learns a per-archetype/bug-class success rate as you run assessments; it never fabricates a score."), false),
+      ]);
+    }).catch(function () { V.mount(v, offlineEmpty()); });
+  }
+
+  function brainBenchmark(v) {
+    V.getJSON(OFF("/api/benchmark")).then(function (b) {
+      var base = b.baseline || {}; var scores = base.scores || {};
+      var rows = [];
+      Object.keys(scores).forEach(function (appName) {
+        var engines = scores[appName] || {};
+        Object.keys(engines).forEach(function (eng) {
+          var sc = engines[eng] || {};
+          rows.push(h("div.kv", null, [h("div.k", null, appName + " · " + eng),
+            h("div.v", null, "tp " + (sc.tp != null ? sc.tp : "—") + " · fp " + (sc.fp != null ? sc.fp : "—") + " · fn " + (sc.fn != null ? sc.fn : "—"))]));
+        });
+      });
+      V.mount(v, [
+        V.card("Benchmark baseline", "CALIBRATION", [
+          h("p.dim", { style: { marginBottom: "10px" } }, base.label || "the in-process benchmark corpus"),
+          rows.length ? h("div.stack", null, rows) : h("div.empty", null, "No benchmark scores recorded yet."),
+        ], false),
+        h("div.legend", null, [V.icon("info"), h("span", null, "tp = planted bugs found · fp = safe controls wrongly flagged · fn = missed bugs. The corpus includes safe controls a precise engine must leave alone.")]),
+      ]);
+    }).catch(function () { V.mount(v, offlineEmpty()); });
+  }
+
+  function brainCatalog(v, b) {
+    V.getJSON(OFF("/api/capabilities")).then(function (c) {
+      var caps = c.capabilities || [];
+      var list = h("div.stack#cap-list");
+      function drawCaps() {
+        var q = (b.catalogQ || "").toLowerCase();
+        var shown = caps.filter(function (x) { return !q || (String(x.label) + x.id + x.purpose).toLowerCase().indexOf(q) >= 0; });
+        V.mount(list, shown.length ? shown.map(function (x) {
+          return h("div.fix-card", null, [
+            h("div.fix-h", null, [h("b", null, x.label || x.id), x.tier ? h("span.pill.sm", null, x.tier) : null]),
+            h("div.dim", { style: { fontSize: "var(--fs-sm)", marginTop: "4px" } }, x.purpose || ""),
+          ]);
+        }) : h("div.empty", null, "No capability matches that filter."));
+      }
+      var input = h("input", { type: "text", placeholder: "Filter capabilities…", value: b.catalogQ || "",
+        onInput: function (e) { b.catalogQ = e.target.value; drawCaps(); } });
+      V.mount(v, [
+        h("div.field", { style: { maxWidth: "480px" } }, [h("label", null, "Capability catalog"), input]),
+        list,
+        h("div.legend", { style: { marginTop: "12px" } }, [V.icon("shield"), h("span", null, c.note || "Capabilities map to already-gated engage flags.")]),
+        h("div.legend", null, [V.icon("brain"), h("span", null, "Reasoning (critics, learning, reflection) is advisory only — it re-ranks and defers, but never promotes a finding. Only a fired oracle confirms.")]),
+      ]);
+      drawCaps();
+    }).catch(function () { V.mount(v, offlineEmpty()); });
+  }
+
+  function brainRunScoped(v, b, tab) {
+    var ep = tab === "intel" ? "/api/intel/" : "/api/planner/";
+    V.getJSON(OFF("/api/runs")).then(function (d) {
+      b.runs = (d && d.runs) || [];
+      if (!b.run || !b.runs.find(function (r) { return r.run_id === b.run.run_id; })) b.run = b.runs[0] || null;
+      var picker = b.runs.length ? h("div.field", { style: { maxWidth: "560px" } }, [
+        h("label", null, "Engagement"),
+        h("select", { onChange: function (e) { b.run = b.runs.find(function (r) { return r.run_id === e.target.value; }); brainRunScoped(v, b, tab); } },
+          b.runs.map(function (r) { return h("option", { value: r.run_id, selected: b.run && r.run_id === b.run.run_id }, (r.mode || "url") + " · " + (r.target || r.slug || r.run_id)); })),
+      ]) : null;
+      var slot = h("div#brain-rs", { style: { marginTop: "12px" } }, h("div.empty", null, b.runs.length ? "Loading…" : ("No engagements yet — " + tab + " is per-engagement.")));
+      V.mount(v, [picker, slot]);
+      if (!b.run) return;
+      var slug = b.run.slug || b.run.run_id;
+      V.getJSON(OFF(ep + encodeURIComponent(slug))).then(function (data) {
+        var host = V.$("#brain-rs"); if (!host) return;
+        var note = data.note || (data.present === false ? (tab + " has no data for this engagement yet") : "");
+        V.mount(host, [
+          note ? h("div.legend", null, [V.icon("info"), h("span", null, note)]) : null,
+          h("pre.code.scroll-x", null, JSON.stringify(data, null, 2)),
+        ]);
+      }).catch(function () { var host = V.$("#brain-rs"); if (host) V.mount(host, h("div.empty", null, "Could not load " + tab + ".")); });
+    }).catch(function () { V.mount(v, offlineEmpty()); });
+  }
+
   function renderStub(screen, item) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, item.label),
@@ -2220,6 +2353,7 @@
     if (id === "safety") { renderSafety(screen); return; }
     if (id === "defense") { renderDefense(screen); return; }
     if (id === "fixes") { renderFixes(screen); return; }
+    if (id === "brain") { renderBrain(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });
