@@ -1699,6 +1699,9 @@
             h("button.btn.owner", { onClick: function () { location.hash = "#/apikeys"; } }, [V.icon("key"), "Manage API keys"])),
         ], true),
       ]),
+      h("div.grid.cols-1", { style: { alignItems: "start", marginTop: "16px" } }, [
+        V.card("Bring your own model", "OWNER", h("div#set-provider", null, h("div.empty", null, "Loading…")), true),
+      ]),
     ]);
     loadSettings();
   }
@@ -1713,6 +1716,70 @@
 
   function drawSettings(st) {
     drawModelCard(st);
+    drawProviderCard(st);
+  }
+
+  // Bring-your-own-model: pick a provider (Bedrock/Vertex/Azure/Mistral/self-hosted/Ollama/Claude), enter its
+  // model + config; the server routes CRUCIBLE_LLM_BACKEND + model/config + Strix and clears the rest. Keys are
+  // sealed in the API Keys screen; this card links there and shows which keys the chosen provider needs.
+  function drawProviderCard(st) {
+    var host = V.$("#set-provider"); if (!host) return;
+    var providers = st.providers || [];
+    if (!providers.length) { V.mount(host, h("div.empty", null, "No providers available from the server.")); return; }
+    var cfg = st.provider_config || {};
+    var chosen = st.selected_provider || (providers[0] && providers[0].id);
+    var secretsByName = {}; (st.secrets || []).forEach(function (s) { secretsByName[s.name] = s; });
+
+    var body = h("div", null, []);
+    function spec() { return providers.filter(function (p) { return p.id === chosen; })[0] || providers[0]; }
+    function render() {
+      var p = spec();
+      var modelInput = h("input", { placeholder: (p.models && p.models[0]) || "model / deployment id",
+        value: (p.id === st.selected_provider ? "" : "") });
+      if (p.model_var && cfg[p.model_var]) modelInput.value = cfg[p.model_var];
+      var configInputs = (p.config || []).map(function (c) {
+        var inp = h("input", { placeholder: c.placeholder || "", value: cfg[c.env] || "" });
+        inp.dataset.env = c.env;
+        return h("div.field", { style: { marginTop: "10px" } },
+          [h("label", null, c.label + (c.required ? " *" : "")), inp]);
+      });
+      var keyNeeds = (p.keys || []).map(function (kn) {
+        var s = secretsByName[kn]; var hs = (s && s.health && s.health.status) || (s && s.set ? "unchecked" : "missing");
+        var cls = hs === "ok" ? ".ok" : (hs === "fail" || hs === "missing" ? ".danger" : "");
+        return h("span.pill.sm" + cls, { title: (s && s.health && s.health.reason) || "" },
+          (s && s.label || kn) + (hs === "missing" ? " — not set" : (hs === "fail" ? " — failing" : (hs === "ok" ? " ✓" : ""))));
+      });
+      var save = h("button.btn.owner", { onClick: function () {
+          var conf = {};
+          configInputs.forEach(function (fld) { var i = fld.querySelector("input"); if (i && i.dataset.env) conf[i.dataset.env] = (i.value || "").trim(); });
+          save.disabled = true;
+          settingsAct({ action: "set_provider", provider: p.id, model: (modelInput.value || "").trim(),
+            config: conf, reason: "set provider " + p.id },
+            (p.label) + " selected.", function () { loadSettings(); refreshKeysBadge(); })
+            .then(function () { save.disabled = false; });
+        } }, [V.icon("check"), "Use this provider"]);
+      V.mount(body, [
+        p.keyless ? null : h("div.hint", { style: { marginBottom: "6px" } },
+          [h("span", null, "Needs: "), keyNeeds.length ? keyNeeds : h("span.dim", null, "an API key"),
+           h("span", null, " · "), h("a", { href: "#/apikeys" }, "manage keys")]),
+        p.note ? h("div.set-status.off", null, [V.icon("info"), h("span", null, p.note)]) : null,
+        p.model_var ? h("div.field", null, [h("label", null, "Model" + (p.models && p.models.length ? " (suggested: " + p.models.join(", ") + ")" : "")), modelInput]) : h("div.hint", null, "This provider uses your local session — no model id needed."),
+        configInputs,
+        h("div.acts", { style: { marginTop: "12px" } }, save),
+      ]);
+    }
+    var sel = h("select.input", { onChange: function (e) { chosen = e.target.value; render(); } },
+      providers.map(function (p) {
+        var o = h("option", { value: p.id }, p.label + (p.id === st.selected_provider ? " — current" : ""));
+        if (p.id === chosen) o.selected = true;
+        return o;
+      }));
+    V.mount(host, [
+      h("div.field", null, [h("label", null, "Provider"), sel]),
+      body,
+      h("div.hint", { style: { marginTop: "10px" } }, "Routes the offense reasoning engine (and the Strix codebase agent) to your chosen provider. Cloud/self-hosted models need their key + config; sovereign deployments can pick an EU or local provider. A running engine picks up the change on the next `vigil up`."),
+    ]);
+    render();
   }
 
   // A live-health chip for a SET secret: ok (green) / fail (red) / can't-verify (grey) / not-tested.

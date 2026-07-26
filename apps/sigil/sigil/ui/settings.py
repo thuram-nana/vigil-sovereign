@@ -113,13 +113,147 @@ _KEYLESS_IDS = frozenset(c["id"] for c in MODEL_CHOICES if c["keyless"])
 
 
 def _env_plan(model: str) -> dict:
-    """The exact env a choice applies (empty string = CLEAR the var). A keyless choice (claude-code)
-    ROUTES the offense backend by name and clears the model-id vars — feeding a backend name to the
-    anthropic SDK / `claude --model` was the red-pen bug. An API-model choice sets the model ids and
-    clears any forced backend so offense availability selects the anthropic SDK when a key is present."""
+    """The exact env a built-in Claude choice applies (empty string = CLEAR the var). A keyless choice
+    (claude-code) ROUTES the offense backend by name and clears the model-id vars; an API-model choice sets
+    the model ids and clears any forced backend. Retained for back-compat; set_model now routes through
+    set_provider (the general BYO path) so there is one env-writer."""
     if model in _KEYLESS_IDS:
         return {_BACKEND_ENV: model, _ANTHROPIC_MODEL_ENV: "", _SIGIL_MODEL_ENV: ""}
     return {_BACKEND_ENV: "", _ANTHROPIC_MODEL_ENV: model, _SIGIL_MODEL_ENV: model}
+
+
+# --- Bring-your-own-model providers (Phase A2b) ----------------------------------------------------
+# The closed provider registry. Selecting a provider ROUTES CRUCIBLE_LLM_BACKEND + the provider's model var
+# + its (non-secret) config vars, CLEARS every other provider's vars, and maps the same choice onto Strix
+# (STRIX_LLM/LLM_API_BASE) so the codebase agent uses the same model. Keys live in the API-keys plane
+# (SECRET_META, category llm/cloud); config (regions/endpoints/project ids) lives here. `backend` is the
+# CRUCIBLE_LLM_BACKEND value ("" = the default anthropic SDK); `model_var` is where the model/deployment id
+# goes; `sovereign_model` marks providers whose model also drives SIGIL research (`claude -p`).
+_PROVIDER_ORDER = ("anthropic", "anthropic-zdr", "bedrock", "vertex", "mistral", "azure_openai",
+                   "self-hosted", "ollama", "claude-code")
+PROVIDERS = {
+    "anthropic": {"label": "Claude (Anthropic API)", "backend": "", "model_var": _ANTHROPIC_MODEL_ENV,
+                  "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+                  "keyless": False, "keys": ["ANTHROPIC_API_KEY"], "config": (),
+                  "strix": "anthropic/{model}", "sovereign_model": True},
+    "anthropic-zdr": {"label": "Claude (zero-data-retention API)", "backend": "anthropic-zdr",
+                      "model_var": _ANTHROPIC_MODEL_ENV, "models": ["claude-opus-5", "claude-sonnet-5"],
+                      "keyless": False, "keys": ["ANTHROPIC_API_KEY"], "config": (),
+                      "strix": "anthropic/{model}", "sovereign_model": True},
+    "bedrock": {"label": "Claude on AWS Bedrock", "backend": "bedrock", "model_var": "CRUCIBLE_BEDROCK_MODEL",
+                "models": ["anthropic.claude-opus-5", "anthropic.claude-sonnet-5"], "keyless": False,
+                "keys": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], "strix": "bedrock/{model}",
+                "config": ({"env": "CRUCIBLE_BEDROCK_REGION", "label": "AWS region",
+                            "placeholder": "eu-west-1", "required": True},)},
+    "vertex": {"label": "Claude on Google Vertex", "backend": "vertex", "model_var": "CRUCIBLE_VERTEX_MODEL",
+               "models": ["claude-opus-5", "claude-sonnet-5"], "keyless": False, "keys": [],
+               "strix": "vertex_ai/{model}",
+               "note": "Also set GOOGLE_APPLICATION_CREDENTIALS (service-account JSON path) below.",
+               "config": ({"env": "CRUCIBLE_VERTEX_PROJECT", "label": "GCP project id",
+                           "placeholder": "my-project", "required": True},
+                          {"env": "CRUCIBLE_VERTEX_REGION", "label": "Vertex region",
+                           "placeholder": "europe-west4", "required": True},
+                          {"env": "GOOGLE_APPLICATION_CREDENTIALS", "label": "Service-account JSON path",
+                           "placeholder": "/path/to/sa.json", "required": True})},
+    "mistral": {"label": "Mistral (EU)", "backend": "mistral", "model_var": "CRUCIBLE_MISTRAL_MODEL",
+                "models": ["mistral-large-latest"], "keyless": False, "keys": ["MISTRAL_API_KEY"],
+                "config": (), "strix": "mistral/{model}"},
+    "azure_openai": {"label": "Azure OpenAI", "backend": "azure_openai",
+                     "model_var": "CRUCIBLE_AZURE_OPENAI_DEPLOYMENT", "models": [], "keyless": False,
+                     "keys": ["AZURE_OPENAI_API_KEY"], "strix": "azure/{model}",
+                     "config": ({"env": "AZURE_OPENAI_ENDPOINT", "label": "Azure endpoint",
+                                 "placeholder": "https://<resource>.openai.azure.com", "required": True},
+                                {"env": "CRUCIBLE_AZURE_OPENAI_API_VERSION", "label": "API version",
+                                 "placeholder": "2024-06-01", "required": False})},
+    "self-hosted": {"label": "Self-hosted (OpenAI-compatible)", "backend": "self-hosted",
+                    "model_var": "CRUCIBLE_SELFHOSTED_MODEL", "models": [], "keyless": True, "keys": [],
+                    "strix": "openai/{model}", "strix_base": "CRUCIBLE_SELFHOSTED_ENDPOINT",
+                    "config": ({"env": "CRUCIBLE_SELFHOSTED_ENDPOINT", "label": "OpenAI-compatible base URL",
+                                "placeholder": "http://localhost:8000/v1", "required": True},)},
+    "ollama": {"label": "Ollama (local)", "backend": "ollama", "model_var": "CRUCIBLE_OLLAMA_MODEL",
+               "models": ["qwen2.5-coder:32b"], "keyless": True, "keys": [], "strix": "ollama/{model}",
+               "strix_base": "CRUCIBLE_OLLAMA_HOST",
+               "config": ({"env": "CRUCIBLE_OLLAMA_HOST", "label": "Ollama host",
+                           "placeholder": "http://localhost:11434", "required": False},)},
+    "claude-code": {"label": "Claude Code (local session)", "backend": "claude-code", "model_var": "",
+                    "models": [], "keyless": True, "keys": [], "config": (), "strix": ""},
+}
+_PROVIDER_IDS = frozenset(PROVIDERS)
+_STRIX_VARS = ("STRIX_LLM", "LLM_API_BASE")
+# Every var any provider touches — set_provider CLEARS all of these, then sets the chosen provider's subset,
+# so a prior provider's model/region/endpoint never lingers to mislead the engine. Also the exact set
+# export_runtime_env delivers to the offense plane.
+_ALL_MODEL_VARS = tuple(sorted({p["model_var"] for p in PROVIDERS.values() if p.get("model_var")}))
+_ALL_CONFIG_VARS = tuple(sorted({c["env"] for p in PROVIDERS.values() for c in p.get("config", ())}))
+PROVIDER_ENV_VARS = tuple(dict.fromkeys(
+    (_BACKEND_ENV, _ANTHROPIC_MODEL_ENV, _SIGIL_MODEL_ENV, _CHOICE_ENV, *_ALL_MODEL_VARS,
+     *_ALL_CONFIG_VARS, *_STRIX_VARS)))
+# The sealed secrets that MAY reach the keyless offense engine: every managed secret EXCEPT the auto-patch
+# signing key. The one hard exclusion is VIGIL_DESTRUCTION_OWNER_KEY — an offense process must never receive
+# the key that AUTHORIZES a destructive PR (it must not be able to self-authorize; A2a red-pen). The GitHub
+# token + LLM/cloud/integration keys are legitimately needed by the offense engine (PR push, model calls,
+# OAST relay, gated API).
+_OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n != "VIGIL_DESTRUCTION_OWNER_KEY")
+
+
+def _validate_config_value(env: str, value: str) -> str:
+    """A non-secret provider-config value (region/endpoint/project/path). Reject control chars (envfile
+    line-injection) + oversize; light endpoint sanity (the BACKEND does the authoritative host validation
+    at construct time). Returns the cleaned value ("" clears the var)."""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if len(value) > 1024 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+        raise ValueError(f"invalid value for {env}")
+    if env == "AZURE_OPENAI_ENDPOINT" and not value.startswith("https://"):
+        raise ValueError("AZURE_OPENAI_ENDPOINT must start with https://")
+    if env == "CRUCIBLE_SELFHOSTED_ENDPOINT" and not (value.startswith("http://") or value.startswith("https://")):
+        raise ValueError("CRUCIBLE_SELFHOSTED_ENDPOINT must be an http(s) URL")
+    return value
+
+
+def set_provider(provider: str, model: str = "", config: Optional[dict] = None, *,
+                 store, owner_key, reason: str = "") -> dict:
+    """Route the whole system to a provider: set CRUCIBLE_LLM_BACKEND + the model var + the provider's config
+    vars + the Strix mapping, and CLEAR every other provider's vars. Fail-closed on an unknown provider, a
+    missing required config field, or an invalid value. Records the (non-secret) choice on the spine. This is
+    the single env-writer both the built-in model picker and the BYO picker go through."""
+    provider = str(provider or "").strip()
+    if provider not in _PROVIDER_IDS:
+        raise ValueError(f"unknown provider {provider!r}: choose one of {', '.join(sorted(_PROVIDER_IDS))}")
+    spec = PROVIDERS[provider]
+    model = str(model or "").strip()
+    config = {str(k): str(v) for k, v in (config or {}).items()}
+
+    plan = {v: "" for v in PROVIDER_ENV_VARS}          # start by clearing EVERYTHING, then set the chosen subset
+    plan[_BACKEND_ENV] = spec["backend"]               # "" for the default anthropic SDK
+    if spec.get("model_var") and model:
+        plan[spec["model_var"]] = model
+    if spec.get("sovereign_model") and model:
+        plan[_SIGIL_MODEL_ENV] = model                 # the same model drives SIGIL research (claude -p)
+    # provider config: only the provider's DECLARED config envs are honored; required ones must be present
+    declared = {c["env"]: c for c in spec.get("config", ())}
+    for env, field in declared.items():
+        val = _validate_config_value(env, config.get(env, ""))
+        if field.get("required") and not val:
+            raise ValueError(f"{spec['label']} needs {field['label']} ({env})")
+        plan[env] = val
+    # Strix mapping (LiteLLM): same model on the codebase agent. self-hosted/ollama also pass a base URL.
+    if spec.get("strix") and model:
+        plan["STRIX_LLM"] = spec["strix"].format(model=model)
+        base_env = spec.get("strix_base")
+        if base_env:
+            plan["LLM_API_BASE"] = plan.get(base_env, "")
+    plan[_CHOICE_ENV] = provider
+
+    for var, val in plan.items():
+        _persist_env(var, val)
+    seq = _record_signed_event(
+        store, owner_key,
+        {"signal": "governor.provider_set", "provider": provider, "backend": spec["backend"] or "anthropic",
+         "model": model}, reason)
+    return {"ok": True, "action": "set_provider", "provider": provider,
+            "backend": spec["backend"] or "anthropic", "model": model, "recorded_seq": seq}
 
 
 def _fingerprint(value: str) -> str:
@@ -213,36 +347,36 @@ def check_secrets(*, store, owner_key, reason: str = "") -> dict:
 
 
 def set_model(model: str, *, store, owner_key, reason: str = "") -> dict:
-    """Select the primary reasoning model (a closed allowlist). Applies the choice's exact env plan for
-    BOTH planes (routing the backend for a keyless choice, setting the model id otherwise, clearing the
-    rest) and records the (non-secret) choice on the spine. Returns {ok, model, backend, recorded_seq}."""
+    """Select a built-in Claude model (a closed allowlist) — the quick picker. Routes through set_provider (the
+    single env-writer): a keyless id → the claude-code provider, else the anthropic provider. Returns the
+    set_model-shaped result for back-compat."""
     model = str(model or "").strip()
     if model not in _MODEL_IDS:
         raise ValueError(f"unknown model {model!r}: choose one of {', '.join(sorted(_MODEL_IDS))}")
-    plan = _env_plan(model)
-    for var, val in plan.items():
-        _persist_env(var, val)
-    _persist_env(_CHOICE_ENV, model)                 # the display source of truth
-    backend = plan.get(_BACKEND_ENV) or "anthropic"
-    seq = _record_signed_event(
-        store, owner_key, {"signal": "governor.model_set", "model": model, "backend": backend}, reason)
-    return {"ok": True, "action": "set_model", "model": model, "backend": backend, "recorded_seq": seq}
+    if model in _KEYLESS_IDS:
+        r = set_provider("claude-code", "", store=store, owner_key=owner_key, reason=reason)
+    else:
+        r = set_provider("anthropic", model, store=store, owner_key=owner_key, reason=reason)
+    return {"ok": True, "action": "set_model", "model": model, "backend": r["backend"],
+            "recorded_seq": r["recorded_seq"]}
 
 
 def export_runtime_env(include_secrets: bool = False) -> dict:
-    """The runtime LLM env the keyless offense engine needs — the model vars (from the process env, where
-    sigil.env has been loaded) always, and (only when `include_secrets`) the resolved API key from the
-    keyring/TPM-sealed/env store. `vigil up` calls this in the SOVEREIGN venv and injects the result into
-    the offense children, so the key/model set in the UI reaches the offense plane without it importing
-    sigil. Only non-empty string values are emitted."""
+    """The runtime LLM env the keyless offense engine needs — the provider model/config/Strix vars (from the
+    process env, where sigil.env has been loaded) always, and (only when `include_secrets`) the resolved LLM +
+    cloud provider keys from the keyring/TPM-sealed/env store. `vigil up` calls this in the SOVEREIGN venv and
+    injects the result into the offense children, so the provider/model/key set in the UI reaches the offense
+    plane without it importing sigil. Only non-empty string values are emitted. Deliberately DELIVERS only the
+    llm/cloud keys (via _OFFENSE_LLM_SECRETS) — NOT the destruction signing key or GitHub token, which must
+    never reach an offense process (the uiproxy consumer re-allowlists the same set, defense-in-depth)."""
     env: dict = {}
-    for var in MODEL_ENV_VARS:
+    for var in PROVIDER_ENV_VARS:
         val = os.environ.get(var, "").strip()
         if val:
             env[var] = val
     if include_secrets:
         ss = SecretStore()
-        for name in SECRET_NAMES:
+        for name in _OFFENSE_DELIVERED_SECRETS:
             val = ss.get(name)
             if val:
                 env[name] = val
@@ -283,14 +417,37 @@ def settings_status() -> dict:
     # the SELECTED choice is tracked explicitly (a keyless choice sets no model id), so the picker
     # reflects it even for claude-code. offense_model is the HONEST effective routing: a forced backend
     # (claude-code) shows the local session, otherwise the anthropic-SDK model id (or its default).
-    selected = os.environ.get(_CHOICE_ENV, "").strip()
+    selected_provider = os.environ.get(_CHOICE_ENV, "").strip()
     forced_backend = os.environ.get(_BACKEND_ENV, "").strip()
     anthropic_model = os.environ.get(_ANTHROPIC_MODEL_ENV, "").strip()
     sovereign_model = os.environ.get(_SIGIL_MODEL_ENV, "").strip()
-    if forced_backend == "claude-code":
+    # _CHOICE_ENV now tracks the PROVIDER; derive the built-in picker's "current" model from the actual model
+    # var so the quick-pick highlight still works (anthropic-family → the anthropic model id; claude-code).
+    if selected_provider == "claude-code":
+        selected_model = "claude-code"
         offense_model = "claude-code (local session)"
-    else:
+    elif selected_provider in ("anthropic", "anthropic-zdr"):
+        selected_model = anthropic_model
         offense_model = anthropic_model or _DEFAULT_OFFENSE_MODEL
+    else:
+        spec = PROVIDERS.get(selected_provider, {})
+        cur = os.environ.get(spec.get("model_var", ""), "").strip() if spec else ""
+        selected_model = None
+        offense_model = (f"{cur} ({selected_provider})" if cur else (forced_backend or "anthropic"))
+    # a serializable provider registry for the UI (config schema + which keys each needs) + current config
+    providers = []
+    for pid in _PROVIDER_ORDER:
+        p = PROVIDERS[pid]
+        providers.append({
+            "id": pid, "label": p["label"], "backend": p["backend"] or "anthropic",
+            "keyless": p["keyless"], "keys": list(p.get("keys", [])),
+            "models": list(p.get("models", [])), "model_var": p.get("model_var", ""),
+            "note": p.get("note", ""),
+            "config": [{"env": c["env"], "label": c["label"], "placeholder": c.get("placeholder", ""),
+                        "required": bool(c.get("required"))} for c in p.get("config", ())],
+        })
+    provider_config = {v: os.environ.get(v, "").strip()          # non-secret config values (safe to show)
+                       for v in _ALL_CONFIG_VARS if os.environ.get(v, "").strip()}
     return {
         "secrets": secrets,
         "secret_backend": ss.backend,
@@ -298,7 +455,10 @@ def settings_status() -> dict:
         "secret_categories": [{"id": c, "label": _SECRET_CATEGORY_LABEL[c]}
                               for c in _SECRET_CATEGORY_ORDER],
         "models": list(MODEL_CHOICES),
-        "selected_model": selected if selected in _MODEL_IDS else None,
+        "providers": providers,
+        "selected_provider": selected_provider if selected_provider in _PROVIDER_IDS else None,
+        "provider_config": provider_config,
+        "selected_model": selected_model if selected_model in _MODEL_IDS else None,
         "offense_backend": forced_backend or "anthropic",
         "offense_model": offense_model,
         "sovereign_model": sovereign_model or None,
