@@ -176,7 +176,8 @@ def _docker_ready() -> tuple[bool, str]:
         return False, "the 'docker' CLI was not found on PATH"
     try:
         p = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=8)  # noqa: S603,S607
-    except (subprocess.TimeoutExpired, OSError) as e:
+    except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+        # ValueError covers a UnicodeDecodeError from text=True on non-UTF-8 output — so "never raises" holds.
         return False, f"the docker daemon did not answer ({type(e).__name__})"
     if p.returncode == 0:
         return True, "docker daemon reachable"
