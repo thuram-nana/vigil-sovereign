@@ -303,14 +303,24 @@ def find_voices(query: str = "jarvis", api_key: str | None = None, timeout: int 
 def set_voice(voice_id: str) -> None:
     """Persist the chosen TTS voice_id as SIGIL_TTS_VOICE_ID in ~/.sigil/sigil.env (loaded by
     config at import), so ElevenLabsTts uses it by default everywhere."""
-    from ..config import SIGIL_HOME
+    import os
+
+    from ..config import SIGIL_HOME, assert_env_value_safe
+    assert_env_value_safe(voice_id, "voice id", maxlen=256)   # a voice id is written raw into sigil.env
     env_path = SIGIL_HOME / "sigil.env"
+    SIGIL_HOME.mkdir(parents=True, exist_ok=True)
     lines = []
     if env_path.exists():
-        lines = [ln for ln in env_path.read_text(encoding="utf-8").splitlines()
-                 if not ln.strip().startswith("SIGIL_TTS_VOICE_ID=")]
+        # Parse on "\n" ONLY (not str.splitlines()) so an existing value carrying a Unicode line separator
+        # (U+0085/U+2028/U+2029) is never re-split into a second `KEY=value` line here. Blank lines dropped.
+        lines = [ln for ln in env_path.read_text(encoding="utf-8").split("\n")
+                 if ln.strip() and not ln.strip().startswith("SIGIL_TTS_VOICE_ID=")]
     lines.append(f"SIGIL_TTS_VOICE_ID={voice_id}")
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Create 0600 up-front (no world-readable window) — sigil.env also holds sealed secrets on the envfile
+    # backend, so this writer must match _persist_env/_env_upsert instead of write_text's umask default.
+    fd = os.open(str(env_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 class MicAudioSource:

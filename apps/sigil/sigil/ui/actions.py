@@ -12,7 +12,8 @@ from ..spine.store import SpineStore
 # the closed set of gated actions the plane will route (fail-closed: anything else is refused)
 _CAP_ACTIONS = frozenset({"disable_gesture", "enable_gesture", "disable_voice", "enable_voice",
                           "disable_both", "enable_both"})
-_SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "check_secret", "check_secrets"})   # secrets/model plane
+_SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider",
+                               "check_secret", "check_secrets"})   # secrets/model/provider plane
 ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke"}) | _CAP_ACTIONS \
     | _SETTINGS_ACTIONS
 
@@ -61,6 +62,11 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
                                           store=store, owner_key=owner, reason=reason)
         if action == "check_secrets":
             return _settings.check_secrets(store=store, owner_key=owner, reason=reason)
+        if action == "set_provider":
+            cfg = params.get("config") or {}
+            return _settings.set_provider(str(params.get("provider", "")), str(params.get("model", "")),
+                                          cfg if isinstance(cfg, dict) else {},
+                                          store=store, owner_key=owner, reason=reason)
         return _settings.set_model(str(params.get("model", "")),
                                    store=store, owner_key=owner, reason=reason)
     raise ValueError(f"unhandled action: {action!r}")   # unreachable (ACTIONS-gated)

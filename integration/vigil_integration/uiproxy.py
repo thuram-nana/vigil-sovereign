@@ -421,6 +421,27 @@ def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None)
     return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
 
 
+# The runtime vars the offense engine may receive from the sovereign settings plane. The ONE hard exclusion
+# is VIGIL_DESTRUCTION_OWNER_KEY — a keyless offense process must never receive the auto-patch SIGNING key
+# (it must not be able to self-authorize a destructive PR; A2a red-pen). The GitHub token + LLM/cloud/
+# integration keys ARE legitimately needed by the offense engine (PR push, model calls, OAST relay, gated API).
+_OFFENSE_ENV_ALLOWLIST = frozenset({
+    # routing + model/config (bring-your-own-model providers)
+    "CRUCIBLE_LLM_BACKEND", "SIGIL_LLM_MODEL", "VIGIL_MODEL_CHOICE",
+    "CRUCIBLE_ANTHROPIC_MODEL", "CRUCIBLE_BEDROCK_MODEL", "CRUCIBLE_VERTEX_MODEL",
+    "CRUCIBLE_MISTRAL_MODEL", "CRUCIBLE_AZURE_OPENAI_DEPLOYMENT", "CRUCIBLE_SELFHOSTED_MODEL",
+    "CRUCIBLE_OLLAMA_MODEL",
+    "CRUCIBLE_BEDROCK_REGION", "CRUCIBLE_VERTEX_PROJECT", "CRUCIBLE_VERTEX_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_OPENAI_ENDPOINT", "CRUCIBLE_AZURE_OPENAI_API_VERSION",
+    "CRUCIBLE_SELFHOSTED_ENDPOINT", "CRUCIBLE_OLLAMA_HOST",
+    "STRIX_LLM", "LLM_API_BASE",
+    # provider + integration KEYS the offense engine needs — NEVER VIGIL_DESTRUCTION_OWNER_KEY
+    "ANTHROPIC_API_KEY", "MISTRAL_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY",
+    "AZURE_OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "GITHUB_TOKEN", "CRUCIBLE_API_KEY", "CRUCIBLE_OOB_RELAY_SECRET",   # never ELEVENLABS (voice = sovereign)
+})
+
+
 def _resolve_offense_llm_env(sigil_bin: Path) -> dict:
     """Ask the SOVEREIGN venv for the runtime LLM env (model vars + resolved API key) and hand it to the
     keyless offense children, so the key/model set in the UI reaches the offense engine WITHOUT the
@@ -443,10 +464,9 @@ def _resolve_offense_llm_env(sigil_bin: Path) -> dict:
         return {}
     # Defense-in-depth: even though the sovereign emitter is closed to these keys, the CONSUMER also
     # allowlists them by name (str→str, non-empty) — so this can never become an arbitrary env-injection
-    # channel even if the emitter changed. These are the only LLM-runtime vars the offense engine reads.
-    allow = {"CRUCIBLE_LLM_BACKEND", "CRUCIBLE_ANTHROPIC_MODEL", "SIGIL_LLM_MODEL", "ANTHROPIC_API_KEY"}
+    # channel even if the emitter changed.
     return {k: str(v) for k, v in data.items()
-            if k in allow and isinstance(v, str) and v}
+            if k in _OFFENSE_ENV_ALLOWLIST and isinstance(v, str) and v}
 
 
 def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:

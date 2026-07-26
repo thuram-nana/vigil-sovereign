@@ -99,12 +99,24 @@ class SecretStore:
 
     @staticmethod
     def _env_upsert(key: str, value: str) -> None:
+        # The envfile is the injectable KEY=value tier; any caller (set_secret, agents/vault passwords, a
+        # direct SecretStore().set) reaches here, so the line-injection guard lives AT this write primitive.
+        # Guard BOTH axes: a literal "\n"/Unicode line separator in the VALUE *or* the KEY (e.g. a vault
+        # `service` in `vault/{service}/password`) would otherwise plant a second KEY=value line.
+        from ..config import assert_env_key_safe, assert_env_value_safe
+        assert_env_key_safe(key)
+        assert_env_value_safe(value, f"secret value for {key}")
         f = SIGIL_HOME / "sigil.env"
         SIGIL_HOME.mkdir(parents=True, exist_ok=True)
         lines = []
         found = False
         try:
-            for ln in f.read_text(encoding="utf-8").splitlines():
+            # Parse on "\n" ONLY (not str.splitlines()) so a stored value containing a Unicode line
+            # separator (U+0085/U+2028/U+2029) is never re-split + re-materialized as a real newline on
+            # the next upsert (an envfile line-injection). Blank lines are dropped.
+            for ln in f.read_text(encoding="utf-8").split("\n"):
+                if not ln.strip():
+                    continue
                 if ln.split("=", 1)[0].strip() == key:
                     lines.append(f"{key}={value}"); found = True
                 else:

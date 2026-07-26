@@ -27,6 +27,40 @@ def _resolve_home() -> Path:
 SIGIL_HOME = _resolve_home()
 
 
+# Every character str.splitlines() treats as a line boundary. The sigil.env tier is a line-based
+# `KEY=value` format with NO escaping, so ANY of these inside a value would break it into an extra line —
+# an envfile line-injection that can plant a var like VIGIL_DESTRUCTION_OWNER_KEY (the auto-patch signing
+# key). An ord<0x20/==0x7f guard misses three: NEL (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR
+# (U+2029). A literal "\n" is stopped ONLY by this input guard (the reader splits ON "\n", so parsing can
+# never neutralize a real newline) — so EVERY writer of sigil.env must validate through it before writing.
+_ENV_LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def assert_env_value_safe(value: str, what: str = "value", *, maxlen: int = 8192) -> None:
+    """Fail-closed if `value` cannot be persisted as a single `KEY=value` line in sigil.env: reject a
+    control character (ord < 0x20 or DEL), any Unicode line separator str.splitlines() honors, or an
+    oversize value. The ONE guard EVERY sigil.env writer shares (settings._persist_env, secrets._env_upsert,
+    voice.set_voice) so a line-injection cannot recur at a writer that forgot it."""
+    if len(value) > maxlen:
+        raise ValueError(f"invalid {what}: too long (> {maxlen})")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f or c in _ENV_LINE_BREAK_CHARS for c in value):
+        raise ValueError(f"invalid {what}: control or line-break character")
+
+
+def assert_env_key_safe(key: str) -> None:
+    """Fail-closed if `key` cannot be the KEY half of a single `KEY=value` line in sigil.env: reject empty,
+    any control/line-break char (a str.splitlines() boundary), or an '=' (which would split the assignment).
+    Every writer emits f"{key}={value}", so the KEY needs the same class-guard as the value — a line-break in
+    a caller-supplied key (e.g. a CredentialVault `service`) would otherwise plant a second KEY=value line
+    just like a poisoned value. Legal keys (A-Z/_/-/./ and the `vault/<svc>/password` form) pass unchanged."""
+    if not key:
+        raise ValueError("invalid env key: empty")
+    if "=" in key:
+        raise ValueError("invalid env key: contains '='")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f or c in _ENV_LINE_BREAK_CHARS for c in key):
+        raise ValueError("invalid env key: control or line-break character")
+
+
 def _load_env_file(home: Path | None = None) -> None:
     """Load persisted `KEY=VALUE` settings from ~/.sigil/sigil.env so a value set once (e.g.
     SIGIL_QDRANT_URL for server mode) reaches BOTH the CLI and the MCP server that Claude spawns
@@ -39,7 +73,11 @@ def _load_env_file(home: Path | None = None) -> None:
         raw = f.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return
-    for line in raw.splitlines():
+    # Parse on "\n" ONLY (not str.splitlines()): a persisted value may contain a Unicode line separator
+    # (U+0085/U+2028/U+2029) which str.splitlines() would treat as a line boundary, splitting one value
+    # into a second `KEY=value` line — an envfile line-injection. On "\n" the separator stays inert
+    # inside its value. (The settings-plane writers also reject those chars at the source.)
+    for line in raw.split("\n"):
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
