@@ -90,6 +90,12 @@ def build_offense_gate(
     so a tampered scope/window/destructive-flag is rejected at load (the map's biggest fail-open).
     A ``None`` trust_root is refused: it would load the authority UNSIGNED, so it fails closed here.
 
+    ``now`` MUST be a TRUSTED-caller value (a datetime, an epoch float, or None → real clock) — NEVER
+    request/agent/attacker-derived data. It is load-bearing for the CRUCIBLE validity-window and the
+    destruction dead-man's-switch: an in-window value passed for an out-of-window authority would honor it.
+    The live wiring passes no ``now`` (→ None → real clock), and the per-call ``gate(...)`` has no ``now``
+    argument, so the only path that sets it is the trusted caller here.
+
     Destructive actions are threshold-gated: pass a ``destruction_authority`` (immutable
     :class:`destruction_gate.DestructionAuthority` from deployment config) and an ``is_consumed``
     single-use check at build time, and per-call the ``destruction_action`` +
