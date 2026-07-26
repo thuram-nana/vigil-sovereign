@@ -85,6 +85,7 @@ class _Quorum:
     approved: bool = False
     reason: str = ""
     signer_ids: list = field(default_factory=list)
+    nonce: str = ""                          # the single-use nonce (surfaced so it can be atomically reserved)
 
 
 def _safe_workdir(base_dir: str, remediation_id: Any) -> Optional[str]:
@@ -328,13 +329,22 @@ class CodefixSession:
 
 
 def build_destruction_quorum(*, authority: Any, signed: Any, slug: str, is_consumed: Callable[[str], bool],
+                             consume: Optional[Callable[[str], bool]] = None,
                              now: Optional[Callable[[], float]] = None) -> Callable[[Any], _Quorum]:
     """Build the PR-leg m-of-n quorum callable from a PROVISIONED owner-inclusive SignedDestructionAuthorization
     + DestructionAuthority. It rebuilds the per-request DestructiveAction (action_id 'pr-<remediation_id>',
     target=repo, engagement=slug) and verifies the signed authorization via ``authorize_destruction`` — which
     fail-closed checks well-formedness, the gated class, action match, the not_before/not_after dead-man's-
-    switch window, the mandatory owner, single-use (``is_consumed``), and the m-of-n threshold. Off without
-    provisioning: ``autopatch_live`` defaults the quorum to a hard DENY."""
+    switch window, the mandatory owner, single-use (``is_consumed``), and the m-of-n threshold.
+
+    SINGLE-USE (atomic): ``is_consumed`` is a cheap advisory early-reject inside ``authorize_destruction``; the
+    AUTHORITATIVE guarantee is ``consume`` — an ATOMIC try-consume that returns True iff THIS caller won the
+    single use. When ``consume`` is given, the authorized nonce is atomically reserved the instant it
+    authorizes (before the PR runs — the replay-safe direction). If ``consume`` returns False the nonce was
+    already spent by a prior OR concurrent caller ⇒ DENY (replay). If it raises ⇒ DENY (fail-closed: never
+    authorize a destruction we could not exclusively reserve). Because the consume is the serialization
+    point, one owner-signed authorization drives exactly ONE destructive PR even under concurrent callers.
+    Off without provisioning: ``autopatch_live`` defaults the quorum to a hard DENY."""
     from ..destruction_gate import DestructiveAction, authorize_destruction
 
     def quorum(request: Any) -> _Quorum:
@@ -347,12 +357,34 @@ def build_destruction_quorum(*, authority: Any, signed: Any, slug: str, is_consu
                 blast_class="destructive")
             d = authorize_destruction(action, signed, authority=authority,
                                       now=_epoch(now() if now else None), is_consumed=is_consumed)
-            return _Quorum(approved=getattr(d, "authorized", False) is True,   # STRICT: only real True
-                           reason=getattr(d, "reason", ""))
+            approved = getattr(d, "authorized", False) is True     # STRICT: only real True
+            nonce = str(getattr(d, "nonce", "") or "")
+            if approved and consume is not None:
+                try:
+                    won = consume(nonce)                            # ATOMIC reserve — exactly one caller wins
+                except Exception:  # noqa: BLE001 — cannot exclusively reserve ⇒ refuse (fail-closed)
+                    return _Quorum(approved=False, nonce=nonce,
+                                   reason="could not record single-use consumption — refusing (fail-closed)")
+                if won is not True:                                 # STRICT: lost the race / already spent
+                    return _Quorum(approved=False, nonce=nonce,
+                                   reason="authorization already consumed (replay)")
+            return _Quorum(approved=approved, reason=getattr(d, "reason", ""), nonce=nonce)
         except Exception:  # noqa: BLE001 — any error ⇒ deny (fail-closed)
             return _Quorum(approved=False, reason="destruction authorization failed (fail-closed)")
 
     return quorum
+
+
+def file_backed_quorum(*, authority: Any, signed: Any, slug: str, ledger_path: str,
+                       now: Optional[Callable[[], float]] = None) -> Callable[[Any], _Quorum]:
+    """Convenience: a destruction quorum whose single-use is backed by a durable, ATOMIC on-disk
+    ``NonceLedger`` (``ledger_path`` is its marker directory) — the consume is an ``O_EXCL`` atomic reserve
+    that survives restart, so one owner-signed authorization drives exactly ONE destructive PR even across
+    process restarts AND concurrent callers of the same authorization."""
+    from .nonce_ledger import NonceLedger
+    ledger = NonceLedger(ledger_path)
+    return build_destruction_quorum(authority=authority, signed=signed, slug=slug,
+                                    is_consumed=ledger.is_consumed, consume=ledger.try_consume, now=now)
 
 
 def _epoch(now_val: Any) -> float:
