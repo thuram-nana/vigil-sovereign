@@ -28,7 +28,7 @@ from ..platform.secrets import SecretStore
 # unknown name is refused, so the UI can never seal an arbitrary env var. GITHUB_TOKEN is what the
 # auto-patch engine uses to push a fix branch + open a gated PR (LAP-3); it is sealed + delivered exactly
 # like the LLM key and never returned to the browser.
-SECRET_NAMES = ("ANTHROPIC_API_KEY", "GITHUB_TOKEN")
+SECRET_NAMES = ("ANTHROPIC_API_KEY", "GITHUB_TOKEN", "VIGIL_DESTRUCTION_OWNER_KEY")
 # Friendly labels + one-line purposes the UI shows per managed secret (the UI hard-codes no secret list).
 SECRET_META = {
     "ANTHROPIC_API_KEY": {"label": "Claude / Anthropic API key",
@@ -36,6 +36,12 @@ SECRET_META = {
     "GITHUB_TOKEN": {"label": "GitHub token",
                      "purpose": "Lets the auto-patch engine push a fix branch and open a gated pull request. "
                                 "Needs 'repo' + 'pull-request' scope. Optional until you use live auto-patch."},
+    "VIGIL_DESTRUCTION_OWNER_KEY": {
+        "label": "Auto-patch signing key (owner)",
+        "purpose": "The owner key that AUTHORIZES an auto-patch pull request (the m-of-n destruction quorum). "
+                   "Generate it with `vigil provision-destruction`, then paste the owner key here. Optional "
+                   "until you open PRs. Solo setups: whoever holds this key can authorize — for separation of "
+                   "duties, provision with more signers and keep their keys off this machine."},
 }
 _MAX_SECRET_LEN = 8192
 
