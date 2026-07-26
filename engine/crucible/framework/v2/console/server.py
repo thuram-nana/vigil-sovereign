@@ -239,6 +239,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._static(path)
         except BrokenPipeError:
             return
+        except ValueError as e:  # an unsafe run id (run_dir guard) → honest 404, not a 500 or a traversal
+            self._json({"error": str(e)}, status=404)
         except Exception as e:  # never 500 the whole console on one bad read
             self._json({"error": f"{type(e).__name__}: {e}"}, status=500)
 

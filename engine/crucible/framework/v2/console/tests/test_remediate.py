@@ -81,6 +81,19 @@ def test_pending_run_is_honest_empty_not_fabricated():
     assert r["ladder"], "the ladder-of-record is always served (documentation, not run data)"
 
 
+def test_run_dir_refuses_path_traversal_ids():
+    # a URL-derived run id must never traverse out of the runs dir (console-wide hardening funnelled
+    # through run_dir). Legit generated ids pass; separators / ".." / absolute / empty are refused.
+    import pytest
+    assert actions.run_dir("20260726-101112-042").name == "20260726-101112-042"
+    for bad in ["../../etc", "..", "a/../b", "/etc/passwd", "x/y", "", "a\x00b"]:
+        with pytest.raises(ValueError):
+            actions.run_dir(bad)
+    # a read route given an unsafe id degrades to an honest empty state (never a traversal / crash)
+    r = api.remediate_plan("../../../etc")
+    assert r.get("pending") is True and r["fixable"] == []
+
+
 def test_missing_remediation_text_is_honest_placeholder():
     rid = "p6test-norem"
     _write_report(rid, [{"grounding": "fact", "title": "t", "bug_class": "sqli", "severity": "high"}])
