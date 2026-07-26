@@ -265,6 +265,31 @@ textarea { min-height: 80px; resize: vertical; }
 .gap-lg { gap: var(--sp-4); }
 .stack { display: flex; flex-direction: column; gap: var(--sp-4); }
 
+/* settings + safety (owner plane) ----------------------------------------- */
+.owner-banner { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--owner-line); border-left: 3px solid var(--owner); background: var(--owner-dim);
+  border-radius: var(--r-2); color: var(--text-1); font-size: var(--fs-sm); }
+.owner-banner .glyph { color: var(--owner); flex: 0 0 auto; }
+.acts { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-4); flex-wrap: wrap; }
+.set-status { display: flex; align-items: center; gap: 10px; font-size: var(--fs-sm); color: var(--text-1);
+  padding: 10px 12px; border-radius: var(--r-2); border: 1px solid var(--border); background: var(--bg-2); }
+.set-status .glyph { flex: 0 0 auto; }
+.set-status.ok { color: var(--st-confirmed); border-color: color-mix(in srgb, var(--st-confirmed) 35%, var(--border)); }
+.set-status.off { color: var(--text-1); border-color: var(--owner-line); }
+.mono { font-family: var(--font-mono); }
+.dim { color: var(--text-2); }
+.pill.sm.ok { color: var(--st-confirmed); border-color: color-mix(in srgb, var(--st-confirmed) 40%, var(--border)); }
+.btn.sm { padding: 6px 12px; font-size: var(--fs-sm); }
+.tile .foot.ok { color: var(--st-confirmed); } .tile .foot.warn { color: var(--st-queued); } .tile .foot.danger { color: var(--st-blocked); }
+.cap-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  padding: 10px 0; border-bottom: 1px solid var(--border); }
+.cap-row:last-child { border-bottom: none; }
+.cap-row .cap-l { display: flex; align-items: center; gap: 12px; }
+.feed-row { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.feed-row:last-child { border-bottom: none; }
+.feed-row .fr-t { flex: 1; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-row .fr-seq { flex: 0 0 auto; font-size: var(--fs-xs); }
+
 /* toasts */
 #toasts { position: fixed; bottom: var(--sp-5); right: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-2); z-index: 80; }
 .toast { background: var(--bg-2); border: 1px solid var(--border-strong); border-radius: var(--r-2); padding: 12px 16px; box-shadow: var(--shadow-2);

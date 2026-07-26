@@ -413,9 +413,40 @@ def _secure_log(log_path: Path):
     return fd
 
 
-def _spawn(argv: list[str], log_path: Path) -> subprocess.Popen:
+def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> subprocess.Popen:
     log = open(_secure_log(log_path), "ab", buffering=0)  # noqa: SIM115 — closed when the child is reaped
-    return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=_child_env())
+    env = _child_env()
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
+
+
+def _resolve_offense_llm_env(sigil_bin: Path) -> dict:
+    """Ask the SOVEREIGN venv for the runtime LLM env (model vars + resolved API key) and hand it to the
+    keyless offense children, so the key/model set in the UI reaches the offense engine WITHOUT the
+    offense plane ever importing sigil. The key may live in a keyring / TPM-sealed store only the sovereign
+    side can decrypt — hence the subprocess. Captured on a PRIVATE pipe (never the teed backend logs) and
+    never printed/logged here. Fail-soft: any error → {} (the offense engine simply runs keyless)."""
+    try:
+        proc = subprocess.run(
+            [str(sigil_bin), "settings", "export-runtime-env", "--include-secrets"],
+            capture_output=True, text=True, env=_child_env(), timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}
+    try:
+        data = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    # Defense-in-depth: even though the sovereign emitter is closed to these keys, the CONSUMER also
+    # allowlists them by name (str→str, non-empty) — so this can never become an arbitrary env-injection
+    # channel even if the emitter changed. These are the only LLM-runtime vars the offense engine reads.
+    allow = {"CRUCIBLE_LLM_BACKEND", "CRUCIBLE_ANTHROPIC_MODEL", "SIGIL_LLM_MODEL", "ANTHROPIC_API_KEY"}
+    return {k: str(v) for k, v in data.items()
+            if k in allow and isinstance(v, str) and v}
 
 
 def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:
@@ -566,12 +597,18 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         return 1
 
     # 2) offense console (read + SSE plane) and 3) offense gated api.
+    # Bridge the LLM key/model the operator set in the UI (sealed on the sovereign side) into the keyless
+    # offense children's env — so an engagement actually reasons with the chosen model. Resolved via the
+    # sovereign venv (subprocess), never logged. Empty when nothing is set → the offense engine runs keyless.
+    offense_llm_env = _resolve_offense_llm_env(sigil_bin)
     console_argv = [str(crucible_bin), "console", "--port", str(CONSOLE_PORT),
                     "--allow-host", authority, "--allow-origin", origin]
     api_argv = [str(crucible_bin), "api", "--port", str(API_PORT),
                 "--allow-host", authority, "--allow-origin", origin]
-    procs.append(("offense-console", _spawn(console_argv, logs / "offense-console.log")))
-    procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log")))
+    procs.append(("offense-console", _spawn(console_argv, logs / "offense-console.log",
+                                            extra_env=offense_llm_env)))
+    procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log",
+                                        extra_env=offense_llm_env)))
 
     # 4) assemble the runtime serve dir with the token + federated mount bases.
     try:

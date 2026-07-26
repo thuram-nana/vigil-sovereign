@@ -12,7 +12,9 @@ from ..spine.store import SpineStore
 # the closed set of gated actions the plane will route (fail-closed: anything else is refused)
 _CAP_ACTIONS = frozenset({"disable_gesture", "enable_gesture", "disable_voice", "enable_voice",
                           "disable_both", "enable_both"})
-ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke"}) | _CAP_ACTIONS
+_SETTINGS_ACTIONS = frozenset({"set_secret", "set_model"})   # owner-signed secrets/model plane (P4)
+ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke"}) | _CAP_ACTIONS \
+    | _SETTINGS_ACTIONS
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) -> dict:
@@ -49,4 +51,11 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         seqs = {c: (cg.disable(c, reason=reason) if verb == "disable" else cg.enable(c, reason=reason))
                 for c in caps}
         return {"ok": True, "action": action, "capabilities": caps, "recorded_seqs": seqs}
+    if action in _SETTINGS_ACTIONS:
+        from . import settings as _settings
+        if action == "set_secret":
+            return _settings.set_secret(str(params.get("name", "")), str(params.get("value", "")),
+                                        store=store, owner_key=owner, reason=reason)
+        return _settings.set_model(str(params.get("model", "")),
+                                   store=store, owner_key=owner, reason=reason)
     raise ValueError(f"unhandled action: {action!r}")   # unreachable (ACTIONS-gated)
