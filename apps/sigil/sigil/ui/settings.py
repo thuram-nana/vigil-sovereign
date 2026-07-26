@@ -25,8 +25,18 @@ from ..platform.secrets import SecretStore
 # The one secret the settings plane may seal today: the Anthropic/Claude API key. Stored under the name
 # BOTH planes resolve (`sigil.config` reads SIGIL_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY; the offense
 # AnthropicBackend reads ANTHROPIC_API_KEY) so a single seal feeds the whole system. A closed set — an
-# unknown name is refused, so the UI can never seal an arbitrary env var.
-SECRET_NAMES = ("ANTHROPIC_API_KEY",)
+# unknown name is refused, so the UI can never seal an arbitrary env var. GITHUB_TOKEN is what the
+# auto-patch engine uses to push a fix branch + open a gated PR (LAP-3); it is sealed + delivered exactly
+# like the LLM key and never returned to the browser.
+SECRET_NAMES = ("ANTHROPIC_API_KEY", "GITHUB_TOKEN")
+# Friendly labels + one-line purposes the UI shows per managed secret (the UI hard-codes no secret list).
+SECRET_META = {
+    "ANTHROPIC_API_KEY": {"label": "Claude / Anthropic API key",
+                          "purpose": "Lets the AI reason over your target (engagements, scans, fix proposals)."},
+    "GITHUB_TOKEN": {"label": "GitHub token",
+                     "purpose": "Lets the auto-patch engine push a fix branch and open a gated pull request. "
+                                "Needs 'repo' + 'pull-request' scope. Optional until you use live auto-patch."},
+}
 _MAX_SECRET_LEN = 8192
 
 # The canonical env vars each plane reads (persisted, non-secret) + delivered to the keyless offense
@@ -186,12 +196,14 @@ def settings_status() -> dict:
         present = bool(val)
         if name == "ANTHROPIC_API_KEY" and present:
             key_set = True
+        meta = SECRET_META.get(name, {})
         secrets.append({
             "name": name,
             "set": present,
             "fingerprint": _fingerprint(val) if present else None,
             "backend": ss.backend,
-            "label": "Claude / Anthropic API key" if name == "ANTHROPIC_API_KEY" else name,
+            "label": meta.get("label", name),
+            "purpose": meta.get("purpose", ""),
         })
     # the SELECTED choice is tracked explicitly (a keyless choice sets no model id), so the picker
     # reflects it even for claude-code. offense_model is the HONEST effective routing: a forced backend

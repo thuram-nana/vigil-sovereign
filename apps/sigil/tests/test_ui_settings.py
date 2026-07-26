@@ -99,6 +99,22 @@ def test_empty_and_oversized_secret_refused(env):
         smod.set_secret("ANTHROPIC_API_KEY", "x" * 9000, store=store, owner_key=owner)
 
 
+def test_github_token_is_a_managed_secret(env):
+    # LAP-2b: the auto-patch GitHub token is sealed + exported + redacted exactly like the LLM key.
+    store, owner, _ = env
+    assert "GITHUB_TOKEN" in smod.SECRET_NAMES and "GITHUB_TOKEN" in smod.SECRET_META
+    out = smod.set_secret("GITHUB_TOKEN", "ghp_SECRET_TOKEN_xyz", store=store, owner_key=owner)
+    assert out["ok"] and out["name"] == "GITHUB_TOKEN"
+    assert "ghp_SECRET_TOKEN_xyz" not in json.dumps(out)          # value never returned
+    st = smod.settings_status()
+    gh = [s for s in st["secrets"] if s["name"] == "GITHUB_TOKEN"][0]
+    assert gh["set"] is True and gh["fingerprint"].startswith("sha256:") and gh["label"] and gh["purpose"]
+    assert "ghp_SECRET_TOKEN_xyz" not in json.dumps(st)           # never in the redacted status
+    e = smod.export_runtime_env(include_secrets=True)
+    assert e.get("GITHUB_TOKEN") == "ghp_SECRET_TOKEN_xyz"        # the launcher feeds it to the offense engine
+    assert "GITHUB_TOKEN" not in smod.export_runtime_env(include_secrets=False)  # withheld without the flag
+
+
 def test_control_chars_refused_no_envfile_injection(env):
     # a newline in the value must not smuggle a second env line into the envfile tier
     store, owner, tmp = env

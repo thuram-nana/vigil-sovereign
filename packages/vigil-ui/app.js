@@ -1672,10 +1672,11 @@
   function renderSettings(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Settings"),
-        h("span.sub", null, "Your API key and the model the AI reasons with — sealed on this machine, never shown back to the browser.")]),
+        h("span.sub", null, "Your secrets and the model the AI reasons with — sealed on this machine, never shown back to the browser.")]),
       ownerBanner("Owner plane — every change is signed with your key on the server. The browser never holds or receives key material."),
+      h("div.grid.cols-2#set-secrets", { style: { alignItems: "start", marginTop: "16px" } },
+        h("div.empty", null, "Loading…")),
       h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
-        V.card("Claude / Anthropic API key", "OWNER", h("div#set-key", null, h("div.empty", null, "Loading…")), true),
         V.card("Reasoning model", "OWNER", h("div#set-model", null, h("div.empty", null, "Loading…")), true),
       ]),
     ]);
@@ -1686,44 +1687,47 @@
     V.getJSON(SOV("/api/settings")).then(drawSettings).catch(function (e) {
       var msg = (e && e.status === 401) ? "The sovereign plane needs the owner token — open the UI via `vigil up`."
         : "Settings are on the sovereign plane, which is offline. Start it with `vigil up`.";
-      var box = V.$("#set-key"); if (box) V.mount(box, h("div.empty", null, msg));
+      var box = V.$("#set-secrets"); if (box) V.mount(box, h("div.empty", null, msg));
       var box2 = V.$("#set-model"); if (box2) V.mount(box2, h("div.empty", null, msg));
     });
   }
 
   function drawSettings(st) {
-    drawKeyCard(st);
+    var host = V.$("#set-secrets");
+    if (host) V.mount(host, (st.secrets || []).map(function (sec) {
+      return V.card(sec.label || sec.name, "OWNER", drawSecretCard(sec, st), true);
+    }));
     drawModelCard(st);
   }
 
-  function drawKeyCard(st) {
-    var host = V.$("#set-key"); if (!host) return;
-    var sec = (st.secrets || []).filter(function (s) { return s.name === "ANTHROPIC_API_KEY"; })[0] || { set: false };
+  function drawSecretCard(sec, st) {
+    var isKey = sec.name === "ANTHROPIC_API_KEY";
     var statusRow = sec.set
-      ? h("div.set-status.ok", null, [V.icon("check"),
-          h("span", null, "Key is set"),
-          h("span.pill.sm", null, sec.backend),
-          h("span.mono.dim", null, sec.fingerprint)])
+      ? h("div.set-status.ok", null, [V.icon("check"), h("span", null, "Set"),
+          h("span.pill.sm", null, sec.backend), h("span.mono.dim", null, sec.fingerprint)])
       : h("div.set-status.off", null, [V.icon("info"),
-          h("span", null, "No key set — the system runs keyless (deterministic oracles only) until you add one or pick the local Claude Code model.")]);
-    var input = h("input", { type: "password", id: "key-input", autocomplete: "off", spellcheck: "false",
-      placeholder: sec.set ? "Enter a new key to replace the current one" : "sk-ant-…" });
+          h("span", null, isKey
+            ? "No key set — the system runs keyless (deterministic oracles only) until you add one or pick the local Claude Code model."
+            : "Not set — optional until you use the feature it enables.")]);
+    var input = h("input", { type: "password", autocomplete: "off", spellcheck: "false",
+      placeholder: sec.set ? "Enter a new value to replace it" : (isKey ? "sk-ant-…" : "ghp_… / github_pat_…") });
     var save = h("button.btn.owner", { onClick: function () {
         var v = (input.value || "").trim();
-        if (!v) { V.toast("Paste a key first.", true); return; }
+        if (!v) { V.toast("Paste a value first.", true); return; }
         save.disabled = true;
-        settingsAct({ action: "set_secret", name: "ANTHROPIC_API_KEY", value: v, reason: "set API key from Settings" },
-          "API key sealed on this machine.", function () { input.value = ""; loadSettings(); })
+        settingsAct({ action: "set_secret", name: sec.name, value: v, reason: "set " + sec.name + " from Settings" },
+          (sec.label || sec.name) + " sealed on this machine.", function () { input.value = ""; loadSettings(); })
           .then(function () { save.disabled = false; });
-      } }, [V.icon("key"), "Seal key"]);
-    V.mount(host, [
+      } }, [V.icon("key"), "Seal"]);
+    return [
       statusRow,
       h("div.field", { style: { marginTop: "14px" } }, [
-        h("label", null, "API key"), input,
-        h("div.hint", null, "Sealed to your OS keyring or a TPM-sealed store when available; the value never enters the spine, a log, or any response — only a fingerprint is recorded. Feeds both the reasoning engine and the sovereign side."),
+        h("label", null, sec.label || sec.name), input,
+        h("div.hint", null, (sec.purpose ? sec.purpose + " " : "")
+          + "Sealed to your OS keyring or a TPM-sealed store when available; the value never enters the spine, a log, or any response — only a fingerprint is recorded."),
       ]),
       h("div.acts", null, save),
-    ]);
+    ];
   }
 
   function drawModelCard(st) {
