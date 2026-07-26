@@ -118,6 +118,12 @@ class ToolSpec:
     version_args: Optional[tuple[str, ...]] = ("--version",)
     alt_binaries: tuple[str, ...] = ()
     sandbox: bool = False
+    # ``wrong_markers`` — case-insensitive substrings that, if they appear in the version banner of the
+    # binary found on PATH, mean a DIFFERENT tool sharing this name is shadowing the real one (e.g. the
+    # Python ``httpx`` HTTP-client CLI shadowing ProjectDiscovery's ``httpx``). A which-hit whose banner
+    # matches is reported ``shadowed`` (NOT ``installed``) so a required tool that is effectively absent
+    # never shows a false green. Requires ``version_args`` (the banner is what disambiguates).
+    wrong_markers: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -137,8 +143,13 @@ HOST_TOOLS: tuple[ToolSpec, ...] = (
         purpose="Fast HTTP probing / tech fingerprint (live executor). ProjectDiscovery httpx "
                 "(the CLI, NOT the same-named Python HTTP client).",
         apt="httpx-toolkit", version_args=("-version",),
+        # a same-named Python `httpx` HTTP-client CLI commonly shadows ProjectDiscovery's on PATH; its
+        # banner is one of these (ProjectDiscovery's `-version` prints a clean version, never these).
+        wrong_markers=("command line client could not run", "options] url", "no such option",
+                       "pip install"),
         manual="Kali: sudo apt-get install -y httpx-toolkit  |  else: "
-               "go install github.com/projectdiscovery/httpx/cmd/httpx@latest",
+               "go install github.com/projectdiscovery/httpx/cmd/httpx@latest  "
+               "(if a Python 'httpx' shadows it, ensure the real one precedes it on PATH)",
     ),
     ToolSpec(
         name="nuclei", binary="nuclei", optional=False,
@@ -381,10 +392,10 @@ def _clean_version(raw: str) -> str:
     return chosen[:_VERSION_CAP]
 
 
-def _probe_version(binary_path: str, version_args: Optional[tuple[str, ...]]) -> str:
-    """Best-effort, read-only version capture. ``version_args is None`` → skip entirely (heavy/GUI
-    tool). Never raises: a timeout / spawn error / garbage output yields ``""``. No shell; stdin is
-    closed so a tool that would prompt can never hang the probe."""
+def _probe_raw(binary_path: str, version_args: Optional[tuple[str, ...]]) -> str:
+    """Best-effort, read-only capture of the FULL version banner (stdout+stderr), ANSI-stripped.
+    ``version_args is None`` → skip (heavy/GUI tool). Never raises: a timeout / spawn error yields
+    ``""``. No shell; stdin is closed so a tool that would prompt can never hang the probe."""
     if version_args is None:
         return ""
     try:
@@ -395,7 +406,12 @@ def _probe_version(binary_path: str, version_args: Optional[tuple[str, ...]]) ->
         )
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return ""
-    return _clean_version((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+    return _ANSI_RE.sub("", (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else ""))
+
+
+def _probe_version(binary_path: str, version_args: Optional[tuple[str, ...]]) -> str:
+    """The compact one-line version banner for display (wraps :func:`_probe_raw`)."""
+    return _clean_version(_probe_raw(binary_path, version_args))
 
 
 def probe_tool(spec: ToolSpec, *, with_version: bool = True,
@@ -405,18 +421,28 @@ def probe_tool(spec: ToolSpec, *, with_version: bool = True,
 
     ``status`` is derived, live-first:
       * ``unsupported`` — the host OS is not Linux (these are Linux packages);
+      * ``shadowed``    — a binary of this name is on PATH but its version banner matches a
+                          ``wrong_markers`` pattern, i.e. a DIFFERENT same-named tool shadows the real
+                          one (e.g. Python ``httpx`` shadowing ProjectDiscovery ``httpx``). Reported as
+                          effectively-missing (NEVER a false green for a required tool);
       * ``installed``   — the binary (or an alternate) is on PATH (the live truth always wins);
-      * ``failed``      — not on PATH AND the installer's hint says it failed to install;
-      * ``missing``     — not on PATH and no failed hint.
+      * ``failed``      — not usable AND the installer's hint says it failed to install;
+      * ``missing``     — not usable and no failed hint.
     """
     path = _resolve(spec)
-    installed = path is not None
-    version = ""
-    if installed and with_version:
-        version = _probe_version(path, spec.version_args)
+    on_path = path is not None
+    # For a name-collision tool we MUST read the banner (even when with_version=False) to tell the real
+    # tool from a same-named impostor on PATH — the banner is the disambiguator.
+    raw = _probe_raw(path, spec.version_args) if (on_path and (with_version or spec.wrong_markers)) else ""
+    shadowed = bool(on_path and spec.wrong_markers and raw
+                    and any(m in raw.lower() for m in spec.wrong_markers))
+    installed = on_path and not shadowed
+    version = _clean_version(raw) if (on_path and with_version) else ""
 
     if not supported:
         status = "unsupported"
+    elif shadowed:
+        status = "shadowed"
     elif installed:
         status = "installed"
     elif (install_state or {}).get(spec.name) == "failed":
@@ -430,6 +456,7 @@ def probe_tool(spec: ToolSpec, *, with_version: bool = True,
         "purpose": spec.purpose,
         "optional": spec.optional,
         "installed": installed,
+        "shadowed": shadowed,
         "path": path,
         "version": version or None,
         "status": status,
@@ -464,9 +491,11 @@ def probe_tools(*, with_version: bool = True,
         "installed": _count("installed"),
         "missing": _count("missing"),
         "failed": _count("failed"),
+        "shadowed": _count("shadowed"),
         "unsupported": _count("unsupported"),
+        # a required tool that is missing, failed, OR shadowed by a same-named impostor is NOT ready.
         "required_missing": sum(
-            1 for t in tools if not t["optional"] and t["status"] in ("missing", "failed")
+            1 for t in tools if not t["optional"] and t["status"] in ("missing", "failed", "shadowed")
         ),
     }
 
@@ -522,8 +551,11 @@ def _emit_shell() -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """CLI shim: ``--emit-shell`` prints the TSV roster (for bootstrap); ``--state-path`` prints
-    the default installer-state path; default prints the live report as JSON (a quick self-check)."""
+    """CLI shim: ``--emit-shell`` prints the roster (for bootstrap); ``--state-path`` prints the
+    default installer-state path; ``--check NAME`` exits 0 iff that tool is REALLY installed (status
+    ``installed`` — a shadowed/missing/failed tool exits 1), so bootstrap shares the registry's one
+    definition of "present" (incl. the name-collision banner check) rather than duplicating it in bash;
+    default prints the live report as JSON (a quick self-check)."""
     args = list(sys.argv[1:] if argv is None else argv)
     if "--emit-shell" in args:
         print(_emit_shell())
@@ -531,6 +563,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if "--state-path" in args:
         print(default_state_path())
         return 0
+    if "--check" in args:
+        i = args.index("--check")
+        name = args[i + 1] if i + 1 < len(args) else ""
+        spec = next((s for s in HOST_TOOLS if s.name == name), None)
+        if spec is None:
+            return 2
+        plat = platform_info()
+        st = probe_tool(spec, with_version=True, supported=bool(plat["supported"]))
+        return 0 if st["status"] == "installed" else 1
     import json
     print(json.dumps(probe_tools(with_version="--no-version" not in args), indent=2, default=str))
     return 0

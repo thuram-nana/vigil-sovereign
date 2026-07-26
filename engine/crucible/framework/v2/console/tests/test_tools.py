@@ -39,6 +39,37 @@ _BOGUS = "vigil-nonexistent-tool-zzz-000"
 # ---------------------------------------------------------------------------
 
 
+def _fake_bin(dirpath, name, banner):
+    """Write an executable that prints `banner` to stdout for any args (a stand-in tool)."""
+    p = dirpath / name
+    p.write_text("#!/bin/sh\ncat <<'EOF'\n" + banner + "\nEOF\n")
+    p.chmod(0o755)
+    return str(p)
+
+
+def test_name_collision_impostor_is_shadowed_not_installed(tmp_path, monkeypatch) -> None:
+    # The offense `httpx` (ProjectDiscovery) is commonly shadowed on PATH by the same-named Python
+    # httpx HTTP-client CLI. A which-hit whose version banner matches a wrong_markers pattern must be
+    # reported `shadowed` (installed=False) — NEVER a false green for a required tool. This is the exact
+    # BLOCK the red-pen found; the version banner is the disambiguator.
+    import os
+    _fake_bin(tmp_path, "collide", "The httpx command line client could not run because ...")
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+    markers = ("command line client could not run", "no such option")
+    spec = ToolSpec(name="collide", binary="collide", optional=False, purpose="collision probe",
+                    version_args=("-version",), wrong_markers=markers)
+    d = probe_tool(spec, with_version=True, supported=True)
+    assert d["status"] == "shadowed" and d["installed"] is False and d["shadowed"] is True
+    # positive control: the SAME spec resolving to a binary whose banner does NOT match → installed.
+    # (mutation guard: if the banner check were dropped, this stays installed but the impostor above
+    #  would wrongly flip to installed too — so the pair pins the disambiguation as load-bearing.)
+    _fake_bin(tmp_path, "clean", "clean-tool version 1.2.3")
+    ok_spec = ToolSpec(name="clean", binary="clean", optional=False, purpose="clean probe",
+                       version_args=("-version",), wrong_markers=markers)
+    ok = probe_tool(ok_spec, with_version=True, supported=True)
+    assert ok["status"] == "installed" and ok["installed"] is True and ok["shadowed"] is False
+
+
 def test_probe_tool_installed_for_a_real_binary() -> None:
     spec = ToolSpec(name="realsh", binary=_REAL_BINARY,
                     purpose="a binary that exists on this box", version_args=None)
@@ -90,14 +121,17 @@ def test_probe_tools_shape_and_counts_are_consistent() -> None:
     assert isinstance(r["tools"], list) and len(r["tools"]) == len(HOST_TOOLS)
     s = r["summary"]
     assert s["total"] == len(HOST_TOOLS)
-    # every tool lands in exactly one of the four status buckets → counts sum to the total.
-    assert s["installed"] + s["missing"] + s["failed"] + s["unsupported"] == s["total"]
-    # required_missing only counts the non-optional (offense-core) tools that are absent.
-    assert s["required_missing"] <= s["installed"] + s["missing"] + s["failed"]
+    # every tool lands in exactly one status bucket → counts sum to the total (incl. 'shadowed').
+    assert s["installed"] + s["missing"] + s["failed"] + s["shadowed"] + s["unsupported"] == s["total"]
+    # required_missing counts the non-optional tools that are absent, failed, OR shadowed.
+    assert s["required_missing"] <= s["missing"] + s["failed"] + s["shadowed"]
     for t in r["tools"]:
-        assert set(t) >= {"name", "binary", "purpose", "optional", "installed",
+        assert set(t) >= {"name", "binary", "purpose", "optional", "installed", "shadowed",
                           "path", "version", "status", "install_hint"}
-        assert t["status"] in ("installed", "missing", "failed", "unsupported")
+        assert t["status"] in ("installed", "missing", "failed", "shadowed", "unsupported")
+        # a shadowed tool is NEVER a false green.
+        if t["status"] == "shadowed":
+            assert t["installed"] is False and t["shadowed"] is True
     # the sandbox roster is informational and clearly separated from the host roster.
     assert r["sandbox"]["image"] and isinstance(r["sandbox"]["tools"], list)
     assert r["sandbox"]["tools"], "the Strix sandbox roster should be surfaced (informational)"

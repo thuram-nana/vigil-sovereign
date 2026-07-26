@@ -74,32 +74,6 @@ ask()  { # ask "prompt" -> 0 (yes) / 1 (no). --yes => yes; NON-interactive witho
 # already-present tool is a no-op; a tool that will not install is recorded FAILED with its exact
 # manual command and the step CONTINUES — a tool never aborts bootstrap.
 
-_tool_present() {  # binary  "alt1,alt2"  -> 0 if the tool (or an alternate name) is on PATH
-  command -v "$1" >/dev/null 2>&1 && return 0
-  local b oldifs="$IFS"; IFS=', '
-  for b in $2; do
-    IFS="$oldifs"
-    [ -n "$b" ] && command -v "$b" >/dev/null 2>&1 && return 0
-    IFS=', '
-  done
-  IFS="$oldifs"; return 1
-}
-
-_install_one() {  # binary apt pip apt_ok sudo  -> 0 installed / 1 failed (never raises)
-  local bin="$1" aptp="$2" pipp="$3" apt_ok="$4" sudo="$5"
-  if [ -n "$aptp" ] && [ "$apt_ok" = 1 ]; then
-    $sudo apt-get install -y "$aptp" >/dev/null 2>&1 || true
-    command -v "$bin" >/dev/null 2>&1 && return 0
-  fi
-  if [ -n "$pipp" ]; then
-    if have pipx; then pipx install "$pipp" >/dev/null 2>&1 || true; fi
-    command -v "$bin" >/dev/null 2>&1 && return 0
-    "$PY" -m pip install --user "$pipp" >/dev/null 2>&1 || true
-    command -v "$bin" >/dev/null 2>&1 && return 0
-  fi
-  return 1
-}
-
 provision_host_tools() {
   local SH="${SIGIL_HOME:-$HOME/.sigil}"; export SIGIL_HOME="$SH"; mkdir -p "$SH"
   # pipx / pip --user land in ~/.local/bin — put it on PATH so a post-install probe sees them.
@@ -107,6 +81,30 @@ provision_host_tools() {
 
   local PYX="$REPO/.venv-offense/bin/python"; [ -x "$PYX" ] || PYX="$PY"
   emit() { PYTHONPATH="$CRUCIBLE_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYX" -m framework.v2.tools.registry "$@" 2>/dev/null; }
+
+  # Authoritative presence check — the registry's ONE definition of "really installed" (handles
+  # alternate binary names AND the name-collision banner check, so a same-named impostor like Python
+  # `httpx` shadowing ProjectDiscovery `httpx` is NOT counted present). Shares the endpoint's logic.
+  _present() { emit --check "$1" >/dev/null 2>&1; }
+
+  # Install one tool. rc: 0 usable (verified via _present) / 1 tried-but-failed / 2 nothing-applicable
+  # to try on this OS (e.g. an apt-only tool on non-Debian) → the caller reports that as 'missing'
+  # (nothing was attempted), never a dishonest 'FAILED to install'. Never raises.
+  _install_one() {  # nm bin apt pip
+    local nm="$1" aptp="$3" pipp="$4" tried=0
+    if [ -n "$aptp" ] && [ "$APT_OK" = 1 ]; then
+      tried=1; $SUDO apt-get install -y "$aptp" >/dev/null 2>&1 || true
+      _present "$nm" && return 0
+    fi
+    if [ -n "$pipp" ]; then
+      tried=1
+      if have pipx; then pipx install "$pipp" >/dev/null 2>&1 || true; fi
+      _present "$nm" && return 0
+      "$PY" -m pip install --user "$pipp" >/dev/null 2>&1 || true
+      _present "$nm" && return 0
+    fi
+    [ "$tried" = 1 ] && return 1 || return 2
+  }
 
   local STATE_FILE; STATE_FILE="$(emit --state-path)"; [ -n "$STATE_FILE" ] || STATE_FILE="$SH/vigil-tool-state.tsv"
   mkdir -p "$(dirname "$STATE_FILE")"
@@ -153,21 +151,27 @@ provision_host_tools() {
   while IFS=$'\x1f' read -r nm bin opt aptp pipp man pur alt; do
     [ -n "$nm" ] || continue
     n_total=$((n_total+1))
-    if _tool_present "$bin" "$alt"; then
+    if _present "$nm"; then
       ok "$nm present ($(command -v "$bin" 2>/dev/null || echo "$bin"))"
       printf '%s\tinstalled\n' "$nm" >> "$STATE_FILE"; n_ok=$((n_ok+1)); continue
     fi
-    if [ "$CONSENT" = 1 ] && _install_one "$bin" "$aptp" "$pipp" "$APT_OK" "$SUDO"; then
-      ok "$nm installed"
-      printf '%s\tinstalled\n' "$nm" >> "$STATE_FILE"; n_ok=$((n_ok+1)); continue
-    fi
+    local outcome="missing"
     if [ "$CONSENT" = 1 ]; then
-      warn "$nm FAILED to install — install it yourself:  ${man:-see docs/DEPLOY.md}"
-      printf '%s\tfailed\n' "$nm" >> "$STATE_FILE"; n_failed=$((n_failed+1))
+      local rc; if _install_one "$nm" "$bin" "$aptp" "$pipp"; then rc=0; else rc=$?; fi
+      if [ "$rc" = 0 ]; then
+        ok "$nm installed"; printf '%s\tinstalled\n' "$nm" >> "$STATE_FILE"; n_ok=$((n_ok+1)); continue
+      elif [ "$rc" = 1 ]; then
+        warn "$nm FAILED to install — install it yourself:  ${man:-see docs/DEPLOY.md}"
+        outcome="failed"; n_failed=$((n_failed+1))
+      else  # rc=2 → nothing to auto-install on this OS; nothing was attempted → honestly 'missing'
+        warn "$nm missing (no auto-install for this OS) — install it yourself:  ${man:-see docs/DEPLOY.md}"
+        n_missing=$((n_missing+1))
+      fi
     else
       warn "$nm missing — install it yourself:  ${man:-see docs/DEPLOY.md}"
-      printf '%s\tmissing\n' "$nm" >> "$STATE_FILE"; n_missing=$((n_missing+1))
+      n_missing=$((n_missing+1))
     fi
+    printf '%s\t%s\n' "$nm" "$outcome" >> "$STATE_FILE"
     [ "$opt" = "0" ] && n_req_missing=$((n_req_missing+1))
   done <<< "$ROSTER"
 

@@ -213,10 +213,12 @@
   }
 
   // ---- Tools (offense host CLIs, probed LIVE via /offense/api/tools) ---------
-  // Six-state status maps onto the shared badge system: installed→confirmed (green),
-  // missing→idle, failed→blocked (red), unsupported→refuted. No hardcoded tool data — every
-  // row comes from the endpoint, which resolves PATH at request time (never invented status).
-  const TOOL_BADGE = { installed: "confirmed", missing: "idle", failed: "blocked", unsupported: "refuted" };
+  // Status maps onto the shared badge system: installed→confirmed (green), missing→idle,
+  // failed→blocked (red), shadowed→blocked (red — a same-named impostor shadows the real tool on PATH),
+  // unsupported→refuted. No hardcoded tool data — every row comes from the endpoint, which resolves
+  // PATH (+ a version-banner check for name collisions) at request time; status is never invented.
+  const TOOL_BADGE = { installed: "confirmed", missing: "idle", failed: "blocked",
+                       shadowed: "blocked", unsupported: "refuted" };
 
   function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -242,7 +244,7 @@
   }
 
   function toolCard(t) {
-    const missing = t.status === "missing" || t.status === "failed";
+    const needsAction = t.status === "missing" || t.status === "failed" || t.status === "shadowed";
     return h("div.card", null, [
       h("div", { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" } }, [
         toolBadge(t.status),
@@ -251,8 +253,13 @@
         t.version ? h("span.muted.mono", { style: { marginLeft: "auto", fontSize: "var(--fs-xs)" } }, t.version) : null,
       ]),
       h("div.muted", { style: { marginTop: "6px", maxWidth: "80ch", lineHeight: "1.5" } }, t.purpose || ""),
-      t.path ? h("div.muted.mono", { style: { marginTop: "4px", fontSize: "var(--fs-micro)" } }, t.path) : null,
-      missing ? installHint(t) : null,
+      // a shadowed tool: be explicit that a same-named binary on PATH is NOT the real tool.
+      t.status === "shadowed"
+        ? h("div", { style: { marginTop: "6px", color: "var(--st-blocked)", fontSize: "var(--fs-sm)" } },
+            "A different '" + t.name + "' on your PATH" + (t.path ? " (" + t.path + ")" : "") +
+            " is shadowing the real tool — it is NOT usable. Fix PATH order or install the real one:")
+        : (t.path ? h("div.muted.mono", { style: { marginTop: "4px", fontSize: "var(--fs-micro)" } }, t.path) : null),
+      needsAction ? installHint(t) : null,
     ]);
   }
 
@@ -274,10 +281,12 @@
       refreshTopbar();
     }
 
+    const shadowNote = (s.shadowed || 0) > 0
+      ? "  " + s.shadowed + " tool(s) SHADOWED (a same-named binary on PATH is not the real tool)." : "";
     const header = supported
       ? h("div.legend", null, [V.icon("info"),
           (s.installed || 0) + " of " + (s.total || 0) + " offensive tools installed on " + osName +
-          " — these are Linux packages, probed live (command -v + a version check)."])
+          " — these are Linux packages, probed live (command -v + a version check)." + shadowNote])
       : h("div.legend", null, [V.icon("info"),
           "Host tools are Linux packages; " + (plat.system || "this OS") +
           " is unsupported — nothing is installed or probed here. Run the offense engine on Linux (Kali/Ubuntu/Debian)."]);
