@@ -22,7 +22,7 @@ from vigil_integration.agent import (
     ToolCall,
     authorize_edge,
 )
-from vigil_integration.live.think_claude import ReplayThinker, think
+from vigil_integration.live.think_claude import DEFAULT_MODEL, ReplayThinker, resolve_model, think
 
 
 # --- fakes -----------------------------------------------------------------------------------------
@@ -88,6 +88,28 @@ def test_valid_json_decision_via_fake_client(state):
     d = think(state, {"prior": "banner: nginx"}, client=FakeClient(text=payload))
     assert isinstance(d, LLMDecision)
     assert d.action == ActionType.USE_TOOL and d.tool.tool_name == "nmap"
+
+
+def test_resolve_model_explicit_then_env_then_default(monkeypatch):
+    monkeypatch.delenv("CRUCIBLE_ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("SIGIL_LLM_MODEL", raising=False)
+    assert resolve_model() == DEFAULT_MODEL                       # no env, no arg → current default
+    assert resolve_model("claude-sonnet-5") == "claude-sonnet-5"  # explicit wins
+    monkeypatch.setenv("CRUCIBLE_ANTHROPIC_MODEL", "claude-sonnet-5")
+    assert resolve_model() == "claude-sonnet-5"                   # Settings choice takes effect
+    assert resolve_model("claude-opus-5") == "claude-opus-5"      # explicit still overrides env
+
+
+def test_think_uses_the_settings_selected_model(state, monkeypatch):
+    # THE picker-actually-works property: a model chosen in Settings (env) is the model the live call uses.
+    monkeypatch.setenv("CRUCIBLE_ANTHROPIC_MODEL", "claude-sonnet-5")
+    fake = FakeClient(text=json.dumps({"action": "ask_user", "reasoning": "x"}))
+    think(state, {"prior": "banner"}, client=fake)
+    assert fake.captured["model"] == "claude-sonnet-5"
+    # an explicit model arg overrides the env choice
+    fake2 = FakeClient(text=json.dumps({"action": "ask_user", "reasoning": "x"}))
+    think(state, {"prior": "banner"}, client=fake2, model="claude-opus-5")
+    assert fake2.captured["model"] == "claude-opus-5"
 
 
 def test_valid_decision_is_still_non_authoritative(state):

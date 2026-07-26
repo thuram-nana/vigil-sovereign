@@ -51,8 +51,14 @@ from ..tools import redact_tool_args
 logger = logging.getLogger("vigil.live.think_claude")
 
 # The think step is a decision-shaped call; correctness matters more than cost → default to Opus.
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_MAX_TOKENS = 4096
+
+# The env vars the Settings model picker writes (see apps/sigil/.../ui/settings.py). Reading them here is
+# what makes a model chosen in the UI actually take effect on `vigil engage`'s think step — otherwise the
+# choice is silently ignored and the hard-coded default is always used. Offense-side + env-only (no import
+# of the sovereign Settings module — the two-env boundary holds).
+_MODEL_ENV_VARS = ("CRUCIBLE_ANTHROPIC_MODEL", "SIGIL_LLM_MODEL")
 
 # Defensive bounds. Truncating UNTRUSTED data is always safe (worst case a valid-but-huge decision
 # truncates and parse_decision fails closed to the safest action — never up). These also cap regex
@@ -323,6 +329,20 @@ def _build_live_client(api_key: str) -> Optional[Any]:
 # ---------------------------------------------------------------------------------------------------
 
 
+def resolve_model(explicit: Optional[str] = None) -> str:
+    """The model the live Claude path should call: an EXPLICIT non-empty value wins; else the model chosen
+    in the Settings UI (``CRUCIBLE_ANTHROPIC_MODEL`` / ``SIGIL_LLM_MODEL``, bridged to the offense child by
+    ``vigil up``); else ``DEFAULT_MODEL``. This is the seam that makes the picker actually take effect."""
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    import os
+    for var in _MODEL_ENV_VARS:
+        val = os.environ.get(var, "")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return DEFAULT_MODEL
+
+
 def think(
     state: AgentState,
     prompt_ctx: object,
@@ -330,7 +350,7 @@ def think(
     client: Optional[Any] = None,
     replay: Optional[Any] = None,
     api_key: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
+    model: Optional[str] = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> LLMDecision:
     """Run one live Claude think step and return a **non-authoritative** ``LLMDecision`` proposal.
@@ -351,6 +371,7 @@ def think(
     Never raises; always returns an ``LLMDecision``. The decision is a proposal only — it must clear
     ``agent.react.authorize_edge`` before anything runs.
     """
+    model = resolve_model(model)   # explicit arg > Settings choice (env) > DEFAULT_MODEL
     try:
         system, user = _build_messages(state, prompt_ctx)
     except Exception as exc:  # noqa: BLE001 — prompt assembly must never crash the think step
@@ -418,4 +439,4 @@ class ReplayThinker:
         return max(0, len(self._items) - self._i)
 
 
-__all__ = ["think", "ReplayThinker", "DEFAULT_MODEL", "DEFAULT_MAX_TOKENS"]
+__all__ = ["think", "ReplayThinker", "resolve_model", "DEFAULT_MODEL", "DEFAULT_MAX_TOKENS"]

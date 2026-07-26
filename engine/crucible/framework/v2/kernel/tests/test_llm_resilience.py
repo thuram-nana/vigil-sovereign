@@ -110,6 +110,38 @@ def test_create_with_backoff_retries_transient_then_succeeds(monkeypatch) -> Non
     assert len(sleeps) == 2                   # backed off before each of the 2 retries
 
 
+def test_temperature_only_sent_to_models_that_accept_it(monkeypatch) -> None:
+    # A CURRENT model (opus-5/sonnet-5/opus-4.8/4.7/fable) 400s if `temperature` is sent; a legacy model
+    # accepts it. The backend must attach temperature ONLY for a sampling-capable model — else the picker's
+    # own default (claude-opus-5) hard-fails every call.
+    monkeypatch.setattr(A.time, "sleep", lambda s: None)
+    captured: dict = {}
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                captured.clear()
+                captured.update(kw)
+                return "OK"
+
+    prompt = SimpleNamespace(temperature=0.2, max_tokens=64)
+
+    be = _bare_anthropic()
+    be.model = "claude-opus-5"
+    be._create_with_backoff(_Client(), "sys", "user", prompt)
+    assert "temperature" not in captured and captured["model"] == "claude-opus-5"
+
+    be = _bare_anthropic()
+    be.model = "claude-sonnet-4-6"
+    be._create_with_backoff(_Client(), "sys", "user", prompt)
+    assert captured.get("temperature") == 0.2      # legacy model still gets it
+
+    assert A._supports_sampling("claude-sonnet-5") is False
+    assert A._supports_sampling("claude-opus-4-8") is False
+    assert A._supports_sampling("claude-haiku-4-5") is True
+
+
 def test_create_with_backoff_raises_overloaded_when_exhausted(monkeypatch) -> None:
     monkeypatch.setattr(A.time, "sleep", lambda s: None)
 

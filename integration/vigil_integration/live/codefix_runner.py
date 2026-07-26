@@ -54,7 +54,7 @@ class CodefixConfig:
     git_bin: str = "git"
     apply_edits: bool = False
     approve_window_s: float = 3600.0
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-opus-5"             # a CURRENT model; `vigil patch` resolves the Settings choice
     max_tokens: int = 4000
     clone_timeout: float = 120.0
     apply_timeout: float = 120.0
