@@ -2014,7 +2014,7 @@
       defField("Mode", mode, "Observe watches only. Enforce blocks proven attacks and needs the AEGIS_RESPOND entitlement (otherwise it downgrades to observe)."),
       defField("Honeypot paths", honey, "Decoy paths — any fetch proves automated access. Optional."),
       defField("Deployment secret", h("div.row-flex", null, [secretIn, genBtn]),
-        "Keys PRIVACY pseudonymisation of actor identifiers (IP/session) — NOT request authentication. Required."),
+        "A per-deployment secret AEGIS uses internally (identifier pseudonymisation on the SDK ingest path) — NOT a request password/auth. Required. Note: your live dashboard below shows the real client source of attackers, which is what you need to act."),
       defField("Gateway name (slug)", slug, "Identity for the kill-switch + audit trail."),
       h("div.legend", { style: { marginTop: "4px" } }, [V.icon("info"),
         h("span", null, "This reverse proxy detects honeypot hits, automated access, and injection/SSRF/XXE leads over real traffic. Canary / prompt-injection detection for an LLM app is the in-process SDK path (aegis detect / the Aegis SDK), not this proxy.")]),
@@ -2066,8 +2066,11 @@
     var mean = (a && typeof a.mean === "number") ? a.mean : 0;
     var pct = Math.max(0, Math.min(100, Math.round(mean * 100)));
     var act = (a && a.action) ? a.action : null;
+    // the id is AEGIS's actor key — the client source (an IP), prefixed "session:" internally. Show the
+    // source plainly (this is the defender's own view of who is hitting their app).
+    var src = String((a && a.id) || "?").replace(/^session:/, "");
     return h("div.actor-row", null, [
-      h("div.actor-h", null, [h("span.mono.dim", null, (a && a.id) || "?"),
+      h("div.actor-h", null, [h("span.mono.dim", { title: "client source" }, src),
         act ? h("span.pill.sm.warn", null, act) : null]),
       h("div.bar", null, h("div.bar-fill" + (pct >= 66 ? ".hi" : (pct >= 40 ? ".mid" : "")), { style: { width: pct + "%" } })),
       h("div.actor-meta.dim", null, "belief " + pct + "% · " + ((a && a.n) || 0) + " observations"),
