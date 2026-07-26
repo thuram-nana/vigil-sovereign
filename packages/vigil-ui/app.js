@@ -1034,6 +1034,11 @@
     const ob = f.confirmed_by || f.oracle_kind || "";
     return f.kind === "active" && !!ob && ob !== "passive" && ob !== "static-lead";
   }
+  // World-model grounding is a DIFFERENT vocabulary from the report's "fact" (do not confuse them):
+  // worldmodel/models.classify_provenance emits "grounded" (the oracle / evidence-cert / confirmed-finding
+  // fact tier) vs "intel" / "ungrounded" / "unclassified" (inferred/unproven). Pinned by
+  // test_worldmodel_grounding_vocab.py so a backend rename can't silently make this lie.
+  function p3WmFact(g) { return g === "grounded"; }
   function p3Surface(f) {
     return f.location || f.surface || f.insertion_point || f.param || f.endpoint || "—";
   }
@@ -1261,7 +1266,9 @@
         return h("div.trow", { style: { cursor: "default" } }, [
           h("div.ico", null, V.icon(x.reproduced ? "check" : "x")),
           h("div.body", null, [h("div.k", null, x.confirmed_by || x.finding || "cert"), h("div.m", null, x.note || "")]),
-          h("div.meta", null, h("span.st." + okc, null, [h("span.dot"), x.reproduced ? "sound" : "not reproduced"])),
+          // "reproduced" (not "sound") — this roll-up exposes only re-fire, not claim-match; the note
+          // flags a claim mismatch, and the Evidence tab shows the full sound/tampered/claim-mismatch state.
+          h("div.meta", null, h("span.st." + okc, null, [h("span.dot"), x.reproduced ? "reproduced" : "not reproduced"])),
         ]);
       });
       V.mount(host, [h("div", { style: { marginTop: "10px", marginBottom: "8px" } }, badge),
@@ -1453,7 +1460,7 @@
     // the facts/leads that touch this node = the edges incident on it
     const incident = (wm.edges || []).filter(function (e) { return e.src === n.id || e.dst === n.id; });
     const edgeRows = incident.length ? incident.map(function (e) {
-      const fact = (typeof e.grounding === "string") ? e.grounding === "fact" : (e.belief != null && e.belief >= 0.999);
+      const fact = (typeof e.grounding === "string" && e.grounding) ? p3WmFact(e.grounding) : (e.belief != null && e.belief >= 0.999);
       return h("div.trow", { style: { cursor: "default" } }, [
         h("div.ico", null, V.icon("dot")),
         h("div.body", null, [h("div.k", null, (e.src === n.id ? "→ " + e.dst : e.src + " →")),
@@ -1464,7 +1471,7 @@
     openDrawer(String(n.id).replace(/^[a-z_]+:/, ""), [
       h("div.dsection", null, [h("span.label", null, "NODE"), h("div", { style: { marginTop: "8px" } }, kv)]),
       h("div.dsection", null, [h("span.label", null, "FACTS / LEADS AT THIS NODE"), h("div.feed", { style: { marginTop: "8px" } }, edgeRows)]),
-      n.grounding && n.grounding !== "fact"
+      n.grounding && !p3WmFact(n.grounding)
         ? h("div.legend", null, [V.icon("info"), "This node's grounding is '" + n.grounding + "' — it is inferred/unproven, not an oracle-confirmed fact."]) : null,
     ]);
   }
