@@ -177,7 +177,11 @@ def _cmd_patch(args: argparse.Namespace) -> int:
         trust_root = args.authority_trust_root or (dp["trust_root"] if Path(dp["trust_root"]).exists() else "")
         signed_path = args.signed_authorization or (dp["signed"] if Path(dp["signed"]).exists() else "")
         ledger = args.ledger or dp["ledger"]
-        mandatory = args.mandatory_signer or ["owner"]      # provision-destruction's default owner id
+        # provision-destruction's default owner id. Fail-closed: the mandatory id must be registered in the
+        # trust root (DestructionAuthority validates that), and the owner's SIGNATURE must be present — so a
+        # wrong default (e.g. a custom --owner-id) refuses rather than fails open. Operator-supplied (the
+        # trusted caller), never the injectable agent.
+        mandatory = args.mandatory_signer or ["owner"]
         missing = [n for n, v in (("--signed-authorization", signed_path),
                                   ("--authority-trust-root", trust_root)) if not v]
         if missing:

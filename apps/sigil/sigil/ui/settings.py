@@ -39,9 +39,11 @@ SECRET_META = {
     "VIGIL_DESTRUCTION_OWNER_KEY": {
         "label": "Auto-patch signing key (owner)",
         "purpose": "The owner key that AUTHORIZES an auto-patch pull request (the m-of-n destruction quorum). "
-                   "Generate it with `vigil provision-destruction`, then paste the owner key here. Optional "
-                   "until you open PRs. Solo setups: whoever holds this key can authorize — for separation of "
-                   "duties, provision with more signers and keep their keys off this machine."},
+                   "Generate it with `vigil provision-destruction` and seal it here. Deliberately NOT broadcast "
+                   "to the offense engine: the `vigil authorize-destruction` step reads it from the "
+                   "VIGIL_DESTRUCTION_OWNER_KEY env, so run that one command in a shell where it is exported. "
+                   "Optional until you open PRs. Solo setups: whoever holds this key can authorize — for "
+                   "separation of duties, provision with more signers and keep their keys off this machine."},
 }
 _MAX_SECRET_LEN = 8192
 

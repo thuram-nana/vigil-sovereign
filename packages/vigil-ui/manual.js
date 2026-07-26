@@ -84,16 +84,16 @@ window.VIGIL_MANUAL = [
       { p: "Opening a PR is gated by an m-of-n signature — “m of n approved keys must sign, and the owner must be one of them.” This is what stops the engine from ever opening a PR on its own: it can only act on an authorization YOU signed, for THAT one repo and finding, that is single-use and expires in minutes." },
       { h: "One-time setup" },
       { list: [
-        ["1. Generate the keys", "Run `vigil provision-destruction`. It prints your signing key(s) ONCE and writes a public trust file. Paste the owner key into Settings → “Auto-patch signing key (owner)”."],
+        ["1. Generate the keys", "Run `vigil provision-destruction`. It prints your signing key(s) ONCE and writes a public trust file. Seal the owner key in Settings → “Auto-patch signing key (owner)” for safekeeping, and keep a copy to export for the signing step below."],
         ["2. (optional) Share duties", "For a team, run `vigil provision-destruction --signers 2 --threshold 2` and give each co-signer their own key, kept on their own machine — then no single machine can authorize a PR alone."],
       ] },
       { h: "Per fix" },
       { list: [
         ["3. Dry run", "`vigil patch --finding-envelope … --target-repo R` prints the exact action to authorize (an id, the engagement, the repo)."],
-        ["4. Authorize", "`vigil authorize-destruction --action-id … --slug … --target R` signs that one action with your owner key (read from Settings), producing a single-use, minutes-long authorization."],
-        ["5. Open the PR", "`vigil patch … --target-repo R --open-pr` finds that authorization automatically and opens the gated pull request. It still needs a GitHub token (Settings) and never merges anything for you."],
+        ["4. Authorize", "In a shell where the owner key is exported (`export VIGIL_DESTRUCTION_OWNER_KEY=…`), run `vigil authorize-destruction --action-id … --slug … --target R`. It signs that one action, producing a single-use, minutes-long authorization. The key is read from the environment, never the command line — so it never lands in your shell history."],
+        ["5. Open the PR", "`vigil patch … --target-repo R --open-pr` finds that authorization automatically and opens the gated pull request. It still needs a GitHub token and never merges anything for you."],
       ] },
-      { note: "Solo setup (the default, one key at threshold 1): whoever holds the owner key can authorize a PR — it is still single-use, time-boxed, bound to one repo+finding, and off by default. For real separation of duties use more signers and keep their keys on separate machines." },
+      { note: "The signing key is deliberately kept OUT of the offense engine — the engine can only CONSUME an authorization you produced, never sign one. Solo setup (the default, one key at threshold 1): whoever holds the owner key can authorize a PR — still single-use, time-boxed, bound to one repo+finding, and off by default. For real separation of duties use more signers and keep their keys on separate machines." },
     ],
   },
   {
