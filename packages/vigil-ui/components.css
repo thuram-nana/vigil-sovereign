@@ -297,6 +297,20 @@ textarea { min-height: 80px; resize: vertical; }
 .bar-fill { height: 100%; background: var(--st-confirmed); border-radius: 999px; }
 .bar-fill.mid { background: var(--st-queued); }
 .bar-fill.hi { background: var(--st-blocked); }
+
+/* fixes — the horizontal gated remediation ladder + fixable-finding cards --------------------- */
+.ladder { display: flex; gap: var(--sp-2); align-items: stretch; padding-bottom: 4px; }
+.ladder-stage { flex: 1 0 150px; min-width: 150px; border: 1px solid var(--border); border-radius: var(--r-2);
+  padding: 10px 12px; background: var(--bg-2); }
+.ladder-stage .ls-h { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-bottom: 6px; }
+.ladder-stage .ls-n { width: 20px; height: 20px; border-radius: 50%; background: var(--bg-3); color: var(--text-1);
+  display: grid; place-items: center; font-size: var(--fs-xs); flex: 0 0 auto; }
+.ladder-stage .ls-w { font-size: var(--fs-xs); line-height: 1.45; }
+.fix-card { border: 1px solid var(--border); border-radius: var(--r-2); padding: 12px 14px; background: var(--bg-1); }
+.fix-card .fix-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.fix-card .fix-rem { margin-top: 8px; }
+.fix-card .fix-rem .label { display: block; margin-bottom: 2px; }
+.fix-card .fix-rem p { color: var(--text-1); font-size: var(--fs-sm); line-height: 1.5; }
 .btn.sm { padding: 6px 12px; font-size: var(--fs-sm); }
 .tile .foot.ok { color: var(--st-confirmed); } .tile .foot.warn { color: var(--st-queued); } .tile .foot.danger { color: var(--st-blocked); }
 .cap-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);

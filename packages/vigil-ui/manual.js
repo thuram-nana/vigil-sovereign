@@ -69,8 +69,11 @@ window.VIGIL_MANUAL = [
   {
     id: "fixes", title: "Fixes",
     blocks: [
-      { p: "If you ask VIGIL to fix what it finds, it only ever acts on a PROVEN bug. The fix runs as a ladder of gated steps you can watch: clone the code, edit it, build in a sandbox, and open a pull request — each step at its own risk tier, and the pull-request step needs your explicit approval." },
-      { p: "A fix is only accepted when the ORIGINAL exploit oracle is re-run and goes silent — i.e. the bug can no longer be proven. Nothing is merged for you." },
+      { p: "The Fixes screen shows what to fix after a run — its oracle-confirmed findings (only PROVEN bugs are eligible; unproven leads are never auto-fixed), each with its own remediation guidance, plus the highest-impact fix points (the single choke-points that sever the most attack paths)." },
+      { h: "The gated ladder" },
+      { p: "An auto-fix follows a ladder of gated steps, each at its own risk tier: clone the repo (A1), apply the AI's proposed edits (A2 — each file needs your explicit approval; a timeout auto-rejects), build in a sandbox (A3), and open a pull request (A3 — a distinct multi-signer approval). Only explicit, path-validated files are ever staged — never a bulk change." },
+      { p: "A fix is marked FIXED only when the ORIGINAL exploit oracle is re-run on the patched build and goes SILENT — i.e. the bug can no longer be proven. If it still fires, the pull request still opens but is flagged as a proposal, not a fix. Nothing is merged for you." },
+      { note: "Live auto-application (actually cloning, building, and opening a PR against your repo) is a separate, sovereign-gated capability that must be provisioned and explicitly authorized — the console never runs it on its own. Today the screen shows you the plan and the exact gated process; it does not clone, build, or open anything." },
     ],
   },
   {

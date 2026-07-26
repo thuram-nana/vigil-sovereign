@@ -22,7 +22,7 @@
       { id: "assess", label: "New Assessment", icon: "assess", ready: true },
       { id: "live", label: "Live", icon: "live", ready: true },
       { id: "findings", label: "Findings", icon: "find", ready: true },
-      { id: "fixes", label: "Fixes", icon: "fixes", phase: "P6" },
+      { id: "fixes", label: "Fixes", icon: "fixes", ready: true },
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", ready: true },
     ]},
     { group: "MANAGE", items: [
@@ -2077,6 +2077,121 @@
     ]);
   }
 
+  // ---- Fixes screen (remediation) --------------------------------------------
+  // HONEST: shows the run's oracle-confirmed FIXABLE findings (with their real remediation guidance) +
+  // the gated ladder any auto-fix follows. Live auto-application (clone/build/open-PR) is a separate
+  // sovereign-gated capability that must be provisioned + authorized — nothing is cloned/built/opened here.
+  function renderFixes(screen) {
+    var S = { runs: [], run: null };
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Fixes"),
+        h("span.sub", null, "What to fix after discovery, and the gated process an auto-fix follows.")]),
+      h("div#fx-body", null, h("div.empty", null, "Loading runs…")),
+    ]);
+    var want = (hashQuery().run) || "";
+    V.getJSON(OFF("/api/runs")).then(function (d) {
+      S.runs = (d && d.runs) || [];
+      S.run = S.runs.find(function (r) { return r.run_id === want; }) || S.runs[0] || null;
+      drawFixes(S);
+    }).catch(function () {
+      var b = V.$("#fx-body");
+      if (b) V.mount(b, h("div.empty", null, "The offense engine is offline. Start it with `vigil up`."));
+    });
+  }
+
+  function drawFixes(S) {
+    var body = V.$("#fx-body"); if (!body) return;
+    if (!S.runs.length) {
+      V.mount(body, h("div.empty", null, [h("div.big", null, "No runs yet"),
+        h("p", null, "Run an assessment first — its confirmed findings become fixable here."),
+        h("button.btn.primary", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/assess"; } }, "New Assessment")]));
+      return;
+    }
+    var picker = h("div.field", { style: { maxWidth: "560px", marginBottom: "0" } }, [
+      h("label", null, "Run"),
+      h("select", { onChange: function (e) {
+          S.run = S.runs.find(function (r) { return r.run_id === e.target.value; }) || null;
+          history.replaceState(null, "", "#/fixes?run=" + encodeURIComponent(S.run ? S.run.run_id : ""));
+          drawFixes(S);
+        } }, S.runs.map(function (r) {
+        return h("option", { value: r.run_id, selected: S.run && r.run_id === S.run.run_id },
+          (r.mode || "url") + " · " + (r.target || r.slug || r.run_id) + " · " + r.status);
+      })),
+    ]);
+    V.mount(body, [picker, h("div#fx-view", { style: { marginTop: "16px" } }, h("div.empty", null, "Loading fix plan…"))]);
+    if (!S.run) return;
+    V.getJSON(OFF("/api/remediate/" + encodeURIComponent(S.run.run_id))).then(drawFixPlan)
+      .catch(function () { var v = V.$("#fx-view"); if (v) V.mount(v, h("div.empty", null, "Could not load the fix plan for this run.")); });
+    // impact-ranked fix points (choke-points) from the world-model — best-effort, non-fatal
+    V.getJSON(OFF("/api/worldmodel/" + encodeURIComponent(S.run.run_id))).then(function (wm) {
+      var host = V.$("#fx-chokes"); if (!host) return;
+      var ch = (wm && wm.chokes) || [];
+      if (!ch.length) { V.mount(host, h("div.empty", null, "No single-lever choke-points for this run.")); return; }
+      V.mount(host, h("div.stack", null, ch.slice(0, 6).map(function (c) {
+        return h("div.kv", null, [
+          h("div.k", null, (c.kind || "edge")), h("div.v", null, (c.src || "?") + " → " + (c.dst || "?")),
+          h("div.k", null, "severs"), h("div.v", null, (c.disconnects != null ? c.disconnects + " path(s)" : "—") + (c.is_bridge ? " · bridge" : "")),
+        ]);
+      })));
+    }).catch(function () { /* worldmodel optional */ });
+  }
+
+  function drawFixPlan(plan) {
+    var view = V.$("#fx-view"); if (!view) return;
+    if (plan.pending) {
+      V.mount(view, h("div.empty", null, "This run has no saved report yet" + (plan.status ? " (" + plan.status + ")" : "") + " — fixes appear once it finishes."));
+      return;
+    }
+    var fixable = plan.fixable || [];
+    var nodes = [
+      plan.apply_fixes_requested ? h("div.legend", null, [V.icon("check"), h("span", null, "You requested fixes for this run at launch. Here is the plan — nothing is applied without the gated steps below.")]) : null,
+      h("div.grid.cols-4", { style: { marginBottom: "4px" } }, [
+        V.tile("Fixable", String(plan.fixable_count || 0), "oracle-confirmed", (plan.fixable_count ? "warn" : "ok")),
+        V.tile("Unproven", String(plan.lead_count || 0), "leads — not auto-fixable", null),
+        V.tile("Live auto-fix", "OFF", "provision + authorize", null),
+        V.tile("Verify", "oracle-silent", "proof required", null),
+      ]),
+      V.card("The gated fix ladder", "PROCESS", fixLadder(plan.ladder || []), false),
+      h("div.legend", null, [V.icon("shield"), h("span", null, plan.note || "")]),
+    ];
+    if (!fixable.length) {
+      nodes.push(h("div.empty", null, "No oracle-confirmed findings to fix in this run. Only proven FACTs are eligible — unproven leads are never auto-fixed."));
+    } else {
+      nodes.push(V.card("Fixable findings", "CONFIRMED", h("div.stack", null, fixable.map(fixFindingCard)), false));
+    }
+    nodes.push(V.card("Highest-impact fix points", "IMPACT", h("div#fx-chokes", null, h("div.empty", null, "Loading…")), false));
+    V.mount(view, nodes);
+  }
+
+  function fixLadder(stages) {
+    return h("div.ladder.scroll-x", null, stages.map(function (s, i) {
+      return h("div.ladder-stage", null, [
+        h("div.ls-h", null, [h("span.ls-n", null, String(i + 1)), h("b", null, s.stage),
+          s.tier && s.tier !== "—" ? h("span.pill.sm", null, s.tier) : null]),
+        h("div.ls-w.dim", null, s.what),
+      ]);
+    }));
+  }
+
+  function sevClass(sev) {
+    var s = String(sev || "").toLowerCase();
+    if (s === "critical" || s === "high") return "danger";
+    if (s === "medium" || s === "moderate") return "warn";
+    return "";
+  }
+  function fixFindingCard(f) {
+    return h("div.fix-card", null, [
+      h("div.fix-h", null, [
+        h("span.vbadge." + (sevClass(f.severity) || "muted"), null, (f.severity || "?").toUpperCase()),
+        h("b", null, f.title || f.bug_class || "finding"),
+        f.bug_class ? h("span.pill.sm", null, f.bug_class) : null,
+      ]),
+      f.location ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, f.location) : null,
+      h("div.fix-rem", null, [h("span.label", null, "Remediation"), h("p", null, f.remediation)]),
+      f.confirmed_by ? h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "6px" } }, "confirmed by " + f.confirmed_by) : null,
+    ]);
+  }
+
   function renderStub(screen, item) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, item.label),
@@ -2104,6 +2219,7 @@
     if (id === "settings") { renderSettings(screen); return; }
     if (id === "safety") { renderSafety(screen); return; }
     if (id === "defense") { renderDefense(screen); return; }
+    if (id === "fixes") { renderFixes(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });
