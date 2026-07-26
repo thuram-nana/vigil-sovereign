@@ -29,6 +29,8 @@ from . import actions
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+")
 _MAX_MSG = 4000
 _MAX_SESSIONS = 200
+_MAX_ID = 128            # a chat id is a single filename component; cap length so an over-long id is a clean
+#                         refusal (ValueError → 404), never an OSError("File name too long") → 500 path leak.
 
 
 def _live_dir() -> Path:
@@ -37,20 +39,36 @@ def _live_dir() -> Path:
     return Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live")
 
 
+def _safe_chat_id(raw: str) -> str:
+    """The console's path-component guard (no separators / .. / leading dot — no traversal) PLUS a length
+    cap, so a character-safe but over-long id is refused cleanly rather than raising OSError deep in a write
+    (which the server would map to a 500 that discloses the chats-dir path). Raises ValueError → server 404."""
+    rid = actions._safe_run_id(raw)
+    if len(rid) > _MAX_ID:
+        raise ValueError(f"chat id too long (> {_MAX_ID})")
+    return rid
+
+
 def _chats_dir() -> Path:
     d = _live_dir() / "chats"
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)              # operator free-text engagement context is not world-readable
+    except OSError:
+        pass
     return d
 
 
 def _chat_path(chat_id: str) -> Path:
-    # reuse the console's one path-component guard so a chat id can never traverse out of the chats dir
-    return _chats_dir() / (actions._safe_run_id(chat_id) + ".jsonl")
+    return _chats_dir() / (_safe_chat_id(chat_id) + ".jsonl")
 
 
 def _append(chat_id: str, rec: dict) -> None:
     line = json.dumps({"ts": time.time(), **rec}, ensure_ascii=False)
-    with open(_chat_path(chat_id), "a", encoding="utf-8") as fh:      # append-only, one JSON object per line
+    p = _chat_path(chat_id)
+    # create 0600 up-front (no world-readable window); append-only, one JSON object per line.
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
 
@@ -89,7 +107,7 @@ def list_sessions() -> dict:
 
 def get_session(chat_id: str) -> dict:
     """One transcript for the UI (fail-closed: an unsafe id raises ValueError → the server maps it to 404)."""
-    return {"chat_id": actions._safe_run_id(chat_id), "messages": read_session(chat_id)}
+    return {"chat_id": _safe_chat_id(chat_id), "messages": read_session(chat_id)}
 
 
 def _infer_mode(target: str) -> str:
@@ -106,7 +124,7 @@ def chat_send(body: dict) -> dict:
     Returns {chat_id, status, reply, run_id?, slug?, stream}. Never raises a traceback into the server
     for an operator-input problem (a clean status is returned); an unsafe chat id raises ValueError which
     the server maps to a 404."""
-    chat_id = actions._safe_run_id(str(body.get("chat_id") or "").strip() or actions._new_run_id())
+    chat_id = _safe_chat_id(str(body.get("chat_id") or "").strip() or actions._new_run_id())
     message = str(body.get("message") or "").strip()[:_MAX_MSG]
     if not message:
         return {"chat_id": chat_id, "status": "error", "reply": "Say what you'd like me to test.",

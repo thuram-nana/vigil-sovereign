@@ -83,6 +83,26 @@ def test_unsafe_chat_id_is_refused(monkeypatch):
         chat.get_session("../secrets")
 
 
+def test_overlong_chat_id_is_a_clean_refusal_not_an_oserror(monkeypatch):
+    # red-pen LOW: a character-safe but over-long id must raise ValueError (server → 404), never reach the
+    # filesystem and OSError("File name too long") → 500 that discloses the chats-dir path.
+    _stub_launch(monkeypatch, {})
+    with pytest.raises(ValueError):
+        chat.chat_send({"message": "x http://127.0.0.1/", "chat_id": "a" * 260})
+    with pytest.raises(ValueError):
+        chat.get_session("a" * 260)
+
+
+def test_transcript_files_are_not_world_readable(monkeypatch, tmp_path):
+    import stat
+    _stub_launch(monkeypatch, {"run_id": "r", "slug": "x", "stream": "none"})
+    chat.chat_send({"message": "one http://127.0.0.1/", "chat_id": "perm"})
+    d = tmp_path / "chats"
+    f = d / "perm.jsonl"
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700       # dir not world/group readable
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600       # transcript not world/group readable
+
+
 def test_transcript_is_append_only_jsonl_and_tolerates_a_torn_line(monkeypatch, tmp_path):
     _stub_launch(monkeypatch, {"run_id": "r", "slug": "x", "stream": "none"})
     chat.chat_send({"message": "one http://127.0.0.1/", "chat_id": "t"})
