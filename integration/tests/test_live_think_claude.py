@@ -112,6 +112,28 @@ def test_think_uses_the_settings_selected_model(state, monkeypatch):
     assert fake2.captured["model"] == "claude-opus-5"
 
 
+def test_effort_env_reaches_the_live_think_call_for_current_models(state, monkeypatch):
+    # A3: CRUCIBLE_EFFORT (set by the Settings picker / chatbot) becomes output_config.effort on a current
+    # model, and is NEVER sent for an older model (which would ignore/reject it). budget_tokens is never sent.
+    monkeypatch.setenv("CRUCIBLE_EFFORT", "high")
+    monkeypatch.setenv("CRUCIBLE_ANTHROPIC_MODEL", "claude-opus-5")
+    fake = FakeClient(text=json.dumps({"action": "ask_user", "reasoning": "x"}))
+    think(state, {"prior": "banner"}, client=fake)
+    assert fake.captured.get("output_config") == {"effort": "high"}
+    assert "budget_tokens" not in fake.captured
+    # older model → no output_config even with the env set
+    monkeypatch.setenv("CRUCIBLE_ANTHROPIC_MODEL", "claude-haiku-4-5")
+    fake2 = FakeClient(text=json.dumps({"action": "ask_user", "reasoning": "x"}))
+    think(state, {"prior": "banner"}, client=fake2)
+    assert "output_config" not in fake2.captured
+    # unknown effort value → ignored (model default), current model
+    monkeypatch.setenv("CRUCIBLE_ANTHROPIC_MODEL", "claude-opus-5")
+    monkeypatch.setenv("CRUCIBLE_EFFORT", "bogus")
+    fake3 = FakeClient(text=json.dumps({"action": "ask_user", "reasoning": "x"}))
+    think(state, {"prior": "banner"}, client=fake3)
+    assert "output_config" not in fake3.captured
+
+
 def test_valid_decision_is_still_non_authoritative(state):
     """A well-formed use_tool proposal must NOT auto-authorize: with no gate wired the edge is DENIED."""
     payload = json.dumps({

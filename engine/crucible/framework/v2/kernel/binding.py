@@ -25,7 +25,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..common import docs
-from .llm import LLMBackend, Prompt, complete_with_failover, get_backend
+from .llm import LLMBackend, Prompt, complete_with_failover
 from .models import CallTrace
 
 
@@ -277,6 +277,7 @@ def run(
     extra_user: str = "",
     temperature: float = 0.2,
     max_tokens: int = 4096,
+    effort: str | None = None,
 ) -> tuple[BaseModel, CallTrace]:
     """Render the prompt, dispatch to the active backend, return (parsed, trace).
 
@@ -308,6 +309,9 @@ def run(
         ),
         temperature=temperature,
         max_tokens=max_tokens,
+        # None => the backend resolves the operator default (CRUCIBLE_EFFORT) at send time; an explicit
+        # value (e.g. from the chatbot's effort control) overrides it. Older models ignore effort entirely.
+        effort=effort,
     )
     # An explicitly-passed backend is the caller's choice (tests / a pinned run) — use it
     # directly. The auto-selected production path goes through complete_with_failover, which

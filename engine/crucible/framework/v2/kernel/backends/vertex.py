@@ -43,7 +43,14 @@ import time
 
 from ...common import logging as v2log
 from ...common.errors import BackendError, BackendUnavailable
-from ..llm import LLMBackend, LLMResult, Prompt, make_call_trace, parse_json_response
+from ..llm import (
+    LLMBackend,
+    LLMResult,
+    Prompt,
+    make_call_trace,
+    parse_json_response,
+    sampling_create_kwargs,
+)
 
 
 _log = v2log.get_logger(__name__)
@@ -173,8 +180,10 @@ class VertexBackend(LLMBackend):
                     model=self.model,
                     system=sys_prompt,
                     messages=[{"role": "user", "content": user_msg}],
-                    temperature=prompt.temperature,
                     max_tokens=prompt.max_tokens,
+                    # temperature (older) / output_config.effort (current) via the shared helper — a
+                    # current model on Vertex previously 400'd on the unconditional temperature.
+                    **sampling_create_kwargs(self.model, prompt.temperature, prompt.effort),
                 )
             except Exception as e:
                 raise BackendError(f"Vertex API error: {e}") from e

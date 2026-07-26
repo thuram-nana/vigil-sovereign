@@ -1699,7 +1699,8 @@
             h("button.btn.owner", { onClick: function () { location.hash = "#/apikeys"; } }, [V.icon("key"), "Manage API keys"])),
         ], true),
       ]),
-      h("div.grid.cols-1", { style: { alignItems: "start", marginTop: "16px" } }, [
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
+        V.card("Reasoning effort", "OWNER", h("div#set-effort", null, h("div.empty", null, "Loading…")), true),
         V.card("Bring your own model", "OWNER", h("div#set-provider", null, h("div.empty", null, "Loading…")), true),
       ]),
     ]);
@@ -1716,7 +1717,36 @@
 
   function drawSettings(st) {
     drawModelCard(st);
+    drawEffortCard(st);
     drawProviderCard(st);
+  }
+
+  // Reasoning-effort control: how hard current-generation models think (output_config.effort). "Model
+  // default" clears it. Applies to BOTH the offense reasoning engine and the Strix codebase agent; older
+  // models ignore it (they steer by prompting). The chatbot (A4) will offer the same control per-message.
+  function drawEffortCard(st) {
+    var host = V.$("#set-effort"); if (!host) return;
+    var levels = st.effort_levels || ["low", "medium", "high", "xhigh", "max"];
+    var current = st.selected_effort || "";
+    var sel = h("select.input", null,
+      [h("option", { value: "" }, "Model default")].concat(levels.map(function (lv) {
+        var o = h("option", { value: lv }, lv.charAt(0).toUpperCase() + lv.slice(1));
+        if (lv === current) o.selected = true;
+        return o;
+      })));
+    var save = h("button.btn.owner", { onClick: function () {
+        save.disabled = true;
+        settingsAct({ action: "set_effort", effort: sel.value, reason: "set reasoning effort" },
+          sel.value ? ("Reasoning effort set to " + sel.value + ".") : "Reasoning effort reset to the model default.",
+          function () { loadSettings(); })
+          .then(function () { save.disabled = false; });
+      } }, [V.icon("check"), "Apply effort"]);
+    V.mount(host, [
+      h("div.field", null, [h("label", null, "Effort level"), sel]),
+      h("div.acts", { style: { marginTop: "12px" } }, save),
+      h("div.hint", { style: { marginTop: "10px" } },
+        "Higher effort = deeper reasoning per step (slower, costs more); lower = faster, cheaper. Takes effect on the next `vigil up`. Only current-generation models honor this."),
+    ]);
   }
 
   // Bring-your-own-model: pick a provider (Bedrock/Vertex/Azure/Mistral/self-hosted/Ollama/Claude), enter its

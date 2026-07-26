@@ -55,6 +55,10 @@ class Prompt:
     structured_input: dict[str, Any] = field(default_factory=dict)
     temperature: float = 0.2
     max_tokens: int = 4096
+    # Reasoning effort for current-generation models (output_config.effort). None => the caller lets the
+    # operator default (CRUCIBLE_EFFORT) or the model's own default decide; an explicit value overrides.
+    # Resolved + applied per-backend via sampling_create_kwargs (older models ignore it and take temperature).
+    effort: str | None = None
     # Self-consistency policy (anti-hallucination P5), for NO-ORACLE bindings only. samples>1
     # declares that the call site wants N-sample agreement clustering (see kernel.consistency);
     # agreement_gate is the modal-share threshold below which the site should ABSTAIN. Defaults
@@ -69,6 +73,44 @@ class LLMResult:
     parsed: BaseModel
     trace: CallTrace
     raw_response: str = ""
+
+
+# The operator-selectable reasoning-effort levels (the Settings picker allowlist + the chatbot's slider).
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# Current-generation models REMOVE the sampling params (temperature/top_p/top_k) — sending any is a 400 —
+# and instead accept `output_config.effort`. Older models accept temperature and do not know effort. This
+# is the SINGLE source of that model-family split; the anthropic backend + the Bedrock/Vertex wrappers
+# (all first-party anthropic-SDK `messages.create`) share sampling_create_kwargs below.
+_CURRENT_MODEL_PREFIXES = (
+    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",
+    "claude-opus-4-8", "claude-opus-4-7",
+)
+
+
+def is_current_model(model: str) -> bool:
+    """True if `model` is a current-generation Claude that takes output_config.effort and rejects sampling."""
+    m = str(model or "")
+    return any(m.startswith(p) for p in _CURRENT_MODEL_PREFIXES)
+
+
+def resolve_effort(explicit: str | None) -> str | None:
+    """The effort level for a call: an explicit choice wins, else the operator default (env CRUCIBLE_EFFORT),
+    else None. An unset/unknown value returns None (the backend simply omits output_config) — never raises."""
+    val = (explicit or os.environ.get("CRUCIBLE_EFFORT") or "").strip().lower()
+    return val if val in EFFORT_LEVELS else None
+
+
+def sampling_create_kwargs(model: str, temperature: float, effort: str | None) -> dict:
+    """The model-appropriate reasoning knobs for a first-party anthropic-SDK `messages.create`:
+      * OLDER model  → {"temperature": ...}          (current models 400 if temperature is sent)
+      * CURRENT model→ {"output_config": {"effort"}}  only when an effort resolves; else {} (model default)
+    Never sends budget_tokens (deprecated / 400 on current models). One helper so anthropic/bedrock/vertex
+    stay consistent and a current-model selection on Bedrock/Vertex no longer sends a rejected temperature."""
+    if not is_current_model(model):
+        return {"temperature": temperature}
+    eff = resolve_effort(effort)
+    return {"output_config": {"effort": eff}} if eff else {}
 
 
 class LLMBackend(abc.ABC):

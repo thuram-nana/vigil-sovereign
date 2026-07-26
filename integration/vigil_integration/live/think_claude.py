@@ -60,6 +60,26 @@ DEFAULT_MAX_TOKENS = 4096
 # of the sovereign Settings module — the two-env boundary holds).
 _MODEL_ENV_VARS = ("CRUCIBLE_ANTHROPIC_MODEL", "SIGIL_LLM_MODEL")
 
+# Reasoning-effort control (env-only; the Settings picker / chatbot write CRUCIBLE_EFFORT). Current-gen
+# models take output_config.effort and REJECT temperature/budget_tokens; older ones ignore effort. We read
+# the env here (no import of the kernel — the two-env boundary holds) and mirror kernel.llm's model split.
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_CURRENT_MODEL_PREFIXES = (
+    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",
+    "claude-opus-4-8", "claude-opus-4-7",
+)
+
+
+def _effort_kwargs(model: str) -> dict:
+    """{"output_config": {"effort": <level>}} when the model is current AND CRUCIBLE_EFFORT is a known
+    level; else {} (older models take the model default; the think call never sends temperature). Never
+    raises on a bad env value."""
+    m = str(model or "")
+    if not any(m.startswith(p) for p in _CURRENT_MODEL_PREFIXES):
+        return {}
+    level = (os.environ.get("CRUCIBLE_EFFORT") or "").strip().lower()
+    return {"output_config": {"effort": level}} if level in _EFFORT_LEVELS else {}
+
 # Defensive bounds. Truncating UNTRUSTED data is always safe (worst case a valid-but-huge decision
 # truncates and parse_decision fails closed to the safest action — never up). These also cap regex
 # cost on a hostile oversized model response.
@@ -242,6 +262,7 @@ def _think_via_client(client: Any, system: str, user: str, *, model: str, max_to
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
+            **_effort_kwargs(model),   # output_config.effort for current models when CRUCIBLE_EFFORT is set
         )
     except Exception as exc:  # noqa: BLE001 — any SDK/transport error is a fail-closed pause, never raised
         logger.warning("live think call failed (%s) — fail-closed to safest action", type(exc).__name__)

@@ -94,6 +94,13 @@ MODEL_ENV_VARS = (_BACKEND_ENV, _ANTHROPIC_MODEL_ENV, _SIGIL_MODEL_ENV)
 _CHOICE_ENV = "VIGIL_MODEL_CHOICE"               # the selected choice id — the status view's source of truth
 _DEFAULT_OFFENSE_MODEL = "claude-opus-5"          # AnthropicBackend's built-in default, for the status view
 
+# Reasoning-effort control (persisted, non-secret, delivered to offense). Current-gen models read it as
+# output_config.effort; older ones ignore it. "" = the model's own default. Kept OUT of PROVIDER_ENV_VARS
+# so switching provider never clears the operator's effort choice; delivered via _EXTRA_DELIVERED_ENV.
+_EFFORT_ENV = "CRUCIBLE_EFFORT"
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_EXTRA_DELIVERED_ENV = (_EFFORT_ENV,)             # non-provider model-plane vars also bridged to offense
+
 # The closed set of selectable models (served to the UI — the UI hard-codes NO model list). `keyless`
 # marks the choice that routes the offense engine to the local Claude Code session (a BACKEND, no API
 # key). The other ids are the Claude model identifiers this project targets across the codebase.
@@ -370,9 +377,23 @@ def set_model(model: str, *, store, owner_key, reason: str = "") -> dict:
             "recorded_seq": r["recorded_seq"]}
 
 
+def set_effort(effort: str, *, store, owner_key, reason: str = "") -> dict:
+    """Set the reasoning-effort level applied to current-gen models (output_config.effort) on BOTH planes.
+    A closed allowlist; "" clears it (the model's own default). Persists CRUCIBLE_EFFORT (delivered to the
+    offense engine by `vigil up`) and records the (non-secret) choice on the spine."""
+    effort = str(effort or "").strip().lower()
+    if effort and effort not in EFFORT_LEVELS:
+        raise ValueError(f"unknown effort {effort!r}: choose one of {', '.join(EFFORT_LEVELS)} (or empty)")
+    _persist_env(_EFFORT_ENV, effort)             # "" clears the var → model default
+    seq = _record_signed_event(
+        store, owner_key, {"signal": "governor.effort_set", "effort": effort or "default"}, reason)
+    return {"ok": True, "action": "set_effort", "effort": effort, "recorded_seq": seq}
+
+
 def export_runtime_env(include_secrets: bool = False) -> dict:
-    """The runtime LLM env the keyless offense engine needs — the provider model/config/Strix vars (from the
-    process env, where sigil.env has been loaded) always, and (only when `include_secrets`) the resolved LLM +
+    """The runtime LLM env the keyless offense engine needs — the provider model/config/Strix vars + the
+    reasoning-effort var (CRUCIBLE_EFFORT, via _EXTRA_DELIVERED_ENV) from the process env (where sigil.env has
+    been loaded) always, and (only when `include_secrets`) the resolved LLM +
     cloud provider keys from the keyring/TPM-sealed/env store. `vigil up` calls this in the SOVEREIGN venv and
     injects the result into the offense children, so the provider/model/key set in the UI reaches the offense
     plane without it importing sigil. Only non-empty string values are emitted. Delivers every managed secret
@@ -380,7 +401,7 @@ def export_runtime_env(include_secrets: bool = False) -> dict:
     — the signing key must NEVER reach an offense process (A2a red-pen). The GitHub token IS delivered (LAP PR
     push). The uiproxy consumer re-allowlists the same set (defense-in-depth)."""
     env: dict = {}
-    for var in PROVIDER_ENV_VARS:
+    for var in (*PROVIDER_ENV_VARS, *_EXTRA_DELIVERED_ENV):
         val = os.environ.get(var, "").strip()
         if val:
             env[var] = val
@@ -472,6 +493,8 @@ def settings_status() -> dict:
         "offense_backend": forced_backend or "anthropic",
         "offense_model": offense_model,
         "sovereign_model": sovereign_model or None,
+        "effort_levels": list(EFFORT_LEVELS),
+        "selected_effort": (os.environ.get(_EFFORT_ENV, "").strip().lower() or None),   # None = model default
         "keyless": not key_set,
         "keyless_note": ("No API key is set — engagements run keyless (deterministic oracles only; "
                          "no LLM reasoning) unless you pick the local Claude Code model or add a key."),
