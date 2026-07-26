@@ -335,3 +335,10 @@ textarea { min-height: 80px; resize: vertical; }
   #nav.mobile-open { display: block; position: fixed; inset: var(--topbar-h) 0 0 0; z-index: 50; width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* a11y — a visible keyboard-focus ring on every interactive element (P7). Uses :focus-visible so it
+   shows for keyboard/AT users without adding a ring on mouse click. */
+:focus-visible { outline: 2px solid var(--st-running); outline-offset: 2px; border-radius: var(--r-1); }
+.nav-item:focus-visible { outline-offset: -2px; }
+a:focus-visible, button:focus-visible, [role="link"]:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible { outline: 2px solid var(--st-running); outline-offset: 2px; }

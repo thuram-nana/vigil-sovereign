@@ -109,6 +109,19 @@ window.VIGIL_MANUAL = [
     ],
   },
   {
+    id: "brain", title: "Brain — memory, benchmark & catalog",
+    blocks: [
+      { p: "The Brain screen is a window into what the system knows and how well it performs. It has tabs:" },
+      { list: [
+        ["Memory", "Cross-engagement priors it has learned — e.g. which intel sources have been reliable. Empty until you run assessments; it never fabricates a score."],
+        ["Benchmark", "How the engine scores on a fixed corpus of planted bugs AND safe controls: true positives (bugs found), false positives (safe things wrongly flagged), and misses. Honest calibration."],
+        ["Catalog", "The searchable list of capabilities the AI can bring to bear, each mapped to an already-gated action and risk tier."],
+        ["Intel / Planner", "Per-engagement reconnaissance and the plan tree for a chosen run."],
+      ] },
+      { note: "Reasoning — the critics, learning, and reflection the system runs on itself — is ADVISORY only. It re-ranks and defers work, but it never promotes a finding to a fact. Only a fired oracle can do that." },
+    ],
+  },
+  {
     id: "deploy", title: "Deploying — local & hosted",
     blocks: [
       { p: "One command, vigil up, brings the whole system up on your machine and opens this interface in your browser (loopback only — never exposed)." },
