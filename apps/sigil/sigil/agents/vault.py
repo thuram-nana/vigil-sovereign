@@ -61,6 +61,11 @@ class CredentialVault:
 
     def set_record(self, service: str, *, email: str = "", username: str = "",
                    password: Optional[str] = None, notes: str = "") -> VaultRecord:
+        # `service` becomes the secret KEY (`vault/{service}/password`) written to the envfile tier; reject a
+        # control/line-break char here for a clear error (the write primitive also guards it defense-in-depth)
+        # so a service name can never plant a second `KEY=value` line, e.g. VIGIL_DESTRUCTION_OWNER_KEY.
+        from ..config import assert_env_value_safe
+        assert_env_value_safe(service, "service name", maxlen=256)
         ref = f"vault/{service}/password"
         if password is not None:
             self.secrets.set(ref, password)          # → keyring (or 0600 sigil.env), never the spine

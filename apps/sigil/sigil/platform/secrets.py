@@ -100,9 +100,11 @@ class SecretStore:
     @staticmethod
     def _env_upsert(key: str, value: str) -> None:
         # The envfile is the injectable KEY=value tier; any caller (set_secret, agents/vault passwords, a
-        # direct SecretStore().set) reaches here, so the line-injection guard lives AT this write primitive
-        # — a value with a literal "\n"/Unicode line separator must never plant a second line.
-        from ..config import assert_env_value_safe
+        # direct SecretStore().set) reaches here, so the line-injection guard lives AT this write primitive.
+        # Guard BOTH axes: a literal "\n"/Unicode line separator in the VALUE *or* the KEY (e.g. a vault
+        # `service` in `vault/{service}/password`) would otherwise plant a second KEY=value line.
+        from ..config import assert_env_key_safe, assert_env_value_safe
+        assert_env_key_safe(key)
         assert_env_value_safe(value, f"secret value for {key}")
         f = SIGIL_HOME / "sigil.env"
         SIGIL_HOME.mkdir(parents=True, exist_ok=True)

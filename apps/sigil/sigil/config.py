@@ -47,6 +47,20 @@ def assert_env_value_safe(value: str, what: str = "value", *, maxlen: int = 8192
         raise ValueError(f"invalid {what}: control or line-break character")
 
 
+def assert_env_key_safe(key: str) -> None:
+    """Fail-closed if `key` cannot be the KEY half of a single `KEY=value` line in sigil.env: reject empty,
+    any control/line-break char (a str.splitlines() boundary), or an '=' (which would split the assignment).
+    Every writer emits f"{key}={value}", so the KEY needs the same class-guard as the value — a line-break in
+    a caller-supplied key (e.g. a CredentialVault `service`) would otherwise plant a second KEY=value line
+    just like a poisoned value. Legal keys (A-Z/_/-/./ and the `vault/<svc>/password` form) pass unchanged."""
+    if not key:
+        raise ValueError("invalid env key: empty")
+    if "=" in key:
+        raise ValueError("invalid env key: contains '='")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f or c in _ENV_LINE_BREAK_CHARS for c in key):
+        raise ValueError("invalid env key: control or line-break character")
+
+
 def _load_env_file(home: Path | None = None) -> None:
     """Load persisted `KEY=VALUE` settings from ~/.sigil/sigil.env so a value set once (e.g.
     SIGIL_QDRANT_URL for server mode) reaches BOTH the CLI and the MCP server that Claude spawns

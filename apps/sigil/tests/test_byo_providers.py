@@ -101,13 +101,22 @@ def test_every_sigil_env_write_primitive_rejects_line_breaks(sep, tmp_path, monk
     monkeypatch.setattr("sigil.platform.secrets.SIGIL_HOME", tmp_path)
     poison = f"v{sep}VIGIL_DESTRUCTION_OWNER_KEY=planted"
     with pytest.raises(ValueError):
-        S._persist_env("CRUCIBLE_ANTHROPIC_MODEL", poison)          # non-secret env writer
+        S._persist_env("CRUCIBLE_ANTHROPIC_MODEL", poison)          # non-secret env writer — VALUE axis
     with pytest.raises(ValueError):
-        SecretStore._env_upsert("GITHUB_TOKEN", poison)             # secret envfile writer (direct)
-    # both writers raised BEFORE touching the file — no poisoned line was ever written
+        SecretStore._env_upsert("GITHUB_TOKEN", poison)             # secret envfile writer — VALUE axis
+    # BOTH axes: a line-break in the KEY plants a second line just like a poisoned value (the vault
+    # `service` -> `vault/{service}/password` path). The write primitives must guard the key too.
+    with pytest.raises(ValueError):
+        S._persist_env(f"K{sep}VIGIL_DESTRUCTION_OWNER_KEY=planted", "v")
+    with pytest.raises(ValueError):
+        SecretStore._env_upsert(f"vault/s{sep}VIGIL_DESTRUCTION_OWNER_KEY=planted/password", "pw")
+    # a legit vault-style key (with '/') still round-trips through the guarded primitive
+    SecretStore._env_upsert("vault/github.com/password", "clean-pw")
+    # every rejection raised BEFORE touching the file — no poisoned line was ever written
     envf = tmp_path / "sigil.env"
     if envf.exists():
         assert "VIGIL_DESTRUCTION_OWNER_KEY" not in envf.read_text(encoding="utf-8")
+        assert "vault/github.com/password=clean-pw" in envf.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("sep", _LINE_BREAKS)

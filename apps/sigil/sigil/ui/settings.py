@@ -19,7 +19,7 @@ import hashlib
 import os
 from typing import Optional
 
-from ..config import SIGIL_HOME, assert_env_value_safe
+from ..config import SIGIL_HOME, assert_env_key_safe, assert_env_value_safe
 from ..platform.secrets import SecretStore
 
 # The one secret the settings plane may seal today: the Anthropic/Claude API key. Stored under the name
@@ -270,8 +270,9 @@ def _persist_env(key: str, value: str) -> None:
     """Upsert (or, when ``value`` is "", REMOVE) a NON-secret var in `~/.sigil/sigil.env` (0600, no
     world-readable window) and mirror the change into this process's env. Clearing leaves no stale line
     and pops the var, so a prior choice's var never lingers to be re-delivered to the offense engine."""
+    assert_env_key_safe(key)                                    # guard BOTH axes at the write primitive
     if value != "":
-        assert_env_value_safe(value, f"env value for {key}")   # airtight backstop at the write primitive
+        assert_env_value_safe(value, f"env value for {key}")   # airtight backstop
     f = SIGIL_HOME / "sigil.env"
     SIGIL_HOME.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
