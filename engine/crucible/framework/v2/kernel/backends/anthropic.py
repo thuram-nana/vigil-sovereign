@@ -38,26 +38,25 @@ import time
 
 from ...common import logging as v2log
 from ...common.errors import BackendError, BackendOverloaded, BackendUnavailable
-from ..llm import LLMBackend, LLMResult, Prompt, make_call_trace, parse_json_response
+from ..llm import (
+    LLMBackend,
+    LLMResult,
+    Prompt,
+    is_current_model,
+    make_call_trace,
+    parse_json_response,
+    sampling_create_kwargs,
+)
 
 
 _log = v2log.get_logger(__name__)
 _DEFAULT_MODEL = "claude-opus-5"
 
-# Current-generation models REMOVE the sampling params (temperature/top_p/top_k) and return a 400 if any
-# is sent — Fable 5, Mythos 5, Opus 5, Sonnet 5, Opus 4.8, Opus 4.7. Older models still accept them. We
-# attach ``temperature`` ONLY for a model that accepts it, so selecting a current model in the picker
-# actually works instead of hard-failing every call with a 400. Behaviour is steered by prompting on the
-# no-sampling models (the recommended approach).
-_NO_SAMPLING_PREFIXES = (
-    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",
-    "claude-opus-4-8", "claude-opus-4-7",
-)
-
 
 def _supports_sampling(model: str) -> bool:
-    m = str(model or "")
-    return not any(m.startswith(p) for p in _NO_SAMPLING_PREFIXES)
+    """False for current-generation models (they 400 on temperature/top_p/top_k and instead take
+    output_config.effort). Delegates to the shared kernel.llm model-family split (single source)."""
+    return not is_current_model(model)
 
 # X4 — transient-failure backoff. On a rate-limit / overload / 5xx / connection error we retry
 # in-backend with exponential backoff + full jitter (honouring a Retry-After header when the
@@ -174,8 +173,9 @@ class AnthropicBackend(LLMBackend):
                     messages=[{"role": "user", "content": user_msg}],
                     max_tokens=prompt.max_tokens,
                 )
-                if _supports_sampling(self.model):     # a current model 400s if temperature is sent
-                    create_kwargs["temperature"] = prompt.temperature
+                # temperature for older models; output_config.effort for current ones — never both, never
+                # budget_tokens. One shared helper keeps anthropic/bedrock/vertex identical.
+                create_kwargs.update(sampling_create_kwargs(self.model, prompt.temperature, prompt.effort))
                 return client.messages.create(**create_kwargs)  # type: ignore[attr-defined]
             except Exception as e:  # noqa: BLE001 — classify below; never leak a raw SDK error
                 last = e

@@ -79,7 +79,7 @@ def test_backoff_wait_is_bounded_even_with_hostile_retry_after(monkeypatch) -> N
                 return "OK"
 
     _bare_anthropic()._create_with_backoff(
-        _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8))
+        _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8, effort=None))
     assert slept == [A._MAX_RETRY_AFTER_S]                       # bounded, never 999999
 
 
@@ -105,7 +105,7 @@ def test_create_with_backoff_retries_transient_then_succeeds(monkeypatch) -> Non
                     raise _exc(429)          # transient twice
                 return "OK"
 
-    prompt = SimpleNamespace(temperature=0.2, max_tokens=64)
+    prompt = SimpleNamespace(temperature=0.2, max_tokens=64, effort=None)
     assert _bare_anthropic()._create_with_backoff(_Client(), "sys", "user", prompt) == "OK"
     assert len(sleeps) == 2                   # backed off before each of the 2 retries
 
@@ -125,7 +125,7 @@ def test_temperature_only_sent_to_models_that_accept_it(monkeypatch) -> None:
                 captured.update(kw)
                 return "OK"
 
-    prompt = SimpleNamespace(temperature=0.2, max_tokens=64)
+    prompt = SimpleNamespace(temperature=0.2, max_tokens=64, effort=None)
 
     be = _bare_anthropic()
     be.model = "claude-opus-5"
@@ -142,6 +142,49 @@ def test_temperature_only_sent_to_models_that_accept_it(monkeypatch) -> None:
     assert A._supports_sampling("claude-haiku-4-5") is True
 
 
+# --------------------------------------------------------------- reasoning effort (A3)
+
+
+def test_sampling_create_kwargs_effort_vs_temperature(monkeypatch) -> None:
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    # older model → temperature ONLY, never output_config.effort
+    assert llm.sampling_create_kwargs("claude-haiku-4-5", 0.2, "high") == {"temperature": 0.2}
+    # current model + no effort (no env) → {} (the model's own default; NEVER temperature/budget_tokens)
+    assert llm.sampling_create_kwargs("claude-opus-5", 0.2, None) == {}
+    # current model + explicit effort → output_config.effort, no temperature
+    assert llm.sampling_create_kwargs("claude-opus-5", 0.2, "high") == {"output_config": {"effort": "high"}}
+    # env default applies when no explicit; explicit overrides env; unknown value is ignored (model default)
+    monkeypatch.setenv("CRUCIBLE_EFFORT", "max")
+    assert llm.sampling_create_kwargs("claude-opus-5", 0.2, None) == {"output_config": {"effort": "max"}}
+    assert llm.sampling_create_kwargs("claude-opus-5", 0.2, "low") == {"output_config": {"effort": "low"}}
+    monkeypatch.setenv("CRUCIBLE_EFFORT", "bogus")
+    assert llm.sampling_create_kwargs("claude-opus-5", 0.2, None) == {}
+    assert set(llm.EFFORT_LEVELS) == {"low", "medium", "high", "xhigh", "max"}
+
+
+def test_effort_threaded_into_anthropic_create_kwargs(monkeypatch) -> None:
+    monkeypatch.setattr(A.time, "sleep", lambda s: None)
+    monkeypatch.delenv("CRUCIBLE_EFFORT", raising=False)
+    captured: dict = {}
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                captured.clear()
+                captured.update(kw)
+                return "OK"
+
+    be = _bare_anthropic()
+    be.model = "claude-opus-5"
+    be._create_with_backoff(_Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8, effort="xhigh"))
+    assert captured.get("output_config") == {"effort": "xhigh"} and "temperature" not in captured
+    assert "budget_tokens" not in captured                     # never sent (deprecated / 400 on current models)
+    # no effort + no env on a current model → neither knob
+    be._create_with_backoff(_Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8, effort=None))
+    assert "output_config" not in captured and "temperature" not in captured
+
+
 def test_create_with_backoff_raises_overloaded_when_exhausted(monkeypatch) -> None:
     monkeypatch.setattr(A.time, "sleep", lambda s: None)
 
@@ -153,7 +196,7 @@ def test_create_with_backoff_raises_overloaded_when_exhausted(monkeypatch) -> No
 
     with pytest.raises(BackendOverloaded):
         _bare_anthropic()._create_with_backoff(
-            _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8))
+            _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8, effort=None))
 
 
 def test_create_with_backoff_permanent_error_is_not_retried(monkeypatch) -> None:
@@ -168,7 +211,7 @@ def test_create_with_backoff_permanent_error_is_not_retried(monkeypatch) -> None
 
     with pytest.raises(BackendError) as ei:
         _bare_anthropic()._create_with_backoff(
-            _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8))
+            _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8, effort=None))
     assert not isinstance(ei.value, BackendOverloaded)     # a plain BackendError, not overloaded
     assert slept == []                                     # never backed off a permanent failure
 
@@ -189,7 +232,7 @@ def test_honours_retry_after_over_computed_backoff(monkeypatch) -> None:
                 return "OK"
 
     _bare_anthropic()._create_with_backoff(
-        _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8))
+        _Client(), "s", "u", SimpleNamespace(temperature=0.2, max_tokens=8, effort=None))
     assert slept == [7.0]                    # server-advised delay used verbatim
 
 
