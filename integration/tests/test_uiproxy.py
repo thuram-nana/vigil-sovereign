@@ -338,3 +338,58 @@ def test_run_up_refuses_domain_without_api_key(tmp_path, monkeypatch):
     rc = uiproxy.run_up(host="127.0.0.1", port=0, domain="vigil.example.com",
                         base_dir=str(tmp_path), no_browser=True)
     assert rc == 2, "must refuse --domain without CRUCIBLE_API_KEY"
+
+
+# ---- P4: the cross-plane LLM-env bridge (sovereign → keyless offense children) ---------------------
+import stat as _stat         # noqa: E402
+import sys as _sys           # noqa: E402
+
+
+def _fake_sigil(tmp_path, body: str):
+    """Write a tiny executable standing in for the sovereign `sigil` console-script."""
+    p = tmp_path / "fake-sigil"
+    p.write_text("#!/usr/bin/env python3\nimport sys\n" + body, encoding="utf-8")
+    p.chmod(p.stat().st_mode | _stat.S_IEXEC | _stat.S_IRWXU)
+    return p
+
+
+def test_resolve_offense_llm_env_parses_json(tmp_path):
+    sig = _fake_sigil(tmp_path, "print('{\"CRUCIBLE_ANTHROPIC_MODEL\": \"claude-opus-5\", "
+                                "\"ANTHROPIC_API_KEY\": \"sk-SECRET\"}')\n")
+    env = uiproxy._resolve_offense_llm_env(sig)
+    assert env == {"CRUCIBLE_ANTHROPIC_MODEL": "claude-opus-5", "ANTHROPIC_API_KEY": "sk-SECRET"}
+
+
+def test_resolve_offense_llm_env_failsoft(tmp_path):
+    # non-existent bin, non-JSON output, non-zero exit → {} (offense simply runs keyless)
+    assert uiproxy._resolve_offense_llm_env(tmp_path / "nope") == {}
+    assert uiproxy._resolve_offense_llm_env(_fake_sigil(tmp_path, "print('not json')\n")) == {}
+    assert uiproxy._resolve_offense_llm_env(_fake_sigil(tmp_path, "sys.exit(3)\n")) == {}
+    # a JSON non-object, and non-string/empty values, are all rejected → {}
+    assert uiproxy._resolve_offense_llm_env(_fake_sigil(tmp_path, "print('[1,2,3]')\n")) == {}
+    only_str = uiproxy._resolve_offense_llm_env(
+        _fake_sigil(tmp_path, "print('{\"A\": 5, \"B\": \"\", \"C\": \"ok\"}')\n"))
+    assert only_str == {"C": "ok"}          # int + empty dropped; only non-empty str→str survives
+
+
+def test_resolve_offense_llm_env_never_writes_a_file(tmp_path, monkeypatch):
+    # the secret is captured on a PRIVATE pipe, not the teed backend logs — resolving must create no files
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    sig = _fake_sigil(tmp_path, "print('{\"ANTHROPIC_API_KEY\": \"sk-SECRET\"}')\n")
+    env = uiproxy._resolve_offense_llm_env(sig)
+    assert env.get("ANTHROPIC_API_KEY") == "sk-SECRET"
+    assert list(workdir.iterdir()) == []     # no stray file holding the captured secret
+
+
+def test_spawn_injects_extra_env(tmp_path):
+    log = tmp_path / "child.log"
+    argv = [_sys.executable, "-c",
+            "import os;print('M='+os.environ.get('CRUCIBLE_ANTHROPIC_MODEL','none')+"
+            "';K='+os.environ.get('ANTHROPIC_API_KEY','none'))"]
+    proc = uiproxy._spawn(argv, log, extra_env={"CRUCIBLE_ANTHROPIC_MODEL": "claude-opus-5"})
+    proc.wait(timeout=10)
+    out = log.read_text(encoding="utf-8")
+    assert "M=claude-opus-5" in out            # injected var reached the child
+    assert "K=none" in out                     # a var we did NOT inject is absent (no accidental leak)

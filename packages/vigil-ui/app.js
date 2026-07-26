@@ -26,10 +26,10 @@
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", phase: "P5" },
     ]},
     { group: "MANAGE", items: [
-      { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, phase: "P4" },
+      { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", phase: "P7" },
-      { id: "settings", label: "Settings", icon: "gear", owner: true, phase: "P4" },
+      { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
     ]},
     { group: "LEARN", items: [
       { id: "manual", label: "Manual", icon: "book", ready: true },
@@ -1652,6 +1652,243 @@
   }
 
   // ---- guided stub for not-yet-built screens --------------------------------
+  // ---- Settings screen (owner plane: API key + model) ------------------------
+  function ownerBanner(text) {
+    return h("div.owner-banner", null, [V.icon("key"), h("span", null, text)]);
+  }
+  function settingsAct(body, okMsg, then) {
+    return V.postJSON(SOV("/api/action"), body)
+      .then(function (r) {
+        if (r && r.error) { V.toast(r.error, true); return; }
+        V.toast(okMsg); if (then) then(r);
+      })
+      .catch(function (e) { V.toast((e && e.message) || "Action failed — check you are on the owner plane", true); });
+  }
+
+  function renderSettings(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Settings"),
+        h("span.sub", null, "Your API key and the model the AI reasons with — sealed on this machine, never shown back to the browser.")]),
+      ownerBanner("Owner plane — every change is signed with your key on the server. The browser never holds or receives key material."),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [
+        V.card("Claude / Anthropic API key", "OWNER", h("div#set-key", null, h("div.empty", null, "Loading…")), true),
+        V.card("Reasoning model", "OWNER", h("div#set-model", null, h("div.empty", null, "Loading…")), true),
+      ]),
+    ]);
+    loadSettings();
+  }
+
+  function loadSettings() {
+    V.getJSON(SOV("/api/settings")).then(drawSettings).catch(function (e) {
+      var msg = (e && e.status === 401) ? "The sovereign plane needs the owner token — open the UI via `vigil up`."
+        : "Settings are on the sovereign plane, which is offline. Start it with `vigil up`.";
+      var box = V.$("#set-key"); if (box) V.mount(box, h("div.empty", null, msg));
+      var box2 = V.$("#set-model"); if (box2) V.mount(box2, h("div.empty", null, msg));
+    });
+  }
+
+  function drawSettings(st) {
+    drawKeyCard(st);
+    drawModelCard(st);
+  }
+
+  function drawKeyCard(st) {
+    var host = V.$("#set-key"); if (!host) return;
+    var sec = (st.secrets || []).filter(function (s) { return s.name === "ANTHROPIC_API_KEY"; })[0] || { set: false };
+    var statusRow = sec.set
+      ? h("div.set-status.ok", null, [V.icon("check"),
+          h("span", null, "Key is set"),
+          h("span.pill.sm", null, sec.backend),
+          h("span.mono.dim", null, sec.fingerprint)])
+      : h("div.set-status.off", null, [V.icon("info"),
+          h("span", null, "No key set — the system runs keyless (deterministic oracles only) until you add one or pick the local Claude Code model.")]);
+    var input = h("input", { type: "password", id: "key-input", autocomplete: "off", spellcheck: "false",
+      placeholder: sec.set ? "Enter a new key to replace the current one" : "sk-ant-…" });
+    var save = h("button.btn.owner", { onClick: function () {
+        var v = (input.value || "").trim();
+        if (!v) { V.toast("Paste a key first.", true); return; }
+        save.disabled = true;
+        settingsAct({ action: "set_secret", name: "ANTHROPIC_API_KEY", value: v, reason: "set API key from Settings" },
+          "API key sealed on this machine.", function () { input.value = ""; loadSettings(); })
+          .then(function () { save.disabled = false; });
+      } }, [V.icon("key"), "Seal key"]);
+    V.mount(host, [
+      statusRow,
+      h("div.field", { style: { marginTop: "14px" } }, [
+        h("label", null, "API key"), input,
+        h("div.hint", null, "Sealed to your OS keyring or a TPM-sealed store when available; the value never enters the spine, a log, or any response — only a fingerprint is recorded. Feeds both the reasoning engine and the sovereign side."),
+      ]),
+      h("div.acts", null, save),
+    ]);
+  }
+
+  function drawModelCard(st) {
+    var host = V.$("#set-model"); if (!host) return;
+    var models = st.models || [];
+    if (!models.length) { V.mount(host, h("div.empty", null, "No models available from the server.")); return; }
+    var chosen = st.selected_model || null;
+    function rows() {
+      return models.map(function (m) {
+        var sel = chosen === m.id;
+        var isCurrent = st.selected_model === m.id;
+        return h("div.choice" + (sel ? ".sel" : ""), { dataset: { model: m.id },
+          onClick: function () { chosen = m.id; V.mount(list, rows()); save.disabled = false; } }, [
+          h("div.cico", null, V.icon(m.keyless ? "shield" : "brain")),
+          h("div", null, [
+            h("div.ct", null, [m.label, isCurrent ? h("span.pill.sm.ok", { style: { marginLeft: "8px" } }, "current") : null,
+              m.keyless ? h("span.pill.sm", { style: { marginLeft: "8px" } }, "no key needed") : null]),
+            h("div.cd", null, m.note),
+          ]),
+        ]);
+      });
+    }
+    var list = h("div.stack", null, rows());
+    var save = h("button.btn.owner", { disabled: true, onClick: function () {
+        if (!chosen) { V.toast("Pick a model first.", true); return; }
+        save.disabled = true;
+        settingsAct({ action: "set_model", model: chosen, reason: "set model from Settings" },
+          "Model set.", function () { loadSettings(); });
+      } }, [V.icon("check"), "Use this model"]);
+    V.mount(host, [
+      st.keyless ? h("div.set-status.off", null, [V.icon("info"),
+        h("span", null, "Tip: models other than the local Claude Code session need an API key (set it on the left).")]) : null,
+      list,
+      h("div.hint", { style: { margin: "10px 2px" } }, "Controls the primary reasoning model — used when the AI reasons over your target (engagements, scans, research). Mechanical helpers (memory extraction) always use a fast model. A running engine picks up a change on the next `vigil up`."),
+      h("div.acts", null, save),
+    ]);
+  }
+
+  // ---- Approvals & Safety screen (owner plane) -------------------------------
+  function renderSafety(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Approvals & Safety"),
+        h("span.sub", null, "Everything that needs your sign-off, the kill-switch, capabilities, and the live governance feed.")]),
+      ownerBanner("Owner plane — approvals, the kill-switch, and capability changes are all signed with your key on the server."),
+      h("div.grid.cols-4#safety-tiles", { style: { marginTop: "16px" } }),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "4px" } }, [
+        h("div.stack", null, [
+          V.card("Waiting for your approval", "OWNER", h("div#safety-approvals", null, h("div.empty", null, "Loading…")), true),
+          V.card("Capabilities", "OWNER", h("div#safety-caps", null, h("div.empty", null, "Loading…")), true),
+        ]),
+        h("div.stack", null, [
+          V.card("Kill-switch", "OWNER", h("div#safety-kill", null, h("div.empty", null, "Loading…")), true),
+          V.card("Live governance feed", "LIVE", h("div.feed#safety-feed", null, h("div.empty", null, "Connecting to the sovereign spine…")), false),
+        ]),
+      ]),
+    ]);
+    loadSafety();
+  }
+
+  function loadSafety() {
+    function refresh() {
+      V.getJSON(SOV("/api/snapshot")).then(drawSafety).catch(function () {
+        var box = V.$("#safety-approvals");
+        if (box) V.mount(box, h("div.empty", null, "The sovereign plane is offline. Start it with `vigil up`."));
+      });
+    }
+    refresh();
+    liveTimers.push(setInterval(refresh, 5000));    // cleaned up by teardownLive() on navigation
+    // live spine feed (owner governance events)
+    var feed = V.$("#safety-feed");
+    try {
+      liveES = V.sse(SOV("/api/stream"), function (ev) {
+        if (!feed) return;
+        var empty = feed.querySelector(".empty"); if (empty) empty.remove();
+        feed.insertBefore(safetyFeedRow(ev), feed.firstChild);
+        while (feed.childNodes.length > 60) feed.removeChild(feed.lastChild);
+      }, function () { /* SSE error — the poll above keeps the rest live */ });
+    } catch (e) { /* EventSource unavailable — non-fatal */ }
+  }
+
+  function safetyFeedRow(ev) {
+    var kind = (ev && (ev.kind || ev.k)) || "event";
+    var who = (ev && (ev.actor || ev.source || ev.agent)) || "";
+    var seq = (ev && ev.seq != null) ? ("#" + ev.seq) : "";
+    var subj = (ev && (ev.subject || (ev.payload && (ev.payload.signal || ev.payload.subject)))) || "";
+    return h("div.feed-row", null, [
+      h("span.pill.sm", null, kind),
+      h("span.fr-t", null, [who ? h("b", null, who) : null, subj ? (" · " + subj) : ""]),
+      h("span.fr-seq.mono.dim", null, seq),
+    ]);
+  }
+
+  function drawSafety(snap) {
+    var ks = snap.kill_switch || "released";
+    var pend = snap.pending_approvals || [];
+    var caps = snap.capabilities || {};
+    // tiles
+    var tiles = V.$("#safety-tiles");
+    if (tiles) V.mount(tiles, [
+      V.tile("Kill-switch", ks === "engaged" ? "ENGAGED" : "Released", ks === "engaged" ? "mesh halted" : "mesh live", ks === "engaged" ? "danger" : "ok"),
+      V.tile("Waiting", String(pend.length), pend.length ? "need your sign-off" : "all clear", pend.length ? "warn" : "ok"),
+      V.tile("Spine head", snap.head_seq != null ? ("#" + snap.head_seq) : "—", "records", null),
+      V.tile("Budget today", budgetLabel(snap.budget_today), "spend", null),
+    ]);
+    // approvals
+    var ab = V.$("#safety-approvals");
+    if (ab) {
+      if (!pend.length) V.mount(ab, h("div.empty", null, "Nothing is waiting. New offensive steps that need sign-off will appear here."));
+      else V.mount(ab, h("div.stack", null, pend.map(safetyApprovalCard)));
+    }
+    // capabilities
+    var cb = V.$("#safety-caps");
+    if (cb) V.mount(cb, [
+      capRow("gesture", caps.gesture),
+      capRow("voice", caps.voice),
+    ]);
+    // kill-switch
+    var kb = V.$("#safety-kill");
+    if (kb) V.mount(kb, [
+      h("div.set-status." + (ks === "engaged" ? "off" : "ok"), null, [
+        V.icon(ks === "engaged" ? "info" : "check"),
+        h("span", null, ks === "engaged"
+          ? "The kill-switch is ENGAGED — the agent mesh is halted (perception and memory-read stay alive)."
+          : "The kill-switch is released — the agent mesh runs normally."),
+      ]),
+      h("div.acts", { style: { marginTop: "12px" } }, ks === "engaged"
+        ? h("button.btn.owner", { onClick: function () {
+            settingsAct({ action: "release", reason: "release from Safety" }, "Kill-switch released.", loadSafety); } }, [V.icon("play"), "Release"])
+        : h("button.btn.danger", { onClick: function () {
+            settingsAct({ action: "kill", reason: "engage from Safety" }, "Kill-switch engaged — mesh halted.", loadSafety); } }, [V.icon("x"), "Engage kill-switch"])),
+      h("div.hint", { style: { marginTop: "10px" } }, "Halting is always safe and immediate. Releasing requires your signed request."),
+    ]);
+  }
+
+  function budgetLabel(b) {
+    if (!b || typeof b !== "object") return "—";
+    if (b.spent != null && b.cap != null) return b.spent + " / " + b.cap;
+    if (b.spent != null) return String(b.spent);
+    var ks = Object.keys(b); return ks.length ? String(b[ks[0]]) : "—";
+  }
+
+  function safetyApprovalCard(a) {
+    return h("div.approval", null, [
+      h("div.ah", null, [V.icon("key"), h("span.t", null, (a.kind || "action") + " · seq " + a.seq),
+        a.tier ? h("span.pill.sm", null, "tier " + a.tier) : null]),
+      h("div.why", null, (a.agent ? a.agent + " → " : "") + (a.subject || "requires owner sign-off")),
+      h("div.acts", null, [
+        h("button.btn.owner", { onClick: function () {
+          settingsAct({ action: "approve", seq: a.seq, reason: "approve from Safety" }, "Approved.", loadSafety); } }, [V.icon("check"), "Approve"]),
+        h("button.btn.danger", { onClick: function () {
+          settingsAct({ action: "deny", seq: a.seq, reason: "deny from Safety" }, "Denied.", loadSafety); } }, [V.icon("x"), "Deny"]),
+      ]),
+    ]);
+  }
+
+  function capRow(name, state) {
+    var on = state === "enabled";
+    var label = name.charAt(0).toUpperCase() + name.slice(1);
+    return h("div.cap-row", null, [
+      h("div.cap-l", null, [h("b", null, label),
+        h("span.st.st-" + (on ? "confirmed" : "idle"), null, [h("span.dot"), on ? "enabled" : "disabled"])]),
+      on
+        ? h("button.btn.sm.danger", { onClick: function () {
+            settingsAct({ action: "disable_" + name, reason: "disable from Safety" }, label + " disabled.", loadSafety); } }, "Disable")
+        : h("button.btn.sm.owner", { onClick: function () {
+            settingsAct({ action: "enable_" + name, reason: "enable from Safety" }, label + " enabled.", loadSafety); } }, "Enable"),
+    ]);
+  }
+
   function renderStub(screen, item) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, item.label),
@@ -1676,6 +1913,8 @@
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "live") { renderLive(screen); return; }
     if (id === "findings") { renderFindings(screen); return; }
+    if (id === "settings") { renderSettings(screen); return; }
+    if (id === "safety") { renderSafety(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });

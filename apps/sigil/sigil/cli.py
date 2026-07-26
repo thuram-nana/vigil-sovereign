@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from .config import ensure_dirs
@@ -603,6 +604,34 @@ def cmd_status(a) -> None:
     print(f"head:      {'OK' if hok else '(' + hmsg + ')'}")
 
 
+def cmd_settings(a) -> None:
+    """Settings inspection + the launcher's cross-plane env bridge.
+
+    `status` prints the REDACTED settings view (no secret value).
+    `export-runtime-env` prints, as JSON on stdout, the runtime LLM env the keyless offense engine needs
+    — the model vars always, and (only with `--include-secrets`) the resolved API key. `vigil up` calls
+    this in the SOVEREIGN venv and injects the result into the offense children's env, so the offense
+    plane never imports sigil yet still honors the key/model set in the UI. This resolves secrets from the
+    keyring/TPM-sealed store the launcher cannot itself decrypt. MACHINE USE ONLY: with --include-secrets
+    it writes a secret to stdout — never redirect it to a file or a shared log."""
+    from .ui import settings as _settings
+    sub = getattr(a, "settings_cmd", "status")
+    if sub == "export-runtime-env":
+        print(json.dumps(_settings.export_runtime_env(getattr(a, "include_secrets", False))))
+        return
+    # default: redacted status (safe to print anywhere)
+    st = _settings.settings_status()
+    print(f"secret backend: {st['secret_backend']}")
+    for s in st["secrets"]:
+        state = f"set ({s['fingerprint']})" if s["set"] else "not set"
+        print(f"  {s['name']}: {state}")
+    print(f"selected model: {st['selected_model'] or '(none — using defaults)'}")
+    print(f"  offense reasoning: {st['offense_model']}")
+    print(f"  sovereign reasoning: {st['sovereign_model'] or '(default)'}")
+    if st["keyless"]:
+        print("mode: KEYLESS — " + st["keyless_note"])
+
+
 def cmd_spine(a) -> None:
     """Segment-rotation ops. `migrate` moves the legacy single file into the segment layout (O(1), one-way,
     idempotent). `status` lists the segment set. Retain-all: no records are ever deleted."""
@@ -1165,6 +1194,12 @@ def main(argv=None) -> None:
     pbud.set_defaults(fn=cmd_budget)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
+    pset.add_argument("settings_cmd", choices=["status", "export-runtime-env"], nargs="?", default="status")
+    pset.add_argument("--include-secrets", action="store_true",
+                      help="(export-runtime-env) also emit the resolved API key — MACHINE USE ONLY, "
+                           "never redirect to a file/log; used by `vigil up` to feed the offense engine")
+    pset.set_defaults(fn=cmd_settings)
     pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate downward re-seed)")
     pfl.add_argument("action", choices=["status", "reset"])
     pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")

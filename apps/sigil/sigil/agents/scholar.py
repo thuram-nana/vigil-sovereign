@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from typing import Dict, List, Optional, Protocol, runtime_checkable
@@ -43,10 +44,16 @@ class Synthesizer(Protocol):
 
 class ClaudeSynthesizer:
     """`claude -p` over the sources → JSON claims, each citing a source ref + a verbatim quote."""
+    # Research/synthesis is genuine reasoning, so it honors the operator's chosen model (SIGIL_LLM_MODEL,
+    # set via the UI's Settings) when the caller doesn't pass one explicitly; else a fast default. (The
+    # mechanical consolidate/extract helpers keep their own fast model on purpose — out of scope here.)
+    _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
     def __init__(self, claude_bin: str | None = None,
-                 model: str = "claude-haiku-4-5-20251001", timeout: int = 180):
+                 model: str | None = None, timeout: int = 180):
         self.claude_bin = claude_bin or _resolve_claude_bin()
-        self.model, self.timeout = model, timeout
+        self.model = model or os.environ.get("SIGIL_LLM_MODEL", "").strip() or self._DEFAULT_MODEL
+        self.timeout = timeout
 
     def synthesize(self, question: str, docs: Dict[str, str]) -> List[dict]:
         rendered = "\n\n".join(f"[SOURCE {ref}]\n{text[:4000]}" for ref, text in docs.items())

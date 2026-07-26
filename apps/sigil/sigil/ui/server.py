@@ -159,6 +159,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/snapshot":
             from ..dashboard import snapshot
             return self._json(snapshot(self.server.store()))
+        if path == "/api/settings":
+            from . import settings as _settings
+            return self._json(_settings.settings_status())     # REDACTED — never a secret value
         if path.startswith("/api/record/"):
             return self._record(path.rsplit("/", 1)[-1])
         if path == "/api/stream":
