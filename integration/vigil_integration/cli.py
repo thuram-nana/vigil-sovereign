@@ -249,7 +249,8 @@ def _cmd_up(args: argparse.Namespace) -> int:
     co-loaded in one interpreter. Binds loopback (or a private/tunnel IP); refuses a public bind."""
     from .uiproxy import run_up
     return run_up(host=args.host, port=args.port, domain=args.domain, base_dir=args.base_dir,
-                  no_browser=args.no_browser)
+                  no_browser=args.no_browser,
+                  insecure_no_api_key=getattr(args, "insecure_no_api_key", False))
 
 
 def _cmd_down(args: argparse.Namespace) -> int:
@@ -343,6 +344,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "deploy/reverse-proxy/vigil.Caddyfile. Sets the scheme to https.")
     pu.add_argument("--no-browser", action="store_true",
                     help="do not auto-open a browser (a browser is opened only for a loopback bind)")
+    pu.add_argument("--insecure-no-api-key", action="store_true",
+                    help="with --domain, proceed even if CRUCIBLE_API_KEY is unset — ONLY if your edge "
+                         "proxy adds authentication (otherwise the gated offense api is internet-exposed)")
     pu.add_argument("--base-dir", default=".vigil-live",
                     help="engagement home for the runtime serve dir (.vigil-live/ui/) + pids file")
     pu.set_defaults(func=_cmd_up)

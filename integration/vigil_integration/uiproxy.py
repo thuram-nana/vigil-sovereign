@@ -55,6 +55,7 @@ from . import dispatch
 
 # ---- ports (fixed; the proxy is the only human-facing listener) -----------------------------------
 DEFAULT_PROXY_PORT = 8770
+_MAX_BODY = 16 * 1024 * 1024   # cap a forwarded request body (UI actions are tiny); refuse oversized
 SOVEREIGN_PORT = 8733     # sigil serve      (the sovereign cockpit)
 CONSOLE_PORT = 8787       # crucible console (offense read + SSE plane)
 API_PORT = 8799           # crucible api     (offense gated /api/v1 action plane)
@@ -155,7 +156,10 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     * ``ui.js`` / ``manual.js`` / ``app.js`` copied verbatim (+ ``manifest.json`` if present),
     * ``index.html`` written with the three placeholders substituted (token + federated mount bases).
     """
+    # 0700 dir: index.html embeds the sovereign session TOKEN (a live bearer credential), so the runtime
+    # serve dir and its files must never be world-readable on a multi-user host.
     serve_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(serve_dir, 0o700)
     tokens_css = (src_dir / "tokens.css").read_text(encoding="utf-8")
     components_css = (src_dir / "components.css").read_text(encoding="utf-8")
     (serve_dir / "style.css").write_text(tokens_css.rstrip() + "\n" + components_css, encoding="utf-8")
@@ -168,7 +172,9 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     html = (html.replace("__VIGIL_TOKEN__", token)
                 .replace("__VIGIL_SOVEREIGN__", sovereign_base)
                 .replace("__VIGIL_OFFENSE__", offense_base))
-    (serve_dir / "index.html").write_text(html, encoding="utf-8")
+    index = serve_dir / "index.html"
+    index.write_text(html, encoding="utf-8")
+    os.chmod(index, 0o600)   # token-bearing → owner-only
     return serve_dir
 
 
@@ -276,9 +282,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         data = candidate.read_bytes()
         ctype = _STATIC_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
+        # Drain any request body and CLOSE the connection after a static response (mirrors the proxied
+        # path). Without this, a body left un-consumed on a kept-alive connection would be re-parsed as a
+        # pipelined request → request smuggling. Closing per static response is the definitive fix.
+        self._read_request_body()
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
         self.send_header("Content-Security-Policy", _BUNDLE_CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -288,6 +300,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # -- faithful forward to a loopback backend, STREAMING the response ------------------------------
     def _proxy(self, host: str, port: int, upstream_path: str):
+        try:
+            clen = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            clen = 0
+        if clen > _MAX_BODY:  # bound memory: UI actions are tiny; refuse an oversized upload
+            self.close_connection = True
+            self._fail(413, "request body too large")
+            return
         body = self._read_request_body()
         req_headers = self._forward_request_headers()
         conn = http.client.HTTPConnection(host, port, timeout=None)  # no read timeout → SSE stays open
@@ -305,6 +325,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
             n = 0
+        n = min(n, _MAX_BODY)  # bounded read (the connection is closed after, so any excess is dropped)
         return self.rfile.read(n) if n > 0 else b""
 
     def _forward_request_headers(self) -> dict:
@@ -384,22 +405,29 @@ def _child_env() -> dict:
     return {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
 
 
-def _spawn(argv: list[str], log_path: Path) -> subprocess.Popen:
+def _secure_log(log_path: Path):
+    """Open a backend log 0600 under a 0700 dir — child stdout may include the cockpit's token line."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = open(log_path, "ab", buffering=0)  # noqa: SIM115 — closed when the child is reaped
+    os.chmod(log_path.parent, 0o700)
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return fd
+
+
+def _spawn(argv: list[str], log_path: Path) -> subprocess.Popen:
+    log = open(_secure_log(log_path), "ab", buffering=0)  # noqa: SIM115 — closed when the child is reaped
     return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=_child_env())
 
 
 def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:
     """Spawn a child whose stdout we both TEE to a log file and scan (for the cockpit token). Returns
     the process and a queue of its stdout lines."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _fd = _secure_log(log_path)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=_child_env(), text=True, bufsize=1)
     q: "Queue[str]" = Queue()
 
     def _pump():
-        log = open(log_path, "a", encoding="utf-8")
+        log = os.fdopen(_fd, "a", encoding="utf-8")
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -465,7 +493,7 @@ def _terminate(pid: int, *, grace: float = 5.0) -> bool:
 
 
 def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
-           src_dir: Optional[Path] = None) -> int:
+           insecure_no_api_key: bool = False, src_dir: Optional[Path] = None) -> int:
     """Bring the whole unified UI up: refuse a public bind, spawn the three backends in their own
     venvs, capture the cockpit token, assemble the runtime serve dir, and serve the single origin
     behind the reverse proxy. Blocks until SIGINT/SIGTERM, then tears the children + proxy down."""
@@ -478,10 +506,15 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     authority, scheme, want_browser = compute_authority(host, port, domain)
     origin = f"{scheme}://{authority}"
 
-    if domain and not os.environ.get("CRUCIBLE_API_KEY"):
-        print("vigil up: NOTE — you gave --domain (internet-fronted) but CRUCIBLE_API_KEY is unset. "
-              "Set it before exposing the gated offense api to the internet (deploy/REMOTE-HOSTING.md).",
+    # FAIL-CLOSED: a --domain deployment is internet-fronted; the gated offense api must not be exposed
+    # without its shared-secret. Refuse unless CRUCIBLE_API_KEY is set (or the operator explicitly
+    # overrides with --insecure-no-api-key, e.g. when their edge proxy adds auth).
+    if domain and not os.environ.get("CRUCIBLE_API_KEY") and not insecure_no_api_key:
+        print("vigil up: REFUSED — --domain is internet-fronted but CRUCIBLE_API_KEY is unset, which "
+              "would expose the gated offense api unauthenticated. Set CRUCIBLE_API_KEY (see "
+              "deploy/REMOTE-HOSTING.md), or pass --insecure-no-api-key if your edge proxy adds auth.",
               file=sys.stderr)
+        return 2
 
     root = dispatch._repo_root()
     src = src_dir or (root / "packages" / "vigil-ui")

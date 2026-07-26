@@ -297,3 +297,44 @@ def test_assemble_serve_dir_contents(tmp_path):
         assert (out / j).read_text(encoding="utf-8") == j
     assert (out / "manifest.json").exists()
     assert (out / "index.html").read_text(encoding="utf-8") == "TK|/sovereign|/offense"
+
+
+def test_serve_dir_and_token_index_are_owner_only(tmp_path):
+    # BLOCK-2 fix: index.html embeds the sovereign session TOKEN, so the runtime serve dir must be 0700
+    # and the token-bearing index.html 0600 — never world-readable on a multi-user host.
+    import stat
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "tokens.css").write_text("T", encoding="utf-8")
+    (src / "components.css").write_text("C", encoding="utf-8")
+    for j in uiproxy.BUNDLE_JS:
+        (src / j).write_text(j, encoding="utf-8")
+    (src / "index.html").write_text("__VIGIL_TOKEN__", encoding="utf-8")
+    out = tmp_path / "o"
+    uiproxy.assemble_serve_dir(src, out, token="SECRET-TK")
+    assert stat.S_IMODE(out.stat().st_mode) == 0o700, "serve dir must be owner-only"
+    assert stat.S_IMODE((out / "index.html").stat().st_mode) == 0o600, "token index must be owner-only"
+    # the token must NOT be world/group readable anywhere in the tree
+    assert not (out / "index.html").stat().st_mode & (stat.S_IRGRP | stat.S_IROTH)
+
+
+def test_static_response_closes_the_connection(proxy):
+    # BLOCK-1 fix: a static response MUST send `Connection: close` and close the socket, so a request
+    # body left un-consumed can never be re-parsed as a pipelined (smuggled) request.
+    base, _serve = proxy
+    conn = http.client.HTTPConnection(base.removeprefix("http://"), timeout=5)
+    conn.request("GET", "/")
+    resp = conn.getresponse()
+    resp.read()
+    assert resp.status == 200
+    assert (resp.getheader("Connection") or "").lower() == "close"
+    conn.close()
+
+
+def test_run_up_refuses_domain_without_api_key(tmp_path, monkeypatch):
+    # R2 fix (fail-closed): --domain is internet-fronted; refuse if CRUCIBLE_API_KEY is unset (would
+    # expose the gated offense api unauthenticated), unless --insecure-no-api-key is given.
+    monkeypatch.delenv("CRUCIBLE_API_KEY", raising=False)
+    rc = uiproxy.run_up(host="127.0.0.1", port=0, domain="vigil.example.com",
+                        base_dir=str(tmp_path), no_browser=True)
+    assert rc == 2, "must refuse --domain without CRUCIBLE_API_KEY"
