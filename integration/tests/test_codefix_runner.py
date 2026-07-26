@@ -122,12 +122,12 @@ def test_remediated_never_true_without_pr(repo_and_diff, tmp_path):
 def test_runner_imports_no_offense_or_sovereign_engine():
     # order-independent: a FRESH interpreter imports only the runner, then checks sys.modules — so another
     # test importing framework first can never falsely pass/fail this.
+    # Inherit the parent's env/PYTHONPATH (legit deps like vigil_gateway must resolve); we only assert the
+    # runner pulls no framework/strix/sigil — a fresh interpreter so test import order can't mask it.
     code = ("import sys; import vigil_integration.live.codefix_runner;"
             "leaked=[m for m in sys.modules if m.split('.')[0] in ('framework','strix','sigil')];"
             "print('LEAK' if leaked else 'CLEAN', leaked)")
-    env = dict(os.environ, PYTHONPATH="integration")
-    r = subprocess.run([sys.executable, "-c", code], cwd=os.getcwd(), capture_output=True, text=True,
-                       env=env, check=False)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
     assert r.stdout.startswith("CLEAN"), f"live runner pulled an engine: {r.stdout} {r.stderr}"
 
