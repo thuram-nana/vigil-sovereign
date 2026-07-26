@@ -122,7 +122,10 @@ class ToolSpec:
     # binary found on PATH, mean a DIFFERENT tool sharing this name is shadowing the real one (e.g. the
     # Python ``httpx`` HTTP-client CLI shadowing ProjectDiscovery's ``httpx``). A which-hit whose banner
     # matches is reported ``shadowed`` (NOT ``installed``) so a required tool that is effectively absent
-    # never shows a false green. Requires ``version_args`` (the banner is what disambiguates).
+    # never shows a false green. Requires ``version_args`` (the banner is what disambiguates). If the
+    # banner is EMPTY (the probe produced no output) detection cannot disambiguate and falls OPEN to
+    # trust-PATH (``installed``) — an honest default: no known impostor shadows a ``wrong_markers`` tool
+    # with zero output, and the real tool prints a version.
     wrong_markers: tuple[str, ...] = ()
 
 
