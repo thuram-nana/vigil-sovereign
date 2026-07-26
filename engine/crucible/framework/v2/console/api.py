@@ -273,19 +273,29 @@ def evidence(run_id: str) -> dict[str, Any]:
         return {"run_id": run_id, "pending": True, "findings": []}
 
     def _build() -> dict[str, Any]:
+        from ..evidence.canonical import digest_payload
         from ..verify.reverify import reverify_document
         results = reverify_document(doc)
         findings = doc.get("active_findings") or []
         out = []
         for i, r in enumerate(results):
             f = findings[i] if i < len(findings) else {}
+            oc = f.get("oracle_context")
+            # cert id = a REAL content address of the retained certificate: sha256 over the
+            # canonical bytes of the oracle_context (the same digest the signed EvidenceCertificate
+            # binds as `oracle_context_digest`). "" when the finding carries no re-runnable proof —
+            # never fabricated. Two byte-identical certificates share an id; a tampered one does not.
+            cert_id = ""
+            if isinstance(oc, dict) and oc:
+                cert_id = _safe(lambda oc=oc: "sha256:" + digest_payload(oc), default="")
             out.append({
                 "ref": r.finding_ref,
                 "bug_class": f.get("bug_class", ""),
                 "surface": f.get("insertion_point") or f.get("param") or "",
                 "confirmed_by": r.confirmed_by or f.get("confirmed_by", ""),
                 "confidence": round(r.confidence, 3),
-                "has_certificate": bool(f.get("oracle_context")),
+                "has_certificate": bool(oc),
+                "cert_id": cert_id,
                 "reproduced": r.reproduced,
                 "matches_claim": r.matches_claim,
                 "sound": r.ok,

@@ -21,7 +21,7 @@
       { id: "home", label: "Home", icon: "home", ready: true },
       { id: "assess", label: "New Assessment", icon: "assess", ready: true },
       { id: "live", label: "Live", icon: "live", ready: true },
-      { id: "findings", label: "Findings", icon: "find", phase: "P3" },
+      { id: "findings", label: "Findings", icon: "find", ready: true },
       { id: "fixes", label: "Fixes", icon: "fixes", phase: "P6" },
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", phase: "P5" },
     ]},
@@ -1002,6 +1002,655 @@
     container.appendChild(leg);
   }
 
+  // ==========================================================================
+  // P3 — Findings hub: Findings · Attack Graph · Evidence · Coverage · Timeline
+  // Every surface reads the offense console's RESILIENT, offline read providers
+  // (report / worldmodel / evidence / coverage). Nothing is hardcoded; a finding
+  // is only ever shown CONFIRMED (a FACT) when a deterministic oracle actually
+  // re-grounds it — otherwise it is an honest LEAD. Re-verify + graph reconstruct
+  // are pure re-runs of retained evidence and issue ZERO target traffic.
+  // ==========================================================================
+
+  const P3_TABS = [
+    { id: "findings", label: "Findings", icon: "find" },
+    { id: "graph", label: "Attack Graph", icon: "brain" },
+    { id: "evidence", label: "Evidence", icon: "shield" },
+    { id: "coverage", label: "Coverage", icon: "assess" },
+    { id: "timeline", label: "Timeline", icon: "live" },
+  ];
+
+  // The HONEST fact test for a finding as returned by /api/report/<run> (the rendered
+  // build_report shape) OR a blackboard FindingPayload. In order of authority:
+  //   1. `grounding` — the LIVE veracity-firewall verdict at render time; "fact" ⟺ the
+  //      finding's own oracle RE-FIRED over its retained evidence. This is the strongest,
+  //      most honest signal (stronger than a mere certificate existing).
+  //   2. `verified_by_oracle` — the blackboard provenance flag.
+  //   3. fallback: an active finding carrying a real oracle kind (never a passive/DOM lead).
+  // A passive/dom_xss lead is NEVER a fact.
+  function p3IsFact(f) {
+    if (!f) return false;
+    if (typeof f.grounding === "string" && f.grounding) return f.grounding === "fact";
+    if (f.verified_by_oracle != null) return !!f.verified_by_oracle;
+    const ob = f.confirmed_by || f.oracle_kind || "";
+    return f.kind === "active" && !!ob && ob !== "passive" && ob !== "static-lead";
+  }
+  // World-model grounding is a DIFFERENT vocabulary from the report's "fact" (do not confuse them):
+  // worldmodel/models.classify_provenance emits "grounded" (the oracle / evidence-cert / confirmed-finding
+  // fact tier) vs "intel" / "ungrounded" / "unclassified" (inferred/unproven). Pinned by
+  // test_worldmodel_grounding_vocab.py so a backend rename can't silently make this lie.
+  function p3WmFact(g) { return g === "grounded"; }
+  function p3Surface(f) {
+    return f.location || f.surface || f.insertion_point || f.param || f.endpoint || "—";
+  }
+  function p3Oracle(f) { return f.confirmed_by || f.oracle_kind || "—"; }
+  function p3Rationale(f) { return f.oracle_rationale || f.evidence || f.rationale || ""; }
+  function p3Sev(f) { return String(f.severity || "").trim(); }
+  function p3SevChip(sev) {
+    const s = String(sev || "").toLowerCase();
+    return s ? h("span.sev.sev-" + s, null, sev) : h("span.muted", null, "—");
+  }
+  function p3StatusChip(f) {
+    if (p3IsFact(f)) return h("span.shield", null, [V.icon("check"), "CONFIRMED"]);
+    // a LEAD is explicitly "not proven". If it is an ACTIVE finding whose oracle failed to
+    // re-ground (contradicted / ungrounded), say so honestly rather than a bland "lead".
+    const g = f.grounding;
+    const label = (g === "contradicted") ? "CONTRADICTED"
+      : (g === "ungrounded") ? "UNGROUNDED" : "LEAD";
+    return h("span.shield.lead", { title: "Not proven by an oracle" }, label);
+  }
+
+  // ---- the hub ---------------------------------------------------------------
+  function renderFindings(screen) {
+    const S = { runs: [], run: null, tab: "findings" };
+    const q = hashQuery();
+    const want = q.run || "";
+    const wantTab = q.tab || "";
+
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Findings"),
+        h("span.sub", null, "Proven bugs, the attack graph, re-checkable evidence, coverage and replay — all oracle-gated.")]),
+      h("div#p3-body", null, h("div.empty", null, "Loading runs…")),
+    ]);
+
+    V.getJSON(OFF("/api/runs")).then(function (d) {
+      S.runs = (d && d.runs) || [];
+      S.run = S.runs.find(function (r) { return r.run_id === want; }) || S.runs[0] || null;
+      if (P3_TABS.some(function (t) { return t.id === wantTab; })) S.tab = wantTab;
+      drawShell();
+    }).catch(function () {
+      V.mount(V.$("#p3-body"), h("div.empty", null, [h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not reach the offense console. Start it (vigil up) and reload.")]));
+    });
+
+    function syncHash() {
+      if (!S.run) return;
+      history.replaceState(null, "", "#/findings?run=" + encodeURIComponent(S.run.run_id) + "&tab=" + S.tab);
+    }
+    function selectRun(runId) {
+      S.run = S.runs.find(function (r) { return r.run_id === runId; }) || null;
+      syncHash(); drawShell();
+    }
+    function selectTab(tab) { S.tab = tab; syncHash(); drawTab(); }
+
+    function drawShell() {
+      const body = V.$("#p3-body"); if (!body) return;
+      if (!S.runs.length) {
+        V.mount(body, h("div.empty", null, [h("div.big", null, "No runs yet"),
+          h("p", null, "Start an assessment and its findings, attack graph and evidence appear here."),
+          h("button.btn.primary", { style: { marginTop: "16px" }, onClick: function () { location.hash = "#/assess"; } },
+            [V.icon("bolt"), "New Assessment"])]));
+        return;
+      }
+      const picker = h("div.field", { style: { maxWidth: "560px", marginBottom: "0" } }, [
+        h("label", null, "Run"),
+        h("select", { onChange: function (e) { selectRun(e.target.value); } }, S.runs.map(function (r) {
+          return h("option", { value: r.run_id, selected: S.run && r.run_id === S.run.run_id },
+            (r.mode || "url") + " · " + (r.target || r.slug || r.run_id) + " · " + r.status);
+        })),
+      ]);
+      const tabs = h("div.segmented", { style: { marginTop: "12px", flexWrap: "wrap" } }, P3_TABS.map(function (t) {
+        return h("button" + (S.tab === t.id ? ".on" : ""), { onClick: function () { selectTab(t.id); } }, t.label);
+      }));
+      V.mount(body, [picker, tabs, h("div#p3-view", { style: { marginTop: "16px" } })]);
+      drawTab();
+    }
+
+    function drawTab() {
+      const host = V.$("#p3-view"); if (!host || !S.run) return;
+      V.mount(host, h("div.empty", null, "Loading…"));
+      if (S.tab === "findings") p3Findings(host, S.run);
+      else if (S.tab === "graph") p3Graph(host, S.run);
+      else if (S.tab === "evidence") p3Evidence(host, S.run);
+      else if (S.tab === "coverage") p3Coverage(host, S.run);
+      else if (S.tab === "timeline") p3Timeline(host, S.run);
+    }
+  }
+
+  function p3RunHasNoReport(run) {
+    // strix/aegis runs (stream 'none') and live engage runs (stream 'blackboard') don't save a
+    // rendered findings report — say so honestly and point to where their results DO live.
+    return run.stream === "none" || run.stream === "blackboard";
+  }
+  function p3NoReportEmpty(run, what) {
+    if (run.stream === "blackboard") {
+      return h("div.empty", null, [h("div.big", null, "This run reports on the reasoning spine"),
+        h("p", null, (what || "Findings") + " for a live engage run stream onto the blackboard — open it in Live to watch every FACT and LEAD as an oracle adjudicates it."),
+        h("button.btn", { style: { marginTop: "14px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } },
+          [V.icon("live"), "Open in Live"])]);
+    }
+    if (run.stream === "none") {
+      return h("div.empty", null, [h("div.big", null, "Runs in its own sandbox"),
+        h("p", null, "A codebase (Strix) / AEGIS run reports inside its sandbox — no re-checkable web report is captured here.")]);
+    }
+    return null;
+  }
+
+  // ---- 1) Findings table + detail drawer -------------------------------------
+  function p3Findings(host, run) {
+    V.getJSON(OFF("/api/report/" + encodeURIComponent(run.run_id))).then(function (rep) {
+      if (rep && rep.pending) { V.mount(host, p3NoReportEmpty(run, "Findings") || pendingEmpty(run)); return; }
+      const findings = (rep && rep.findings) || [];
+      const sum = (rep && rep.summary) || {};
+      const st = { filter: "all" };
+
+      function draw() {
+        let rows = findings;
+        if (st.filter === "facts") rows = rows.filter(p3IsFact);
+        else if (st.filter === "leads") rows = rows.filter(function (f) { return !p3IsFact(f); });
+
+        const facts = findings.filter(p3IsFact).length;
+        const leads = findings.length - facts;
+        const summaryTiles = h("div.grid.cols-4", { style: { marginBottom: "16px" } }, [
+          V.tile("Confirmed", String(facts), "oracle-proven FACTs", facts ? "up" : ""),
+          V.tile("Leads", String(leads), "not proven"),
+          V.tile("Endpoints", String((sum.discovered_endpoints != null ? sum.discovered_endpoints : (rep.discovered_endpoints || []).length)), "surface seen"),
+          V.tile("Requests", String(sum.requests_audited || 0), "audited"),
+        ]);
+        const filterSeg = h("div.segmented", null, [["all", "All"], ["facts", "Facts"], ["leads", "Leads"]].map(function (f) {
+          return h("button" + (st.filter === f[0] ? ".on" : ""), { onClick: function () { st.filter = f[0]; draw(); } }, f[1]);
+        }));
+        const legend = h("div.legend", null, [V.icon("shield"),
+          "Only a fired deterministic ORACLE proves a finding (CONFIRMED / FACT). Everything else — passive hygiene, DOM leads, an active finding whose oracle did not re-ground — is an honest LEAD, never shown as fact."]);
+
+        let table;
+        if (!rows.length) {
+          table = h("div.empty", null, findings.length
+            ? "No findings match this filter."
+            : "Findings appear here once an oracle proves a bug on this target.");
+        } else {
+          table = h("div.scroll-x", null, h("table.tbl", null, [
+            h("thead", null, h("tr", null, ["Severity", "Bug class", "Surface", "Oracle", "Status"].map(function (c) { return h("th", null, c); }))),
+            h("tbody", null, rows.map(function (f) {
+              return h("tr.click", { onClick: function () { p3OpenFindingDrawer(run, f); } }, [
+                h("td", null, p3SevChip(p3Sev(f))),
+                h("td", null, h("b.mono", null, f.bug_class || "—")),
+                h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, p3Surface(f))),
+                h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)" } }, p3Oracle(f))),
+                h("td", null, p3StatusChip(f)),
+              ]);
+            })),
+          ]));
+        }
+        V.mount(host, [
+          summaryTiles,
+          h("div.card", null, [
+            h("div.card-h", null, [h("span.label", null, "FINDINGS"),
+              h("h3", null, (rep.target || run.target || "target")),
+              h("span.grow", { style: { flex: 1 } }), filterSeg]),
+            legend,
+            h("div", { style: { marginTop: "12px" } }, table),
+          ]),
+        ]);
+      }
+      draw();
+    }).catch(function () { V.mount(host, offlineEmpty()); });
+  }
+
+  function p3OpenFindingDrawer(run, f) {
+    const kv = [];
+    const put = function (k, v) { if (v == null || v === "") return; kv.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
+    const fact = p3IsFact(f);
+    put("Verdict", fact ? "CONFIRMED — an oracle re-fired over the retained evidence (a FACT)"
+      : (f.grounding === "contradicted" ? "CONTRADICTED — the oracle did NOT re-ground this claim"
+        : f.grounding === "ungrounded" ? "UNGROUNDED — no live oracle proof"
+          : "LEAD — a proposal, not proven"));
+    put("Severity", p3Sev(f) || "—");
+    put("Bug class", f.bug_class);
+    put("Surface", p3Surface(f));
+    put("Oracle kind", p3Oracle(f));
+    if (f.confidence != null && f.confidence !== "") put("Confidence", f.confidence);
+    if (f.cvss_vector) put("CVSS vector", f.cvss_vector);
+    if (f.cvss_base != null) put("CVSS base", f.cvss_base);
+    if (f.derived_from_hypothesis) put("Derived from", f.derived_from_hypothesis);
+    if (f.re_verifiable != null) put("Re-runnable certificate", f.re_verifiable ? "yes" : "no");
+
+    const sections = [h("div.dsection", null, [h("h3", { style: { marginBottom: "6px" } }, f.title || f.bug_class || "Finding"),
+      p3IsFact(f) ? h("span.shield", null, [V.icon("check"), "CONFIRMED"]) : h("span.shield.lead", null, "LEAD"),
+      h("div", { style: { marginTop: "12px" } }, kv)])];
+
+    if (f.impact) sections.push(h("div.dsection", null, [h("span.label", null, "IMPACT"),
+      h("p.muted", { style: { marginTop: "6px", lineHeight: "1.55" } }, f.impact)]));
+
+    const rationale = p3Rationale(f);
+    sections.push(h("div.dsection", null, [h("span.label", null, "ORACLE RATIONALE — which signal fired, on what evidence"),
+      rationale ? h("pre.code", { style: { marginTop: "8px" } }, rationale)
+        : h("p.muted", { style: { marginTop: "6px" } }, fact ? "(no rationale text retained)" : "No oracle fired — this is a lead, not a proven fact.")]));
+
+    if (f.remediation) sections.push(h("div.dsection", null, [h("span.label", null, "REMEDIATION"),
+      h("p.muted", { style: { marginTop: "6px", lineHeight: "1.55" } }, f.remediation)]));
+    if (f.references && f.references.length) sections.push(h("div.dsection", null, [h("span.label", null, "REFERENCES"),
+      h("div.stack", { style: { gap: "4px", marginTop: "6px" } }, f.references.map(function (r) { return h("span.mono.muted", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, r); }))]));
+
+    // Re-verify: a PURE, offline re-run of this run's retained certificates (no target traffic).
+    const rvHost = h("div", { style: { marginTop: "8px" } });
+    const rvBtn = h("button.btn", { onClick: function () { p3ReverifyInline(run, rvHost, rvBtn); } },
+      [V.icon("check"), "Re-verify this run (offline)"]);
+    sections.push(h("div.dsection", null, [h("span.label", null, "RE-VERIFY"),
+      h("p.muted", { style: { margin: "6px 0" } }, "Re-runs every retained oracle certificate for this run offline — no request is sent to the target."),
+      rvBtn, rvHost]));
+
+    openDrawer(f.title || f.bug_class || "Finding", sections);
+  }
+
+  function p3ReverifyInline(run, host, btn) {
+    btn.disabled = true;
+    V.mount(host, h("div.muted", { style: { marginTop: "10px" } }, "Re-verifying offline…"));
+    V.postJSON(OFF("/api/reverify/" + encodeURIComponent(run.run_id)), {}).then(function (r) {
+      btn.disabled = false;
+      if (!r || r.error) { V.mount(host, h("div.legend", { style: { marginTop: "10px" } }, [V.icon("info"), (r && r.error) || "no re-verifiable artifact for this run"])); return; }
+      const all = r.total > 0 && r.reproduced === r.total;
+      const badge = h("span.st." + (all ? "st-confirmed" : (r.reproduced ? "st-queued" : "st-blocked")), null,
+        [h("span.dot"), r.reproduced + " / " + r.total + " reproduced"]);
+      const list = (r.results || []).map(function (x) {
+        const okc = x.reproduced ? "st-confirmed" : "st-blocked";
+        return h("div.trow", { style: { cursor: "default" } }, [
+          h("div.ico", null, V.icon(x.reproduced ? "check" : "x")),
+          h("div.body", null, [h("div.k", null, x.confirmed_by || x.finding || "cert"), h("div.m", null, x.note || "")]),
+          // "reproduced" (not "sound") — this roll-up exposes only re-fire, not claim-match; the note
+          // flags a claim mismatch, and the Evidence tab shows the full sound/tampered/claim-mismatch state.
+          h("div.meta", null, h("span.st." + okc, null, [h("span.dot"), x.reproduced ? "reproduced" : "not reproduced"])),
+        ]);
+      });
+      V.mount(host, [h("div", { style: { marginTop: "10px", marginBottom: "8px" } }, badge),
+        h("div.feed", null, list)]);
+    }).catch(function (e) { btn.disabled = false; V.mount(host, h("div.legend", { style: { marginTop: "10px" } }, [V.icon("info"), (e && e.message) || "re-verify failed"])); });
+  }
+
+  // ---- 2) Attack graph (CSP-native SVG; force-directed layout) ---------------
+  const P3_KIND_COLOR = {
+    endpoint: "#4aa3ff", finding: "#ff8a3d", host: "#ff5470", datastore: "#f5c542",
+    credential: "#c88bff", principal: "#37c8d6", cloud_resource: "#35d07f",
+    service: "#8895a7", webapp: "#4aa3ff", session: "#c88bff", control: "#8895a7",
+    network_segment: "#8895a7", attacker: "#f5a623",
+  };
+  function p3IsAttacker(id) { return String(id || "").indexOf("attacker") >= 0; }
+  function p3NodeColor(n) {
+    if (p3IsAttacker(n.id)) return P3_KIND_COLOR.attacker;
+    return P3_KIND_COLOR[n.kind] || "#8895a7";
+  }
+  // Deterministic force-directed layout (ported from the legacy graph.js, math only — no DOM).
+  function p3Layout(nodes, edges, W, H) {
+    const N = nodes.length; if (!N) return;
+    nodes.forEach(function (n, i) {
+      const a = (i / N) * Math.PI * 2;
+      n.x = W / 2 + Math.cos(a) * Math.min(W, H) * 0.32;
+      n.y = H / 2 + Math.sin(a) * Math.min(W, H) * 0.32;
+      n.vx = 0; n.vy = 0;
+      if (p3IsAttacker(n.id)) { n.x = W / 2; n.y = H - 54; }
+    });
+    const idx = {}; nodes.forEach(function (n, i) { idx[n.id] = i; });
+    const REST = 90, KREP = 5200, KSPR = 0.045, DAMP = 0.85, CENTER = 0.008;
+    for (let it = 0; it < 260; it++) {
+      for (let i = 0; i < N; i++) {
+        let fx = (W / 2 - nodes[i].x) * CENTER, fy = (H / 2 - nodes[i].y) * CENTER;
+        for (let j = 0; j < N; j++) {
+          if (i === j) continue;
+          const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
+          const d2 = dx * dx + dy * dy || 0.01, d = Math.sqrt(d2);
+          const f = KREP / d2; fx += (dx / d) * f; fy += (dy / d) * f;
+        }
+        nodes[i]._fx = fx; nodes[i]._fy = fy;
+      }
+      for (let k = 0; k < edges.length; k++) {
+        const a = nodes[idx[edges[k].src]], b = nodes[idx[edges[k].dst]]; if (!a || !b) continue;
+        const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 0.01;
+        const f = (d - REST) * KSPR;
+        a._fx += (dx / d) * f; a._fy += (dy / d) * f;
+        b._fx -= (dx / d) * f; b._fy -= (dy / d) * f;
+      }
+      for (let i = 0; i < N; i++) {
+        const n = nodes[i]; if (p3IsAttacker(n.id)) continue;
+        n.vx = (n.vx + n._fx) * DAMP; n.vy = (n.vy + n._fy) * DAMP;
+        n.x += Math.max(-12, Math.min(12, n.vx)); n.y += Math.max(-12, Math.min(12, n.vy));
+        n.x = Math.max(30, Math.min(W - 30, n.x)); n.y = Math.max(30, Math.min(H - 30, n.y));
+      }
+    }
+  }
+  // Render a world-model graph into `container` (svgEl → CSP-clean: no innerHTML, no inline handlers).
+  function p3DrawGraph(container, data, onPick) {
+    V.clear(container);
+    const nodes = (data.nodes || []).map(function (n) { return Object.assign({}, n); });
+    const edges = data.edges || [];
+    if (!nodes.length) {
+      container.appendChild(h("div.empty", null, "No world-model nodes — a run with chainable findings (IDOR / SSRF / deserialization) populates the graph."));
+      return;
+    }
+    const W = Math.max(680, container.clientWidth || 880), H = 520;
+    p3Layout(nodes, edges, W, H);
+    const pos = {}; nodes.forEach(function (n) { pos[n.id] = n; });
+    const pathEdges = {}; (data.paths || []).forEach(function (p) { (p.steps || []).forEach(function (s) { pathEdges[s.src + ">" + s.dst] = 1; }); });
+    const chokeEdges = {}; const chokeNodes = {};
+    (data.chokes || []).forEach(function (c) { chokeEdges[c.src + ">" + c.dst] = 1; chokeNodes[c.src] = 1; chokeNodes[c.dst] = 1; });
+
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, width: "100%", height: H });
+    // style via CSSOM (never an inline style ATTRIBUTE) so this stays clean under the bundle's
+    // strict same-origin CSP (no 'unsafe-inline' for styles); presentation attrs (fill/stroke) are fine.
+    svg.style.background = "var(--bg-0)"; svg.style.border = "1px solid var(--border)"; svg.style.borderRadius = "8px";
+
+    edges.forEach(function (e) {
+      const a = pos[e.src], b = pos[e.dst]; if (!a || !b) return;
+      const key = e.src + ">" + e.dst;
+      const onPath = pathEdges[key], choke = chokeEdges[key];
+      const stroke = choke ? "var(--st-blocked)" : (onPath ? "var(--st-running)" : "var(--border-strong)");
+      const w = choke ? 2.4 : (onPath ? 2.2 : 1);
+      const line = svgEl("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: stroke, "stroke-width": w,
+        opacity: (onPath || choke) ? 0.95 : 0.4 });
+      if (choke) line.setAttribute("stroke-dasharray", "5 4");
+      svg.appendChild(line);
+      if (onPath && e.technique) {
+        const t = svgEl("text", { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 3, "font-size": 9,
+          fill: "var(--text-2)", "text-anchor": "middle", "font-family": "var(--font-mono)" });
+        t.textContent = String(e.technique).slice(0, 22); svg.appendChild(t);
+      }
+    });
+
+    nodes.forEach(function (n) {
+      const isAtt = p3IsAttacker(n.id);
+      const r = isAtt ? 11 : (n.kind === "finding" ? 6 : 8);
+      const g = svgEl("g"); g.style.cursor = "pointer";
+      if (chokeNodes[n.id]) {
+        g.appendChild(svgEl("circle", { cx: n.x, cy: n.y, r: r + 5, fill: "none",
+          stroke: "var(--st-blocked)", "stroke-width": 1.4, "stroke-dasharray": "3 3", opacity: 0.9 }));
+      }
+      const dot = svgEl("circle", { cx: n.x, cy: n.y, r: r, fill: p3NodeColor(n), stroke: "var(--bg-0)", "stroke-width": 1.5,
+        opacity: 0.55 + 0.45 * (n.belief == null ? 1 : n.belief) });
+      const label = svgEl("text", { x: n.x + r + 3, y: n.y + 3, "font-size": 10, fill: "var(--text-1)", "font-family": "var(--font-mono)" });
+      label.textContent = String(n.id).replace(/^[a-z_]+:/, "").slice(0, 22);
+      g.appendChild(dot); g.appendChild(label);
+      g.addEventListener("click", function () { if (onPick) onPick(n); });
+      svg.appendChild(g);
+    });
+    container.appendChild(svg);
+
+    // legend (kinds present) + path / choke keys
+    const kinds = {}; nodes.forEach(function (n) { kinds[p3IsAttacker(n.id) ? "attacker" : n.kind] = 1; });
+    const leg = h("div.row-flex", { style: { flexWrap: "wrap", gap: "12px", marginTop: "8px" } },
+      Object.keys(kinds).map(function (k) {
+        return h("span.row-flex", { style: { gap: "5px" } }, [
+          h("span", { style: { width: "9px", height: "9px", borderRadius: "50%", background: P3_KIND_COLOR[k] || "#8895a7", display: "inline-block" } }),
+          h("span.muted", { style: { fontSize: "var(--fs-xs)" } }, k)]);
+      }).concat([
+        h("span.row-flex", { style: { gap: "5px", marginLeft: "auto" } }, [
+          h("span", { style: { width: "16px", borderTop: "2px solid var(--st-running)", display: "inline-block" } }),
+          h("span.muted", { style: { fontSize: "var(--fs-xs)" } }, "attack path")]),
+        h("span.row-flex", { style: { gap: "5px" } }, [
+          h("span", { style: { width: "16px", borderTop: "2px dashed var(--st-blocked)", display: "inline-block" } }),
+          h("span.muted", { style: { fontSize: "var(--fs-xs)" } }, "choke-point")]),
+      ]));
+    container.appendChild(leg);
+  }
+
+  function p3Graph(host, run) {
+    V.getJSON(OFF("/api/worldmodel/" + encodeURIComponent(run.run_id))).then(function (wm) {
+      if (wm && wm.pending) { V.mount(host, p3NoReportEmpty(run, "The attack graph") || pendingEmpty(run)); return; }
+      if (wm && wm.error) { V.mount(host, h("div.empty", null, [h("div.big", null, "Could not reconstruct the world-model"), h("p", null, wm.error)])); return; }
+      const tiles = h("div.grid.cols-4", { style: { marginBottom: "16px" } }, [
+        V.tile("Nodes", String(wm.node_count != null ? wm.node_count : (wm.nodes || []).length), "world-model"),
+        V.tile("Edges", String(wm.edge_count != null ? wm.edge_count : (wm.edges || []).length), "relations"),
+        V.tile("Attack paths", String((wm.paths || []).length), "attacker → crown-jewel", (wm.paths || []).length ? "down" : ""),
+        V.tile("Choke-points", String((wm.chokes || []).length), "sever to cut paths"),
+      ]);
+      const graphCard = V.card("Attacker → impact", "ATTACK GRAPH", h("div#p3-graph", null, h("div.empty", null, "Rendering…")), false);
+      const pathsCard = V.card("Attack paths", "REACHABILITY",
+        (wm.paths || []).length
+          ? h("div.stack", { style: { gap: "8px" } }, wm.paths.map(function (p) {
+              return h("div.node", null, [
+                h("div.node-t", null, p.description || (p.destination || "path")),
+                h("div.node-meta", null, [
+                  h("span", null, (p.hops != null ? p.hops + " hops" : "")),
+                  h("span", null, "detection cost " + (p.detection_cost != null ? p.detection_cost : "?")),
+                  h("span", null, "value " + (p.value != null ? Math.round(p.value * 100) / 100 : "?")),
+                ]),
+              ]);
+            }))
+          : h("div.empty", null, "No attacker→crown-jewel path — nothing chains to a modelled crown jewel."), false);
+      const chokeCard = V.card("Choke-points", "REMEDIATION LEVERS",
+        (wm.chokes || []).length
+          ? h("div.scroll-x", null, h("table.tbl", null, [
+              h("thead", null, h("tr", null, ["Edge", "Kind", "Disconnects", "Impact cut", "Bridge"].map(function (c) { return h("th", null, c); }))),
+              h("tbody", null, wm.chokes.map(function (c) {
+                return h("tr", null, [
+                  h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)" } }, (c.src || "") + " → " + (c.dst || ""))),
+                  h("td", null, c.kind || "—"),
+                  h("td", null, String(c.disconnects != null ? c.disconnects : "—")),
+                  h("td", null, String(c.impact_disconnected != null ? Math.round(c.impact_disconnected * 100) / 100 : "—")),
+                  h("td", null, c.is_bridge ? h("span.st.st-blocked", null, [h("span.dot"), "bridge"]) : h("span.muted", null, "no")),
+                ]);
+              })),
+            ]))
+          : h("div.empty", null, "No choke-points — no single edge severs an attack path here."), false);
+
+      V.mount(host, [tiles, graphCard, h("div.grid.cols-2", { style: { marginTop: "16px", alignItems: "start" } }, [pathsCard, chokeCard])]);
+      p3DrawGraph(V.$("#p3-graph"), wm, function (n) { p3OpenNodeDrawer(wm, n); });
+    }).catch(function () { V.mount(host, offlineEmpty()); });
+  }
+
+  function p3OpenNodeDrawer(wm, n) {
+    const kv = [];
+    const put = function (k, v) { if (v == null || v === "") return; kv.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
+    put("Node", n.id);
+    put("Kind", n.kind);
+    put("Belief", n.belief);
+    put("Confidence", n.confidence);
+    put("Grounding", n.grounding);
+    put("Provenance", n.provenance);
+    put("Detail", n.detail);
+    if (n.first_seen != null) put("First seen (seq)", n.first_seen);
+    if (n.last_seen != null) put("Last seen (seq)", n.last_seen);
+    // the facts/leads that touch this node = the edges incident on it
+    const incident = (wm.edges || []).filter(function (e) { return e.src === n.id || e.dst === n.id; });
+    const edgeRows = incident.length ? incident.map(function (e) {
+      const fact = (typeof e.grounding === "string" && e.grounding) ? p3WmFact(e.grounding) : (e.belief != null && e.belief >= 0.999);
+      return h("div.trow", { style: { cursor: "default" } }, [
+        h("div.ico", null, V.icon("dot")),
+        h("div.body", null, [h("div.k", null, (e.src === n.id ? "→ " + e.dst : e.src + " →")),
+          h("div.m", null, (e.kind || "") + (e.technique ? " · " + e.technique : ""))]),
+        h("div.meta", null, fact ? h("span.shield", null, [V.icon("check"), "FACT"]) : h("span.shield.lead", null, "LEAD")),
+      ]);
+    }) : [h("div.empty", null, "No incident edges.")];
+    openDrawer(String(n.id).replace(/^[a-z_]+:/, ""), [
+      h("div.dsection", null, [h("span.label", null, "NODE"), h("div", { style: { marginTop: "8px" } }, kv)]),
+      h("div.dsection", null, [h("span.label", null, "FACTS / LEADS AT THIS NODE"), h("div.feed", { style: { marginTop: "8px" } }, edgeRows)]),
+      n.grounding && !p3WmFact(n.grounding)
+        ? h("div.legend", null, [V.icon("info"), "This node's grounding is '" + n.grounding + "' — it is inferred/unproven, not an oracle-confirmed fact."]) : null,
+    ]);
+  }
+
+  // ---- 3) Evidence browser (offline re-verify → sound / tampered / mismatch) --
+  function p3EvidenceState(f) {
+    if (!f.has_certificate) return { sym: "—", label: "No certificate", cls: "st-idle",
+      why: "This finding carries no re-runnable oracle_context — it is a lead, not a certified fact." };
+    if (f.sound) return { sym: "✔", label: "Sound", cls: "st-confirmed",
+      why: "The pure oracle re-fired over the retained evidence and matches the claimed certificate." };
+    if (!f.reproduced) return { sym: "✖", label: "Tampered", cls: "st-blocked",
+      why: "The retained evidence no longer re-confirms — it was altered, or never truly confirmed." };
+    return { sym: "⚠", label: "Claim mismatch", cls: "st-queued",
+      why: "The oracle re-fires, but with a different kind/confidence than the certificate claimed." };
+  }
+  function p3Evidence(host, run) {
+    function load(then) {
+      V.getJSON(OFF("/api/evidence/" + encodeURIComponent(run.run_id))).then(then).catch(function () { V.mount(host, offlineEmpty()); });
+    }
+    load(function (ev) {
+      if (ev && ev.pending) { V.mount(host, p3NoReportEmpty(run, "Evidence") || pendingEmpty(run)); return; }
+      const findings = (ev && ev.findings) || [];
+      const tiles = h("div.grid.cols-4", { style: { marginBottom: "16px" } }, [
+        V.tile("Certificates", String(findings.length), "re-checkable"),
+        V.tile("Sound", String(ev.reproduced != null ? ev.reproduced : findings.filter(function (f) { return f.sound; }).length), "reproduced offline", "up"),
+        V.tile("Not sound", String(findings.filter(function (f) { return f.has_certificate && !f.sound; }).length), "tampered / mismatch", findings.some(function (f) { return f.has_certificate && !f.sound; }) ? "down" : ""),
+        V.tile("Traffic sent", "0", "pure re-run", "up"),
+      ]);
+      const doctrine = h("div.legend", { style: { marginBottom: "12px" } }, [V.icon("shield"),
+        (ev.doctrine || "Each certificate re-verifies OFFLINE with no target and no trust in the tool that produced it.")]);
+      let cards;
+      if (!findings.length) {
+        cards = h("div.empty", null, "No evidence certificates — a run with oracle-confirmed findings mints re-checkable certificates here.");
+      } else {
+        cards = h("div.stack", null, findings.map(function (f) { return p3EvidenceCard(run, f); }));
+      }
+      V.mount(host, [tiles, doctrine, cards]);
+    });
+  }
+  function p3EvidenceCard(run, f) {
+    const state = p3EvidenceState(f);
+    const badge = h("span.st." + state.cls, { style: { fontSize: "var(--fs-sm)", padding: "6px 12px" } }, [h("span.dot"), state.sym + " " + state.label]);
+    const stateHost = h("div", null, badge);
+    const rvBtn = h("button.btn", { title: "Re-run this run's certificates offline (no target traffic)",
+      onClick: function () { p3EvidenceReverify(run, f, stateHost, rvBtn); } }, [V.icon("check"), "Offline re-verify"]);
+    const meta = [];
+    const put = function (k, v) { if (v == null || v === "") return; meta.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
+    put("Finding", f.bug_class || f.ref);
+    put("Surface", f.surface);
+    put("OracleKind", f.confirmed_by);
+    put("Confidence", f.confidence);
+    put("Cert id (content hash)", f.cert_id || "(no certificate)");
+    return h("div.card", null, [
+      h("div", { style: { display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap", marginBottom: "10px" } },
+        [stateHost, h("b.mono", null, f.bug_class || f.ref), h("span.grow", { style: { flex: 1 } }), rvBtn]),
+      h("div", null, meta),
+      f.note ? h("div.legend", { style: { marginTop: "10px" } }, [V.icon("info"), f.note]) : null,
+      h("p.muted", { style: { marginTop: "8px", fontSize: "var(--fs-xs)" } }, state.why),
+    ]);
+  }
+  function p3EvidenceReverify(run, f, stateHost, btn) {
+    btn.disabled = true;
+    const prev = stateHost.firstChild;
+    V.mount(stateHost, h("span.muted", null, "Re-verifying offline…"));
+    // Re-fetch the evidence provider (a pure offline oracle re-run — issues NO target traffic) and
+    // resolve THIS certificate's honest state again.
+    V.getJSON(OFF("/api/evidence/" + encodeURIComponent(run.run_id))).then(function (ev) {
+      btn.disabled = false;
+      const fresh = ((ev && ev.findings) || []).find(function (x) { return x.ref === f.ref; }) || f;
+      const st = p3EvidenceState(fresh);
+      V.mount(stateHost, h("span.st." + st.cls, { style: { fontSize: "var(--fs-sm)", padding: "6px 12px" } }, [h("span.dot"), st.sym + " " + st.label]));
+      V.toast(st.label === "Sound" ? "Certificate reproduced offline — sound." : ("Re-verify: " + st.label), st.label !== "Sound");
+    }).catch(function () { btn.disabled = false; if (prev) V.mount(stateHost, prev); V.toast("Re-verify failed", true); });
+  }
+
+  // ---- 4) Coverage -----------------------------------------------------------
+  function p3Coverage(host, run) {
+    V.getJSON(OFF("/api/coverage/" + encodeURIComponent(run.run_id))).then(function (cov) {
+      if (cov && cov.pending) { V.mount(host, p3NoReportEmpty(run, "Coverage") || pendingEmpty(run)); return; }
+      const sum = cov.summary || {};
+      const fp = cov.fingerprint || [];
+      const eps = cov.discovered_endpoints || [];
+      const passive = cov.passive || [];
+      const dom = cov.dom_xss || [];
+      const tiles = h("div.grid.cols-4", { style: { marginBottom: "16px" } }, [
+        V.tile("Pages crawled", String(sum.pages_crawled || 0), "reached"),
+        V.tile("Requests audited", String(sum.requests_audited || 0), "probed"),
+        V.tile("Endpoints", String(eps.length || sum.discovered_endpoints || 0), "surface mapped"),
+        V.tile("Confirmed", String(sum.confirmed || 0), "oracle FACTs", sum.confirmed ? "up" : ""),
+      ]);
+      const stack = V.card("Detected stack", "FINGERPRINT",
+        fp.length ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" } }, fp.map(function (t) { return h("span.pill", null, t); }))
+          : h("div.empty", null, "No technology fingerprinted (library-driven scanning may have been off)."), false);
+      const epsCard = V.card("Endpoints seen", "SURFACE",
+        eps.length ? h("div.stack", { style: { gap: "2px" } }, eps.slice(0, 200).map(function (e) { return h("div.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, e); }))
+          : h("div.empty", null, "No extra endpoints discovered beyond the seed."), false);
+      const passiveCard = V.card("Passive hygiene", "LEADS · not proven",
+        passive.length ? h("div.stack", { style: { gap: "8px" } }, passive.map(function (p) {
+          return h("div.trow", { style: { cursor: "default" } }, [
+            h("div.ico", null, V.icon("info")),
+            h("div.body", null, [h("div.k", null, p.title || p.bug_class || "passive"), h("div.m", null, p.url || p.evidence || "")]),
+            h("div.meta", null, p3SevChip(p.severity)),
+          ]);
+        })) : h("div.empty", null, "No passive-hygiene leads."), false);
+      const domCard = V.card("DOM-XSS leads", "STATIC · candidates",
+        dom.length ? h("div.stack", { style: { gap: "8px" } }, dom.map(function (d) {
+          return h("div.trow", { style: { cursor: "default" } }, [
+            h("div.ico", null, V.icon("find")),
+            h("div.body", null, [h("div.k", null, (d.source || "?") + " → " + (d.sink || "?")), h("div.m", null, d.evidence || "")]),
+            h("div.meta", null, h("span.shield.lead", null, "LEAD")),
+          ]);
+        })) : h("div.empty", null, "No static DOM-XSS candidates."), false);
+      const blind = h("div.legend", null, [V.icon("info"),
+        "Coverage map: what was reached and probed. A quick loopback scan does not exercise auth-gated classes (access-control, SSO) or the host arsenal unless those packs were explicitly enabled — those remain blind spots for this run."]);
+      V.mount(host, [tiles, blind, h("div.grid.cols-2", { style: { marginTop: "16px", alignItems: "start" } }, [stack, epsCard]),
+        h("div.grid.cols-2", { style: { marginTop: "16px", alignItems: "start" } }, [passiveCard, domCard])]);
+    }).catch(function () { V.mount(host, offlineEmpty()); });
+  }
+
+  // ---- 5) Timeline replay (scrub graph growth by monotonic first_seen) --------
+  function p3Timeline(host, run) {
+    V.getJSON(OFF("/api/worldmodel/" + encodeURIComponent(run.run_id))).then(function (wm) {
+      if (wm && wm.pending) { V.mount(host, p3NoReportEmpty(run, "The timeline") || pendingEmpty(run)); return; }
+      if (wm && wm.error) { V.mount(host, h("div.empty", null, [h("div.big", null, "No timeline"), h("p", null, wm.error)])); return; }
+      const nodes = wm.nodes || [], edges = wm.edges || [];
+      // monotonic breakpoints = sorted unique first_seen values across nodes+edges.
+      const seqs = {};
+      nodes.forEach(function (n) { if (n.first_seen != null) seqs[n.first_seen] = 1; });
+      edges.forEach(function (e) { if (e.first_seen != null) seqs[e.first_seen] = 1; });
+      const breaks = Object.keys(seqs).map(Number).sort(function (a, b) { return a - b; });
+      if (!nodes.length || !breaks.length) {
+        V.mount(host, h("div.empty", null, [h("div.big", null, "Nothing to replay"),
+          h("p", null, "The world-model carries no timestamped nodes for this run (a run with chainable findings populates the replay).")]));
+        return;
+      }
+      const st = { i: breaks.length - 1 };
+      const graphHost = h("div#p3-tl-graph");
+      const counter = h("div.muted", { style: { marginTop: "6px" } });
+      const slider = h("input", { type: "range", min: "0", max: String(breaks.length - 1), value: String(st.i),
+        step: "1", style: { width: "100%" },
+        onInput: function (e) { st.i = parseInt(e.target.value, 10) || 0; redraw(); } });
+
+      function redraw() {
+        const cut = breaks[st.i];
+        const vn = nodes.filter(function (n) { return n.first_seen == null || n.first_seen <= cut; });
+        const ids = {}; vn.forEach(function (n) { ids[n.id] = 1; });
+        const ve = edges.filter(function (e) { return (e.first_seen == null || e.first_seen <= cut) && ids[e.src] && ids[e.dst]; });
+        // paths/chokes only when fully materialised by this cut (honest — no premature path highlight)
+        const vp = (wm.paths || []).filter(function (p) { return (p.steps || []).every(function (s) { return ids[s.src] && ids[s.dst]; }); });
+        const vc = (wm.chokes || []).filter(function (c) { return ids[c.src] && ids[c.dst]; });
+        p3DrawGraph(V.$("#p3-tl-graph"), { nodes: vn, edges: ve, paths: vp, chokes: vc }, function (n) { p3OpenNodeDrawer(wm, n); });
+        V.mount(counter, "Step " + (st.i + 1) + " of " + breaks.length + " · seq ≤ " + cut + " · " + vn.length + " nodes · " + ve.length + " edges · " + vp.length + " paths");
+      }
+      V.mount(host, [
+        V.card("Investigation replay", "TIMELINE", h("div", null, [
+          h("p.muted", { style: { margin: "0 0 12px" } }, "Scrub to replay how the attack graph grew, in the monotonic order the reasoning discovered it. Pure reconstruction — no traffic."),
+          graphHost, counter,
+          h("div", { style: { marginTop: "14px" } }, slider),
+          h("div.row-flex", { style: { justifyContent: "space-between", marginTop: "4px" } }, [
+            h("span.muted", { style: { fontSize: "var(--fs-xs)" } }, "start"),
+            h("span.muted", { style: { fontSize: "var(--fs-xs)" } }, "now"),
+          ]),
+        ]), false),
+      ]);
+      redraw();
+    }).catch(function () { V.mount(host, offlineEmpty()); });
+  }
+
+  // ---- shared small empties --------------------------------------------------
+  function pendingEmpty(run) {
+    return h("div.empty", null, [h("div.big", null, "Still running"),
+      h("p", null, "This run has not produced a saved report yet. Watch it in Live, then come back."),
+      h("button.btn", { style: { marginTop: "12px" }, onClick: function () { location.hash = "#/live?run=" + encodeURIComponent(run.run_id); } }, [V.icon("live"), "Open in Live"])]);
+  }
+  function offlineEmpty() {
+    return h("div.empty", null, [h("div.big", null, "Offense engine offline"),
+      h("p", null, "Could not reach the offense console read plane. Start it (vigil up) and reload.")]);
+  }
+
   // ---- guided stub for not-yet-built screens --------------------------------
   function renderStub(screen, item) {
     V.mount(screen, [
@@ -1026,6 +1675,7 @@
     if (id === "tools") { renderTools(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "live") { renderLive(screen); return; }
+    if (id === "findings") { renderFindings(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });
