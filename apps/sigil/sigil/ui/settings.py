@@ -29,13 +29,24 @@ from ..platform.secrets import SecretStore
 SECRET_NAMES = ("ANTHROPIC_API_KEY",)
 _MAX_SECRET_LEN = 8192
 
-# The canonical model env vars each plane reads (persisted, non-secret). Offense: the AnthropicBackend
-# reads CRUCIBLE_ANTHROPIC_MODEL. Sovereign: SIGIL_LLM_MODEL is the research/reasoning default.
-MODEL_ENV_VARS = ("CRUCIBLE_ANTHROPIC_MODEL", "SIGIL_LLM_MODEL")
+# The canonical env vars each plane reads (persisted, non-secret) + delivered to the keyless offense
+# engine by `vigil up`. Three DISTINCT knobs — conflating them was the P4 red-pen bug (a backend NAME
+# stuffed into a model-id var):
+#   * CRUCIBLE_LLM_BACKEND  — SELECTS the offense backend by name (e.g. "claude-code" → the local
+#     Claude-Code session, keyless). Read by kernel/llm.py get_backend() as the override.
+#   * CRUCIBLE_ANTHROPIC_MODEL — the MODEL ID the anthropic-SDK backend calls. Read by AnthropicBackend.
+#   * SIGIL_LLM_MODEL — the sovereign research MODEL passed to `claude -p --model`. Read by scholar.
+# set_model sets only the right subset per choice and CLEARS the others, so no stale/invalid value leaks.
+_BACKEND_ENV = "CRUCIBLE_LLM_BACKEND"
+_ANTHROPIC_MODEL_ENV = "CRUCIBLE_ANTHROPIC_MODEL"
+_SIGIL_MODEL_ENV = "SIGIL_LLM_MODEL"
+MODEL_ENV_VARS = (_BACKEND_ENV, _ANTHROPIC_MODEL_ENV, _SIGIL_MODEL_ENV)
+_CHOICE_ENV = "VIGIL_MODEL_CHOICE"               # the selected choice id — the status view's source of truth
+_DEFAULT_OFFENSE_MODEL = "claude-sonnet-4-6"     # AnthropicBackend's built-in default, for the status view
 
 # The closed set of selectable models (served to the UI — the UI hard-codes NO model list). `keyless`
-# marks the model that runs through the local Claude Code session and needs no API key. IDs are the
-# real, current Claude model identifiers used across the codebase.
+# marks the choice that routes the offense engine to the local Claude Code session (a BACKEND, no API
+# key). The other ids are the Claude model identifiers this project targets across the codebase.
 MODEL_CHOICES = (
     {"id": "claude-opus-5", "label": "Claude Opus 5",
      "note": "Most capable — deepest reasoning over your target. Needs an API key.", "keyless": False},
@@ -48,7 +59,17 @@ MODEL_CHOICES = (
      "keyless": True},
 )
 _MODEL_IDS = frozenset(c["id"] for c in MODEL_CHOICES)
-_DEFAULT_OFFENSE_MODEL = "claude-sonnet-4-6"     # AnthropicBackend's built-in default, for the status view
+_KEYLESS_IDS = frozenset(c["id"] for c in MODEL_CHOICES if c["keyless"])
+
+
+def _env_plan(model: str) -> dict:
+    """The exact env a choice applies (empty string = CLEAR the var). A keyless choice (claude-code)
+    ROUTES the offense backend by name and clears the model-id vars — feeding a backend name to the
+    anthropic SDK / `claude --model` was the red-pen bug. An API-model choice sets the model ids and
+    clears any forced backend so offense availability selects the anthropic SDK when a key is present."""
+    if model in _KEYLESS_IDS:
+        return {_BACKEND_ENV: model, _ANTHROPIC_MODEL_ENV: "", _SIGIL_MODEL_ENV: ""}
+    return {_BACKEND_ENV: "", _ANTHROPIC_MODEL_ENV: model, _SIGIL_MODEL_ENV: model}
 
 
 def _fingerprint(value: str) -> str:
@@ -59,27 +80,27 @@ def _fingerprint(value: str) -> str:
 
 
 def _persist_env(key: str, value: str) -> None:
-    """Upsert a NON-secret var into `~/.sigil/sigil.env` (0600, no world-readable window) and make it
-    live this process. Mirrors SecretStore's env writer for the non-secret model vars."""
+    """Upsert (or, when ``value`` is "", REMOVE) a NON-secret var in `~/.sigil/sigil.env` (0600, no
+    world-readable window) and mirror the change into this process's env. Clearing leaves no stale line
+    and pops the var, so a prior choice's var never lingers to be re-delivered to the offense engine."""
     f = SIGIL_HOME / "sigil.env"
     SIGIL_HOME.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
-    found = False
     try:
         for ln in f.read_text(encoding="utf-8").splitlines():
-            if ln.split("=", 1)[0].strip() == key:
-                lines.append(f"{key}={value}")
-                found = True
-            else:
-                lines.append(ln)
+            if ln.split("=", 1)[0].strip() != key:
+                lines.append(ln)                 # drop any existing line for this key
     except OSError:
         pass
-    if not found:
+    if value != "":
         lines.append(f"{key}={value}")
     fd = os.open(str(f), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    os.environ[key] = value
+        fh.write("\n".join(lines) + ("\n" if lines else ""))
+    if value == "":
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
 
 
 def _record_signed_event(store, owner_key, core: dict, reason: str) -> Optional[int]:
@@ -117,16 +138,20 @@ def set_secret(name: str, value: str, *, store, owner_key, reason: str = "") -> 
 
 
 def set_model(model: str, *, store, owner_key, reason: str = "") -> dict:
-    """Select the primary reasoning model (a closed allowlist). Persists the canonical model env vars for
-    BOTH planes and records the (non-secret) choice on the spine. Returns {ok, model, recorded_seq}."""
+    """Select the primary reasoning model (a closed allowlist). Applies the choice's exact env plan for
+    BOTH planes (routing the backend for a keyless choice, setting the model id otherwise, clearing the
+    rest) and records the (non-secret) choice on the spine. Returns {ok, model, backend, recorded_seq}."""
     model = str(model or "").strip()
     if model not in _MODEL_IDS:
         raise ValueError(f"unknown model {model!r}: choose one of {', '.join(sorted(_MODEL_IDS))}")
-    for var in MODEL_ENV_VARS:
-        _persist_env(var, model)
+    plan = _env_plan(model)
+    for var, val in plan.items():
+        _persist_env(var, val)
+    _persist_env(_CHOICE_ENV, model)                 # the display source of truth
+    backend = plan.get(_BACKEND_ENV) or "anthropic"
     seq = _record_signed_event(
-        store, owner_key, {"signal": "governor.model_set", "model": model}, reason)
-    return {"ok": True, "action": "set_model", "model": model, "recorded_seq": seq}
+        store, owner_key, {"signal": "governor.model_set", "model": model, "backend": backend}, reason)
+    return {"ok": True, "action": "set_model", "model": model, "backend": backend, "recorded_seq": seq}
 
 
 def export_runtime_env(include_secrets: bool = False) -> dict:
@@ -168,14 +193,23 @@ def settings_status() -> dict:
             "backend": ss.backend,
             "label": "Claude / Anthropic API key" if name == "ANTHROPIC_API_KEY" else name,
         })
-    offense_model = os.environ.get("CRUCIBLE_ANTHROPIC_MODEL", "").strip() or _DEFAULT_OFFENSE_MODEL
-    sovereign_model = os.environ.get("SIGIL_LLM_MODEL", "").strip()
-    selected = os.environ.get("CRUCIBLE_ANTHROPIC_MODEL", "").strip() or sovereign_model
+    # the SELECTED choice is tracked explicitly (a keyless choice sets no model id), so the picker
+    # reflects it even for claude-code. offense_model is the HONEST effective routing: a forced backend
+    # (claude-code) shows the local session, otherwise the anthropic-SDK model id (or its default).
+    selected = os.environ.get(_CHOICE_ENV, "").strip()
+    forced_backend = os.environ.get(_BACKEND_ENV, "").strip()
+    anthropic_model = os.environ.get(_ANTHROPIC_MODEL_ENV, "").strip()
+    sovereign_model = os.environ.get(_SIGIL_MODEL_ENV, "").strip()
+    if forced_backend == "claude-code":
+        offense_model = "claude-code (local session)"
+    else:
+        offense_model = anthropic_model or _DEFAULT_OFFENSE_MODEL
     return {
         "secrets": secrets,
         "secret_backend": ss.backend,
         "models": list(MODEL_CHOICES),
         "selected_model": selected if selected in _MODEL_IDS else None,
+        "offense_backend": forced_backend or "anthropic",
         "offense_model": offense_model,
         "sovereign_model": sovereign_model or None,
         "keyless": not key_set,

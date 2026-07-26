@@ -35,7 +35,7 @@ def env(tmp_path, monkeypatch):
         self._kr = None                     # no OS keyring in tests → the envfile tier under tmp_path
 
     monkeypatch.setattr(secmod.SecretStore, "__init__", _no_kr)
-    for var in (*smod.MODEL_ENV_VARS, *smod.SECRET_NAMES, "SIGIL_ANTHROPIC_API_KEY"):
+    for var in (*smod.MODEL_ENV_VARS, smod._CHOICE_ENV, *smod.SECRET_NAMES, "SIGIL_ANTHROPIC_API_KEY"):
         monkeypatch.setenv(var, "")         # monkeypatch restores the ORIGINAL after the test
         monkeypatch.delenv(var, raising=False)
     store = SpineStore(str(tmp_path / "spine.jsonl"))
@@ -110,16 +110,50 @@ def test_control_chars_refused_no_envfile_injection(env):
 
 # --- set_model: real bounded control -----------------------------------------
 
-def test_set_model_persists_both_plane_env_vars(env):
+def test_api_model_sets_model_ids_and_clears_backend(env):
     store, owner, tmp = env
     out = smod.set_model("claude-opus-5", store=store, owner_key=owner)
-    assert out["ok"] and out["model"] == "claude-opus-5"
+    assert out["ok"] and out["model"] == "claude-opus-5" and out["backend"] == "anthropic"
+    import os
+    # the MODEL ID goes into the anthropic + sovereign model vars (real: AnthropicBackend / scholar read them)
+    assert os.environ.get("CRUCIBLE_ANTHROPIC_MODEL") == "claude-opus-5"
+    assert os.environ.get("SIGIL_LLM_MODEL") == "claude-opus-5"
+    # and NO forced backend (so offense availability picks the anthropic SDK when a key is present)
+    assert not os.environ.get("CRUCIBLE_LLM_BACKEND")
     envfile = (tmp / "sigil.env").read_text(encoding="utf-8")
-    for var in smod.MODEL_ENV_VARS:
-        assert f"{var}=claude-opus-5" in envfile
+    assert "CRUCIBLE_ANTHROPIC_MODEL=claude-opus-5" in envfile
+    assert "CRUCIBLE_LLM_BACKEND=" not in envfile        # cleared, not left as a stale/empty line
     st = smod.settings_status()
-    assert st["selected_model"] == "claude-opus-5"
-    assert st["offense_model"] == "claude-opus-5"      # the offense AnthropicBackend reads this var
+    assert st["selected_model"] == "claude-opus-5" and st["offense_model"] == "claude-opus-5"
+
+
+def test_claude_code_routes_backend_never_a_model_id(env):
+    # the P4 red-pen BLOCK: claude-code is a BACKEND, not a model id. It must set CRUCIBLE_LLM_BACKEND
+    # and must NEVER be stuffed into a model-id var (which the anthropic SDK / `claude --model` would
+    # reject → every reasoning call errors). This test fails if that regresses.
+    import os
+    store, owner, _ = env
+    out = smod.set_model("claude-code", store=store, owner_key=owner)
+    assert out["backend"] == "claude-code"
+    assert os.environ.get("CRUCIBLE_LLM_BACKEND") == "claude-code"    # backend routed
+    assert not os.environ.get("CRUCIBLE_ANTHROPIC_MODEL")             # model-id vars CLEARED, not "claude-code"
+    assert not os.environ.get("SIGIL_LLM_MODEL")
+    st = smod.settings_status()
+    assert st["selected_model"] == "claude-code"                     # picker still reflects the choice
+    assert st["offense_backend"] == "claude-code" and "claude-code" not in (st["sovereign_model"] or "")
+    e = smod.export_runtime_env(include_secrets=False)
+    assert e.get("CRUCIBLE_LLM_BACKEND") == "claude-code"
+    assert "CRUCIBLE_ANTHROPIC_MODEL" not in e                       # a backend name never rides as a model id
+
+
+def test_switching_off_claude_code_clears_the_forced_backend(env):
+    import os
+    store, owner, _ = env
+    smod.set_model("claude-code", store=store, owner_key=owner)
+    assert os.environ.get("CRUCIBLE_LLM_BACKEND") == "claude-code"
+    smod.set_model("claude-sonnet-5", store=store, owner_key=owner)  # switch to an API model
+    assert not os.environ.get("CRUCIBLE_LLM_BACKEND")                # no stale forced backend lingers
+    assert os.environ.get("CRUCIBLE_ANTHROPIC_MODEL") == "claude-sonnet-5"
 
 
 def test_unknown_model_refused(env):

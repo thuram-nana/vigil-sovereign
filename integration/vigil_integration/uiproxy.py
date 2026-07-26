@@ -441,8 +441,12 @@ def _resolve_offense_llm_env(sigil_bin: Path) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    # accept only str→str entries; never let this become an arbitrary env-injection channel
-    return {str(k): str(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, str) and v}
+    # Defense-in-depth: even though the sovereign emitter is closed to these keys, the CONSUMER also
+    # allowlists them by name (str→str, non-empty) — so this can never become an arbitrary env-injection
+    # channel even if the emitter changed. These are the only LLM-runtime vars the offense engine reads.
+    allow = {"CRUCIBLE_LLM_BACKEND", "CRUCIBLE_ANTHROPIC_MODEL", "SIGIL_LLM_MODEL", "ANTHROPIC_API_KEY"}
+    return {k: str(v) for k, v in data.items()
+            if k in allow and isinstance(v, str) and v}
 
 
 def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:

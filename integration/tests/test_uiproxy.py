@@ -367,9 +367,12 @@ def test_resolve_offense_llm_env_failsoft(tmp_path):
     assert uiproxy._resolve_offense_llm_env(_fake_sigil(tmp_path, "sys.exit(3)\n")) == {}
     # a JSON non-object, and non-string/empty values, are all rejected → {}
     assert uiproxy._resolve_offense_llm_env(_fake_sigil(tmp_path, "print('[1,2,3]')\n")) == {}
-    only_str = uiproxy._resolve_offense_llm_env(
-        _fake_sigil(tmp_path, "print('{\"A\": 5, \"B\": \"\", \"C\": \"ok\"}')\n"))
-    assert only_str == {"C": "ok"}          # int + empty dropped; only non-empty str→str survives
+    # OBS-2 hardening: the CONSUMER key-allowlists too. A non-allowlisted key, an int, and an empty
+    # value are all dropped; only allowlisted non-empty str→str survives.
+    filtered = uiproxy._resolve_offense_llm_env(_fake_sigil(
+        tmp_path, "print('{\"EVIL\": \"x\", \"CRUCIBLE_ANTHROPIC_MODEL\": 5, "
+                  "\"SIGIL_LLM_MODEL\": \"\", \"CRUCIBLE_LLM_BACKEND\": \"claude-code\"}')\n"))
+    assert filtered == {"CRUCIBLE_LLM_BACKEND": "claude-code"}    # EVIL dropped, int dropped, empty dropped
 
 
 def test_resolve_offense_llm_env_never_writes_a_file(tmp_path, monkeypatch):
