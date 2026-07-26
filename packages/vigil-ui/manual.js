@@ -104,8 +104,8 @@ window.VIGIL_MANUAL = [
   {
     id: "settings", title: "Settings — keys & model",
     blocks: [
-      { p: "Add your AI provider API key here. It is sealed into your machine's keyring or TPM-backed vault, shown to you only as a redacted fingerprint afterwards, and is NEVER written to the audit log or sent to your browser again. You can also run keyless (deterministic checks only, no AI reasoning)." },
-      { p: "Choose which AI model VIGIL thinks with, manage the scope/authority it is allowed to act under, and pair devices (like your phone for remote approvals)." },
+      { p: "Add the secrets the system uses here — your AI provider API key, and (for live auto-patch) a GitHub token that lets the fix engine push a branch and open a gated pull request. Each is sealed into your machine's keyring or TPM-backed vault, shown to you only as a redacted fingerprint afterwards, and is NEVER written to the audit log or sent to your browser again. You can also run keyless (deterministic checks only, no AI reasoning)." },
+      { p: "Choose which AI model VIGIL thinks with. Every secret is sealed and delivered to the engine on your machine only — the GitHub token, for example, is what the auto-patch engine uses when you approve opening a fix PR." },
     ],
   },
   {
