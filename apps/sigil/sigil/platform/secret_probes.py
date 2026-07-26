@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
 from ..config import SIGIL_HOME
 from .secrets import SecretStore
@@ -29,14 +30,31 @@ _HEALTH_CACHE: Path = SIGIL_HOME / "secret-health.json"     # 0600, value-free v
 OK, FAIL, UNKNOWN = "ok", "fail", "unknown"
 
 
-# --- HTTP core (host-pinned, minimal, fail-closed) --------------------------------------------------
+# --- HTTP core (host-pinned, minimal, fail-closed, NO cross-host redirect) --------------------------
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect. A 3xx would otherwise be auto-followed WITH the auth header attached, which
+    would relay the API key to the redirect target (a second SSRF/exfil path). Returning None stops the
+    follow; the 3xx is then reported as a non-2xx ⇒ fail."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _do_open(req, timeout):
+    """Single open point (redirect-blocking opener) — also the test seam."""
+    return _OPENER.open(req, timeout=timeout)   # noqa: S310 — https + host-pinned/validated by callers
+
 
 def _http_probe(url: str, headers: dict, *, ok_codes: tuple = (200,)) -> "tuple[str, str]":
     """A minimal authenticated GET to a PINNED provider URL. Sends only the auth header(s) — no target data.
-    2xx ⇒ ok; 401/403 ⇒ fail (bad/expired key); other status/network/timeout ⇒ fail. Never raises."""
+    2xx ⇒ ok; 401/403 ⇒ fail (bad/expired key); 3xx/other/network/timeout ⇒ fail. Never follows a redirect
+    (would relay the key); never raises."""
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:   # noqa: S310 — https, host-pinned below
+        with _do_open(req, timeout=_TIMEOUT_S) as resp:
             code = resp.getcode()
             return (OK, f"reachable (HTTP {code})") if code in ok_codes else (FAIL, f"HTTP {code}")
     except urllib.error.HTTPError as e:
@@ -49,10 +67,6 @@ def _http_probe(url: str, headers: dict, *, ok_codes: tuple = (200,)) -> "tuple[
         return FAIL, f"unreachable: {type(e).__name__}"
     except Exception as e:  # noqa: BLE001 — fail-closed on anything unexpected
         return FAIL, f"probe error: {type(e).__name__}"
-
-
-def _require_https(url: str) -> bool:
-    return isinstance(url, str) and url.startswith("https://")
 
 
 # --- per-provider probes: run(value, store, ctx) -> (status, reason) --------------------------------
@@ -90,10 +104,16 @@ def _probe_azure_openai(value: str, store: SecretStore, ctx: dict) -> "tuple[str
     endpoint = str(ctx.get("AZURE_OPENAI_ENDPOINT", "") or "").strip().rstrip("/")
     if not endpoint:
         return UNKNOWN, "set the Azure endpoint (in Models) to enable this check"
-    # SSRF guard: the endpoint is operator-supplied, so pin it to a real Azure OpenAI host over https.
-    if not _require_https(endpoint) or ".openai.azure.com" not in endpoint:
+    # SSRF guard: the endpoint is the ONE operator-supplied URL, so parse it and validate the HOSTNAME (not a
+    # substring — `https://evil/.openai.azure.com`, `https://x.openai.azure.com.evil`, and userinfo tricks all
+    # defeat a substring check). Then rebuild the base URL from ONLY scheme+host(+port) so no path/query the
+    # operator smuggled in survives. The auth key is only ever sent to a real *.openai.azure.com host.
+    u = urlparse(endpoint)
+    host = (u.hostname or "").lower()
+    if u.scheme != "https" or u.username or u.password or "@" in endpoint or not host.endswith(".openai.azure.com"):
         return FAIL, "endpoint must be https://<resource>.openai.azure.com"
-    return _http_probe(f"{endpoint}/openai/models?api-version=2024-02-01", {"api-key": value})
+    base = f"https://{host}" + (f":{u.port}" if u.port else "")
+    return _http_probe(f"{base}/openai/models?api-version=2024-02-01", {"api-key": value})
 
 
 def _probe_aws(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
@@ -157,6 +177,10 @@ def _write_cache(name: str, rec: dict) -> None:
     fd = os.open(str(_HEALTH_CACHE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(data, fh)
+    try:
+        os.chmod(str(_HEALTH_CACHE), 0o600)      # unconditional 0600 even if the file pre-existed
+    except OSError:
+        pass
 
 
 def cached_health(name: str) -> Optional[dict]:

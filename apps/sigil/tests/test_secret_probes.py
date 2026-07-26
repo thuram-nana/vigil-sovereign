@@ -66,7 +66,7 @@ def test_verdict_and_cache_never_contain_the_secret_value(monkeypatch):
 
 # --- HTTP status mapping (401/403 → fail; 2xx → ok; network → fail) --------------------------------
 
-def _fake_urlopen_status(code):
+def _fake_open_status(code):
     class _Resp:
         def getcode(self):
             return code
@@ -79,19 +79,30 @@ def _fake_urlopen_status(code):
 
 def test_http_probe_ok_and_reject(monkeypatch):
     P = _probes()
-    monkeypatch.setattr(P.urllib.request, "urlopen", _fake_urlopen_status(200))
+    monkeypatch.setattr(P, "_do_open", _fake_open_status(200))
     assert P._http_probe("https://api.example.com/x", {})[0] == P.OK
+
+    # a 3xx must map to FAIL (and — see the SSRF test — is never followed with the auth header)
+    monkeypatch.setattr(P, "_do_open", _fake_open_status(302))
+    assert P._http_probe("https://api.example.com/x", {})[0] == P.FAIL
 
     def _401(req, timeout=None):
         raise urllib.error.HTTPError("u", 401, "unauth", {}, io.BytesIO(b""))
-    monkeypatch.setattr(P.urllib.request, "urlopen", _401)
+    monkeypatch.setattr(P, "_do_open", _401)
     st, reason = P._http_probe("https://api.example.com/x", {})
     assert st == P.FAIL and "401" in reason
 
     def _neterr(req, timeout=None):
         raise urllib.error.URLError("no route")
-    monkeypatch.setattr(P.urllib.request, "urlopen", _neterr)
+    monkeypatch.setattr(P, "_do_open", _neterr)
     assert P._http_probe("https://api.example.com/x", {})[0] == P.FAIL
+
+
+def test_probe_never_follows_a_redirect():
+    # the no-redirect opener must not follow a 3xx (which would relay the auth header cross-host)
+    P = _probes()
+    handler = P._NoRedirect()
+    assert handler.redirect_request(None, None, 302, "Found", {}, "https://evil.example.com") is None
 
 
 def test_anthropic_probe_sends_key_header_and_maps_ok(monkeypatch):
@@ -106,7 +117,7 @@ def test_anthropic_probe_sends_key_header_and_maps_ok(monkeypatch):
             def __enter__(self): return self
             def __exit__(self, *a): return False
         return _R()
-    monkeypatch.setattr(P.urllib.request, "urlopen", _cap)
+    monkeypatch.setattr(P, "_do_open", _cap)
     st, _ = P._probe_anthropic("sk-ant-xyz", _store(), {})
     assert st == P.OK
     assert captured["url"] == "https://api.anthropic.com/v1/models"     # host-pinned
@@ -115,12 +126,41 @@ def test_anthropic_probe_sends_key_header_and_maps_ok(monkeypatch):
 
 # --- SSRF guard on the one operator-supplied URL (Azure endpoint) ----------------------------------
 
-def test_azure_probe_rejects_non_azure_endpoint():
+def test_azure_probe_rejects_non_azure_endpoint(monkeypatch):
     P = _probes()
-    st, reason = P._probe_azure_openai("key", _store(), {"AZURE_OPENAI_ENDPOINT": "http://evil.example.com"})
-    assert st == P.FAIL and "openai.azure.com" in reason
-    st2, reason2 = P._probe_azure_openai("key", _store(), {"AZURE_OPENAI_ENDPOINT": ""})
+    # if the guard were bypassed, _do_open would be reached — make that a hard failure so a bypass can't pass
+    def _boom(req, timeout=None):
+        raise AssertionError(f"SSRF: probe reached the network for {req.full_url!r}")
+    monkeypatch.setattr(P, "_do_open", _boom)
+    # every substring/userinfo/metadata bypass of the OLD guard must be REFUSED before any network call
+    for ep in ("http://evil.example.com",
+               "https://evil.attacker.com/.openai.azure.com",          # path-suffix
+               "https://x.openai.azure.com.evil.attacker.com",         # subdomain-suffix
+               "https://real.openai.azure.com@evil.attacker.com",      # userinfo
+               "https://169.254.169.254/.openai.azure.com"):           # IMDS metadata
+        st, reason = P._probe_azure_openai("key", _store(), {"AZURE_OPENAI_ENDPOINT": ep})
+        assert st == P.FAIL and "openai.azure.com" in reason, f"bypass not refused: {ep}"
+    st2, _ = P._probe_azure_openai("key", _store(), {"AZURE_OPENAI_ENDPOINT": ""})
     assert st2 == P.UNKNOWN                        # no endpoint → can't check (not a false ok)
+
+
+def test_azure_probe_accepts_real_host_and_pins_base(monkeypatch):
+    P = _probes()
+    captured = {}
+
+    def _cap(req, timeout=None):
+        captured["url"] = req.full_url
+        class _R:
+            def getcode(self): return 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return _R()
+    monkeypatch.setattr(P, "_do_open", _cap)
+    # a real endpoint with a smuggled path/query — the probe must rebuild the base from host only
+    st, _ = P._probe_azure_openai("azkey", _store(),
+                                  {"AZURE_OPENAI_ENDPOINT": "https://myres.openai.azure.com/evil?x=1"})
+    assert st == P.OK
+    assert captured["url"] == "https://myres.openai.azure.com/openai/models?api-version=2024-02-01"
 
 
 def test_aws_probe_needs_companion_and_boto3():
