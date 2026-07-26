@@ -358,8 +358,17 @@ def _build_gate(prov: Provisioned, *, ceiling: str = "A1") -> Optional[Callable[
     gate cannot be built. ``ceiling`` is the operator's standing approval tier (see EngineConfig)."""
     try:
         from ..conjunctive_gate import build_offense_gate
+        # Wire the operator KILL-SWITCH into the gate — previously omitted, so the live engine's gate never
+        # consulted it (a tripped killswitch would not have halted tool calls through THIS gate). Fail-soft:
+        # if the KillSwitch can't be constructed, still build the gate (the CRUCIBLE authority stands).
+        killswitch = None
+        try:
+            from framework.v2.authority.killswitch import KillSwitch
+            killswitch = KillSwitch(prov.slug)
+        except Exception:  # noqa: BLE001 — killswitch unavailable ⇒ gate still built without it
+            killswitch = None
         return build_offense_gate(slug=prov.slug, trust_root=prov.trust_root,
-                                  classify=default_classify, ceiling=ceiling)
+                                  classify=default_classify, ceiling=ceiling, killswitch=killswitch)
     except Exception:  # noqa: BLE001 — no gate wired ⇒ deny-by-default (the engine denies every call)
         return None
 
