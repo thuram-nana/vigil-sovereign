@@ -18,6 +18,7 @@ The boundary invariants (this is the ONE inert seam — treat every byte as host
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -96,11 +97,13 @@ class SpoolWatcher:
 
     @staticmethod
     def _read_regular(path: Path) -> str:
-        """Read a REGULAR file without following a symlink or blocking on a FIFO. A compromised producer
-        that plants a symlink / named pipe / device in the spool must never hang the ingest or make us
-        read/follow an arbitrary path. O_NOFOLLOW rejects a symlink at open; O_NONBLOCK returns instead of
-        blocking on a writer-less FIFO; then S_ISREG + the size cap reject anything that is not a bounded
-        regular file. Raises OSError on any of these (→ the caller quarantines)."""
+        """Read a REGULAR file without following a symlink or blocking on a FIFO, and decode it as UTF-8.
+        A compromised producer that plants a symlink / named pipe / device / non-UTF-8 blob in the spool
+        must never hang or CRASH the ingest, nor make us read/follow an arbitrary path. O_NOFOLLOW rejects
+        a symlink at open; O_NONBLOCK returns instead of blocking on a writer-less FIFO; then S_ISREG + the
+        size cap reject anything that is not a bounded regular file; and a non-UTF-8 decode is normalised to
+        OSError. Raises OSError (ONLY) on any of these — so the caller's single ``except OSError`` catches
+        every hostile-file case and quarantines it, and ``drain()`` never raises on one bad file."""
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(str(path), flags)
         try:
@@ -121,17 +124,22 @@ class SpoolWatcher:
         data = b"".join(chunks)
         if len(data) > _MAX_BYTES:
             raise OSError(f"file exceeds {_MAX_BYTES} bytes")
-        return data.decode("utf-8")
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:          # a non-UTF-8 blob is hostile input, not a crash
+            raise OSError(f"not valid UTF-8: {exc}") from exc
 
     def drain(self) -> dict:
         """Process every file currently in ``incoming/`` once. Returns {ingested, rejected, deduped, seqs}.
 
         For each file: CLAIM it out of ``incoming/`` (atomic rename into ``working/``) BEFORE anything else,
-        so a failed archive or a re-run can never re-read it from ``incoming/`` and double-append. If an
-        identical envelope was already ingested (its content-named marker exists in ``processed/``), the
-        claimed copy is a re-spool and is archived WITHOUT re-appending (idempotent). Otherwise read it as a
-        bounded regular file, ingest, and archive to ``processed/<name>`` (the dedup marker). ANY failure →
-        ``rejected/``, nothing appended. Never raises on one bad file; never blocks on a hostile one."""
+        so a failed archive or a re-run can never re-read it from ``incoming/`` and double-append. Read it as
+        a bounded regular UTF-8 file, then compute the dedup identity from the READ BYTES (not the producer-
+        chosen filename — so a mismatched name cannot suppress a different finding). If that identical
+        envelope was already ingested (``processed/<sha256>`` exists), the claimed copy is a re-spool and is
+        archived WITHOUT re-appending (idempotent). Otherwise ingest and archive to ``processed/<sha256>``
+        (the dedup marker). ANY failure → ``rejected/``, nothing appended. Never raises on one bad file;
+        never blocks on a hostile one."""
         ingested, rejected, deduped, seqs = 0, 0, 0, []
         for src in sorted(self.incoming.glob("*.json")):
             if src.name.startswith(".tmp-"):
@@ -141,7 +149,15 @@ class SpoolWatcher:
                 os.replace(src, claimed)   # atomic CLAIM: the file leaves incoming/ before we act on it
             except OSError:
                 continue                    # gone / raced away — nothing to do
-            marker = self.processed / src.name
+            try:
+                text = self._read_regular(claimed)   # regular-file-only, bounded, UTF-8 → OSError on any breach
+            except OSError as exc:
+                self._quarantine(claimed, f"unreadable / not a bounded regular UTF-8 file: {exc}")
+                rejected += 1
+                continue
+            # dedup identity is the sha256 of the ACTUAL bytes, not the producer's filename — a producer
+            # cannot suppress a real finding by naming it after an already-processed marker.
+            marker = self.processed / (hashlib.sha256(text.encode("utf-8")).hexdigest() + ".json")
             if marker.exists():
                 # a byte-identical envelope already crossed onto the spine — do NOT re-append (idempotent)
                 try:
@@ -149,12 +165,6 @@ class SpoolWatcher:
                 except OSError:
                     self._safe_unlink(claimed)
                 deduped += 1
-                continue
-            try:
-                text = self._read_regular(claimed)
-            except OSError as exc:
-                self._quarantine(claimed, f"unreadable / not a bounded regular file: {exc}")
-                rejected += 1
                 continue
             try:
                 seq = self._ingest_text(text)

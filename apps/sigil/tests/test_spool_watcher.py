@@ -83,7 +83,10 @@ def test_genuine_finding_is_ingested_and_moved_to_processed(env):
     r = _watcher(store, spool, gov=_gov_deleg()).drain()
     assert r["ingested"] == 1 and r["rejected"] == 0
     assert len(_kinds(store, "finding")) == 1
-    assert not p.exists() and (Path(spool) / "processed" / p.name).exists()
+    # the claimed file left incoming/ and working/, and exactly one content-hash marker landed in processed/
+    assert not p.exists()
+    assert list((Path(spool) / "working").glob("*.json")) == []
+    assert len(list((Path(spool) / "processed").glob("*.json"))) == 1
 
 
 def test_genuine_detection_is_ingested(env):
@@ -162,6 +165,35 @@ def test_mislabelled_kind_cannot_flip_the_validation_path(env):
                  gov=_gov_deleg(scope="*"), spine=_spine_deleg()).drain()
     assert r["ingested"] == 0 and r["rejected"] == 1
     assert _kinds(store, "finding") == [] and _kinds(store, "detection") == []
+
+
+def test_non_utf8_file_is_rejected_not_crashing(env):
+    # BLOCK-3: a non-UTF-8 .json blob must be quarantined fail-closed — it must NOT raise out of drain()
+    # (which would crash the watch() loop and take the sovereign ingest down).
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    w.incoming.mkdir(parents=True, exist_ok=True)
+    (w.incoming / "bad.json").write_bytes(b"\xff\xfe\x00\x01 not utf8 \xc3\x28")
+    r = w.drain()   # must return, not raise
+    assert r["ingested"] == 0 and r["rejected"] == 1 and _kinds(store, "finding") == []
+    assert list((Path(spool) / "rejected").glob("*.reason"))   # quarantined with a reason
+
+
+def test_dedup_keys_on_content_not_filename(env):
+    # OBS-2 hardening: the dedup identity is the sha256 of the READ BYTES, not the producer's filename. A
+    # producer cannot suppress a genuine finding by naming a DIFFERENT body after an already-processed file.
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    inc = w.incoming
+    inc.mkdir(parents=True, exist_ok=True)
+    (inc / "aaaa.json").write_text(_finding(ref="sqli-001"), encoding="utf-8")
+    w.drain()                                              # first finding ingested
+    # a DIFFERENT finding body, deliberately named to collide with the first file's name
+    (inc / "aaaa.json").write_text(_finding(ref="sqli-999"), encoding="utf-8")
+    r = w.drain()
+    assert r["ingested"] == 1 and r["deduped"] == 0        # NOT suppressed — different content ingested
+    refs = {rec.payload["finding_ref"] for rec in _kinds(store, "finding")}
+    assert refs == {"sqli-001", "sqli-999"}
 
 
 def test_owner_pubkey_required():
