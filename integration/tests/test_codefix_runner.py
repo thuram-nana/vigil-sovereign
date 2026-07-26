@@ -209,12 +209,42 @@ def test_nonce_ledger_durable_and_fail_closed(tmp_path):
     led = NonceLedger(str(tmp_path / "nonces"))
     assert led.is_consumed("") is True                       # blank ⇒ fail-closed consumed
     assert led.is_consumed("n1") is False
-    led.record("n1")
+    assert led.try_consume("n1") is True                     # first consume WINS
     assert led.is_consumed("n1") is True
     assert NonceLedger(str(tmp_path / "nonces")).is_consumed("n1") is True   # survives a fresh instance
-    assert stat.S_IMODE(os.stat(tmp_path / "nonces").st_mode) == 0o600
+    marker = os.listdir(tmp_path / "nonces")[0]
+    assert stat.S_IMODE(os.stat(tmp_path / "nonces" / marker).st_mode) == 0o600   # marker is 0600
     with pytest.raises(ValueError):
-        led.record("")                                       # refuse recording a blank nonce
+        led.try_consume("")                                  # refuse consuming a blank nonce
+
+
+def test_nonce_ledger_atomic_single_winner_and_no_newline_poison(tmp_path):
+    # THE red-pen BLOCK fix: of N callers of the SAME nonce, EXACTLY ONE wins (atomic O_EXCL) — even under
+    # real concurrency; and a newline-bearing nonce cannot poison a different nonce's entry (hashed filename).
+    import threading
+    from vigil_integration.live.nonce_ledger import NonceLedger
+    led = NonceLedger(str(tmp_path / "nonces"))
+    # Concurrency: 16 threads race to consume ONE nonce past a barrier; exactly one may win.
+    wins = []
+    barrier = threading.Barrier(16)
+    lock = threading.Lock()
+
+    def _race():
+        barrier.wait()
+        won = led.try_consume("race")
+        with lock:
+            wins.append(won)
+    threads = [threading.Thread(target=_race) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert wins.count(True) == 1                              # atomic single-use holds under concurrency
+    assert wins.count(False) == 15
+    # Newline poisoning: consuming a newline-bearing nonce must NOT mark a distinct nonce consumed.
+    assert led.try_consume("evil\nrealnonce2") is True
+    assert led.is_consumed("realnonce2") is False             # the distinct nonce is untouched
+    assert led.is_consumed("evil") is False
 
 
 def test_single_use_authorization_cannot_replay(tmp_path):
@@ -261,8 +291,30 @@ def test_quorum_denies_when_consumption_cannot_be_recorded(tmp_path):
         target_repo = "git@example.com:o/r.git"
         finding = f
     q = build_destruction_quorum(authority=authority, signed=signed, slug="acme",
-                                 is_consumed=lambda n: False, record_consumed=_boom)
-    assert q(_Req()).approved is False                                  # record failure ⇒ fail-closed deny
+                                 is_consumed=lambda n: False, consume=_boom)
+    assert q(_Req()).approved is False                                  # consume failure ⇒ fail-closed deny
+
+
+def test_quorum_denies_when_consume_loses_the_race(tmp_path):
+    # a concurrent caller that LOSES the atomic reservation (consume ⇒ False) must be DENIED as a replay,
+    # never authorized — this is what makes single-use hold under concurrency, not just sequentially.
+    from vigil_integration.autopatch.loop import _derive_remediation_id
+    from vigil_integration.destruction_gate import DestructionAuthority
+    from vigil_integration.live.codefix_runner import build_destruction_quorum
+    owner, worker, tr = _keys()
+    authority = DestructionAuthority(trust_root=tr, mandatory_signer_ids={"owner"})
+    f = _fact("git@example.com:o/r.git")
+    rid = _derive_remediation_id("", f)
+    signed = _signed(rid, slug="acme", repo="git@example.com:o/r.git", owner=owner, worker=worker,
+                     signers=[("owner", owner.private_key_b64), ("worker", worker.private_key_b64)])
+
+    class _Req:
+        remediation_id = rid
+        target_repo = "git@example.com:o/r.git"
+        finding = f
+    q = build_destruction_quorum(authority=authority, signed=signed, slug="acme",
+                                 is_consumed=lambda n: False, consume=lambda n: False)  # lost the race
+    assert q(_Req()).approved is False                                  # lost reservation ⇒ deny (replay)
 
 
 def test_open_pr_fail_closed_without_enable_or_token(repo_and_diff, tmp_path, monkeypatch):
