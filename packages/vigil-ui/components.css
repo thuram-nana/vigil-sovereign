@@ -279,6 +279,24 @@ textarea { min-height: 80px; resize: vertical; }
 .mono { font-family: var(--font-mono); }
 .dim { color: var(--text-2); }
 .pill.sm.ok { color: var(--st-confirmed); border-color: color-mix(in srgb, var(--st-confirmed) 40%, var(--border)); }
+.pill.sm.warn { color: var(--st-queued); border-color: color-mix(in srgb, var(--st-queued) 45%, var(--border)); }
+
+/* defense (AEGIS) — SEMANTIC INVERSION: a confirmed verdict is an ATTACK (danger), never green ------ */
+.feed-row.verdict-danger { border-left: 3px solid var(--st-blocked); padding-left: 8px; }
+.feed-row.verdict-warn { border-left: 3px solid var(--st-queued); padding-left: 8px; }
+.vbadge { flex: 0 0 auto; font-size: var(--fs-xs); font-weight: 800; letter-spacing: .04em; padding: 3px 8px;
+  border-radius: var(--r-1); text-transform: uppercase; border: 1px solid var(--border); color: var(--text-2); }
+.vbadge.danger { color: #fff; background: var(--st-blocked); border-color: var(--st-blocked); }
+.vbadge.warn { color: var(--st-queued); background: color-mix(in srgb, var(--st-queued) 16%, transparent); border-color: color-mix(in srgb, var(--st-queued) 45%, var(--border)); }
+.vbadge.muted { color: var(--text-2); }
+.actor-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.actor-row:last-child { border-bottom: none; }
+.actor-row .actor-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.actor-row .actor-meta { font-size: var(--fs-xs); margin-top: 4px; }
+.bar { height: 8px; border-radius: 999px; background: var(--bg-3); overflow: hidden; margin: 6px 0 2px; }
+.bar-fill { height: 100%; background: var(--st-confirmed); border-radius: 999px; }
+.bar-fill.mid { background: var(--st-queued); }
+.bar-fill.hi { background: var(--st-blocked); }
 .btn.sm { padding: 6px 12px; font-size: var(--fs-sm); }
 .tile .foot.ok { color: var(--st-confirmed); } .tile .foot.warn { color: var(--st-queued); } .tile .foot.danger { color: var(--st-blocked); }
 .cap-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);

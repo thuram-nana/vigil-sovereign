@@ -25,8 +25,11 @@ Nothing here is on the scan hot path; a launched run is an ordinary subprocess.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -37,6 +40,7 @@ from urllib.parse import urlsplit
 from ..common import paths
 
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+_AEGIS_MODES = frozenset({"observe", "enforce"})
 
 # The valid assessment modes and the wizard target-types they back.
 _MODES = frozenset({"url", "codebase", "tool", "suite", "aegis"})
@@ -342,3 +346,142 @@ def trip_killswitch(slug: str, reason: str) -> dict:
         return {"slug": slug, "tripped": True, "reason": ks.reason()}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# AEGIS Defense gateway (P5a) — launch / stop / current-pointer
+#
+# The AEGIS gateway is a PERSISTENT data-plane reverse proxy (`serve_forever`), so — unlike a scan —
+# it is spawned with subprocess.Popen (subprocess.run's timeout would kill it) and tracked by pid. It
+# writes browser-safe verdicts to a JSONL the console SSE tails and a status snapshot the status read
+# consumes. Exactly ONE managed gateway at a time (a single-pointer file). This does NOT relax any gate:
+# it spawns the SAME `aegis gateway` CLI a hand-run deployment uses; enforce still needs the entitlement.
+# ---------------------------------------------------------------------------
+
+
+def _aegis_current_path() -> Path:
+    return console_dir() / "aegis-current.json"
+
+
+def _read_aegis_current() -> dict:
+    try:
+        return json.loads(_aegis_current_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_aegis_current(meta: dict) -> None:
+    try:
+        _aegis_current_path().write_text(json.dumps(meta, default=str, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def aegis_verdicts_path() -> str | None:
+    """The JSONL the live verdict feed tails — the current gateway's verdicts file, or None."""
+    cur = _read_aegis_current()
+    p = cur.get("verdicts")
+    return p if p else None
+
+
+def aegis_setup(body: dict) -> dict:
+    """Launch a managed AEGIS gateway in front of the operator's app. Fail-closed validation BEFORE any
+    spawn; refuses if a gateway is already running. Returns the run info + the production edge command
+    (secret redacted) so the operator can also run it on their own routable edge. Loopback-default; a
+    routable bind is flagged (`warn_public`) — the gateway is the ONLY VIGIL server allowed off-loopback."""
+    upstream = str(body.get("upstream", "")).strip()
+    us = urlsplit(upstream)
+    if us.scheme not in ("http", "https") or not us.hostname:
+        return {"error": "upstream must be a full http(s) URL to your app, e.g. http://127.0.0.1:3000"}
+    host = str(body.get("host", "127.0.0.1")).strip() or "127.0.0.1"
+    try:
+        port = int(body.get("port", 8080))
+    except (TypeError, ValueError):
+        return {"error": "port must be a number"}
+    if not (1 <= port <= 65535):
+        return {"error": "port must be 1–65535"}
+    mode = str(body.get("mode", "observe")).strip()
+    if mode not in _AEGIS_MODES:
+        return {"error": "mode must be 'observe' or 'enforce'"}
+    slug = _slugify(str(body.get("slug", "")), fallback="aegis-gateway")
+    secret = str(body.get("deployment_secret", "")).strip()
+    if not secret:
+        return {"error": "a deployment secret is required — it keys privacy pseudonymisation of actor "
+                         "identifiers (NOT request authentication); use the generate button"}
+    if any(ord(c) < 0x20 for c in secret) or len(secret) > 4096:
+        return {"error": "deployment secret must be a single line, ≤4096 chars"}
+    honeypots = [str(h).strip() for h in (body.get("honeypot_paths") or []) if str(h).strip()]
+    # A honeypot is a URL PATH — require a leading "/" (and no control chars). This also means a value
+    # can never begin with "-" and be mistaken for a flag when it reaches the child argv (defence in depth
+    # on top of the argv-list, no-shell spawn) — a hostile path is rejected here, never spawned.
+    for hp in honeypots:
+        if not hp.startswith("/") or any(ord(c) < 0x20 for c in hp):
+            return {"error": f"honeypot path must start with '/' and contain no control chars: {hp!r}"}
+    # Parse-check the config fail-closed before spawning (extra='forbid' rejects a malformed field).
+    try:
+        from ..aegis.models import AegisConfig
+        AegisConfig(deployment_secret=secret, mode=mode, honeypot_paths=honeypots)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"invalid gateway config: {type(e).__name__}: {str(e)[:160]}"}
+    if importlib.util.find_spec("httpx") is None:
+        return {"error": "the gateway needs httpx to forward requests — install it (pip install httpx)"}
+    cur = _read_aegis_current()
+    if cur and _pid_alive(cur.get("pid")):
+        return {"error": f"a gateway is already running (pid {cur.get('pid')} → {cur.get('upstream')}); "
+                         f"stop it first", "running": cur}
+
+    run_id = _new_run_id()
+    rd = run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    verdicts = rd / "verdicts.jsonl"
+    verdicts.write_text("", encoding="utf-8")
+    status_file = rd / "status.json"
+    cmd = [sys.executable, "-m", "framework.v2", "aegis", "gateway",
+           "--upstream", upstream, "--host", host, "--port", str(port), "--mode", mode,
+           "--slug", slug, "--secret", secret,
+           "--verdicts-out", str(verdicts), "--status-out", str(status_file)]
+    for hp in honeypots:
+        cmd += ["--honeypot", hp]
+    try:
+        logf = open(rd / "gateway.log", "ab")  # noqa: SIM115 — held by the persistent child
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT)  # noqa: S603
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"could not launch the gateway: {type(e).__name__}: {e}"}
+    meta = {"run_id": run_id, "kind": "aegis", "upstream": upstream, "host": host, "port": port,
+            "mode": mode, "slug": slug, "pid": proc.pid, "status": "running", "started": time.time(),
+            "verdicts": str(verdicts), "status_file": str(status_file)}
+    _write_meta(run_id, **meta)
+    _write_aegis_current(meta)
+    # the production edge command (secret REDACTED) — the operator runs this on their own routable edge.
+    prod = ["aegis", "gateway", "--upstream", upstream, "--host", "0.0.0.0", "--port", str(port),
+            "--mode", mode, "--slug", slug, "--secret", "<your-deployment-secret>"]
+    for hp in honeypots:
+        prod += ["--honeypot", hp]
+    return {"run_id": run_id, "status": "running", "pid": proc.pid, "bind": f"{host}:{port}",
+            "warn_public": host not in _LOOPBACK, "requested_mode": mode,
+            "production_command": " ".join(prod)}
+
+
+def aegis_stop(_body: dict | None = None) -> dict:
+    """Stop the managed AEGIS gateway (SIGTERM). Idempotent — a no-op if none is running."""
+    cur = _read_aegis_current()
+    pid = cur.get("pid")
+    if not pid or not _pid_alive(pid):
+        _write_aegis_current({})
+        return {"stopped": False, "note": "no gateway was running"}
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except (OSError, TypeError, ValueError) as e:
+        return {"error": f"could not stop pid {pid}: {e}"}
+    if cur.get("run_id"):
+        _write_meta(cur["run_id"], **{**cur, "status": "stopped", "finished": time.time()})
+    _write_aegis_current({})
+    return {"stopped": True, "pid": pid}
