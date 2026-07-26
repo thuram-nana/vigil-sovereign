@@ -419,6 +419,12 @@ def aegis_setup(body: dict) -> dict:
     if any(ord(c) < 0x20 for c in secret) or len(secret) > 4096:
         return {"error": "deployment secret must be a single line, ≤4096 chars"}
     honeypots = [str(h).strip() for h in (body.get("honeypot_paths") or []) if str(h).strip()]
+    # A honeypot is a URL PATH — require a leading "/" (and no control chars). This also means a value
+    # can never begin with "-" and be mistaken for a flag when it reaches the child argv (defence in depth
+    # on top of the argv-list, no-shell spawn) — a hostile path is rejected here, never spawned.
+    for hp in honeypots:
+        if not hp.startswith("/") or any(ord(c) < 0x20 for c in hp):
+            return {"error": f"honeypot path must start with '/' and contain no control chars: {hp!r}"}
     # Parse-check the config fail-closed before spawning (extra='forbid' rejects a malformed field).
     try:
         from ..aegis.models import AegisConfig

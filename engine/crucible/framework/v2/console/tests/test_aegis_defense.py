@@ -29,6 +29,10 @@ def isolated_current(tmp_path, monkeypatch):
     ({"upstream": "http://app:3000", "deployment_secret": "s\nEVIL=1"}, "single line"),
     ({"upstream": "http://app:3000", "deployment_secret": "s", "port": "99999"}, "1–65535"),
     ({"upstream": "http://app:3000", "deployment_secret": "s", "port": "abc"}, "number"),
+    # a honeypot path must be a URL path (leading "/"), so a "--flag"-looking value can never reach the
+    # child argv, and a newline can't smuggle anything — rejected BEFORE any spawn.
+    ({"upstream": "http://app:3000", "deployment_secret": "s", "honeypot_paths": ["--verdicts-out=/etc/x"]}, "honeypot path"),
+    ({"upstream": "http://app:3000", "deployment_secret": "s", "honeypot_paths": ["/ok\ninject"]}, "honeypot path"),
 ])
 def test_aegis_setup_refuses_bad_input(isolated_current, body, needle):
     r = actions.aegis_setup(body)
