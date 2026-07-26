@@ -28,6 +28,8 @@ existing importer of ``vigil_integration.conjunctive_gate``) and adds the OFFENS
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 # The pure gate-of-record composition now lives in the neutral shared core (S6). Re-exported here so every
@@ -39,6 +41,31 @@ from .warden_gate import DEFAULT_CEILING, DEFAULT_FLOOR, ToolDecision, decide_to
 __all__ = [
     "GateVerdict", "CrucibleResult", "DestructionOutcome", "conjunctive_decide", "build_offense_gate",
 ]
+
+
+def _as_datetime(now: Any) -> "datetime | None":
+    """The CRUCIBLE leg (authorize_action) wants a timezone-aware datetime (or None → it uses utcnow). A
+    single ``now`` shared with the destruction leg (which wants an epoch float) must be adapted per-leg —
+    this was the confirmed gate bug: one ``now`` broke whichever leg it wasn't typed for."""
+    if now is None or isinstance(now, datetime):
+        return now
+    if isinstance(now, (int, float)) and not isinstance(now, bool):
+        try:
+            return datetime.fromtimestamp(float(now), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None                                # unusable → authorize_action defaults to utcnow (safe)
+
+
+def _as_epoch(now: Any) -> float:
+    """The destruction leg (authorize_destruction) wants an epoch float (it rejects None/datetime/bool as
+    'not numeric'). None/unusable → the real wall-clock, which is correct for the not_before/not_after
+    dead-man's-switch window (this is not the deterministic learning path)."""
+    if isinstance(now, datetime):
+        return now.timestamp()
+    if isinstance(now, (int, float)) and not isinstance(now, bool):
+        return float(now)
+    return time.time()
 
 
 def build_offense_gate(
@@ -62,6 +89,12 @@ def build_offense_gate(
     ``trust_root`` MUST be the governance TrustRoot — the CRUCIBLE authority is loaded verified,
     so a tampered scope/window/destructive-flag is rejected at load (the map's biggest fail-open).
     A ``None`` trust_root is refused: it would load the authority UNSIGNED, so it fails closed here.
+
+    ``now`` MUST be a TRUSTED-caller value (a datetime, an epoch float, or None → real clock) — NEVER
+    request/agent/attacker-derived data. It is load-bearing for the CRUCIBLE validity-window and the
+    destruction dead-man's-switch: an in-window value passed for an out-of-window authority would honor it.
+    The live wiring passes no ``now`` (→ None → real clock), and the per-call ``gate(...)`` has no ``now``
+    argument, so the only path that sets it is the trusted caller here.
 
     Destructive actions are threshold-gated: pass a ``destruction_authority`` (immutable
     :class:`destruction_gate.DestructionAuthority` from deployment config) and an ``is_consumed``
@@ -93,7 +126,8 @@ def build_offense_gate(
             authority = load_authority_for_gate(slug, trust_root=trust_root)  # verified, fail-closed
             req = ActionRequest(target=target_url, action_kind="offense", destructive=destructive)
             decision = authorize_action(
-                authority, req, killswitch=killswitch, actions_taken=actions_taken, now=now,
+                authority, req, killswitch=killswitch, actions_taken=actions_taken,
+                now=_as_datetime(now),          # CRUCIBLE leg wants a datetime (or None)
             )
             return CrucibleResult(allowed=bool(decision.allowed), reason=decision.reason)
 
@@ -125,7 +159,9 @@ def build_offense_gate(
                 def destruction_authorize() -> Any:  # type: ignore[misc]
                     return authorize_destruction(
                         destruction_action, destruction_signed,
-                        authority=destruction_authority, now=now, is_consumed=is_consumed,
+                        authority=destruction_authority,
+                        now=_as_epoch(now),      # destruction leg wants an epoch float
+                        is_consumed=is_consumed,
                     )
 
         return conjunctive_decide(

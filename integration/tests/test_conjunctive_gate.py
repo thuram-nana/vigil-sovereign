@@ -212,6 +212,68 @@ def test_build_offense_gate_engages_the_destruction_conjunct(monkeypatch):
     assert gate("http.get", "db", destructive=False).outcome == "allow"
 
 
+@pytest.mark.parametrize("now_in", [None, 1577854800.0, 1577854800])
+def test_now_is_adapted_per_leg(monkeypatch, now_in):
+    # GATE-WIRING BUG regression: one `now` must reach the CRUCIBLE leg as a datetime|None and the
+    # destruction leg as an epoch float — the two legs demand incompatible types. Capture what each real
+    # call site receives and assert the adaptation (previously a single `now` broke whichever leg it
+    # wasn't typed for, so no destructive action could pass the gate at all).
+    import datetime as _dt
+    import sys
+    import types
+
+    captured = {}
+    for name in ("framework", "framework.v2", "framework.v2.authority"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    gate_mod = types.ModuleType("framework.v2.authority.gate")
+    gate_mod.load_authority_for_gate = lambda slug, trust_root: object()
+
+    def _cap_authorize(authority, req, **kw):
+        captured["cru_now"] = kw.get("now")
+        return types.SimpleNamespace(allowed=True, reason="in envelope")
+
+    gate_mod.authorize_action = _cap_authorize
+    models_mod = types.ModuleType("framework.v2.authority.models")
+    models_mod.ActionRequest = lambda **kw: types.SimpleNamespace(**kw)
+    monkeypatch.setitem(sys.modules, "framework.v2.authority.gate", gate_mod)
+    monkeypatch.setitem(sys.modules, "framework.v2.authority.models", models_mod)
+
+    from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
+    from vigil_integration import destruction_gate as dg
+    from vigil_integration.destruction_gate import (
+        DestructionAuthority,
+        DestructionAuthorization,
+        DestructiveAction,
+        sign_authorization,
+    )
+
+    def _cap_authz(action, signed, *, authority, now, is_consumed):
+        captured["dz_now"] = now
+        return DestructionOutcome(authorized=True, reason="ok")
+
+    monkeypatch.setattr(dg, "authorize_destruction", _cap_authz)
+
+    owner, worker = generate_keypair(), generate_keypair()
+    tr = TrustRoot(threshold=2, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64),
+        AuthorizerKey(key_id="worker", name="worker", public_key_b64=worker.public_key_b64)])
+    authority = DestructionAuthority(trust_root=tr, mandatory_signer_ids={"owner"})
+    action = DestructiveAction(action_id="rm-1", engagement_slug="acme", target="db", blast_class="destructive")
+    auth = DestructionAuthorization(action_id="rm-1", engagement_slug="acme", target="db",
+                                    blast_class="destructive", not_before=0, not_after=10 ** 12, nonce="n1")
+    signed = sign_authorization(auth, [("owner", owner.private_key_b64), ("worker", worker.private_key_b64)])
+
+    gate = build_offense_gate(slug="acme", trust_root=tr, classify=lambda n: "A0", floor="A0",
+                              ceiling="A3", now=now_in, destruction_authority=authority,
+                              is_consumed=lambda n: False)
+    v = gate("shell.exec", "db", destructive=True, destruction_action=action, destruction_signed=signed)
+    assert v.outcome == "allow"
+    # CRUCIBLE leg: a datetime (or None when now_in is None); NEVER a raw float/int
+    assert captured["cru_now"] is None if now_in is None else isinstance(captured["cru_now"], _dt.datetime)
+    # destruction leg: ALWAYS an epoch float (never None/datetime/bool)
+    assert isinstance(captured["dz_now"], float) and not isinstance(captured["dz_now"], bool)
+
+
 def test_end_to_end_with_the_real_destruction_gate():
     # the real destruction_gate.DestructionDecision duck-types DestructionOutcome (.authorized/.reason)
     from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
