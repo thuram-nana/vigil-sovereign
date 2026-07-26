@@ -166,6 +166,69 @@ for the offense plane by design.
 
 ---
 
+## The WHOLE unified UI in one command — `vigil up` (VIGIL COMMAND P1b)
+
+`vigil up` brings the **entire** VIGIL COMMAND UI up at **one origin** and
+federates both trust planes behind a self-contained, pure-stdlib reverse proxy —
+so you point a browser at a single URL instead of juggling three servers:
+
+```
+browser ─▶ vigil up proxy (127.0.0.1:8770, the ONLY human-facing listener)
+             ├─ /sovereign/*        ▶ 127.0.0.1:8733  sigil cockpit      (sovereign plane)
+             ├─ /offense/api/v1/*   ▶ 127.0.0.1:8799  crucible api       (gated action plane)
+             └─ /offense/*          ▶ 127.0.0.1:8787  crucible console   (read + SSE plane)
+```
+
+The proxy assembles the bundle (`packages/vigil-ui`) into a runtime serve dir
+under `.vigil-live/ui/` (gitignored), substitutes the cockpit session **token**
+and the federated mount bases into `index.html`, serves `/` itself, and **streams**
+Server-Sent Events (`text/event-stream`) through live. It **imports no
+`framework`/`strix`/`sigil`** — the three backends run as separate OS processes in
+their own venvs — so the two trust domains never co-load in one interpreter.
+
+**Never-public still holds.** The three backends bind loopback; the proxy binds
+loopback (or a private/tunnel IP) and **fails closed (exit 2)** on `0.0.0.0` / an
+unspecified / a public address (the same `bind_ok` predicate, reimplemented inline
+so this offense-side path pulls in no sigil). `--domain` is an *allowlist string*
+(fronted by your TLS proxy), never a bind.
+
+### Local (loopback)
+
+```bash
+vigil up                 # → http://127.0.0.1:8770/?token=<token>  (opens your browser)
+vigil down               # stop the backends + proxy
+```
+
+### Over a private tunnel (no domain)
+
+```bash
+vigil up --host 100.x.y.z --port 8770 --no-browser
+# → http://100.x.y.z:8770/?token=<token>   (reach it over WireGuard/Tailscale only)
+```
+
+### Behind your domain (hosted, TLS at the edge)
+
+```bash
+CRUCIBLE_API_KEY=... \
+vigil up --domain vigil.example.com --host 127.0.0.1 --port 8770 --no-browser
+```
+
+This teaches each backend to trust `vigil.example.com` (adds it to every anti-DNS-
+rebinding Host/Origin allowlist) and binds the proxy to loopback. Then front it
+with TLS using `deploy/reverse-proxy/vigil.Caddyfile` (or `vigil.nginx.conf`),
+which terminates TLS for the domain and forwards to `127.0.0.1:8770`, preserving
+the original `Host`. Set **`CRUCIBLE_API_KEY`** whenever the gated offense api is
+internet-fronted (WS-B doctrine) — `vigil up --domain` prints a reminder if it is
+unset. The SSE endpoints (`/sovereign/api/stream`, `/offense/api/events`,
+`/offense/api/blackboard`) get buffering-off + a long read timeout in both
+templates.
+
+> The single URL includes `?token=<token>` (the sovereign cockpit's session
+> token, kept to the terminal/journal — never embedded where a cross-origin page
+> can read it). Keep it private, exactly like the standalone cockpit token.
+
+---
+
 ## Checklist
 
 - [ ] Cockpit bound to loopback or a private/tunnel IP (never `0.0.0.0`/public).
@@ -174,3 +237,7 @@ for the offense plane by design.
 - [ ] `/api/stream` proxied with buffering off + a long read timeout.
 - [ ] Session token kept private (terminal/journal only).
 - [ ] Phone bridge left WG-direct; offense plane left loopback.
+- [ ] For `vigil up --domain`: proxy bound loopback/tunnel (never public), domain
+      forwarded as `Host`, SSE paths (`/sovereign/api/stream`, `/offense/api/events`,
+      `/offense/api/blackboard`) buffering-off + long read timeout, and
+      `CRUCIBLE_API_KEY` set when the offense api is internet-fronted.
