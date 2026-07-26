@@ -58,6 +58,16 @@ class CodefixConfig:
     max_tokens: int = 4000
     clone_timeout: float = 120.0
     apply_timeout: float = 120.0
+    # --- LAP-3 destructive PR leg (OFF by default) ------------------------------------------------
+    pr_enabled: bool = False                 # master switch — off ⇒ the gate DENIES the PR + open_pr refuses
+    # repr=False so a stray repr/log of the config can never expose the token (it is sealed at the Settings
+    # layer; here it is only ever forwarded into the child ENV for git/gh).
+    github_token: str = field(default="", repr=False)   # else resolved from GITHUB_TOKEN env; empty ⇒ refuse
+    pr_base: str = ""                        # PR base branch (default: the repo's default branch)
+    push_remote: str = "origin"
+    gh_bin: str = "gh"
+    push_timeout: float = 180.0
+    pr_title_prefix: str = "VIGIL auto-fix: "
 
 
 @dataclass
@@ -136,10 +146,14 @@ class CodefixSession:
     # -- gate: WARDEN tier + killswitch for the NON-destructive legs; destructive ⇒ deny (LAP-3) ------
     def gate(self, tool_name: str, target: str, destructive: bool = False, *,
              destruction_action: Any = None, destruction_signed: Any = None) -> GateVerdict:
-        if destructive:
+        if destructive and not self.config.pr_enabled:
             return GateVerdict(allowed=False, outcome="deny",
-                               reason="destructive stage (open-PR) requires the m-of-n destruction authority "
-                                      "— not provisioned here (LAP-3)", crucible_allowed=None, warden=None)
+                               reason="destructive stage (open-PR) is disabled (pr_enabled=False) — provision "
+                                      "a GitHub token + the m-of-n quorum to enable", crucible_allowed=None,
+                               warden=None)
+        # When pr_enabled, a destructive github_pr leg is allowed on the WARDEN tier + kill-switch here; the
+        # m-of-n threshold is enforced ORTHOGONALLY by the pipeline's separate `quorum` callable (run_codefix
+        # requires BOTH), so there is ONE m-of-n (the quorum), not a double gate.
         try:
             if self._killswitch is not None and self._killswitch.is_tripped():
                 return GateVerdict(allowed=False, outcome="deny", reason="kill-switch engaged",
@@ -227,12 +241,54 @@ class CodefixSession:
                 pass
         return _Exec(True, reason="fix applies cleanly to the real code (sandbox clone)", build_ref=self.workdir)
 
-    @staticmethod
-    def open_pr(request: Any, approved: Any) -> _Exec:
-        """DISABLED in LAP-1 (belt-and-suspenders — the destructive gate already denies). Real push + PR +
-        the m-of-n quorum are the provisioned destructive follow-up (LAP-3)."""
-        return _Exec(False, reason="opening a PR is disabled in this build — it is the provisioned, "
-                                   "destructive LAP-3 leg (needs credentials + the m-of-n quorum)")
+    def open_pr(self, request: Any, approved: Any) -> _Exec:
+        """The DESTRUCTIVE, outward-facing leg (LAP-3): stage ONLY the explicit approved paths (never
+        `git add -A`), commit on the fix branch, push it, and open a PR via `gh`. OFF unless pr_enabled AND
+        a GitHub token is provisioned; the token flows via CHILD ENV only (never argv/logs). Reached only
+        after the gate (tier/kill-switch) AND the pipeline's m-of-n quorum both pass."""
+        if not self.config.pr_enabled:
+            return _Exec(False, reason="PR opening is disabled (pr_enabled=False)")
+        token = (self.config.github_token or os.environ.get("GITHUB_TOKEN", "")).strip()
+        if not token:
+            return _Exec(False, reason="no GITHUB_TOKEN provisioned — refusing to open a PR (fail-closed)")
+        if not self.workdir or not os.path.isdir(self.workdir):
+            return _Exec(False, reason="no clone workdir")
+        paths = [p if isinstance(p, str) else getattr(p, "path", "") for p in (approved or [])]
+        paths = [p for p in paths if p]
+        if not paths:
+            return _Exec(False, reason="no approved paths to stage")
+        for p in paths:                                   # defense in depth — never stage a flag/bulk/traversal
+            ok, why = is_safe_repo_path(p)
+            if not ok:
+                return _Exec(False, reason=f"refusing to stage unsafe path {p!r}: {why}")
+        git = self.config.git_bin
+        for p in paths:
+            r = subprocess_runner([git, "-C", self.workdir, "add", "--", p], timeout=self.config.apply_timeout)
+            if r.exit_code != 0:
+                return _Exec(False, reason="git add failed: " + (r.stderr or "")[:160])
+        title = (self.config.pr_title_prefix + str(getattr(request, "title", "") or "fix")).strip()
+        cm = subprocess_runner([git, "-C", self.workdir, "-c", "user.email=vigil@localhost",
+                                "-c", "user.name=VIGIL", "commit", "-m", title],
+                               timeout=self.config.apply_timeout)
+        if cm.exit_code != 0:
+            return _Exec(False, reason="git commit failed: " + (cm.stderr or "")[:160])
+        # the token goes in the CHILD ENV, never in argv (argv shows in ps/logs). GIT_ASKPASS/terminal-prompt
+        # off so a missing/invalid cred fails instead of hanging; gh reads GH_TOKEN from env.
+        child_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+        child_env.update({"GIT_TERMINAL_PROMPT": "0", "GH_TOKEN": token, "GITHUB_TOKEN": token})
+        branch = getattr(request, "fix_branch", "") or "vigil-fix"
+        push = subprocess_runner([git, "-C", self.workdir, "push", "--set-upstream", self.config.push_remote,
+                                  branch], timeout=self.config.push_timeout, env=child_env)
+        if push.exit_code != 0:
+            return _Exec(False, reason="git push failed: " + (push.stderr or "")[:200])
+        pr_argv = [self.config.gh_bin, "pr", "create", "--title", title, "--fill", "--head", branch]
+        if self.config.pr_base:
+            pr_argv += ["--base", self.config.pr_base]
+        pr = subprocess_runner(pr_argv, timeout=self.config.push_timeout, cwd=self.workdir, env=child_env)
+        if pr.exit_code != 0:
+            return _Exec(False, reason="gh pr create failed: " + (pr.stderr or "")[:200])
+        pr_ref = (pr.stdout or "").strip().splitlines()[-1] if (pr.stdout or "").strip() else "opened"
+        return _Exec(True, reason="pull request opened", pr_ref=pr_ref)
 
     # -- coder: real Claude unified-diff proposal (fail-closed to '' with no key/client) -------------
     def propose(self, request: Any) -> str:
@@ -271,13 +327,53 @@ class CodefixSession:
         return _extract_text(resp) or ""
 
 
+def build_destruction_quorum(*, authority: Any, signed: Any, slug: str, is_consumed: Callable[[str], bool],
+                             now: Optional[Callable[[], float]] = None) -> Callable[[Any], _Quorum]:
+    """Build the PR-leg m-of-n quorum callable from a PROVISIONED owner-inclusive SignedDestructionAuthorization
+    + DestructionAuthority. It rebuilds the per-request DestructiveAction (action_id 'pr-<remediation_id>',
+    target=repo, engagement=slug) and verifies the signed authorization via ``authorize_destruction`` — which
+    fail-closed checks well-formedness, the gated class, action match, the not_before/not_after dead-man's-
+    switch window, the mandatory owner, single-use (``is_consumed``), and the m-of-n threshold. Off without
+    provisioning: ``autopatch_live`` defaults the quorum to a hard DENY."""
+    from ..destruction_gate import DestructiveAction, authorize_destruction
+
+    def quorum(request: Any) -> _Quorum:
+        try:
+            action = DestructiveAction(
+                action_id="pr-" + str(getattr(request, "remediation_id", "")),
+                engagement_slug=slug,
+                target=(getattr(request, "target_repo", "") or getattr(getattr(request, "finding", None),
+                        "target", "") or ""),
+                blast_class="destructive")
+            d = authorize_destruction(action, signed, authority=authority,
+                                      now=_epoch(now() if now else None), is_consumed=is_consumed)
+            return _Quorum(approved=getattr(d, "authorized", False) is True,   # STRICT: only real True
+                           reason=getattr(d, "reason", ""))
+        except Exception:  # noqa: BLE001 — any error ⇒ deny (fail-closed)
+            return _Quorum(approved=False, reason="destruction authorization failed (fail-closed)")
+
+    return quorum
+
+
+def _epoch(now_val: Any) -> float:
+    from datetime import datetime
+    if isinstance(now_val, datetime):
+        return now_val.timestamp()
+    if isinstance(now_val, (int, float)) and not isinstance(now_val, bool):
+        return float(now_val)
+    return time.time()
+
+
 def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
                    killswitch: Any = None, operator_present: bool = True,
+                   quorum: Optional[Callable[[Any], Any]] = None,
                    now: Optional[Callable[[], float]] = None) -> PatchResult:
-    """Run the sovereign auto-patch loop against REAL executors, non-destructively (LAP-1): propose (Claude)
-    → clone → apply-in-sandbox; the PR leg is gated off. Returns the loop's PatchResult (the full gated
-    ladder + the applied paths + status). A confirmed FACT is the only valid input (the loop refuses a lead);
-    edits apply only when ``config.apply_edits`` is set (else they time out and are rejected)."""
+    """Run the sovereign auto-patch loop against REAL executors: propose (Claude) → clone → apply-in-sandbox
+    → (if ``config.pr_enabled`` AND a ``quorum`` passes AND a GitHub token is provisioned) open a gated PR.
+    A confirmed FACT is the only valid input (a lead is refused); edits apply only with ``config.apply_edits``
+    (else timeout ⇒ reject); the PR leg needs pr_enabled + the m-of-n ``quorum`` + a token (all off by
+    default ⇒ no PR). ``remediated`` is minted only if a verify ``oracle`` (not wired here — a PR opens as a
+    PROPOSAL) later goes silent. Returns the loop's PatchResult (the full gated ladder + status)."""
     session = CodefixSession(config, client=client, killswitch=killswitch, operator_present=operator_present)
     clock = now or time.monotonic
 
@@ -286,12 +382,12 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
             return PatchApproval(decision="approve", deadline=float(clock()) + config.approve_window_s)
         return PatchApproval(decision="timeout", deadline=0.0)
 
-    def quorum(_request: Any) -> _Quorum:
-        return _Quorum(approved=False, reason="m-of-n destruction quorum not provisioned (LAP-3)")
+    def _deny_quorum(_request: Any) -> _Quorum:
+        return _Quorum(approved=False, reason="m-of-n destruction quorum not provisioned")
 
     return autopatch(
         finding, gate=session.gate, oracle=None, propose_patch=session.propose,
         clone=session.clone, build=session.build, open_pr=session.open_pr,
-        quorum=quorum, approval=approval, now=clock,
+        quorum=quorum or _deny_quorum, approval=approval, now=clock,
         target_repo=config.target_repo, target_branch=config.target_branch,
     )

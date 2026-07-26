@@ -147,14 +147,20 @@ def _decode(b: Any) -> str:
 
 
 def subprocess_runner(argv: list, *, timeout: float = DEFAULT_TIMEOUT,
-                      output_cap: int = DEFAULT_OUTPUT_CAP) -> RunOutcome:
+                      output_cap: int = DEFAULT_OUTPUT_CAP, cwd: Optional[str] = None,
+                      env: Optional[dict] = None) -> RunOutcome:
     """The default live runner: spawn ``argv`` with ``subprocess.run``, NO shell, capture both streams
     under a wall-time ``timeout`` and truncate each to ``output_cap``. Total — a timeout or a spawn error
     (OSError/ValueError) degrades to a ``RunOutcome`` with ``exit_code=None``, never an exception. The
-    argv is always a LIST; there is no shell and no string interpolation anywhere on this path."""
+    argv is always a LIST; there is no shell and no string interpolation anywhere on this path.
+
+    ``cwd`` runs the child in that directory (a build/git tree). ``env``, when given, is the child's FULL
+    environment — pass secrets (e.g. a GH token) HERE, never in ``argv`` (argv shows up in ``ps``/logs);
+    both default to inherit-parent, so existing callers are unchanged."""
     args = [str(a) for a in argv]
     try:
-        proc = subprocess.run(args, capture_output=True, timeout=timeout, shell=False, check=False)  # noqa: S603
+        proc = subprocess.run(args, capture_output=True, timeout=timeout, shell=False, check=False,  # noqa: S603
+                              cwd=cwd, env=env)
     except subprocess.TimeoutExpired as exc:
         out, t1 = _cap(_decode(exc.stdout), output_cap)
         err, t2 = _cap(_decode(exc.stderr), output_cap)
