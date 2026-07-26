@@ -39,7 +39,7 @@ def _is_loopback_host(host: str) -> bool:
     except ValueError:
         return False
 
-from . import actions, api
+from . import actions, api, chat
 from .blackboard_sse import BlackboardTailer
 from .sse import EventTailer, stream_path
 
@@ -217,6 +217,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         pass
                 self._sse_blackboard(slug, since)
                 return
+            if path == "/api/chat/sessions":
+                self._json(chat.list_sessions())
+                return
+            if path.startswith("/api/chat/session/"):
+                self._json(chat.get_session(path[len("/api/chat/session/"):].strip("/")))
+                return
             if path == "/api/aegis/verdicts":
                 # the live Defense verdict feed — tail the managed gateway's browser-safe verdicts JSONL
                 # (oracle-context already stripped at the sink). EventTailer is robust to a missing file.
@@ -347,6 +353,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/killswitch/") and path.endswith("/trip"):
                 slug = path[len("/api/killswitch/"):-len("/trip")].strip("/")
                 self._json(actions.trip_killswitch(slug, str(body.get("reason", ""))))
+                return
+            if path == "/api/chat/send":
+                # the operator chatbot turn — a natural-language front door to the SAME gated launcher.
+                # CSRF/rebind-gated above; launches only via actions.launch_assessment (scope/charter/gate
+                # enforced there), persists the transcript, and mints no facts.
+                self._json(chat.chat_send(body))
                 return
             if path == "/api/aegis/setup":
                 # launch the managed AEGIS gateway (the SAME gated `aegis gateway` CLI). CSRF/rebind-gated
