@@ -394,11 +394,12 @@ fi
 echo
 if [ "$SMOKE_FAIL" = 0 ]; then
   printf "${c_g}${c_b}VIGIL is ready.${c_0}\n"
+  echo "  • unified UI:    vigil up            (ONE command → the whole UI at one origin; 'vigil down' stops it)"
   echo "  • unified CLI:   vigil --help        (offense: engage/verify; sovereign: 'vigil sigil ...')"
   echo "  • sovereign:     sigil doctor        (self-check)"
   echo "  • cockpit UI:    sigil serve         (loopback; see apps/sigil/deploy/REMOTE-HOSTING.md for a domain)"
   echo "  • engage a target you OWN + authorized:  vigil engage <url> --scope <host>"
-  echo "  • docs:          docs/DEPLOY.md"
+  echo "  • docs:          docs/DEPLOY.md   ·   hosting a domain: apps/sigil/deploy/REMOTE-HOSTING.md"
   exit 0
 else
   printf "${c_y}${c_b}Bootstrap finished with smoke-test failures above.${c_0} Review them before use.\n"

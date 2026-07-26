@@ -3,7 +3,13 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup up down logs smoke strix systemd envs clean-services
+.PHONY: help setup up down services services-down logs smoke strix systemd envs clean-services
+
+# extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
+ARGS ?=
+# prefer the offense-venv launcher, fall back to `vigil` on PATH (installed by bootstrap.sh)
+VIGIL := $(shell if [ -x .venv-offense/bin/vigil ]; then echo .venv-offense/bin/vigil; \
+                 elif command -v vigil >/dev/null 2>&1; then echo vigil; fi)
 
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -12,11 +18,19 @@ help: ## show this help
 setup: ## full one-command setup on a fresh machine (venvs + kernel + services + config + vault + smoke)
 	./bootstrap.sh
 
-up: ## start the default backend services (Qdrant), bound to 127.0.0.1
+up: ## bring the WHOLE unified UI up at ONE origin (vigil up; ARGS=... for --domain/--host/--no-browser)
+	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }
+	$(VIGIL) up $(ARGS)
+
+down: ## stop a running `vigil up` (backends + reverse proxy)
+	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }
+	$(VIGIL) down
+
+services: ## start the default backend services (Qdrant), bound to 127.0.0.1
 	@[ -f .env ] || { cp .env.example .env && chmod 600 .env && echo "wrote .env (0600)"; }
 	docker compose --env-file .env up -d qdrant
 
-down: ## stop all compose services (data volumes are preserved)
+services-down: ## stop all compose services (data volumes are preserved)
 	docker compose down
 
 logs: ## follow the Qdrant logs

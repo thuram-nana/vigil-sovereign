@@ -1,0 +1,72 @@
+# VIGIL COMMAND — Caddy reverse proxy for the WHOLE unified UI (automatic HTTPS)
+# ==============================================================================
+# `vigil up` already serves the unified UI at ONE origin and federates the two
+# trust planes behind a self-contained reverse proxy:
+#
+#     browser ─▶ vigil up proxy (127.0.0.1:8770)
+#                  ├─ /sovereign/*        ▶ 127.0.0.1:8733  (sigil cockpit)
+#                  ├─ /offense/api/v1/*   ▶ 127.0.0.1:8799  (crucible api — gated actions)
+#                  └─ /offense/*          ▶ 127.0.0.1:8787  (crucible console — read + SSE)
+#
+# NONE of those four listeners is public: the three backends bind loopback, and
+# the vigil up proxy binds loopback (or a private/tunnel IP) and FAILS CLOSED on a
+# public bind. This Caddy site is the ONLY thing on a public port — it terminates
+# TLS for your domain and forwards to the vigil up proxy over loopback. The
+# tunnel/proxy is the network boundary; never the transport (see REMOTE-HOSTING.md).
+#
+# Bring the stack up so its backends trust this domain (adds it to each anti-DNS-
+# rebinding Host/Origin allowlist) and the proxy binds loopback:
+#
+#     CRUCIBLE_API_KEY=... \
+#     vigil up --domain vigil.example.com --host 127.0.0.1 --port 8770 --no-browser
+#
+# (Set CRUCIBLE_API_KEY when the gated offense api is internet-fronted — WS-B doctrine.)
+# Then point DNS A/AAAA for vigil.example.com at THIS host and run Caddy with this file.
+#
+# NOTE: Caddy preserves the incoming Host header to the upstream by default, so the
+# vigil up proxy (and, through it, each backend) receives `Host: vigil.example.com` —
+# exactly what the allowlist expects. Do not rewrite the Host.
+
+vigil.example.com {
+	encode zstd gzip
+
+	# Server-Sent Events: disable response buffering so events flush immediately and keep the
+	# connection long-lived. These are the live streams the UI subscribes to:
+	#   /sovereign/api/stream   — the sovereign cockpit's event stream
+	#   /offense/api/events     — the offense console's engagement/blackboard stream
+	#   /offense/api/blackboard — (reserved) the offense blackboard stream
+	@sse path /sovereign/api/stream /offense/api/events /offense/api/blackboard
+	reverse_proxy @sse 127.0.0.1:8770 {
+		flush_interval -1
+	}
+
+	# Everything else (the unified bundle + both federated read/action planes).
+	reverse_proxy 127.0.0.1:8770
+
+	# Belt-and-braces: only accept the exact host this site serves.
+	@badhost not host vigil.example.com
+	respond @badhost 421
+
+	header {
+		# The backends already set their own strict 'self' CSP/nosniff/referrer headers; add HSTS at the edge.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# ------------------------------------------------------------------------------
+# ALTERNATIVE (advanced): federate to the three backends directly, WITHOUT the
+# vigil up proxy. Only do this if you run the three backends yourself (e.g. via
+# systemd) with `--allow-host vigil.example.com --allow-origin https://vigil.example.com`
+# on each, and you serve the vigil-ui bundle from Caddy's file_server. You lose the
+# single-command launch; prefer forwarding to `vigil up` above.
+#
+# vigil.example.com {
+#     @sov path /sovereign/*
+#     handle @sov { uri strip_prefix /sovereign; reverse_proxy 127.0.0.1:8733 { flush_interval -1 } }
+#     @offapi path /offense/api/v1/*
+#     handle @offapi { uri strip_prefix /offense; reverse_proxy 127.0.0.1:8799 }
+#     @off path /offense/*
+#     handle @off { uri strip_prefix /offense; reverse_proxy 127.0.0.1:8787 { flush_interval -1 } }
+#     handle { root * /path/to/.vigil-live/ui; file_server }
+# }

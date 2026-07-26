@@ -14,6 +14,10 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
   * ``vigil detect --access-log`` — run the Detection Mirror (defensive oracle plane) over log files;
                                     each fire is certificate-re-verified before it counts as a FACT.
                                     (Distinct from ``vigil aegis detect`` — the AEGIS-app firewall verdict.)
+  * ``vigil up`` / ``vigil down``  — bring the WHOLE unified UI up at ONE origin behind a self-contained
+                                    reverse proxy (federating the two trust planes), and stop it. EXEC-
+                                    ONLY: spawns the three backends in their own venvs; imports no
+                                    framework/strix/sigil (the two trust domains never co-load here).
 
 SUBSYSTEM verbs (S1 control plane — forwarded to the subsystem's own console-script, EXEC'd in its OWN
 environment so the two trust domains are never co-loaded in one interpreter):
@@ -237,6 +241,24 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_up(args: argparse.Namespace) -> int:
+    """`vigil up` — bring the WHOLE unified UI up at ONE origin and federate the two trust planes
+    behind a self-contained reverse proxy. EXEC-ONLY: it spawns the three backends (sigil cockpit,
+    crucible console, crucible api) as separate OS processes in their OWN venvs (via dispatch) and
+    serves the bundle itself — it imports NO framework/strix/sigil, so the two trust domains are never
+    co-loaded in one interpreter. Binds loopback (or a private/tunnel IP); refuses a public bind."""
+    from .uiproxy import run_up
+    return run_up(host=args.host, port=args.port, domain=args.domain, base_dir=args.base_dir,
+                  no_browser=args.no_browser)
+
+
+def _cmd_down(args: argparse.Namespace) -> int:
+    """`vigil down` — stop a running `vigil up` (terminate the backends + proxy tracked in the pids
+    file). EXEC-ONLY: imports NO framework/strix/sigil."""
+    from .uiproxy import run_down
+    return run_down(base_dir=args.base_dir)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -308,6 +330,27 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("--auth-log", default="", help="an auth log (credential oracles)")
     pd.add_argument("--conn-log", default="", help="a connection/flow log (port-scan oracle)")
     pd.set_defaults(func=_cmd_detect)
+
+    pu = sub.add_parser("up", help="bring the WHOLE unified UI up at one origin (self-contained reverse proxy)")
+    pu.add_argument("--port", type=int, default=8770, help="the proxy port a browser points at (default 8770)")
+    pu.add_argument("--host", default="127.0.0.1",
+                    help="bind address for the proxy — loopback (default) or a PRIVATE/tunnel IP only; "
+                         "a public/0.0.0.0 bind is refused (never-public). The three backends always "
+                         "bind loopback; the proxy is the only human-facing listener.")
+    pu.add_argument("--domain", default="",
+                    help="the domain the browser reaches you by (hosted; TLS terminated by your edge "
+                         "reverse proxy). An allowlist STRING, not a bind — front it with "
+                         "deploy/reverse-proxy/vigil.Caddyfile. Sets the scheme to https.")
+    pu.add_argument("--no-browser", action="store_true",
+                    help="do not auto-open a browser (a browser is opened only for a loopback bind)")
+    pu.add_argument("--base-dir", default=".vigil-live",
+                    help="engagement home for the runtime serve dir (.vigil-live/ui/) + pids file")
+    pu.set_defaults(func=_cmd_up)
+
+    pdn = sub.add_parser("down", help="stop a running `vigil up` (backends + proxy)")
+    pdn.add_argument("--base-dir", default=".vigil-live",
+                     help="engagement home holding the ui/pids file written by `vigil up`")
+    pdn.set_defaults(func=_cmd_down)
 
     return p
 

@@ -95,3 +95,73 @@ def test_dispatcher_is_pure_stdlib_exec_only():
     assert not forbidden, f"dispatcher must import stdlib only; found {forbidden}"
     for banned in ("framework", "strix", "sigil", "vigil_integration"):
         assert banned not in imported, f"dispatcher must not import {banned!r}"
+
+
+# ---- P1b: the `vigil up`/`down` code path must also stay boundary-clean --------------------------
+# `vigil up` orchestrates the WHOLE UI by subprocess ONLY (spawns sigil/crucible in their own venvs);
+# it must import neither framework/strix (offense engine) nor sigil (sovereign core), so a single
+# interpreter never co-loads both trust domains — exactly like the dispatcher it delegates spawning to.
+_UP_ALLOWED_STDLIB = {
+    "__future__", "http", "ipaddress", "json", "os", "re", "signal", "socket", "socketserver",
+    "subprocess", "sys", "threading", "time", "pathlib", "queue", "typing", "urllib", "webbrowser",
+}
+_BANNED = ("framework", "strix", "sigil")
+
+
+def _module_imports(src: str) -> tuple[set[str], set[str]]:
+    """Return (absolute_roots, relative_names) for every import in `src`. `absolute_roots` is the set of
+    top-level module names of ABSOLUTE imports; `relative_names` is the set of sibling names brought in by
+    a package-relative import (``from . import X`` / ``from .X import ...``)."""
+    tree = ast.parse(src)
+    absolute_roots: set[str] = set()
+    relative_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            absolute_roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:                     # relative
+                if node.module:
+                    relative_names.add(node.module.split(".")[0])  # from .uiproxy import ...
+                else:
+                    relative_names.update(alias.name for alias in node.names)  # from . import dispatch
+            elif node.module:
+                absolute_roots.add(node.module.split(".")[0])
+    return absolute_roots, relative_names
+
+
+def test_uiproxy_is_pure_stdlib():
+    # The reverse-proxy module: stdlib only + the (pure-stdlib) sibling `dispatch`. Never framework/strix/sigil.
+    from vigil_integration import uiproxy
+    absolute_roots, relative_names = _module_imports(Path(uiproxy.__file__).read_text(encoding="utf-8"))
+    stray = absolute_roots - _UP_ALLOWED_STDLIB
+    assert not stray, f"uiproxy must import stdlib only; found {stray}"
+    assert relative_names <= {"dispatch"}, f"uiproxy may only reach the sibling `dispatch`; found {relative_names}"
+    for banned in _BANNED:
+        assert banned not in absolute_roots and banned not in relative_names, \
+            f"uiproxy must not import {banned!r}"
+
+
+def test_up_down_verbs_import_no_trust_domain():
+    # The `vigil up`/`vigil down` verb bodies in cli.py may lazily import ONLY the (pure-stdlib) `.uiproxy`
+    # module — never framework/strix/sigil. Prove it at the AST level over just those two functions.
+    from vigil_integration import cli
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    seen = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in ("_cmd_up", "_cmd_down"):
+            seen.add(node.name)
+            roots: set[str] = set()
+            rels: set[str] = set()
+            for child in ast.walk(node):
+                if isinstance(child, ast.Import):
+                    roots.update(a.name.split(".")[0] for a in child.names)
+                elif isinstance(child, ast.ImportFrom):
+                    if child.level and child.level > 0:
+                        rels.add((child.module or "").split(".")[0])
+                    elif child.module:
+                        roots.add(child.module.split(".")[0])
+            assert rels <= {"uiproxy"}, f"{node.name} may only import `.uiproxy`; found relative {rels}"
+            for banned in _BANNED:
+                assert banned not in roots and banned not in rels, \
+                    f"{node.name} must not import {banned!r}"
+    assert seen == {"_cmd_up", "_cmd_down"}, f"expected both up/down verbs in cli.py, found {seen}"
