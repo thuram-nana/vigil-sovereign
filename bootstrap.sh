@@ -21,8 +21,10 @@
 #   --no-rust            do NOT auto-install rustup; print instructions and stop if Rust is missing
 #   --no-services        skip docker-compose (native-only install; Qdrant runs embedded)
 #   --with-strix         also build the Kali strix sandbox image (needs Docker; large)
+#   --no-tools           skip the offense host-tool install/probe step (nmap/nuclei/httpx/...)
+#   --with-tools         force the host-tool step on (it is on by default)
 #   --systemd            install the user systemd units (cockpit + consolidate)
-#   --yes                non-interactive: assume "yes" to auto-installs (rustup)
+#   --yes                non-interactive: assume "yes" to auto-installs (rustup + apt/pipx host tools)
 #   PYTHON=python3.13    pin the interpreter used to build the venvs
 # -----------------------------------------------------------------------------
 set -euo pipefail
@@ -33,12 +35,14 @@ export VIGIL_ROOT="$REPO"
 export CRUCIBLE_ROOT="$REPO/engine/crucible"
 
 # --- flags ---
-NO_RUST=0; NO_SERVICES=0; WITH_STRIX=0; DO_SYSTEMD=0; ASSUME_YES=0
+NO_RUST=0; NO_SERVICES=0; WITH_STRIX=0; DO_SYSTEMD=0; ASSUME_YES=0; WITH_TOOLS=1
 for arg in "$@"; do
   case "$arg" in
     --no-rust) NO_RUST=1 ;;
     --no-services) NO_SERVICES=1 ;;
     --with-strix) WITH_STRIX=1 ;;
+    --no-tools) WITH_TOOLS=0 ;;
+    --with-tools) WITH_TOOLS=1 ;;
     --systemd) DO_SYSTEMD=1 ;;
     --yes|-y) ASSUME_YES=1 ;;
     -h|--help) grep '^#' "$0" | grep -v '^#!' | sed 's/^#\s\{0,1\}//'; exit 0 ;;
@@ -58,6 +62,125 @@ ask()  { # ask "prompt" -> 0 (yes) / 1 (no). --yes => yes; NON-interactive witho
   [ "$ASSUME_YES" = 1 ] && return 0
   [ -t 0 ] || return 1
   read -r -p "  $1 [Y/n] " a; [ -z "$a" ] || [ "$a" = y ] || [ "$a" = Y ]
+}
+
+# --- offense host-tool provisioning (WS-TOOLS) -------------------------------------------------
+# The external CLIs the OFFENSE engine SPAWNS (nmap/nuclei/httpx/ffuf/sqlmap/hydra + analysis/
+# sensor/adapter tools). The single source of truth for the roster is the offense engine itself
+# (framework.v2.tools.registry, offense-side only — the sovereign process never imports it), read
+# here via `--emit-shell`. This step DETECTS the OS, PROBES each tool (command -v), INSTALLS the
+# missing ones WITH CONSENT (apt for system packages, pipx/pip --user for Python apps), and RECORDS
+# a per-tool outcome the console's Tools screen reads live. It is FAIL-SOFT + IDEMPOTENT: an
+# already-present tool is a no-op; a tool that will not install is recorded FAILED with its exact
+# manual command and the step CONTINUES — a tool never aborts bootstrap.
+
+provision_host_tools() {
+  local SH="${SIGIL_HOME:-$HOME/.sigil}"; export SIGIL_HOME="$SH"; mkdir -p "$SH"
+  # pipx / pip --user land in ~/.local/bin — put it on PATH so a post-install probe sees them.
+  export PATH="$HOME/.local/bin:$PATH"
+
+  local PYX="$REPO/.venv-offense/bin/python"; [ -x "$PYX" ] || PYX="$PY"
+  emit() { PYTHONPATH="$CRUCIBLE_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYX" -m framework.v2.tools.registry "$@" 2>/dev/null; }
+
+  # Authoritative presence check — the registry's ONE definition of "really installed" (handles
+  # alternate binary names AND the name-collision banner check, so a same-named impostor like Python
+  # `httpx` shadowing ProjectDiscovery `httpx` is NOT counted present). Shares the endpoint's logic.
+  _present() { emit --check "$1" >/dev/null 2>&1; }
+
+  # Install one tool. rc: 0 usable (verified via _present) / 1 tried-but-failed / 2 nothing-applicable
+  # to try on this OS (e.g. an apt-only tool on non-Debian) → the caller reports that as 'missing'
+  # (nothing was attempted), never a dishonest 'FAILED to install'. Never raises.
+  _install_one() {  # nm bin apt pip
+    local nm="$1" aptp="$3" pipp="$4" tried=0
+    if [ -n "$aptp" ] && [ "$APT_OK" = 1 ]; then
+      tried=1; $SUDO apt-get install -y "$aptp" >/dev/null 2>&1 || true
+      _present "$nm" && return 0
+    fi
+    if [ -n "$pipp" ]; then
+      tried=1
+      if have pipx; then pipx install "$pipp" >/dev/null 2>&1 || true; fi
+      _present "$nm" && return 0
+      "$PY" -m pip install --user "$pipp" >/dev/null 2>&1 || true
+      _present "$nm" && return 0
+    fi
+    [ "$tried" = 1 ] && return 1 || return 2
+  }
+
+  local STATE_FILE; STATE_FILE="$(emit --state-path)"; [ -n "$STATE_FILE" ] || STATE_FILE="$SH/vigil-tool-state.tsv"
+  mkdir -p "$(dirname "$STATE_FILE")"
+  local ROSTER; ROSTER="$(emit --emit-shell)"
+  if [ -z "$ROSTER" ]; then warn "could not read the tool roster from the offense engine — skipping tool provisioning."; return 0; fi
+
+  # OS detect via /etc/os-release (ubuntu/debian/kali/other-linux; non-Linux → unsupported).
+  local OS_KERNEL OS_ID="" OS_LIKE="" OS_PRETTY="" DEBIAN=0
+  OS_KERNEL="$(uname -s 2>/dev/null || echo unknown)"
+  if [ -r /etc/os-release ]; then . /etc/os-release; OS_ID="${ID:-}"; OS_LIKE="${ID_LIKE:-}"; OS_PRETTY="${PRETTY_NAME:-}"; fi
+  case " $OS_ID $OS_LIKE " in *" debian "*|*" ubuntu "*|*" kali "*) DEBIAN=1 ;; esac
+
+  : > "$STATE_FILE"
+  printf '# vigil host-tool install state — bootstrap.sh %s (os=%s)\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${OS_PRETTY:-${OS_ID:-$OS_KERNEL}}" >> "$STATE_FILE"
+
+  # Non-Linux: these are Linux packages. Report unsupported (never a faked install), install nothing.
+  if [ "$OS_KERNEL" != "Linux" ]; then
+    warn "offense host tools are Linux packages; this host is '$OS_KERNEL' — UNSUPPORTED. Skipping install."
+    warn "run the offense engine on Linux (Kali/Ubuntu/Debian) for nmap/nuclei/httpx/ffuf/sqlmap/…"
+    while IFS=$'\x1f' read -r nm _bin _opt _apt _pip _man _pur _alt; do
+      [ -n "$nm" ] && printf '%s\tunsupported\n' "$nm" >> "$STATE_FILE"
+    done <<< "$ROSTER"
+    return 0
+  fi
+  [ "$DEBIAN" = 1 ] || warn "OS '${OS_ID:-$OS_KERNEL}' is not Debian-family — apt is unavailable; tools will be reported for manual install."
+
+  # sudo / apt availability. Root needs no sudo; non-root uses sudo if present, else apt is off.
+  local UID_NOW SUDO="" APT_OK=0
+  UID_NOW="$(id -u 2>/dev/null || echo 1000)"
+  if [ "$UID_NOW" != "0" ] && have sudo; then SUDO="sudo"; fi
+  if [ "$DEBIAN" = 1 ] && have apt-get && { [ "$UID_NOW" = "0" ] || [ -n "$SUDO" ]; }; then APT_OK=1; fi
+
+  # One consent gate for the whole step: --yes ⇒ install; interactive ⇒ ask; non-tty w/o --yes ⇒ NO.
+  local CONSENT=0
+  if [ "$ASSUME_YES" = 1 ]; then CONSENT=1
+  elif ask "install missing offense host tools now? (apt needs sudo; pipx/pip are user-level)"; then CONSENT=1; fi
+  if [ "$CONSENT" != 1 ]; then warn "no consent (or non-interactive) — probing only; missing tools are reported with their exact install command."; fi
+  if [ "$CONSENT" = 1 ] && [ "$APT_OK" = 1 ]; then
+    $SUDO apt-get update >/dev/null 2>&1 || warn "apt-get update failed — continuing; individual installs may still work."
+  fi
+
+  local n_ok=0 n_missing=0 n_failed=0 n_total=0 n_req_missing=0
+  while IFS=$'\x1f' read -r nm bin opt aptp pipp man pur alt; do
+    [ -n "$nm" ] || continue
+    n_total=$((n_total+1))
+    if _present "$nm"; then
+      ok "$nm present ($(command -v "$bin" 2>/dev/null || echo "$bin"))"
+      printf '%s\tinstalled\n' "$nm" >> "$STATE_FILE"; n_ok=$((n_ok+1)); continue
+    fi
+    local outcome="missing"
+    if [ "$CONSENT" = 1 ]; then
+      local rc; if _install_one "$nm" "$bin" "$aptp" "$pipp"; then rc=0; else rc=$?; fi
+      if [ "$rc" = 0 ]; then
+        ok "$nm installed"; printf '%s\tinstalled\n' "$nm" >> "$STATE_FILE"; n_ok=$((n_ok+1)); continue
+      elif [ "$rc" = 1 ]; then
+        warn "$nm FAILED to install — install it yourself:  ${man:-see docs/DEPLOY.md}"
+        outcome="failed"; n_failed=$((n_failed+1))
+      else  # rc=2 → nothing to auto-install on this OS; nothing was attempted → honestly 'missing'
+        warn "$nm missing (no auto-install for this OS) — install it yourself:  ${man:-see docs/DEPLOY.md}"
+        n_missing=$((n_missing+1))
+      fi
+    else
+      warn "$nm missing — install it yourself:  ${man:-see docs/DEPLOY.md}"
+      n_missing=$((n_missing+1))
+    fi
+    printf '%s\t%s\n' "$nm" "$outcome" >> "$STATE_FILE"
+    [ "$opt" = "0" ] && n_req_missing=$((n_req_missing+1))
+  done <<< "$ROSTER"
+
+  printf "  ${c_b}tools:${c_0} %d installed / %d missing / %d failed (of %d)\n" "$n_ok" "$n_missing" "$n_failed" "$n_total"
+  if [ "$n_req_missing" -gt 0 ]; then
+    warn "$n_req_missing REQUIRED offense-core tool(s) not installed — live engagements needing them will refuse until you install them."
+  fi
+  ok "recorded per-tool status → $STATE_FILE (the console Tools screen reads this live)"
+  return 0
 }
 
 # =============================================================================
@@ -129,6 +252,18 @@ PYTHON="$PY" bash envs/build_envs.sh
 [ -x ".venv-sovereign/bin/sigil" ]  || die "the sovereign 'sigil' console script is missing — sovereign env build incomplete (re-run envs/build_envs.sh)."
 .venv-offense/bin/python -c "import framework.v2.authority.gate" 2>/dev/null || die "framework is not importable in the offense venv — engine/crucible did not install (re-run envs/build_envs.sh)."
 ok "both venvs built (with console scripts + framework); the offense-free boundary held"
+
+# =============================================================================
+step "2b offense host tools (nmap/nuclei/httpx/ffuf/sqlmap/hydra + analysis/sensors)"
+# =============================================================================
+# Install every external CLI the offense engine spawns. Detects the OS, probes each (command -v),
+# installs the missing ones with consent (apt / pipx), records a per-tool outcome the Tools screen
+# reads, and prints an installed/missing/failed summary. FAIL-SOFT — a tool never aborts bootstrap.
+if [ "$WITH_TOOLS" = 1 ]; then
+  provision_host_tools || warn "tool provisioning hit an unexpected error — continuing (core install unaffected)."
+else
+  warn "--no-tools: skipping offense host-tool install/probe. Install later with: ./bootstrap.sh --with-tools"
+fi
 
 # =============================================================================
 step "3/6 services (docker-compose; 127.0.0.1-bound only)"

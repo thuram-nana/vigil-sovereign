@@ -62,6 +62,7 @@ _EXACT_ROUTES = {
     "/api/benchmark": api.benchmark_data,
     "/api/memory": api.memory_data,
     "/api/kernel": api.kernel_data,
+    "/api/tools": api.tools_data,
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
