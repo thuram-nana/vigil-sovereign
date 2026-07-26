@@ -114,6 +114,7 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     """
     from .autopatch.loop import _derive_remediation_id
     from .live.codefix_runner import CodefixConfig, autopatch_live, file_backed_quorum
+    from .live.think_claude import resolve_model
     from .live.trusted_finding import (
         TrustedFindingError,
         finding_from_envelope,
@@ -187,7 +188,8 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     #     argv); apply_edits/pr_enabled are explicit opt-ins; the GitHub token is read from the child env only.
     cfg = CodefixConfig(
         target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
-        apply_edits=bool(args.apply_edits), model=args.model, pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
+        apply_edits=bool(args.apply_edits), model=resolve_model(args.model),  # --model > Settings choice > default
+        pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
     result = autopatch_live(finding, config=cfg, client=None,
                             operator_present=bool(args.approve), quorum=quorum)
 
@@ -459,8 +461,10 @@ def build_parser() -> argparse.ArgumentParser:
     ppatch.add_argument("--target-branch", default="")
     ppatch.add_argument("--repo-base-dir", default=".vigil-live/patch",
                         help="base dir for the DISPOSABLE clone/workdir (the source repo is never modified)")
-    ppatch.add_argument("--model", default="claude-sonnet-4-6",
-                        help="the Claude coder model (the API key is read from ANTHROPIC_API_KEY env, never argv)")
+    ppatch.add_argument("--model", default="",
+                        help="the Claude coder model — overrides the model chosen in Settings; empty ⇒ use the "
+                             "Settings choice (CRUCIBLE_ANTHROPIC_MODEL) or the current default. The API key is "
+                             "read from ANTHROPIC_API_KEY env, never argv.")
     # legs — each an explicit opt-in; all off ⇒ a non-destructive propose-only dry run
     ppatch.add_argument("--apply-edits", action="store_true",
                         help="apply the proposed fix into the DISPOSABLE clone + sandbox-build (safe: the source "

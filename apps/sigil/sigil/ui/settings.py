@@ -52,7 +52,7 @@ _ANTHROPIC_MODEL_ENV = "CRUCIBLE_ANTHROPIC_MODEL"
 _SIGIL_MODEL_ENV = "SIGIL_LLM_MODEL"
 MODEL_ENV_VARS = (_BACKEND_ENV, _ANTHROPIC_MODEL_ENV, _SIGIL_MODEL_ENV)
 _CHOICE_ENV = "VIGIL_MODEL_CHOICE"               # the selected choice id — the status view's source of truth
-_DEFAULT_OFFENSE_MODEL = "claude-sonnet-4-6"     # AnthropicBackend's built-in default, for the status view
+_DEFAULT_OFFENSE_MODEL = "claude-opus-5"          # AnthropicBackend's built-in default, for the status view
 
 # The closed set of selectable models (served to the UI — the UI hard-codes NO model list). `keyless`
 # marks the choice that routes the offense engine to the local Claude Code session (a BACKEND, no API

@@ -42,7 +42,22 @@ from ..llm import LLMBackend, LLMResult, Prompt, make_call_trace, parse_json_res
 
 
 _log = v2log.get_logger(__name__)
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_MODEL = "claude-opus-5"
+
+# Current-generation models REMOVE the sampling params (temperature/top_p/top_k) and return a 400 if any
+# is sent — Fable 5, Mythos 5, Opus 5, Sonnet 5, Opus 4.8, Opus 4.7. Older models still accept them. We
+# attach ``temperature`` ONLY for a model that accepts it, so selecting a current model in the picker
+# actually works instead of hard-failing every call with a 400. Behaviour is steered by prompting on the
+# no-sampling models (the recommended approach).
+_NO_SAMPLING_PREFIXES = (
+    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",
+    "claude-opus-4-8", "claude-opus-4-7",
+)
+
+
+def _supports_sampling(model: str) -> bool:
+    m = str(model or "")
+    return not any(m.startswith(p) for p in _NO_SAMPLING_PREFIXES)
 
 # X4 — transient-failure backoff. On a rate-limit / overload / 5xx / connection error we retry
 # in-backend with exponential backoff + full jitter (honouring a Retry-After header when the
@@ -153,13 +168,15 @@ class AnthropicBackend(LLMBackend):
         last: Exception | None = None
         for api_attempt in range(1, _MAX_API_ATTEMPTS + 1):
             try:
-                return client.messages.create(  # type: ignore[attr-defined]
+                create_kwargs = dict(
                     model=self.model,
                     system=sys_prompt,
                     messages=[{"role": "user", "content": user_msg}],
-                    temperature=prompt.temperature,
                     max_tokens=prompt.max_tokens,
                 )
+                if _supports_sampling(self.model):     # a current model 400s if temperature is sent
+                    create_kwargs["temperature"] = prompt.temperature
+                return client.messages.create(**create_kwargs)  # type: ignore[attr-defined]
             except Exception as e:  # noqa: BLE001 — classify below; never leak a raw SDK error
                 last = e
                 transient, retry_after = _classify_transient(e)
