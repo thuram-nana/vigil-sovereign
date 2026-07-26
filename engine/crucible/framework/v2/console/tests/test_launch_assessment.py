@@ -87,6 +87,18 @@ def test_tool_mode_maps_one_capability_to_its_gated_flag(stub_launch):
     assert "--recon" in cmd2 and "--sso" not in cmd2
 
 
+def test_tool_mode_drops_unknown_capability_ids(stub_launch):
+    # a capability id NOT in the whitelist must be DROPPED — never passed through as an argv or a flag
+    # (defends the `_CAP_BY_ID.get` whitelist against a future regression that lets arbitrary ids through).
+    r = actions.launch_assessment({"mode": "tool", "target": "http://127.0.0.1/",
+                                   "tools": ["recon", "totally-unknown", "--approve-offense", "x;rm -rf /"]})
+    cmd, _ = stub_launch(r["run_id"])
+    assert "--recon" in cmd                       # the one known capability still maps to its gated flag
+    joined = " ".join(cmd)
+    for bad in ("totally-unknown", "approve-offense", "rm -rf", "x;rm"):
+        assert bad not in joined, f"unknown/bogus tool id leaked into argv: {bad!r}"
+
+
 def test_codebase_routes_to_strix_and_validates_path(stub_launch, tmp_path):
     src = tmp_path / "proj"
     src.mkdir()
