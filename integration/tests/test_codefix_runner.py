@@ -120,8 +120,55 @@ def test_remediated_never_true_without_pr(repo_and_diff, tmp_path):
 
 
 def test_runner_imports_no_offense_or_sovereign_engine():
-    import importlib
-    mod = importlib.import_module("vigil_integration.live.codefix_runner")
-    assert mod is not None
-    leaked = [m for m in sys.modules if m.split(".")[0] in ("framework", "strix", "sigil")]
-    assert leaked == [], f"the live runner must stay import-clean of the engines: {leaked}"
+    # order-independent: a FRESH interpreter imports only the runner, then checks sys.modules — so another
+    # test importing framework first can never falsely pass/fail this.
+    code = ("import sys; import vigil_integration.live.codefix_runner;"
+            "leaked=[m for m in sys.modules if m.split('.')[0] in ('framework','strix','sigil')];"
+            "print('LEAK' if leaked else 'CLEAN', leaked)")
+    env = dict(os.environ, PYTHONPATH="integration")
+    r = subprocess.run([sys.executable, "-c", code], cwd=os.getcwd(), capture_output=True, text=True,
+                       env=env, check=False)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("CLEAN"), f"live runner pulled an engine: {r.stdout} {r.stderr}"
+
+
+def test_unsafe_remediation_id_refuses_workdir_escape(repo_and_diff, tmp_path):
+    # HOLD-1: the clone workdir is built from remediation_id; a '../' id must NOT escape base_dir. The
+    # shipped autopatch_live never passes one (it derives a slash-free digest), but clone() guards at the sink.
+    from vigil_integration.live.codefix_runner import CodefixSession, _safe_workdir
+
+    repo, _diff = repo_and_diff
+    base = str(tmp_path / "work")
+    assert _safe_workdir(base, "ap-abc123") is not None
+    for bad in ["../escape", "..", "a/b", "a\\b", "", ".", "x/../../y", "a\x00b"]:
+        assert _safe_workdir(base, bad) is None, bad
+    sess = CodefixSession(CodefixConfig(target_repo=repo, base_dir=base))
+
+    class _Req:
+        remediation_id = "../../../../tmp/ESCAPE_SHOULD_NOT_HAPPEN"
+        target_repo = repo
+        fix_branch = "vigil-fix/x"
+    res = sess.clone(_Req())
+    assert res.ok is False and "unsafe remediation id" in res.reason
+    assert not os.path.exists("/tmp/ESCAPE_SHOULD_NOT_HAPPEN")
+
+
+def test_clone_refuses_flag_and_transport_helper_repos(tmp_path):
+    # HOLD-2: a repo that is a git-flag (leading '-') or a transport-helper (ext::/fd:: → command exec) is
+    # refused BEFORE git runs.
+    from vigil_integration.live.codefix_runner import CodefixSession, _repo_ok
+
+    for bad in ["--upload-pack=touch /tmp/x", "-x", "ext::sh -c 'touch /tmp/x'", "fd::7", ""]:
+        ok, _why = _repo_ok(bad)
+        assert ok is False, bad
+    for good in ["/local/path/repo", "https://github.com/o/r.git", "git@github.com:o/r.git", "ssh://h/r"]:
+        assert _repo_ok(good)[0] is True, good
+    sess = CodefixSession(CodefixConfig(target_repo="ext::sh -c 'touch /tmp/EVIL_LAP1'", base_dir=str(tmp_path)))
+
+    class _Req:
+        remediation_id = "ap-x"
+        target_repo = "ext::sh -c 'touch /tmp/EVIL_LAP1'"
+        fix_branch = "vigil-fix/x"
+    res = sess.clone(_Req())
+    assert res.ok is False and "transport-helper" in res.reason
+    assert not os.path.exists("/tmp/EVIL_LAP1")

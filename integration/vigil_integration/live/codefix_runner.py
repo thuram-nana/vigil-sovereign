@@ -77,6 +77,38 @@ class _Quorum:
     signer_ids: list = field(default_factory=list)
 
 
+def _safe_workdir(base_dir: str, remediation_id: Any) -> Optional[str]:
+    """Resolve the disposable clone workdir, refusing an id that would escape ``base_dir`` (defense in
+    depth at the sink — never rely on the id being a slash-free digest two layers up, since a future caller
+    could pass one). A separator / '..' / empty / dot id ⇒ None (the clone then fails closed). The result
+    is abspath-confirmed to sit strictly under ``base_dir`` before any rmtree/clone touches it."""
+    rid = str(remediation_id or "")
+    if rid in ("", ".", "..") or "/" in rid or "\\" in rid or ".." in rid or "\x00" in rid:
+        return None
+    base = os.path.abspath(base_dir)
+    wd = os.path.abspath(os.path.join(base, "codefix-" + rid))
+    try:
+        if os.path.commonpath([base, wd]) != base or wd == base:
+            return None
+    except ValueError:                     # different drives / mixed abs-rel → refuse
+        return None
+    return wd
+
+
+def _repo_ok(repo: str) -> tuple[bool, str]:
+    """Validate the clone source: never a leading-dash (git-flag injection), never a transport-helper form
+    (``ext::``/``fd::`` → arbitrary command execution), and a scheme, if any, on a short allowlist. A
+    schemeless value is a local path or an scp-like ``user@host:path`` (a single ':' is fine)."""
+    r = str(repo or "")
+    if not r or r.startswith("-"):
+        return False, "repo is empty or starts with '-' (git-flag injection refused)"
+    if "::" in r:
+        return False, "transport-helper repo form refused (e.g. ext::/fd:: → command execution)"
+    if "://" in r and not r.lower().startswith(("https://", "http://", "git://", "ssh://")):
+        return False, "repo URL scheme not on the allowlist (https/http/git/ssh only)"
+    return True, ""
+
+
 def _file_from_target(target: Any) -> str:
     """Best-effort repo-relative file path from a finding's ``target`` (e.g. 'pkg/x.py:42' → 'pkg/x.py').
     A URL (has '://') or an unsafe path yields '' — the coder then proposes without file context."""
@@ -131,16 +163,22 @@ class CodefixSession:
     def clone(self, request: Any) -> _Exec:
         repo = getattr(request, "target_repo", "") or self.config.target_repo
         branch = getattr(request, "fix_branch", "") or "vigil-fix"
-        if not repo:
-            return _Exec(False, reason="no target repo configured")
-        wd = os.path.join(self.config.base_dir, "codefix-" + str(getattr(request, "remediation_id", "run")))
+        ok, why = _repo_ok(repo)
+        if not ok:
+            return _Exec(False, reason=why)
+        if branch.startswith("-") or (self.config.target_branch or "").startswith("-"):
+            return _Exec(False, reason="branch name starts with '-' (refused)")   # no ref-as-flag
+        wd = _safe_workdir(self.config.base_dir, getattr(request, "remediation_id", "run"))
+        if wd is None:
+            return _Exec(False, reason="unsafe remediation id — refusing to build a workdir outside base_dir")
         try:
             if os.path.exists(wd):
-                shutil.rmtree(wd, ignore_errors=True)
+                shutil.rmtree(wd, ignore_errors=True)   # wd is abspath-confirmed under base_dir (see _safe_workdir)
             os.makedirs(self.config.base_dir, exist_ok=True)
         except OSError as exc:
             return _Exec(False, reason=f"workdir prep failed: {exc}")
-        r = subprocess_runner([self.config.git_bin, "clone", "--no-hardlinks", "--quiet", repo, wd],
+        # `--` ends option parsing so a repo/URL can never be read as a git flag.
+        r = subprocess_runner([self.config.git_bin, "clone", "--no-hardlinks", "--quiet", "--", repo, wd],
                               timeout=self.config.clone_timeout)
         if r.exit_code != 0:
             return _Exec(False, reason="git clone failed: " + (r.stderr or "")[:200])
