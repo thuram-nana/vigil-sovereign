@@ -99,7 +99,12 @@ _DEFAULT_OFFENSE_MODEL = "claude-opus-5"          # AnthropicBackend's built-in 
 # so switching provider never clears the operator's effort choice; delivered via _EXTRA_DELIVERED_ENV.
 _EFFORT_ENV = "CRUCIBLE_EFFORT"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-_EXTRA_DELIVERED_ENV = (_EFFORT_ENV,)             # non-provider model-plane vars also bridged to offense
+# The Strix codebase agent has its OWN effort knob (STRIX_REASONING_EFFORT, a pydantic Literal that tops out
+# at "xhigh" — it has no "max"). We mirror the operator's choice onto it so effort reaches Strix too, mapping
+# our "max" onto Strix's "xhigh"; sending an out-of-Literal value would make Strix's config fail to load.
+_STRIX_EFFORT_ENV = "STRIX_REASONING_EFFORT"
+_STRIX_EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
+_EXTRA_DELIVERED_ENV = (_EFFORT_ENV, _STRIX_EFFORT_ENV)   # non-provider model-plane vars also bridged to offense
 
 # The closed set of selectable models (served to the UI — the UI hard-codes NO model list). `keyless`
 # marks the choice that routes the offense engine to the local Claude Code session (a BACKEND, no API
@@ -378,13 +383,16 @@ def set_model(model: str, *, store, owner_key, reason: str = "") -> dict:
 
 
 def set_effort(effort: str, *, store, owner_key, reason: str = "") -> dict:
-    """Set the reasoning-effort level applied to current-gen models (output_config.effort) on BOTH planes.
-    A closed allowlist; "" clears it (the model's own default). Persists CRUCIBLE_EFFORT (delivered to the
-    offense engine by `vigil up`) and records the (non-secret) choice on the spine."""
+    """Set the reasoning-effort level applied to current-gen models (output_config.effort). Reaches the
+    offense reasoning engine + the sovereign think step (CRUCIBLE_EFFORT) AND the Strix codebase agent
+    (STRIX_REASONING_EFFORT, with "max" mapped to Strix's top "xhigh"). A closed allowlist; "" clears both
+    (each side falls back to its own default). Persists the env (delivered to offense by `vigil up`) and
+    records the (non-secret) choice on the spine."""
     effort = str(effort or "").strip().lower()
     if effort and effort not in EFFORT_LEVELS:
         raise ValueError(f"unknown effort {effort!r}: choose one of {', '.join(EFFORT_LEVELS)} (or empty)")
-    _persist_env(_EFFORT_ENV, effort)             # "" clears the var → model default
+    _persist_env(_EFFORT_ENV, effort)                              # "" clears → model default
+    _persist_env(_STRIX_EFFORT_ENV, _STRIX_EFFORT_MAP.get(effort, ""))   # "" clears → Strix default ("high")
     seq = _record_signed_event(
         store, owner_key, {"signal": "governor.effort_set", "effort": effort or "default"}, reason)
     return {"ok": True, "action": "set_effort", "effort": effort, "recorded_seq": seq}

@@ -436,6 +436,7 @@ _OFFENSE_ENV_ALLOWLIST = frozenset({
     "CRUCIBLE_SELFHOSTED_ENDPOINT", "CRUCIBLE_OLLAMA_HOST",
     "STRIX_LLM", "LLM_API_BASE",
     "CRUCIBLE_EFFORT",                          # reasoning-effort level (output_config.effort on current models)
+    "STRIX_REASONING_EFFORT",                   # the same choice mapped onto the Strix codebase agent
     # provider + integration KEYS the offense engine needs — NEVER VIGIL_DESTRUCTION_OWNER_KEY
     "ANTHROPIC_API_KEY", "MISTRAL_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY",
     "AZURE_OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",

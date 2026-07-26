@@ -1722,8 +1722,9 @@
   }
 
   // Reasoning-effort control: how hard current-generation models think (output_config.effort). "Model
-  // default" clears it. Applies to BOTH the offense reasoning engine and the Strix codebase agent; older
-  // models ignore it (they steer by prompting). The chatbot (A4) will offer the same control per-message.
+  // default" clears it. Applies to the offense reasoning engine, the sovereign think step, AND the Strix
+  // codebase agent (our "max" maps to Strix's top "xhigh"); older models ignore it (they steer by
+  // prompting). The chatbot (A4) will offer the same control per-message.
   function drawEffortCard(st) {
     var host = V.$("#set-effort"); if (!host) return;
     var levels = st.effort_levels || ["low", "medium", "high", "xhigh", "max"];
