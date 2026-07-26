@@ -59,11 +59,51 @@ def test_required_config_and_endpoint_validation_fail_closed():
         S.set_provider("self-hosted", "m", {"CRUCIBLE_SELFHOSTED_ENDPOINT": "ftp://x"}, **_sa())
     with pytest.raises(ValueError):
         S.set_provider("not-a-provider", "m", {}, **_sa())          # unknown provider
-    # model must get the SAME control-char/length guard as config/secrets — no envfile line-injection
     with pytest.raises(ValueError):
-        S.set_provider("anthropic", "x\nVIGIL_DESTRUCTION_OWNER_KEY=planted", {}, **_sa())
-    with pytest.raises(ValueError):
-        S.set_provider("anthropic", "z" * 9000, {}, **_sa())        # oversize
+        S.set_provider("anthropic", "z" * 9000, {}, **_sa())        # oversize model
+
+
+# Every character str.splitlines() treats as a line boundary. An ord<0x20/==0x7f guard MISSES the last
+# three (NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR) — the re-check's bypass. The guard MUST reject all.
+_LINE_BREAKS = ["\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+
+
+@pytest.mark.parametrize("sep", _LINE_BREAKS)
+def test_no_line_injection_at_any_settings_writer(sep):
+    """The model id, provider config, AND secret writers must ALL reject every splitlines() boundary char,
+    so none can inject an extra `KEY=value` line (e.g. plant VIGIL_DESTRUCTION_OWNER_KEY) into sigil.env."""
+    from sigil.ui import settings as S
+    from sigil.platform.secrets import SecretStore
+    payload = f"x{sep}VIGIL_DESTRUCTION_OWNER_KEY=planted"
+    with pytest.raises(ValueError):                                  # model id site
+        S.set_provider("anthropic", payload, {}, **_sa())
+    with pytest.raises(ValueError):                                  # provider-config site
+        S.set_provider("self-hosted", "m", {"CRUCIBLE_SELFHOSTED_ENDPOINT": f"http://x{sep}Y=z/v1"}, **_sa())
+    with pytest.raises(ValueError):                                  # secret site
+        S.set_secret("ANTHROPIC_API_KEY", payload, **_sa())
+    # nothing partially applied: the poison var must NOT be present in the process env
+    assert "VIGIL_DESTRUCTION_OWNER_KEY" not in os.environ
+    assert not SecretStore().get("VIGIL_DESTRUCTION_OWNER_KEY")
+
+
+@pytest.mark.parametrize("sep", ["\x85", "\u2028", "\u2029"])
+def test_envfile_reader_never_rematerializes_a_separator(sep, tmp_path, monkeypatch):
+    """Defense-in-depth: even if a value carrying a Unicode line separator reached sigil.env directly
+    (bypassing the input guard), the reader/writer parse on '\\n' only, so it stays INERT inside its value
+    and is never split into a second `KEY=value` line — config._load_env_file must not set the poison var.
+    Uses an ISOLATED SIGIL_HOME (the persister binds the module global) so the real envfile can't pollute."""
+    from sigil.ui import settings as S
+    import sigil.config as C
+    monkeypatch.setattr(S, "SIGIL_HOME", tmp_path)           # persister writes into the temp home only
+    # write a poisoned value straight through the low-level persister (simulating a pre-existing bad file)
+    S._persist_env("CRUCIBLE_ANTHROPIC_MODEL", f"safe{sep}VIGIL_DESTRUCTION_OWNER_KEY=planted")
+    # force a second upsert so the reader round-trips the poisoned line (the re-materialization path)
+    S._persist_env("VIGIL_MODEL_CHOICE", "anthropic")
+    for k in ("CRUCIBLE_ANTHROPIC_MODEL", "VIGIL_DESTRUCTION_OWNER_KEY"):
+        os.environ.pop(k, None)
+    C._load_env_file(home=tmp_path)                          # read back from the isolated file
+    assert "VIGIL_DESTRUCTION_OWNER_KEY" not in os.environ    # separator stayed inside the value — inert
+    assert sep in os.environ.get("CRUCIBLE_ANTHROPIC_MODEL", "")  # the value round-tripped whole
 
 
 def test_set_model_delegates_and_highlight_works():

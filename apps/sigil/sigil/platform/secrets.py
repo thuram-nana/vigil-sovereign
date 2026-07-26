@@ -104,7 +104,12 @@ class SecretStore:
         lines = []
         found = False
         try:
-            for ln in f.read_text(encoding="utf-8").splitlines():
+            # Parse on "\n" ONLY (not str.splitlines()) so a stored value containing a Unicode line
+            # separator (U+0085/U+2028/U+2029) is never re-split + re-materialized as a real newline on
+            # the next upsert (an envfile line-injection). Blank lines are dropped.
+            for ln in f.read_text(encoding="utf-8").split("\n"):
+                if not ln.strip():
+                    continue
                 if ln.split("=", 1)[0].strip() == key:
                     lines.append(f"{key}={value}"); found = True
                 else:

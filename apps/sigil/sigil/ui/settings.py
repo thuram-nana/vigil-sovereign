@@ -196,16 +196,34 @@ PROVIDER_ENV_VARS = tuple(dict.fromkeys(
 _OFFENSE_EXCLUDED_SECRETS = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY", "ELEVENLABS_API_KEY"})
 _OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n not in _OFFENSE_EXCLUDED_SECRETS)
 
+# Every character str.splitlines() treats as a line boundary. The persisted `~/.sigil/sigil.env` tier is
+# parsed line-by-line, so ANY of these inside a value is an envfile line-injection vector — a value could
+# plant an extra `KEY=value` line (e.g. VIGIL_DESTRUCTION_OWNER_KEY, the auto-patch signing key). An
+# ord<0x20/==0x7f guard MISSES three of them: NEL (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR
+# (U+2029). We reject the full splitlines() set at EVERY settings-plane writer so the class can't recur at
+# one site while another is fixed. (The envfile reader/writer separately parse on "\n" only — defense in
+# depth: even a stray separator that reached the file stays inert inside its value, never re-materialized.)
+_LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _reject_unsafe_env_value(value: str, what: str, *, maxlen: int) -> None:
+    """Fail-closed if `value` cannot be safely persisted as a single envfile `KEY=value` line: reject a
+    control character (ord < 0x20 or DEL), any Unicode line separator str.splitlines() honors, or an
+    oversize value. The ONE guard every settings-plane writer (model id / provider config / secret) shares."""
+    if len(value) > maxlen:
+        raise ValueError(f"invalid {what}: too long (> {maxlen})")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f or c in _LINE_BREAK_CHARS for c in value):
+        raise ValueError(f"invalid {what}: control or line-break character")
+
 
 def _validate_config_value(env: str, value: str) -> str:
-    """A non-secret provider-config value (region/endpoint/project/path). Reject control chars (envfile
-    line-injection) + oversize; light endpoint sanity (the BACKEND does the authoritative host validation
-    at construct time). Returns the cleaned value ("" clears the var)."""
+    """A non-secret provider-config value (region/endpoint/project/path). Reject control/line-break chars
+    (envfile line-injection) + oversize; light endpoint sanity (the BACKEND does the authoritative host
+    validation at construct time). Returns the cleaned value ("" clears the var)."""
     value = str(value or "").strip()
     if not value:
         return ""
-    if len(value) > 1024 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
-        raise ValueError(f"invalid value for {env}")
+    _reject_unsafe_env_value(value, f"value for {env}", maxlen=1024)
     if env == "AZURE_OPENAI_ENDPOINT" and not value.startswith("https://"):
         raise ValueError("AZURE_OPENAI_ENDPOINT must start with https://")
     if env == "CRUCIBLE_SELFHOSTED_ENDPOINT" and not (value.startswith("http://") or value.startswith("https://")):
@@ -224,10 +242,10 @@ def set_provider(provider: str, model: str = "", config: Optional[dict] = None, 
         raise ValueError(f"unknown provider {provider!r}: choose one of {', '.join(sorted(_PROVIDER_IDS))}")
     spec = PROVIDERS[provider]
     model = str(model or "").strip()
-    # model is written into env vars (+ persisted to sigil.env), so it gets the SAME control-char + length
-    # guard as config/secrets — a newline would inject an extra `KEY=value` line into the envfile tier.
-    if len(model) > 512 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in model):
-        raise ValueError("invalid model id (control characters or too long)")
+    # model is written into env vars (+ persisted to sigil.env), so it gets the SAME line-injection guard
+    # as config/secrets — a newline OR a Unicode line separator (U+0085/U+2028/U+2029, which an ord-only
+    # guard misses) could inject an extra `KEY=value` line into the envfile tier. "" is fine (keyless).
+    _reject_unsafe_env_value(model, "model id", maxlen=512)
     config = {str(k): str(v) for k, v in (config or {}).items()}
 
     plan = {v: "" for v in PROVIDER_ENV_VARS}          # start by clearing EVERYTHING, then set the chosen subset
@@ -276,7 +294,12 @@ def _persist_env(key: str, value: str) -> None:
     SIGIL_HOME.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     try:
-        for ln in f.read_text(encoding="utf-8").splitlines():
+        # Parse on "\n" ONLY (not str.splitlines()) so a value that contains a Unicode line separator
+        # (U+0085/U+2028/U+2029) is never re-split into a new line and re-materialized as a real newline
+        # on rewrite — the envfile line-injection re-check caught exactly that. Blank lines are dropped.
+        for ln in f.read_text(encoding="utf-8").split("\n"):
+            if not ln.strip():
+                continue
             if ln.split("=", 1)[0].strip() != key:
                 lines.append(ln)                 # drop any existing line for this key
     except OSError:
@@ -311,12 +334,10 @@ def set_secret(name: str, value: str, *, store, owner_key, reason: str = "") -> 
     value = value.strip()
     if not value:
         raise ValueError("secret value is empty")
-    if len(value) > _MAX_SECRET_LEN:
-        raise ValueError(f"secret value too large (>{_MAX_SECRET_LEN} bytes)")
-    # Reject control characters. A newline would let a value inject an extra line into the envfile tier
-    # (`KEY=value\nEVIL=...`); an API key is printable text anyway. Defense-in-depth even for an owner.
-    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
-        raise ValueError("secret value contains control characters")
+    # Reject oversize + any char that could break the envfile tier into an extra `KEY=value` line — a
+    # newline OR a Unicode line separator (U+0085/U+2028/U+2029). An API key is printable text anyway.
+    # Defense-in-depth even for an owner: a value must never be able to plant VIGIL_DESTRUCTION_OWNER_KEY.
+    _reject_unsafe_env_value(value, "secret value", maxlen=_MAX_SECRET_LEN)
     fp = _fingerprint(value)
     backend = SecretStore().set(name, value)          # keyring → sealed → 0600 env file; never the spine
     seq = _record_signed_event(

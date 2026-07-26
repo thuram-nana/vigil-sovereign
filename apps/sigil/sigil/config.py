@@ -39,7 +39,11 @@ def _load_env_file(home: Path | None = None) -> None:
         raw = f.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return
-    for line in raw.splitlines():
+    # Parse on "\n" ONLY (not str.splitlines()): a persisted value may contain a Unicode line separator
+    # (U+0085/U+2028/U+2029) which str.splitlines() would treat as a line boundary, splitting one value
+    # into a second `KEY=value` line — an envfile line-injection. On "\n" the separator stays inert
+    # inside its value. (The settings-plane writers also reject those chars at the source.)
+    for line in raw.split("\n"):
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue

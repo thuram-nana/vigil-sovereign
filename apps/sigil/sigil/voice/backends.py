@@ -307,8 +307,10 @@ def set_voice(voice_id: str) -> None:
     env_path = SIGIL_HOME / "sigil.env"
     lines = []
     if env_path.exists():
-        lines = [ln for ln in env_path.read_text(encoding="utf-8").splitlines()
-                 if not ln.strip().startswith("SIGIL_TTS_VOICE_ID=")]
+        # Parse on "\n" ONLY (not str.splitlines()) so an existing value carrying a Unicode line separator
+        # (U+0085/U+2028/U+2029) is never re-split into a second `KEY=value` line here. Blank lines dropped.
+        lines = [ln for ln in env_path.read_text(encoding="utf-8").split("\n")
+                 if ln.strip() and not ln.strip().startswith("SIGIL_TTS_VOICE_ID=")]
     lines.append(f"SIGIL_TTS_VOICE_ID={voice_id}")
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
