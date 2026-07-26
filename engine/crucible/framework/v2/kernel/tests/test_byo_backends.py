@@ -77,7 +77,10 @@ def test_azure_endpoint_host_validation():
     assert _validated_azure_base("https://myres.openai.azure.com/x?y=1") == "https://myres.openai.azure.com"
     for bad in ("https://evil.com/.openai.azure.com", "https://x.openai.azure.com.evil.com",
                 "https://real.openai.azure.com@evil.com", "http://myres.openai.azure.com",
-                "https://169.254.169.254/.openai.azure.com", "https://openai.azure.com.evil.com"):
+                "https://169.254.169.254/.openai.azure.com", "https://openai.azure.com.evil.com",
+                # malformed → BackendUnavailable, NOT an uncaught ValueError (fail-closed contract)
+                "https://myres.openai.azure.com:8O80", "https://myres.openai.azure.com:99999999999",
+                "https://[::1"):
         with pytest.raises(BackendUnavailable):
             _validated_azure_base(bad)
 
@@ -86,7 +89,8 @@ def test_selfhosted_base_validation():
     from framework.v2.kernel.backends.self_hosted import _validated_base
     assert _validated_base("http://localhost:8000/v1") == "http://localhost:8000/v1"      # local http ok
     assert _validated_base("https://gpu.lan:8000/v1") == "https://gpu.lan:8000/v1"
-    for bad in ("file:///etc/passwd", "notaurl", "javascript:alert(1)", "ftp://h/x"):
+    for bad in ("file:///etc/passwd", "notaurl", "javascript:alert(1)", "ftp://h/x",
+                "http://h:8O80", "http://[::1"):     # malformed → BackendUnavailable, not raw ValueError
         with pytest.raises(BackendUnavailable):
             _validated_base(bad)
 

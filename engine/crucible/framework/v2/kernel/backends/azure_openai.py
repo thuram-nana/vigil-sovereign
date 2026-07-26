@@ -42,12 +42,16 @@ def _validated_azure_base(endpoint: str) -> str:
     substring) so `https://evil/.openai.azure.com`, `https://x.openai.azure.com.evil`, and userinfo tricks
     are all refused — the api-key never reaches a look-alike host."""
     ep = str(endpoint or "").strip().rstrip("/")
-    u = urlparse(ep)
-    host = (u.hostname or "").lower()
+    try:
+        u = urlparse(ep)
+        host = (u.hostname or "").lower()
+        port = u.port                       # .hostname/.port raise ValueError on a bad port / [::1
+    except ValueError as e:
+        raise BackendUnavailable(f"AZURE_OPENAI_ENDPOINT is malformed: {e}") from e
     if u.scheme != "https" or u.username or u.password or "@" in ep or not host.endswith(".openai.azure.com"):
         raise BackendUnavailable(
             "AZURE_OPENAI_ENDPOINT must be https://<resource>.openai.azure.com")
-    return f"https://{host}" + (f":{u.port}" if u.port else "")
+    return f"https://{host}" + (f":{port}" if port else "")
 
 
 class AzureOpenAIBackend(LLMBackend):

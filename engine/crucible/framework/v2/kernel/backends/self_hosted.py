@@ -38,8 +38,13 @@ def _validated_base(endpoint: str) -> str:
     """A well-formed http(s) base URL for the operator's own server. Local http is normal, so https is not
     required; but the URL must be a real http(s) URL with a host (no `file:`/`javascript:`/hostless)."""
     ep = str(endpoint or "").strip().rstrip("/")
-    u = urlparse(ep)
-    if u.scheme not in ("http", "https") or not u.hostname:
+    try:
+        u = urlparse(ep)
+        host = u.hostname
+        _ = u.port                          # validate the port too (raises ValueError on a bad port / [::1)
+    except ValueError as e:
+        raise BackendUnavailable(f"CRUCIBLE_SELFHOSTED_ENDPOINT is malformed: {e}") from e
+    if u.scheme not in ("http", "https") or not host:
         raise BackendUnavailable(
             "CRUCIBLE_SELFHOSTED_ENDPOINT must be an http(s) URL, e.g. http://localhost:8000/v1")
     return ep
