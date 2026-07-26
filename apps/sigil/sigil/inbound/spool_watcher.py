@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -48,9 +49,10 @@ class SpoolWatcher:
         self._now = now_fn
         self.spool = Path(spool_dir)
         self.incoming = self.spool / "incoming"
-        self.processed = self.spool / "processed"
+        self.working = self.spool / "working"       # a file is CLAIMED here (out of incoming) before append
+        self.processed = self.spool / "processed"   # doubles as the dedup ledger: <name> present ⇒ ingested
         self.rejected = self.spool / "rejected"
-        for d in (self.incoming, self.processed, self.rejected):
+        for d in (self.incoming, self.working, self.processed, self.rejected):
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
 
@@ -92,41 +94,94 @@ class SpoolWatcher:
         except OSError:
             pass
 
+    @staticmethod
+    def _read_regular(path: Path) -> str:
+        """Read a REGULAR file without following a symlink or blocking on a FIFO. A compromised producer
+        that plants a symlink / named pipe / device in the spool must never hang the ingest or make us
+        read/follow an arbitrary path. O_NOFOLLOW rejects a symlink at open; O_NONBLOCK returns instead of
+        blocking on a writer-less FIFO; then S_ISREG + the size cap reject anything that is not a bounded
+        regular file. Raises OSError on any of these (→ the caller quarantines)."""
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(str(path), flags)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise OSError("not a regular file (symlink/FIFO/device refused)")
+            if st.st_size > _MAX_BYTES:
+                raise OSError(f"file exceeds {_MAX_BYTES} bytes")
+            chunks, remaining = [], _MAX_BYTES + 1
+            while remaining > 0:
+                b = os.read(fd, remaining)
+                if not b:
+                    break
+                chunks.append(b)
+                remaining -= len(b)
+        finally:
+            os.close(fd)
+        data = b"".join(chunks)
+        if len(data) > _MAX_BYTES:
+            raise OSError(f"file exceeds {_MAX_BYTES} bytes")
+        return data.decode("utf-8")
+
     def drain(self) -> dict:
-        """Process every file currently in ``incoming/`` once. Returns {ingested, rejected, seqs}.
-        A file too large to be a valid envelope is rejected unread; a valid one is ingested + moved to
-        ``processed/``; any failure quarantines it in ``rejected/``. Never raises on one bad file."""
-        ingested, rejected, seqs = 0, 0, []
-        for path in sorted(self.incoming.glob("*.json")):
-            if path.name.startswith(".tmp-"):
+        """Process every file currently in ``incoming/`` once. Returns {ingested, rejected, deduped, seqs}.
+
+        For each file: CLAIM it out of ``incoming/`` (atomic rename into ``working/``) BEFORE anything else,
+        so a failed archive or a re-run can never re-read it from ``incoming/`` and double-append. If an
+        identical envelope was already ingested (its content-named marker exists in ``processed/``), the
+        claimed copy is a re-spool and is archived WITHOUT re-appending (idempotent). Otherwise read it as a
+        bounded regular file, ingest, and archive to ``processed/<name>`` (the dedup marker). ANY failure →
+        ``rejected/``, nothing appended. Never raises on one bad file; never blocks on a hostile one."""
+        ingested, rejected, deduped, seqs = 0, 0, 0, []
+        for src in sorted(self.incoming.glob("*.json")):
+            if src.name.startswith(".tmp-"):
                 continue  # a producer's in-flight temp; skip until it is atomically renamed in
+            claimed = self.working / src.name
             try:
-                if path.stat().st_size > _MAX_BYTES:
-                    self._quarantine(path, f"file exceeds {_MAX_BYTES} bytes (rejected unread)")
-                    rejected += 1
-                    continue
-                text = path.read_text(encoding="utf-8")
+                os.replace(src, claimed)   # atomic CLAIM: the file leaves incoming/ before we act on it
+            except OSError:
+                continue                    # gone / raced away — nothing to do
+            marker = self.processed / src.name
+            if marker.exists():
+                # a byte-identical envelope already crossed onto the spine — do NOT re-append (idempotent)
+                try:
+                    os.replace(claimed, marker)   # archive the duplicate over its identical marker
+                except OSError:
+                    self._safe_unlink(claimed)
+                deduped += 1
+                continue
+            try:
+                text = self._read_regular(claimed)
             except OSError as exc:
-                self._quarantine(path, f"unreadable: {exc}")
+                self._quarantine(claimed, f"unreadable / not a bounded regular file: {exc}")
                 rejected += 1
                 continue
             try:
                 seq = self._ingest_text(text)
             except InertFindingError as exc:
-                self._quarantine(path, f"rejected (fail-closed): {exc}")
+                self._quarantine(claimed, f"rejected (fail-closed): {exc}")
                 rejected += 1
                 continue
             except Exception as exc:  # noqa: BLE001 — any unexpected error is still a refusal, never an append
-                self._quarantine(path, f"rejected (unexpected {type(exc).__name__}): {exc}")
+                self._quarantine(claimed, f"rejected (unexpected {type(exc).__name__}): {exc}")
                 rejected += 1
                 continue
+            # appended. Archive to the dedup marker. If this fails the record is already spined AND the file
+            # is in working/ (NOT incoming/), so it is never re-drained → no double-ingest either way.
             try:
-                os.replace(path, self.processed / path.name)
+                os.replace(claimed, marker)
             except OSError:
-                pass  # the record is already spined; a move failure must not double-ingest — leave it, next
+                self._safe_unlink(claimed)
             ingested += 1
             seqs.append(seq)
-        return {"ingested": ingested, "rejected": rejected, "seqs": seqs}
+        return {"ingested": ingested, "rejected": rejected, "deduped": deduped, "seqs": seqs}
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
     def watch(self, *, interval: float = 2.0, stop: Optional["object"] = None) -> None:
         """Drain in a loop until ``stop`` (a threading.Event) is set. Each round is a fresh ``drain()``

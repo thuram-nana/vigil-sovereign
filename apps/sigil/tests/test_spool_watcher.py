@@ -11,6 +11,7 @@ Run: SIGIL_HOME=$(mktemp -d) PYTHONPATH=apps/sigil:integration pytest apps/sigil
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -178,10 +179,63 @@ def test_watcher_imports_no_offense_engine():
     assert leaked == [], f"the sovereign watcher must import no offense engine: {leaked}"
 
 
-def test_drain_is_idempotent_no_double_ingest(env):
+def test_drain_twice_same_state_no_double_ingest(env):
     store, spool = env
     spool_envelope(spool, _finding())
     w = _watcher(store, spool, gov=_gov_deleg())
     w.drain()
-    r2 = w.drain()   # incoming is now empty (moved to processed) → a second drain ingests nothing
+    r2 = w.drain()   # incoming is now empty (claimed → processed) → a second drain ingests nothing
     assert r2["ingested"] == 0 and len(_kinds(store, "finding")) == 1
+
+
+def test_lifecycle_respool_is_deduped_not_reingested(env):
+    # BLOCK-2b: after a finding is ingested + archived, an offense worker re-emits the IDENTICAL envelope
+    # (retry). spool_envelope makes a fresh incoming/ file (same content name). It must be DEDUPED against
+    # the processed/ marker, NOT appended a second time.
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    spool_envelope(spool, _finding())
+    w.drain()
+    spool_envelope(spool, _finding())          # identical re-spool, AFTER the first was archived
+    r2 = w.drain()
+    assert r2["deduped"] == 1 and r2["ingested"] == 0
+    assert len(_kinds(store, "finding")) == 1   # exactly one record on the spine
+
+
+def test_archive_failure_does_not_double_ingest(env):
+    # BLOCK-2a: even if the post-append archive move FAILS (processed/ unwritable), the file was already
+    # CLAIMED out of incoming/ before the append, so the next drain cannot re-read and re-append it.
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    spool_envelope(spool, _finding())
+    os.chmod(w.processed, 0o500)               # make the archive move fail
+    try:
+        r1 = w.drain()
+        assert r1["ingested"] == 1
+        r2 = w.drain()                          # must NOT re-append
+        assert r2["ingested"] == 0
+    finally:
+        os.chmod(w.processed, 0o700)
+    assert len(_kinds(store, "finding")) == 1
+
+
+def test_fifo_and_symlink_in_incoming_are_rejected_without_hanging(env):
+    # BLOCK-1: a compromised producer plants a named pipe (would block a naive read forever) and a symlink
+    # (would follow to an arbitrary path). Both must be rejected fail-closed, drain must NOT hang, and
+    # nothing crosses onto the spine.
+    import threading
+    store, spool = env
+    w = _watcher(store, spool, gov=_gov_deleg())
+    w.incoming.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(w.incoming / "pipe.json")                    # writer-less FIFO → a blocking read never returns
+    secret = tmp_target = os.path.join(spool, "secret.txt")
+    with open(secret, "w") as fh:
+        fh.write("TOP-SECRET-SHOULD-NOT-BE-READ")
+    os.symlink(secret, w.incoming / "link.json")           # symlink → must not be followed
+    result = {}
+    t = threading.Thread(target=lambda: result.update(w.drain()))
+    t.start()
+    t.join(timeout=10)
+    assert not t.is_alive(), "drain HUNG on a hostile non-regular file (FIFO DoS)"
+    assert result.get("ingested", 0) == 0 and _kinds(store, "finding") == []
+    assert os.path.exists(secret), "the symlink target must be untouched"
