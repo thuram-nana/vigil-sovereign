@@ -14,6 +14,11 @@ One entry point over the whole fused system. NATIVE verbs (handled in-process, o
   * ``vigil detect --access-log`` — run the Detection Mirror (defensive oracle plane) over log files;
                                     each fire is certificate-re-verified before it counts as a FACT.
                                     (Distinct from ``vigil aegis detect`` — the AEGIS-app firewall verdict.)
+  * ``vigil patch --finding-envelope|--from-spine`` — run the gated auto-patch ladder over a PROVENANCE-
+                                    GROUNDED confirmed finding (signed envelope OR the engagement's signed
+                                    spine — never raw JSON). Default is a non-destructive propose-only dry
+                                    run; ``--apply-edits`` applies into a disposable clone; ``--open-pr`` (off
+                                    by default) opens a gated PR under a provisioned m-of-n destruction quorum.
   * ``vigil up`` / ``vigil down``  — bring the WHOLE unified UI up at ONE origin behind a self-contained
                                     reverse proxy (federating the two trust planes), and stop it. EXEC-
                                     ONLY: spawns the three backends in their own venvs; imports no
@@ -95,6 +100,107 @@ def _cmd_engage(args: argparse.Namespace) -> int:
     if report.paused:
         print(f"paused           : {report.paused}")
     return 0
+
+
+def _cmd_patch(args: argparse.Namespace) -> int:
+    """LAP-3b: run the gated auto-patch ladder over a PROVENANCE-GROUNDED confirmed finding.
+
+    The driving finding is NEVER built from raw JSON (a raw ``TriageFinding`` is trivially forgeable). It comes
+    from a signed inert envelope (``--finding-envelope`` — m-of-n governance, owner-delegated) or the
+    engagement's OWN signed spine (``--from-spine`` — integrity-audited + rebuilt). Default is a NON-destructive
+    dry run: propose (Claude) → clone → sandbox-build in a DISPOSABLE clone; the source is never touched and no
+    PR is opened. ``--apply-edits`` applies the fix into the clone; ``--open-pr`` (off by default) opens a gated
+    PR and needs a provisioned m-of-n destruction authorization + a ``GITHUB_TOKEN`` in the environment.
+    """
+    from .autopatch.loop import _derive_remediation_id
+    from .live.codefix_runner import CodefixConfig, autopatch_live, file_backed_quorum
+    from .live.trusted_finding import (
+        TrustedFindingError,
+        finding_from_envelope,
+        finding_from_spine,
+        load_destruction_authority,
+        load_signed_authorization,
+    )
+
+    # (1) EXACTLY ONE trusted finding source. A raw-JSON finding is never accepted.
+    if bool(args.finding_envelope) == bool(args.from_spine):
+        print("vigil patch: choose EXACTLY ONE trusted finding source — --finding-envelope <signed.json> "
+              "(owner-delegated m-of-n governance) OR --from-spine <slug> (the engagement's signed spine). "
+              "A raw-JSON finding is never accepted.", file=sys.stderr)
+        return 2
+    slug = args.scope if args.finding_envelope else args.from_spine
+    try:
+        if args.finding_envelope:
+            finding = finding_from_envelope(
+                envelope_path=args.finding_envelope, owner_pubkey=args.owner_pubkey,
+                delegation_path=args.delegation, scope=args.scope,
+                target_repo=args.target_repo, target_branch=args.target_branch)
+        else:
+            finding = finding_from_spine(
+                base_dir=args.base_dir, slug=args.from_spine, target_repo=args.target_repo,
+                finding_ref=args.finding_ref, target_branch=args.target_branch)
+    except TrustedFindingError as exc:
+        print(f"vigil patch: REFUSED (fail-closed): {exc}", file=sys.stderr)
+        return 2
+
+    rid = _derive_remediation_id("", finding)
+    action_id = f"pr-{rid}"
+    provenance = ("signed envelope (m-of-n governance, owner-delegated)" if args.finding_envelope
+                  else "signed offense spine (verified + rebuilt)")
+    print(f"=== vigil patch — finding {finding.ref!r} [{finding.bug_class or '?'}] ===")
+    print(f"provenance     : {provenance}")
+    print(f"target_repo    : {finding.target_repo or '(none — pass --target-repo)'}")
+    print(f"remediation_id : {rid}")
+    print("PR authorization (sign THIS destructive action to enable --open-pr):")
+    print(f"    action_id       : {action_id}")
+    print(f"    engagement_slug : {slug}")
+    print(f"    target          : {finding.target_repo}")
+    print("    blast_class     : destructive")
+
+    if not finding.target_repo:
+        print("vigil patch: --target-repo is required (the local path or git URL to fix)", file=sys.stderr)
+        return 2
+
+    # (2) the PR-leg m-of-n quorum: DENY by default; only wired when --open-pr is fully provisioned. The
+    #     single-use is durable + ATOMIC via the file-backed nonce ledger (one authorization → one PR).
+    quorum = None
+    if args.open_pr:
+        missing = [n for n, v in (("--signed-authorization", args.signed_authorization),
+                                  ("--authority-trust-root", args.authority_trust_root),
+                                  ("--mandatory-signer", args.mandatory_signer),
+                                  ("--ledger", args.ledger)) if not v]
+        if missing:
+            print(f"vigil patch: --open-pr requires {', '.join(missing)} (the provisioned m-of-n destruction "
+                  "authorization + the single-use ledger). A GITHUB_TOKEN must also be set in the environment.",
+                  file=sys.stderr)
+            return 2
+        try:
+            authority = load_destruction_authority(trust_root_path=args.authority_trust_root,
+                                                   mandatory_signer_ids=args.mandatory_signer)
+            signed = load_signed_authorization(args.signed_authorization)
+        except TrustedFindingError as exc:
+            print(f"vigil patch: REFUSED (fail-closed): {exc}", file=sys.stderr)
+            return 2
+        quorum = file_backed_quorum(authority=authority, signed=signed, slug=slug, ledger_path=args.ledger)
+
+    # (3) config + run the gated ladder. client=None ⇒ the coder is built from ANTHROPIC_API_KEY (env, never
+    #     argv); apply_edits/pr_enabled are explicit opt-ins; the GitHub token is read from the child env only.
+    cfg = CodefixConfig(
+        target_repo=finding.target_repo, base_dir=args.repo_base_dir, target_branch=args.target_branch,
+        apply_edits=bool(args.apply_edits), model=args.model, pr_enabled=bool(args.open_pr), pr_base=args.pr_base)
+    result = autopatch_live(finding, config=cfg, client=None,
+                            operator_present=bool(args.approve), quorum=quorum)
+
+    print("--- result ---")
+    print(f"status         : {result.status}")
+    print(f"applied_paths  : {list(result.patched_paths) or '-'}")
+    print(f"opened_pr      : {result.opened_pr}   pr_ref={result.pr_ref or '-'}")
+    print(f"remediated     : {result.remediated}")
+    if result.reason:
+        print(f"reason         : {result.reason}")
+    # Honest exit: non-zero only on an outright refusal (not-confirmed / gate deny). A propose-only or
+    # applied-in-clone or opened-PR run is a success; a "no proposal" (e.g. no API key) is reported, not crashed.
+    return 1 if str(result.status).startswith("refused") else 0
 
 
 def _load_and_verify_ledger(path: str, *, base_dir: str) -> tuple[list, object]:
@@ -325,6 +431,57 @@ def build_parser() -> argparse.ArgumentParser:
                          help="export the offense stable identity PUBLIC keys (spine+governance) for owner delegation")
     pid.add_argument("--base-dir", default=".vigil-live")
     pid.set_defaults(func=_cmd_identity)
+
+    ppatch = sub.add_parser(
+        "patch", help="run the gated auto-patch ladder over a PROVENANCE-GROUNDED confirmed finding")
+    # finding source (EXACTLY one) — a raw-JSON finding is never accepted
+    ppatch.add_argument("--finding-envelope", default="",
+                        help="a signed inert finding envelope (soundest): its m-of-n governance signature is "
+                             "verified with vigil_core under an OWNER-signed delegation. Needs --owner-pubkey, "
+                             "--delegation, --scope.")
+    ppatch.add_argument("--from-spine", default="",
+                        help="an engagement slug: rebuild a confirmed fact from {slug}.spine under --base-dir "
+                             "after a fail-closed integrity audit. Use --finding-ref to disambiguate.")
+    ppatch.add_argument("--owner-pubkey", default="",
+                        help="the pinned owner PUBLIC key (base64) — the delegation trust anchor")
+    ppatch.add_argument("--delegation", default="",
+                        help="an owner-signed offense-governance DelegationCert JSON file")
+    ppatch.add_argument("--scope", default="",
+                        help="the engagement slug the envelope + delegation must cover")
+    ppatch.add_argument("--finding-ref", default="",
+                        help="pick this fact by ref (--from-spine, when the spine has >1 confirmed fact)")
+    ppatch.add_argument("--base-dir", default=".vigil-live",
+                        help="engagement home holding {slug}.spine + vault (--from-spine)")
+    # target + workdir + coder
+    ppatch.add_argument("--target-repo", default="",
+                        help="the LOCAL path or git URL to fix (operator deployment choice; not part of the "
+                             "signed finding)")
+    ppatch.add_argument("--target-branch", default="")
+    ppatch.add_argument("--repo-base-dir", default=".vigil-live/patch",
+                        help="base dir for the DISPOSABLE clone/workdir (the source repo is never modified)")
+    ppatch.add_argument("--model", default="claude-sonnet-4-6",
+                        help="the Claude coder model (the API key is read from ANTHROPIC_API_KEY env, never argv)")
+    # legs — each an explicit opt-in; all off ⇒ a non-destructive propose-only dry run
+    ppatch.add_argument("--apply-edits", action="store_true",
+                        help="apply the proposed fix into the DISPOSABLE clone + sandbox-build (safe: the source "
+                             "is never touched, no PR). Off (default) ⇒ propose-only.")
+    ppatch.add_argument("--approve", action="store_true",
+                        help="the operator's standing approval for the reversible local legs (clone/edit in the "
+                             "disposable clone)")
+    ppatch.add_argument("--open-pr", action="store_true",
+                        help="OFF by default. Open a gated PR — requires --signed-authorization, "
+                             "--authority-trust-root, --mandatory-signer (>=1, incl. the owner), --ledger, and a "
+                             "GITHUB_TOKEN in the environment.")
+    ppatch.add_argument("--signed-authorization", default="",
+                        help="the m-of-n SignedDestructionAuthorization JSON (--open-pr)")
+    ppatch.add_argument("--authority-trust-root", default="",
+                        help="the destruction TrustRoot JSON (--open-pr)")
+    ppatch.add_argument("--mandatory-signer", action="append", default=[],
+                        help="a MANDATORY signer key_id (repeatable; MUST include the owner) (--open-pr)")
+    ppatch.add_argument("--ledger", default="",
+                        help="the durable single-use nonce ledger DIRECTORY (--open-pr; one authorization → one PR)")
+    ppatch.add_argument("--pr-base", default="", help="the PR base branch (default: the repo's default branch)")
+    ppatch.set_defaults(func=_cmd_patch)
 
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")
