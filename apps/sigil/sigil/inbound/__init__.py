@@ -5,5 +5,6 @@ imports NO offense-engine module (``framework.*`` / ``strix.*``) — it treats a
 opaque signed DATA, verified with the shared integrity core alone."""
 
 from .finding_receiver import FindingReceiver, ingest_finding
+from .spool_watcher import SpoolWatcher
 
-__all__ = ["FindingReceiver", "ingest_finding"]
+__all__ = ["FindingReceiver", "SpoolWatcher", "ingest_finding"]

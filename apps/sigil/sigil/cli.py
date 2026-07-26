@@ -632,6 +632,53 @@ def cmd_settings(a) -> None:
         print("mode: KEYLESS — " + st["keyless_note"])
 
 
+def cmd_inbound(a) -> None:
+    """Drain / watch the offense→sovereign inert-finding spool onto the owner-signed spine (P5b).
+
+    Owner-tied + fail-closed: a FINDING verifies under an OFFENSE_GOVERNANCE delegation, a DETECTION FACT
+    under an OFFENSE_SPINE one — both owner-signed; a rejected envelope is quarantined in ``rejected/``,
+    never appended. Verification is vigil_core only (this path imports no offense engine). There is NO
+    network ingest endpoint — the seam is a directory drained by this local command."""
+    from pathlib import Path
+
+    from .governor.identity import owner_pubkey as _owner_pubkey
+    from .inbound import SpoolWatcher
+
+    owner = _owner_pubkey()
+    if not owner:
+        print("no owner identity on this machine — provision it first (`sigil sign`)", file=sys.stderr)
+        sys.exit(2)
+
+    def _load(path):
+        if not path:
+            return None
+        from vigil_core.delegation import DelegationCert
+        return DelegationCert.model_validate_json(Path(path).read_text(encoding="utf-8"))
+
+    try:
+        gov = _load(a.governance_delegation)
+        spine = _load(a.spine_delegation)
+    except (OSError, ValueError) as e:
+        print(f"could not load a delegation: {e}", file=sys.stderr)
+        sys.exit(2)
+    if gov is None and spine is None:
+        print("provide at least one owner-signed delegation: --governance-delegation (findings) and/or "
+              "--spine-delegation (detections). The watcher is owner-tied + fail-closed.", file=sys.stderr)
+        sys.exit(2)
+
+    watcher = SpoolWatcher(SpineStore(), spool_dir=a.spool, owner_pubkey=owner, scope=a.scope,
+                           governance_delegation=gov, spine_delegation=spine)
+    if getattr(a, "inbound_cmd", "drain") == "watch":
+        print(f"  watching {a.spool}/incoming → spine (scope={a.scope}); Ctrl-C to stop")
+        try:
+            watcher.watch(interval=a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        r = watcher.drain()
+        print(f"  drained: {r['ingested']} ingested, {r['rejected']} rejected → spine seqs {r['seqs']}")
+
+
 def cmd_spine(a) -> None:
     """Segment-rotation ops. `migrate` moves the legacy single file into the segment layout (O(1), one-way,
     idempotent). `status` lists the segment set. Retain-all: no records are ever deleted."""
@@ -1200,6 +1247,17 @@ def main(argv=None) -> None:
                       help="(export-runtime-env) also emit the resolved API key — MACHINE USE ONLY, "
                            "never redirect to a file/log; used by `vigil up` to feed the offense engine")
     pset.set_defaults(fn=cmd_settings)
+    pinb = sub.add_parser("inbound", help="drain/watch the offense→sovereign inert-finding spool onto the "
+                                          "spine (owner-tied, fail-closed; no network endpoint)")
+    pinb.add_argument("inbound_cmd", choices=["drain", "watch"], nargs="?", default="drain")
+    pinb.add_argument("--spool", required=True, help="the spool directory (its incoming/ is drained)")
+    pinb.add_argument("--governance-delegation", default=None,
+                      help="owner-signed OFFENSE_GOVERNANCE delegation JSON (authorizes FINDINGS)")
+    pinb.add_argument("--spine-delegation", default=None,
+                      help="owner-signed OFFENSE_SPINE delegation JSON (authorizes DETECTION FACTs)")
+    pinb.add_argument("--scope", default="*", help="engagement scope to confine ingest to (default: * = any)")
+    pinb.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pinb.set_defaults(fn=cmd_inbound)
     pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate downward re-seed)")
     pfl.add_argument("action", choices=["status", "reset"])
     pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")
