@@ -201,6 +201,17 @@ class OracleKind(str, enum.Enum):
     # `privileged`/`mfa_enrolled`/`never_rotated` are read by STRICT identity (`is True`/`is False`), never
     # coerced; `max_age_days` is producer-supplied POLICY; `age_days` is a retained integer (no wall-clock).
     IDENTITY_POSTURE = "identity_posture"
+    # Slice-C3 ACTIVE EXPOSURE — the LIVE, GATED, UNAUTHENTICATED confirmation that a cloud resource
+    # POSTURE already re-derived as PUBLIC (an anonymous grant path, POLICY_PATH) is genuinely reachable
+    # by an anonymous client: a bounded, credential-free HTTP GET is CAPTURED and this oracle judges the
+    # RETAINED response ALONE (an unauthenticated 2xx with a present body). "Posture says public" ->
+    # "PROVEN anonymously reachable". Like the posture members above, this NEW OracleKind is reachable ONLY
+    # via its explicit BUG_CLASS_ORACLES row (keyed on the `anon_get` ctx field no benchmark/scan/engage
+    # finding carries), never via the frozen unknown-class fallback (verifier._ALL_ORACLES) — so appending
+    # it leaves that fallback and `make gate` byte-identical. It NEVER launders the live call into a fact:
+    # the GET is the capture; this pure oracle is the sole authority over the retained capture, and the
+    # confirmed FACT re-verifies OFFLINE from that JSON-safe capture with no network.
+    ACTIVE_EXPOSURE = "active_exposure"
 
 
 class OracleProbe(BaseModel):

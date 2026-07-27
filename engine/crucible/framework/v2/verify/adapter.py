@@ -227,6 +227,12 @@ class FindingContext(BaseModel):
     # service_reachability_oracle (a real transport handshake reproduced a scanner's "open port")
     handshake: dict[str, Any] | None = None
 
+    # anonymous_reachable_oracle (Slice-C3: a bounded, UNAUTHENTICATED HTTP GET reached a resource a
+    # cloud posture already re-derived as PUBLIC — an unauthenticated 2xx with a present body). No
+    # benchmark/scan/engage finding carries this, so appending it leaves the gate byte-identical; routes
+    # to the ACTIVE_EXPOSURE kind via its distinct `anon_get` ctx key.
+    anon_get: dict[str, Any] | None = None
+
     # tls_weakness_oracle (a real TLS handshake negotiated a deprecated protocol / weak cipher)
     tls: dict[str, Any] | None = None
 
@@ -457,6 +463,22 @@ class FindingContext(BaseModel):
         defeat prove-don't-guess (the observation stays GROUNDING_INTEL until a live connect
         reproduces it)."""
         return cls(bug_class=bug_class, handshake=dict(handshake or {}))
+
+    @classmethod
+    def from_anonymous_capture(
+        cls, capture: Mapping[str, Any], *, bug_class: str = "anonymous_reachable"
+    ) -> "FindingContext":
+        """A captured UNAUTHENTICATED HTTP GET (verify.reachability_cloud), for the active-exposure
+        oracle — the retained response that turns a cloud POSTURE fact ("this bucket is public") into a
+        PROVEN anonymously-reachable FACT.
+
+        Like ``from_handshake``, the ``capture`` MUST come from a real gated, credential-free GET
+        (``reachability_cloud.capture_anonymous_get``: kill-switch -> single-host -> ACTIVE_RECON ->
+        charter scope), NEVER a posture tool's "public=true" row: the oracle re-verifies *reachability*
+        by an INDEPENDENT anonymous request, so laundering a "public" configuration straight into this
+        context would defeat prove-don't-guess. Both this and the retained capture are JSON-safe, so the
+        certificate re-verifies offline with no network."""
+        return cls(bug_class=bug_class, anon_get=dict(capture or {}))
 
     @classmethod
     def from_tls_handshake(
@@ -1042,6 +1064,8 @@ class FindingContext(BaseModel):
             ctx["oob_hits"] = self.oob_hits
         if self.handshake is not None:
             ctx["handshake"] = self.handshake
+        if self.anon_get is not None:
+            ctx["anon_get"] = self.anon_get
         if self.tls is not None:
             ctx["tls"] = self.tls
         if self.crypto_artifact is not None:

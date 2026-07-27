@@ -880,8 +880,105 @@ def _reverify_tls_live(world: Any, task: FusionTask, res: Any, *, seq: int, slug
     return promoted
 
 
+# The provider aliases we can turn into an anonymous public-read URL (C3). An unknown/empty provider
+# is fail-closed: we cannot infer the endpoint, so we do NOT probe (no fact).
+_AWS_PROVIDERS = frozenset({"aws", "amazon", "amazon_web_services", "s3"})
+_GCP_PROVIDERS = frozenset({"gcp", "gcs", "google", "google_cloud", "googlecloud"})
+_AZURE_PROVIDERS = frozenset({"azure", "az", "microsoft", "azure_blob"})
+
+
+def _exposure_url(provider: str, resource: str) -> str:
+    """Construct the anonymous public-read URL for a confirmed-public resource, per provider (C3). The
+    resource id is exactly what the cloud collectors emit: an S3/GCS bucket NAME, or ``<account>/
+    <container>`` for Azure Blob. Pure/total: an unknown provider or a malformed id yields ``""`` (no
+    probe, no fact) — fail-closed. NOTE: S3/Azure carry the bucket/account in the HOST (per-resource charter
+    scoping); GCS path-style scopes only the shared ``storage.googleapis.com`` host — per-resource safety
+    then rests on the export being the operator's own inventory + the opt-in flag (C3 red-pen LOW-2)."""
+    from .verify.reachability_cloud import azure_blob_url, gcs_public_url, s3_public_url
+
+    p = str(provider or "").strip().lower().replace("-", "_")
+    r = str(resource or "").strip()
+    if not r:
+        return ""
+    if p in _AWS_PROVIDERS:
+        return s3_public_url(r)
+    if p in _GCP_PROVIDERS:
+        return gcs_public_url(r)
+    if p in _AZURE_PROVIDERS:
+        account, sep, container = r.partition("/")
+        return azure_blob_url(account, container) if sep else ""
+    return ""
+
+
+def _reverify_active_exposure(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str,
+                              connect: Any = None) -> int:
+    """C3 promotion (OPT-IN, GATED, LIVE, UNAUTHENTICATED): turn a cloud resource a POSTURE already
+    re-derived as PUBLIC into a PROVEN anonymously-reachable FACT with ONE gated, credential-free HTTP
+    GET. Fires ONLY when the task explicitly opts in (``args['confirm_exposure']`` truthy) AND the live
+    GET passes the fail-closed gate (``verify.reachability_cloud.capture_anonymous_get``: kill-switch ->
+    single-host -> ACTIVE_RECON entitlement -> charter scope on the URL host, no credentials). A refused/
+    failed capture or any non-2xx (401/403/404/redirect) promotes NOTHING (the posture fact stays a
+    posture fact). Never on the default/gate path — only under the opt-in fusion flag AND an explicit
+    per-task opt-in. ``connect`` is injectable so the path is testable offline. Mirrors
+    :func:`_reverify_reachability` / :func:`_reverify_tls_live`.
+
+    The set of resources probed is EXACTLY the ORACLE-confirmed public ones: ``confirm_cloud_posture_facts``
+    re-derives each anonymous grant path over the RETAINED export, and only its ``public_exposure`` facts
+    are eligible — so the active GET only ever tests what the deterministic posture oracle already proved
+    public over the operator's own evidence (posture-proven -> reachability-proven, never a raw guess)."""
+    if not (isinstance(task.args, dict) and task.args.get("confirm_exposure")):
+        return 0
+    try:
+        import json as _json
+
+        from .intel.from_cloud import _resource as _resource_ref
+        from .sensors.cloud import confirm_cloud_posture_facts, normalize_cloud_export
+        from .verify.reachability_cloud import capture_anonymous_get, confirm_anonymous_reachable
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    text, fmt = output.get("export"), output.get("format", "auto")
+    if not isinstance(text, str) or not text.strip():
+        return 0
+    try:
+        inventory = normalize_cloud_export(_json.loads(text), fmt if isinstance(fmt, str) else "auto")
+        facts = confirm_cloud_posture_facts(inventory)
+    except Exception:
+        return 0
+    provider = str(inventory.get("provider") or "").strip().lower()
+    promoted = 0
+    seen: set = set()
+    for f in facts:
+        if not isinstance(f, dict) or f.get("lead_class") != "public_exposure":
+            continue
+        resource = str(f.get("resource") or "")
+        if not resource or resource in seen:
+            continue
+        seen.add(resource)
+        url = _exposure_url(provider, resource)
+        if not url:
+            continue
+        try:
+            capture = capture_anonymous_get(url, slug=slug, connect=connect)
+            if not confirm_anonymous_reachable(capture).confirmed:
+                continue
+        except Exception:
+            continue
+        subject = _resource_ref(resource, str(f.get("resource_kind") or ""))
+        _project_oracle_fact(
+            world, subject, oracle_kind="active_exposure", bug_class="anonymous_reachable",
+            evidence=(f"unauthenticated HTTP GET to {url} returned HTTP {capture.get('status')} with a "
+                      f"{capture.get('body_len')}-byte body — public {provider or 'cloud'} resource "
+                      f"{resource!r} PROVEN anonymously reachable"),
+            seq=seq, detail={"url": url, "status": capture.get("status"),
+                             "body_len": capture.get("body_len"), "provider": provider or None,
+                             "content_type": capture.get("content_type") or None})
+        promoted += 1
+    return promoted
+
+
 def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "",
-              connect: Any = None, tls_connect: Any = None) -> int:
+              connect: Any = None, tls_connect: Any = None, exposure_connect: Any = None) -> int:
     """Let the existing oracles re-fire over the sensor's OWN retained evidence, in-run — the LEAD ->
     FACT bridge. Each promotion is a deterministic oracle over the sensor's retained evidence; the
     sensor's LEADS are untouched. Returns the number of facts promoted. Best-effort and deterministic.
@@ -931,7 +1028,11 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
     if task.sensor == "tls_cert":
         return _reverify_crypto(world, res, seq=seq)
     if task.sensor in ("cloud_import", "cloud_live", "gcp_live", "azure_live"):
-        return _reverify_cloud(world, res, seq=seq)
+        n = _reverify_cloud(world, res, seq=seq)
+        # C3: PLUS an OPT-IN, GATED, UNAUTHENTICATED live GET that proves a confirmed-public resource is
+        # anonymously reachable (fires only under args['confirm_exposure'] AND the fail-closed gate).
+        n += _reverify_active_exposure(world, task, res, seq=seq, slug=slug, connect=exposure_connect)
+        return n
     if task.sensor == "declared_service":
         n = _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
         n += _reverify_tls_live(world, task, res, seq=seq, slug=slug, connect=tls_connect)
@@ -969,6 +1070,7 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
     # connect (still fail-closed inside capture_handshake / capture_tls_handshake). Tests pass a fake.
     reach_connect = getattr(ctx, "reach_connect", None)
     tls_connect = getattr(ctx, "tls_connect", None)
+    exposure_connect = getattr(ctx, "exposure_connect", None)   # C3 anonymous-GET connector (None => real)
 
     minted: list[Observation] = []
     for i, task in enumerate(tasks):
@@ -981,5 +1083,5 @@ def fuse_sensors(world: Any, slug: str, ctx: Any) -> list:
         minted.extend(res.observations)
         # LEAD -> FACT, where an oracle re-fires over the sensor's OWN retained evidence.
         _reverify(world, task, res, seq=seq, slug=slug or "", connect=reach_connect,
-                  tls_connect=tls_connect)
+                  tls_connect=tls_connect, exposure_connect=exposure_connect)
     return minted

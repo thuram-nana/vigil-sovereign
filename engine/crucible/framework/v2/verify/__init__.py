@@ -65,6 +65,7 @@ from .jwt_forgery import confirm_jwt_forgery, jwt_forgery_context
 from .saml_forgery import confirm_saml_forgery, saml_forgery_context
 from .oracles import (
     achieved_state_oracle,
+    anonymous_reachable_oracle,
     differential_response_oracle,
     honeypot_hit_oracle,
     jwt_forgery_oracle,
@@ -91,6 +92,14 @@ from .policy_path import (
     privilege_path_query,
 )
 from .reachability import capture_handshake, confirm_reachable, reachable_context
+from .reachability_cloud import (
+    anonymous_capture_context,
+    azure_blob_url,
+    capture_anonymous_get,
+    confirm_anonymous_reachable,
+    gcs_public_url,
+    s3_public_url,
+)
 from .tls import capture_tls_handshake, confirm_weak_tls, weak_tls_context
 from .weak_crypto import (
     confirm_crypto_descriptor,
@@ -125,6 +134,7 @@ __all__ = [
     "sanitizer_signal_oracle",
     "oob_callback_oracle",
     "service_reachability_oracle",
+    "anonymous_reachable_oracle",
     "tls_weakness_oracle",
     "version_range_oracle",
     "policy_path_oracle",
@@ -142,6 +152,13 @@ __all__ = [
     "capture_handshake",
     "confirm_reachable",
     "reachable_context",
+    # active exposure (anonymous reachability of a public cloud resource)
+    "capture_anonymous_get",
+    "confirm_anonymous_reachable",
+    "anonymous_capture_context",
+    "s3_public_url",
+    "gcs_public_url",
+    "azure_blob_url",
     # tls posture
     "capture_tls_handshake",
     "confirm_weak_tls",

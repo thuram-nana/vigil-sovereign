@@ -1537,6 +1537,76 @@ def service_reachability_oracle(observed_handshake: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Active exposure — an anonymous, UNAUTHENTICATED HTTP GET actually reached a public resource
+# ---------------------------------------------------------------------------
+
+
+def anonymous_reachable_oracle(observed_capture: Any) -> OracleSignal:
+    """Fire when a bounded, UNAUTHENTICATED HTTP GET actually reached a resource anonymously — the
+    endpoint answered a credential-free request with an HTTP 2xx and a non-empty body. This is what
+    promotes a cloud POSTURE fact ("this bucket is public" — an anonymous grant path the POLICY_PATH
+    oracle re-derived over the retained export) into an ACTIVE-EXPOSURE FACT: the resource is not merely
+    *configured* public, it is *provably* fetchable by anyone, judged here over the RETAINED capture
+    ALONE — pure, deterministic, re-runnable offline, so a posture heuristic alone never confirms it.
+
+    ``observed_capture`` is the JSON-safe evidence a gated anonymous GET captured
+    (``verify.reachability_cloud.capture_anonymous_get``)::
+
+        {"url": str, "status": int|None, "body_len": int, "snippet": str,
+         "content_type": str, "authenticated": bool, "error": str?}
+
+    Fires iff (a) the request was UNAUTHENTICATED — the capture does NOT record credentials
+    (``authenticated`` is not ``True``): this oracle proves ANONYMOUS reachability, so a capture that
+    admits it carried auth must NOT confirm; AND (b) ``status`` is an integer in 200..299 — a real
+    success, so a 3xx redirect, a 401/403 (present-but-protected — the OPPOSITE of the claim), a 404
+    (absent), or a ``None`` (gate refusal / connect failure) does NOT fire; AND (c) ``body_len`` > 0 —
+    the endpoint actually returned content, not an empty 204/200. A completed anonymous 2xx-with-body IS
+    the proof of public reachability. An absent or negative signal is never an assumed pass.
+
+    GROUNDING is procedural, exactly as for ``service_reachability_oracle``: the capture MUST originate
+    from a real gated GET (``capture_anonymous_get``: kill-switch -> single-host -> ACTIVE_RECON ->
+    charter scope, credential-free), never a posture tool's "public=true" say-so — that is what keeps
+    this a re-verification of *reachability* rather than a rubber-stamp of the *configuration*."""
+    if not isinstance(observed_capture, Mapping):
+        return OracleSignal(kind=OracleKind.ACTIVE_EXPOSURE, fired=False, confidence=0.0,
+                            evidence="no capture evidence")
+    cap = observed_capture
+    url = _coerce_text(cap.get("url")).strip()
+    # status is the AUTHORITY's input — accept ONLY a real int (a bool or a "200" string is NOT a status);
+    # anything else is UNKNOWN → no fact (C3 red-pen LOW-1: the sole oracle must not coerce a non-int).
+    raw_status = cap.get("status")
+    status = raw_status if isinstance(raw_status, int) and not isinstance(raw_status, bool) else None
+    try:
+        body_len = int(cap.get("body_len") or 0)
+    except (TypeError, ValueError):
+        body_len = 0
+
+    # (a) an anonymous proof must not have carried credentials — refuse ANY truthy `authenticated` (a
+    # string "true" must not evade a strict `is True`; C3 red-pen LOW-1).
+    if bool(cap.get("authenticated")):
+        return OracleSignal(
+            kind=OracleKind.ACTIVE_EXPOSURE, fired=False, confidence=0.0,
+            evidence="capture carried credentials — cannot prove ANONYMOUS reachability",
+            observed={"url": url, "status": status, "authenticated": True})
+    # (b)/(c) an unauthenticated 2xx with a present body, judged over the retained response alone.
+    if status is None or not (200 <= status <= 299) or body_len <= 0:
+        reason = _coerce_text(cap.get("error")).strip() or (
+            f"status {status}, body_len {body_len} — not an unauthenticated 2xx with a present body")
+        return OracleSignal(
+            kind=OracleKind.ACTIVE_EXPOSURE, fired=False, confidence=0.0,
+            evidence=f"not anonymously reachable: {reason}",
+            observed={"url": url, "status": status, "body_len": body_len})
+
+    content_type = _coerce_text(cap.get("content_type")).strip()
+    return OracleSignal(
+        kind=OracleKind.ACTIVE_EXPOSURE, fired=True, confidence=0.95,
+        evidence=(f"unauthenticated GET reached {url or 'the resource'} — HTTP {status} with a "
+                  f"{body_len}-byte body (content-type {content_type or 'unknown'})"),
+        observed={"url": url, "status": status, "body_len": body_len,
+                  "content_type": content_type[:96], "authenticated": False})
+
+
+# ---------------------------------------------------------------------------
 # TLS weakness — a real handshake negotiated a deprecated protocol / weak cipher
 # ---------------------------------------------------------------------------
 
