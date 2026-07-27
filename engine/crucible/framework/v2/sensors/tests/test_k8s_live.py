@@ -20,8 +20,10 @@ from framework.v2.sensors.k8s_live import (
 from framework.v2.verify.oracles import k8s_workload_posture_oracle
 
 
-def _binding(name, role, subjects, namespace=""):
-    return {"name": name, "namespace": namespace, "role": role, "subjects": subjects}
+def _binding(name, role, subjects, namespace="", role_kind="ClusterRole",
+             role_apigroup="rbac.authorization.k8s.io"):
+    return {"name": name, "namespace": namespace, "role": role, "subjects": subjects,
+            "role_kind": role_kind, "role_apigroup": role_apigroup}
 
 
 # --- the new oracle: re-derives (anonymous ∧ dangerous-role) from the RAW binding ---
@@ -50,6 +52,17 @@ def test_oracle_does_not_fire_on_benign_or_non_dangerous():
     # dangerous role bound to a NAMED (authenticated) subject → not anonymous → not a fact
     assert not k8s_workload_posture_oracle(
         {"achieved_state": {"subjects": ["alice", "system:serviceaccount:x:y"], "role": "cluster-admin"}}).fired
+    # LOW regression: a CUSTOM namespaced Role merely NAMED "edit" is not the powerful built-in ClusterRole
+    assert not k8s_workload_posture_oracle(
+        {"achieved_state": {"subjects": ["system:anonymous"], "role": "edit",
+                            "role_kind": "Role", "role_apigroup": "rbac.authorization.k8s.io"}}).fired
+    assert not k8s_workload_posture_oracle(          # a non-RBAC apiGroup is likewise not the built-in
+        {"achieved_state": {"subjects": ["system:anonymous"], "role": "admin",
+                            "role_kind": "ClusterRole", "role_apigroup": "example.com"}}).fired
+    # but the genuine built-in ClusterRole DOES fire
+    assert k8s_workload_posture_oracle(
+        {"achieved_state": {"subjects": ["system:anonymous"], "role": "cluster-admin",
+                            "role_kind": "ClusterRole", "role_apigroup": "rbac.authorization.k8s.io"}}).fired
     # malformed / absent
     assert not k8s_workload_posture_oracle("garbage").fired
     assert not k8s_workload_posture_oracle({"achieved_state": {"subjects": "x", "role": 5}}).fired

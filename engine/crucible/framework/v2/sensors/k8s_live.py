@@ -85,7 +85,10 @@ def _binding_controls(bindings: Any) -> list[dict]:
             continue                                    # not anonymous, or the benign default → no control
         ns = str(b.get("namespace") or "").strip()
         out.append({"check_id": f"binding:{ns}/{name}", "resource_kind": "rolebinding", "name": name,
-                    "namespace": ns, "achieved_state": {"subjects": subjects, "role": role}})
+                    "namespace": ns, "achieved_state": {
+                        "subjects": subjects, "role": role,
+                        "role_kind": str(b.get("role_kind") or ""),
+                        "role_apigroup": str(b.get("role_apigroup") or "")}})
     return out
 
 
@@ -211,9 +214,12 @@ class K8sLiveSensor:
                 if not name:
                     continue
                 subjects = [str(getattr(s, "name", "") or "") for s in (getattr(b, "subjects", None) or [])]
-                role = str(getattr(getattr(b, "role_ref", None), "name", "") or "")
+                ref = getattr(b, "role_ref", None)
                 out.append({"name": name, "namespace": str(getattr(meta, "namespace", "") or ""),
-                            "role": role, "subjects": subjects})
+                            "role": str(getattr(ref, "name", "") or ""),
+                            "role_kind": str(getattr(ref, "kind", "") or ""),
+                            "role_apigroup": str(getattr(ref, "api_group", "") or ""),
+                            "subjects": subjects})
         return out
 
     def run(self, args: dict, ctx: ToolContext) -> ToolResult:
