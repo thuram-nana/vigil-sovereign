@@ -92,7 +92,7 @@ _SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", 
 # — C1). With no entitlement, no provisioned egress, or no ambient credentials the live collector
 # refuses / no-ops (fail-closed, default-off). Their leads are promoted by the SAME oracles as the
 # offline importers (``cloud_live`` reuses ``_reverify_cloud``), so no new promotion path is trusted.
-_LIVE_SENSORS = ("cloud_live", "gcp_live", "azure_live")
+_LIVE_SENSORS = ("cloud_live", "gcp_live", "azure_live", "k8s_live")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -193,6 +193,7 @@ def _fusion_registry() -> ToolRegistry:
     from .sensors.azure_live import AzureLiveSensor
     from .sensors.cloud_live import CloudLiveSensor
     from .sensors.gcp_live import GcpLiveSensor
+    from .sensors.k8s_live import K8sLiveSensor
     from .sensors.k8s_runtime import KubeBenchSensor
     from .sensors.mobile import MobsfSensor
     from .sensors.tls_cert import CertScanSensor
@@ -205,6 +206,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(DeclaredServiceSensor())
     reg.register(SbomVulnSensor())
     reg.register(KubeBenchSensor())          # offline kube-bench --json ingest (Tier-1)
+    reg.register(K8sLiveSensor())            # LIVE read-only K8s workload/RBAC posture (Tier-2, gated; C2·K8s)
     reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
     reg.register(CloudLiveSensor())           # LIVE read-only AWS posture pull (Tier-2, gated; C2)
     reg.register(GcpLiveSensor())             # LIVE read-only GCP posture pull (Tier-2, gated; C2·GCP)
@@ -373,6 +375,44 @@ def _reverify_k8s(world: Any, res: Any, *, seq: int) -> int:
             world, subject, oracle_kind="k8s_posture", bug_class="k8s_misconfiguration",
             evidence=f"kube-bench CIS control {check_id} FAILED with a concrete observed insecure setting",
             seq=seq, detail={"check_id": check_id, "status": str(c.get("status") or "")})
+        promoted += 1
+    return promoted
+
+
+def _reverify_k8s_live(world: Any, res: Any, *, seq: int) -> int:
+    """C2·K8s promotion: the LIVE k8s-workload achieved-state oracle over each RETAINED live control. A
+    control whose achieved state re-derives a concrete insecure fact (a privileged container, a host-network
+    pod, an RBAC binding to an anonymous subject) is promoted to an oracle-grounded FACT on its CONTROL node;
+    a benign workload is left an honest LEAD. NO cluster calls — a pure re-derivation over the retained
+    control (mirrors :func:`_reverify_k8s`, but the collector reads the live cluster and the oracle is the
+    achieved-state ``k8s_workload_posture_oracle``, called directly like :func:`_reverify_crypto`)."""
+    try:
+        from .verify.oracles import k8s_workload_posture_oracle
+    except Exception:
+        return 0
+    output = getattr(res.result, "output", None) or {}
+    controls = output.get("controls")
+    if not isinstance(controls, list):
+        return 0
+    promoted = 0
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        check_id = str(c.get("check_id") or "").strip()
+        if not check_id:
+            continue
+        try:
+            sig = k8s_workload_posture_oracle(c)
+        except Exception:
+            continue
+        if not getattr(sig, "fired", False):
+            continue
+        subject = EntityRef(kind=NodeKind.CONTROL, key=f"k8s-workload:{check_id}".lower())
+        _project_oracle_fact(
+            world, subject, oracle_kind="k8s_workload", bug_class="k8s_workload_misconfiguration",
+            evidence=f"live k8s control {check_id} re-derives a concrete insecure achieved state",
+            seq=seq, detail={"check_id": check_id, "resource_kind": str(c.get("resource_kind") or ""),
+                             "rule": (getattr(sig, "observed", None) or {}).get("rule")})
         promoted += 1
     return promoted
 
@@ -848,6 +888,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
 
       * sbom_vuln       -> version-range oracle over SBOM advisories
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
+      * k8s_live        -> the LIVE k8s-workload achieved-state oracle over each retained live control
+                           (privileged container / host-network pod / anonymous RBAC subject; C2·K8s)
       * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
       * mesh_config     -> mesh-posture oracle over each retained Istio/Linkerd control
       * email_auth      -> email-auth-posture oracle over each retained DNS policy control (Domain 10)
@@ -873,6 +915,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_sbom(world, res, seq=seq)
     if task.sensor == "kube_bench":
         return _reverify_k8s(world, res, seq=seq)
+    if task.sensor == "k8s_live":
+        return _reverify_k8s_live(world, res, seq=seq)
     if task.sensor == "cicd_workflows":
         return _reverify_cicd(world, res, seq=seq)
     if task.sensor == "mesh_config":

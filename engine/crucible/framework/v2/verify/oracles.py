@@ -1990,6 +1990,88 @@ def k8s_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Kubernetes WORKLOAD/RBAC posture — the ACHIEVED-STATE sibling of k8s_posture_oracle for a LIVE cluster
+# read (sensors.k8s_live). kube_bench matches control-plane CLI FLAGS; a live pod/binding does not carry
+# those, so this oracle promotes a live-read posture LEAD to a FACT over the RETAINED achieved state ALONE
+# (offline, ZERO cluster calls) — modelled on cloud_posture_oracle. Fires ONLY on an EXPLICIT insecure
+# achieved state a HARDENED workload cannot exhibit: a privileged container, a host-namespace pod, or an
+# RBAC binding to an ANONYMOUS subject. An ABSENT/unknown/False flag never fires (near-zero-FP).
+_K8S_WL_STR_CAP = 4096
+
+
+def _k8s_workload_state(control: Mapping[str, Any]) -> dict[str, Any]:
+    """The achieved-state view the rules judge — a nested ``achieved_state`` sub-dict OR a flat record.
+    Each flag is tri-state via ``_cloud_tri_bool`` so an ABSENT/unparseable flag is UNKNOWN, never insecure."""
+    src = control.get("achieved_state") if isinstance(control.get("achieved_state"), Mapping) else control
+    return {
+        "privileged": _cloud_tri_bool(src.get("privileged")),
+        "host_network": _cloud_tri_bool(src.get("host_network")),
+        "anonymous_subject": _cloud_tri_bool(src.get("anonymous_subject")),
+    }
+
+
+def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a retained LIVE Kubernetes workload/RBAC control PROVABLY carries an insecure ACHIEVED STATE
+    — the membership/parse-proof that promotes a ``sensors.k8s_live`` posture LEAD to a FACT over the
+    control's achieved state ALONE (offline, ZERO cluster calls). A live cluster read's "this pod is
+    privileged" is the sensor's say-so; this oracle re-derives the concrete insecure state over the RETAINED
+    control so the read is never rubber-stamped and a benign workload is never confirmed.
+
+    ``observed_control`` is the JSON-safe retained control::
+
+        {"check_id": "pod:ns/name:privileged"?, "resource_kind": "pod"|"rolebinding"?, "name": str?,
+         "achieved_state": {"privileged": true?, "host_network": true?, "anonymous_subject": true?}}
+
+    Fires (0.9) only when an EXPLICIT insecure achieved-state flag holds (fixed rule order):
+      1. ``privileged_container`` — a container's ``securityContext.privileged`` is explicitly ``true``;
+      2. ``host_network`` — the pod shares the host network namespace (``hostNetwork`` explicitly ``true``);
+      3. ``anonymous_rbac_subject`` — an RBAC (Cluster)RoleBinding grants a role to ``system:anonymous`` /
+         ``system:unauthenticated`` (an unauthenticated caller gets the role's permissions).
+
+    Does NOT fire (stays an honest LEAD) when every relevant flag is ABSENT/unknown/False. Malformed /
+    non-mapping evidence -> non-fire (never raises). Pure + deterministic — the same verdict re-verifies
+    offline from the retained context. GROUNDING is procedural: the control MUST be the sensor's RETAINED
+    live evidence, never a re-run of a cluster call laundered as a fact."""
+    if not isinstance(observed_control, Mapping):
+        return OracleSignal(kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+                            evidence="no k8s workload control evidence")
+    ctl = observed_control
+    cid = _coerce_text(ctl.get("check_id") or ctl.get("name"))[:_K8S_WL_STR_CAP].strip()
+    rk = _coerce_text(ctl.get("resource_kind")).strip().lower()
+    label = cid or rk or "?"
+    state = _k8s_workload_state(ctl)
+
+    if state["privileged"] is True:
+        return OracleSignal(
+            kind=OracleKind.K8S_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"k8s workload fact: {label} runs a PRIVILEGED container "
+                      f"(achieved state: privileged=true) — promoted over the retained achieved state"),
+            observed={"check_id": cid, "resource_kind": rk, "rule": "privileged_container",
+                      "reason": "insecure_achieved_state", "privileged": True})
+    if state["host_network"] is True:
+        return OracleSignal(
+            kind=OracleKind.K8S_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"k8s workload fact: {label} shares the HOST network namespace "
+                      f"(achieved state: hostNetwork=true) — promoted over the retained achieved state"),
+            observed={"check_id": cid, "resource_kind": rk, "rule": "host_network",
+                      "reason": "insecure_achieved_state", "host_network": True})
+    if state["anonymous_subject"] is True:
+        return OracleSignal(
+            kind=OracleKind.K8S_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"k8s workload fact: {label} grants an RBAC role to an ANONYMOUS subject "
+                      f"(system:anonymous / system:unauthenticated) — promoted over the retained achieved state"),
+            observed={"check_id": cid, "resource_kind": rk, "rule": "anonymous_rbac_subject",
+                      "reason": "insecure_achieved_state", "anonymous_subject": True})
+
+    return OracleSignal(
+        kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+        evidence=(f"k8s workload control {label} carries no EXPLICIT insecure achieved-state flag "
+                  f"(not privileged / not host-network / no anonymous subject, or flags absent) — "
+                  f"not provably an insecure state (stays a lead)"),
+        observed={"check_id": cid, "resource_kind": rk})
+
+
+# ---------------------------------------------------------------------------
 # Cloud / CSPM posture — promote a retained cloud-posture LEAD to a FACT over its ACHIEVED STATE
 # (Wave-F1). The achieved-state SIBLING of ``k8s_posture_oracle``.
 #
