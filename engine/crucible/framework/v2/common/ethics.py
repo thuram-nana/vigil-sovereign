@@ -51,26 +51,50 @@ _SIGNED_PREFIX = "Signed:"
 
 
 # Code points whose Unicode category is L/N/P/S (so they would pass the category test below) but which
-# render as ZERO visible ink — an "invisible signature" a human reads as blank. A value made only of
-# these is treated as empty (the braille-blank / Hangul-filler bypass the re-verification found). The
-# category filter already drops whitespace (Z*), control/format (C*: ZWSP U+200B, BOM U+FEFF, word-joiner
-# U+2060, …), and combining marks (M*); this set covers the remaining graphical-category exceptions.
-# The Hangul fillers ARE Default_Ignorable; braille-blank U+2800 is NOT, so an explicit list is required.
+# render as ZERO visible ink — an "invisible signature" a human reads as blank. The category filter
+# already drops whitespace (Z*), control/format (C*: ZWSP U+200B, BOM U+FEFF, word-joiner U+2060, …) and
+# combining marks (M*); this set is the graphical-category exceptions. It is the COMPLETE set of assigned
+# L/N/P/S code points in the running Unicode DB whose glyph is a blank/filler/null placeholder (braille-
+# blank, the Hangul fillers, the Egyptian "blank" hieroglyphs, the null notehead) — found by a full-DB
+# scan. Visible look-alikes that merely NAME a blank ("BLANK SYMBOL" U+2422, "SYMBOL FOR NULL" U+2400,
+# "EMPTY SET" U+2205, the "MONOSPACE" letters, the visible GAP/SPACE FILLERs) are deliberately NOT here.
+# HONEST SCOPE: this rejects the invisible-rendering graphical code points Unicode defines today plus the
+# forward-compatible "…BLANK"-named family (_renders_blank). It is a self-attestation integrity check
+# (the engine agrees with a human on "is the Signed: line blank"), not a claim about every font.
 _INVISIBLE_INK = frozenset(
-    "\u2800"          # BRAILLE PATTERN BLANK (So)
-    "\u115f\u1160"    # HANGUL CHOSEONG / JUNGSEONG FILLER (Lo, default-ignorable)
-    "\u3164"          # HANGUL FILLER (Lo, default-ignorable)
-    "\uffa0"          # HALFWIDTH HANGUL FILLER (Lo, default-ignorable)
+    "\u2800"                      # BRAILLE PATTERN BLANK (So)
+    "\u115f\u1160\u3164\uffa0"    # HANGUL CHOSEONG / JUNGSEONG / FILLER / HALFWIDTH FILLER (Lo, DI)
+    "\U00013441\U00013442"        # EGYPTIAN HIEROGLYPH FULL / HALF BLANK (Lo)
+    "\U0001d159"                  # MUSICAL SYMBOL NULL NOTEHEAD (So)
 )
+
+
+def _renders_blank(c: str) -> bool:
+    """Forward-compatible backstop: a graphical code point whose Unicode name ENDS in ``BLANK`` renders
+    with no ink (BRAILLE PATTERN BLANK, EGYPTIAN HIEROGLYPH FULL/HALF BLANK, and any future ``… BLANK``).
+    The ``endswith`` — not ``in`` — avoids the visible ``BLANK SYMBOL`` (ends in SYMBOL). Unnamed /
+    unassigned code points return False (the category filter handles those)."""
+    try:
+        return unicodedata.name(c).endswith("BLANK")
+    except ValueError:
+        return False
 
 
 def _has_graphical(s: str) -> bool:
     """True iff ``s`` has at least one VISIBLE-INK character — Unicode category Letter / Number /
-    Punctuation / Symbol AND not one of the invisible-but-graphical code points in ``_INVISIBLE_INK``.
-    Whitespace, control (Cc), format (Cf: zero-width space, BOM, word-joiner), combining marks, and the
-    zero-ink fillers / braille-blank all read as empty — so a value a human sees as blank can never
-    authorize a run, no matter which invisible code point it is built from."""
-    return any(unicodedata.category(c)[0] in ("L", "N", "P", "S") and c not in _INVISIBLE_INK for c in s)
+    Punctuation / Symbol, AND not one of the enumerated invisible code points in ``_INVISIBLE_INK``, AND
+    not a ``…BLANK``-named glyph (:func:`_renders_blank`). Whitespace, control (Cc), format (Cf: ZWSP,
+    BOM, word-joiner) and combining marks are already dropped by the category test; this additionally
+    rejects the fillers, braille-blank, Egyptian blank hieroglyphs and null notehead — so a value a human
+    sees as blank cannot authorize a run. Scoped honestly: covers the invisible-rendering graphical code
+    points Unicode defines today (verified by a full-DB scan) plus the forward-compatible ``…BLANK``
+    family; not a claim about every font's rendering of every code point."""
+    return any(
+        unicodedata.category(c)[0] in ("L", "N", "P", "S")
+        and c not in _INVISIBLE_INK
+        and not _renders_blank(c)
+        for c in s
+    )
 
 
 def is_charter_signed(slug: str) -> tuple[bool, str]:

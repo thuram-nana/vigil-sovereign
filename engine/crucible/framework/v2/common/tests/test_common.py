@@ -189,17 +189,28 @@ def test_zero_width_only_signature_is_unsigned(
 
 
 # Invisible-but-GRAPHICAL code points — Unicode category L/N/P/S yet ZERO visible ink, so a human sees a
-# blank Signed: line — must also read as empty. This is the exhaustively-verified COMPLETE set of such
-# code points (Default_Ignorable ∩ L/N/P/S, plus braille-blank U+2800): the third route in the
-# charter-signature bypass class the re-verification found.
-@pytest.mark.parametrize("cp", [0x2800, 0x115F, 0x1160, 0x3164, 0xFFA0])
+# blank Signed: line — must also read as empty. This is the full-DB-scanned set of such code points:
+# braille-blank U+2800, the Hangul fillers, the Egyptian "blank" hieroglyphs, and the null notehead — the
+# invisible-rendering routes the re-verification found. (See ethics._INVISIBLE_INK / _renders_blank.)
+@pytest.mark.parametrize("cp", [0x2800, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x13441, 0x13442, 0x1D159])
 def test_invisible_graphical_only_signature_is_unsigned(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cp: int) -> None:
     signed, reason = _sig_verdict(tmp_path, monkeypatch, " " + chr(cp) * 4 + "\n")
     assert not signed, f"invisible-graphical U+{cp:04X} x4 wrongly read as signed ({reason})"
 
 
-@pytest.mark.parametrize("name", ["tester", "Jane Doe", "O'Brien, J. (lead)", "Jos" + chr(0xe9)])
+# VISIBLE look-alikes that merely NAME a blank must NOT be over-rejected — they carry real ink, so a
+# human reading the charter sees a (weird but present) signature. BLANK SYMBOL ␢, SYMBOL FOR NULL ␀,
+# EMPTY SET ∅, a MONOSPACE letter, a Devanagari GAP FILLER, and a real Egyptian hieroglyph all sign.
+@pytest.mark.parametrize("cp", [0x2422, 0x2400, 0x2205, 0x1D670, 0xA8F9, 0x13000])
+def test_visible_lookalike_signature_is_signed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cp: int) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " " + chr(cp) + "\n")
+    assert signed, f"visible glyph U+{cp:04X} wrongly rejected as unsigned ({reason})"
+
+
+@pytest.mark.parametrize("name", ["tester", "Jane Doe", "O'Brien, J. (lead)", "Jos" + chr(0xe9),
+                                  chr(0x738b) + chr(0x5c0f) + chr(0x660e)])  # + a CJK name
 def test_real_signature_is_signed(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     signed, reason = _sig_verdict(tmp_path, monkeypatch, " `" + name + "`   Date: `2026`\n")
