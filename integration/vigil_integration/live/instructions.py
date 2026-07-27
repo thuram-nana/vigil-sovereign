@@ -105,9 +105,12 @@ def _cursor(slug: str, base: Optional[str] = None) -> int:
 
 
 def drain(slug: str, *, base: Optional[str] = None) -> list[str]:
-    """Return the NEW instructions for ``slug`` (since the last drain) and advance the cursor so each is
-    consumed exactly once — across processes (a resumed run does not replay). Never raises for a missing
-    file / unsafe slug (returns [])."""
+    """Return the NEW instructions for ``slug`` (since the last drain) and advance the cursor. A single
+    SEQUENTIAL drainer (the one OODA loop, incl. a resumed run in a later process) consumes each exactly
+    once and never replays. The cursor is not file-locked, so two CONCURRENT drainers could re-deliver an
+    instruction — benign here because an instruction is advisory + fully gated (a re-delivery only re-adds
+    the same text to the think context; it fires nothing). Never raises for a missing file / unsafe slug
+    (returns [])."""
     try:
         slug = _safe_slug(slug)
     except ValueError:
