@@ -50,12 +50,27 @@ _PLACEHOLDER = re.compile(r"<\s*name\s*>", re.IGNORECASE)
 _SIGNED_PREFIX = "Signed:"
 
 
+# Code points whose Unicode category is L/N/P/S (so they would pass the category test below) but which
+# render as ZERO visible ink — an "invisible signature" a human reads as blank. A value made only of
+# these is treated as empty (the braille-blank / Hangul-filler bypass the re-verification found). The
+# category filter already drops whitespace (Z*), control/format (C*: ZWSP U+200B, BOM U+FEFF, word-joiner
+# U+2060, …), and combining marks (M*); this set covers the remaining graphical-category exceptions.
+# The Hangul fillers ARE Default_Ignorable; braille-blank U+2800 is NOT, so an explicit list is required.
+_INVISIBLE_INK = frozenset(
+    "\u2800"          # BRAILLE PATTERN BLANK (So)
+    "\u115f\u1160"    # HANGUL CHOSEONG / JUNGSEONG FILLER (Lo, default-ignorable)
+    "\u3164"          # HANGUL FILLER (Lo, default-ignorable)
+    "\uffa0"          # HALFWIDTH HANGUL FILLER (Lo, default-ignorable)
+)
+
+
 def _has_graphical(s: str) -> bool:
-    """True iff ``s`` has at least one GRAPHICAL character — a Letter / Number / Punctuation / Symbol.
-    Whitespace, control (Cc), and FORMAT characters (Cf: zero-width space U+200B, BOM U+FEFF, …) do NOT
-    count, so an all-whitespace or all-zero-width "signature" reads as empty — an invisible non-signature
-    can never authorize a run."""
-    return any(unicodedata.category(c)[0] in ("L", "N", "P", "S") for c in s)
+    """True iff ``s`` has at least one VISIBLE-INK character — Unicode category Letter / Number /
+    Punctuation / Symbol AND not one of the invisible-but-graphical code points in ``_INVISIBLE_INK``.
+    Whitespace, control (Cc), format (Cf: zero-width space, BOM, word-joiner), combining marks, and the
+    zero-ink fillers / braille-blank all read as empty — so a value a human sees as blank can never
+    authorize a run, no matter which invisible code point it is built from."""
+    return any(unicodedata.category(c)[0] in ("L", "N", "P", "S") and c not in _INVISIBLE_INK for c in s)
 
 
 def is_charter_signed(slug: str) -> tuple[bool, str]:

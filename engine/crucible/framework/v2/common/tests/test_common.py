@@ -188,6 +188,17 @@ def test_zero_width_only_signature_is_unsigned(
     assert not signed, f"zero-width-only value {zw!r} wrongly read as signed ({reason})"
 
 
+# Invisible-but-GRAPHICAL code points — Unicode category L/N/P/S yet ZERO visible ink, so a human sees a
+# blank Signed: line — must also read as empty. This is the exhaustively-verified COMPLETE set of such
+# code points (Default_Ignorable ∩ L/N/P/S, plus braille-blank U+2800): the third route in the
+# charter-signature bypass class the re-verification found.
+@pytest.mark.parametrize("cp", [0x2800, 0x115F, 0x1160, 0x3164, 0xFFA0])
+def test_invisible_graphical_only_signature_is_unsigned(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cp: int) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " " + chr(cp) * 4 + "\n")
+    assert not signed, f"invisible-graphical U+{cp:04X} x4 wrongly read as signed ({reason})"
+
+
 @pytest.mark.parametrize("name", ["tester", "Jane Doe", "O'Brien, J. (lead)", "Jos" + chr(0xe9)])
 def test_real_signature_is_signed(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
