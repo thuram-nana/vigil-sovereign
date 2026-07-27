@@ -274,6 +274,33 @@ const Console = (() => {
         </div>
         <div id="launchMsg" style="margin-top:8px"></div>
       </div>
+      <div class="card" style="margin-bottom:var(--sp-4)">
+        <h3>Launch a cloud / Kubernetes posture assessment <span class="badge">no seed URL</span></h3>
+        <div class="row-flex" style="flex-wrap:wrap;gap:8px">
+          <select id="cloudType" class="eng-select" onchange="Console.onCloudType()" style="min-width:180px">
+            <option value="cloud">Cloud (AWS / GCP / Azure)</option>
+            <option value="k8s">Kubernetes</option>
+            <option value="infra">Infrastructure services</option>
+          </select>
+          <select id="cloudProvider" class="eng-select" style="min-width:120px" aria-label="cloud provider">
+            <option value="aws">AWS</option>
+            <option value="gcp">GCP</option>
+            <option value="azure">Azure</option>
+          </select>
+          <input id="cloudSlug" class="eng-select" style="min-width:150px;font-family:var(--font-mono)"
+                 placeholder="engagement slug (needs a charter)" />
+          <input id="cloudTarget" class="eng-select" style="flex:1;min-width:180px;font-family:var(--font-mono)"
+                 placeholder="account / subscription / project id" />
+          <button class="btn primary" onclick="Console.launchCloud()">▶ Launch posture run</button>
+        </div>
+        <div class="muted" style="font-size:var(--fs-xs);margin-top:6px">
+          Spawns the gated <code>engage &lt;slug&gt; --fuse-only --spine</code> (no web crawl) — it runs
+          the operator's declared offline collectors (<code>targets/&lt;slug&gt;/fusion.json</code>) and
+          their promotion oracles. Needs a signed charter; drop your provider export at the path the task
+          names, then launch. Honest empty until real data is present.
+        </div>
+        <div id="cloudMsg" style="margin-top:8px"></div>
+      </div>
       <div class="grid cols-4" id="liveTiles"></div>
       <div class="grid cols-2" style="margin-top:var(--sp-4)">
         <div class="card"><h3>Findings confirming <span id="livePhase" class="badge">idle</span></h3>
@@ -282,6 +309,9 @@ const Console = (() => {
           <div class="feed" id="liveStream"></div></div>
       </div>`;
     renderLiveTiles();
+    // pre-fill the cloud slug with the active engagement + sync the provider picker visibility
+    if (state.activeSlug) { const cs = document.getElementById('cloudSlug'); if (cs) cs.value = state.activeSlug; }
+    onCloudType();
     // if an engagement is active, tail its log by default
     if (state.activeSlug) startLive({ slug: state.activeSlug });
   }
@@ -333,6 +363,42 @@ const Console = (() => {
       const d = await r.json();
       if (d.error) { msg.innerHTML = `<span class="badge danger">${esc(d.error)}</span>`; return; }
       msg.innerHTML = `<span class="badge ok">running</span> <span class="mono">${esc(d.run_id)}</span>`;
+      state.live = true; renderSafety();
+      startLive({ run: d.run_id });
+    } catch (e) { msg.innerHTML = `<span class="badge danger">${esc(e.message)}</span>`; }
+  }
+
+  // Cloud/K8s/infra posture launch — a SEEDLESS fusion-only run (no web URL). The provider picker only
+  // applies to the Cloud type; the target is a cloud identifier (account/subscription/project/cluster),
+  // never a URL.
+  function onCloudType() {
+    const sel = document.getElementById('cloudType'); if (!sel) return;
+    const t = sel.value;
+    const prov = document.getElementById('cloudProvider');
+    if (prov) prov.style.display = (t === 'cloud') ? '' : 'none';
+    const tgt = document.getElementById('cloudTarget');
+    if (tgt) tgt.placeholder = t === 'k8s' ? 'cluster label (e.g. prod-eks-1)'
+      : t === 'infra' ? 'host / infra label (must be in charter scope)'
+      : 'account / subscription / project id';
+  }
+  async function launchCloud() {
+    const mode = (document.getElementById('cloudType').value || '');
+    const provider = (document.getElementById('cloudProvider').value || '');
+    const slug = (document.getElementById('cloudSlug').value || '').trim();
+    const target = (document.getElementById('cloudTarget').value || '').trim();
+    const msg = document.getElementById('cloudMsg');
+    if (!slug) { msg.innerHTML = '<span class="badge warn">enter the engagement slug (needs a signed charter)</span>'; return; }
+    if (!target) { msg.innerHTML = '<span class="badge warn">enter the cloud / cluster label</span>'; return; }
+    msg.innerHTML = '<span class="muted">launching…</span>';
+    try {
+      const b = { slug, mode, target };
+      if (mode === 'cloud') b.provider = provider;
+      const r = await fetch('/api/launch/cloud', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' },
+        body: JSON.stringify(b) });
+      const d = await r.json();
+      if (d.error) { msg.innerHTML = `<span class="badge danger">${esc(d.error)}</span>`; return; }
+      msg.innerHTML = `<span class="badge ok">running</span> <span class="mono">${esc(d.run_id)}</span>`
+        + ` — ${esc(d.mode)} fusion-only; if empty, drop the export under <code>targets/${esc(d.slug)}/</code> and re-launch`;
       state.live = true; renderSafety();
       startLive({ run: d.run_id });
     } catch (e) { msg.innerHTML = `<span class="badge danger">${esc(e.message)}</span>`; }
@@ -794,7 +860,7 @@ const Console = (() => {
   }
   function closeDrawer() { $('#drawer').classList.remove('open'); }
 
-  return { init, openEngagement, closeDrawer, launchScan, selectRun, openFinding, reverify, tripKill };
+  return { init, openEngagement, closeDrawer, launchScan, launchCloud, onCloudType, selectRun, openFinding, reverify, tripKill };
 })();
 
 document.addEventListener('DOMContentLoaded', Console.init);

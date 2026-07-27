@@ -41,6 +41,189 @@ from urllib.parse import urlsplit
 from ..common import paths
 
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+
+# ---- slice C2b: seedless cloud / Kubernetes / infra posture launch ----------
+#
+# A cloud/K8s/infra assessment has NO web seed URL — the just-added `engage <slug> --fuse-only` path
+# runs ONLY the operator's declared OFFLINE sensor fusion (targets/<slug>/fusion.json) and its
+# promotion oracles. This action just ENSURES the right sensor task is on that manifest and SPAWNS the
+# already-gated `engage --fuse-only` CLI; it mints nothing itself, cannot relax scope (scope is
+# charter-signed) and cannot bypass a gate (the spawned CLI has its own kill-switch + signed-charter
+# preflight, and every fused sensor is gated at run time). Two-env boundary: this file imports nothing
+# from sigil/apps — only the offense engine's own CLI, spawned as a subprocess.
+
+# mode -> the SAFE, offline, Tier-1 fusion sensor it runs. AWS/GCP/Azure all use the cloud/CSPM export
+# importer (cloud_import); Kubernetes uses the kube-bench report importer (kube_bench); a generic infra
+# posture uses the declared-service inventory (declared_service). Each is already on
+# engage_fusion._SAFE_SENSORS and registered in engage_fusion._fusion_registry.
+_CLOUD_MODES = {
+    "cloud": "cloud_import",
+    "k8s": "kube_bench",
+    "infra": "declared_service",
+}
+
+# A `cloud` assessment must name its provider (recorded on the task for operator context; the sensor
+# reads inventory_file/format only).
+_CLOUD_PROVIDERS = frozenset({"aws", "gcp", "azure"})
+
+# An engagement slug directs targets/<slug>/... — it MUST be a single, path-safe component (no
+# separators, no traversal). A single-segment allowlist rules out '/', '\\', '..' and every shell
+# metacharacter, so it can never escape targets/ nor be mis-read as anything but a slug.
+_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# A cloud identifier: an account id / subscription / project / cluster label. Allow alphanumerics and a
+# small safe punctuation set; DISALLOW '/' (which rules out URLs and CIDRs and path separators) and
+# every shell metacharacter. The label is NEVER a shell arg (the spawn is an argv list, no shell) and
+# NEVER a file path (data paths are derived from the validated slug) — this allowlist is defence in
+# depth so it also cannot be a seed URL or a network range.
+_CLOUD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:@-]{0,127}$")
+
+
+def _valid_slug(slug: str) -> bool:
+    return bool(slug) and ".." not in slug and _SLUG_RE.match(slug) is not None
+
+
+def _valid_cloud_label(target: str) -> tuple[bool, str]:
+    """Validate the cloud identifier (account/subscription/project/cluster label). It must be a
+    non-empty, injection-safe label — explicitly NOT a URL, a CIDR/network range, or a path."""
+    if not target:
+        return False, "target (a cloud account/subscription/project/cluster label) is required"
+    if "://" in target:
+        return False, "target is a cloud identifier, not a URL — a cloud/K8s run has no web seed"
+    if "/" in target:
+        return False, "target is a cloud identifier, not a URL / CIDR / path (no '/')"
+    if not _CLOUD_LABEL_RE.match(target):
+        return False, ("target has invalid characters — expected a plain account/subscription/project/"
+                       "cluster label (letters, digits, '.', '_', '-', ':', '@', space)")
+    return True, ""
+
+
+def _has_signed_charter(slug: str) -> bool:
+    """True iff a SIGNED charter exists for the slug — the console-side authorization gate. Uses the
+    SAME ``ethics.is_charter_signed`` bar the spawned engage --fuse-only re-checks fail-closed (an
+    unfilled ``<name>`` placeholder does NOT count as signed), so the console cannot start an assessment
+    the engine's own charter gate would refuse. Total: any path/parse trouble is a fail-closed False."""
+    try:
+        from ..common.ethics import is_charter_signed
+        return bool(is_charter_signed(slug)[0])
+    except Exception:
+        return False
+
+
+def _fusion_task_for(slug: str, mode: str, provider: str, label: str) -> dict:
+    """The single fusion task for a chosen mode — a default the operator fills in with their real
+    export. Every FILE path is derived from the validated slug (via paths.target_dir), NEVER from
+    operator input, so the write target cannot be traversed. The provider/label are recorded as
+    context only (the offline sensor reads inventory_file/report/host)."""
+    td = Path(paths.target_dir(slug))
+    if mode == "cloud":
+        return {"sensor": "cloud_import",
+                "args": {"inventory_file": str(td / "cloud-inventory.json"), "format": "auto",
+                         "provider": provider, "label": label}}
+    if mode == "k8s":
+        return {"sensor": "kube_bench",
+                "args": {"report": str(td / "kube-bench.json"), "label": label}}
+    # infra -> declared_service: a host/services inventory (the operator edits in real in-scope
+    # services; the sensor is charter-scope-gated, so an out-of-scope label simply no-ops — fail-closed).
+    return {"sensor": "declared_service",
+            "args": {"host": label, "services": [], "label": label}}
+
+
+def _ensure_fusion_manifest(slug: str, mode: str, provider: str, label: str) -> tuple[Path, bool]:
+    """Ensure targets/<slug>/fusion.json carries the right sensor task. Writes a DEFAULT single-task
+    manifest ONLY when absent (owner-only, path-safe); an operator-authored manifest is RESPECTED and
+    left untouched. Returns ``(path, wrote_default)``."""
+    path = Path(paths.target_dir(slug)) / "fusion.json"
+    if path.is_file():
+        return path, False
+    task = _fusion_task_for(slug, mode, provider, label)
+    paths.secure_write(path, json.dumps({"tasks": [task]}, indent=2))
+    return path, True
+
+
+def _append_progress(progress: Path, event: dict) -> None:
+    """Append one JSON event line to a run's progress.jsonl (best-effort) so the run-based SSE view has
+    something to tail immediately (mirrors the scan launcher's progress stream)."""
+    try:
+        with progress.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, default=str) + "\n")
+    except OSError:
+        pass
+
+def launch_cloud(slug: str, mode: str, target: str, *, provider: str = "") -> dict:
+    """Launch a SEEDLESS cloud / Kubernetes / infra POSTURE assessment (slice C2b).
+
+    Requires a signed charter for ``slug`` (the gate), validates ``mode``/``provider`` and the cloud
+    ``target`` label (non-empty, injection-safe, NOT a URL/CIDR/path — never a seed), ENSURES
+    ``targets/<slug>/fusion.json`` carries the right offline sensor task (writing a path-safe default
+    only when absent), then SPAWNS the already-gated ``engage <slug> --fuse-only --spine`` subprocess.
+
+    Returns ``{run_id, status, mode, slug, provider, target, stream}`` on launch, or ``{error}`` on any
+    refusal. Cannot relax scope (scope is charter-signed) nor bypass a gate (the spawned CLI has its own
+    kill-switch + signed-charter preflight, and every fused sensor is gated at run time)."""
+    mode = (mode or "").strip().lower()
+    if mode not in _CLOUD_MODES:
+        return {"error": f"unknown assessment mode {mode!r} "
+                         f"(expected one of: {', '.join(sorted(_CLOUD_MODES))})"}
+    slug = (slug or "").strip()
+    if not _valid_slug(slug):
+        return {"error": "invalid engagement slug (expected [A-Za-z0-9._-], a single path-safe "
+                         "component — no separators, no '..')"}
+    target = (target or "").strip()
+    ok, why = _valid_cloud_label(target)
+    if not ok:
+        return {"error": why}
+    provider = (provider or "").strip().lower()
+    if mode == "cloud" and provider not in _CLOUD_PROVIDERS:
+        return {"error": f"a cloud assessment needs a provider "
+                         f"(one of: {', '.join(sorted(_CLOUD_PROVIDERS))})"}
+    # THE GATE: a cloud/K8s posture engagement needs a SIGNED charter for the slug, like a remote
+    # engage. (The spawned CLI re-checks this fail-closed — this is the early, honest console refusal.)
+    if not _has_signed_charter(slug):
+        return {"error": f"no signed charter for {slug!r} — a cloud/Kubernetes/infra assessment needs "
+                         f"a SIGNED charter (targets/{slug}/charter.md; fill the 'Signed:' line). Run "
+                         "`intake` to scaffold one."}
+
+    try:
+        fusion_path, wrote = _ensure_fusion_manifest(slug, mode, provider, target)
+    except Exception as e:
+        return {"error": f"could not prepare the fusion plan: {type(e).__name__}: {e}"}
+
+    sensor = _CLOUD_MODES[mode]
+    run_id = _new_run_id()
+    rd = run_dir(run_id)
+    rd.mkdir(parents=True, exist_ok=True)
+    progress = rd / "progress.jsonl"
+    progress.write_text("", encoding="utf-8")
+    # The spawn is an ARGV LIST (no shell) built from the VALIDATED slug — the operator's target label
+    # is NEVER on the command line (it lives only inside the JSON fusion.json value), so there is no
+    # argv-injection surface. --fuse-only forbids a seed; --spine mirrors the gated run onto the spine.
+    cmd = [sys.executable, "-m", "framework.v2", "engage", slug, "--fuse-only", "--spine"]
+
+    def _meta(**extra) -> None:
+        _write_meta(run_id, target=target, slug=slug, mode=mode, provider=provider or None,
+                    sensor=sensor, fusion_json=str(fusion_path), wrote_fusion=wrote, cmd=cmd, **extra)
+
+    _meta(status="running", started=time.time())
+    _append_progress(progress, {"event": "launch.fusion", "mode": mode, "slug": slug,
+                                "sensor": sensor, "provider": provider or None, "target": target})
+
+    def _run() -> None:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
+            status = "done" if proc.returncode == 0 else "error"
+            _append_progress(progress, {"event": "scan.done", "status": status, "rc": proc.returncode})
+            _meta(status=status, rc=proc.returncode,
+                  summary=(proc.stdout or "")[-4000:], stderr=(proc.stderr or "")[-2000:],
+                  finished=time.time())
+        except Exception as e:  # never let a launch crash the console
+            _append_progress(progress, {"event": "scan.done", "status": "error"})
+            _meta(status="error", error=str(e), finished=time.time())
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug,
+            "provider": provider or None, "target": target, "stream": f"runs/{run_id}"}
 _AEGIS_MODES = frozenset({"observe", "enforce"})
 
 # The valid assessment modes and the wizard target-types they back.

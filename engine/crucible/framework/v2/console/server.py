@@ -349,6 +349,16 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # refusal (no charter / bad target / CIDR scope) is returned as a normal 200 body.
                 self._json(actions.launch_assessment(body))
                 return
+            if path == "/api/launch/cloud":
+                # Seedless cloud/Kubernetes/infra posture launch (slice C2b). Spawns the already-gated
+                # `engage --fuse-only`; validation + the signed-charter gate live in actions.launch_cloud.
+                self._json(actions.launch_cloud(
+                    str(body.get("slug", "")),
+                    str(body.get("mode", "")),
+                    str(body.get("target", "")),
+                    provider=str(body.get("provider", "")),
+                ))
+                return
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
                 return

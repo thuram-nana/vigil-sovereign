@@ -131,6 +131,30 @@ def preflight(slug: str, seed_url: str) -> None:
             f"seed out of scope ({decision.refusal_kind}): {decision.reason}")
 
 
+def preflight_fusion(slug: str) -> None:
+    """Fail closed BEFORE any fusion for a SEEDLESS (cloud / Kubernetes / infra POSTURE) engagement:
+    refuse a tripped kill-switch, or a slug whose charter is missing OR UNSIGNED. A fusion-only run
+    carries no seed URL, so per-request URL scope cannot be validated here — and the offline importer
+    sensors (cloud_import / kube_bench) carry no host/target, so the per-sensor scope step (the only
+    place ``require_charter_signed`` otherwise runs) is skipped for them. So this preflight is the SOLE
+    charter authority on the fusion-only path, and it enforces the SAME signed-charter bar as a remote
+    engage's ``preflight`` (``ethics.is_charter_signed`` — an unfilled ``<name>`` placeholder is NOT a
+    signature). Every fused sensor is still additionally gated at ``run_sensor`` time (kill-switch /
+    entitlement / scope / egress)."""
+    ks = KillSwitch(slug)
+    if ks.is_tripped():
+        raise EngagementRefused(f"kill-switch tripped: {ks.reason()}")
+    # `from` at call time (not a module-top import) so a test's monkeypatch of paths.charter_path is
+    # honoured — mirrors _fusion_manifest_present's target_dir lookup.
+    from .common.ethics import is_charter_signed
+    signed, reason = is_charter_signed(slug)
+    if not signed:
+        raise EngagementRefused(
+            f"charter for {slug!r} is not signed ({reason}) — a cloud/Kubernetes/infra posture "
+            f"engagement needs a SIGNED charter (targets/{slug}/charter.md), exactly like a remote "
+            "engage; fill the 'Signed:' line before launching")
+
+
 def _intel_recon(world: WorldModel, slug: str, seed_url: str, *,
                  fixtures_dir: str | None, max_depth: int) -> object:
     """Best-effort intel recon bound to the run's SHARED world-model. Returns the
@@ -866,6 +890,90 @@ def run_engagement(
     return result
 
 
+def run_fusion_only(slug: str, *, spine: object = None) -> EngagementResult:
+    """FUSION-ONLY engagement (slice C2b): NO seed URL, NO web crawl / recon / scan. Build the run
+    world-model and fold ONLY the operator's declared sensor LEADS (``targets/<slug>/fusion.json``)
+    through the GATED pipeline, letting the deterministic promotion oracles re-fire over each sensor's
+    OWN retained evidence — the CLOUD / KUBERNETES / INFRA POSTURE path, whose sensors (``cloud_import``,
+    ``kube_bench``, ``declared_service`` …) need no web seed.
+
+    Same fail-closed authorization as a remote engage (``preflight_fusion``: kill-switch + a signed
+    charter for the slug); an absent/empty/malformed ``fusion.json``, or sensors that no-op, yield an
+    HONEST empty result (0 leads, 0 facts) — nothing is fabricated. Best-effort: a fusion failure never
+    raises out of the run, and every sensor is STILL gated at ``run_sensor`` time (kill-switch /
+    entitlement / scope / egress). Returns an :class:`EngagementResult` whose report is an empty shell
+    (nothing was crawled or audited) carrying the fused lead/fact counts + the shared world-model.
+
+    This is the exact ``fuse_sensors`` pass ``run_engagement(..., fuse_sensors=True)`` runs, MINUS the
+    seed-dependent web pass — so it changes no oracle verdict and adds only oracle-grounded facts +
+    intel leads, never a scanner finding. It also runs the C4 lateral-path pass over the fused world."""
+    sink = _make_spine_sink(spine, slug)
+    try:
+        preflight_fusion(slug)
+    except EngagementRefused as e:
+        if sink is not None:
+            sink.refusal("preflight", f"fuse-only:{slug}", reason=str(e), fatal=True)
+        raise
+
+    # A fresh run world-model + an empty report shell (a fusion-only run crawled nothing / audited
+    # nothing — the report.target is an honest fusion:// marker, never a URL that was fetched).
+    world = WorldModel()
+    report = ScanReport(target=f"fusion://{slug}")
+    result = EngagementResult(report=report, world=world)
+    try:
+        # seq_base=1 over a fresh (empty) world — the fusion clock starts at 1, exactly as the default
+        # engage's post-scan fusion does over an empty world.
+        result.fused_leads, result.fused_facts = _run_fusion(world, slug, seq_base=1, sink=sink)
+    except Exception:
+        pass   # fusion is the whole point, but a failure is an honest empty, never a crash
+
+    # C4 — internal attack paths over the fused world (the SAME lateral pass the web-engage fuse hook
+    # runs). Best-effort; mints no fact — every bridged edge restates a fired oracle.
+    try:
+        from .scanner.lateral import lateral_paths
+        from .worldmodel.impact import ImpactModel
+        lateral_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
+        result.lateral_paths = lateral_paths(
+            world, impact_model=ImpactModel.from_slug(slug), seq_base=lateral_base)
+    except Exception:
+        pass
+
+    # Opt-in event-spine mirror (only when --spine attached). Best-effort; never sinks the run.
+    if sink is not None:
+        try:
+            _run_reasoning_pass(sink, spine, slug, report, result, world)
+            _persist_plan_input(slug, report, world)
+        except Exception:
+            pass
+    return result
+
+
+def _run_fuse_only_cli(args: argparse.Namespace, spine: object) -> int:
+    """CLI leg for ``engage <slug> --fuse-only`` — a seedless cloud/K8s/infra posture run. Refuses a
+    stray seed URL (a fusion-only run has no web seed), runs the fusion-only engagement, and prints an
+    honest summary (an explicit empty note when nothing fused)."""
+    if args.seed_url:
+        print(f"engage --fuse-only takes NO seed url (a cloud/Kubernetes/infra posture run has no web "
+              f"seed); got {args.seed_url!r}. Drop the URL, or run a normal web engage.")
+        return 2
+    try:
+        result = run_fusion_only(args.slug, spine=spine)
+    except EngagementRefused as e:
+        print(f"engagement refused: {e}")
+        return 2
+    print(f"engage {args.slug}  (fusion-only, no web seed)")
+    print(f"  fused sensors     : {result.fused_leads} lead(s) folded, "
+          f"{result.fused_facts} oracle-promoted fact(s) "
+          f"(from targets/{args.slug}/fusion.json; leads stay leads, oracles prove facts)")
+    if result.lateral_paths:
+        print(f"  lateral paths     : {len(result.lateral_paths)} internal attack path(s) over the "
+              "fused world (C4)")
+    if result.fused_leads == 0 and result.fused_facts == 0:
+        print(f"  (honest empty — author targets/{args.slug}/fusion.json with a sensor task and drop "
+              "the provider export it points at; nothing was fabricated)")
+    return 0
+
+
 def _resolve_oob_relay_secret(args: argparse.Namespace) -> str | None:
     """Resolve the collaborator-relay poll secret WITHOUT leaking it on argv (X6). Preference:
     a file (--oob-relay-secret-file), then the CRUCIBLE_OOB_RELAY_SECRET env var, then the
@@ -1015,7 +1123,9 @@ def main(argv: list[str]) -> int:
                     "arsenal through the charter/scope/kill-switch/egress stack).",
     )
     parser.add_argument("slug", help="Engagement slug (directs charter, scope, evidence, log).")
-    parser.add_argument("seed_url", help="Absolute seed URL on an in-scope host.")
+    parser.add_argument("seed_url", nargs="?", default=None,
+                        help="Absolute seed URL on an in-scope host. Omit ONLY with --fuse-only "
+                             "(a seedless cloud/Kubernetes/infra posture run).")
     parser.add_argument("--request-budget", type=int, default=200)
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--max-audit-requests", type=int, default=0)
@@ -1145,6 +1255,15 @@ def main(argv: list[str]) -> int:
                              "entitlement/scope/egress); a LEAD becomes a FACT only when an oracle "
                              "confirms it. Off by default (0 sensors) = byte-identical. AUTO-ENABLED "
                              "when a targets/<slug>/fusion.json manifest is present (NW-3).")
+    parser.add_argument("--fuse-only", action="store_true",
+                        help="SEEDLESS fusion-only engagement (slice C2b — cloud / Kubernetes / infra "
+                             "POSTURE). Runs ONLY the operator's declared sensor fusion "
+                             "(targets/<slug>/fusion.json: cloud_import / kube_bench / declared_service …) "
+                             "and their deterministic promotion oracles (plus the C4 lateral-path pass), "
+                             "with NO web seed and NO crawl / recon / scan. Takes NO seed_url. Still "
+                             "requires a signed charter for <slug> (like a remote engage); every sensor "
+                             "is still gated at run time (kill-switch/entitlement/scope/egress). Honest "
+                             "empty when no fusion.json / the sensors no-op — nothing is fabricated.")
     parser.add_argument("--no-fuse-sensors", action="store_true",
                         help="Force sensor fusion OFF even when a targets/<slug>/fusion.json manifest "
                              "exists (the explicit opt-OUT that overrides NW-3's auto-enable-by-manifest-"
@@ -1246,6 +1365,23 @@ def main(argv: list[str]) -> int:
             spine = open_blackboard()
         except Exception:
             spine = None   # spine is opt-in telemetry; never block the engagement on it
+
+    # Slice C2b — the SEEDLESS fusion-only branch: a cloud/Kubernetes/infra posture run has no web seed
+    # and never enters the web-scan path below. It has its OWN fail-closed preflight (kill-switch +
+    # signed charter, inside run_fusion_only). Placed BEFORE the seed-URL requirement so the URL is
+    # genuinely optional here; honors --ephemeral exactly like the web path (tmpfs write-root + ZDR).
+    if args.fuse_only:
+        if args.ephemeral:
+            from .common.ephemeral import ephemeral_session
+            with ephemeral_session() as _sess:
+                print(f"  ephemeral/ZDR     : ON (tier {_sess.forced_tier}; tmpfs write-root "
+                      f"purged on exit; spine/bandit/outcomes suppressed)")
+                return _run_fuse_only_cli(args, spine)
+        return _run_fuse_only_cli(args, spine)
+    if not args.seed_url:
+        print("engage: seed_url is required (an absolute in-scope URL). For a seedless cloud / "
+              "Kubernetes / infra posture run, pass --fuse-only instead.")
+        return 2
 
     if args.ephemeral:
         from .common.ephemeral import ephemeral_session
