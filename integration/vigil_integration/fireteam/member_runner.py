@@ -98,7 +98,10 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
                 continue                              # pivot — bounded by `limit`
 
             # SUCCESS: an authorized edge. An inert (A0) edge executes nothing; a target-touching tool runs
-            # through the SAME governed executor (approved=False — a member never self-approves).
+            # through the SAME governed executor (approved=False — a member never self-approves). NOTE: only
+            # a USE_TOOL decision executes here; a PLAN_TOOLS (or other non-tool) member decision authorizes
+            # but has no `.tool`, so it is inert (fail-safe — a planning member contributes nothing until it
+            # proposes a concrete tool call; expanding a member PLAN_TOOLS to its calls is a follow-up).
             tool = getattr(decision, "tool", None)
             if outcome.verdict.tier != "A0" and tool is not None:
                 try:

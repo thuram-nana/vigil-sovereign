@@ -356,6 +356,9 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # privileged copy. run_fireteam validates the plan fail-closed (a malformed/over-cap/mutex plan
         # spawns NOTHING) and collect() re-fires the oracle so only a confirmed claim mints a fact.
         runner = build_member_runner(think=think_seam, run_tool=run_tool, parent_objective=state.objective)
+        # No ConfirmationRegistry is passed: a member's over-cap escalation is SURFACED (the engine records
+        # it as a queued_edge) but not yet persisted for a later signed action. Fail-closed — a queued
+        # member edge never auto-runs; wiring an actionable member-escalation registry is a follow-up.
         return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
                                         seq_start=int(seq)))
 
