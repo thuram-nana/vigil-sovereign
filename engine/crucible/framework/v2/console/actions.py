@@ -70,14 +70,14 @@ _CLOUD_PROVIDERS = frozenset({"aws", "gcp", "azure"})
 # An engagement slug directs targets/<slug>/... — it MUST be a single, path-safe component (no
 # separators, no traversal). A single-segment allowlist rules out '/', '\\', '..' and every shell
 # metacharacter, so it can never escape targets/ nor be mis-read as anything but a slug.
-_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 # A cloud identifier: an account id / subscription / project / cluster label. Allow alphanumerics and a
 # small safe punctuation set; DISALLOW '/' (which rules out URLs and CIDRs and path separators) and
 # every shell metacharacter. The label is NEVER a shell arg (the spawn is an argv list, no shell) and
 # NEVER a file path (data paths are derived from the validated slug) — this allowlist is defence in
 # depth so it also cannot be a seed URL or a network range.
-_CLOUD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:@-]{0,127}$")
+_CLOUD_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:@-]{0,127}\Z")
 
 
 def _valid_slug(slug: str) -> bool:

@@ -121,6 +121,19 @@ def test_fuse_only_with_a_present_but_unsigned_charter_is_refused(_isolate) -> N
         run_fusion_only(slug)
 
 
+def test_fuse_only_with_a_blank_signed_line_is_refused(_isolate) -> None:
+    # regression for the C2b authz-lens BLOCK: a BLANK `Signed:` line (the operator deleted the
+    # placeholder AND the backticks/Date scaffold) must NOT let the signature regex slurp the next
+    # content line as a bogus signature. The seedless preflight must refuse an empty Signed line.
+    slug = "blank-sig-slug"
+    (_isolate / slug).mkdir(parents=True, exist_ok=True)
+    (_isolate / slug / "charter.md").write_text(
+        "# charter\n\n## 1. Operator attestation\nSigned:\n\n## 2. In-scope systems\n"
+        "| `10.0.0.5` | Declared host | Yes |\n", encoding="utf-8")
+    with pytest.raises(EngagementRefused, match="not signed"):
+        run_fusion_only(slug)
+
+
 def test_fuse_only_with_a_tripped_kill_switch_is_refused(_isolate) -> None:
     from framework.v2.authority import KillSwitch
 

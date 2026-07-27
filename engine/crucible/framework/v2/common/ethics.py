@@ -36,7 +36,14 @@ from .errors import (
 #   Signed: `<name>`     Date: `__________`
 # When unsigned the angle-bracketed placeholder remains. Anything that
 # is not the literal placeholder counts as signed.
-_SIGNATURE_LINE = re.compile(r"^Signed:\s*`?([^`\n]+?)`?\s*(?:Date:.*)?$", re.MULTILINE)
+#
+# The signature value is captured on the SAME line as `Signed:` — the inter-token whitespace is
+# HORIZONTAL only (`[^\S\n]`, never a newline) and the value class excludes newlines, so a BLANK
+# `Signed:` line cannot let the match cross the newline and slurp the NEXT content line as a bogus
+# signature (a real auth-bypass the seedless-fusion red-pen found: an empty Signed line read as
+# "signed by '## 2. In-scope systems'"). The value is `*` (may be empty) so a blank line still
+# MATCHES and is then rejected below as an empty value — fail-closed.
+_SIGNATURE_LINE = re.compile(r"^Signed:[^\S\n]*`?([^`\n]*?)`?[^\S\n]*(?:Date:.*)?$", re.MULTILINE)
 _PLACEHOLDER = re.compile(r"<\s*name\s*>", re.IGNORECASE)
 
 

@@ -105,6 +105,30 @@ def test_present_but_unsigned_placeholder_charter_refused(cloud_env: Path) -> No
     assert "run_id" not in res
 
 
+def test_blank_signed_line_charter_refused(cloud_env: Path) -> None:
+    # regression for the C2b authz-lens BLOCK: a BLANK `Signed:` line must not be read as signed
+    # (the regex must not slurp the next line). The console gate refuses it BEFORE any spawn.
+    d = cloud_env / "targets" / "acme"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "charter.md").write_text(
+        "# charter\n\n## 1. Operator attestation\nSigned:\n\n## 2. In-scope systems\n"
+        "| `10.0.0.5` | Declared host | Yes |\n", encoding="utf-8")
+    res = actions.launch_cloud("acme", "cloud", "123456789012", provider="aws")
+    assert "error" in res and "charter" in res["error"]
+    assert not (cloud_env / "targets" / "acme" / "fusion.json").exists()
+    assert "run_id" not in res
+
+
+def test_validators_reject_a_trailing_newline_without_a_caller_strip() -> None:
+    # defence-in-depth (C2b inject-lens LOW): the validators must be self-sufficient — a trailing
+    # newline is rejected even though launch_cloud also strips its inputs (\Z, not $, so a value
+    # ending in a newline cannot pass).
+    assert actions._valid_slug("acme\n") is False
+    assert actions._valid_cloud_label("acct-1\n")[0] is False
+    assert actions._valid_slug("acme") is True
+    assert actions._valid_cloud_label("acct-1")[0] is True
+
+
 def test_url_target_refused(cloud_env: Path) -> None:
     _charter(cloud_env, "acme")
     d = actions.launch_cloud("acme", "cloud", "https://evil.example/seed", provider="aws")
