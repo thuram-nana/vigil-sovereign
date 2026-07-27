@@ -36,6 +36,15 @@ def test_unsafe_name_is_refused_without_a_file_read(monkeypatch):
     assert called["n"] == 0
 
 
+def test_overlong_name_never_raises(monkeypatch):
+    # red-pen BLOCK-1: a character-safe name whose <name>.md would exceed NAME_MAX must NOT raise
+    # ENAMETOOLONG (the docstring promises "never raises") — it degrades to has_doc=False, honestly.
+    # Guarded BEFORE any filesystem touch, so it holds even if a tooling dir exists.
+    for n in ("a" * 253, "a" * 300, "a" * 5000):
+        r = R.research_refs(n)                       # must not raise
+        assert r["has_doc"] is False and r["query"]
+
+
 def test_absent_strix_is_honest_not_a_crash(monkeypatch):
     monkeypatch.setattr(R, "_tooling_dir", lambda: None)   # simulate Strix not installed
     r = R.research_refs("nmap", purpose="network scanner")

@@ -45,18 +45,22 @@ def research_refs(name: str, *, purpose: str = "") -> dict:
     tooling dir."""
     name = str(name or "").strip().lower()
     generated = _default_query(name, purpose)
-    if not name or ".." in name or not _SAFE_NAME.match(name):
+    # len>200 refused BEFORE any filesystem touch: "<name>.md" must stay under NAME_MAX (255) or os.stat
+    # would raise ENAMETOOLONG — this keeps the "never raises" contract true (red-pen BLOCK-1).
+    if not name or ".." in name or len(name) > 200 or not _SAFE_NAME.match(name):
         return {"name": name, "has_doc": False, "docs": [], "query": generated,
                 "summary": "", "note": "no CLI-usage playbook for this tool"}
     d = _tooling_dir()
-    doc = (d / f"{name}.md") if d is not None else None
-    if doc is None or not doc.is_file():
+    if d is None:
         return {"name": name, "has_doc": False, "docs": [], "query": generated,
                 "summary": "", "note": "no CLI-usage playbook — research via the query below"}
-    # confine to the tooling dir (defence in depth against a resolved symlink escaping)
+    doc = d / f"{name}.md"
+    # ALL filesystem access (stat + resolve + read) is inside the guard, confined to the tooling dir
+    # (defence in depth against a resolved symlink escaping); any OSError → honest empty, never a raise.
     try:
-        if d not in doc.resolve().parents:
-            return {"name": name, "has_doc": False, "docs": [], "query": generated, "summary": ""}
+        if not doc.is_file() or d not in doc.resolve().parents:
+            return {"name": name, "has_doc": False, "docs": [], "query": generated,
+                    "summary": "", "note": "no CLI-usage playbook — research via the query below"}
         text = doc.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {"name": name, "has_doc": False, "docs": [], "query": generated, "summary": ""}
