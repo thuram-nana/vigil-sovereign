@@ -193,6 +193,34 @@ def test_console_allows_same_origin_post() -> None:
         assert st != 403
 
 
+def test_session_routes_create_list_rename_delete(tmp_path, monkeypatch) -> None:
+    # F2: the permanent-session POST routes go through the SAME CSRF/rebind guard and drive only the
+    # registry (which mints no fact). Isolate the live dir so the test never touches the repo's .vigil-live.
+    monkeypatch.setenv("VIGIL_LIVE_DIR", str(tmp_path / "live"))
+    same = {"Sec-Fetch-Site": "same-origin"}
+    with _running_server() as base:
+        # a cross-site create (no custom header) is refused before it touches the registry
+        st, _ = _post(base + "/api/session/create", csrf=False, data=b'{"name":"x"}')
+        assert st == 403
+        # same-origin create → ok, returns a session id
+        st, body = _post(base + "/api/session/create", headers=same, data=b'{"name":"Audit A"}')
+        assert st == 200
+        sid = json.loads(body)["session"]["id"]
+        # it lists (read route, no CSRF needed)
+        _, _, lst = _get(base + "/api/sessions")
+        assert any(s["id"] == sid for s in json.loads(lst)["sessions"])
+        # rename + soft delete
+        st, body = _post(base + "/api/session/rename", headers=same,
+                         data=json.dumps({"id": sid, "name": "Audit A2"}).encode())
+        assert st == 200 and json.loads(body)["session"]["name"] == "Audit A2"
+        st, body = _post(base + "/api/session/delete", headers=same, data=json.dumps({"id": sid}).encode())
+        assert st == 200 and json.loads(body)["deleted"] == "soft"
+        # an unsafe id on a mutating route is a clean 404, never a 500/traversal
+        st, _ = _post(base + "/api/session/rename", headers=same,
+                      data=json.dumps({"id": "../etc", "name": "x"}).encode())
+        assert st == 404
+
+
 def test_only_safe_actions_no_clear_or_destructive_route() -> None:
     # The console exposes exactly three SAFE POST actions (launch / reverify / trip).
     # It must NOT expose a kill-switch CLEAR, a scope/authority edit, or any other

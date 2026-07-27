@@ -184,6 +184,31 @@ def list_runs() -> dict[str, Any]:
     return {"runs": _safe(_list, default=[])}
 
 
+def sessions_list() -> dict[str, Any]:
+    """The operator's permanent SESSIONS (F2), newest first: registry entries + adopted legacy chats.
+    Read-only; never a secret. The Sessions screen builds on this."""
+    from . import sessions
+    return _safe(sessions.list_sessions, default={"sessions": []})
+
+
+def session_detail(session_id: str) -> dict[str, Any]:
+    """One session + the meta of its linked runs (for the Sessions screen). Fail-closed: an unsafe id
+    raises ValueError (→ 404 in do_GET); an unknown id returns an error body."""
+    from . import actions, sessions
+    got = sessions.get_session(session_id)          # raises ValueError on an unsafe id (→ 404)
+    if got.get("error"):
+        return got
+    sess = got["session"]
+    runs = []
+    for rid in sess.get("run_ids", []):
+        meta = _safe(lambda r=rid: json.loads(
+            (actions.run_dir(r) / "meta.json").read_text(encoding="utf-8")), default={})
+        runs.append({"run_id": rid, "mode": meta.get("mode"), "target": meta.get("target"),
+                     "status": meta.get("status", "unknown"), "slug": meta.get("slug"),
+                     "stream": meta.get("stream", "progress"), "started": meta.get("started")})
+    return {"session": sess, "runs": runs}
+
+
 def run_report(run_id: str) -> dict[str, Any]:
     """The saved `build_report` document for a console run (findings + attack_paths +
     summary), or an error marker if it has not finished yet."""
