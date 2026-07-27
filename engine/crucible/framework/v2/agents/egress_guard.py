@@ -44,12 +44,12 @@ into every `httpx.Client` they construct.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable
 
 import httpx
 
-from ..common import ethics
+from ..common import ethics, paths
 from ..common.errors import SovereigntyViolation
 from ..kernel import sovereignty
 
@@ -102,16 +102,81 @@ class EgressAllowlist:
         return ethics.host_matches_scope(host, list(self.all_entries()))
 
 
+# Common multi-label public suffixes — a wildcard whose base IS a public suffix opens an enormous egress
+# range. Not a full PSL (collector hosts are operator-provisioned + explicit); just the frequent footguns.
+_PUBLIC_2LABEL_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz",
+    "com.br", "co.in", "com.cn", "co.za", "com.mx", "com.sg", "co.kr",
+})
+
+
+def _collector_host_too_broad(h: str) -> bool:
+    """A collector egress host that would open a whole TLD / public suffix (a C2/exfil footgun on a
+    sovereignty boundary). A concrete apex or a wildcard whose base has ≥2 PRIVATE labels
+    (e.g. ``*.amazonaws.com``) is fine; a bare ``*``, a single-TLD-label wildcard (``*.com``, ``*.internal``,
+    ``*.local``), or a public-suffix wildcard (``*.co.uk``) is refused (H1)."""
+    h = h.strip().strip(".").lower()
+    if not h or h in ("*", "*.*"):
+        return True
+    if not h.startswith("*."):
+        return False       # a concrete host/apex is exactly as narrow as it reads
+    base = h[2:]
+    if not base or "." not in base:
+        return True        # '*.com', '*.internal' — a single label after the wildcard
+    return base in _PUBLIC_2LABEL_SUFFIXES
+
+
+def _slug_safe(slug: str) -> bool:
+    """A slug is a single path component (mirrors the console guard). Reject traversal/absolute so a crafted
+    slug can never read a collector-hosts file outside targets/<slug>/ (H2 defence-in-depth; slug is
+    operator-supplied, but this makes THIS reader traversal-safe regardless of the shared paths layer)."""
+    s = str(slug or "")
+    return bool(s) and ".." not in s and "/" not in s and "\\" not in s and ":" not in s \
+        and not s.startswith(".")
+
+
+def provisioned_collector_hosts(slug: str | None) -> tuple[str, ...]:
+    """The operator-provisioned live-collection egress hosts for ``slug`` — read from
+    ``targets/<slug>/collector-hosts.txt`` (one host/wildcard per line; ``#`` comments; blanks ignored).
+
+    This is a SEPARATE, explicit provisioning surface from the charter target scope: a live cloud/K8s
+    collector must reach a third-party control plane (e.g. ``sts.amazonaws.com``, the kube-apiserver) that is
+    deliberately NOT in the engagement's attack scope. DEFAULT EMPTY — absent file ⇒ no collector egress is
+    permitted (fail-closed; live collection stays off until the operator provisions it). Never raises."""
+    if not _slug_safe(slug):
+        return ()
+    try:
+        p = paths.target_dir(slug) / "collector-hosts.txt"
+        if not p.is_file():
+            return ()
+        out: list[str] = []
+        for ln in p.read_text(encoding="utf-8", errors="replace").split("\n"):
+            ln = ln.strip()
+            if ln and not ln.startswith("#"):
+                out.append(ln)
+        return tuple(dict.fromkeys(out))       # de-dup, preserve order
+    except OSError:
+        return ()
+
+
 def build_engagement_allowlist(
     *,
     slug: str | None = None,
     extra_hosts: Iterable[str] = (),
+    collector_hosts: Iterable[str] = (),
 ) -> EgressAllowlist:
     """Construct an allowlist for one engagement.
 
     Reads the charter scope via `ethics.parse_scope()` if `slug` is
     given; falls back to an empty list otherwise (still permits
     `localhost`-equivalent for the LLM backend).
+
+    ``collector_hosts`` (explicit, plus any provisioned in
+    ``targets/<slug>/collector-hosts.txt``) enable a LIVE read-only collector to reach a third-party control
+    plane. They are held in a SEPARATE allowlist axis from the target scope AND any that OVERLAP the target
+    scope are DROPPED (the intel doctrine: a recon source must be a third party disjoint from the target —
+    ``collector_scope_conflicts``). Empty by default ⇒ no collector egress is widened until the operator
+    provisions it (fail-closed).
 
     Under sovereign-strict, `llm_hosts` never includes a public LLM
     vendor because `kernel.sovereignty` has already refused those
@@ -129,9 +194,17 @@ def build_engagement_allowlist(
             # until the charter exists; the guard's job is to backstop,
             # not duplicate, that gate.
             target_hosts = ()
+    # union the explicit + provisioned collector hosts, then DROP any that (a) conflict with the target
+    # scope — a collector egress host must be a third party disjoint from what we are attacking — or
+    # (b) are too broad (a bare '*' / whole-TLD / public-suffix wildcard, an exfil footgun). Fail-closed.
+    requested = tuple(dict.fromkeys(tuple(collector_hosts) + provisioned_collector_hosts(slug)))
+    conflicts = set(collector_scope_conflicts(requested, target_hosts))
+    safe_collectors = tuple(h for h in requested
+                            if h and h not in conflicts and not _collector_host_too_broad(h))
     return EgressAllowlist(
         target_hosts=target_hosts,
         llm_hosts=tuple(_LOCAL_LLM_HOSTS),
+        collector_hosts=safe_collectors,
         extra_hosts=tuple(extra_hosts),
     )
 
