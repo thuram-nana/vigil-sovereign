@@ -142,6 +142,13 @@ class EntitlementError(CrucibleError, IntegrityError):
 # ---------------------------------------------------------------------------
 
 
+class EphemeralPurgeError(CrucibleError):
+    """An --ephemeral/ZDR session could not verify that its tmpfs run/spine/evidence dir
+    was fully purged on exit. Raised loudly and fail-closed: ephemeral's whole promise is
+    'leaves nothing on disk', so a residual dir is an integrity failure the operator must
+    see, never a silent best-effort cleanup."""
+
+
 class IntakeBudgetExceeded(CrucibleError):
     """UTI's per-intake request cap was hit."""
 

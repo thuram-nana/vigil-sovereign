@@ -1087,6 +1087,15 @@ def main(argv: list[str]) -> int:
                         help="Mirror the whole engagement onto the immutable blackboard event "
                              "spine (phases, findings with their live grounding verdict, "
                              "refusals). Opt-in, best-effort; off by default (zero impact).")
+    parser.add_argument("--ephemeral", action="store_true",
+                        help="EPHEMERAL / ZDR session (opt-in; persist-by-default). Re-root the "
+                             "run's evidence archive + audit log onto an in-memory tmpfs dir that "
+                             "is PURGED (and its absence verified) on exit; SUPPRESS every "
+                             "persistent writer that can't be tmpfs-redirected (the on-disk "
+                             "spine, the learned bandit, the outcome ledger); and FORCE the "
+                             "sovereignty ZDR/local tier (consumer Anthropic + Claude Code refused; "
+                             "anthropic-zdr / local preferred). Charter/scope reads are unaffected — "
+                             "an ephemeral run still reads its real charter and stays in scope.")
     parser.add_argument("--defender", action="store_true",
                         help="DEFENSIVE / purple-team pass (opt-in; off = byte-identical). Over the "
                              "confirmed findings: report detection GAPS in the operator's ruleset and "
@@ -1202,6 +1211,16 @@ def main(argv: list[str]) -> int:
               "needs operator victim references (bug_class:ref_param:victim_ref) and runs no "
               "checks without them.")
 
+    # D2 EPHEMERAL / ZDR: persist-by-default; only under --ephemeral. Suppress every
+    # persistent writer that CANNOT be tmpfs-redirected (the on-disk spine/blackboard, the
+    # learned bandit, the outcome ledger) by forcing their flags off here — BEFORE the spine
+    # is opened. The evidence archive + audit log are re-rooted onto the purged tmpfs write-
+    # root by the ephemeral_session context in _engage_body; the ZDR tier is forced there too.
+    if args.ephemeral:
+        args.spine = False
+        args.bandit_file = None
+        args.learn = False
+
     spine = None
     if args.spine:
         try:
@@ -1210,6 +1229,19 @@ def main(argv: list[str]) -> int:
         except Exception:
             spine = None   # spine is opt-in telemetry; never block the engagement on it
 
+    if args.ephemeral:
+        from .common.ephemeral import ephemeral_session
+        with ephemeral_session() as _sess:
+            print(f"  ephemeral/ZDR     : ON (tier {_sess.forced_tier}; tmpfs write-root "
+                  f"purged on exit; spine/bandit/outcomes suppressed)")
+            return _engage_body(args, spine)
+    return _engage_body(args, spine)
+
+
+def _engage_body(args: argparse.Namespace, spine: object) -> int:
+    """Run the engagement and print its report. Split out of ``main`` so it can run either
+    directly (persisting) or inside the ``ephemeral_session`` context (tmpfs + ZDR) without
+    duplicating the ~120-line report renderer."""
     try:
         result = run_engagement(
             args.slug, args.seed_url,

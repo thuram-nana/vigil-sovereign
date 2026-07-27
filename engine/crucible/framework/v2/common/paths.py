@@ -320,8 +320,51 @@ def engagement_log(slug: str) -> Path:
     return target_dir(slug) / "notes" / "engagement-log.md"
 
 
+# ---------------------------------------------------------------------------
+# D2 ephemeral / ZDR write-redirect. When an --ephemeral session is active,
+# `common.ephemeral` sets a tmpfs base here for the session's lifetime. Only the
+# per-engagement WRITE sinks that would otherwise land under the repo's `targets/`
+# — the HTTP evidence archive and the engagement audit log — re-root under it, so an
+# ephemeral run leaves NOTHING on the real disk. READ paths (charter/scope/threat-
+# model) are deliberately NOT redirected: a ZDR run still reads its real charter and
+# stays in-scope. Default None => byte-identical (every existing path is unchanged).
+# ---------------------------------------------------------------------------
+
+_EPHEMERAL_WRITE_ROOT: Path | None = None
+
+
+def set_ephemeral_write_root(base: Path | None) -> None:
+    """Set (or clear with None) the tmpfs base under which per-engagement write sinks are
+    re-rooted for an ephemeral/ZDR session. `common.ephemeral` owns the lifecycle: it sets
+    this on session enter and clears it on exit. Idempotent."""
+    global _EPHEMERAL_WRITE_ROOT
+    _EPHEMERAL_WRITE_ROOT = Path(base) if base is not None else None
+
+
+def ephemeral_write_root() -> Path | None:
+    """The active ephemeral write root, or None when persisting normally."""
+    return _EPHEMERAL_WRITE_ROOT
+
+
+def _write_target_dir(slug: str) -> Path:
+    """The per-engagement WRITE base for ``slug``: the ephemeral tmpfs base when a ZDR/ephemeral
+    session is active, else exactly ``target_dir(slug)`` — so the DEFAULT path is byte-identical
+    (and honours any test/deployment override of ``target_dir``); only ephemeral re-roots."""
+    if _EPHEMERAL_WRITE_ROOT is not None:
+        return _EPHEMERAL_WRITE_ROOT / slug
+    return target_dir(slug)
+
+
+def evidence_dir(slug: str, action_id: str) -> Path:
+    """The per-action HTTP evidence archive dir (request/response/body). Identical to
+    ``target_dir(slug)/evidence/<action_id>`` when persisting; re-rooted under the ephemeral
+    write base when a ZDR/ephemeral session is active — so captured HTTP (which can hold
+    Authorization/Cookie headers + bodies) never touches the real disk in that mode."""
+    return _write_target_dir(slug) / "evidence" / action_id
+
+
 def crucible_v2_log(slug: str) -> Path:
-    return target_dir(slug) / ".crucible-v2.log"
+    return _write_target_dir(slug) / ".crucible-v2.log"
 
 
 def planner_state(slug: str) -> Path:

@@ -121,6 +121,13 @@ def _verify(argv: list[str]) -> int:
     return reverify.main(argv)
 
 
+def _drift(argv: list[str]) -> int:
+    # Continuous drift: diff the oracle-CONFIRMED fact set between two runs (re-firing each
+    # run's retained certs). Pure, offline, deterministic — reuses verify.reverify.
+    from .verify import drift as drift_mod
+    return drift_mod.main(argv)
+
+
 def _capabilities(argv: list[str]) -> int:
     from .plugins import cli as plugins_cli
     return plugins_cli.main(argv)
@@ -217,6 +224,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "engage": _engage,
     "plan": _plan,
     "verify": _verify,
+    "drift": _drift,
     "capabilities": _capabilities,
     "aegis": _aegis,
     "evidence": _evidence,
