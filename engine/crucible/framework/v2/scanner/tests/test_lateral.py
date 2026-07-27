@@ -125,3 +125,61 @@ def test_missing_subject_edge_is_skipped_not_crashed() -> None:
                         attrs={"bug_class": "active_exposure"}, provenance="oracle:active_exposure",
                         confidence=0.99, first_seen=1, last_seen=1))
     assert bridge_confirmed_cloud_facts(world, seq_base=10) == 0
+
+
+def _finding_with_subject(world: WorldModel, *, fid: str, provenance: str, subject_id: str,
+                          subject_kind: NodeKind, detail: dict | None = None) -> None:
+    """A finding node at an ARBITRARY provenance + a single EVIDENCES edge to a crown-jewel subject —
+    used to probe the admission gate directly (bypassing _oracle_fact's oracle: provenance)."""
+    world.add_node(Node(id=fid, kind=NodeKind.FINDING, attrs=dict(detail or {}),
+                        provenance=provenance, confidence=0.99, first_seen=1, last_seen=1))
+    world.add_node(Node(id=subject_id, kind=subject_kind, attrs={}, provenance="intel:x",
+                        confidence=0.6, first_seen=1, last_seen=1))
+    world.add_edge(Edge(src=fid, dst=subject_id, kind=EdgeKind.EVIDENCES, attrs={},
+                        provenance=provenance, confidence=0.99, first_seen=1, last_seen=1))
+
+
+def test_grounded_but_non_oracle_provenance_is_never_bridged() -> None:
+    # GROUNDING_GROUNDED admits cert:/finding:/evidence: too — but the bridge gates on the EXACT
+    # confirming-oracle provenance, so a GROUNDED-but-not-cloud-oracle finding (even with a matching
+    # finding-id) is NOT bridged and never restamped oracle:*.
+    for prov in ("cert:signed-abc", "finding:derived-agg", "evidence:blob-42"):
+        world = WorldModel()
+        _finding_with_subject(world, fid="finding:active_exposure:crown", provenance=prov,
+                              subject_id="datastore:crown", subject_kind=NodeKind.DATASTORE)
+        assert bridge_confirmed_cloud_facts(world, seq_base=10) == 0, prov
+        assert world.get_edge(ATTACKER_ID, "datastore:crown", EdgeKind.REACHED) is None
+
+
+def test_other_grounded_oracle_kinds_are_not_bridged() -> None:
+    # ONLY active_exposure + policy_path are bridged; every OTHER fired cloud/posture oracle
+    # (cloud_posture, k8s_posture, reachability, tls_weakness, …) is a GROUNDED fact but NOT a
+    # lateral-movement edge — it must not become an attacker-traversable edge.
+    for kind in ("cloud_posture", "k8s_posture", "reachability", "tls_weakness"):
+        world = WorldModel()
+        _finding_with_subject(world, fid=f"finding:{kind}:res", provenance=f"oracle:{kind}",
+                              subject_id="datastore:res", subject_kind=NodeKind.DATASTORE,
+                              detail={"principal": "role/x"})
+        assert bridge_confirmed_cloud_facts(world, seq_base=10) == 0, kind
+        assert world.get_edge(ATTACKER_ID, "datastore:res", EdgeKind.REACHED) is None
+
+
+def test_finding_id_key_collision_is_skipped_fail_closed() -> None:
+    # two resources of DIFFERENT kinds sharing a key ('acme') collide on one finding id
+    # 'finding:policy_path:acme' (the id omits the kind) -> two EVIDENCES subjects. The principal attr
+    # is last-writer-wins and may not match a given subject, so the bridge SKIPS it fail-closed rather
+    # than cross-wire a grant onto the wrong resource.
+    world = WorldModel()
+    world.add_node(Node(id="finding:policy_path:acme", kind=NodeKind.FINDING,
+                        attrs={"principal": "role/app"}, provenance="oracle:policy_path",
+                        confidence=0.99, first_seen=1, last_seen=1))
+    for sid in ("datastore:acme", "host:acme"):
+        kind = NodeKind.DATASTORE if sid.startswith("datastore") else NodeKind.HOST
+        world.add_node(Node(id=sid, kind=kind, attrs={}, provenance="intel:x",
+                            confidence=0.6, first_seen=1, last_seen=1))
+        world.add_edge(Edge(src="finding:policy_path:acme", dst=sid, kind=EdgeKind.EVIDENCES,
+                            attrs={}, provenance="oracle:policy_path", confidence=0.99,
+                            first_seen=1, last_seen=1))
+    assert bridge_confirmed_cloud_facts(world, seq_base=10) == 0
+    assert world.get_edge("principal:role/app", "datastore:acme", EdgeKind.HAS_GRANT) is None
+    assert world.get_edge("principal:role/app", "host:acme", EdgeKind.HAS_GRANT) is None
