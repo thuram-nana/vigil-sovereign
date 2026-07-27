@@ -138,6 +138,10 @@ class AgentState(BaseModel):
     awaiting_approval: bool = False
     awaiting_question: bool = False
     done: bool = False
+    # Mid-run operator guidance (A5), folded into the think step's UNTRUSTED context. ADVISORY only — it
+    # steers reasoning like the objective does; every action it prompts still passes the gate + approval,
+    # and every claimed exploit still needs the oracle. It can neither fire a tool nor relax scope.
+    operator_instructions: list[str] = Field(default_factory=list)
 
     def record_lead(self, finding: Finding) -> None:
         finding.status = "lead"
