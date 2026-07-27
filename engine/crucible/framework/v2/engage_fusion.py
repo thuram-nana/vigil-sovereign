@@ -83,6 +83,17 @@ from .worldmodel.models import Edge, EdgeKind, Node, NodeKind
 _SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", "cicd_workflows",
                  "mobsf_static", "tls_cert", "android_manifest", "mesh_config", "email_auth", "identity")
 
+# The LIVE-collector allowlist (Phase C2): Tier-2 sensors that call a third-party control plane
+# read-only AT RUN TIME. Unlike the offline _SAFE_SENSORS these make network calls in their own
+# ``run`` (not merely in an opt-in re-verify handshake), so they are admitted to the fusion plan as a
+# SEPARATE, explicit, auditable set — and remain fully gated at ``run_sensor`` time: each declares an
+# ``ACTIVE_RECON`` capability (the engagement must be entitled) and its control-plane ``egress_hosts``
+# (the egress gate REFUSES it unless the operator provisioned them in ``targets/<slug>/collector-hosts.txt``
+# — C1). With no entitlement, no provisioned egress, or no ambient credentials the live collector
+# refuses / no-ops (fail-closed, default-off). Their leads are promoted by the SAME oracles as the
+# offline importers (``cloud_live`` reuses ``_reverify_cloud``), so no new promotion path is trusted.
+_LIVE_SENSORS = ("cloud_live",)
+
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
 # because of this scalar; belief stays a Beta posterior in the graph.
@@ -164,7 +175,7 @@ def _resolve_tasks(slug: str, ctx: Any) -> list[FusionTask]:
     tasks: list[FusionTask] = []
     for item in raw or []:
         t = _coerce_task(item)
-        if t is not None and t.sensor in _SAFE_SENSORS:
+        if t is not None and (t.sensor in _SAFE_SENSORS or t.sensor in _LIVE_SENSORS):
             tasks.append(t)
     return tasks
 
@@ -179,6 +190,7 @@ def _fusion_registry() -> ToolRegistry:
     their promotion oracles."""
     from .sensors.cicd import WorkflowScanSensor
     from .sensors.cloud import CloudPostureImportSensor
+    from .sensors.cloud_live import CloudLiveSensor
     from .sensors.k8s_runtime import KubeBenchSensor
     from .sensors.mobile import MobsfSensor
     from .sensors.tls_cert import CertScanSensor
@@ -192,6 +204,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(SbomVulnSensor())
     reg.register(KubeBenchSensor())          # offline kube-bench --json ingest (Tier-1)
     reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
+    reg.register(CloudLiveSensor())           # LIVE read-only AWS posture pull (Tier-2, gated; C2)
     reg.register(WorkflowScanSensor())        # offline GitHub-Actions workflow ingest (Tier-1)
     reg.register(MobsfSensor())               # offline MobSF static-report ingest (Tier-1)
     reg.register(CertScanSensor())            # offline X.509 certificate ingest (Tier-1)
@@ -840,6 +853,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * tls_cert        -> weak-crypto-artifact oracle over each retained certificate descriptor
       * cloud_import    -> policy-path oracle over each reachability-provable posture lead + cloud-posture
                            oracle over each achieved-state misconfiguration lead (3b)
+      * cloud_live      -> the SAME two cloud oracles over the LIVE read-only pull's retained export (C2:
+                           gated ACTIVE_RECON + egress; ambient creds; no new promotion path)
       * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c), PLUS the
                            weak-TLS + weak-crypto oracles over a GATED, OPT-IN live TLS handshake
     """
@@ -861,7 +876,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_mobile(world, res, seq=seq)
     if task.sensor == "tls_cert":
         return _reverify_crypto(world, res, seq=seq)
-    if task.sensor == "cloud_import":
+    if task.sensor in ("cloud_import", "cloud_live"):
         return _reverify_cloud(world, res, seq=seq)
     if task.sensor == "declared_service":
         n = _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
