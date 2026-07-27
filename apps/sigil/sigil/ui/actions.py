@@ -14,7 +14,7 @@ _CAP_ACTIONS = frozenset({"disable_gesture", "enable_gesture", "disable_voice", 
                           "disable_both", "enable_both"})
 _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_effort",
                                "check_secret", "check_secrets",
-                               "set_cloud_config"})   # secrets/model/provider/effort/cloud-config plane
+                               "set_cloud_config", "set_cloud_file_secret"})   # + cloud-config/file-cred plane
 ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke"}) | _CAP_ACTIONS \
     | _SETTINGS_ACTIONS
 
@@ -74,6 +74,9 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         if action == "set_cloud_config":
             return _settings.set_cloud_config(str(params.get("env", "")), str(params.get("value", "")),
                                               store=store, owner_key=owner, reason=reason)
+        if action == "set_cloud_file_secret":
+            return _settings.set_cloud_file_secret(str(params.get("name", "")), str(params.get("content", "")),
+                                                   store=store, owner_key=owner, reason=reason)
         return _settings.set_model(str(params.get("model", "")),
                                    store=store, owner_key=owner, reason=reason)
     raise ValueError(f"unhandled action: {action!r}")   # unreachable (ACTIONS-gated)

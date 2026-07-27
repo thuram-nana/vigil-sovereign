@@ -2175,14 +2175,23 @@
   // var (text input + Save). One "Test connection" per provider runs the provider's live probe.
   function drawCloudField(f, reload) {
     if (f.kind === "secret") {
-      var input = h("input", { type: "password", autocomplete: "off", spellcheck: "false",
-        placeholder: f.set ? "enter a new value to replace it" : "paste the value…" });
+      // a "file" credential (a pasted GCP service-account JSON / kubeconfig) uses a textarea + the
+      // base64-sealing action; a "line" credential uses a masked single-line input.
+      var isFile = f.input === "file";
+      var input = isFile
+        ? h("textarea", { rows: "6", autocomplete: "off", spellcheck: "false",
+            style: { fontFamily: "var(--mono, monospace)", fontSize: "12px", width: "100%" },
+            placeholder: f.set ? "paste a new value to replace it…" : "paste the whole file…" })
+        : h("input", { type: "password", autocomplete: "off", spellcheck: "false",
+            placeholder: f.set ? "enter a new value to replace it" : "paste the value…" });
       var save = h("button.btn.owner", { onClick: function () {
           var v = (input.value || "").trim();
           if (!v) { V.toast("Paste a value first.", true); return; }
           save.disabled = true;
-          settingsAct({ action: "set_secret", name: f.env, value: v, reason: "set " + f.env + " (cloud creds)" },
-            (f.label || f.env) + " sealed on this machine.",
+          var payload = isFile
+            ? { action: "set_cloud_file_secret", name: f.env, content: v, reason: "set " + f.env + " (cloud creds)" }
+            : { action: "set_secret", name: f.env, value: v, reason: "set " + f.env + " (cloud creds)" };
+          settingsAct(payload, (f.label || f.env) + " sealed on this machine.",
             function () { input.value = ""; reload(); refreshKeysBadge(); })
             .then(function () { save.disabled = false; });
         } }, [V.icon("key"), "Seal"]);

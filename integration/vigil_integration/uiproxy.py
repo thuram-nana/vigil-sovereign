@@ -33,6 +33,8 @@ would strand the console's ``/api/status``/``/api/events`` (they live on 8787), 
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import http.client
 import http.server
 import ipaddress
@@ -401,8 +403,12 @@ _PIDS_NAME = "pids"
 
 def _child_env() -> dict:
     """A clean env for cross-venv children — strip PYTHONPATH/PYTHONHOME so the parent's offense-side
-    path can never inject a module into a child (mirrors dispatch's discipline)."""
-    return {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    path can never inject a module into a child (mirrors dispatch's discipline), and strip the BASE64
+    file-content credential vars so a value that happens to be in the PARENT `vigil up` env can never leak
+    into a child's environment (the child only ever gets the materialised file PATH, never the content)."""
+    _content_vars = {cv for cv, _p, _f in _FILE_SECRET_MATERIALISE}
+    return {k: v for k, v in os.environ.items()
+            if k not in ("PYTHONPATH", "PYTHONHOME") and k not in _content_vars}
 
 
 def _secure_log(log_path: Path):
@@ -444,11 +450,75 @@ _OFFENSE_ENV_ALLOWLIST = frozenset({
     "ANTHROPIC_API_KEY", "MISTRAL_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY",
     "AZURE_OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
     "AZURE_CLIENT_SECRET",                      # cloud posture service-principal secret (read-only Azure)
+    "GOOGLE_CLOUD_PROJECT", "KUBE_CONTEXT",     # GCP/K8s non-secret config
+    # BASE64 file-content creds — bridged only to be MATERIALISED to a 0600 file here (then dropped from the
+    # child env; the child sees only the path via GOOGLE_APPLICATION_CREDENTIALS / KUBECONFIG).
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON", "KUBECONFIG_CONTENT",
     "GITHUB_TOKEN", "CRUCIBLE_API_KEY", "CRUCIBLE_OOB_RELAY_SECRET",   # never ELEVENLABS (voice = sovereign)
 })
 
+# BASE64 file-content secret → (path env var the SDK reads, FIXED on-disk filename). The bridge decodes the
+# content to a 0600 file with this exact name (never an operator-controlled name → no path traversal) and
+# hands the child only the PATH, never the raw content.
+_FILE_SECRET_MATERIALISE = (
+    ("GOOGLE_APPLICATION_CREDENTIALS_JSON", "GOOGLE_APPLICATION_CREDENTIALS", "gcp-sa.json"),
+    ("KUBECONFIG_CONTENT", "KUBECONFIG", "kubeconfig"),
+)
 
-def _resolve_offense_llm_env(sigil_bin: Path) -> dict:
+
+def _materialise_file_secrets(env: dict, runtime_dir: "Optional[Path]") -> dict:
+    """Turn any BASE64 file-content cred in ``env`` into a 0600 file the offense SDKs read by PATH. The raw
+    content var is ALWAYS removed from the child env (materialised or not) — an offense child never receives
+    the credential body as an env var, only a path. Fixed filenames under ``runtime_dir/creds`` (0700), so a
+    crafted value can never traverse. Fail-soft: a bad base64 / no runtime dir simply drops the cred (the
+    collector then fails closed with no cloud identity), never a crash, never a raw-content leak."""
+    creds_dir = (runtime_dir / "creds") if runtime_dir else None
+    for content_var, path_var, filename in _FILE_SECRET_MATERIALISE:
+        b64 = env.pop(content_var, None)                 # ALWAYS drop the raw content from the child env
+        if not b64 or creds_dir is None:
+            continue
+        try:
+            blob = base64.b64decode(b64, validate=True)
+        except (ValueError, binascii.Error):
+            continue                                     # not decodable → skip (collector fails closed)
+        try:
+            # NEVER follow a pre-planted symlink (a plaintext credential must not be written through one to a
+            # victim path). Refuse a symlinked creds dir; refuse a symlinked target; and O_NOFOLLOW on the
+            # open closes the TOCTOU (open fails rather than following a symlink swapped in at the last moment).
+            if creds_dir.is_symlink():
+                continue
+            creds_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(creds_dir, 0o700)
+            path = creds_dir / filename                  # FIXED name; no operator input in the path
+            # Remove any pre-existing name (a symlink / hardlink / stale file), then create a FRESH inode with
+            # O_EXCL: if anything is (re-)planted at the name in a TOCTOU race, O_EXCL fails rather than writing
+            # the plaintext credential THROUGH it. This defeats symlink- AND hardlink-write-through; O_NOFOLLOW
+            # is belt-and-braces, and the st_nlink==1 check confirms the created inode has no other hard link.
+            try:
+                os.unlink(str(path))
+            except FileNotFoundError:
+                pass
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                if os.fstat(fd).st_nlink != 1:
+                    os.close(fd)
+                    continue
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(blob)
+            except OSError:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                continue
+            os.chmod(str(path), 0o600)
+            env[path_var] = str(path)
+        except OSError:
+            continue                                     # symlink refused / could not write → skip (fail closed)
+    return env
+
+
+def _resolve_offense_llm_env(sigil_bin: Path, runtime_dir: "Optional[Path]" = None) -> dict:
     """Ask the SOVEREIGN venv for the runtime LLM env (model vars + resolved API key) and hand it to the
     keyless offense children, so the key/model set in the UI reaches the offense engine WITHOUT the
     offense plane ever importing sigil. The key may live in a keyring / TPM-sealed store only the sovereign
@@ -471,8 +541,11 @@ def _resolve_offense_llm_env(sigil_bin: Path) -> dict:
     # Defense-in-depth: even though the sovereign emitter is closed to these keys, the CONSUMER also
     # allowlists them by name (str→str, non-empty) — so this can never become an arbitrary env-injection
     # channel even if the emitter changed.
-    return {k: str(v) for k, v in data.items()
-            if k in _OFFENSE_ENV_ALLOWLIST and isinstance(v, str) and v}
+    env = {k: str(v) for k, v in data.items()
+           if k in _OFFENSE_ENV_ALLOWLIST and isinstance(v, str) and v}
+    # BASE64 file-content creds (GCP JSON / kubeconfig) are materialised to a 0600 file here and replaced by
+    # their PATH env var; the raw content never reaches an offense child as an env var.
+    return _materialise_file_secrets(env, runtime_dir)
 
 
 def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:
@@ -626,7 +699,7 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # Bridge the LLM key/model the operator set in the UI (sealed on the sovereign side) into the keyless
     # offense children's env — so an engagement actually reasons with the chosen model. Resolved via the
     # sovereign venv (subprocess), never logged. Empty when nothing is set → the offense engine runs keyless.
-    offense_llm_env = _resolve_offense_llm_env(sigil_bin)
+    offense_llm_env = _resolve_offense_llm_env(sigil_bin, base.resolve())
     console_argv = [str(crucible_bin), "console", "--port", str(CONSOLE_PORT),
                     "--allow-host", authority, "--allow-origin", origin]
     api_argv = [str(crucible_bin), "api", "--port", str(API_PORT),

@@ -164,6 +164,87 @@ def _probe_azure(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]"
         return FAIL, f"Azure rejected credentials: {type(e).__name__}"
 
 
+def _decode_b64(value: str) -> "str | None":
+    """Decode a BASE64-sealed file-content secret back to text; None if it is not valid base64/UTF-8."""
+    import base64
+    try:
+        return base64.b64decode(value, validate=True).decode("utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _probe_gcp(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
+    # value = BASE64(service-account JSON). google-auth is optional — absent ⇒ unknown (honest). Minting an
+    # access token validates the key WITHOUT touching any resource; the request goes to Google's fixed OAuth
+    # token endpoint. Any error ⇒ fail; the key material never appears in the verdict.
+    content = _decode_b64(value)
+    if not content:
+        return UNKNOWN, "stored GCP credential is not decodable — re-seal the service-account JSON"
+    try:
+        import json as _json
+        import socket as _socket
+        from urllib.parse import urlsplit
+        from google.oauth2 import service_account  # optional dependency
+        from google.auth.transport.requests import Request  # optional dependency
+    except Exception:  # noqa: BLE001
+        return UNKNOWN, "install google-auth to validate GCP credentials"
+    try:
+        info = _json.loads(content)
+        # defence-in-depth (the seal already pins this): the signed assertion must go only to a Google host,
+        # never an attacker-chosen token_uri (SSRF / assertion exfil).
+        tu = str(info.get("token_uri") or "")
+        if tu:
+            parts = urlsplit(tu)
+            host = (parts.hostname or "").lower().rstrip(".")
+            if parts.scheme != "https" or host not in ("oauth2.googleapis.com", "accounts.google.com"):
+                return FAIL, "GCP token_uri is not an https Google OAuth endpoint — refused"
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])
+        _old = _socket.getdefaulttimeout()
+        _socket.setdefaulttimeout(_TIMEOUT_S)                 # bound the token POST
+        try:
+            creds.refresh(Request())
+        finally:
+            _socket.setdefaulttimeout(_old)
+        return (OK, "GCP access token ok") if creds.token else (FAIL, "GCP returned no token")
+    except Exception as e:  # noqa: BLE001 — fail-closed; never leak the key
+        return FAIL, f"GCP rejected credentials: {type(e).__name__}"
+
+
+def _probe_kubernetes(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
+    # value = BASE64(kubeconfig). The kubernetes client is optional — absent ⇒ unknown (honest). A read-only
+    # GET /version validates reachability + auth; the apiserver host is pinned by the operator's kubeconfig,
+    # short-timeout, fail-closed. Any error ⇒ fail; the kubeconfig never appears in the verdict.
+    content = _decode_b64(value)
+    if not content:
+        return UNKNOWN, "stored kubeconfig is not decodable — re-seal it"
+    try:
+        import yaml  # optional dependency (pulled in by the kubernetes client)
+        from kubernetes import client as _kclient  # optional dependency
+        from kubernetes import config as _kconfig
+    except Exception:  # noqa: BLE001
+        return UNKNOWN, "install the kubernetes client to validate a kubeconfig"
+    try:
+        cfg = yaml.safe_load(content)
+        # defence-in-depth (the seal already refuses these): a user.exec / auth-provider cmd-path runs a LOCAL
+        # command when load_kube_config_from_dict is called — refuse BEFORE loading, so the probe is genuinely
+        # a read-only /version check and can never execute a pasted command.
+        for u in (cfg.get("users") or []) if isinstance(cfg, dict) else []:
+            user = u.get("user") if isinstance(u, dict) and isinstance(u.get("user"), dict) else {}
+            ap = user.get("auth-provider") if isinstance(user.get("auth-provider"), dict) else {}
+            apc = ap.get("config") if isinstance(ap.get("config"), dict) else {}
+            if isinstance(user.get("exec"), dict) or apc.get("cmd-path"):
+                return FAIL, "kubeconfig has a command credential plugin (exec/cmd-path) — refused; re-seal a token/cert kubeconfig"
+        api = _kclient.ApiClient()
+        context = str(ctx.get("KUBE_CONTEXT", "") or "").strip() or None
+        _kconfig.load_kube_config_from_dict(cfg, context=context, client_configuration=api.configuration)
+        code = _kclient.VersionApi(api).get_code(_request_timeout=_TIMEOUT_S)
+        ver = getattr(code, "git_version", "") or ""
+        return OK, (f"cluster reachable ({ver})" if ver else "cluster /version ok")
+    except Exception as e:  # noqa: BLE001 — fail-closed; never leak the kubeconfig
+        return FAIL, f"Kubernetes check failed: {type(e).__name__}"
+
+
 # name → probe. A secret NOT listed here has no live check (verdict = unknown, "no live check").
 _PROBES: "dict[str, Callable[[str, SecretStore, dict], tuple[str, str]]]" = {
     "ANTHROPIC_API_KEY": _probe_anthropic,
@@ -175,6 +256,8 @@ _PROBES: "dict[str, Callable[[str, SecretStore, dict], tuple[str, str]]]" = {
     "AZURE_OPENAI_API_KEY": _probe_azure_openai,
     "AWS_ACCESS_KEY_ID": _probe_aws,
     "AZURE_CLIENT_SECRET": _probe_azure,
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON": _probe_gcp,
+    "KUBECONFIG_CONTENT": _probe_kubernetes,
 }
 
 
@@ -187,7 +270,8 @@ def _probe_ctx() -> dict:
     return {k: os.environ.get(k, "") for k in
             ("AZURE_OPENAI_ENDPOINT", "CRUCIBLE_BEDROCK_REGION", "AWS_REGION",
              "CRUCIBLE_AWS_ENDPOINT_URL", "AWS_ROLE_ARN",
-             "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID")}
+             "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID",
+             "GOOGLE_CLOUD_PROJECT", "KUBE_CONTEXT")}
 
 
 # --- verdict cache (0600, value-free) --------------------------------------------------------------
