@@ -45,6 +45,7 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.SANITIZER_SIGNAL: (oracles.sanitizer_signal_oracle,),
     OracleKind.OOB_CALLBACK: (oracles.oob_callback_oracle,),
     OracleKind.SERVICE_REACHABILITY: (oracles.service_reachability_oracle,),
+    OracleKind.ACTIVE_EXPOSURE: (oracles.anonymous_reachable_oracle,),
     OracleKind.TLS_WEAKNESS: (oracles.tls_weakness_oracle, oracles.weak_crypto_artifact_oracle),
     OracleKind.VERSION_RANGE: (oracles.version_range_oracle,),
     OracleKind.POLICY_PATH: (oracles.policy_path_oracle,),

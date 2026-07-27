@@ -60,11 +60,17 @@ _EMAIL_KINDS = {OracleKind.EMAIL_AUTH_POSTURE}   # FORGE Domain 10 email-auth po
 _EMAIL_CLASSES = {"email_auth_misconfiguration"}
 _IDENTITY_KINDS = {OracleKind.IDENTITY_POSTURE}   # FORGE Domain 7 identity posture
 _IDENTITY_CLASSES = {"identity_misconfiguration"}
+# Slice-C3 (live, gated, UNAUTHENTICATED active-exposure oracle) additive kind/class: SAME
+# frozen-fallback discipline — a NEW OracleKind kept OUT of _ALL_ORACLES, reachable ONLY via its
+# `anonymous_reachable` row (keyed on an `anon_get` ctx field no benchmark/scan finding carries).
+_C3_KINDS = {OracleKind.ACTIVE_EXPOSURE}
+_C3_CLASSES = {"anonymous_reachable"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
-                   | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS)
+                   | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
+                   | _C3_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",

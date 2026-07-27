@@ -1076,3 +1076,133 @@ def test_cloud_live_export_promotes_through_reverify_like_cloud_import() -> None
     assert world.get_edge("finding:policy_path:s3/public-bucket",
                           "datastore:s3/public-bucket", EdgeKind.EVIDENCES) is not None
     assert not world.has_node("finding:policy_path:s3/internal")   # benign resource never promoted
+
+
+
+# ---- C3: confirmed-public cloud resource -> active-exposure FACT (opt-in, gated, unauthenticated) ----
+
+# a native AWS export: one bucket the posture oracle confirms PUBLIC (a real bucket NAME, so an anonymous
+# URL can be built), plus a private bucket that is neither public nor over-privileged (no probe, no fact).
+_CLOUD_PUBLIC_BUCKET = """
+{"provider": "aws",
+ "resources": [
+   {"id": "acme-public-assets", "public": true},
+   {"id": "acme-private", "grants": [{"principal": "role/dev", "access": "read"}]}
+ ]}
+"""
+
+_BUCKET_HOST = "acme-public-assets.s3.amazonaws.com"
+
+
+def _rescope(tmp_path: Path, *hosts: str) -> None:
+    """Overwrite the 'alpha' charter so the given hosts (e.g. the S3 bucket host) are in scope — the
+    active GET is gated on the URL host, distinct from the offline cloud_import file read."""
+    rows = "\n".join(f"| `{h}` | Host | Yes |" for h in hosts)
+    (tmp_path / "alpha" / "charter.md").write_text(
+        "# Engagement charter — `alpha`\n\n**Status:** Final\n\n## 1. Operator attestation\n\n"
+        "Signed: `tester`     Date: `2026-05-04`\n\n## 2. In-scope systems\n\n"
+        "| Host | Notes | Auth |\n|---|---|---|\n" + rows + "\n\n## 7. Posture\n\n- [x] **TEST**\n",
+        encoding="utf-8")
+
+
+def _expose_ctx(connect, *tasks) -> SimpleNamespace:
+    return SimpleNamespace(fusion_tasks=list(tasks), exposure_connect=connect)
+
+
+def test_confirmed_public_bucket_is_promoted_to_active_exposure_by_a_gated_anonymous_get(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    _rescope(tmp_path, _BUCKET_HOST)
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_PUBLIC_BUCKET)
+    # opt-in per task (confirm_exposure) + an injected connector returning a 200 + a real body listing
+    connect = lambda url, timeout: (200, {"Content-Type": "application/xml"}, b"<ListBucketResult/>")  # noqa: E731
+    fuse_sensors(world, "alpha", _expose_ctx(
+        connect, {"sensor": "cloud_import", "args": {"inventory_file": inv, "confirm_exposure": True}}))
+    # the POSTURE fact is present (public exposure re-derived over the retained policy graph) ...
+    assert world.get_node("finding:policy_path:acme-public-assets") is not None
+    # ... and ADDITIVELY the ACTIVE-EXPOSURE fact: the anonymous GET proved it reachable -> oracle-grounded
+    fact = world.get_node("finding:active_exposure:acme-public-assets")
+    assert fact is not None and fact.grounding == GROUNDING_GROUNDED and fact.provenance.startswith("oracle:")
+    assert world.get_edge("finding:active_exposure:acme-public-assets",
+                          "cloud_resource:acme-public-assets", EdgeKind.EVIDENCES) is not None
+    # the private bucket was never confirmed public, so it is never actively probed / promoted
+    assert not world.has_node("finding:active_exposure:acme-private")
+
+
+def test_a_403_response_promotes_no_active_exposure_fact(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    _rescope(tmp_path, _BUCKET_HOST)
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_PUBLIC_BUCKET)
+    # AccessDenied — the resource may be CONFIGURED public in the export but is NOT anonymously reachable
+    connect = lambda url, timeout: (403, {"Content-Type": "application/xml"}, b"<Error>AccessDenied</Error>")  # noqa: E731
+    fuse_sensors(world, "alpha", _expose_ctx(
+        connect, {"sensor": "cloud_import", "args": {"inventory_file": inv, "confirm_exposure": True}}))
+    # the posture fact still stands, but NO active-exposure fact (a non-2xx never confirms reachability)
+    assert world.get_node("finding:policy_path:acme-public-assets") is not None
+    assert not world.has_node("finding:active_exposure:acme-public-assets")
+
+
+def test_no_opt_in_means_no_anonymous_get_and_no_active_exposure_fact(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    _rescope(tmp_path, _BUCKET_HOST)
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_PUBLIC_BUCKET)
+    called = {"n": 0}
+    # NO confirm_exposure — the live GET must never run even though a connector + scope + entitlement exist
+    connect = lambda url, timeout: (called.update(n=called["n"] + 1) or (200, {}, b"x"))  # noqa: E731
+    fuse_sensors(world, "alpha", _expose_ctx(
+        connect, {"sensor": "cloud_import", "args": {"inventory_file": inv}}))
+    assert called["n"] == 0                                            # no anonymous probe attempted
+    assert not world.has_node("finding:active_exposure:acme-public-assets")
+    # the posture promotion still happened (it needs no live call) — C3 is strictly additive on top
+    assert world.get_node("finding:policy_path:acme-public-assets") is not None
+
+
+def test_active_exposure_out_of_scope_bucket_host_is_refused_never_connects(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    # default charter scopes 10.0.0.5, NOT the bucket host -> the GET's gate refuses before dialling
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_PUBLIC_BUCKET)
+    called = {"n": 0}
+    connect = lambda url, timeout: (called.update(n=called["n"] + 1) or (200, {}, b"x"))  # noqa: E731
+    fuse_sensors(world, "alpha", _expose_ctx(
+        connect, {"sensor": "cloud_import", "args": {"inventory_file": inv, "confirm_exposure": True}}))
+    assert called["n"] == 0                                            # never connected (fail-closed scope)
+    assert not world.has_node("finding:active_exposure:acme-public-assets")
+
+
+def test_active_exposure_fails_closed_without_the_active_recon_entitlement(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _rescope(tmp_path, _BUCKET_HOST)
+    from framework.v2 import entitlement
+    monkeypatch.setattr(entitlement, "require_capability",
+                        lambda cap: (_ for _ in ()).throw(PermissionError("active_recon not entitled")))
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_PUBLIC_BUCKET)
+    called = {"n": 0}
+    connect = lambda url, timeout: (called.update(n=called["n"] + 1) or (200, {}, b"x"))  # noqa: E731
+    fuse_sensors(world, "alpha", _expose_ctx(
+        connect, {"sensor": "cloud_import", "args": {"inventory_file": inv, "confirm_exposure": True}}))
+    assert called["n"] == 0                                            # never connected (fail-closed)
+    assert not world.has_node("finding:active_exposure:acme-public-assets")
+
+
+def test_active_exposure_is_idempotent_over_re_runs(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _grant_active_recon(monkeypatch)
+    _rescope(tmp_path, _BUCKET_HOST)
+    world = WorldModel()
+    inv = _write(tmp_path, "cloud.json", _CLOUD_PUBLIC_BUCKET)
+    connect = lambda url, timeout: (200, {"Content-Type": "application/xml"}, b"<ListBucketResult/>")  # noqa: E731
+    plan = _expose_ctx(connect, {"sensor": "cloud_import",
+                                 "args": {"inventory_file": inv, "confirm_exposure": True}})
+    fuse_sensors(world, "alpha", plan)
+    ids = {n.id for n in world.all_nodes()}
+    assert "finding:active_exposure:acme-public-assets" in ids
+    fuse_sensors(world, "alpha", plan)                                # a stable finding id, no duplicate
+    assert {n.id for n in world.all_nodes()} == ids

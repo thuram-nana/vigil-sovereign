@@ -99,6 +99,13 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # network-service reachability: a scanner's "open port" observation is confirmed a FACT only when
     # a real transport handshake reproduces (verify.reachability captures it; the oracle judges it).
     "service_reachable": (OracleKind.SERVICE_REACHABILITY,),
+    # Slice-C3 active exposure: a cloud resource a POSTURE already re-derived as PUBLIC (an anonymous
+    # grant path, POLICY_PATH) becomes a PROVEN anonymously-reachable FACT only when a bounded, gated,
+    # UNAUTHENTICATED HTTP GET actually reaches it (an unauthenticated 2xx with a present body). Like the
+    # posture rows, this NEW OracleKind is reachable ONLY via this row — it is NOT in the frozen
+    # _ALL_ORACLES fallback — and fires only when the ctx carries `anon_get`, which no benchmark/scan/engage
+    # finding does. So appending it leaves the unknown-class fallback and `make gate` byte-identical.
+    "anonymous_reachable": (OracleKind.ACTIVE_EXPOSURE,),
     # TLS posture: a deprecated protocol / weak cipher is a FACT only when a real handshake negotiated
     # it (verify.tls captures it; the oracle judges the negotiated version/suite).
     "weak_tls": (OracleKind.TLS_WEAKNESS,),
@@ -672,6 +679,12 @@ class OracleVerifier:
         if kind is OracleKind.SERVICE_REACHABILITY:
             if "handshake" in ctx:
                 return oracles.service_reachability_oracle(ctx["handshake"])
+            return None
+        # -- Slice-C3 active exposure — fire ONLY when the ctx carries `anon_get` (a retained
+        #    unauthenticated GET); no benchmark/scan/engage finding does, so it is inert on the gate path.
+        if kind is OracleKind.ACTIVE_EXPOSURE:
+            if "anon_get" in ctx:
+                return oracles.anonymous_reachable_oracle(ctx["anon_get"])
             return None
         if kind is OracleKind.TLS_WEAKNESS:
             if "tls" in ctx:
