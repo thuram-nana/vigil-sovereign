@@ -1990,6 +1990,89 @@ def k8s_posture_oracle(observed_control: Any) -> OracleSignal:
 
 
 # ---------------------------------------------------------------------------
+# Kubernetes RBAC posture — the ACHIEVED-STATE sibling of k8s_posture_oracle for a LIVE cluster read
+# (sensors.k8s_live). A live RBAC binding does not carry kube_bench's control-plane CLI flags, so this
+# oracle promotes a live-read RBAC LEAD to a FACT over the RETAINED binding evidence ALONE (offline, ZERO
+# cluster calls) — modelled on cloud_posture_oracle.
+#
+# It re-derives ONE unambiguous, near-zero-FP CRITICAL fact from the RAW retained binding (not a pre-computed
+# boolean the sensor decided): an ANONYMOUS subject (system:anonymous / system:unauthenticated) is bound to a
+# genuinely DANGEROUS built-in role (cluster-admin / admin / edit — the write/superuser ClusterRoles). That is
+# anonymous WRITE/admin access and no cluster ships it by default. Deliberately NOT fired: the built-in
+# ``system:public-info-viewer`` binding to ``system:unauthenticated`` (a read-only health/version binding
+# present, and benign, in EVERY cluster) — its role is not dangerous, so it never confirms. Privileged /
+# host-network pods are NOT promoted here — they are legitimately used by hardened system components
+# (kube-proxy, CNI, CSI) on every cluster, so they are LEADS, not facts. An anonymous binding to a
+# non-dangerous/custom role also stays a LEAD (surfaced for review, not asserted).
+_K8S_WL_STR_CAP = 4096
+_K8S_ANON_SUBJECTS = frozenset({"system:anonymous", "system:unauthenticated"})
+# built-in ClusterRoles that grant write/superuser — anonymous access to any of these is a critical fact.
+_K8S_DANGEROUS_ROLES = frozenset({"cluster-admin", "admin", "edit"})
+
+
+def _k8s_norm(value: Any) -> str:
+    return _coerce_text(value)[:_K8S_WL_STR_CAP].strip().lower()
+
+
+def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
+    """Fire when a retained LIVE RBAC binding PROVABLY grants a DANGEROUS built-in role to an ANONYMOUS
+    subject — the parse-proof that promotes a ``sensors.k8s_live`` RBAC LEAD to a FACT over the RETAINED
+    binding ALONE (offline, ZERO cluster calls). The oracle re-derives the judgment from the RAW retained
+    ``subjects`` list and ``role`` (NOT a boolean the sensor pre-computed), so it is an independent
+    membership-proof, not a rubber-stamp.
+
+    ``observed_control`` is the JSON-safe retained control::
+
+        {"check_id": "binding:ns/name"?, "resource_kind": "rolebinding"?, "name": str?,
+         "achieved_state": {"subjects": ["system:unauthenticated", "alice", …], "role": "cluster-admin"}}
+
+    Fires (0.9) ONLY when: a subject is ``system:anonymous`` / ``system:unauthenticated`` AND the bound
+    ``role`` is a genuinely dangerous built-in role (``cluster-admin`` / ``admin`` / ``edit``). Does NOT fire
+    (stays an honest LEAD) for: the benign built-in ``system:public-info-viewer`` binding (its role is not
+    dangerous), an anonymous binding to any other/custom role, a binding with no anonymous subject, or
+    malformed/absent evidence (non-mapping -> non-fire, never raises). Pure + deterministic — re-verifies
+    offline from the retained context. GROUNDING is procedural: the control MUST be the sensor's RETAINED
+    binding evidence, never a re-run of a cluster call laundered as a fact."""
+    if not isinstance(observed_control, Mapping):
+        return OracleSignal(kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+                            evidence="no k8s RBAC control evidence")
+    ctl = observed_control
+    cid = _coerce_text(ctl.get("check_id") or ctl.get("name"))[:_K8S_WL_STR_CAP].strip()
+    label = cid or "?"
+    state = ctl.get("achieved_state") if isinstance(ctl.get("achieved_state"), Mapping) else ctl
+    raw_subjects = state.get("subjects")
+    subjects = raw_subjects if isinstance(raw_subjects, (list, tuple)) else []
+    role = _k8s_norm(state.get("role"))
+    role_kind = _k8s_norm(state.get("role_kind"))
+    role_apigroup = _k8s_norm(state.get("role_apigroup"))
+    anon = [s for s in subjects if _k8s_norm(s) in _K8S_ANON_SUBJECTS]
+    # dangerous ONLY when the roleRef is the BUILT-IN ClusterRole in the RBAC apiGroup — a custom namespaced
+    # Role merely NAMED "edit"/"admin" is NOT the powerful built-in (an empty kind/apiGroup is tolerated for
+    # hand-authored/older evidence, but a non-ClusterRole kind or a non-RBAC apiGroup is rejected).
+    dangerous = (role in _K8S_DANGEROUS_ROLES
+                 and role_kind in ("clusterrole", "")
+                 and role_apigroup in ("rbac.authorization.k8s.io", ""))
+
+    if anon and dangerous:
+        who = _coerce_text(anon[0])[:_K8S_WL_STR_CAP].strip()
+        return OracleSignal(
+            kind=OracleKind.K8S_POSTURE, fired=True, confidence=0.9,
+            evidence=(f"k8s RBAC fact: binding {label} grants the dangerous built-in ClusterRole {role!r} to "
+                      f"an ANONYMOUS subject {who!r} — an unauthenticated caller has write/admin access "
+                      f"(cluster-wide for a ClusterRoleBinding, namespace-scoped for a RoleBinding); re-derived "
+                      f"over the retained binding"),
+            observed={"check_id": cid, "rule": "anonymous_privileged_binding",
+                      "reason": "anonymous_dangerous_rbac", "role": role, "subject": who})
+
+    return OracleSignal(
+        kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+        evidence=(f"k8s RBAC control {label} does not bind a dangerous built-in ClusterRole to an anonymous "
+                  f"subject (role {role or '?'!r}; anonymous subjects: {len(anon)}) — not provably critical "
+                  f"(stays a lead)"),
+        observed={"check_id": cid, "role": role})
+
+
+# ---------------------------------------------------------------------------
 # Cloud / CSPM posture — promote a retained cloud-posture LEAD to a FACT over its ACHIEVED STATE
 # (Wave-F1). The achieved-state SIBLING of ``k8s_posture_oracle``.
 #
