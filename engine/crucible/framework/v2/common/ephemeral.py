@@ -22,10 +22,12 @@ An ephemeral session guarantees three things for its lifetime, and undoes them o
      The env var drives ``is_sovereign_mode()`` so the egress allowlist is enforced too; an
      injected policy is set so the force wins even over a sealed tier.
 
-  3. SUPPRESS PERSISTENCE.  ``is_active()`` lets write paths that CANNOT be tmpfs-redirected
-     (the on-disk spine/blackboard, plan-input, learned bandit, outcome ledger) be suppressed
-     by the caller. The engage path forces the spine off and skips those writes when a session
-     is active.
+  3. SUPPRESS PERSISTENCE.  Write paths that CANNOT be tmpfs-redirected (the on-disk spine/
+     blackboard, plan-input, learned bandit, outcome ledger) are suppressed by the ``--ephemeral``
+     engage path FORCING their flags off up front (``args.spine = False``, ``args.bandit_file =
+     None``, ``args.learn = False``) BEFORE the spine opens — so the spine sink is never built,
+     and plan-input (spine-gated) is skipped transitively. ``is_active()`` is a status query for
+     consumers/tests; it is not itself the suppression seam (the flag-forcing is).
 
 Everything restores exactly on exit (env, injected policy, the paths write-root), so a
 persisting run in the same process afterwards is byte-identical to never having gone
