@@ -168,6 +168,15 @@ def _slugify(raw: str, *, fallback: str) -> str:
     return s[:48] or fallback
 
 
+def provision_tool(body: dict) -> dict:
+    """On-demand install of ONE B1-admitted, missing host tool (Phase B2). CSRF/rebind-gated by the caller
+    (do_POST). Delegates to the fail-closed tools.install.install_tool: only an admitted tool, only its
+    DECLARED apt/pip hint (never a caller package/command), and only with explicit operator ``consent`` —
+    without consent it returns the exact command it WOULD run (the ask-operator path), mutating nothing."""
+    from ..tools.install import install_tool
+    return install_tool(str(body.get("name", "")), consent=bool(body.get("consent", False)))
+
+
 def _docker_ready() -> tuple[bool, str]:
     """Whether the Strix sandbox can run: the ``docker`` CLI is on PATH AND its daemon answers. Strix runs
     every agent inside a container and HARD-EXITS if docker is missing, so a codebase run must pre-flight
