@@ -92,7 +92,7 @@ _SAFE_SENSORS = ("declared_service", "sbom_vuln", "kube_bench", "cloud_import", 
 # — C1). With no entitlement, no provisioned egress, or no ambient credentials the live collector
 # refuses / no-ops (fail-closed, default-off). Their leads are promoted by the SAME oracles as the
 # offline importers (``cloud_live`` reuses ``_reverify_cloud``), so no new promotion path is trusted.
-_LIVE_SENSORS = ("cloud_live", "gcp_live")
+_LIVE_SENSORS = ("cloud_live", "gcp_live", "azure_live")
 
 # The confidence an oracle-confirmed vulnerable-dependency FACT enters at. It is a fact because the
 # version-range oracle deterministically re-derived membership over the retained advisory, not
@@ -190,6 +190,7 @@ def _fusion_registry() -> ToolRegistry:
     their promotion oracles."""
     from .sensors.cicd import WorkflowScanSensor
     from .sensors.cloud import CloudPostureImportSensor
+    from .sensors.azure_live import AzureLiveSensor
     from .sensors.cloud_live import CloudLiveSensor
     from .sensors.gcp_live import GcpLiveSensor
     from .sensors.k8s_runtime import KubeBenchSensor
@@ -207,6 +208,7 @@ def _fusion_registry() -> ToolRegistry:
     reg.register(CloudPostureImportSensor())  # offline cloud/CSPM export ingest (Tier-1)
     reg.register(CloudLiveSensor())           # LIVE read-only AWS posture pull (Tier-2, gated; C2)
     reg.register(GcpLiveSensor())             # LIVE read-only GCP posture pull (Tier-2, gated; C2·GCP)
+    reg.register(AzureLiveSensor())           # LIVE read-only Azure posture pull (Tier-2, gated; C2·Azure)
     reg.register(WorkflowScanSensor())        # offline GitHub-Actions workflow ingest (Tier-1)
     reg.register(MobsfSensor())               # offline MobSF static-report ingest (Tier-1)
     reg.register(CertScanSensor())            # offline X.509 certificate ingest (Tier-1)
@@ -859,6 +861,9 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
                            gated ACTIVE_RECON + egress; ambient creds; no new promotion path)
       * gcp_live        -> the SAME two cloud oracles over the LIVE GCP pull (provider-agnostic; a public
                            GCS bucket / project-IAM binding promotes exactly as AWS does)
+      * azure_live      -> the SAME two cloud oracles over the LIVE Azure pull (a public blob container —
+                           container publicAccess + account allowBlobPublicAccess + network internet-open
+                           three-scope — promotes as AWS)
       * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c), PLUS the
                            weak-TLS + weak-crypto oracles over a GATED, OPT-IN live TLS handshake
     """
@@ -880,7 +885,7 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
         return _reverify_mobile(world, res, seq=seq)
     if task.sensor == "tls_cert":
         return _reverify_crypto(world, res, seq=seq)
-    if task.sensor in ("cloud_import", "cloud_live", "gcp_live"):
+    if task.sensor in ("cloud_import", "cloud_live", "gcp_live", "azure_live"):
         return _reverify_cloud(world, res, seq=seq)
     if task.sensor == "declared_service":
         n = _reverify_reachability(world, task, res, seq=seq, slug=slug, connect=connect)
