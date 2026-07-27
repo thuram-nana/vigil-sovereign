@@ -380,12 +380,13 @@ def _reverify_k8s(world: Any, res: Any, *, seq: int) -> int:
 
 
 def _reverify_k8s_live(world: Any, res: Any, *, seq: int) -> int:
-    """C2·K8s promotion: the LIVE k8s-workload achieved-state oracle over each RETAINED live control. A
-    control whose achieved state re-derives a concrete insecure fact (a privileged container, a host-network
-    pod, an RBAC binding to an anonymous subject) is promoted to an oracle-grounded FACT on its CONTROL node;
-    a benign workload is left an honest LEAD. NO cluster calls — a pure re-derivation over the retained
-    control (mirrors :func:`_reverify_k8s`, but the collector reads the live cluster and the oracle is the
-    achieved-state ``k8s_workload_posture_oracle``, called directly like :func:`_reverify_crypto`)."""
+    """C2·K8s promotion: the LIVE k8s-RBAC achieved-state oracle over each RETAINED binding control. A binding
+    whose retained raw subjects + role re-derive a concrete critical fact (an ANONYMOUS subject bound to a
+    dangerous built-in role — cluster-admin/admin/edit) is promoted to an oracle-grounded FACT on its CONTROL
+    node; anything else (the benign public-info-viewer default, an anonymous binding to a non-dangerous role)
+    is left an honest LEAD. NO cluster calls — a pure re-derivation over the retained control (mirrors
+    :func:`_reverify_k8s`; the oracle ``k8s_workload_posture_oracle`` is called directly like
+    :func:`_reverify_crypto`)."""
     try:
         from .verify.oracles import k8s_workload_posture_oracle
     except Exception:
@@ -888,8 +889,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
 
       * sbom_vuln       -> version-range oracle over SBOM advisories
       * kube_bench      -> k8s-posture oracle over each retained CIS control (3a)
-      * k8s_live        -> the LIVE k8s-workload achieved-state oracle over each retained live control
-                           (privileged container / host-network pod / anonymous RBAC subject; C2·K8s)
+      * k8s_live        -> the LIVE k8s-RBAC achieved-state oracle over each retained binding control
+                           (an anonymous subject bound to a dangerous built-in role; C2·K8s)
       * cicd_workflows  -> CI/CD-posture oracle over each retained workflow control
       * mesh_config     -> mesh-posture oracle over each retained Istio/Linkerd control
       * email_auth      -> email-auth-posture oracle over each retained DNS policy control (Domain 10)

@@ -1,10 +1,11 @@
 """
-Phase C2 · K8s — LIVE read-only Kubernetes workload/RBAC posture collector (sensors.k8s_live) + its new
+Phase C2 · K8s — LIVE read-only Kubernetes RBAC posture collector (sensors.k8s_live) + its new
 achieved-state oracle (verify.oracles.k8s_workload_posture_oracle).
 
-Near-zero-FP by construction: the collector emits a control ONLY for an EXPLICIT insecure achieved state
-(a privileged container / a host-network pod / an RBAC binding to system:anonymous|system:unauthenticated),
-and the oracle fires ONLY on that explicit state — a benign workload mints nothing and promotes nothing.
+Near-zero-FP the hard way (the first cut over-promoted and was BLOCKed): the ONE confirmed FACT is an
+ANONYMOUS subject (system:anonymous / system:unauthenticated) bound to a genuinely DANGEROUS built-in role
+(cluster-admin / admin / edit). The built-in system:public-info-viewer binding to system:unauthenticated —
+present in EVERY cluster — must mint NOTHING; privileged/host-network pods are leads, not facts (deferred).
 """
 
 from __future__ import annotations
@@ -19,72 +20,89 @@ from framework.v2.sensors.k8s_live import (
 from framework.v2.verify.oracles import k8s_workload_posture_oracle
 
 
-# --- the new achieved-state oracle: fires only on an EXPLICIT insecure state ---
+def _binding(name, role, subjects, namespace=""):
+    return {"name": name, "namespace": namespace, "role": role, "subjects": subjects}
 
 
-def test_oracle_fires_on_each_explicit_insecure_state():
-    for state, rule in (({"privileged": True}, "privileged_container"),
-                        ({"host_network": True}, "host_network"),
-                        ({"anonymous_subject": True}, "anonymous_rbac_subject")):
-        sig = k8s_workload_posture_oracle({"check_id": "x", "achieved_state": state})
-        assert sig.fired and sig.confidence == 0.9 and sig.observed["rule"] == rule
+# --- the new oracle: re-derives (anonymous ∧ dangerous-role) from the RAW binding ---
 
 
-def test_oracle_does_not_fire_on_benign_or_unknown():
-    for state in ({}, {"privileged": False}, {"host_network": False}, {"anonymous_subject": False},
-                  {"privileged": None}, {"privileged": "maybe"}):
-        assert not k8s_workload_posture_oracle({"check_id": "x", "achieved_state": state}).fired
-    assert not k8s_workload_posture_oracle("garbage").fired                    # non-mapping → non-fire, no raise
+def test_oracle_fires_on_anonymous_dangerous_role():
+    for role in ("cluster-admin", "admin", "edit", "Cluster-Admin"):
+        sig = k8s_workload_posture_oracle(
+            {"check_id": "b", "achieved_state": {"subjects": ["system:unauthenticated"], "role": role}})
+        assert sig.fired and sig.confidence == 0.9 and sig.observed["rule"] == "anonymous_privileged_binding"
+    # system:anonymous too
+    assert k8s_workload_posture_oracle(
+        {"achieved_state": {"subjects": ["alice", "system:anonymous"], "role": "cluster-admin"}}).fired
+
+
+def test_oracle_does_not_fire_on_benign_or_non_dangerous():
+    # THE critical negative control: the built-in public-info-viewer binding present on EVERY cluster
+    assert not k8s_workload_posture_oracle(
+        {"achieved_state": {"subjects": ["system:authenticated", "system:unauthenticated"],
+                            "role": "system:public-info-viewer"}}).fired
+    # anonymous bound to a NON-dangerous / custom role → not a fact (a lead)
+    assert not k8s_workload_posture_oracle(
+        {"achieved_state": {"subjects": ["system:unauthenticated"], "role": "view"}}).fired
+    assert not k8s_workload_posture_oracle(
+        {"achieved_state": {"subjects": ["system:anonymous"], "role": "my-custom-role"}}).fired
+    # dangerous role bound to a NAMED (authenticated) subject → not anonymous → not a fact
+    assert not k8s_workload_posture_oracle(
+        {"achieved_state": {"subjects": ["alice", "system:serviceaccount:x:y"], "role": "cluster-admin"}}).fired
+    # malformed / absent
+    assert not k8s_workload_posture_oracle("garbage").fired
+    assert not k8s_workload_posture_oracle({"achieved_state": {"subjects": "x", "role": 5}}).fired
     assert not k8s_workload_posture_oracle({}).fired
 
 
-def test_oracle_rule_order_privileged_wins():
-    sig = k8s_workload_posture_oracle({"achieved_state": {"privileged": True, "host_network": True}})
-    assert sig.observed["rule"] == "privileged_container"                      # fixed order, deterministic
+# --- the collector translators (pure): only anon bindings, excluding the benign default ---
 
 
-# --- the collector translators (pure) ------------------------------------------
+def test_binding_controls_exclude_the_benign_default():
+    bindings = [
+        _binding("system:public-info-viewer", "system:public-info-viewer",
+                 ["system:authenticated", "system:unauthenticated"]),      # benign default → excluded
+        _binding("anon-admin", "cluster-admin", ["system:anonymous"]),     # critical → control
+        _binding("anon-view", "view", ["system:unauthenticated"], namespace="ns"),  # anon+non-dangerous → control (lead)
+        _binding("named-admin", "cluster-admin", ["alice"]),               # not anonymous → excluded
+    ]
+    ids = {c["check_id"] for c in k8s_workload_controls(bindings=bindings)}
+    assert "binding:/anon-admin" in ids and "binding:ns/anon-view" in ids
+    assert "binding:/system:public-info-viewer" not in ids                 # the every-cluster default: NO control
+    assert not any("named-admin" in i for i in ids)
 
 
-def test_pod_controls_only_for_insecure_pods():
-    pods = [{"name": "priv", "namespace": "ns", "privileged": True, "host_network": False},
-            {"name": "hostnet", "namespace": "ns", "privileged": False, "host_network": True},
-            {"name": "both", "namespace": "kube-system", "privileged": True, "host_network": True},
-            {"name": "benign", "namespace": "ns", "privileged": False, "host_network": False}]
-    controls = k8s_workload_controls(pods=pods)
-    ids = {c["check_id"] for c in controls}
-    assert "pod:ns/priv:privileged" in ids
-    assert "pod:ns/hostnet:hostnetwork" in ids
-    assert "pod:kube-system/both:privileged" in ids and "pod:kube-system/both:hostnetwork" in ids
-    assert not any("benign" in i for i in ids)                                 # a hardened pod emits nothing
+def test_a_default_cluster_mints_and_promotes_nothing():
+    # the BLOCK regression, proven end-to-end: a fully benign default cluster (only the public-info-viewer
+    # binding) yields NO controls, NO observations, and NO facts.
+    from framework.v2.engage_fusion import FusionTask, _reverify
+    from framework.v2.worldmodel.graph import WorldModel
 
-
-def test_binding_controls_only_for_anonymous_subjects():
-    bindings = [{"name": "anon", "role": "cluster-admin", "subjects": ["system:anonymous"]},
-                {"name": "unauth", "namespace": "ns", "role": "view", "subjects": ["system:unauthenticated"]},
-                {"name": "named", "role": "cluster-admin", "subjects": ["alice", "system:serviceaccount:x:y"]}]
-    controls = k8s_workload_controls(bindings=bindings)
-    ids = {c["check_id"] for c in controls}
-    assert "binding:/anon" in ids and "binding:ns/unauth" in ids
-    assert not any("named" in i for i in ids)                                  # a named-subject binding is not anon
+    default_only = [_binding("system:public-info-viewer", "system:public-info-viewer",
+                             ["system:authenticated", "system:unauthenticated"])]
+    controls = k8s_workload_controls(bindings=default_only)
+    assert controls == []
+    assert k8s_workload_observations(controls, seq=1) == []
+    world = WorldModel()
+    res = SimpleNamespace(ok=True, result=SimpleNamespace(output={"controls": controls}))
+    assert _reverify(world, FusionTask("k8s_live", {}), res, seq=1, slug="alpha") == 0
+    assert not any(n.id.startswith("finding:k8s_workload:") for n in world.all_nodes())
 
 
 def test_controls_totality():
-    assert k8s_workload_controls(pods="x", bindings=7) == []                   # non-iterable → total
-    assert k8s_workload_controls(pods=[7, {"name": ""}], bindings=[None]) == []
-
-
-# --- observations (LEADS) + the oracle promotes them ---------------------------
+    assert k8s_workload_controls(bindings=7) == []
+    assert k8s_workload_controls(bindings=[7, {"name": ""}, {"name": "x", "subjects": "y"}]) == []
 
 
 def test_observations_are_leads_keyed_per_control():
-    controls = k8s_workload_controls(pods=[{"name": "p", "namespace": "ns", "privileged": True}])
+    controls = k8s_workload_controls(bindings=[_binding("anon-admin", "cluster-admin", ["system:anonymous"])])
     obs = k8s_workload_observations(controls, seq=1)
-    assert len(obs) == 1 and obs[0].subject.key == "k8s-workload:pod:ns/p:privileged"
-    assert obs[0].attrs.get("privileged") is True                             # achieved state rides in attrs
+    assert len(obs) == 1 and obs[0].subject.key == "k8s-workload:binding:/anon-admin"
+    assert obs[0].attrs.get("role") == "cluster-admin" and obs[0].attrs.get("anonymous_subject") == "system:anonymous"
 
 
-# --- egress + fail-closed run + fusion wiring ----------------------------------
+# --- egress robustness + fail-closed run + fusion wiring ------------------------
 
 
 def test_egress_from_in_cluster_env(monkeypatch):
@@ -93,10 +111,14 @@ def test_egress_from_in_cluster_env(monkeypatch):
     assert K8sLiveSensor().egress_hosts == ("10.0.0.1",)
 
 
-def test_egress_empty_when_no_config(monkeypatch):
+def test_egress_from_kubeconfig_file(tmp_path, monkeypatch):
+    kc = tmp_path / "kubeconfig"
+    kc.write_text("apiVersion: v1\ncurrent-context: c\ncontexts:\n- name: c\n  context:\n    cluster: cl\n"
+                  "clusters:\n- name: cl\n  cluster:\n    server: https://api.my-cluster.example:6443\n",
+                  encoding="utf-8")
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
-    monkeypatch.delenv("KUBECONFIG", raising=False)
-    assert K8sLiveSensor().egress_hosts == ()                                  # coincides with the run() no-op
+    monkeypatch.setenv("KUBECONFIG", f"{kc}{__import__('os').pathsep}/nonexistent")   # multi-path, first wins
+    assert K8sLiveSensor().egress_hosts == ("api.my-cluster.example",)
 
 
 def test_run_fail_closed_without_kubernetes_client(monkeypatch):
@@ -114,23 +136,20 @@ def test_k8s_live_wired_into_fusion():
     assert isinstance(s, K8sLiveSensor) and s.tier == "T2" and s.capability == Capability.ACTIVE_RECON
 
 
-def test_k8s_live_controls_promote_through_reverify():
+def test_anonymous_cluster_admin_promotes_through_reverify():
     from framework.v2.engage_fusion import FusionTask, _reverify
     from framework.v2.worldmodel.graph import WorldModel
     from framework.v2.worldmodel.models import EdgeKind, GROUNDING_GROUNDED
 
-    controls = k8s_workload_controls(
-        pods=[{"name": "p", "namespace": "ns", "privileged": True, "host_network": False},
-              {"name": "ok", "namespace": "ns", "privileged": False, "host_network": False}],
-        bindings=[{"name": "anon", "role": "cluster-admin", "subjects": ["system:anonymous"]}])
+    controls = k8s_workload_controls(bindings=[
+        _binding("anon-admin", "cluster-admin", ["system:anonymous"]),      # critical → FACT
+        _binding("anon-view", "view", ["system:unauthenticated"])])        # anon+non-dangerous → LEAD only
     res = SimpleNamespace(ok=True, result=SimpleNamespace(output={"controls": controls}))
     world = WorldModel()
     promoted = _reverify(world, FusionTask("k8s_live", {}), res, seq=3, slug="alpha")
-    assert promoted == 2                                                       # privileged pod + anon binding
-    priv = world.get_node("finding:k8s_workload:k8s-workload:pod:ns/p:privileged")
-    assert priv is not None and priv.grounding == GROUNDING_GROUNDED
-    assert world.get_edge("finding:k8s_workload:k8s-workload:pod:ns/p:privileged",
-                          "control:k8s-workload:pod:ns/p:privileged", EdgeKind.EVIDENCES) is not None
-    assert world.get_node("finding:k8s_workload:k8s-workload:binding:/anon") is not None
-    # the benign pod promoted nothing
-    assert not any(n.id.startswith("finding:k8s_workload:") and "ns/ok" in n.id for n in world.all_nodes())
+    assert promoted == 1                                                    # only the anonymous cluster-admin
+    fid = "finding:k8s_workload:k8s-workload:binding:/anon-admin"
+    node = world.get_node(fid)
+    assert node is not None and node.grounding == GROUNDING_GROUNDED
+    assert world.get_edge(fid, "control:k8s-workload:binding:/anon-admin", EdgeKind.EVIDENCES) is not None
+    assert world.get_node("finding:k8s_workload:k8s-workload:binding:/anon-view") is None   # the lead is not a fact
