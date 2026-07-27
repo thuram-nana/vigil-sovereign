@@ -99,7 +99,10 @@ CLOUD_CONFIG_META = {
     "AWS_ROLE_ARN": {"provider": "aws", "label": "Assume-role ARN (optional)",
                      "placeholder": "arn:aws:iam::123456789012:role/ReadOnlyAudit", "optional": True},
     "CRUCIBLE_AWS_ENDPOINT_URL": {"provider": "aws", "label": "Endpoint override (optional)",
-                                  "placeholder": "http://localhost:4566  (LocalStack / self-hosted)", "optional": True},
+                                  "placeholder": "http://localhost:4566  (LocalStack / self-hosted)", "optional": True,
+                                  "warn": "Your AWS credentials (a signed STS request, plus the session token if "
+                                          "set) are sent to THIS endpoint. Use it only for a LocalStack / self-hosted "
+                                          "endpoint you control. Leave blank for real AWS."},
     "AZURE_TENANT_ID": {"provider": "azure", "label": "Tenant id",
                         "placeholder": "00000000-0000-0000-0000-000000000000", "optional": True},
     "AZURE_CLIENT_ID": {"provider": "azure", "label": "Client (application) id",
@@ -577,7 +580,7 @@ def settings_status() -> dict:
                 fields.append({
                     "env": env, "kind": "config", "label": cmeta.get("label", env),
                     "placeholder": cmeta.get("placeholder", ""), "optional": bool(cmeta.get("optional")),
-                    "value": cval, "set": bool(cval),
+                    "warn": cmeta.get("warn", ""), "value": cval, "set": bool(cval),
                 })
         cloud_providers.append({"id": prov["id"], "label": prov["label"], "purpose": prov.get("purpose", ""),
                                 "probe_env": prov["probe_env"], "fields": fields})

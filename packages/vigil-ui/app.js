@@ -2208,6 +2208,7 @@
     return h("div.field", null, [
       h("label", null, f.label || f.env),
       h("div.row-flex", null, [cin, csave]),
+      f.warn ? h("div.hint", { style: { color: "var(--warn, #d9a441)" } }, [V.icon("info"), " " + f.warn]) : null,
     ]);
   }
 

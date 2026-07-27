@@ -64,6 +64,14 @@ def test_cloud_providers_view_groups_full_field_set(env):
     assert provs["azure"]["probe_env"] == "AZURE_CLIENT_SECRET"
 
 
+def test_endpoint_override_carries_a_credential_warning(env):
+    # LOW-1 mitigation: the custom-endpoint field warns that credentials are sent there.
+    st = smod.settings_status()
+    aws = [p for p in st["cloud_providers"] if p["id"] == "aws"][0]
+    ep = [f for f in aws["fields"] if f["env"] == "CRUCIBLE_AWS_ENDPOINT_URL"][0]
+    assert ep["kind"] == "config" and "credentials" in ep["warn"].lower()
+
+
 def test_sealed_cloud_secret_is_redacted_in_the_view(env):
     store, owner, _ = env
     smod.set_secret("AZURE_CLIENT_SECRET", AZ_SECRET, store=store, owner_key=owner)
