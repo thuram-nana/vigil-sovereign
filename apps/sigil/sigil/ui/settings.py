@@ -16,6 +16,7 @@ Two closed allowlists keep this a real, bounded control (never an arbitrary env-
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from typing import Optional
 
@@ -59,6 +60,16 @@ SECRET_META = {
     "AZURE_CLIENT_SECRET": {"category": "cloud", "probe": True, "label": "Azure client secret",
                             "purpose": "The service-principal secret for read-only Azure posture testing. Set the "
                                        "tenant / client / subscription ids below; validated via an AAD token."},
+    # File-content credentials (pasted multi-line, sealed BASE64 so the line-based envfile stays safe; the
+    # offense bridge materialises them to a 0600 file the SDK reads). `input: file` → a textarea in the UI.
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON": {
+        "category": "cloud", "probe": True, "input": "file", "label": "GCP service-account JSON",
+        "purpose": "Paste a read-only service-account key (the whole JSON). Sealed on this machine; the "
+                   "collector reads it via GOOGLE_APPLICATION_CREDENTIALS. Validated by minting an access token."},
+    "KUBECONFIG_CONTENT": {
+        "category": "cloud", "probe": True, "input": "file", "label": "Kubeconfig",
+        "purpose": "Paste a kubeconfig for the cluster to test (read-only context preferred). Sealed here; the "
+                   "collector reads it via KUBECONFIG. Validated with a read-only call to the cluster's /version."},
     # --- Integrations ---
     "GITHUB_TOKEN": {"category": "integration", "probe": True, "label": "GitHub token",
                      "purpose": "Lets the auto-patch engine push a fix branch and open a gated pull request. "
@@ -109,8 +120,20 @@ CLOUD_CONFIG_META = {
                         "placeholder": "the app-registration id", "optional": True},
     "AZURE_SUBSCRIPTION_ID": {"provider": "azure", "label": "Subscription id (optional)",
                               "placeholder": "the subscription to scan", "optional": True},
+    "GOOGLE_CLOUD_PROJECT": {"provider": "gcp", "label": "Project id (optional)",
+                             "placeholder": "the GCP project to scan", "optional": True},
+    "KUBE_CONTEXT": {"provider": "kubernetes", "label": "Context (optional)",
+                     "placeholder": "kubeconfig context to use (blank = current-context)", "optional": True},
 }
 CLOUD_CONFIG_VARS = tuple(CLOUD_CONFIG_META)
+
+# The cloud secrets whose value is pasted MULTI-LINE file content (a service-account JSON, a kubeconfig).
+# They are sealed BASE64 (single line → the envfile line-injection guard stays satisfied) via
+# set_cloud_file_secret; the offense bridge materialises them to a 0600 file the SDK's path env var points at.
+CLOUD_FILE_SECRETS = {
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON": {"path_env": "GOOGLE_APPLICATION_CREDENTIALS", "kind": "json"},
+    "KUBECONFIG_CONTENT": {"path_env": "KUBECONFIG", "kind": "kubeconfig"},
+}
 
 # The ordered per-provider layout for the Settings UI. Each field name is either a SECRET_META secret
 # (masked) or a CLOUD_CONFIG_META config var (shown). `probe_env` is the secret whose LIVE probe validates
@@ -125,6 +148,14 @@ CLOUD_PROVIDERS = (
      "purpose": "Read-only Azure posture via a service principal (tenant + client id + secret). Validated with "
                 "an AAD token; the check touches no resource.",
      "fields": ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID")},
+    {"id": "gcp", "label": "Google Cloud (GCP)", "probe_env": "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+     "purpose": "Read-only GCP posture. Paste a service-account key JSON; validated by minting an access "
+                "token (no resource is touched). The collector reads it via the ambient credential chain.",
+     "fields": ("GOOGLE_APPLICATION_CREDENTIALS_JSON", "GOOGLE_CLOUD_PROJECT")},
+    {"id": "kubernetes", "label": "Kubernetes", "probe_env": "KUBECONFIG_CONTENT",
+     "purpose": "Read-only Kubernetes posture. Paste a kubeconfig; validated with a read-only call to the "
+                "cluster's /version. Prefer a context bound to a read-only ServiceAccount.",
+     "fields": ("KUBECONFIG_CONTENT", "KUBE_CONTEXT")},
 )
 
 # The canonical env vars each plane reads (persisted, non-secret) + delivered to the keyless offense
@@ -410,6 +441,46 @@ def set_cloud_config(env: str, value: str, *, store, owner_key, reason: str = ""
     return {"ok": True, "action": "set_cloud_config", "env": env, "value": cleaned, "recorded_seq": seq}
 
 
+_MAX_FILE_SECRET_LEN = 6144      # raw content; base64 (~4/3×) must stay under _MAX_SECRET_LEN=8192
+
+
+def _validate_file_content(kind: str, content: str) -> None:
+    """Light sanity check that pasted file content is the RIGHT kind of file (catches a paste error early;
+    it is NOT a security control — the content is owner-supplied). Raises ValueError on an obvious mismatch."""
+    if kind == "json":
+        try:
+            obj = json.loads(content)
+        except (ValueError, TypeError):
+            raise ValueError("not valid JSON — paste the whole service-account key file") from None
+        if not isinstance(obj, dict) or obj.get("type") != "service_account":
+            raise ValueError("not a service-account key (expected a JSON object with type=service_account)")
+    elif kind == "kubeconfig":
+        low = content.lower()
+        if "apiversion" not in low or ("clusters" not in low and "current-context" not in low):
+            raise ValueError("does not look like a kubeconfig (expected apiVersion + clusters/current-context)")
+
+
+def set_cloud_file_secret(name: str, content: str, *, store, owner_key, reason: str = "") -> dict:
+    """Seal a pasted MULTI-LINE cloud file credential (a GCP service-account JSON, a kubeconfig). Because the
+    envfile tier is line-based, the content is stored BASE64 (single line — the line-injection guard stays
+    satisfied) via the SAME sealing/spine machinery as any secret; the offense bridge materialises it back to
+    a 0600 file. Returns {ok, name, fingerprint, …} — NEVER the content. Fail-closed: an unknown name, empty/
+    oversized content, or content of the wrong kind is refused."""
+    if name not in CLOUD_FILE_SECRETS:
+        raise ValueError(f"unknown cloud file secret {name!r}: only {', '.join(CLOUD_FILE_SECRETS)} may be set here")
+    if not isinstance(content, str):
+        raise ValueError("file content must be a string")
+    content = content.strip()
+    if not content:
+        raise ValueError("file content is empty")
+    if len(content) > _MAX_FILE_SECRET_LEN:
+        raise ValueError(f"file content too large (> {_MAX_FILE_SECRET_LEN} bytes)")
+    _validate_file_content(CLOUD_FILE_SECRETS[name]["kind"], content)
+    import base64
+    b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")   # single line, no injection chars
+    return set_secret(name, b64, store=store, owner_key=owner_key, reason=reason)
+
+
 def check_secret(name: str, *, store, owner_key, reason: str = "") -> dict:
     """Run a LIVE health probe for one secret (does it actually work?) and record the (non-secret) verdict on
     the spine. Returns {ok, name, status, reason, checked_at} — never the value. Fail-closed: an unknown name
@@ -568,8 +639,8 @@ def settings_status() -> dict:
                 present = bool(val)
                 health = cached_health(env) if present else None
                 fields.append({
-                    "env": env, "kind": "secret", "label": meta.get("label", env),
-                    "purpose": meta.get("purpose", ""), "set": present,
+                    "env": env, "kind": "secret", "input": meta.get("input", "line"),
+                    "label": meta.get("label", env), "purpose": meta.get("purpose", ""), "set": present,
                     "fingerprint": _fingerprint(val) if present else None,
                     "probeable": bool(meta.get("probe")),
                     "health": (health or {"status": "unchecked", "reason": "", "checked_at": 0}) if present else None,
