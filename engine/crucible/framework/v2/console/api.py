@@ -538,6 +538,24 @@ def tool_profiles_data() -> dict[str, Any]:
     })
 
 
+def tool_research_data(name: str) -> dict[str, Any]:
+    """Per-tool deep-research pointers (Phase B3): the tool's playbook official-docs URLs + the canonical
+    web_search query. Offline + advisory + read-only (reads the vendored Strix playbook only; no network,
+    no egress). Fail-closed on an unsafe/unknown name (returns has_doc=False with a generated query)."""
+    def _read() -> dict[str, Any]:
+        from ..tools.registry import probe_tools
+        from ..tools.research import research_refs
+        purpose = ""
+        for t in probe_tools().get("tools", []):
+            if str(t.get("name", "")).lower() == str(name or "").strip().lower():
+                purpose = str(t.get("purpose", "") or "")
+                break
+        return research_refs(name, purpose=purpose)
+
+    return _safe(_read, default={"name": name, "has_doc": False, "docs": [], "query": "",
+                                 "summary": "", "error": "could not build research refs"})
+
+
 def capabilities_data() -> dict[str, Any]:
     """The ENGAGE capability packs the New-Assessment wizard offers under 'pick tools' — the SINGLE
     source of truth (``actions.ENGAGE_CAPABILITIES``) that a launch maps a picked id onto a real,

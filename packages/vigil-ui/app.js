@@ -382,6 +382,19 @@
           } }, [V.icon("bolt"), "Install"]);
         V.mount(installSlot, btn);
       }
+      // deep-research pointers (B3): fetch the tool's official docs + the canonical research query on demand
+      var researchSlot = h("span", { style: { flex: "1 1 100%" } });
+      var rbtn = h("button.btn.sm", { onClick: function () {
+          rbtn.disabled = true;
+          V.getJSON(OFF("/api/toolresearch/" + encodeURIComponent(p.name))).then(function (r) {
+            rbtn.disabled = false;
+            var kids = [h("div.mono.dim", { style: { fontSize: "var(--fs-xs)" } }, "research query: " + (r.query || "—"))];
+            (r.docs || []).forEach(function (u) { kids.push(h("div", { style: { fontSize: "var(--fs-xs)" } }, h("a", { href: u, target: "_blank", rel: "noreferrer" }, u))); });
+            if (!r.has_doc) kids.push(h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, r.note || "no playbook — research via the query above"));
+            V.mount(researchSlot, kids);
+          }).catch(function () { rbtn.disabled = false; V.toast("research lookup failed", true); });
+        } }, [V.icon("book"), "Research"]);
+      V.mount(researchSlot, rbtn);
       return h("div", { style: { display: "flex", alignItems: "center", gap: "8px", padding: "6px 0", borderBottom: "1px solid var(--border)", flexWrap: "wrap" } }, [
         h("span.mono", { style: { minWidth: "120px", fontWeight: "600" } }, p.name),
         p.in_host_roster ? h("span.pill.sm", { title: "a host security CLI" }, "host CLI")
@@ -389,6 +402,7 @@
         chip,
         h("span", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, signals),
         installSlot,
+        researchSlot,
         p.admitted ? null : h("span.dim", { style: { fontSize: "var(--fs-xs)", flex: "1 1 100%" } }, p.admit_reason),
       ]);
     }
