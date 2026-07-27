@@ -149,6 +149,24 @@ def test_public_signal_with_unknown_bpa_is_not_confirmed_public():
     assert r["acl_public"] is True and r["bpa_known"] is False          # retained as an un-promoted lead
 
 
+def test_partial_bpa_config_is_unknown_not_defaulted_false():
+    # defence-in-depth (LOW): a PARTIAL BPA config (only reachable from a non-AWS endpoint_url) must be
+    # UNKNOWN, not have its absent keys defaulted False — else a possibly-blocking scope reads 'open'.
+    from framework.v2.sensors.cloud_live import _bpa_fields
+    assert _bpa_fields({"PublicAccessBlockConfiguration": {}}) is None
+    assert _bpa_fields({"PublicAccessBlockConfiguration": {"IgnorePublicAcls": True}}) is None   # partial
+    assert _bpa_fields({"PublicAccessBlockConfiguration": {                                       # complete -> read
+        "BlockPublicAcls": False, "IgnorePublicAcls": True,
+        "BlockPublicPolicy": False, "RestrictPublicBuckets": False}}) == {
+        "BlockPublicAcls": False, "IgnorePublicAcls": True,
+        "BlockPublicPolicy": False, "RestrictPublicBuckets": False}
+    # a bucket whose (only) BPA scope is a partial config -> unknown scope -> public NOT confirmed
+    r = bucket_resource({"name": "b", "acl": _ACL_PUBLIC,
+                         "public_access_block": {"PublicAccessBlockConfiguration": {"IgnorePublicAcls": False}}},
+                        account_bpa=_BPA_OFF_FIELDS)
+    assert "public" not in r                       # one scope unknown -> not both-known -> conservative
+
+
 def test_account_level_bpa_overrides_bucket_absence():
     # bucket has no BPA, but the ACCOUNT enforces IgnorePublicAcls -> a public ACL is still neutralised
     r = bucket_resource({"name": "b", "acl": _ACL_PUBLIC, "public_access_block": _BPA_OFF},

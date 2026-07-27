@@ -122,6 +122,12 @@ def _bpa_fields(pab: Any) -> dict | None:
     cfg = pab.get("PublicAccessBlockConfiguration")
     if not isinstance(cfg, dict):
         return None
+    # defence-in-depth: a real AWS/S3 response ALWAYS carries all four booleans (even when only one was
+    # set); a PARTIAL config is possible only from a non-AWS/S3-compatible ``endpoint_url``. Treat it as
+    # UNKNOWN (None) rather than defaulting the absent keys to False — which would read a possibly-blocking
+    # scope as 'not blocking', the less-conservative direction. An unknown scope stays un-promoted.
+    if not all(k in cfg for k in _BPA_KEYS):
+        return None
     return {k: bool(cfg.get(k)) for k in _BPA_KEYS}
 
 
