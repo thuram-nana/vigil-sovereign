@@ -335,12 +335,62 @@
     V.mount(V.$("#tools-body"), body);
   }
 
+  // Tool consciousness (Phase B1): each tool joined across its host install-status, its CLI-usage playbook,
+  // and whether the engine can build a validated gated argv for it — with the admission verdict (only a
+  // globally-recognised tool it can drive via CLI/background is adopted). Advisory; execution stays gated.
+  function drawToolProfiles(d) {
+    const host = V.$("#tool-consciousness"); if (!host) return;
+    const profs = (d && d.profiles) || [];
+    const s = (d && d.summary) || {};
+    if (d && d.error && !profs.length) {
+      V.mount(host, V.card("Tool consciousness", "ADVISORY", h("div.empty", null, "Could not build profiles: " + d.error), false));
+      return;
+    }
+    function row(p) {
+      var chip = p.admitted
+        ? h("span.pill.sm.ok", { title: p.admit_reason }, [V.icon("check"), " Controllable (" + (p.control_surface || "cli") + ")"])
+        : h("span.pill.sm.danger", { title: p.admit_reason }, [V.icon("info"), " Refused"]);
+      var signals = [
+        p.has_skill_doc ? h("span.pill.sm", { title: "has a CLI-usage playbook the agent reads" }, "playbook ✓") : null,
+        p.has_typed_builder ? h("span.pill.sm", { title: "the engine builds a validated, gated argv" }, "typed argv ✓") : null,
+        p.installed ? h("span.pill.sm.ok", { title: p.path || "" }, "installed") :
+          (p.install_hint ? h("span.pill.sm", { title: p.install_hint }, "installable") : h("span.pill.sm", null, p.status || "—")),
+      ];
+      return h("div", { style: { display: "flex", alignItems: "center", gap: "8px", padding: "6px 0", borderBottom: "1px solid var(--border)", flexWrap: "wrap" } }, [
+        h("span.mono", { style: { minWidth: "120px", fontWeight: "600" } }, p.name),
+        p.in_host_roster ? h("span.pill.sm", { title: "a host security CLI" }, "host CLI")
+                         : h("span.pill.sm", { title: "an agent capability skill (not a host security CLI)" }, "agent skill"),
+        chip,
+        h("span", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, signals),
+        p.admitted ? null : h("span.dim", { style: { fontSize: "var(--fs-xs)", flex: "1 1 100%" } }, p.admit_reason),
+      ]);
+    }
+    var admitted = profs.filter(function (p) { return p.admitted; });
+    var refused = profs.filter(function (p) { return !p.admitted; });
+    V.mount(host, V.card("Tool consciousness", "ADVISORY", h("div", null, [
+      h("div.grid.cols-4", { style: { marginBottom: "12px" } }, [
+        V.tile("Adopted", String(s.admitted || 0), "recognised + controllable", "up"),
+        V.tile("Refused", String(s.refused || 0), "not usable/recognised", s.refused ? "" : "up"),
+        V.tile("Installed", String(s.installed || 0), "on PATH", ""),
+        V.tile("Installable", String(s.installable_missing || 0), "adopted, not yet installed", ""),
+      ]),
+      h("div.legend", { style: { marginBottom: "8px" } }, [V.icon("info"),
+        "The arsenal is curated: a tool is adopted only if it is globally recognised AND the engine can drive it (a CLI playbook or a typed argv builder). Everything here is advisory — a real run still passes the safety gate."]),
+      admitted.length ? h("div", null, admitted.map(row)) : h("div.empty", null, "No tools adopted yet."),
+      refused.length ? h("details", { style: { marginTop: "12px" } }, [
+        h("summary", { style: { cursor: "pointer", color: "var(--text-1)" } }, "Refused / not-yet-usable (" + refused.length + ")"),
+        h("div", { style: { marginTop: "8px" } }, refused.map(row)),
+      ]) : null,
+    ]), false));
+  }
+
   function renderTools(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Tools"),
         h("span.sub", null, "External security tools the offense engine runs on this host — installed live.")]),
       h("div.grid.cols-4#tools-summary"),
       h("div#tools-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Probing host tools…")),
+      h("div#tool-consciousness", { style: { marginTop: "16px" } }),
     ]);
     V.getJSON(OFF("/api/tools")).then(renderToolsData).catch(function () {
       V.mount(V.$("#tools-body"), h("div.empty", null, [
@@ -348,6 +398,7 @@
         h("p", null, "Could not reach the offense console to probe host tools. Start it (vigil up / the console server) and reload."),
       ]));
     });
+    V.getJSON(OFF("/api/toolprofiles")).then(drawToolProfiles).catch(function () { /* panel just stays empty */ });
   }
 
   // ==========================================================================

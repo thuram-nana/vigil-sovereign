@@ -521,6 +521,23 @@ def tools_data() -> dict[str, Any]:
     })
 
 
+def tool_profiles_data() -> dict[str, Any]:
+    """The unified ToolProfiles + the tool-consciousness admission gate (Phase B1): each tool joined across
+    the host roster (install/live-status/binary/version), its Strix CLI-usage playbook, and whether the
+    executor can build a validated gated argv for it — with a fail-closed verdict on whether it is
+    globally-recognised AND CLI/background-controllable enough to be adopted. Advisory + read-only (issues
+    no traffic, installs nothing); every real execution still passes the WARDEN gate."""
+    def _read() -> dict[str, Any]:
+        from ..tools.profile import build_profiles
+        return build_profiles()
+
+    return _safe(_read, default={
+        "profiles": [],
+        "summary": {"total": 0, "admitted": 0, "refused": 0, "installed": 0, "installable_missing": 0},
+        "error": "could not build tool profiles",
+    })
+
+
 def capabilities_data() -> dict[str, Any]:
     """The ENGAGE capability packs the New-Assessment wizard offers under 'pick tools' — the SINGLE
     source of truth (``actions.ENGAGE_CAPABILITIES``) that a launch maps a picked id onto a real,

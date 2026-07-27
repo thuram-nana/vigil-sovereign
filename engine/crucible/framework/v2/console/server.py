@@ -64,6 +64,7 @@ _EXACT_ROUTES = {
     "/api/memory": api.memory_data,
     "/api/kernel": api.kernel_data,
     "/api/tools": api.tools_data,
+    "/api/toolprofiles": api.tool_profiles_data,
     "/api/capabilities": api.capabilities_data,
     "/api/aegis/status": api.aegis_status,
 }
