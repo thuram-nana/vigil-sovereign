@@ -603,6 +603,34 @@ class Neo4jGraphWriter:
         rows = self._read_rows(_LEAD_CYPHER, {"engagement_id": eid})
         return [_summary_from_props(p) for p in rows][:lim]
 
+    def retrieve_priors(self, *, group_id: Optional[str] = None, limit: int = 8,
+                        extra_partitions: Any = ()) -> list[dict[str, Any]]:
+        """NON-AUTHORITATIVE PRIOR context from the session's Neo4j partition(s), for the think step (F3).
+
+        Returns bounded, deterministic advisory summaries — the confirmed facts + leads ALREADY projected
+        into this session's partition (an earlier run's findings, or this run's so far). It is RETRIEVAL,
+        never authority: a prior confirmed here is a LEAD in the current run — THIS run's oracle must
+        re-fire over its own evidence to mint a fact. Each row is tagged with its ``origin`` partition so
+        F4's cross-session union stays provenance-preserving; ``extra_partitions`` unions the operator's
+        CONSENTED connected sessions (empty in F3 — a session reads only its own partition). Nothing here is
+        read back by the gate. Total ([] on any error); no wallclock/rng (severity/confirmed/ref order)."""
+        eid = str(group_id) if group_id is not None else self.group_id
+        extra = [str(p) for p in extra_partitions] if isinstance(
+            extra_partitions, (list, tuple, set, frozenset)) else []
+        parts = sorted({eid, *extra})
+        lim = max(0, int(limit)) if isinstance(limit, int) and not isinstance(limit, bool) else 8
+        out: list[dict[str, Any]] = []
+        for part in parts:
+            for s in self.query_confirmed(group_id=part, limit=lim):
+                out.append({"ref": s.ref, "title": s.title, "severity": s.severity,
+                            "bug_class": s.bug_class, "confirmed": True, "origin": part})
+            for s in self.query_leads(group_id=part, limit=lim):
+                out.append({"ref": s.ref, "title": s.title, "severity": s.severity,
+                            "bug_class": s.bug_class, "confirmed": False, "origin": part})
+        # deterministic rank: confirmed first, then higher severity, then ref (a total, stable order)
+        out.sort(key=lambda r: (0 if r["confirmed"] else 1, -severity_rank(r["severity"]), str(r["ref"])))
+        return out[:lim]
+
     def run_triage(self, *, high_only: bool = False, existing_refs: Any = (),
                    group_id: Optional[str] = None) -> RemediationDraft:
         """Run the 9 deterministic F10 triage queries (``TRIAGE_CYPHER``) over the Neo4j projection and

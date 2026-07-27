@@ -167,6 +167,10 @@ class EngineConfig:
     its seam to fail-closed (never a fake pass)."""
 
     slug: str
+    # F3: the SESSION this run belongs to. When set, it is the Neo4j graph PARTITION key (so each session
+    # owns a disjoint graph + its own accumulating prior context); empty falls back to the slug. It is a
+    # partition/organisation key only — it grants no authority and never widens scope.
+    session_id: str = ""
     base_dir: str = ".vigil-live"
     scope: Sequence[str] = field(default_factory=lambda: ("127.0.0.1",))
     # think backend
@@ -322,9 +326,28 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     # -- oracle (F2): confirm_and_certify over the retained oracle_context ---------------------------
     oracle = _build_oracle(prov)
 
-    # -- think (F2) ----------------------------------------------------------------------------------
+    # -- per-session knowledge graph (F3): the partition key is the SESSION id (falls back to the slug),
+    # so each session owns a disjoint Neo4j partition + accumulates its own prior context. graph_writer is
+    # set below in the projection block (None when no Neo4j is connected); think_seam reads it at CALL time
+    # (during engage), by which point it is assigned — Python closure late-binding.
+    # NB: session_id + slug share the one `engagement_id` partition namespace, so naming a session EXACTLY
+    # equal to an unrelated engagement's slug would merge their partitions — a low-risk, advisory-only leak
+    # (priors are non-authoritative + never read by the gate). session ids are auto-minted (timestamped /
+    # chat ids), so a collision needs a deliberate identical --session; we .strip() to avoid a blank alias.
+    graph_partition = (config.session_id or "").strip() or config.slug
+    graph_writer: Any = None
+
+    # -- think (F2) — folds the session's PRIOR graph context (F3) as UNTRUSTED advisory priors ----------
     def think_seam(state: AgentState) -> Any:
-        return think(state, _prompt_ctx(state), replay=config.replay, api_key=config.api_key)
+        ctx = _prompt_ctx(state)
+        if graph_writer is not None:
+            priors = graph_writer.retrieve_priors(group_id=graph_partition, limit=8)
+            if priors:
+                # PRIOR, NOT FACT: these are non-authoritative summaries from this session's partition (an
+                # earlier run's findings, or this run's so far). A prior confirmed in an earlier run must be
+                # RE-confirmed by THIS run's oracle to mint a fact here. think() nonce-fences the whole digest.
+                ctx += " " + _format_priors(priors)
+        return think(state, ctx, replay=config.replay, api_key=config.api_key)
 
     # -- detection mirror (WS-4) ---------------------------------------------------------------------
     def _cert_signer(message: bytes) -> str:
@@ -375,7 +398,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     from .graph_neo4j import Neo4jGraphWriter
     session_factory = build_neo4j_session_factory()
     if session_factory is not None:
-        writer = Neo4jGraphWriter(session_factory, group_id=config.slug)
+        graph_writer = Neo4jGraphWriter(session_factory, group_id=graph_partition)   # F3: per-session partition
         _mirror: dict[str, Any] = {}      # finding ref -> confirmed Finding, accumulated across the run
 
         def graph_project(facts: list) -> None:
@@ -395,10 +418,10 @@ def build_engine(config: EngineConfig) -> VigilEngine:
                 spine_record_from_finding(
                     f, seq=i, hash=str(getattr(f, "ref", "") or f"proj-{i}"),
                     signature_ref=str(getattr(f, "signature_ref", "") or getattr(f, "evidence_ref", "") or ""),
-                    engagement_id=config.slug)
+                    engagement_id=graph_partition)                        # F3: the per-session partition id
                 for i, (_ref, f) in enumerate(sorted(_mirror.items()))
             ]
-            writer.rebuild_from_spine(records, group_id=config.slug)
+            graph_writer.rebuild_from_spine(records, group_id=graph_partition)
 
     seams = EngineSeams(
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
@@ -514,6 +537,24 @@ def _prompt_ctx(state: AgentState) -> str:
         recent = " | ".join(state.operator_instructions[-5:])   # bounded; most-recent guidance wins
         ctx += f" operator_instructions={recent}"
     return ctx
+
+
+def _format_priors(priors: list) -> str:
+    """A compact, bounded rendering of the session's PRIOR graph context for the UNTRUSTED think digest.
+    Each entry is an advisory summary from the session partition (an earlier run's finding, or this run's so
+    far) — labelled ``advisory,not-facts`` so the model treats it as a lead. It authorizes nothing: every
+    action the model then proposes still passes the gate, and a prior confirmed finding is re-minted a FACT
+    only if THIS run's oracle re-fires. Separator-safe + length-bounded (no wallclock/rng)."""
+    parts = []
+    for p in priors[:8]:
+        tag = "confirmed-prior" if p.get("confirmed") else "lead-prior"
+        origin = str(p.get("origin", "") or "")
+        sev = str(p.get("severity") or "?")[:16]
+        what = str(p.get("bug_class") or p.get("title") or p.get("ref") or "?")[:48]
+        ref = str(p.get("ref") or "?")[:48]
+        frm = (";from=" + origin[:64]) if origin else ""
+        parts.append(f"{ref}:{sev}:{what}({tag}{frm})")
+    return "session_priors[advisory,not-facts]=" + " | ".join(parts)
 
 
 def _read(path: str) -> str:
