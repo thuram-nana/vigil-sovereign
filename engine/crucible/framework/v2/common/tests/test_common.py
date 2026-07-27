@@ -155,6 +155,68 @@ def test_require_charter_signed_raises_for_missing() -> None:
         ethics.require_charter_signed("does-not-exist")
 
 
+def _sig_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signed_line_body: str) -> tuple:
+    """Write a charter whose `Signed:` line is ``Signed:{signed_line_body}`` (the body carries the line
+    terminator) followed by a real content line, redirect paths.charter_path, and return
+    is_charter_signed's verdict. Probes the signature parser against separator / zero-width evasions."""
+    slug = "sig-probe"
+    d = tmp_path / "targets" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    text = "# charter\n\n## 1. Attestation\nSigned:" + signed_line_body + "## 2. In-scope systems\n| `h` | x |\n"
+    (d / "charter.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(paths, "charter_path",
+                        lambda s, _p=d / "charter.md": _p if s == slug else Path("/nonexistent"))
+    return ethics.is_charter_signed(slug)
+
+
+# A BLANK `Signed:` line terminated by ANY line separator (not just \n) must NOT slurp the next content
+# line as a bogus signature — the seedless-fusion auth-bypass CLASS the red-pen found. str.splitlines()
+# splits on all of these; re's ^/$ under MULTILINE would split on \n ALONE (so U+2028/U+2029/U+0085/FS
+# would let the value cross the visual break).
+@pytest.mark.parametrize("sep", ["\n", "\r\n", "\r", chr(0x85), chr(0x2028), chr(0x2029), chr(0x1c)])
+def test_blank_signed_line_any_separator_is_unsigned(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sep: str) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, sep)
+    assert not signed, f"blank Signed line + {sep!r} wrongly read as signed ({reason})"
+
+
+# An invisible (zero-width / format-character-only) value is not a signature.
+@pytest.mark.parametrize("zw", [chr(0x200B), chr(0xFEFF), chr(0x200B) + chr(0xFEFF)])
+def test_zero_width_only_signature_is_unsigned(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zw: str) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " " + zw + "\n")
+    assert not signed, f"zero-width-only value {zw!r} wrongly read as signed ({reason})"
+
+
+# Invisible-but-GRAPHICAL code points — Unicode category L/N/P/S yet ZERO visible ink, so a human sees a
+# blank Signed: line — must also read as empty. This is the full-DB-scanned set of such code points:
+# braille-blank U+2800, the Hangul fillers, the Egyptian "blank" hieroglyphs, and the null notehead — the
+# invisible-rendering routes the re-verification found. (See ethics._INVISIBLE_INK / _renders_blank.)
+@pytest.mark.parametrize("cp", [0x2800, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x13441, 0x13442, 0x1D159])
+def test_invisible_graphical_only_signature_is_unsigned(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cp: int) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " " + chr(cp) * 4 + "\n")
+    assert not signed, f"invisible-graphical U+{cp:04X} x4 wrongly read as signed ({reason})"
+
+
+# VISIBLE look-alikes that merely NAME a blank must NOT be over-rejected — they carry real ink, so a
+# human reading the charter sees a (weird but present) signature. BLANK SYMBOL ␢, SYMBOL FOR NULL ␀,
+# EMPTY SET ∅, a MONOSPACE letter, a Devanagari GAP FILLER, and a real Egyptian hieroglyph all sign.
+@pytest.mark.parametrize("cp", [0x2422, 0x2400, 0x2205, 0x1D670, 0xA8F9, 0x13000])
+def test_visible_lookalike_signature_is_signed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cp: int) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " " + chr(cp) + "\n")
+    assert signed, f"visible glyph U+{cp:04X} wrongly rejected as unsigned ({reason})"
+
+
+@pytest.mark.parametrize("name", ["tester", "Jane Doe", "O'Brien, J. (lead)", "Jos" + chr(0xe9),
+                                  chr(0x738b) + chr(0x5c0f) + chr(0x660e)])  # + a CJK name
+def test_real_signature_is_signed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " `" + name + "`   Date: `2026`\n")
+    assert signed, f"legit signature {name!r} wrongly rejected ({reason})"
+
+
 def test_parse_scope_extracts_hosts(synthetic_target: str) -> None:
     scope = ethics.parse_scope(synthetic_target)
     assert "synthetic-target.example" in scope

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -34,27 +35,87 @@ from .errors import (
 
 # The signature line in framework/templates/charter.md is:
 #   Signed: `<name>`     Date: `__________`
-# When unsigned the angle-bracketed placeholder remains. Anything that
-# is not the literal placeholder counts as signed.
-_SIGNATURE_LINE = re.compile(r"^Signed:\s*`?([^`\n]+?)`?\s*(?:Date:.*)?$", re.MULTILINE)
+# When unsigned the angle-bracketed placeholder remains. A signature counts only if it is NOT the
+# placeholder AND is a real (graphical) name.
+#
+# We ISOLATE the `Signed:` line with str.splitlines() and read the value from THAT LINE ALONE — this is
+# DELIBERATELY not an ``re``-MULTILINE ``^Signed:...$`` match. Python's ``re`` treats ONLY ``\n`` as a
+# line boundary for ``^``/``$``, so a BLANK ``Signed:`` line terminated by ANY other line separator a
+# human editor can produce — ``\r``, U+0085 (NEL), U+2028 (LINE SEP), U+2029 (PARA SEP), FS/GS/RS — would
+# let the value cross the visual break and slurp the NEXT content line as a bogus signature (a real
+# auth-bypass CLASS the seedless-fusion red-pen found: an empty Signed line read as "signed by
+# '## 2. In-scope systems'"). ``str.splitlines()`` splits on that FULL set, so the value can NEVER cross
+# a line break of any kind — fail-closed.
 _PLACEHOLDER = re.compile(r"<\s*name\s*>", re.IGNORECASE)
+_SIGNED_PREFIX = "Signed:"
+
+
+# Code points whose Unicode category is L/N/P/S (so they would pass the category test below) but which
+# render as ZERO visible ink — an "invisible signature" a human reads as blank. The category filter
+# already drops whitespace (Z*), control/format (C*: ZWSP U+200B, BOM U+FEFF, word-joiner U+2060, …) and
+# combining marks (M*); this set is the graphical-category exceptions. It is the COMPLETE set of assigned
+# L/N/P/S code points in the running Unicode DB whose glyph is a blank/filler/null placeholder (braille-
+# blank, the Hangul fillers, the Egyptian "blank" hieroglyphs, the null notehead) — found by a full-DB
+# scan. Visible look-alikes that merely NAME a blank ("BLANK SYMBOL" U+2422, "SYMBOL FOR NULL" U+2400,
+# "EMPTY SET" U+2205, the "MONOSPACE" letters, the visible GAP/SPACE FILLERs) are deliberately NOT here.
+# HONEST SCOPE: this rejects the invisible-rendering graphical code points Unicode defines today plus the
+# forward-compatible "…BLANK"-named family (_renders_blank). It is a self-attestation integrity check
+# (the engine agrees with a human on "is the Signed: line blank"), not a claim about every font.
+_INVISIBLE_INK = frozenset(
+    "\u2800"                      # BRAILLE PATTERN BLANK (So)
+    "\u115f\u1160\u3164\uffa0"    # HANGUL CHOSEONG / JUNGSEONG / FILLER / HALFWIDTH FILLER (Lo, DI)
+    "\U00013441\U00013442"        # EGYPTIAN HIEROGLYPH FULL / HALF BLANK (Lo)
+    "\U0001d159"                  # MUSICAL SYMBOL NULL NOTEHEAD (So)
+)
+
+
+def _renders_blank(c: str) -> bool:
+    """Forward-compatible backstop: a graphical code point whose Unicode name ENDS in ``BLANK`` renders
+    with no ink (BRAILLE PATTERN BLANK, EGYPTIAN HIEROGLYPH FULL/HALF BLANK, and any future ``… BLANK``).
+    The ``endswith`` — not ``in`` — avoids the visible ``BLANK SYMBOL`` (ends in SYMBOL). Unnamed /
+    unassigned code points return False (the category filter handles those)."""
+    try:
+        return unicodedata.name(c).endswith("BLANK")
+    except ValueError:
+        return False
+
+
+def _has_graphical(s: str) -> bool:
+    """True iff ``s`` has at least one VISIBLE-INK character — Unicode category Letter / Number /
+    Punctuation / Symbol, AND not one of the enumerated invisible code points in ``_INVISIBLE_INK``, AND
+    not a ``…BLANK``-named glyph (:func:`_renders_blank`). Whitespace, control (Cc), format (Cf: ZWSP,
+    BOM, word-joiner) and combining marks are already dropped by the category test; this additionally
+    rejects the fillers, braille-blank, Egyptian blank hieroglyphs and null notehead — so a value a human
+    sees as blank cannot authorize a run. Scoped honestly: covers the invisible-rendering graphical code
+    points Unicode defines today (verified by a full-DB scan) plus the forward-compatible ``…BLANK``
+    family; not a claim about every font's rendering of every code point."""
+    return any(
+        unicodedata.category(c)[0] in ("L", "N", "P", "S")
+        and c not in _INVISIBLE_INK
+        and not _renders_blank(c)
+        for c in s
+    )
 
 
 def is_charter_signed(slug: str) -> tuple[bool, str]:
     """
-    Return (signed, reason). signed=True means a non-placeholder name
-    is on the 'Signed:' line. reason gives the raw evidence either way.
+    Return (signed, reason). signed=True means a non-placeholder, GRAPHICAL name is on the 'Signed:'
+    line. reason gives the raw evidence either way. Fail-closed on any ambiguity.
     """
     cp = paths.charter_path(slug)
     if not cp.is_file():
         return False, f"charter file missing at {cp}"
     text = cp.read_text(encoding="utf-8")
 
-    m = _SIGNATURE_LINE.search(text)
-    if not m:
+    # Isolate the first line that starts with 'Signed:'. splitlines() splits on the FULL Unicode
+    # line-boundary set, so the value below cannot cross a visual line break of any kind (see note above).
+    sig_line = next((ln for ln in text.splitlines() if ln.startswith(_SIGNED_PREFIX)), None)
+    if sig_line is None:
         return False, "no 'Signed:' line found in charter"
-    sig = m.group(1).strip().strip("`").strip()
-    if not sig:
+    value = sig_line[len(_SIGNED_PREFIX):]
+    value = re.split(r"Date:", value, maxsplit=1)[0]   # drop a trailing 'Date:' scaffold on the line
+    sig = value.strip().strip("`").strip()
+    if not sig or not _has_graphical(sig):
         return False, "'Signed:' line has empty value"
     if _PLACEHOLDER.search(sig):
         return False, f"signature is the unfilled placeholder ({sig!r})"

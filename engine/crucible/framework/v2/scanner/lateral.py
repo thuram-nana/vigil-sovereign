@@ -125,17 +125,20 @@ def bridge_confirmed_cloud_facts(world: Any, *, seq_base: int) -> int:
 
 def lateral_paths(world: Any, *, impact_model: Any, seq_base: int, k: int = 8) -> list[AttackPath]:
     """Internal lateral-movement routes over the FUSED world (slice C4). Bridge the GROUNDED cloud
-    oracle facts into traversable edges (:func:`bridge_confirmed_cloud_facts`), ensure the attacker
-    principal exists (a seedless fusion-only run may not have run the pre-fusion chain), then extract
-    the best attacker -> crown-jewel paths with the SAME deterministic search + detection-cost /
-    impact ranking the pre-fusion chain uses.
+    oracle facts into traversable edges (:func:`bridge_confirmed_cloud_facts`), then extract the best
+    attacker -> crown-jewel paths with the SAME deterministic search + detection-cost / impact ranking
+    the pre-fusion chain uses.
+
+    Does NOT seed the attacker node itself — the attacker exists either because the pre-fusion chain
+    already ran (a web engage) OR because the bridge added an ``active_exposure`` edge from it. When
+    neither holds (a seedless fusion-only run with no anonymous entry point), there is no attacker in
+    the world and this returns ``[]`` WITHOUT polluting an otherwise-empty world with a phantom node.
 
     Returns :class:`AttackPath` objects, stealthiest-first. Empty when the fused facts unlock no
     attacker-reachable route — a confirmed grant to a principal the attacker cannot reach yields NO
     path (near-zero-FP). Best-effort caller: the engage loop wraps this so a reasoning failure never
     sinks the engagement."""
-    AttackerState(world).ensure(seq=int(seq_base))
-    bridge_confirmed_cloud_facts(world, seq_base=int(seq_base) + 1)
+    bridge_confirmed_cloud_facts(world, seq_base=int(seq_base))
     if world.get_node(ATTACKER_ID) is None:
         return []
     paths: list[AttackPath] = []
