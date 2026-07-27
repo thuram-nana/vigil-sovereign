@@ -437,9 +437,13 @@ _OFFENSE_ENV_ALLOWLIST = frozenset({
     "STRIX_LLM", "LLM_API_BASE",
     "CRUCIBLE_EFFORT",                          # reasoning-effort level (output_config.effort on current models)
     "STRIX_REASONING_EFFORT",                   # the same choice mapped onto the Strix codebase agent
+    # cloud-provider CONFIG (non-secret) the Phase-C live collectors read via the SDK ambient chains
+    "AWS_REGION", "AWS_ROLE_ARN", "CRUCIBLE_AWS_ENDPOINT_URL",
+    "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID",
     # provider + integration KEYS the offense engine needs — NEVER VIGIL_DESTRUCTION_OWNER_KEY
     "ANTHROPIC_API_KEY", "MISTRAL_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY",
-    "AZURE_OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "AZURE_OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AZURE_CLIENT_SECRET",                      # cloud posture service-principal secret (read-only Azure)
     "GITHUB_TOKEN", "CRUCIBLE_API_KEY", "CRUCIBLE_OOB_RELAY_SECRET",   # never ELEVENLABS (voice = sovereign)
 })
 

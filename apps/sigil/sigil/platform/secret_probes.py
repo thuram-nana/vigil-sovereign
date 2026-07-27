@@ -117,24 +117,51 @@ def _probe_azure_openai(value: str, store: SecretStore, ctx: dict) -> "tuple[str
 
 
 def _probe_aws(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
-    # value = AWS_ACCESS_KEY_ID; the companion secret is read from the store (never passed via ctx). boto3 is
-    # optional — absent ⇒ unknown (honest), never a false ok. STS get-caller-identity validates without
-    # touching Bedrock or any resource.
+    # value = AWS_ACCESS_KEY_ID; the companion secret + optional session token are read from the store
+    # (never passed via ctx). boto3 is optional — absent ⇒ unknown (honest), never a false ok. STS
+    # get-caller-identity validates without touching any resource; an endpoint override (LocalStack/self-
+    # hosted) is honoured so the check hits the same endpoint the collector will.
     secret = str(store.get("AWS_SECRET_ACCESS_KEY") or "").strip()
     if not secret:
         return UNKNOWN, "also set AWS_SECRET_ACCESS_KEY to validate"
-    region = str(ctx.get("CRUCIBLE_BEDROCK_REGION", "") or ctx.get("AWS_REGION", "") or "us-east-1")
+    token = str(store.get("AWS_SESSION_TOKEN") or "").strip()
+    region = str(ctx.get("AWS_REGION", "") or ctx.get("CRUCIBLE_BEDROCK_REGION", "") or "us-east-1")
+    endpoint = str(ctx.get("CRUCIBLE_AWS_ENDPOINT_URL", "") or "").strip()
     try:
         import boto3  # optional dependency
     except Exception:  # noqa: BLE001
         return UNKNOWN, "install boto3 to validate AWS credentials"
+    kwargs: dict = {"aws_access_key_id": value, "aws_secret_access_key": secret, "region_name": region}
+    if token:
+        kwargs["aws_session_token"] = token
+    if endpoint:
+        kwargs["endpoint_url"] = endpoint
     try:
-        sts = boto3.client("sts", aws_access_key_id=value, aws_secret_access_key=secret, region_name=region)
-        ident = sts.get_caller_identity()
+        ident = boto3.client("sts", **kwargs).get_caller_identity()
         acct = str(ident.get("Account", "")) if isinstance(ident, dict) else ""
-        return OK, f"STS ok (account {acct[:6]}…)" if acct else (OK, "STS get-caller-identity ok")
+        return (OK, f"STS ok (account {acct[:6]}…)") if acct else (OK, "STS get-caller-identity ok")
     except Exception as e:  # noqa: BLE001 — fail-closed; never leak the secret in the message
         return FAIL, f"AWS rejected credentials: {type(e).__name__}"
+
+
+def _probe_azure(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
+    # value = AZURE_CLIENT_SECRET; tenant + client id are NON-secret config (from ctx). azure-identity is
+    # optional — absent ⇒ unknown (honest). A management-scope AAD token validates the service principal
+    # without touching any resource. Any error ⇒ fail; the secret never appears in the message.
+    tenant = str(ctx.get("AZURE_TENANT_ID", "") or "").strip()
+    client = str(ctx.get("AZURE_CLIENT_ID", "") or "").strip()
+    if not (tenant and client):
+        return UNKNOWN, "also set AZURE_TENANT_ID and AZURE_CLIENT_ID to validate"
+    try:
+        from azure.identity import ClientSecretCredential  # optional dependency
+    except Exception:  # noqa: BLE001
+        return UNKNOWN, "install azure-identity to validate Azure credentials"
+    try:
+        cred = ClientSecretCredential(tenant_id=tenant, client_id=client, client_secret=value)
+        tok = cred.get_token("https://management.azure.com/.default")
+        return (OK, "AAD token ok") if (tok and getattr(tok, "token", "")) else (FAIL, "Azure returned no token")
+    except Exception as e:  # noqa: BLE001 — fail-closed; never leak the secret
+        return FAIL, f"Azure rejected credentials: {type(e).__name__}"
 
 
 # name → probe. A secret NOT listed here has no live check (verdict = unknown, "no live check").
@@ -147,6 +174,7 @@ _PROBES: "dict[str, Callable[[str, SecretStore, dict], tuple[str, str]]]" = {
     "ELEVENLABS_API_KEY": _probe_elevenlabs,
     "AZURE_OPENAI_API_KEY": _probe_azure_openai,
     "AWS_ACCESS_KEY_ID": _probe_aws,
+    "AZURE_CLIENT_SECRET": _probe_azure,
 }
 
 
@@ -155,9 +183,11 @@ def has_probe(name: str) -> bool:
 
 
 def _probe_ctx() -> dict:
-    """NON-secret companion config the probes read (endpoints / regions) — from the process env only."""
+    """NON-secret companion config the probes read (endpoints / regions / ids) — from the process env only."""
     return {k: os.environ.get(k, "") for k in
-            ("AZURE_OPENAI_ENDPOINT", "CRUCIBLE_BEDROCK_REGION", "AWS_REGION")}
+            ("AZURE_OPENAI_ENDPOINT", "CRUCIBLE_BEDROCK_REGION", "AWS_REGION",
+             "CRUCIBLE_AWS_ENDPOINT_URL", "AWS_ROLE_ARN",
+             "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID")}
 
 
 # --- verdict cache (0600, value-free) --------------------------------------------------------------
