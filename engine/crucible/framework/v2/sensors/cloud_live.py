@@ -14,8 +14,14 @@ Doctrine, by construction:
     becomes a FACT only when the EXISTING deterministic oracles re-fire over the RETAINED export
     (``confirm_cloud_posture_facts`` re-derives each grant PATH over the retained policy graph;
     ``cloud_posture_oracle`` re-derives the encryption-at-rest achieved state) — NEVER because a live
-    API said so. The live API response is evidence, re-verified offline; it is never laundered into a
-    fact by the collector itself.
+    API said so. Stated precisely (not overclaimed): the collector's OWN judgment of whether a resource
+    is public/over-broadly-trusted IS part of the grounding — but it is made CONSERVATIVELY and only over
+    CONFIRMED state (a public ACL/policy that Block-Public-Access does not neutralise; a wildcard trust
+    with NO narrowing Condition and no Deny), and the RAW ground-truth signals (``acl_public`` /
+    ``policy_public`` / ``bpa`` / ``trust_conditioned`` …) are RETAINED alongside so the verdict is
+    auditable and a future/active oracle can judge them independently. The oracle then re-derives the
+    reachability PATH over that retained, conservative evidence. The near-zero-FP burden is met by erring
+    to a false-NEGATIVE (an un-confirmable public signal stays an un-promoted lead), never a false-FACT.
   * AMBIENT CREDENTIALS, NEVER HANDED OVER. Credentials come from boto3's DEFAULT chain — environment,
     shared config/SSO cache, an EC2 instance profile, an ECS/EKS task role, a pod's IRSA identity. The
     operator configures the HOST's own read-only identity once; VIGIL discovers and uses it. No secret
@@ -41,14 +47,23 @@ Doctrine, by construction:
     no SDK and no network. That pure core is what feeds the oracles.
 
 TESTING. The deterministic core is CI-tested against recorded AWS/LocalStack response shapes (zero SDK,
-zero network). The live path is exercised against **LocalStack** (real emulated AWS in Docker) via an
-``endpoint_url`` override + boto3's env-credential provider — an integration test that skips when boto3
-or LocalStack is absent, so CI stays green while the live path is genuinely verified where the rig runs.
+zero network), including the adversarial NEGATIVE controls a near-zero-FP claim demands (a Condition-
+narrowed wildcard trust, a Deny-subtracted wildcard, a public ACL neutralised by Block-Public-Access, a
+public signal with BPA UNKNOWN). The live path is driven END-TO-END against a purpose-built AWS test
+system — **moto** (in-process AWS mock) in CI, and **LocalStack** (emulated AWS in Docker, via an
+``endpoint_url`` override) where that rig is up — each seeding a real account and running the collector's
+actual boto3 ``run`` path; both skip cleanly when their dependency is absent, so CI stays green.
 
-HONEST LIMITATION. S3 objects carry no intrinsic "sensitive" bit, so the encryption-at-rest achieved-
-state FACT (which requires ``sensitive AND not encrypted``) fires only when the operator has TAGGED the
-bucket's data classification (``sensitive`` / ``classification`` / ``data-classification``) — operator-
-declared sensitivity, never fabricated. Public-exposure and over-broad-trust facts need no such tag.
+HONEST LIMITATIONS (stated, not papered over):
+  * S3 objects carry no intrinsic "sensitive" bit, so the encryption-at-rest achieved-state FACT (which
+    requires ``sensitive AND not encrypted``) fires only when the operator has TAGGED the bucket's data
+    classification (``sensitive`` / ``classification`` / ``data-classification``) — operator-declared
+    sensitivity, never fabricated. Public-exposure and over-broad-trust facts need no such tag.
+  * A public ACL/policy whose Block-Public-Access state cannot be read (denied) stays an un-promoted LEAD
+    rather than a confirmed public FACT (conservative — no false fact; a possible false negative). The C3
+    active-reachability oracle is what definitively CONFIRMS anonymous reach where it matters.
+  * A Condition-narrowed wildcard trust (the secure org/ExternalId pattern) is NOT promoted; the deep
+    evaluation of trust Conditions is deferred to a future oracle that judges the retained raw condition.
 """
 
 from __future__ import annotations
@@ -73,14 +88,48 @@ _SENSITIVITY_TAG_KEYS = frozenset({"sensitive", "classification", "data-classifi
 _SENSITIVE_TAG_VALUES = frozenset({
     "true", "yes", "1", "sensitive", "confidential", "restricted", "secret", "pii", "high", "critical",
 })
-# STS AssumeRole principal tokens that denote "anyone" — a wildcard trust makes a role publicly assumable.
+# STS AssumeRole principal tokens that denote "anyone" — a wildcard trust makes a role publicly assumable
+# ONLY when it carries no narrowing Condition (see _trust_analysis).
 _WILDCARD_TRUST = frozenset({"*", "arn:aws:iam::*:root"})
+
+# S3 Block-Public-Access booleans. IgnorePublicAcls NEUTRALISES an existing public ACL; RestrictPublicBuckets
+# NEUTRALISES anonymous access from a public bucket policy. BlockPublicAcls / BlockPublicPolicy are
+# PREVENTIVE (they reject new public ACLs/policies) and do not retroactively neutralise, so they are
+# retained as evidence but not used to compute effective anonymous reachability.
+_BPA_KEYS = ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")
 
 
 # ---------------------------------------------------------------------------
 # pure translation: recorded boto3 read-only responses -> the native inventory
 # (no boto3, no network — the deterministic, CI-tested core the oracles consume)
 # ---------------------------------------------------------------------------
+
+
+def _bpa_fields(pab: Any) -> dict | None:
+    """Extract the four Block-Public-Access booleans from a ``get_public_access_block`` OUTCOME, tri-state:
+      * a response dict -> its four fields (a KNOWN BPA config);
+      * the ``"absent"`` sentinel (the call raised ``NoSuchPublicAccessBlockConfiguration`` — no BPA is
+        configured AT THIS LEVEL) -> all-False (a KNOWN 'off');
+      * ``None`` (denied / not attempted) -> ``None`` (UNKNOWN — never assumed off).
+    Total: any odd shape -> None."""
+    if pab == "absent":
+        return {k: False for k in _BPA_KEYS}
+    if not isinstance(pab, dict):
+        return None
+    cfg = pab.get("PublicAccessBlockConfiguration")
+    if not isinstance(cfg, dict):
+        return None
+    return {k: bool(cfg.get(k)) for k in _BPA_KEYS}
+
+
+def _merge_bpa(bucket_bpa: Any, account_bpa: Any) -> tuple[dict, bool]:
+    """Merge bucket- and account-level BPA field dicts. Account-level BPA applies account-wide, so a
+    ``True`` at EITHER level blocks. ``known`` iff at least one level is a KNOWN dict (else the effective
+    BPA is UNKNOWN and the caller must not confirm public). Returns (merged_fields, known)."""
+    levels = [b for b in (bucket_bpa, account_bpa) if isinstance(b, dict)]
+    if not levels:
+        return ({k: False for k in _BPA_KEYS}, False)
+    return ({k: any(bool(b.get(k)) for b in levels) for k in _BPA_KEYS}, True)
 
 
 def _acl_is_public(acl: Any) -> bool:
@@ -139,30 +188,57 @@ def _sensitive_from_tagging(tagging: Any) -> bool | None:
     return None
 
 
-def bucket_resource(entry: Any) -> dict | None:
+def bucket_resource(entry: Any, *, account_bpa: Any = None) -> dict | None:
     """Map ONE collected S3 bucket record onto a native-inventory resource. ``entry`` is what the live
     collector gathered for a bucket::
 
         {"name": "acme-secrets", "acl": <get_bucket_acl resp>|None,
          "policy_status": <get_bucket_policy_status resp>|None,
+         "public_access_block": <get_public_access_block resp>|"absent"|None,
          "encryption": <get_bucket_encryption resp>|"absent"|None, "tagging": <get_bucket_tagging resp>|None}
 
-    Returns a resource dict (``id``/``kind``/``public``?/``encrypted``?/``sensitive``?/``grants``) or
-    ``None`` for a nameless entry. Pure + total (odd/absent fields are simply not asserted). ``public`` is
-    set only when EXPLICITLY observed (policy-status public OR a public ACL grant); ``encrypted`` only
-    when explicitly known; ``sensitive`` only when the operator tagged it — so an unknown flag never
-    becomes an insecure fact (near-zero-FP, matching the oracle's own tri-state discipline)."""
+    ``account_bpa`` is the account-level BPA FIELD DICT (from :func:`_bpa_fields`) or ``None`` (unknown).
+
+    Returns a resource dict or ``None`` for a nameless entry. Pure + total. CONSERVATIVE, evidence-
+    retaining, near-zero-FP by construction:
+
+      * The RAW ground-truth signals (``acl_public`` / ``policy_public`` / the merged ``bpa`` / ``bpa_known``)
+        are retained as resource attrs — the oracle ignores these keys, but they make the public verdict
+        AUDITABLE and let a future oracle (or the C3 active-reachability oracle) judge them independently.
+      * ``public`` (the promotable FACT flag + a synthesised anonymous grant) is set ONLY when anonymous
+        reachability is AFFIRMATIVELY CONFIRMED: a public ACL/policy AND a KNOWN Block-Public-Access state
+        that does not neutralise it (``IgnorePublicAcls`` neutralises a public ACL; ``RestrictPublicBuckets``
+        neutralises a public policy). BPA UNKNOWN, or BPA neutralising -> ``public`` is NOT set, so the
+        policy-path oracle finds no anonymous grant and promotes nothing (the raw signals remain an
+        auditable lead). This deliberately errs to a false-NEGATIVE (a genuinely-public bucket whose BPA we
+        cannot read stays an un-promoted lead) rather than a false-POSITIVE (the cardinal sin under oracle
+        authority) — the C3 active oracle definitively confirms reachability where it matters.
+      * ``encrypted`` / ``sensitive`` stay tri-state (set only when explicitly known / operator-tagged)."""
     if not isinstance(entry, dict):
         return None
     name = str(entry.get("name") or "").strip()
     if not name:
         return None
     res: dict[str, Any] = {"id": name, "kind": "datastore"}
-    public = _policy_status_is_public(entry.get("policy_status")) or _acl_is_public(entry.get("acl"))
-    if public:
+    acl_public = _acl_is_public(entry.get("acl"))
+    policy_public = _policy_status_is_public(entry.get("policy_status"))
+    merged, bpa_known = _merge_bpa(_bpa_fields(entry.get("public_access_block")),
+                                   account_bpa if isinstance(account_bpa, dict) else None)
+    # retain the RAW ground truth as evidence (oracle-inert keys)
+    if acl_public:
+        res["acl_public"] = True
+    if policy_public:
+        res["policy_public"] = True
+    res["bpa_known"] = bpa_known
+    if bpa_known:
+        res["bpa"] = merged
+    # EFFECTIVE anonymous reachability — only a CONFIRMED public state becomes a promotable fact.
+    effective_public = False
+    if (acl_public or policy_public) and bpa_known:
+        effective_public = (acl_public and not merged["IgnorePublicAcls"]) or \
+                           (policy_public and not merged["RestrictPublicBuckets"])
+    if effective_public:
         res["public"] = True
-        # a concrete anonymous grant so the policy-path oracle can re-derive the public-access path
-        # (normalize_cloud_export would synthesise this too; making it explicit keeps the record honest).
         res["grants"] = [{"principal": "*", "access": "read"}]
     enc = _encryption_state(entry.get("encryption"))
     if enc is not None:
@@ -173,48 +249,71 @@ def bucket_resource(entry: Any) -> dict | None:
     return res
 
 
-def _trust_principals(assume_role_policy_document: Any) -> tuple[list[str], bool]:
-    """Parse an IAM role's trust policy (``AssumeRolePolicyDocument``, already a dict from
-    ``get_account_authorization_details``) into (concrete-principals-allowed-to-assume, has-wildcard-trust).
-    Reads only ``Allow`` statements. ``Principal`` may be ``"*"``, ``{"AWS": "..."|[...]}``,
-    ``{"Service": ...}`` (ignored — a service trust is not a user-reachable assume), etc. Total: any odd
-    shape contributes nothing / no wildcard."""
-    concrete: list[str] = []
-    wildcard = False
+def _trust_analysis(assume_role_policy_document: Any) -> dict:
+    """Analyse an IAM role trust policy (``AssumeRolePolicyDocument``, a dict from
+    ``get_account_authorization_details``) into::
+
+        {"concrete": [...],            # concrete principals allowed to assume (topology edges)
+         "public_unconditioned": bool, # an Allow with a '*'/'*:root' principal AND NO Condition (truly anyone)
+         "public_conditioned":  bool,  # an Allow '*' NARROWED by a Condition (org/ExternalId/SourceAccount) — SECURE
+         "has_deny": bool}             # any Deny statement (may subtract the grant — be conservative)
+
+    A ``*`` principal carrying ANY ``Condition`` is the standard SECURE cross-account/organisation pattern
+    (``aws:PrincipalOrgID`` / ``sts:ExternalId`` / ``aws:SourceAccount``) — it is emphatically NOT publicly
+    assumable, so it must never be minted as a public FACT (BLOCK-1). ``Service`` trusts are ignored (a
+    service trust is not a user-reachable assume). Total: any odd shape contributes nothing."""
+    out: dict[str, Any] = {"concrete": [], "public_unconditioned": False,
+                           "public_conditioned": False, "has_deny": False}
     if not isinstance(assume_role_policy_document, dict):
-        return concrete, wildcard
+        return out
     stmts = assume_role_policy_document.get("Statement")
     if isinstance(stmts, dict):
         stmts = [stmts]
     if not isinstance(stmts, list):
-        return concrete, wildcard
+        return out
     for st in stmts:
-        if not isinstance(st, dict) or str(st.get("Effect") or "").strip().lower() != "allow":
+        if not isinstance(st, dict):
             continue
+        effect = str(st.get("Effect") or "").strip().lower()
+        if effect == "deny":
+            out["has_deny"] = True
+            continue
+        if effect != "allow":
+            continue
+        conditioned = bool(st.get("Condition"))
         principal = st.get("Principal")
+        wildcard = False
         if principal == "*":
             wildcard = True
-            continue
-        if not isinstance(principal, dict):
-            continue
-        aws = principal.get("AWS")
-        vals = [aws] if isinstance(aws, str) else (aws if isinstance(aws, list) else [])
-        for v in vals:
-            v = str(v or "").strip()
-            if not v:
-                continue
-            if v in _WILDCARD_TRUST:
-                wildcard = True
+        elif isinstance(principal, dict):
+            aws = principal.get("AWS")
+            vals = [aws] if isinstance(aws, str) else (aws if isinstance(aws, list) else [])
+            for v in vals:
+                v = str(v or "").strip()
+                if not v:
+                    continue
+                if v in _WILDCARD_TRUST:
+                    wildcard = True
+                else:
+                    out["concrete"].append(v)   # a concrete trust is a real assume edge (condition or not)
+        if wildcard:
+            if conditioned:
+                out["public_conditioned"] = True
             else:
-                concrete.append(v)
-    return concrete, wildcard
+                out["public_unconditioned"] = True
+    return out
 
 
 def _roles_to_inventory(role_detail_list: Any) -> tuple[list[dict], list[dict]]:
     """From IAM ``get_account_authorization_details`` ``RoleDetailList`` build (principals, resources):
-    each role is a ``role`` principal; a role with WILDCARD trust becomes a public ``cloud_resource``
-    (over-broad trust — the policy-path oracle re-derives the anonymous assume path); each concrete
-    trust principal gains a ``can_assume`` edge to the role. Total: odd entries are skipped."""
+    each role is a ``role`` principal; each concrete trust principal gains a ``can_assume`` edge to it.
+
+    A role becomes a public ``cloud_resource`` (over-broad trust — the policy-path oracle re-derives the
+    anonymous assume path) ONLY when its trust is a wildcard that is UNCONDITIONED and not subtracted by a
+    Deny (``public_unconditioned and not has_deny``). A CONDITION-narrowed wildcard (the secure org/
+    ExternalId pattern) or a wildcard with a Deny is NOT promoted — instead the raw trust analysis is
+    retained on the role PRINCIPAL (``trust_wildcard``/``trust_conditioned``/``trust_has_deny``, oracle-inert
+    attrs) so the config is auditable without a false public FACT. Total: odd entries are skipped."""
     principals: list[dict] = []
     resources: list[dict] = []
     can_assume: dict[str, list[str]] = {}
@@ -226,12 +325,17 @@ def _roles_to_inventory(role_detail_list: Any) -> tuple[list[dict], list[dict]]:
         rid = str(role.get("Arn") or role.get("RoleName") or "").strip()
         if not rid:
             continue
-        principals.append({"id": rid, "kind": "role"})
-        concrete, wildcard = _trust_principals(role.get("AssumeRolePolicyDocument"))
-        if wildcard:
+        ta = _trust_analysis(role.get("AssumeRolePolicyDocument"))
+        principal: dict[str, Any] = {"id": rid, "kind": "role"}
+        if ta["public_unconditioned"] or ta["public_conditioned"]:
+            principal["trust_wildcard"] = True
+            principal["trust_conditioned"] = bool(ta["public_conditioned"])
+            principal["trust_has_deny"] = bool(ta["has_deny"])
+        principals.append(principal)
+        if ta["public_unconditioned"] and not ta["has_deny"]:
             resources.append({"id": rid, "kind": "cloud_resource", "public": True,
                               "grants": [{"principal": "*", "access": "assume"}]})
-        for p in concrete:
+        for p in ta["concrete"]:
             can_assume.setdefault(p, [])
             if rid not in can_assume[p]:
                 can_assume[p].append(rid)
@@ -258,15 +362,20 @@ def aws_inventory_from_responses(
     *,
     buckets: Any = (),
     account_auth: Any = None,
+    account_bpa: Any = None,
     provider: str = "aws",
 ) -> dict:
     """Assemble the native inventory (``{"provider","principals","resources"}``) from the collector's
     retained read-only responses. PURE + total — the deterministic core every cloud_live test exercises
     and every oracle consumes. ``buckets`` is the list of per-bucket records (see :func:`bucket_resource`);
-    ``account_auth`` is the ``get_account_authorization_details`` response (or None when IAM was denied)."""
+    ``account_auth`` is the ``get_account_authorization_details`` response (or None); ``account_bpa`` is the
+    ACCOUNT-level ``get_public_access_block`` outcome (dict / ``"absent"`` / None), applied to every bucket."""
     resources: list[dict] = []
-    for b in buckets or []:
-        r = bucket_resource(b)
+    acct_bpa = _bpa_fields(account_bpa)          # dict|None — the account-wide BPA field view
+    if not isinstance(buckets, (list, tuple)):   # totality: a non-iterable never raises
+        buckets = ()
+    for b in buckets:
+        r = bucket_resource(b, account_bpa=acct_bpa)
         if r is not None:
             resources.append(r)
     principals: list[dict] = []
@@ -284,16 +393,22 @@ def aws_inventory_from_responses(
 
 
 def _aws_service_hosts(region: str) -> tuple[str, ...]:
-    """The concrete AWS control-plane hosts the collector reaches for ``region`` (global + regional STS/S3
-    + global IAM). Declared as ``egress_hosts`` so the egress gate authorises exactly what boto3 will call.
-    For multi-region S3 the operator provisions ``*.amazonaws.com`` (C1 permits a ≥2-private-label
-    wildcard) or sets the bucket's region."""
-    r = (region or "us-east-1").strip() or "us-east-1"
-    return (
-        "sts.amazonaws.com", f"sts.{r}.amazonaws.com",
-        "iam.amazonaws.com",
-        "s3.amazonaws.com", f"s3.{r}.amazonaws.com",
-    )
+    """The concrete AWS control-plane hosts the collector reaches for ``region`` — STS, S3, S3-Control and
+    IAM — partition-aware (commercial / GovCloud / China). Declared as ``egress_hosts`` so the egress gate
+    authorises exactly what boto3 will call. The one residual is a cross-REGION S3 access, where botocore
+    may 301-redirect to a sibling ``s3.<other-region>...`` host; for a multi-region account the operator
+    provisions ``*.amazonaws.com`` (C1 permits a ≥2-private-label wildcard) or scopes the region."""
+    r = (region or "us-east-1").strip().lower() or "us-east-1"
+    china = r.startswith("cn-")
+    gov = r.startswith("us-gov-")
+    sfx = "amazonaws.com.cn" if china else "amazonaws.com"
+    hosts: set[str] = {f"sts.{r}.{sfx}", f"s3.{r}.{sfx}", f"s3-control.{r}.{sfx}"}
+    if not china:                       # commercial + gov expose global STS / S3 aliases
+        hosts.add(f"sts.{sfx}")
+        hosts.add(f"s3.{sfx}")
+    # IAM is a single global endpoint per partition
+    hosts.add(f"iam.{r}.{sfx}" if china else ("iam.us-gov.amazonaws.com" if gov else "iam.amazonaws.com"))
+    return tuple(sorted(hosts))
 
 
 class CloudLiveSensor:
@@ -339,8 +454,9 @@ class CloudLiveSensor:
         return kw
 
     def _collect_s3(self, s3: Any) -> list[dict]:
-        """Per-bucket read-only posture: ACL, policy-status, default-encryption, classification tags. A
-        per-bucket denial/absence degrades that field (best-effort), never raising."""
+        """Per-bucket read-only posture: ACL, policy-status, Block-Public-Access, default-encryption,
+        classification tags. A per-bucket denial/absence degrades that field (best-effort), never raising.
+        Each closure binds ``name`` as a default arg so the loop variable is captured correctly."""
         out: list[dict] = []
         try:
             listing = s3.list_buckets()
@@ -351,12 +467,27 @@ class CloudLiveSensor:
             if not name:
                 continue
             rec: dict[str, Any] = {"name": name}
-            rec["acl"] = self._safe_call(lambda: s3.get_bucket_acl(Bucket=name))
-            rec["policy_status"] = self._safe_call(lambda: s3.get_bucket_policy_status(Bucket=name))
-            rec["encryption"] = self._safe_encryption(s3, name)
-            rec["tagging"] = self._safe_call(lambda: s3.get_bucket_tagging(Bucket=name))
+            rec["acl"] = self._safe_call(lambda n=name: s3.get_bucket_acl(Bucket=n))
+            rec["policy_status"] = self._safe_call(lambda n=name: s3.get_bucket_policy_status(Bucket=n))
+            rec["public_access_block"] = self._safe_notfound(
+                lambda n=name: s3.get_public_access_block(Bucket=n), "NoSuchPublicAccessBlock")
+            rec["encryption"] = self._safe_notfound(
+                lambda n=name: s3.get_bucket_encryption(Bucket=n), "ServerSideEncryptionConfigurationNotFound")
+            rec["tagging"] = self._safe_call(lambda n=name: s3.get_bucket_tagging(Bucket=n))
             out.append(rec)
         return out
+
+    def _collect_account_bpa(self, session: Any, account: str, kw: dict) -> Any:
+        """Account-level Block-Public-Access via S3-Control (read-only). ``"absent"`` when none is
+        configured (a KNOWN 'off'); None when denied / S3-Control unavailable (UNKNOWN)."""
+        if not account:
+            return None
+        try:
+            s3c = session.client("s3control", **kw)
+        except Exception:
+            return None
+        return self._safe_notfound(
+            lambda: s3c.get_public_access_block(AccountId=account), "NoSuchPublicAccessBlock")
 
     def _collect_iam(self, iam: Any) -> dict | None:
         """IAM authorization details (users/roles/trust policies), read-only. Returns None when the call is
@@ -383,15 +514,26 @@ class CloudLiveSensor:
             return None
 
     @staticmethod
-    def _safe_encryption(s3: Any, name: str) -> Any:
-        """Default-encryption with the NotFound case distinguished from a denial: a
-        ``ServerSideEncryptionConfigurationNotFoundError`` (no default encryption) -> the ``"absent"``
-        sentinel (an EXPLICIT not-encrypted fact); any other error -> None (unknown)."""
+    def _safe_notfound(fn: Any, marker: str) -> Any:
+        """Run a read-only call, distinguishing a genuine NOT-CONFIGURED result from a denial/other error:
+          * success -> the response;
+          * an exception whose botocore error CODE, exception CLASS name, or message contains ``marker``
+            (e.g. ``ServerSideEncryptionConfigurationNotFound`` / ``NoSuchPublicAccessBlock``) -> the
+            ``"absent"`` sentinel (a KNOWN 'not configured', an explicit fact);
+          * any other error (AccessDenied, network, throttle, …) -> ``None`` (UNKNOWN — never mistaken for
+            an insecure fact). Robust across boto3 versions: real boto3 raises a ``ClientError`` whose type
+            name is NOT the code, so the error-code check is the load-bearing one."""
         try:
-            return s3.get_bucket_encryption(Bucket=name)
+            return fn()
         except Exception as e:
-            if type(e).__name__ == "ServerSideEncryptionConfigurationNotFoundError" or \
-                    "ServerSideEncryptionConfigurationNotFound" in str(e):
+            code = ""
+            try:
+                resp = getattr(e, "response", None)
+                if isinstance(resp, dict):
+                    code = str((resp.get("Error") or {}).get("Code") or "")
+            except Exception:
+                code = ""
+            if marker in code or marker in type(e).__name__ or marker in str(e):
                 return "absent"
             return None
 
@@ -425,10 +567,15 @@ class CloudLiveSensor:
         except Exception:
             buckets = []
         try:
+            account_bpa = self._collect_account_bpa(session, account, kw)
+        except Exception:
+            account_bpa = None
+        try:
             account_auth = self._collect_iam(session.client("iam", **kw))
         except Exception:
             account_auth = None
-        inventory = aws_inventory_from_responses(buckets=buckets, account_auth=account_auth, provider="aws")
+        inventory = aws_inventory_from_responses(
+            buckets=buckets, account_auth=account_auth, account_bpa=account_bpa, provider="aws")
         n_res, n_pri = len(inventory.get("resources", [])), len(inventory.get("principals", []))
         return ToolResult(
             ok=True,

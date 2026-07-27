@@ -24,7 +24,6 @@ from framework.v2.worldmodel.models import (
     GROUNDING_GROUNDED,
     GROUNDING_INTEL,
     EdgeKind,
-    NodeKind,
 )
 
 
