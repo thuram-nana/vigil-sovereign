@@ -182,15 +182,29 @@ def _probe_gcp(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
         return UNKNOWN, "stored GCP credential is not decodable — re-seal the service-account JSON"
     try:
         import json as _json
+        import socket as _socket
+        from urllib.parse import urlsplit
         from google.oauth2 import service_account  # optional dependency
         from google.auth.transport.requests import Request  # optional dependency
     except Exception:  # noqa: BLE001
         return UNKNOWN, "install google-auth to validate GCP credentials"
     try:
         info = _json.loads(content)
+        # defence-in-depth (the seal already pins this): the signed assertion must go only to a Google host,
+        # never an attacker-chosen token_uri (SSRF / assertion exfil).
+        tu = str(info.get("token_uri") or "")
+        if tu:
+            host = (urlsplit(tu).hostname or "").lower()
+            if not (host in ("oauth2.googleapis.com", "accounts.google.com") or host.endswith(".googleapis.com")):
+                return FAIL, "GCP token_uri is not a Google endpoint — refused"
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])
-        creds.refresh(Request())
+        _old = _socket.getdefaulttimeout()
+        _socket.setdefaulttimeout(_TIMEOUT_S)                 # bound the token POST
+        try:
+            creds.refresh(Request())
+        finally:
+            _socket.setdefaulttimeout(_old)
         return (OK, "GCP access token ok") if creds.token else (FAIL, "GCP returned no token")
     except Exception as e:  # noqa: BLE001 — fail-closed; never leak the key
         return FAIL, f"GCP rejected credentials: {type(e).__name__}"
@@ -211,6 +225,15 @@ def _probe_kubernetes(value: str, store: SecretStore, ctx: dict) -> "tuple[str, 
         return UNKNOWN, "install the kubernetes client to validate a kubeconfig"
     try:
         cfg = yaml.safe_load(content)
+        # defence-in-depth (the seal already refuses these): a user.exec / auth-provider cmd-path runs a LOCAL
+        # command when load_kube_config_from_dict is called — refuse BEFORE loading, so the probe is genuinely
+        # a read-only /version check and can never execute a pasted command.
+        for u in (cfg.get("users") or []) if isinstance(cfg, dict) else []:
+            user = u.get("user") if isinstance(u, dict) and isinstance(u.get("user"), dict) else {}
+            ap = user.get("auth-provider") if isinstance(user.get("auth-provider"), dict) else {}
+            apc = ap.get("config") if isinstance(ap.get("config"), dict) else {}
+            if isinstance(user.get("exec"), dict) or apc.get("cmd-path"):
+                return FAIL, "kubeconfig has a command credential plugin (exec/cmd-path) — refused; re-seal a token/cert kubeconfig"
         api = _kclient.ApiClient()
         context = str(ctx.get("KUBE_CONTEXT", "") or "").strip() or None
         _kconfig.load_kube_config_from_dict(cfg, context=context, client_configuration=api.configuration)

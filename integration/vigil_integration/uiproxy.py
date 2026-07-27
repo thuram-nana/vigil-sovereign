@@ -403,8 +403,12 @@ _PIDS_NAME = "pids"
 
 def _child_env() -> dict:
     """A clean env for cross-venv children — strip PYTHONPATH/PYTHONHOME so the parent's offense-side
-    path can never inject a module into a child (mirrors dispatch's discipline)."""
-    return {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    path can never inject a module into a child (mirrors dispatch's discipline), and strip the BASE64
+    file-content credential vars so a value that happens to be in the PARENT `vigil up` env can never leak
+    into a child's environment (the child only ever gets the materialised file PATH, never the content)."""
+    _content_vars = {cv for cv, _p, _f in _FILE_SECRET_MATERIALISE}
+    return {k: v for k, v in os.environ.items()
+            if k not in ("PYTHONPATH", "PYTHONHOME") and k not in _content_vars}
 
 
 def _secure_log(log_path: Path):
@@ -478,16 +482,23 @@ def _materialise_file_secrets(env: dict, runtime_dir: "Optional[Path]") -> dict:
         except (ValueError, binascii.Error):
             continue                                     # not decodable → skip (collector fails closed)
         try:
+            # NEVER follow a pre-planted symlink (a plaintext credential must not be written through one to a
+            # victim path). Refuse a symlinked creds dir; refuse a symlinked target; and O_NOFOLLOW on the
+            # open closes the TOCTOU (open fails rather than following a symlink swapped in at the last moment).
+            if creds_dir.is_symlink():
+                continue
             creds_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(creds_dir, 0o700)
             path = creds_dir / filename                  # FIXED name; no operator input in the path
-            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            if path.is_symlink():
+                continue
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(blob)
             os.chmod(str(path), 0o600)                   # unconditional 0600 even if the file pre-existed
             env[path_var] = str(path)
         except OSError:
-            continue                                     # could not write → skip (fail closed)
+            continue                                     # symlink refused / could not write → skip (fail closed)
     return env
 
 

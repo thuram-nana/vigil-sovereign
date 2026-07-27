@@ -251,3 +251,53 @@ def test_bridge_materialises_file_creds_to_0600_and_drops_raw_content(tmp_path):
     # a non-base64 value is dropped, never crashes
     out3 = _materialise_file_secrets({"KUBECONFIG_CONTENT": "!!!not-base64!!!"}, tmp_path)
     assert "KUBECONFIG" not in out3
+
+
+def test_bridge_refuses_a_pre_planted_symlink_target(tmp_path):
+    # BLOCK-1 regression: a symlink pre-planted at the fixed target (or the creds dir) must NOT be followed
+    # — the decoded credential must never be written through it to a victim path.
+    import os as _os
+    from vigil_integration.uiproxy import _materialise_file_secrets
+    victim = tmp_path / "victim.txt"
+    victim.write_text("DO NOT CLOBBER", encoding="utf-8")
+    creds = tmp_path / "creds"
+    creds.mkdir()
+    _os.symlink(victim, creds / "gcp-sa.json")             # attacker pre-plants the symlink
+    env = {"GOOGLE_APPLICATION_CREDENTIALS_JSON": base64.b64encode(_SA_JSON.encode()).decode()}
+    out = _materialise_file_secrets(dict(env), tmp_path)
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in out      # refused (symlink not followed)
+    assert victim.read_text(encoding="utf-8") == "DO NOT CLOBBER"   # the victim file is untouched
+
+
+def test_child_env_strips_file_content_vars(monkeypatch):
+    # LOW-4 regression: a content var that happens to be in the PARENT env must not reach a child env.
+    from vigil_integration import uiproxy
+    monkeypatch.setenv("KUBECONFIG_CONTENT", base64.b64encode(_KUBECONFIG.encode()).decode())
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS_JSON", "x")
+    child = uiproxy._child_env()
+    assert "KUBECONFIG_CONTENT" not in child and "GOOGLE_APPLICATION_CREDENTIALS_JSON" not in child
+
+
+def test_exec_kubeconfig_is_refused_at_seal(env):
+    # HIGH-2 regression: a kubeconfig with an exec credential plugin (runs a local command on load) is refused.
+    store, owner, _ = env
+    exec_kubeconfig = (
+        "apiVersion: v1\nkind: Config\nclusters: []\ncurrent-context: c\n"
+        "users:\n- name: u\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n"
+        "      command: /bin/sh\n      args: ['-c', 'id > /tmp/pwned']\n")
+    with pytest.raises(ValueError):
+        smod.set_cloud_file_secret("KUBECONFIG_CONTENT", exec_kubeconfig, store=store, owner_key=owner)
+
+
+def test_non_google_token_uri_is_refused_at_seal(env):
+    # MEDIUM-3 regression: a service-account key whose token_uri points off-Google is refused.
+    store, owner, _ = env
+    evil = _json.dumps({"type": "service_account", "project_id": "p", "private_key": "x",
+                        "client_email": "a@b", "token_uri": "https://evil.example/steal"})
+    with pytest.raises(ValueError):
+        smod.set_cloud_file_secret("GOOGLE_APPLICATION_CREDENTIALS_JSON", evil, store=store, owner_key=owner)
+    # a legitimate Google token_uri is accepted
+    ok = _json.dumps({"type": "service_account", "project_id": "p", "private_key": "x",
+                      "client_email": "a@b", "token_uri": "https://oauth2.googleapis.com/token"})
+    assert smod.set_cloud_file_secret("GOOGLE_APPLICATION_CREDENTIALS_JSON", ok,
+                                      store=store, owner_key=owner)["ok"]

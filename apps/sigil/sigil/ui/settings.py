@@ -68,8 +68,10 @@ SECRET_META = {
                    "collector reads it via GOOGLE_APPLICATION_CREDENTIALS. Validated by minting an access token."},
     "KUBECONFIG_CONTENT": {
         "category": "cloud", "probe": True, "input": "file", "label": "Kubeconfig",
-        "purpose": "Paste a kubeconfig for the cluster to test (read-only context preferred). Sealed here; the "
-                   "collector reads it via KUBECONFIG. Validated with a read-only call to the cluster's /version."},
+        "purpose": "Paste a kubeconfig for the cluster to test (a read-only ServiceAccount token is best). "
+                   "Sealed here; the collector reads it via KUBECONFIG. Validated with a read-only call to the "
+                   "cluster's /version. exec / cmd-path credential plugins (which run a local command) are "
+                   "refused for safety — use a token- or certificate-based kubeconfig."},
     # --- Integrations ---
     "GITHUB_TOKEN": {"category": "integration", "probe": True, "label": "GitHub token",
                      "purpose": "Lets the auto-patch engine push a fix branch and open a gated pull request. "
@@ -444,9 +446,38 @@ def set_cloud_config(env: str, value: str, *, store, owner_key, reason: str = ""
 _MAX_FILE_SECRET_LEN = 6144      # raw content; base64 (~4/3×) must stay under _MAX_SECRET_LEN=8192
 
 
+_GCP_TOKEN_HOSTS = frozenset({"oauth2.googleapis.com", "accounts.google.com"})
+
+
+def _kubeconfig_has_command_plugin(content: str) -> bool:
+    """True iff a kubeconfig carries a credential plugin that RUNS A LOCAL COMMAND — a ``user.exec`` block
+    or an ``auth-provider`` with a ``cmd-path``. Loading such a kubeconfig executes that command (at probe
+    and at collect time), so it is refused. Structural check when PyYAML is available; a conservative
+    substring scan otherwise (never a false NEGATIVE for the standard shapes)."""
+    try:
+        import yaml
+        doc = yaml.safe_load(content)
+    except Exception:  # noqa: BLE001 — no yaml / parse error → conservative scan
+        low = content.lower()
+        return "exec:" in low or "cmd-path:" in low
+    if not isinstance(doc, dict):
+        return False
+    for u in doc.get("users") or []:
+        user = u.get("user") if isinstance(u, dict) and isinstance(u.get("user"), dict) else {}
+        if isinstance(user.get("exec"), dict):
+            return True
+        ap = user.get("auth-provider")
+        cfg = ap.get("config") if isinstance(ap, dict) and isinstance(ap.get("config"), dict) else {}
+        if cfg.get("cmd-path"):
+            return True
+    return False
+
+
 def _validate_file_content(kind: str, content: str) -> None:
-    """Light sanity check that pasted file content is the RIGHT kind of file (catches a paste error early;
-    it is NOT a security control — the content is owner-supplied). Raises ValueError on an obvious mismatch."""
+    """Validate pasted file content is the RIGHT kind of file AND carries no local-command-execution vector.
+    Catches a paste error early AND is a SAFETY gate (a kubeconfig ``exec`` plugin / a non-Google GCP
+    ``token_uri`` would run a command / exfil the signed assertion when the credential is loaded). Raises
+    ValueError on a mismatch or an unsafe construct."""
     if kind == "json":
         try:
             obj = json.loads(content)
@@ -454,10 +485,23 @@ def _validate_file_content(kind: str, content: str) -> None:
             raise ValueError("not valid JSON — paste the whole service-account key file") from None
         if not isinstance(obj, dict) or obj.get("type") != "service_account":
             raise ValueError("not a service-account key (expected a JSON object with type=service_account)")
+        # a service-account key names the OAuth token endpoint it will POST its signed assertion to; pin it
+        # to Google so a crafted key can't redirect the assertion (SSRF / assertion exfil).
+        tu = obj.get("token_uri")
+        if tu:
+            from urllib.parse import urlsplit
+            host = (urlsplit(str(tu)).hostname or "").lower()
+            if not (host in _GCP_TOKEN_HOSTS or host.endswith(".googleapis.com")):
+                raise ValueError("service-account token_uri must be a Google endpoint (oauth2.googleapis.com)")
     elif kind == "kubeconfig":
         low = content.lower()
         if "apiversion" not in low or ("clusters" not in low and "current-context" not in low):
             raise ValueError("does not look like a kubeconfig (expected apiVersion + clusters/current-context)")
+        if _kubeconfig_has_command_plugin(content):
+            raise ValueError(
+                "kubeconfig contains an exec / cmd-path credential plugin, which runs a LOCAL COMMAND when "
+                "loaded — refused for safety. Use a token- or client-certificate-based kubeconfig (e.g. one "
+                "bound to a read-only ServiceAccount).")
 
 
 def set_cloud_file_secret(name: str, content: str, *, store, owner_key, reason: str = "") -> dict:
