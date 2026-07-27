@@ -1036,3 +1036,44 @@ def test_tls_live_out_of_scope_host_is_refused(monkeypatch: pytest.MonkeyPatch) 
     minted = fuse_sensors(world, "alpha", ctx)
     assert minted == []
     assert all(n.grounding != GROUNDING_GROUNDED for n in world.all_nodes())
+
+
+# ---- C2: cloud_live LIVE collector is wired into the fusion path ------------
+
+
+def test_cloud_live_is_admitted_and_registered() -> None:
+    """The live collector is on the explicit LIVE-sensor allowlist, admitted by _resolve_tasks, and
+    present in the fusion registry as a Tier-2 ACTIVE_RECON sensor (still gated at run_sensor time)."""
+    from framework.v2.engage_fusion import _LIVE_SENSORS, _fusion_registry, _resolve_tasks
+    from framework.v2.entitlement.models import Capability
+    from framework.v2.sensors.cloud_live import CloudLiveSensor
+
+    assert "cloud_live" in _LIVE_SENSORS
+    tasks = _resolve_tasks("alpha", SimpleNamespace(fusion_tasks=[{"sensor": "cloud_live", "args": {}}]))
+    assert [t.sensor for t in tasks] == ["cloud_live"]           # admitted (not dropped like a stray active sensor)
+    sensor = _fusion_registry().get("cloud_live")
+    assert isinstance(sensor, CloudLiveSensor)
+    assert sensor.tier == "T2" and sensor.capability == Capability.ACTIVE_RECON and sensor.destructive is False
+
+
+def test_cloud_live_export_promotes_through_reverify_like_cloud_import() -> None:
+    """A cloud_live pull's retained export flows through the SAME _reverify_cloud promotion as the offline
+    importer: a public bucket becomes a policy-path FACT (FINDING + oracle-grounded EVIDENCES edge). This
+    proves the dispatch branch routes cloud_live to the existing cloud oracles — no new promotion path."""
+    import json as _json
+
+    from framework.v2.engage_fusion import FusionTask, _reverify
+
+    export = _json.dumps({"provider": "aws", "principals": [], "resources": [
+        {"id": "s3/public-bucket", "kind": "datastore", "public": True,
+         "grants": [{"principal": "*", "access": "read"}]},
+        {"id": "s3/internal", "kind": "datastore", "public": False, "grants": []}]})
+    res = SimpleNamespace(ok=True, result=SimpleNamespace(output={"export": export, "format": "native"}))
+    world = WorldModel()
+    promoted = _reverify(world, FusionTask("cloud_live", {}), res, seq=7, slug="alpha")
+    assert promoted == 1
+    finding = world.get_node("finding:policy_path:s3/public-bucket")
+    assert finding is not None and finding.grounding == GROUNDING_GROUNDED
+    assert world.get_edge("finding:policy_path:s3/public-bucket",
+                          "datastore:s3/public-bucket", EdgeKind.EVIDENCES) is not None
+    assert not world.has_node("finding:policy_path:s3/internal")   # benign resource never promoted
