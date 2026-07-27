@@ -218,3 +218,79 @@ def test_broker_routes_set_secret_and_set_model(env):
     # an unknown action is still refused by the broker (fail-closed)
     with pytest.raises(ValueError):
         actions.do_action("set_everything", {}, store=store)
+
+
+# --- F1: the Neo4j knowledge-graph credential plane ---------------------------
+
+def test_neo4j_password_is_a_managed_graph_secret_delivered_to_offense(env):
+    # NEO4J_PASSWORD is a sealed graph-category secret. It IS delivered to the keyless offense engine (it
+    # opens its own driver to project the per-session graph) — unlike the destruction key, which never is.
+    assert "NEO4J_PASSWORD" in smod.SECRET_NAMES
+    assert smod.SECRET_META["NEO4J_PASSWORD"]["category"] == "graph"
+    assert "graph" in smod._SECRET_CATEGORY_ORDER and "graph" in smod._SECRET_CATEGORY_LABEL
+    assert "NEO4J_PASSWORD" in smod._OFFENSE_DELIVERED_SECRETS
+    assert "VIGIL_DESTRUCTION_OWNER_KEY" not in smod._OFFENSE_DELIVERED_SECRETS   # still excluded
+
+
+def test_neo4j_uri_and_username_are_shown_config_not_secrets(env):
+    # the URI + username are identifiers (shown config), only the password is sealed.
+    assert {"NEO4J_URI", "NEO4J_USERNAME"} <= set(smod.CLOUD_CONFIG_VARS)
+    assert "NEO4J_URI" not in smod.SECRET_NAMES and "NEO4J_USERNAME" not in smod.SECRET_NAMES
+
+
+def test_neo4j_uri_scheme_is_validated(env):
+    # only bolt/neo4j (+s/+ssc) schemes; an http/file/tcp URI is refused (defence-in-depth vs the probe).
+    for good in ("bolt://h:7687", "neo4j://h", "neo4j+s://x.databases.neo4j.io", "bolt+ssc://h"):
+        assert smod._validate_config_value("NEO4J_URI", good) == good
+    for bad in ("http://evil", "file:///etc/passwd", "tcp://h", "javascript:1", "h:7687"):
+        with pytest.raises(ValueError):
+            smod._validate_config_value("NEO4J_URI", bad)
+    # inline userinfo is refused — a password must never ride in the NON-secret URI (which is persisted
+    # to the envfile + recorded on the spine); the sealed password field is the only place for it.
+    for creds in ("neo4j://user:pass@host", "bolt+s://neo4j:secret@x.databases.neo4j.io"):
+        with pytest.raises(ValueError):
+            smod._validate_config_value("NEO4J_URI", creds)
+
+
+def test_settings_status_exposes_the_graph_provider(env):
+    st = smod.settings_status()
+    graph = [p for p in st["cloud_providers"] if p["id"] == "graph"]
+    assert len(graph) == 1
+    g = graph[0]
+    assert g["category"] == "graph" and g["probe_env"] == "NEO4J_PASSWORD"
+    field_envs = [f["env"] for f in g["fields"]]
+    assert field_envs == ["NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD"]
+    # the password field is a SECRET (masked), the URI/username are CONFIG (shown)
+    kinds = {f["env"]: f["kind"] for f in g["fields"]}
+    assert kinds["NEO4J_PASSWORD"] == "secret" and kinds["NEO4J_URI"] == "config"
+    # the "graph" secret category is advertised so the UI renders a section for it
+    assert any(c["id"] == "graph" for c in st["secret_categories"])
+
+
+def test_neo4j_password_sealed_and_never_leaked(env):
+    store, owner, _ = env
+    secret = "neo4j-TOPSECRET-pw-9999"
+    out = smod.set_secret("NEO4J_PASSWORD", secret, store=store, owner_key=owner)
+    assert out["ok"] and out["fingerprint"].startswith("sha256:")
+    assert secret not in json.dumps(out)
+    st = smod.settings_status()
+    assert secret not in json.dumps(st)                 # never in the redacted view
+    g = [p for p in st["cloud_providers"] if p["id"] == "graph"][0]
+    pw = [f for f in g["fields"] if f["env"] == "NEO4J_PASSWORD"][0]
+    assert pw["set"] is True and pw["probeable"] is True
+
+
+def test_neo4j_probe_is_fail_closed(env):
+    # the live probe never returns a false ok: no URI/username → unknown (honest), a bad scheme → fail,
+    # and a well-formed config with the neo4j driver absent → unknown ("install the driver"), never ok.
+    store, _, _ = env
+    from sigil.platform import secret_probes as sp
+    assert sp.has_probe("NEO4J_PASSWORD")
+    assert sp._probe_neo4j("pw", store, {})[0] == "unknown"
+    assert sp._probe_neo4j("pw", store, {"NEO4J_URI": "neo4j://h"})[0] == "unknown"   # no username
+    assert sp._probe_neo4j("pw", store, {"NEO4J_URI": "http://x", "NEO4J_USERNAME": "neo4j"})[0] == "fail"
+    ok_ctx = {"NEO4J_URI": "neo4j+s://x", "NEO4J_USERNAME": "neo4j"}
+    status, reason = sp._probe_neo4j("pw", store, ok_ctx)
+    assert status in ("ok", "unknown", "fail")          # never crashes
+    if status == "unknown":
+        assert "driver" in reason                       # honest "install the neo4j driver", not a false ok

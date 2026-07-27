@@ -451,6 +451,9 @@ _OFFENSE_ENV_ALLOWLIST = frozenset({
     "AZURE_OPENAI_API_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
     "AZURE_CLIENT_SECRET",                      # cloud posture service-principal secret (read-only Azure)
     "GOOGLE_CLOUD_PROJECT", "KUBE_CONTEXT",     # GCP/K8s non-secret config
+    # knowledge-graph connection: non-secret URI + username (shown) + the sealed password. The offense
+    # engine opens its OWN Neo4j driver (graph_driver) to project the per-session graph; never the owner key.
+    "NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD",
     # BASE64 file-content creds — bridged only to be MATERIALISED to a 0600 file here (then dropped from the
     # child env; the child sees only the path via GOOGLE_APPLICATION_CREDENTIALS / KUBECONFIG).
     "GOOGLE_APPLICATION_CREDENTIALS_JSON", "KUBECONFIG_CONTENT",
