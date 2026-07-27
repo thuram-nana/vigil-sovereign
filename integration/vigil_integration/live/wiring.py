@@ -339,9 +339,15 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             signer=_cert_signer, verify_key=spine_kp.public_key_b64, key_id=SPINE_KEY_ID,
         )
 
+    # -- operator instructions (A5) — the offense-local, advisory mid-run guidance queue for this slug ---
+    def operator_messages() -> list:
+        from .instructions import drain
+        return drain(config.slug, base=config.base_dir)
+
     seams = EngineSeams(
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
         checkpoint=checkpoint, detect=detect, approval=approval,
+        operator_messages=operator_messages,
     )
     return VigilEngine(slug=config.slug, seams=seams,
                        require_attestation=config.require_attestation,
@@ -442,9 +448,15 @@ def _build_oracle(prov: Provisioned) -> Callable[[str, Any], Optional[str]]:
 
 
 def _prompt_ctx(state: AgentState) -> str:
-    """A compact, UNTRUSTED-framed-downstream context digest for the think step (think() nonce-wraps it)."""
-    return (f"phase={state.phase.value} iteration={state.iteration} "
-            f"facts={len(state.facts)} leads={len(state.leads)} objective={state.objective}")
+    """A compact, UNTRUSTED-framed-downstream context digest for the think step (think() nonce-wraps it).
+    Operator instructions (A5) ride in the SAME untrusted digest as advisory guidance — think() fences the
+    whole string, and every action the model then proposes still passes the gate, so this cannot escalate."""
+    ctx = (f"phase={state.phase.value} iteration={state.iteration} "
+           f"facts={len(state.facts)} leads={len(state.leads)} objective={state.objective}")
+    if state.operator_instructions:
+        recent = " | ".join(state.operator_instructions[-5:])   # bounded; most-recent guidance wins
+        ctx += f" operator_instructions={recent}"
+    return ctx
 
 
 def _read(path: str) -> str:

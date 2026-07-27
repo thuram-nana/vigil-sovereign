@@ -67,6 +67,23 @@ def _cmd_provision(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_engage_instruct(args: argparse.Namespace) -> int:
+    """Enqueue a mid-run, natural-language operator instruction for a live engagement `slug`. The running
+    `vigil engage` folds it into its next think as ADVISORY context — it fires nothing (every action still
+    passes the gate + approval; every exploit still needs the oracle), so this can neither run a tool nor
+    relax scope. This is the "tell it what to include DURING a live engagement" path."""
+    from .live.instructions import enqueue
+    try:
+        out = enqueue(args.slug, args.text, base=args.base_dir)
+    except ValueError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    print(f"queued operator instruction #{out['seq']} for engagement '{out['slug']}' "
+          f"(advisory — the running engage will fold it into its next reasoning step; every action it "
+          f"prompts still waits for your approval).")
+    return 0
+
+
 def _cmd_engage(args: argparse.Namespace) -> int:
     from .live.think_claude import ReplayThinker
     from .live.wiring import EngineConfig, build_engine
@@ -486,6 +503,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the operator's standing approval to run queued offense tools against their "
                          "own chartered loopback (the human leg of the conjunctive gate; scope still enforced)")
     pe.set_defaults(func=_cmd_engage)
+
+    pei = sub.add_parser("engage-instruct",
+                         help="add a mid-run, natural-language instruction to a LIVE engagement (advisory; "
+                              "the running engage folds it into its next reasoning step — every action it "
+                              "prompts still waits for your approval)")
+    pei.add_argument("slug", help="the engagement slug to steer (same --slug you gave `vigil engage`)")
+    pei.add_argument("text", help="the instruction, e.g. \"also check the admin API for BOLA\"")
+    pei.add_argument("--base-dir", default=".vigil-live")
+    pei.set_defaults(func=_cmd_engage_instruct)
 
     pl = sub.add_parser("ledger", help="query the usage-attestation ledger (who/when)")
     pl.add_argument("which", choices=("who", "when"))

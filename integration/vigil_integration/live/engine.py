@@ -73,6 +73,10 @@ DetectFn = Callable[[], list]
 # approval(decision, state) -> True iff a valid SIGNED operator approval exists for this escalation
 # (the human leg of the conjunctive gate). None-seam ⇒ False ⇒ an escalation stays queued (fail-closed).
 ApprovalFn = Callable[[LLMDecision, AgentState], bool]
+# operator_messages() -> the NEW mid-run operator instructions for this engagement, consumed once (A5).
+# ADVISORY context only — folded into the think step; never a tool trigger or a scope change. None-seam ⇒
+# no mid-run guidance (an ASK_USER pause simply ends the run, exactly as before A5).
+OperatorMsgFn = Callable[[], list]
 
 _GENESIS = "0" * 64
 
@@ -92,6 +96,7 @@ class EngineSeams:
     checkpoint: Optional[CheckpointFn] = None  # None ⇒ no per-turn spine snapshot
     detect: Optional[DetectFn] = None          # None ⇒ the Detection Mirror is not run
     approval: Optional[ApprovalFn] = None      # None ⇒ a phase escalation / fireteam stays QUEUED
+    operator_messages: Optional[OperatorMsgFn] = None  # None ⇒ no mid-run operator instructions (A5)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -176,6 +181,7 @@ class VigilEngine:
             state.iteration = it
             report.iterations = it + 1
 
+            self._drain_operator(state)      # (A5) fold in any queued operator instructions BEFORE we think
             decision = self._think(state)
             report.decisions.append(str(decision.action.value))
 
@@ -184,6 +190,13 @@ class VigilEngine:
                 state.done = True
                 break
             if decision.action == ActionType.ASK_USER:
+                # (A5) the ASK_USER dead-end is now resumable: if the operator queued an instruction
+                # (possibly DURING this think), fold it in and continue instead of ending the run. Advisory
+                # only — the resulting think's proposals still pass authorize_edge (gate + approval), so an
+                # instruction can neither fire a tool nor relax scope.
+                if self._drain_operator(state) > 0:
+                    report.decisions[-1] = "ask_user->resumed"
+                    continue
                 state.awaiting_question = True
                 report.paused = "ask_user"
                 break
@@ -316,6 +329,21 @@ class VigilEngine:
             return self.seams.approval(decision, state) is True
         except Exception:  # noqa: BLE001 — an approval error denies the escalation
             return False
+
+    def _drain_operator(self, state: AgentState) -> int:
+        """Fold any NEW operator instructions into ``state`` so the next think sees them; return how many
+        were new. ADVISORY only — this changes what the LLM reads, never what it may do (every proposed
+        action still passes authorize_edge). Fail-closed + total: no seam, or any seam error, yields 0 and
+        never raises into the loop."""
+        if self.seams.operator_messages is None:
+            return 0
+        try:
+            msgs = self.seams.operator_messages() or []
+        except Exception:  # noqa: BLE001 — an instruction-source error never crashes the run
+            return 0
+        new = [str(m).strip() for m in msgs if str(m or "").strip()]
+        state.operator_instructions.extend(new)
+        return len(new)
 
     @staticmethod
     def _apply_escalation(decision: LLMDecision, state: AgentState) -> None:

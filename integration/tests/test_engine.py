@@ -283,3 +283,67 @@ def test_a_governor_is_advisory_only_never_gates_truth():
                               oracle=lambda raw, an: "spine:" + "f" * 60, govern=govern))
     rep = eng.engage(TARGET)
     assert rep.fact_count == 1        # the governor did not gate the fact
+
+
+# --- A5: mid-run operator instructions (advisory; the ASK_USER dead-end becomes resumable) ----------
+
+
+def _ask_user():
+    return LLMDecision(action=ActionType.ASK_USER, reasoning="need guidance",
+                       question="how should I proceed?")
+
+
+class _ScriptedThink:
+    """A think seam that returns a scripted decision sequence AND snapshots what operator instructions
+    were in state at each call — so a test can prove the instruction actually reached the reasoning step."""
+
+    def __init__(self, decisions):
+        self._it = iter(decisions)
+        self.seen: list = []
+
+    def __call__(self, state):
+        self.seen.append(list(state.operator_instructions))
+        return next(self._it, _complete())
+
+
+def _op_msgs(*batches):
+    """An operator_messages seam yielding one batch per call, then [] forever."""
+    it = iter(batches)
+    return lambda: list(next(it, []))
+
+
+def test_ask_user_pauses_when_no_operator_instruction():
+    eng = _engine(EngineSeams(attest=_attest_allow, think=_ScriptedThink([_ask_user()]),
+                              operator_messages=_op_msgs()))   # no instruction ever
+    rep = eng.engage(TARGET)
+    assert rep.paused == "ask_user" and not rep.done          # unchanged pre-A5 behaviour
+
+def test_ask_user_resumes_when_an_operator_instruction_is_queued():
+    think = _ScriptedThink([_ask_user(), _complete()])
+    # first drain (top of it0) is empty; the instruction arrives at the ASK_USER re-drain
+    eng = _engine(EngineSeams(attest=_attest_allow, think=think,
+                              operator_messages=_op_msgs([], ["check the admin API for BOLA"])))
+    rep = eng.engage(TARGET)
+    assert rep.paused == "" and rep.done                       # the dead-end resumed, no pause
+    assert rep.decisions == ["ask_user->resumed", "complete"]
+    assert think.seen[1] == ["check the admin API for BOLA"]   # the instruction reached the next think
+
+
+def test_operator_instruction_is_advisory_not_a_tool_trigger():
+    # an instruction reaches think, but a USE_TOOL it prompts is STILL gated — with a denying gate the
+    # tool never runs. The instruction cannot manufacture an un-gated fire path.
+    think = _ScriptedThink([_use_tool()])
+    eng = _engine(EngineSeams(attest=_attest_allow, think=think, gate=_deny_gate,
+                              run_tool=_run_tool_ok, operator_messages=_op_msgs(["focus on auth"])))
+    rep = eng.engage(TARGET)
+    assert think.seen[0] == ["focus on auth"]                  # advisory context reached the model
+    assert rep.denied_edges and not [t for t in rep.tool_calls if t.outcome == "ran"]  # still gated
+
+
+def test_operator_messages_seam_is_total_a_raise_is_not_a_crash():
+    def _boom():
+        raise RuntimeError("instruction source unavailable")
+    eng = _engine(EngineSeams(attest=_attest_allow, think=_ScriptedThink([_ask_user()]),
+                              operator_messages=_boom))
+    rep = eng.engage(TARGET)                                    # must not raise
+    assert rep.paused == "ask_user"                            # fail-closed: a broken source → no resume
