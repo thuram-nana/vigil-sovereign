@@ -292,6 +292,24 @@ else
   warn "Docker unavailable — skipping services. Qdrant runs embedded; strix will not work until Docker is up."
 fi
 
+# --- knowledge graph: test + connect a cloud/remote Neo4j on deploy (best-effort, non-fatal) ---------
+# If the operator has connected a cloud/remote Neo4j in Settings, "auto get up" = TEST the connection now
+# (through the SOVEREIGN check-secret broker, so the password stays in the sealed store and never enters
+# argv/logs — only the redacted verdict is printed). Absent creds → skip silently. Present-but-invalid →
+# warn + continue (the engine still runs; the graph projection is honestly omitted). Cloud Neo4j (Aura)
+# needs no container; the local docker `neo4j` (--profile graph) remains a dev-only fallback.
+if [ -x ".venv-sovereign/bin/sigil" ]; then
+  # load the persisted config (NEO4J_URI / NEO4J_USERNAME live in sigil.env; the password is in the sealed
+  # store, read by the probe) so the sovereign check can see the connection details.
+  ( set -a; [ -f sigil.env ] && . ./sigil.env 2>/dev/null; set +a
+    _graph_verdict="$(.venv-sovereign/bin/sigil settings check NEO4J_PASSWORD 2>/dev/null || true)"
+    case "$_graph_verdict" in
+      ok:*)      ok "knowledge graph: Neo4j connected (${_graph_verdict#ok: })" ;;
+      fail:*)    warn "knowledge graph: Neo4j did not connect (${_graph_verdict#fail: }) — check Settings → Knowledge graph. The engine still runs; graph projection is omitted." ;;
+      *)         : ;;   # unknown / not set → no Neo4j configured; skip silently
+    esac )
+fi
+
 # =============================================================================
 step "4/6 config + launchers"
 # =============================================================================

@@ -83,6 +83,13 @@ SECRET_META = {
                                     "An internal secret you choose — no external service to check."},
     "CRUCIBLE_OOB_RELAY_SECRET": {"category": "integration", "probe": False, "label": "OOB relay secret",
                                   "purpose": "Authenticates out-of-band (OAST) callbacks. Internal secret."},
+    # --- Knowledge graph (the offense per-session Neo4j read-model; cloud/remote) ---
+    "NEO4J_PASSWORD": {"category": "graph", "probe": True, "label": "Neo4j password",
+                       "purpose": "The password for your cloud/remote Neo4j (e.g. Neo4j Aura). Paired with the "
+                                  "connection URI + username below; validated live with a bolt `RETURN 1`. The "
+                                  "offense engine projects the per-session knowledge graph into this database "
+                                  "(a one-way, rebuildable projection of the signed spine — it stores no secret "
+                                  "and authorizes nothing). Optional until you connect a graph."},
     # --- Auto-patch signing (the m-of-n destruction quorum) ---
     "VIGIL_DESTRUCTION_OWNER_KEY": {
         "category": "destruction", "probe": False, "label": "Auto-patch signing key (owner)",
@@ -95,9 +102,10 @@ SECRET_META = {
 }
 # Ordered allowlist (grouping order preserved for the UI). Only these names may be sealed here.
 SECRET_NAMES = tuple(SECRET_META.keys())
-_SECRET_CATEGORY_ORDER = ("llm", "cloud", "integration", "destruction")
+_SECRET_CATEGORY_ORDER = ("llm", "cloud", "graph", "integration", "destruction")
 _SECRET_CATEGORY_LABEL = {"llm": "AI model providers", "cloud": "Cloud credentials",
-                          "integration": "Integrations", "destruction": "Auto-patch signing"}
+                          "graph": "Knowledge graph", "integration": "Integrations",
+                          "destruction": "Auto-patch signing"}
 _MAX_SECRET_LEN = 8192
 
 # --- Cloud-provider CREDENTIAL plane (Phase C) -----------------------------------------------------
@@ -126,6 +134,13 @@ CLOUD_CONFIG_META = {
                              "placeholder": "the GCP project to scan", "optional": True},
     "KUBE_CONTEXT": {"provider": "kubernetes", "label": "Context (optional)",
                      "placeholder": "kubeconfig context to use (blank = current-context)", "optional": True},
+    # Knowledge-graph connection (non-secret identifiers; the password is the sealed secret above). The URI
+    # is a bolt/neo4j scheme host — validated for scheme here and re-validated (scheme allowlist) by the probe
+    # + the offense driver-factory before any connection is opened.
+    "NEO4J_URI": {"provider": "graph", "label": "Connection URI",
+                  "placeholder": "neo4j+s://<id>.databases.neo4j.io  (Aura) or bolt://host:7687", "optional": True},
+    "NEO4J_USERNAME": {"provider": "graph", "label": "Username",
+                       "placeholder": "neo4j", "optional": True},
 }
 CLOUD_CONFIG_VARS = tuple(CLOUD_CONFIG_META)
 
@@ -158,6 +173,12 @@ CLOUD_PROVIDERS = (
      "purpose": "Read-only Kubernetes posture. Paste a kubeconfig; validated with a read-only call to the "
                 "cluster's /version. Prefer a context bound to a read-only ServiceAccount.",
      "fields": ("KUBECONFIG_CONTENT", "KUBE_CONTEXT")},
+    {"id": "graph", "label": "Neo4j knowledge graph", "probe_env": "NEO4J_PASSWORD",
+     "purpose": "The cloud/remote Neo4j the offense engine projects the per-session knowledge graph into "
+                "(e.g. Neo4j Aura). Enter the connection URI, username, and password; validated live with a "
+                "bolt `RETURN 1`. The graph is a one-way, rebuildable projection of the signed spine — it "
+                "stores no secret and authorizes nothing.",
+     "fields": ("NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD")},
 )
 
 # The canonical env vars each plane reads (persisted, non-secret) + delivered to the keyless offense
@@ -305,6 +326,16 @@ def _validate_config_value(env: str, value: str) -> str:
         raise ValueError("CRUCIBLE_AWS_ENDPOINT_URL must be an http(s) URL")
     if env == "AWS_ROLE_ARN" and not value.startswith("arn:"):
         raise ValueError("AWS_ROLE_ARN must be an IAM role ARN (arn:aws:iam::…:role/…)")
+    if env == "NEO4J_URI":
+        if not value.startswith(("bolt://", "bolt+s://", "bolt+ssc://",
+                                 "neo4j://", "neo4j+s://", "neo4j+ssc://")):
+            raise ValueError("NEO4J_URI must be a bolt:// or neo4j:// URI (use neo4j+s:// for Aura / TLS)")
+        # reject inline userinfo (neo4j://user:pass@host): the URI is NON-secret config (written to the
+        # envfile + recorded on the spine), so a password must never ride in it — the sealed NEO4J_PASSWORD
+        # field is the only place for it. The driver ignores URI userinfo anyway.
+        if "@" in value:
+            raise ValueError("NEO4J_URI must not contain a username/password (user:pass@host) — put the "
+                             "password in the Neo4j password field; the URI is stored non-secret")
     return value
 
 
@@ -698,8 +729,11 @@ def settings_status() -> dict:
                     "placeholder": cmeta.get("placeholder", ""), "optional": bool(cmeta.get("optional")),
                     "warn": cmeta.get("warn", ""), "value": cval, "set": bool(cval),
                 })
+        # the provider's category = its probe secret's category (cloud / graph …). The UI renders per-category
+        # provider cards, so a graph provider groups under "Knowledge graph", cloud ones under "Cloud credentials".
+        prov_cat = SECRET_META.get(prov["probe_env"], {}).get("category", "cloud")
         cloud_providers.append({"id": prov["id"], "label": prov["label"], "purpose": prov.get("purpose", ""),
-                                "probe_env": prov["probe_env"], "fields": fields})
+                                "probe_env": prov["probe_env"], "category": prov_cat, "fields": fields})
     return {
         "secrets": secrets,
         "cloud_providers": cloud_providers,

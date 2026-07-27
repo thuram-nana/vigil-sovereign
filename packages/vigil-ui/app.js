@@ -2277,17 +2277,20 @@
     var cats = st.secret_categories || [{ id: "integration", label: "Secrets" }];
     var secrets = st.secrets || [];
     var sections = cats.map(function (cat) {
-      // the "cloud" category renders as detailed PER-PROVIDER credential cards (AWS / Azure / …), each
-      // with its full field set (keys, session token, region, role, tenant/subscription) + a live test.
-      if (cat.id === "cloud") {
-        var provs = st.cloud_providers || [];
-        if (!provs.length) return null;
+      // provider-backed categories (cloud / graph) render as detailed PER-PROVIDER credential cards, each
+      // with its full field set + a live Test. The provider's category is set server-side from its probe
+      // secret, so a graph provider (Neo4j) groups under "Knowledge graph" and cloud ones under "Cloud".
+      var provs = (st.cloud_providers || []).filter(function (p) { return (p.category || "cloud") === cat.id; });
+      if (provs.length) {
+        var hint = cat.id === "cloud"
+          ? "Enter each cloud provider's credentials for the read-only pentest collectors. Everything is sealed "
+            + "on this machine and never shown back to the browser; a tenant/subscription id is shown, access "
+            + "keys and secrets are masked. Press Test connection to verify a credential is live."
+          : "Enter the connection details. The password is sealed on this machine and never shown back to the "
+            + "browser; the URI and username are shown. Press Test connection to verify it is live.";
         return h("div", { style: { marginTop: "18px" } }, [
           h("div.screen-head", { style: { marginBottom: "6px" } }, h("h2", null, cat.label)),
-          h("div.hint", { style: { marginBottom: "8px" } },
-            "Enter each cloud provider's credentials for the read-only pentest collectors. Everything is sealed "
-            + "on this machine and never shown back to the browser; a tenant/subscription id is shown, access "
-            + "keys and secrets are masked. Press Test connection to verify a credential is live."),
+          h("div.hint", { style: { marginBottom: "8px" } }, hint),
           provs.map(function (p) { return drawCloudProvider(p, st, loadApiKeys); }),
         ]);
       }

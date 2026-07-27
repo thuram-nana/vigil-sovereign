@@ -178,7 +178,7 @@ def test_settings_status_surfaces_health_category_and_failing_count():
     _probes()._write_cache("ANTHROPIC_API_KEY", {"status": "fail", "reason": "rejected", "checked_at": 1})
     st = S.settings_status()
     assert st["keys_failing"] == 1
-    assert [c["id"] for c in st["secret_categories"]] == ["llm", "cloud", "integration", "destruction"]
+    assert [c["id"] for c in st["secret_categories"]] == ["llm", "cloud", "graph", "integration", "destruction"]
     row = next(r for r in st["secrets"] if r["name"] == "ANTHROPIC_API_KEY")
     assert row["category"] == "llm" and row["probeable"] is True
     assert row["health"]["status"] == "fail"

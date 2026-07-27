@@ -619,6 +619,18 @@ def cmd_settings(a) -> None:
     if sub == "export-runtime-env":
         print(json.dumps(_settings.export_runtime_env(getattr(a, "include_secrets", False))))
         return
+    if sub == "check":
+        # run ONE secret's live probe and print only the REDACTED verdict (status + reason, never the
+        # value). Used by bootstrap to "test + connect" a cloud/remote credential (e.g. Neo4j) on deploy.
+        # Always exits 0 — a failing/unknown check is informational, never fatal to a deploy.
+        from .platform.secret_probes import check_secret_health   # noqa: PLC0415
+        name = str(getattr(a, "secret_name", "") or "").strip()
+        if name not in _settings.SECRET_NAMES:
+            print(f"unknown secret {name!r}", file=sys.stderr)
+            return
+        rec = check_secret_health(name)
+        print(f"{rec.get('status', 'unknown')}: {rec.get('reason', '')}")
+        return
     # default: redacted status (safe to print anywhere)
     st = _settings.settings_status()
     print(f"secret backend: {st['secret_backend']}")
@@ -1242,7 +1254,9 @@ def main(argv=None) -> None:
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     pset = sub.add_parser("settings", help="show settings (redacted) | export the runtime LLM env for the launcher")
-    pset.add_argument("settings_cmd", choices=["status", "export-runtime-env"], nargs="?", default="status")
+    pset.add_argument("settings_cmd", choices=["status", "export-runtime-env", "check"], nargs="?", default="status")
+    pset.add_argument("secret_name", nargs="?", default="",
+                      help="(check) the secret to live-probe, e.g. NEO4J_PASSWORD — prints only status + reason")
     pset.add_argument("--include-secrets", action="store_true",
                       help="(export-runtime-env) also emit the resolved API key — MACHINE USE ONLY, "
                            "never redirect to a file/log; used by `vigil up` to feed the offense engine")

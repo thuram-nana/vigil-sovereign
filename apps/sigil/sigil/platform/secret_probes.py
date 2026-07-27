@@ -245,6 +245,47 @@ def _probe_kubernetes(value: str, store: SecretStore, ctx: dict) -> "tuple[str, 
         return FAIL, f"Kubernetes check failed: {type(e).__name__}"
 
 
+_NEO4J_SCHEMES = ("bolt://", "bolt+s://", "bolt+ssc://", "neo4j://", "neo4j+s://", "neo4j+ssc://")
+
+
+def _probe_neo4j(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
+    # value = NEO4J_PASSWORD; the connection URI + username are NON-secret config (from ctx). The neo4j
+    # driver is optional — absent ⇒ unknown (honest), never a false ok. A bolt `RETURN 1` validates the
+    # credential + reachability; the URI SCHEME is allowlisted here (defence-in-depth — the settings
+    # validator + the offense driver-factory enforce the same set) so a pasted http/file/tcp URI is
+    # refused before any connection is opened. Short-timeout, fail-closed; the password never appears in
+    # the verdict, and the driver is always closed.
+    uri = str(ctx.get("NEO4J_URI", "") or "").strip()
+    user = str(ctx.get("NEO4J_USERNAME", "") or "").strip()
+    if not uri:
+        return UNKNOWN, "also set the Neo4j connection URI to validate"
+    if not uri.startswith(_NEO4J_SCHEMES):
+        return FAIL, "URI must be a bolt:// or neo4j:// scheme (use neo4j+s:// for Aura / TLS)"
+    if not user:
+        return UNKNOWN, "also set the Neo4j username to validate"
+    try:
+        from neo4j import GraphDatabase  # optional dependency
+    except Exception:  # noqa: BLE001
+        return UNKNOWN, "install the neo4j driver to validate a Neo4j connection"
+    driver = None
+    try:
+        driver = GraphDatabase.driver(uri, auth=(user, value), connection_timeout=_TIMEOUT_S,
+                                      max_transaction_retry_time=_TIMEOUT_S)
+        driver.verify_connectivity()
+        with driver.session() as session:
+            rec = session.run("RETURN 1 AS ok").single()
+        ok = bool(rec and rec.get("ok") == 1)
+        return (OK, "connected (RETURN 1 ok)") if ok else (FAIL, "connected but RETURN 1 did not return 1")
+    except Exception as e:  # noqa: BLE001 — fail-closed; never leak the password in the message
+        return FAIL, f"Neo4j rejected the connection: {type(e).__name__}"
+    finally:
+        try:
+            if driver is not None:
+                driver.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # name → probe. A secret NOT listed here has no live check (verdict = unknown, "no live check").
 _PROBES: "dict[str, Callable[[str, SecretStore, dict], tuple[str, str]]]" = {
     "ANTHROPIC_API_KEY": _probe_anthropic,
@@ -258,6 +299,7 @@ _PROBES: "dict[str, Callable[[str, SecretStore, dict], tuple[str, str]]]" = {
     "AZURE_CLIENT_SECRET": _probe_azure,
     "GOOGLE_APPLICATION_CREDENTIALS_JSON": _probe_gcp,
     "KUBECONFIG_CONTENT": _probe_kubernetes,
+    "NEO4J_PASSWORD": _probe_neo4j,
 }
 
 
@@ -271,7 +313,8 @@ def _probe_ctx() -> dict:
             ("AZURE_OPENAI_ENDPOINT", "CRUCIBLE_BEDROCK_REGION", "AWS_REGION",
              "CRUCIBLE_AWS_ENDPOINT_URL", "AWS_ROLE_ARN",
              "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID",
-             "GOOGLE_CLOUD_PROJECT", "KUBE_CONTEXT")}
+             "GOOGLE_CLOUD_PROJECT", "KUBE_CONTEXT",
+             "NEO4J_URI", "NEO4J_USERNAME")}
 
 
 # --- verdict cache (0600, value-free) --------------------------------------------------------------

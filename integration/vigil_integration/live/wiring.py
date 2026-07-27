@@ -362,10 +362,49 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
                                         seq_start=int(seq)))
 
+    # -- knowledge-graph projection (F1) — mirror the run's oracle-CONFIRMED facts into a cloud/remote
+    # Neo4j read-model, when the operator has connected one (Settings → Knowledge graph). Honest omission:
+    # no creds / an unreachable host → build_neo4j_session_factory returns None → the project seam stays
+    # None → the engine simply does not mirror (it never fakes a connection). The mirror is a PURE ONE-WAY
+    # PROJECTION: rebuild_from_spine re-derives confirmation via graph.project (a bare status="fact" without
+    # a signed evidence+signature ref projects as a :Lead), CLEARS + rewrites the partition each call, mints
+    # no fact, and is never consulted by the gate. Deterministic (sorted, spine-seq coordinate; no wallclock).
+    graph_project = None
+    from ..graph import spine_record_from_finding
+    from .graph_driver import build_neo4j_session_factory
+    from .graph_neo4j import Neo4jGraphWriter
+    session_factory = build_neo4j_session_factory()
+    if session_factory is not None:
+        writer = Neo4jGraphWriter(session_factory, group_id=config.slug)
+        _mirror: dict[str, Any] = {}      # finding ref -> confirmed Finding, accumulated across the run
+
+        def graph_project(facts: list) -> None:
+            # Accumulate this batch (dedupe by finding ref), then re-project the WHOLE set — a projection,
+            # never an append. What confirmation rests on here (stated honestly): the ENGINE only ever calls
+            # this seam with oracle-MINTED facts — `intake.facts` and fireteam facts filtered on a non-empty
+            # signed `evidence_ref` (engine._project); a `Finding` is type-level unconstructable as a fact
+            # without that signed ref (state.Finding._fact_needs_evidence). A `Finding` carries NO separate
+            # spine signature field, so `signature_ref` below MIRRORS the same signed oracle `evidence_ref`
+            # (it is NOT a second, independent gate in this path). The projector's `_is_confirmed` still
+            # re-derives :Confirmed vs :Lead from status+evidence_ref+signature_ref, so a LEAD (which the
+            # engine never passes here anyway) can never become :Confirmed.
+            for f in facts or []:
+                ref = str(getattr(f, "ref", "") or "") or f"f{len(_mirror)}"
+                _mirror[ref] = f
+            records = [
+                spine_record_from_finding(
+                    f, seq=i, hash=str(getattr(f, "ref", "") or f"proj-{i}"),
+                    signature_ref=str(getattr(f, "signature_ref", "") or getattr(f, "evidence_ref", "") or ""),
+                    engagement_id=config.slug)
+                for i, (_ref, f) in enumerate(sorted(_mirror.items()))
+            ]
+            writer.rebuild_from_spine(records, group_id=config.slug)
+
     seams = EngineSeams(
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
         checkpoint=checkpoint, detect=detect, approval=approval,
         operator_messages=operator_messages, deploy_fireteam=deploy_fireteam,
+        project=graph_project,
     )
     return VigilEngine(slug=config.slug, seams=seams,
                        require_attestation=config.require_attestation,
