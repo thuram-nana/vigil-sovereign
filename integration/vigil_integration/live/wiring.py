@@ -344,10 +344,25 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         from .instructions import drain
         return drain(config.slug, base=config.base_dir)
 
+    # -- fireteam (A4c) — an APPROVED deploy fans out N capped, gated members via run_fireteam -----------
+    def deploy_fireteam(decision: Any, state: AgentState, seq: int) -> Any:
+        import asyncio
+
+        from ..fireteam.member_runner import build_member_runner
+        from ..fireteam.orchestrator import run_fireteam
+        plan = {"wave_id": f"{config.slug}-w{int(seq)}",
+                "members": list(getattr(decision, "fireteam", []) or [])}
+        # members reuse the SAME think + governed executor + gate + oracle as the parent — never a
+        # privileged copy. run_fireteam validates the plan fail-closed (a malformed/over-cap/mutex plan
+        # spawns NOTHING) and collect() re-fires the oracle so only a confirmed claim mints a fact.
+        runner = build_member_runner(think=think_seam, run_tool=run_tool, parent_objective=state.objective)
+        return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
+                                        seq_start=int(seq)))
+
     seams = EngineSeams(
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
         checkpoint=checkpoint, detect=detect, approval=approval,
-        operator_messages=operator_messages,
+        operator_messages=operator_messages, deploy_fireteam=deploy_fireteam,
     )
     return VigilEngine(slug=config.slug, seams=seams,
                        require_attestation=config.require_attestation,
