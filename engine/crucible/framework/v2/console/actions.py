@@ -100,28 +100,37 @@ def _safe_run_id(run_id: str) -> str:
     return rid
 
 
-def run_dir(run_id: str) -> Path:
+def run_dir(run_id: str, *, ephemeral: bool = False) -> Path:
+    # D2: an ephemeral run store lives on an in-memory tmpfs base (purged when the console
+    # exits), never under the repo's .console/runs. Default path unchanged.
+    if ephemeral:
+        from ..common.ephemeral import console_run_base
+        return console_run_base() / _safe_run_id(run_id)
     return console_dir() / "runs" / _safe_run_id(run_id)
 
 
-def _write_meta(run_id: str, **fields) -> None:
+def _write_meta(run_id: str, *, ephemeral: bool = False, **fields) -> None:
     try:
-        (run_dir(run_id) / "meta.json").write_text(
-            json.dumps(fields, default=str, indent=2), encoding="utf-8")
+        (run_dir(run_id, ephemeral=ephemeral) / "meta.json").write_text(
+            json.dumps({**fields, "ephemeral": ephemeral}, default=str, indent=2),
+            encoding="utf-8")
     except OSError:
         pass
 
 
-def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True) -> dict:
+def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
+                ephemeral: bool = False) -> dict:
     """Spawn a loopback `scan` subprocess that streams progress + saves its report.
     Returns ``{run_id, status}``. Refuses a non-loopback target (scan is loopback-only;
-    a remote target must go through the gated `engage`)."""
+    a remote target must go through the gated `engage`). With ``ephemeral`` the whole run
+    store (progress/report/reverifiable/meta) lands on an in-memory tmpfs base purged when
+    the console exits — nothing under the repo's .console/runs."""
     host = (urlsplit(target).hostname or "").lower()
     if host not in _LOOPBACK:
         return {"error": "scan is loopback-only (127.0.0.1/localhost/::1); use engage for remote"}
 
     run_id = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
-    rd = run_dir(run_id)
+    rd = run_dir(run_id, ephemeral=ephemeral)
     rd.mkdir(parents=True, exist_ok=True)
     progress = rd / "progress.jsonl"
     progress.write_text("", encoding="utf-8")
@@ -134,21 +143,23 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True) -
         # a receiver + poll for callbacks, adding latency) and prioritise per point.
         "--no-oob", "--targeted",
     ]
-    _write_meta(run_id, target=target, cmd=cmd, status="running", started=time.time())
+    _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd,
+                status="running", started=time.time())
 
     def _run() -> None:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
             if proc.returncode == 0 and proc.stdout.strip():
                 (rd / "report.json").write_text(proc.stdout, encoding="utf-8")
-                _write_meta(run_id, target=target, cmd=cmd, status="done",
+                _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd, status="done",
                             rc=proc.returncode, finished=time.time())
             else:
-                _write_meta(run_id, target=target, cmd=cmd, status="error",
+                _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd, status="error",
                             rc=proc.returncode, stderr=(proc.stderr or "")[-2000:],
                             finished=time.time())
         except Exception as e:  # never let a launch crash the console
-            _write_meta(run_id, target=target, cmd=cmd, status="error", error=str(e))
+            _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd,
+                        status="error", error=str(e))
 
     threading.Thread(target=_run, daemon=True).start()
     return {"run_id": run_id, "status": "running", "progress": f"runs/{run_id}"}

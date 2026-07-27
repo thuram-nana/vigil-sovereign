@@ -888,7 +888,9 @@ class HttpExecutor:
         return f"H-{int(time.time() * 1000) % 1_000_000_000:09d}"
 
     def _evidence_dir(self, action_id: str) -> Path:
-        return paths.target_dir(self.engagement_slug) / "evidence" / action_id
+        # Routes through paths.evidence_dir so an --ephemeral/ZDR session re-roots the
+        # captured HTTP archive onto tmpfs (purged on exit); default is unchanged.
+        return paths.evidence_dir(self.engagement_slug, action_id)
 
     def _sleep_for_rate_limit(self) -> None:
         floor, jitter_max = _RATE_PROFILES[self._resolved_posture]
