@@ -63,6 +63,11 @@ class EngagementResult:
     attack_paths: list[AttackPath] = field(default_factory=list)
     path_portfolio: list[AttackPath] = field(default_factory=list)
     chained_conclusions: list[ChainedConclusion] = field(default_factory=list)
+    # C4 — internal attack paths over the FUSED world (opt-in ``fuse_sensors``). The lateral-
+    # movement routes that only exist once the cloud / IAM oracle facts are folded in: the pre-
+    # fusion ``attack_paths`` are computed BEFORE fusion, so they never see the cloud posture.
+    # Empty on the default (no-fuse) path — byte-identical to before.
+    lateral_paths: list[AttackPath] = field(default_factory=list)
     # Intelligence Engine (opt-in ``enable_recon``): the resolved asset inventory this
     # engagement observed/discovered, and the GATED prediction queue (where-to-look-next
     # hypotheses — never facts, never auto-scanned). ``world`` is the shared graph the
@@ -817,6 +822,19 @@ def run_engagement(
             fusion_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
             result.fused_leads, result.fused_facts = _run_fusion(
                 world, slug, seq_base=fusion_base, sink=sink)
+        except Exception:
+            pass
+        # C4 — internal attack paths over the NOW-FUSED world. Bridge the GROUNDED cloud oracle
+        # facts (policy_path / active_exposure) into attacker-traversable edges and re-run the
+        # deterministic path search, surfacing lateral routes that only exist once the cloud
+        # posture is folded in. Only under fuse_sensors (default path byte-identical). Mints no
+        # fact — every bridged edge restates a fired oracle; best-effort, never sinks the run.
+        try:
+            from .scanner.lateral import lateral_paths
+            from .worldmodel.impact import ImpactModel
+            lateral_base = max((n.last_seen for n in world.all_nodes()), default=0) + 1
+            result.lateral_paths = lateral_paths(
+                world, impact_model=ImpactModel.from_slug(slug), seq_base=lateral_base)
         except Exception:
             pass
     # DEFENSIVE / purple-team pass (opt-in ``enable_defender``, default OFF → this whole block is
