@@ -358,6 +358,8 @@
       ];
       return h("div", { style: { display: "flex", alignItems: "center", gap: "8px", padding: "6px 0", borderBottom: "1px solid var(--border)", flexWrap: "wrap" } }, [
         h("span.mono", { style: { minWidth: "120px", fontWeight: "600" } }, p.name),
+        p.in_host_roster ? h("span.pill.sm", { title: "a host security CLI" }, "host CLI")
+                         : h("span.pill.sm", { title: "an agent capability skill (not a host security CLI)" }, "agent skill"),
         chip,
         h("span", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, signals),
         p.admitted ? null : h("span.dim", { style: { fontSize: "var(--fs-xs)", flex: "1 1 100%" } }, p.admit_reason),
