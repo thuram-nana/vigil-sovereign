@@ -265,8 +265,59 @@ def test_bridge_refuses_a_pre_planted_symlink_target(tmp_path):
     _os.symlink(victim, creds / "gcp-sa.json")             # attacker pre-plants the symlink
     env = {"GOOGLE_APPLICATION_CREDENTIALS_JSON": base64.b64encode(_SA_JSON.encode()).decode()}
     out = _materialise_file_secrets(dict(env), tmp_path)
-    assert "GOOGLE_APPLICATION_CREDENTIALS" not in out      # refused (symlink not followed)
+    # the symlink is removed (not followed) and a FRESH inode is written — the victim is never clobbered
     assert victim.read_text(encoding="utf-8") == "DO NOT CLOBBER"   # the victim file is untouched
+    written = out["GOOGLE_APPLICATION_CREDENTIALS"]
+    assert not _os.path.islink(written) and open(written, encoding="utf-8").read() == _SA_JSON
+    assert _os.path.realpath(written) != _os.path.realpath(str(victim))   # a different inode, not the victim
+
+
+def test_bridge_refuses_a_pre_planted_hardlink_target(tmp_path):
+    # BLOCK-1 residual: a HARDLINK pre-planted at the fixed target must NOT be written through (O_NOFOLLOW
+    # only stops symlinks). unlink+O_EXCL creates a fresh inode; the victim inode is untouched.
+    import os as _os
+    from vigil_integration.uiproxy import _materialise_file_secrets
+    victim = tmp_path / "victim.txt"
+    victim.write_text("DO NOT CLOBBER", encoding="utf-8")
+    creds = tmp_path / "creds"
+    creds.mkdir()
+    _os.link(victim, creds / "gcp-sa.json")                # attacker pre-plants a HARDLINK
+    env = {"GOOGLE_APPLICATION_CREDENTIALS_JSON": base64.b64encode(_SA_JSON.encode()).decode()}
+    out = _materialise_file_secrets(dict(env), tmp_path)
+    assert victim.read_text(encoding="utf-8") == "DO NOT CLOBBER"   # victim inode untouched
+    # a fresh non-linked write still succeeds
+    (creds / "gcp-sa.json").unlink(missing_ok=True)
+    out2 = _materialise_file_secrets(dict(env), tmp_path)
+    assert out2["GOOGLE_APPLICATION_CREDENTIALS"].endswith("/creds/gcp-sa.json")
+    assert open(out2["GOOGLE_APPLICATION_CREDENTIALS"], encoding="utf-8").read() == _SA_JSON
+
+
+def test_kubeconfig_gate_is_fail_closed_without_pyyaml(env, monkeypatch):
+    # HIGH-2 residual: the exec gate is STRUCTURAL; if PyYAML can't be imported it must REFUSE to seal,
+    # never fall back to a bypassable substring scan.
+    store, owner, _ = env
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_yaml(name, *a, **k):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_yaml)
+    with pytest.raises(ValueError):
+        smod.set_cloud_file_secret("KUBECONFIG_CONTENT", _KUBECONFIG, store=store, owner_key=owner)
+
+
+def test_quoted_key_exec_kubeconfig_is_refused(env):
+    # HIGH-2 residual: a quoted/spaced exec key that a substring scan would miss is caught structurally.
+    store, owner, _ = env
+    for kc in (
+        'apiVersion: v1\nclusters: []\ncurrent-context: c\nusers:\n- name: u\n  user:\n    "exec":\n      command: sh\n',
+        'apiVersion: v1\nclusters: []\ncurrent-context: c\nusers:\n- name: u\n  user: {exec: {command: sh}}\n',
+    ):
+        with pytest.raises(ValueError):
+            smod.set_cloud_file_secret("KUBECONFIG_CONTENT", kc, store=store, owner_key=owner)
 
 
 def test_child_env_strips_file_content_vars(monkeypatch):

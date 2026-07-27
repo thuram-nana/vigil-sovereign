@@ -194,9 +194,10 @@ def _probe_gcp(value: str, store: SecretStore, ctx: dict) -> "tuple[str, str]":
         # never an attacker-chosen token_uri (SSRF / assertion exfil).
         tu = str(info.get("token_uri") or "")
         if tu:
-            host = (urlsplit(tu).hostname or "").lower()
-            if not (host in ("oauth2.googleapis.com", "accounts.google.com") or host.endswith(".googleapis.com")):
-                return FAIL, "GCP token_uri is not a Google endpoint — refused"
+            parts = urlsplit(tu)
+            host = (parts.hostname or "").lower().rstrip(".")
+            if parts.scheme != "https" or host not in ("oauth2.googleapis.com", "accounts.google.com"):
+                return FAIL, "GCP token_uri is not an https Google OAuth endpoint — refused"
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])
         _old = _socket.getdefaulttimeout()

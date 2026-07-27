@@ -449,28 +449,31 @@ _MAX_FILE_SECRET_LEN = 6144      # raw content; base64 (~4/3×) must stay under 
 _GCP_TOKEN_HOSTS = frozenset({"oauth2.googleapis.com", "accounts.google.com"})
 
 
-def _kubeconfig_has_command_plugin(content: str) -> bool:
-    """True iff a kubeconfig carries a credential plugin that RUNS A LOCAL COMMAND — a ``user.exec`` block
-    or an ``auth-provider`` with a ``cmd-path``. Loading such a kubeconfig executes that command (at probe
-    and at collect time), so it is refused. Structural check when PyYAML is available; a conservative
-    substring scan otherwise (never a false NEGATIVE for the standard shapes)."""
+def _assert_kubeconfig_safe(content: str) -> None:
+    """Raise ValueError unless a kubeconfig is STRUCTURALLY free of a local-command credential plugin — a
+    ``user.exec`` block or an ``auth-provider`` with a ``cmd-path``. Loading such a kubeconfig executes that
+    command (at probe and at collect time), so it must be refused. FAIL-CLOSED: the check is structural via
+    PyYAML; if PyYAML is unavailable or the YAML does not parse, sealing is REFUSED (a substring scan is
+    evadable with a quoted/spaced key, so it is never trusted as the gate)."""
     try:
         import yaml
+    except Exception:  # noqa: BLE001
+        raise ValueError("cannot validate the kubeconfig safely (PyYAML is unavailable) — refused") from None
+    try:
         doc = yaml.safe_load(content)
-    except Exception:  # noqa: BLE001 — no yaml / parse error → conservative scan
-        low = content.lower()
-        return "exec:" in low or "cmd-path:" in low
+    except Exception:  # noqa: BLE001
+        raise ValueError("kubeconfig is not valid YAML") from None
     if not isinstance(doc, dict):
-        return False
+        return
     for u in doc.get("users") or []:
         user = u.get("user") if isinstance(u, dict) and isinstance(u.get("user"), dict) else {}
-        if isinstance(user.get("exec"), dict):
-            return True
-        ap = user.get("auth-provider")
+        ap = user.get("auth-provider") if isinstance(user, dict) else None
         cfg = ap.get("config") if isinstance(ap, dict) and isinstance(ap.get("config"), dict) else {}
-        if cfg.get("cmd-path"):
-            return True
-    return False
+        if (isinstance(user, dict) and isinstance(user.get("exec"), dict)) or cfg.get("cmd-path"):
+            raise ValueError(
+                "kubeconfig contains an exec / cmd-path credential plugin, which runs a LOCAL COMMAND when "
+                "loaded — refused for safety. Use a token- or client-certificate-based kubeconfig (e.g. one "
+                "bound to a read-only ServiceAccount).")
 
 
 def _validate_file_content(kind: str, content: str) -> None:
@@ -490,18 +493,16 @@ def _validate_file_content(kind: str, content: str) -> None:
         tu = obj.get("token_uri")
         if tu:
             from urllib.parse import urlsplit
-            host = (urlsplit(str(tu)).hostname or "").lower()
-            if not (host in _GCP_TOKEN_HOSTS or host.endswith(".googleapis.com")):
-                raise ValueError("service-account token_uri must be a Google endpoint (oauth2.googleapis.com)")
+            parts = urlsplit(str(tu))
+            host = (parts.hostname or "").lower().rstrip(".")
+            if parts.scheme != "https" or host not in _GCP_TOKEN_HOSTS:
+                raise ValueError("service-account token_uri must be https to a Google OAuth endpoint "
+                                 "(oauth2.googleapis.com)")
     elif kind == "kubeconfig":
         low = content.lower()
         if "apiversion" not in low or ("clusters" not in low and "current-context" not in low):
             raise ValueError("does not look like a kubeconfig (expected apiVersion + clusters/current-context)")
-        if _kubeconfig_has_command_plugin(content):
-            raise ValueError(
-                "kubeconfig contains an exec / cmd-path credential plugin, which runs a LOCAL COMMAND when "
-                "loaded — refused for safety. Use a token- or client-certificate-based kubeconfig (e.g. one "
-                "bound to a read-only ServiceAccount).")
+        _assert_kubeconfig_safe(content)      # fail-closed: refuses exec/cmd-path plugins (and if unverifiable)
 
 
 def set_cloud_file_secret(name: str, content: str, *, store, owner_key, reason: str = "") -> dict:

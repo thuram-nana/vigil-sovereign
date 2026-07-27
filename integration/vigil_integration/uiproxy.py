@@ -490,12 +490,28 @@ def _materialise_file_secrets(env: dict, runtime_dir: "Optional[Path]") -> dict:
             creds_dir.mkdir(parents=True, exist_ok=True)
             os.chmod(creds_dir, 0o700)
             path = creds_dir / filename                  # FIXED name; no operator input in the path
-            if path.is_symlink():
+            # Remove any pre-existing name (a symlink / hardlink / stale file), then create a FRESH inode with
+            # O_EXCL: if anything is (re-)planted at the name in a TOCTOU race, O_EXCL fails rather than writing
+            # the plaintext credential THROUGH it. This defeats symlink- AND hardlink-write-through; O_NOFOLLOW
+            # is belt-and-braces, and the st_nlink==1 check confirms the created inode has no other hard link.
+            try:
+                os.unlink(str(path))
+            except FileNotFoundError:
+                pass
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                if os.fstat(fd).st_nlink != 1:
+                    os.close(fd)
+                    continue
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(blob)
+            except OSError:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
                 continue
-            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(blob)
-            os.chmod(str(path), 0o600)                   # unconditional 0600 even if the file pre-existed
+            os.chmod(str(path), 0o600)
             env[path_var] = str(path)
         except OSError:
             continue                                     # symlink refused / could not write → skip (fail closed)

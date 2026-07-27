@@ -5,4 +5,5 @@ mcp==1.28.1
 numpy>=1.26,<3
 onnxruntime==1.27.0
 pydantic==2.13.4
+PyYAML>=6
 qdrant-client==1.18.0

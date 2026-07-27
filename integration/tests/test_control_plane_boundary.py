@@ -102,8 +102,9 @@ def test_dispatcher_is_pure_stdlib_exec_only():
 # it must import neither framework/strix (offense engine) nor sigil (sovereign core), so a single
 # interpreter never co-loads both trust domains — exactly like the dispatcher it delegates spawning to.
 _UP_ALLOWED_STDLIB = {
-    "__future__", "http", "ipaddress", "json", "os", "re", "signal", "socket", "socketserver",
-    "subprocess", "sys", "threading", "time", "pathlib", "queue", "typing", "urllib", "webbrowser",
+    "__future__", "base64", "binascii", "http", "ipaddress", "json", "os", "re", "signal", "socket",
+    "socketserver", "subprocess", "sys", "threading", "time", "pathlib", "queue", "typing", "urllib",
+    "webbrowser",
 }
 _BANNED = ("framework", "strix", "sigil")
 
