@@ -259,3 +259,21 @@ def test_provisioned_absent_or_overlapping_is_fail_closed(isolated_engagement, m
     (P.target_dir("alpha") / "collector-hosts.txt").write_text("*.alpha.example\n", encoding="utf-8")
     a = build_engagement_allowlist(slug="alpha")            # a provisioned host overlapping scope is dropped
     assert "*.alpha.example" not in a.collector_hosts
+
+
+def test_overbroad_collector_hosts_are_dropped(isolated_engagement):
+    # H1: a whole-TLD / public-suffix / bare-* collector host is an exfil footgun → refused, even though it
+    # doesn't overlap the specific target scope. A concrete apex or a ≥2-private-label wildcard is fine.
+    a = build_engagement_allowlist(slug="alpha", collector_hosts=[
+        "*.com", "*.io", "*.internal", "*.co.uk", "*", "*.*",           # too broad → dropped
+        "*.amazonaws.com", "sts.us-east-1.amazonaws.com",               # legitimately narrow → kept
+    ])
+    assert a.collector_hosts == ("*.amazonaws.com", "sts.us-east-1.amazonaws.com")
+    assert not a.permits("evil.com") and not a.permits("evil.co.uk")    # the TLD hole is closed
+    assert a.permits("iam.amazonaws.com") and a.permits("sts.us-east-1.amazonaws.com")
+
+
+def test_provisioned_collector_hosts_rejects_traversal_slug():
+    # H2: a crafted slug can never read a collector-hosts file outside targets/<slug>/
+    for bad in ("../secret", "../../etc", "/etc", "a/b", "a\\b", ".hidden", "c:stuff"):
+        assert provisioned_collector_hosts(bad) == ()
