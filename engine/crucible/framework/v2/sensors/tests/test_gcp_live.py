@@ -1,11 +1,12 @@
 """
 Phase C2 · GCP — LIVE read-only GCP posture collector (sensors.gcp_live).
 
-The GCP twin of test_cloud_live: recorded google-cloud read-only response shapes -> the native inventory
--> the EXISTING provider-agnostic cloud oracles FIRE (a public GCS bucket / public project-IAM binding
-promotes to a public_exposure FACT exactly as AWS does). Includes the near-zero-FP negative controls: a
-Public-Access-Prevention-enforced bucket and a PAP-unknown bucket must NOT promote. The live boto3-style
-run() path is fail-closed without the SDK/ADC (the SDKs are optional).
+Recorded google-cloud read-only response shapes -> the native inventory -> the EXISTING provider-agnostic
+cloud oracles. Near-zero-FP (the AWS lessons, corrected after a BLOCK):
+  * a public GCS bucket is a FACT only when an UNCONDITIONED anon binding is present AND the bucket does not
+    enforce PAP AND the EFFECTIVE org-policy PAP is read and NOT enforcing (the two-scope rule);
+  * a Condition-narrowed anon binding is NEVER promoted;
+  * a project-IAM anon binding is an auditable signal, not a promoted FACT.
 """
 
 from __future__ import annotations
@@ -21,95 +22,109 @@ from framework.v2.sensors.gcp_live import (
     GcpLiveSensor,
     bucket_resource,
     gcp_inventory_from_responses,
+    org_pap_enforced_from_policy,
 )
 
-# recorded read-only response shapes (reduced to what the collector gathers per bucket / for project IAM)
-_PUBLIC_BUCKET = {"name": "acme-public", "iam_members": ["allUsers", "user:a@b.com"],
-                  "public_access_prevention": "inherited", "labels": {}}
-_ENFORCED_BUCKET = {"name": "acme-enforced", "iam_members": ["allUsers"],
-                    "public_access_prevention": "enforced", "labels": {}}      # PAP blocks the public binding
-_PAP_UNKNOWN_BUCKET = {"name": "acme-unknown", "iam_members": ["allAuthenticatedUsers"],
-                       "public_access_prevention": None, "labels": {}}          # PAP unreadable → unconfirmed
-_PRIVATE_BUCKET = {"name": "acme-private", "iam_members": ["user:a@b.com"],
-                   "public_access_prevention": "inherited", "labels": {"data-classification": "confidential"}}
 
-_PROJECT_IAM_PUBLIC = {"project": "acme-prod", "bindings": [
-    {"role": "roles/viewer", "members": ["allUsers"]},                          # a PUBLIC project binding
-    {"role": "roles/owner", "members": ["user:admin@acme.com"]}]}
-_PROJECT_IAM_PRIVATE = {"project": "acme-prod", "bindings": [
-    {"role": "roles/owner", "members": ["user:admin@acme.com"]}]}
+def _bucket(name, members, *, pap="inherited", conditioned=False, labels=None):
+    return {"name": name, "iam_bindings": [{"members": members, "conditioned": conditioned}],
+            "public_access_prevention": pap, "labels": labels or {}}
 
 
-# --- deterministic core: bucket public detection is PAP-aware -----------------
+# --- the org-policy PAP parser -------------------------------------------------
 
 
-def test_public_bucket_via_anon_binding_when_pap_not_enforced():
-    r = bucket_resource(_PUBLIC_BUCKET)
-    assert r["public"] is True and any(g["principal"] == "allUsers" for g in r["grants"])
-    assert r["iam_public"] is True and r["public_access_prevention"] == "inherited"
+def test_org_pap_parser():
+    assert org_pap_enforced_from_policy({"spec": {"rules": [{"enforce": True}]}}) is True
+    assert org_pap_enforced_from_policy({"spec": {"rules": [{"enforce": False}]}}) is False
+    assert org_pap_enforced_from_policy({"spec": {"rules": []}}) is None          # no rule → unknown
+    assert org_pap_enforced_from_policy("garbage") is None                        # total
 
 
-def test_pap_enforced_neutralises_a_public_binding():
-    r = bucket_resource(_ENFORCED_BUCKET)
-    assert "public" not in r                       # PAP enforced → not anonymously reachable
-    assert r["iam_public"] is True                 # raw signal retained (auditable)
+# --- bucket public: the two-scope PAP rule + conditions ------------------------
 
 
-def test_pap_unknown_is_not_confirmed_public():
-    r = bucket_resource(_PAP_UNKNOWN_BUCKET)        # PAP unreadable → cannot confirm
-    assert "public" not in r
-    assert r["iam_public"] is True and "public_access_prevention" not in r
+def test_public_bucket_only_when_both_scopes_open():
+    b = _bucket("acme-public", ["allUsers"], pap="inherited")
+    # org unknown → NOT confirmed (conservative, err to false-negative)
+    r0 = bucket_resource(b, org_pap_enforced=None)
+    assert "public" not in r0 and r0["iam_public"] is True
+    # org enforces → NOT public (org blocks it even though bucket is 'inherited')
+    r1 = bucket_resource(b, org_pap_enforced=True)
+    assert "public" not in r1
+    # bucket 'inherited' + org NOT enforcing + unconditioned anon → CONFIRMED public
+    r2 = bucket_resource(b, org_pap_enforced=False)
+    assert r2["public"] is True and any(g["principal"] == "allUsers" for g in r2["grants"])
 
 
-def test_private_bucket_and_sensitivity_label():
-    r = bucket_resource(_PRIVATE_BUCKET)
-    assert "public" not in r and r["sensitive"] is True   # operator-labelled sensitive; not public
+def test_bucket_pap_enforced_never_public():
+    r = bucket_resource(_bucket("acme-enforced", ["allUsers"], pap="enforced"), org_pap_enforced=False)
+    assert "public" not in r and r["iam_public"] is True   # bucket enforces → not public even if org is open
 
 
-def test_bucket_resource_totality():
+def test_conditioned_anon_binding_is_not_public():
+    # BLOCK regression: a Condition-narrowed anon binding must NOT be promoted, even with both scopes open
+    r = bucket_resource(_bucket("acme-cond", ["allUsers"], pap="inherited", conditioned=True),
+                        org_pap_enforced=False)
+    assert "public" not in r and "iam_public" not in r
+    assert r["conditioned_public"] is True                 # retained as an audit signal only
+
+
+def test_non_anon_and_labels_and_totality():
+    r = bucket_resource(_bucket("acme-private", ["user:a@b.com"], labels={"data-classification": "confidential"}),
+                        org_pap_enforced=False)
+    assert "public" not in r and r["sensitive"] is True
     assert bucket_resource({"name": ""}) is None and bucket_resource(7) is None
-    r = bucket_resource({"name": "b", "iam_members": "nonsense", "public_access_prevention": 5, "labels": []})
-    assert r == {"id": "b", "kind": "datastore"}   # nothing asserted from garbage
-    assert gcp_inventory_from_responses(buckets=1)["resources"] == []   # non-iterable → total, no raise
+    assert bucket_resource({"name": "b", "iam_bindings": "x", "public_access_prevention": 5}) == {
+        "id": "b", "kind": "datastore"}
+    # totality of the assembler on non-iterables (LOW regression)
+    assert gcp_inventory_from_responses(buckets=1)["resources"] == []
+    assert gcp_inventory_from_responses(project_iam={"project": "p", "bindings": {"members": 5}})["resources"] == []
 
 
-# --- the existing cloud oracles fire over the translated GCP inventory --------
+# --- the existing cloud oracles fire only on the confirmed cell ----------------
 
 
-def test_oracles_fire_on_public_gcs_and_project_iam_not_on_safe():
-    inv = gcp_inventory_from_responses(
-        buckets=[_PUBLIC_BUCKET, _ENFORCED_BUCKET, _PAP_UNKNOWN_BUCKET, _PRIVATE_BUCKET],
-        project_iam=_PROJECT_IAM_PUBLIC, project="acme-prod")
-    assert inv["provider"] == "gcp"
-    facts = confirm_cloud_posture_facts(inv)
-    reached = {f["resource"] for f in facts if f["lead_class"] == "public_exposure"}
-    assert "acme-public" in reached                        # public GCS bucket confirmed
-    assert "projects/acme-prod" in reached                 # public project-IAM binding confirmed
-    for safe in ("acme-enforced", "acme-unknown", "acme-private"):
-        assert safe not in reached, f"false public FACT on {safe}"
+def test_oracle_fires_only_on_confirmed_public_bucket():
+    buckets = [_bucket("open", ["allUsers"], pap="inherited"),          # + org open → confirmed
+               _bucket("enforced", ["allUsers"], pap="enforced"),       # bucket enforces → no
+               _bucket("cond", ["allUsers"], pap="inherited", conditioned=True),   # conditioned → no
+               _bucket("private", ["user:a@b"])]                        # not anon → no
+    inv = gcp_inventory_from_responses(buckets=buckets, org_pap_enforced=False, project="p")
+    reached = {f["resource"] for f in confirm_cloud_posture_facts(inv) if f["lead_class"] == "public_exposure"}
+    assert reached == {"open"}                                          # exactly the confirmed one
 
 
-def test_private_project_iam_promotes_nothing():
-    inv = gcp_inventory_from_responses(buckets=[_PRIVATE_BUCKET], project_iam=_PROJECT_IAM_PRIVATE,
-                                       project="acme-prod")
-    facts = confirm_cloud_posture_facts(inv)
-    assert not [f for f in facts if f["lead_class"] == "public_exposure"]
-    # the named admin is a topology principal, not a public resource
+def test_org_unknown_promotes_no_bucket_fact():
+    inv = gcp_inventory_from_responses(buckets=[_bucket("open", ["allUsers"])], org_pap_enforced=None, project="p")
+    assert not [f for f in confirm_cloud_posture_facts(inv) if f["lead_class"] == "public_exposure"]
+
+
+def test_project_iam_anon_is_a_signal_not_a_fact():
+    project_iam = {"project": "acme-prod", "bindings": [
+        {"role": "roles/viewer", "members": ["allUsers"], "conditioned": False},   # unconditioned anon
+        {"role": "roles/owner", "members": ["user:admin@acme.com"], "conditioned": False}]}
+    inv = gcp_inventory_from_responses(project_iam=project_iam, org_pap_enforced=False, project="acme-prod")
+    # recorded as an auditable signal, NOT promoted to a public FACT (DRS org-policy unresolved here)
+    proj = [r for r in inv["resources"] if r["id"] == "projects/acme-prod"][0]
+    assert proj.get("public_roles") and "public" not in proj
+    assert not confirm_cloud_posture_facts(inv)
     assert any(p["id"] == "user:admin@acme.com" for p in inv["principals"])
 
 
-def test_normalize_mints_public_exposure_lead():
-    inv = gcp_inventory_from_responses(buckets=[_PUBLIC_BUCKET], project="acme-prod")
+def test_normalize_mints_a_lead_for_a_confirmed_public_bucket():
+    inv = gcp_inventory_from_responses(buckets=[_bucket("open", ["allUsers"])], org_pap_enforced=False, project="p")
     obs = cloud_observations(normalize_cloud_export(inv), seq=1)
     assert any(getattr(o, "attrs", {}).get("lead_class") == "public_exposure" for o in obs)
 
 
-# --- fail-closed run + egress + fusion wiring --------------------------------
+# --- egress + fail-closed run + fusion wiring ----------------------------------
 
 
-def test_egress_hosts_are_the_google_control_plane():
+def test_egress_declares_google_hosts_incl_metadata():
     h = set(GcpLiveSensor().egress_hosts)
-    assert {"storage.googleapis.com", "cloudresourcemanager.googleapis.com", "oauth2.googleapis.com"} <= h
+    assert {"storage.googleapis.com", "orgpolicy.googleapis.com", "oauth2.googleapis.com"} <= h
+    assert "metadata.google.internal" in h and "169.254.169.254" in h    # ADC metadata egress declared
 
 
 def test_run_fail_closed_without_google_auth(monkeypatch):
@@ -135,11 +150,11 @@ def test_gcp_live_export_promotes_through_reverify():
     from framework.v2.worldmodel.graph import WorldModel
     from framework.v2.worldmodel.models import EdgeKind
 
-    export = _json.dumps(gcp_inventory_from_responses(buckets=[_PUBLIC_BUCKET], project="acme-prod"))
+    export = _json.dumps(gcp_inventory_from_responses(
+        buckets=[_bucket("open", ["allUsers"])], org_pap_enforced=False, project="p"))
     res = SimpleNamespace(ok=True, result=SimpleNamespace(output={"export": export, "format": "native"}))
     world = WorldModel()
     promoted = _reverify(world, FusionTask("gcp_live", {}), res, seq=5, slug="alpha")
     assert promoted == 1
-    finding = world.get_node("finding:policy_path:acme-public")
-    assert finding is not None
-    assert world.get_edge("finding:policy_path:acme-public", "datastore:acme-public", EdgeKind.EVIDENCES) is not None
+    assert world.get_node("finding:policy_path:open") is not None
+    assert world.get_edge("finding:policy_path:open", "datastore:open", EdgeKind.EVIDENCES) is not None
