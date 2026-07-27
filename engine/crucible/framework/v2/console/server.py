@@ -39,7 +39,7 @@ def _is_loopback_host(host: str) -> bool:
     except ValueError:
         return False
 
-from . import actions, api, chat
+from . import actions, api, chat, sessions
 from .blackboard_sse import BlackboardTailer
 from .sse import EventTailer, stream_path
 
@@ -60,6 +60,7 @@ _EXACT_ROUTES = {
     "/api/status": api.status_data,
     "/api/engagements": api.list_engagements,
     "/api/runs": api.list_runs,
+    "/api/sessions": api.sessions_list,
     "/api/benchmark": api.benchmark_data,
     "/api/memory": api.memory_data,
     "/api/kernel": api.kernel_data,
@@ -72,6 +73,7 @@ _EXACT_ROUTES = {
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
 _PREFIX_ROUTES = {
     "/api/engagement/": api.engagement_detail,
+    "/api/session/": api.session_detail,
     "/api/report/": api.run_report,
     "/api/worldmodel/": api.worldmodel,
     "/api/coverage/": api.coverage_data,
@@ -371,6 +373,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # only a B1-admitted tool, only its declared apt/pip hint, only with explicit consent
                 # (else it returns the exact command it WOULD run and installs nothing).
                 self._json(actions.provision_tool(body))
+                return
+            if path == "/api/session/create":
+                # F2: create a named session. CSRF/rebind-gated above; the registry mints no fact and
+                # authorizes nothing — it only organises runs/chats under an operator-editable name.
+                self._json(sessions.create_session(
+                    name=str(body.get("name", "")), kind=str(body.get("kind", "engagement"))))
+                return
+            if path == "/api/session/rename":
+                self._json(sessions.rename_session(str(body.get("id", "")), str(body.get("name", ""))))
+                return
+            if path == "/api/session/delete":
+                # SOFT tombstone by default; HARD only on an explicit boolean true (removes the registry
+                # entry + rebuildable graph partition, never the append-only spine or a FACT).
+                self._json(sessions.delete_session(
+                    str(body.get("id", "")), hard=(body.get("hard") is True)))
                 return
             if path == "/api/chat/send":
                 # the operator chatbot turn — a natural-language front door to the SAME gated launcher.

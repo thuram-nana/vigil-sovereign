@@ -457,17 +457,32 @@ def launch_assessment(body: dict) -> dict:
     apply_fixes = bool(body.get("apply_fixes", False))
     keyless = bool(body.get("keyless", False))
     model = str(body.get("model", "")).strip()[:64]
+    # F2: the session this run belongs to (optional). Recorded in meta so list_runs/session_detail can
+    # associate the run; an unsafe id is dropped (never a traversal, never a raise) — the run still launches.
+    session_id = str(body.get("session_id", "")).strip()
+    if session_id:
+        try:
+            from . import sessions
+            session_id = sessions._safe_session_id(session_id)
+        except ValueError:
+            session_id = ""
 
     run_id = _new_run_id()
     rd = run_dir(run_id)
     rd.mkdir(parents=True, exist_ok=True)
     (rd / "progress.jsonl").write_text("", encoding="utf-8")
+    if session_id:                                    # F2: attach this run to its permanent session
+        try:
+            from . import sessions
+            sessions.link_run(session_id, run_id)
+        except Exception:  # noqa: BLE001 — a registry hiccup must never sink the launch
+            pass
 
     # meta shared by every branch; apply_fixes/model/keyless are RECORDED (shown in the UI) but do
     # not add an un-gated fire path — a fix is proposed and QUEUES for approval (the Fixes screen).
     base = {"mode": mode, "target": target, "scope": scope, "objective": objective,
             "scan_mode": scan_mode, "tools": tools, "apply_fixes": apply_fixes,
-            "keyless": keyless, "model": model, "started": time.time()}
+            "keyless": keyless, "model": model, "started": time.time(), "session_id": session_id}
 
     # ---- codebase → strix (path-validated, headless, Docker pre-flighted) --
     if mode == "codebase":

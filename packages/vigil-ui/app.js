@@ -27,6 +27,7 @@
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", ready: true },
     ]},
     { group: "MANAGE", items: [
+      { id: "sessions", label: "Sessions", icon: "book", ready: true },
       { id: "activity", label: "Activity", icon: "live", ready: true },
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
       { id: "apikeys", label: "API Keys", icon: "key", owner: true, ready: true },
@@ -3059,6 +3060,98 @@
     ]);
   }
 
+  // ---- sessions (F2) — permanent, renamable/deletable engagement sessions ----
+  function sessionKindPill(kind) {
+    var tone = kind === "engagement" ? "live" : "idle";
+    var label = kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "Session";
+    return V.pill(label, tone, null);
+  }
+
+  function loadSessions() {
+    var host = V.$("#sessions-body"); if (!host) return;
+    V.getJSON(OFF("/api/sessions")).then(function (d) { drawSessions((d && d.sessions) || []); })
+      .catch(function (e) { V.mount(host, h("div.empty", null, "Couldn't load sessions: " + e)); });
+  }
+
+  function drawSessions(rows) {
+    var host = V.$("#sessions-body"); if (!host) return;
+    if (!rows.length) {
+      V.mount(host, h("div.empty", null, "No sessions yet. Create one, or start a chat or assessment."));
+      return;
+    }
+    var linkStyle = { padding: "2px 8px", border: "1px solid var(--border,#334)", borderRadius: "6px",
+      fontSize: "12px", textDecoration: "none" };
+    V.mount(host, h("div.grid.cols-2", { style: { alignItems: "start" } }, rows.map(function (s) {
+      var runs = s.run_ids || [];
+      var body = h("div", null, [
+        h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
+          sessionKindPill(s.kind),
+          h("span.dim", null, runs.length + (runs.length === 1 ? " run" : " runs")),
+          s.legacy ? h("span.dim", null, "· legacy chat") : null,
+        ]),
+        runs.length
+          ? h("div", { style: { marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap" } },
+              runs.slice(0, 8).map(function (rid) {
+                return h("a", { href: "#/live?run=" + encodeURIComponent(rid), title: "Open in Live",
+                  style: linkStyle }, rid);
+              }))
+          : h("div.dim", { style: { marginTop: "8px" } }, "No runs yet."),
+        h("div", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } }, [
+          h("button.btn", { onClick: function () { renameSession(s); } }, "Rename"),
+          h("button.btn", { onClick: function () { deleteSession(s, false); } }, "Delete"),
+          h("button.btn.danger", { onClick: function () { deleteSession(s, true); } }, "Delete permanently"),
+        ]),
+      ]);
+      return V.card(s.name || "(unnamed session)", (s.kind || "session").toUpperCase(), body, true);
+    })));
+  }
+
+  function createSession() {
+    var name = window.prompt("Name this session:", "");
+    if (name === null) return;
+    V.postJSON(OFF("/api/session/create"), { name: name, kind: "engagement" }).then(function (d) {
+      if (d && d.error) { V.toast(d.error, true); return; }
+      V.toast("Session created"); loadSessions();
+    }).catch(function (e) { V.toast(String(e), true); });
+  }
+
+  function renameSession(s) {
+    var cur = s.name === "(unnamed session)" ? "" : s.name;
+    var name = window.prompt("Rename session:", cur);
+    if (name === null) return;
+    V.postJSON(OFF("/api/session/rename"), { id: s.id, name: name }).then(function (d) {
+      if (d && d.error) { V.toast(d.error, true); return; }
+      loadSessions();
+    }).catch(function (e) { V.toast(String(e), true); });
+  }
+
+  function deleteSession(s, hard) {
+    var label = s.name || s.id;
+    var msg = hard
+      ? "Permanently delete '" + label + "'? It is removed from history — your runs and the signed record are kept."
+      : "Remove '" + label + "' from your session list?";
+    if (!window.confirm(msg)) return;
+    V.postJSON(OFF("/api/session/delete"), { id: s.id, hard: !!hard }).then(function (d) {
+      if (d && d.error) { V.toast(d.error, true); return; }
+      V.toast(hard ? "Deleted permanently" : "Removed"); loadSessions();
+    }).catch(function (e) { V.toast(String(e), true); });
+  }
+
+  function renderSessions(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [
+        h("h1", null, "Sessions"),
+        h("button.btn.primary", { onClick: createSession }, [V.icon("assess"), "New session"]),
+      ]),
+      h("div.hint", { style: { marginBottom: "10px" } },
+        "Every chat and assessment is a permanent session you can rename, reopen, and remove. Removing from "
+        + "the list is reversible; 'Delete permanently' takes it out of history — your runs and the signed "
+        + "record are always kept."),
+      h("div#sessions-body", null, h("div.empty", null, "Loading…")),
+    ]);
+    loadSessions();
+  }
+
   // ---- boot ------------------------------------------------------------------
   function route() {
     const id = current();
@@ -3070,6 +3163,7 @@
     if (id === "tools") { renderTools(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "chat") { renderChat(screen); return; }
+    if (id === "sessions") { renderSessions(screen); return; }
     if (id === "live") { renderLive(screen); return; }
     if (id === "activity") { renderBackground(screen); return; }
     if (id === "findings") { renderFindings(screen); return; }

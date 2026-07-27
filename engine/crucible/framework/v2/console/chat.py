@@ -125,6 +125,12 @@ def chat_send(body: dict) -> dict:
     for an operator-input problem (a clean status is returned); an unsafe chat id raises ValueError which
     the server maps to a 404."""
     chat_id = _safe_chat_id(str(body.get("chat_id") or "").strip() or actions._new_run_id())
+    # F2: every chat is a first-class, renamable/deletable SESSION (its id == the chat id).
+    try:
+        from . import sessions
+        sessions.ensure_session(chat_id, kind="chat")
+    except Exception:  # noqa: BLE001 — the registry never blocks a chat turn
+        pass
     message = str(body.get("message") or "").strip()[:_MAX_MSG]
     if not message:
         return {"chat_id": chat_id, "status": "error", "reply": "Say what you'd like me to test.",
@@ -155,6 +161,7 @@ def chat_send(body: dict) -> dict:
         "mode": mode, "target": target, "objective": message,
         "scan_mode": str(body.get("scan_mode", "standard")),
         "slug": str(body.get("slug", "")), "model": model,
+        "session_id": chat_id,                        # F2: link the launched run to this chat's session
         "tools": [str(t) for t in (body.get("tools") or [])],
     })
     if launch.get("error"):
