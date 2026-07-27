@@ -355,6 +355,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 slug = path[len("/api/killswitch/"):-len("/trip")].strip("/")
                 self._json(actions.trip_killswitch(slug, str(body.get("reason", ""))))
                 return
+            if path == "/api/tools/install":
+                # on-demand tool provisioning (B2). CSRF/rebind-gated above. Fail-closed in provision_tool:
+                # only a B1-admitted tool, only its declared apt/pip hint, only with explicit consent
+                # (else it returns the exact command it WOULD run and installs nothing).
+                self._json(actions.provision_tool(body))
+                return
             if path == "/api/chat/send":
                 # the operator chatbot turn — a natural-language front door to the SAME gated launcher.
                 # CSRF/rebind-gated above; launches only via actions.launch_assessment (scope/charter/gate

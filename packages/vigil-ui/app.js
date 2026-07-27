@@ -356,12 +356,39 @@
         p.installed ? h("span.pill.sm.ok", { title: p.path || "" }, "installed") :
           (p.install_hint ? h("span.pill.sm", { title: p.install_hint }, "installable") : h("span.pill.sm", null, p.status || "—")),
       ];
+      // on-demand install (B2): two-step operator consent — the first click reveals the EXACT declared
+      // command; confirming runs it. Server-side only an adopted tool + its declared apt/pip may install.
+      var installSlot = h("span", { style: { flex: "1 1 100%" } });
+      if (p.admitted && !p.installed && p.install_hint) {
+        var slot = installSlot;
+        var confirm = function (cmd) {
+          var run = h("button.btn.sm.owner", { onClick: function () {
+              run.disabled = true;
+              V.postJSON(OFF("/api/tools/install"), { name: p.name, consent: true }).then(function (r) {
+                V.toast(r && r.ok ? (p.name + " installed.") : ((r && r.error) || (p.name + " install failed")), !(r && r.ok));
+                renderTools(V.$("#screen") || document.body);   // re-probe + re-render
+              }).catch(function (e) { run.disabled = false; V.toast((e && e.message) || "install failed", true); });
+            } }, [V.icon("check"), "Run it"]);
+          V.mount(slot, [h("span.mono.dim", { style: { fontSize: "var(--fs-xs)", marginRight: "8px" } }, "$ " + cmd), run]);
+        };
+        var btn = h("button.btn.sm", { onClick: function () {
+            btn.disabled = true;
+            V.postJSON(OFF("/api/tools/install"), { name: p.name }).then(function (r) {
+              btn.disabled = false;
+              if (r && r.needs_consent) { confirm(r.command); }
+              else if (r && r.ok) { V.toast(p.name + " already installed."); }
+              else { V.toast((r && r.error) || "cannot install", true); }
+            }).catch(function (e) { btn.disabled = false; V.toast((e && e.message) || "install check failed", true); });
+          } }, [V.icon("bolt"), "Install"]);
+        V.mount(installSlot, btn);
+      }
       return h("div", { style: { display: "flex", alignItems: "center", gap: "8px", padding: "6px 0", borderBottom: "1px solid var(--border)", flexWrap: "wrap" } }, [
         h("span.mono", { style: { minWidth: "120px", fontWeight: "600" } }, p.name),
         p.in_host_roster ? h("span.pill.sm", { title: "a host security CLI" }, "host CLI")
                          : h("span.pill.sm", { title: "an agent capability skill (not a host security CLI)" }, "agent skill"),
         chip,
         h("span", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, signals),
+        installSlot,
         p.admitted ? null : h("span.dim", { style: { fontSize: "var(--fs-xs)", flex: "1 1 100%" } }, p.admit_reason),
       ]);
     }
