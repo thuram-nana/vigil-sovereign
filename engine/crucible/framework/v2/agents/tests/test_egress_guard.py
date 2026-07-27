@@ -19,10 +19,10 @@ from framework.v2.agents.egress_guard import (
     EgressAllowlist,
     SovereignHttpxTransport,
     build_engagement_allowlist,
+    provisioned_collector_hosts,
 )
 from framework.v2.common import paths as _paths
 from framework.v2.common.errors import SovereigntyViolation
-from framework.v2.kernel import sovereignty
 from framework.v2.kernel.sovereignty import SovereigntyPolicy, set_policy
 
 
@@ -214,3 +214,48 @@ def test_transport_refusal_message_includes_url_and_allowlist():
     assert "alpha.example" in msg  # allowlist visible
     assert "internal-mirror.example" in msg
     client.close()
+
+
+# ---------------------------------------------------------------------------
+# C1 — live-collection egress: collector_hosts provisioning + third-party disjointness
+# ---------------------------------------------------------------------------
+
+
+def test_collector_hosts_empty_by_default(isolated_engagement):
+    # no file, no explicit arg → NO collector egress is widened (fail-closed; unchanged behaviour)
+    a = build_engagement_allowlist(slug="alpha")
+    assert a.collector_hosts == ()
+    assert not a.permits("sts.amazonaws.com")
+
+
+def test_explicit_disjoint_collector_hosts_are_permitted(isolated_engagement):
+    a = build_engagement_allowlist(slug="alpha", collector_hosts=["sts.amazonaws.com", "*.googleapis.com"])
+    assert a.permits("sts.amazonaws.com") and a.permits("iam.googleapis.com")   # collector control planes
+    assert a.permits("alpha.example")            # the target scope still works
+    assert not a.permits("evil.example")         # nothing else widened
+
+
+def test_collector_hosts_overlapping_target_scope_are_dropped(isolated_engagement):
+    # a "collector" host inside the engagement's attack scope is REFUSED as a collector (third-party-disjoint
+    # doctrine) — it must not be laundered onto the collector axis.
+    a = build_engagement_allowlist(slug="alpha", collector_hosts=["api.alpha.example", "sts.amazonaws.com"])
+    assert "api.alpha.example" not in a.collector_hosts     # dropped (covered by *.alpha.example scope)
+    assert "sts.amazonaws.com" in a.collector_hosts         # the genuinely third-party one survives
+
+
+def test_provisioned_collector_hosts_file_is_read(isolated_engagement, monkeypatch):
+    import framework.v2.common.paths as P
+    (P.target_dir("alpha") / "collector-hosts.txt").write_text(
+        "# operator-provisioned live-collection control planes\nsts.amazonaws.com\n\n*.googleapis.com\n",
+        encoding="utf-8")
+    assert provisioned_collector_hosts("alpha") == ("sts.amazonaws.com", "*.googleapis.com")   # comment/blank stripped
+    a = build_engagement_allowlist(slug="alpha")            # picked up automatically
+    assert a.permits("sts.amazonaws.com") and a.permits("compute.googleapis.com")
+
+
+def test_provisioned_absent_or_overlapping_is_fail_closed(isolated_engagement, monkeypatch):
+    import framework.v2.common.paths as P
+    assert provisioned_collector_hosts("nope") == ()        # absent file → empty (fail-closed)
+    (P.target_dir("alpha") / "collector-hosts.txt").write_text("*.alpha.example\n", encoding="utf-8")
+    a = build_engagement_allowlist(slug="alpha")            # a provisioned host overlapping scope is dropped
+    assert "*.alpha.example" not in a.collector_hosts
