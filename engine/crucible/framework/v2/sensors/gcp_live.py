@@ -217,8 +217,10 @@ def org_pap_enforced_from_policy(policy: Any) -> bool | None:
     for r in rules:
         if not isinstance(r, dict) or "enforce" not in r:
             continue
+        if r.get("condition") is not None:
+            continue                                  # a CONDITIONED rule is indeterminate — never read as OPEN
         if r.get("enforce") is True:
-            return True
+            return True                               # any unconditional enforce wins, regardless of order
         if r.get("enforce") is False:
             saw_false = True
     return False if saw_false else None
@@ -311,7 +313,8 @@ class GcpLiveSensor:
         def _pull() -> bool | None:
             client = orgpolicy_v2.OrgPolicyClient(credentials=credentials)
             eff = client.get_effective_policy(name=f"projects/{project}/policies/{_PAP_CONSTRAINT}")
-            rules = [{"enforce": getattr(r, "enforce", None)} for r in getattr(getattr(eff, "spec", None), "rules", []) or []]
+            rules = [{"enforce": getattr(r, "enforce", None), "condition": getattr(r, "condition", None)}
+                     for r in getattr(getattr(eff, "spec", None), "rules", []) or []]
             return org_pap_enforced_from_policy({"spec": {"rules": rules}})
 
         return self._safe(_pull)

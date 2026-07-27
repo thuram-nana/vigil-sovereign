@@ -35,10 +35,19 @@ def _bucket(name, members, *, pap="inherited", conditioned=False, labels=None):
 
 
 def test_org_pap_parser():
-    assert org_pap_enforced_from_policy({"spec": {"rules": [{"enforce": True}]}}) is True
-    assert org_pap_enforced_from_policy({"spec": {"rules": [{"enforce": False}]}}) is False
-    assert org_pap_enforced_from_policy({"spec": {"rules": []}}) is None          # no rule → unknown
-    assert org_pap_enforced_from_policy("garbage") is None                        # total
+    P = org_pap_enforced_from_policy
+    assert P({"spec": {"rules": [{"enforce": True}]}}) is True
+    assert P({"spec": {"rules": [{"enforce": False}]}}) is False
+    assert P({"spec": {"rules": []}}) is None                                     # no rule → unknown
+    assert P("garbage") is None                                                   # total
+    # safety-critical direction (return OPEN while the org enforces) must be unreachable:
+    assert P({"spec": {"rules": [{"enforce": False}, {"enforce": True}]}}) is True   # order-independent
+    assert P({"spec": {"rules": [{"enforce": True}, {"enforce": False}]}}) is True
+    for spoof in ("false", "true", 0, 1, None):
+        assert P({"spec": {"rules": [{"enforce": spoof}]}}) is None               # non-bool never spoofs OPEN
+    # a CONDITIONED rule is indeterminate — never read as OPEN (defence-in-depth)
+    assert P({"spec": {"rules": [{"enforce": False, "condition": {"expression": "x"}}]}}) is None
+    assert P({"spec": {"rules": [{"enforce": False, "condition": {"e": "x"}}, {"enforce": True}]}}) is True
 
 
 # --- bucket public: the two-scope PAP rule + conditions ------------------------
