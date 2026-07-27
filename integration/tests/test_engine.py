@@ -347,3 +347,83 @@ def test_operator_messages_seam_is_total_a_raise_is_not_a_crash():
                               operator_messages=_boom))
     rep = eng.engage(TARGET)                                    # must not raise
     assert rep.paused == "ask_user"                            # fail-closed: a broken source → no resume
+
+
+# --- A4c: the fireteam deploy bridge (an APPROVED deploy fans out; folds facts fail-closed) ----------
+
+from vigil_integration.agent.state import Finding                                    # noqa: E402
+from vigil_integration.fireteam.models import EscalationRequest                       # noqa: E402
+from vigil_integration.fireteam.orchestrator import FireteamOutcome                   # noqa: E402
+
+
+def _deploy():
+    return LLMDecision(action=ActionType.DEPLOY_FIRETEAM, reasoning="fan out",
+                       fireteam=[{"member_id": "a", "capped_tier": "A1", "tools": ["nmap"]}])
+
+
+def _approve_all(decision, state):
+    return True                       # the operator's signed approval satisfied the queued deploy edge
+
+
+def test_approved_deploy_folds_wave_facts_leads_and_escalations():
+    fact = Finding(ref="f1", bug_class="sqli", status="fact", evidence_ref="spine:" + "a" * 58)
+    lead = Finding(ref="l1", bug_class="xss", status="lead")
+    esc = EscalationRequest(wave_id="w", member_id="a", tool_name="sqlmap", reason="destructive → queued")
+    outcome = FireteamOutcome(facts=[fact], leads=[lead], escalations=[esc])
+    eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy(), _complete()]),
+                              gate=_allow_gate, approval=_approve_all,
+                              deploy_fireteam=lambda d, s, seq: outcome))
+    rep = eng.engage(TARGET)
+    assert "deploy_fireteam" in rep.decisions
+    assert rep.fact_count == 1 and rep.facts[0].ref == "f1"          # the oracle-confirmed fact folded in
+    assert any(ld.ref == "l1" for ld in rep.leads)                  # the lead folded in
+    assert any("escalation" in q for q in rep.queued_edges)          # member escalation surfaced (never run)
+
+
+def test_wave_fact_without_a_signed_ref_is_downgraded_to_a_lead():
+    # honesty guard: a Finding that lands in outcome.facts WITHOUT a signed evidence ref must NOT become a
+    # fact in the run — it degrades to a lead (a FACT needs a signed ref, even from a wave).
+    mislabeled = Finding(ref="x1", bug_class="rce", status="lead", evidence_ref="")   # no ref
+    outcome = FireteamOutcome(facts=[mislabeled])
+    eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy(), _complete()]),
+                              gate=_allow_gate, approval=_approve_all,
+                              deploy_fireteam=lambda d, s, seq: outcome))
+    rep = eng.engage(TARGET)
+    assert rep.fact_count == 0 and any(ld.ref == "x1" for ld in rep.leads)   # downgraded, not a fact
+
+
+def test_approved_deploy_with_no_seam_is_a_recorded_refusal_not_a_crash():
+    eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy(), _complete()]),
+                              gate=_allow_gate, approval=_approve_all))       # deploy_fireteam=None
+    rep = eng.engage(TARGET)
+    assert rep.fact_count == 0 and any("no fireteam seam" in d for d in rep.denied_edges)
+
+
+def test_refused_plan_spawns_nothing():
+    eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy(), _complete()]),
+                              gate=_allow_gate, approval=_approve_all,
+                              deploy_fireteam=lambda d, s, seq: FireteamOutcome(refused=True,
+                                                                                reason="over-cap")))
+    rep = eng.engage(TARGET)
+    assert rep.fact_count == 0 and any("refused" in q for q in rep.queued_edges)
+
+
+def test_deploy_seam_raise_is_fail_closed():
+    def _boom(d, s, seq):
+        raise RuntimeError("wave backend down")
+    eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy(), _complete()]),
+                              gate=_allow_gate, approval=_approve_all, deploy_fireteam=_boom))
+    rep = eng.engage(TARGET)                                     # must not raise
+    assert any("fireteam wave error" in d for d in rep.denied_edges)
+
+
+def test_unapproved_deploy_stays_queued_and_never_fans_out():
+    called = {"n": 0}
+    def _seam(d, s, seq):
+        called["n"] += 1
+        return FireteamOutcome()
+    # no approval seam ⇒ the queued deploy is never approved ⇒ the seam is NEVER invoked (approve-then-run)
+    eng = _engine(EngineSeams(attest=_attest_allow, think=ReplayThinker([_deploy()]),
+                              gate=_allow_gate, deploy_fireteam=_seam))
+    rep = eng.engage(TARGET)
+    assert rep.paused == "awaiting_approval" and called["n"] == 0

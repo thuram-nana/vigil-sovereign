@@ -77,6 +77,11 @@ ApprovalFn = Callable[[LLMDecision, AgentState], bool]
 # ADVISORY context only — folded into the think step; never a tool trigger or a scope change. None-seam ⇒
 # no mid-run guidance (an ASK_USER pause simply ends the run, exactly as before A5).
 OperatorMsgFn = Callable[[], list]
+# deploy_fireteam(decision, state, seq) -> a FireteamOutcome (A4c). Runs an APPROVED fan-out wave: N capped
+# members (never A3) each independently gated + oracle-checked; returns oracle-confirmed facts + leads +
+# queued escalations. Reached ONLY after authorize_edge queued the deploy and a signed operator approval
+# satisfied it (approve-then-run). None-seam ⇒ an approved deploy is a recorded refusal (fail-closed).
+DeployFireteamFn = Callable[[LLMDecision, AgentState, int], Any]
 
 _GENESIS = "0" * 64
 
@@ -97,6 +102,7 @@ class EngineSeams:
     detect: Optional[DetectFn] = None          # None ⇒ the Detection Mirror is not run
     approval: Optional[ApprovalFn] = None      # None ⇒ a phase escalation / fireteam stays QUEUED
     operator_messages: Optional[OperatorMsgFn] = None  # None ⇒ no mid-run operator instructions (A5)
+    deploy_fireteam: Optional[DeployFireteamFn] = None  # None ⇒ an approved fireteam deploy is refused (A4c)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -216,8 +222,11 @@ class VigilEngine:
                     break
                 approved = True
                 if decision.action != ActionType.USE_TOOL:
-                    # phase escalation / fireteam: apply the approved escalation and loop.
+                    # phase escalation / fireteam: apply the approved escalation and loop. (Reached ONLY
+                    # after a signed operator approval satisfied the queued edge — approve-then-run.)
                     self._apply_escalation(decision, state)
+                    if decision.action == ActionType.DEPLOY_FIRETEAM:
+                        self._deploy_fireteam(decision, state, seq, report)
                     self._checkpoint(state, seq, report)
                     seq += 1
                     continue
@@ -344,6 +353,45 @@ class VigilEngine:
         new = [str(m).strip() for m in msgs if str(m or "").strip()]
         state.operator_instructions.extend(new)
         return len(new)
+
+    def _deploy_fireteam(self, decision: LLMDecision, state: AgentState, seq: int, report: RunReport) -> None:
+        """Run an APPROVED fireteam wave (reached ONLY after a signed operator approval satisfied the queued
+        deploy edge). Folds the wave's oracle-confirmed FACTS + LEADS into the run and surfaces member
+        escalations as queued edges. Fail-closed + total: no seam / a seam error / a refused (malformed /
+        over-cap / mutex) plan spawns nothing and adds no fact. The wave's members are each independently
+        capped (≤A2, never A3) + gated + oracle-checked — this NEVER bypasses the parent gate or the
+        oracle: a wave 'fact' is admitted here ONLY if it carries a signed evidence ref, else it degrades
+        to a lead (the same 'a FACT needs a signed evidence ref' invariant AgentState enforces)."""
+        if self.seams.deploy_fireteam is None:
+            report.denied_edges.append("fireteam deploy approved but no fireteam seam is wired (fail-closed)")
+            return
+        try:
+            outcome = self.seams.deploy_fireteam(decision, state, seq)
+        except Exception as exc:  # noqa: BLE001 — a wave error is a recorded refusal, never a crash
+            report.denied_edges.append(f"fireteam wave error (fail-closed): {type(exc).__name__}")
+            return
+        if outcome is None or getattr(outcome, "refused", False):
+            report.queued_edges.append(
+                "fireteam plan refused (malformed / over-cap / mutex) — nothing spawned")
+            return
+        for f in getattr(outcome, "facts", []) or []:
+            ref = str(getattr(f, "evidence_ref", "") or "").strip()
+            if ref:
+                state.record_fact(f, evidence_ref=ref)   # already oracle-confirmed by fireteam.collect
+                report.facts.append(f)
+            else:                                          # fail-closed: no signed ref ⇒ a LEAD, never a fact
+                state.record_lead(f)
+                report.leads.append(f)
+        for ld in getattr(outcome, "leads", []) or []:
+            state.record_lead(ld)
+            report.leads.append(ld)
+        self._project([f for f in getattr(outcome, "facts", []) or []
+                       if str(getattr(f, "evidence_ref", "") or "").strip()])
+        for esc in getattr(outcome, "escalations", []) or []:
+            report.queued_edges.append(f"fireteam escalation (queued, never auto-run): "
+                                       f"{getattr(esc, 'reason', '') or getattr(esc, 'tool_name', '')}")
+        for ref in getattr(outcome, "spine_refs", []) or []:
+            report.checkpoints.append(str(ref))
 
     @staticmethod
     def _apply_escalation(decision: LLMDecision, state: AgentState) -> None:
