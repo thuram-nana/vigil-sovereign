@@ -155,6 +155,46 @@ def test_require_charter_signed_raises_for_missing() -> None:
         ethics.require_charter_signed("does-not-exist")
 
 
+def _sig_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signed_line_body: str) -> tuple:
+    """Write a charter whose `Signed:` line is ``Signed:{signed_line_body}`` (the body carries the line
+    terminator) followed by a real content line, redirect paths.charter_path, and return
+    is_charter_signed's verdict. Probes the signature parser against separator / zero-width evasions."""
+    slug = "sig-probe"
+    d = tmp_path / "targets" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    text = "# charter\n\n## 1. Attestation\nSigned:" + signed_line_body + "## 2. In-scope systems\n| `h` | x |\n"
+    (d / "charter.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(paths, "charter_path",
+                        lambda s, _p=d / "charter.md": _p if s == slug else Path("/nonexistent"))
+    return ethics.is_charter_signed(slug)
+
+
+# A BLANK `Signed:` line terminated by ANY line separator (not just \n) must NOT slurp the next content
+# line as a bogus signature — the seedless-fusion auth-bypass CLASS the red-pen found. str.splitlines()
+# splits on all of these; re's ^/$ under MULTILINE would split on \n ALONE (so U+2028/U+2029/U+0085/FS
+# would let the value cross the visual break).
+@pytest.mark.parametrize("sep", ["\n", "\r\n", "\r", chr(0x85), chr(0x2028), chr(0x2029), chr(0x1c)])
+def test_blank_signed_line_any_separator_is_unsigned(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sep: str) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, sep)
+    assert not signed, f"blank Signed line + {sep!r} wrongly read as signed ({reason})"
+
+
+# An invisible (zero-width / format-character-only) value is not a signature.
+@pytest.mark.parametrize("zw", [chr(0x200B), chr(0xFEFF), chr(0x200B) + chr(0xFEFF)])
+def test_zero_width_only_signature_is_unsigned(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zw: str) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " " + zw + "\n")
+    assert not signed, f"zero-width-only value {zw!r} wrongly read as signed ({reason})"
+
+
+@pytest.mark.parametrize("name", ["tester", "Jane Doe", "O'Brien, J. (lead)", "Jos" + chr(0xe9)])
+def test_real_signature_is_signed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    signed, reason = _sig_verdict(tmp_path, monkeypatch, " `" + name + "`   Date: `2026`\n")
+    assert signed, f"legit signature {name!r} wrongly rejected ({reason})"
+
+
 def test_parse_scope_extracts_hosts(synthetic_target: str) -> None:
     scope = ethics.parse_scope(synthetic_target)
     assert "synthetic-target.example" in scope

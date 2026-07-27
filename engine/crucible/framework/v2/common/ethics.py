@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -34,34 +35,48 @@ from .errors import (
 
 # The signature line in framework/templates/charter.md is:
 #   Signed: `<name>`     Date: `__________`
-# When unsigned the angle-bracketed placeholder remains. Anything that
-# is not the literal placeholder counts as signed.
+# When unsigned the angle-bracketed placeholder remains. A signature counts only if it is NOT the
+# placeholder AND is a real (graphical) name.
 #
-# The signature value is captured on the SAME line as `Signed:` — the inter-token whitespace is
-# HORIZONTAL only (`[^\S\n]`, never a newline) and the value class excludes newlines, so a BLANK
-# `Signed:` line cannot let the match cross the newline and slurp the NEXT content line as a bogus
-# signature (a real auth-bypass the seedless-fusion red-pen found: an empty Signed line read as
-# "signed by '## 2. In-scope systems'"). The value is `*` (may be empty) so a blank line still
-# MATCHES and is then rejected below as an empty value — fail-closed.
-_SIGNATURE_LINE = re.compile(r"^Signed:[^\S\n]*`?([^`\n]*?)`?[^\S\n]*(?:Date:.*)?$", re.MULTILINE)
+# We ISOLATE the `Signed:` line with str.splitlines() and read the value from THAT LINE ALONE — this is
+# DELIBERATELY not an ``re``-MULTILINE ``^Signed:...$`` match. Python's ``re`` treats ONLY ``\n`` as a
+# line boundary for ``^``/``$``, so a BLANK ``Signed:`` line terminated by ANY other line separator a
+# human editor can produce — ``\r``, U+0085 (NEL), U+2028 (LINE SEP), U+2029 (PARA SEP), FS/GS/RS — would
+# let the value cross the visual break and slurp the NEXT content line as a bogus signature (a real
+# auth-bypass CLASS the seedless-fusion red-pen found: an empty Signed line read as "signed by
+# '## 2. In-scope systems'"). ``str.splitlines()`` splits on that FULL set, so the value can NEVER cross
+# a line break of any kind — fail-closed.
 _PLACEHOLDER = re.compile(r"<\s*name\s*>", re.IGNORECASE)
+_SIGNED_PREFIX = "Signed:"
+
+
+def _has_graphical(s: str) -> bool:
+    """True iff ``s`` has at least one GRAPHICAL character — a Letter / Number / Punctuation / Symbol.
+    Whitespace, control (Cc), and FORMAT characters (Cf: zero-width space U+200B, BOM U+FEFF, …) do NOT
+    count, so an all-whitespace or all-zero-width "signature" reads as empty — an invisible non-signature
+    can never authorize a run."""
+    return any(unicodedata.category(c)[0] in ("L", "N", "P", "S") for c in s)
 
 
 def is_charter_signed(slug: str) -> tuple[bool, str]:
     """
-    Return (signed, reason). signed=True means a non-placeholder name
-    is on the 'Signed:' line. reason gives the raw evidence either way.
+    Return (signed, reason). signed=True means a non-placeholder, GRAPHICAL name is on the 'Signed:'
+    line. reason gives the raw evidence either way. Fail-closed on any ambiguity.
     """
     cp = paths.charter_path(slug)
     if not cp.is_file():
         return False, f"charter file missing at {cp}"
     text = cp.read_text(encoding="utf-8")
 
-    m = _SIGNATURE_LINE.search(text)
-    if not m:
+    # Isolate the first line that starts with 'Signed:'. splitlines() splits on the FULL Unicode
+    # line-boundary set, so the value below cannot cross a visual line break of any kind (see note above).
+    sig_line = next((ln for ln in text.splitlines() if ln.startswith(_SIGNED_PREFIX)), None)
+    if sig_line is None:
         return False, "no 'Signed:' line found in charter"
-    sig = m.group(1).strip().strip("`").strip()
-    if not sig:
+    value = sig_line[len(_SIGNED_PREFIX):]
+    value = re.split(r"Date:", value, maxsplit=1)[0]   # drop a trailing 'Date:' scaffold on the line
+    sig = value.strip().strip("`").strip()
+    if not sig or not _has_graphical(sig):
         return False, "'Signed:' line has empty value"
     if _PLACEHOLDER.search(sig):
         return False, f"signature is the unfilled placeholder ({sig!r})"
