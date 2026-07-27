@@ -21,6 +21,7 @@ for. Advisory verdicts elsewhere (B1) still gate what may be ADOPTED; this only 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,10 @@ from typing import Callable, Optional
 from .profile import build_profiles
 
 _INSTALL_TIMEOUT_S = 300.0
+# A declared package must be a plain package token — no leading dash (which apt-get/pip would read as an
+# OPTION, not a package: argv-injection), no whitespace/shell metacharacter. The roster is curated + frozen,
+# but this makes a future dash-leading/typo'd entry a clean refusal rather than a mis-parsed flag.
+_SAFE_PKG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 def _profile(name: str) -> Optional[dict]:
@@ -53,9 +58,14 @@ def _plan_argv(p: dict) -> tuple[Optional[list], str]:
     usable (matches bootstrap precedence), else pipx, else pip --user. Package name is the roster's own."""
     apt, pip = str(p.get("apt") or ""), str(p.get("pip") or "")
     if apt and _apt_usable():
+        if not _SAFE_PKG.match(apt):
+            return None, "declared apt package is not a safe package name (refused)"
         base = [] if os.geteuid() == 0 else ["sudo", "-n"]   # -n: never PROMPT for a password in a daemon
-        return base + ["apt-get", "install", "-y", apt], "apt"
+        # `--` ends option parsing → a package can NEVER be read as an apt-get flag (defence in depth).
+        return base + ["apt-get", "install", "-y", "--", apt], "apt"
     if pip:
+        if not _SAFE_PKG.match(pip):
+            return None, "declared pip package is not a safe package name (refused)"
         if shutil.which("pipx"):
             return ["pipx", "install", pip], "pipx"
         return [sys.executable, "-m", "pip", "install", "--user", pip], "pip"

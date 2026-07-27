@@ -174,7 +174,9 @@ def provision_tool(body: dict) -> dict:
     DECLARED apt/pip hint (never a caller package/command), and only with explicit operator ``consent`` —
     without consent it returns the exact command it WOULD run (the ask-operator path), mutating nothing."""
     from ..tools.install import install_tool
-    return install_tool(str(body.get("name", "")), consent=bool(body.get("consent", False)))
+    # STRICT consent: only a real JSON boolean `true` is consent — NOT a truthy non-bool like the string
+    # "false" (bool("false") is True). Anything else takes the ask path (needs_consent), mutating nothing.
+    return install_tool(str(body.get("name", "")), consent=(body.get("consent") is True))
 
 
 def _docker_ready() -> tuple[bool, str]:

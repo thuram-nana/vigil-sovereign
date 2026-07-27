@@ -55,13 +55,35 @@ def test_without_consent_it_asks_and_runs_nothing(monkeypatch):
     assert "apt-get" in out["command"] and "nmap" in out["command"]        # surfaces the exact command
 
 
-def test_declared_package_is_a_single_argv_element_no_shell_injection(monkeypatch):
-    # a (hypothetical) malicious declared package must stay ONE argv token — list form, never a shell string
+def test_unsafe_declared_package_is_refused(monkeypatch):
+    # a metacharacter/space package is REFUSED outright (H1) — never built into argv at all …
     monkeypatch.setattr(I, "_apt_usable", lambda: True)
-    argv, method = I._plan_argv(_prof(apt="evil; rm -rf / #", pip=""))
+    argv, why = I._plan_argv(_prof(apt="evil; rm -rf / #", pip=""))
+    assert argv is None and "not a safe package name" in why
+    # … and a leading-dash package (would be read as an apt/pip OPTION, not a package) is refused too
+    assert I._plan_argv(_prof(apt="-o=APT::x", pip=""))[0] is None
+    assert I._plan_argv(_prof(apt="", pip="-rrequirements.txt"))[0] is None
+
+
+def test_safe_package_argv_is_list_with_end_of_options_separator(monkeypatch):
+    # a normal package → a LIST argv (no shell), with `--` before the package so it can't be a flag
+    monkeypatch.setattr(I, "_apt_usable", lambda: True)
+    argv, method = I._plan_argv(_prof(apt="nmap", pip=""))
     assert method == "apt" and isinstance(argv, list)
-    assert argv[-1] == "evil; rm -rf / #"          # the whole thing is one package token, not split/executed
-    assert "apt-get" in argv and "install" in argv
+    assert argv[-2:] == ["--", "nmap"] and "apt-get" in argv and "install" in argv
+
+
+def test_provision_tool_consent_is_strict_boolean(monkeypatch):
+    # H2: only a real JSON boolean true is consent; a truthy non-bool ("false"/1/"yes") takes the ask path.
+    from framework.v2.console import actions
+    seen = []
+    monkeypatch.setattr("framework.v2.tools.install.install_tool",
+                        lambda name, *, consent=False: seen.append(consent) or {"ok": False})
+    for val in ("false", "true", 1, 0, "yes", None):
+        actions.provision_tool({"name": "nmap", "consent": val})
+    assert seen == [False, False, False, False, False, False]     # NONE of the non-bool values consent
+    actions.provision_tool({"name": "nmap", "consent": True})
+    assert seen[-1] is True                                        # only boolean True consents
 
 
 def test_pip_tool_installs_via_declared_pip_and_reprobes(monkeypatch):
