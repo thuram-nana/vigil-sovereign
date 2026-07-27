@@ -862,7 +862,8 @@ def _reverify(world: Any, task: FusionTask, res: Any, *, seq: int, slug: str = "
       * gcp_live        -> the SAME two cloud oracles over the LIVE GCP pull (provider-agnostic; a public
                            GCS bucket / project-IAM binding promotes exactly as AWS does)
       * azure_live      -> the SAME two cloud oracles over the LIVE Azure pull (a public blob container —
-                           container publicAccess + account allowBlobPublicAccess two-scope — promotes as AWS)
+                           container publicAccess + account allowBlobPublicAccess + network internet-open
+                           three-scope — promotes as AWS)
       * declared_service-> service-reachability oracle over a GATED, OPT-IN live handshake (3c), PLUS the
                            weak-TLS + weak-crypto oracles over a GATED, OPT-IN live TLS handshake
     """

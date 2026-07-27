@@ -2,9 +2,10 @@
 Phase C2 · Azure — LIVE read-only Azure posture collector (sensors.azure_live).
 
 Recorded azure-mgmt read-only response shapes -> the native inventory -> the EXISTING provider-agnostic
-cloud oracles. Near-zero-FP (the AWS/GCP two-scope lesson): a blob container is a public FACT only when the
-container's publicAccess is Blob/Container AND the storage account's allowBlobPublicAccess is enabled; the
-account setting UNKNOWN → an un-promoted lead. Azure RBAC has no anonymous principal → topology only.
+cloud oracles. Near-zero-FP (the AWS/GCP lesson, extended): a blob container is an internet public FACT only
+when its publicAccess is Blob/Container AND the account's allowBlobPublicAccess is enabled AND the account's
+network is internet-open (a three-scope rule); any scope False/UNKNOWN → an un-promoted lead. Azure RBAC has
+no anonymous principal → topology only.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from framework.v2.sensors.azure_live import (
 )
 
 
-# --- the two-scope public rule -------------------------------------------------
+# --- the three-scope public rule -----------------------------------------------
 
 
 def _open(c, **kw):
