@@ -44,13 +44,21 @@ SECRET_META = {
                            "purpose": "Lets the agent do live web research during a codebase engagement (Strix)."},
     "AZURE_OPENAI_API_KEY": {"category": "llm", "probe": True, "label": "Azure OpenAI API key",
                              "purpose": "Bring-your-own-model via Azure OpenAI. Also set the endpoint in Models."},
-    # --- Cloud credentials (read-only; used by cloud/Bedrock + Phase-C cloud pentesting) ---
+    # --- Cloud credentials (read-only; used by Phase-C cloud pentesting + the cloud LLM backends). The UI
+    #     groups these per cloud provider via CLOUD_PROVIDERS; the collectors discover them via each SDK's
+    #     ambient credential chain (delivered to the offense engine as env). ---
     "AWS_ACCESS_KEY_ID": {"category": "cloud", "probe": True, "label": "AWS access key id",
-                          "purpose": "Read-only AWS creds for Bedrock models and cloud posture testing. "
-                                     "Pair with the secret access key below."},
+                          "purpose": "Read-only AWS creds for cloud posture testing (S3/IAM) and Bedrock models. "
+                                     "Pair with the secret access key below; validated via STS get-caller-identity."},
     "AWS_SECRET_ACCESS_KEY": {"category": "cloud", "probe": False, "label": "AWS secret access key",
                               "purpose": "The secret half of the AWS credential pair (validated via the access "
                                          "key id)."},
+    "AWS_SESSION_TOKEN": {"category": "cloud", "probe": False, "label": "AWS session token (optional)",
+                          "purpose": "Only for TEMPORARY/STS credentials (an assumed-role or SSO session). Leave "
+                                     "blank for long-lived IAM access keys."},
+    "AZURE_CLIENT_SECRET": {"category": "cloud", "probe": True, "label": "Azure client secret",
+                            "purpose": "The service-principal secret for read-only Azure posture testing. Set the "
+                                       "tenant / client / subscription ids below; validated via an AAD token."},
     # --- Integrations ---
     "GITHUB_TOKEN": {"category": "integration", "probe": True, "label": "GitHub token",
                      "purpose": "Lets the auto-patch engine push a fix branch and open a gated pull request. "
@@ -78,6 +86,43 @@ _SECRET_CATEGORY_ORDER = ("llm", "cloud", "integration", "destruction")
 _SECRET_CATEGORY_LABEL = {"llm": "AI model providers", "cloud": "Cloud credentials",
                           "integration": "Integrations", "destruction": "Auto-patch signing"}
 _MAX_SECRET_LEN = 8192
+
+# --- Cloud-provider CREDENTIAL plane (Phase C) -----------------------------------------------------
+# Per cloud provider a credential is a mix of SEALED secrets (in SECRET_META, category "cloud") and
+# NON-SECRET config (region / role / subscription id, below). Both are DELIVERED to the keyless offense
+# engine so each SDK's ambient credential chain (boto3 / azure.identity) assembles a working identity — the
+# same env the Phase-C live collectors read. CLOUD_PROVIDERS is the ordered per-provider layout the Settings
+# UI renders. A tenant/client/subscription id is an identifier, not a secret, so it is config (shown), while
+# the access-key/secret/session-token/client-secret are sealed off-spine.
+CLOUD_CONFIG_META = {
+    "AWS_REGION": {"provider": "aws", "label": "Default region", "placeholder": "us-east-1", "optional": True},
+    "AWS_ROLE_ARN": {"provider": "aws", "label": "Assume-role ARN (optional)",
+                     "placeholder": "arn:aws:iam::123456789012:role/ReadOnlyAudit", "optional": True},
+    "CRUCIBLE_AWS_ENDPOINT_URL": {"provider": "aws", "label": "Endpoint override (optional)",
+                                  "placeholder": "http://localhost:4566  (LocalStack / self-hosted)", "optional": True},
+    "AZURE_TENANT_ID": {"provider": "azure", "label": "Tenant id",
+                        "placeholder": "00000000-0000-0000-0000-000000000000", "optional": True},
+    "AZURE_CLIENT_ID": {"provider": "azure", "label": "Client (application) id",
+                        "placeholder": "the app-registration id", "optional": True},
+    "AZURE_SUBSCRIPTION_ID": {"provider": "azure", "label": "Subscription id (optional)",
+                              "placeholder": "the subscription to scan", "optional": True},
+}
+CLOUD_CONFIG_VARS = tuple(CLOUD_CONFIG_META)
+
+# The ordered per-provider layout for the Settings UI. Each field name is either a SECRET_META secret
+# (masked) or a CLOUD_CONFIG_META config var (shown). `probe_env` is the secret whose LIVE probe validates
+# the whole provider credential (a bad/expired credential always shows as failing).
+CLOUD_PROVIDERS = (
+    {"id": "aws", "label": "Amazon Web Services (AWS)", "probe_env": "AWS_ACCESS_KEY_ID",
+     "purpose": "Read-only AWS posture (S3 public exposure, IAM over-broad trust) and Bedrock models. The live "
+                "collector discovers these via boto3's credential chain.",
+     "fields": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+                "AWS_REGION", "AWS_ROLE_ARN", "CRUCIBLE_AWS_ENDPOINT_URL")},
+    {"id": "azure", "label": "Microsoft Azure", "probe_env": "AZURE_CLIENT_SECRET",
+     "purpose": "Read-only Azure posture via a service principal (tenant + client id + secret). Validated with "
+                "an AAD token; the check touches no resource.",
+     "fields": ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID")},
+)
 
 # The canonical env vars each plane reads (persisted, non-secret) + delivered to the keyless offense
 # engine by `vigil up`. Three DISTINCT knobs — conflating them was the P4 red-pen bug (a backend NAME
@@ -220,6 +265,10 @@ def _validate_config_value(env: str, value: str) -> str:
         raise ValueError("AZURE_OPENAI_ENDPOINT must start with https://")
     if env == "CRUCIBLE_SELFHOSTED_ENDPOINT" and not (value.startswith("http://") or value.startswith("https://")):
         raise ValueError("CRUCIBLE_SELFHOSTED_ENDPOINT must be an http(s) URL")
+    if env == "CRUCIBLE_AWS_ENDPOINT_URL" and not (value.startswith("http://") or value.startswith("https://")):
+        raise ValueError("CRUCIBLE_AWS_ENDPOINT_URL must be an http(s) URL")
+    if env == "AWS_ROLE_ARN" and not value.startswith("arn:"):
+        raise ValueError("AWS_ROLE_ARN must be an IAM role ARN (arn:aws:iam::…:role/…)")
     return value
 
 
@@ -342,6 +391,22 @@ def set_secret(name: str, value: str, *, store, owner_key, reason: str = "") -> 
             "backend": backend, "recorded_seq": seq}
 
 
+def set_cloud_config(env: str, value: str, *, store, owner_key, reason: str = "") -> dict:
+    """Persist ONE non-secret cloud-provider config var (region / role ARN / subscription id / endpoint) —
+    a closed allowlist (CLOUD_CONFIG_VARS), so the UI can never write an arbitrary env var. The value is
+    validated (line-injection-safe + light per-var sanity) and written to the 0600 sigil.env; an empty value
+    CLEARS it. Non-secret, so the (cleaned) value is echoed back and the value is recorded on the spine.
+    Fail-closed on an unknown var or an invalid value."""
+    if env not in CLOUD_CONFIG_VARS:
+        raise ValueError(f"unknown cloud config var {env!r}: only {', '.join(CLOUD_CONFIG_VARS)} may be set here")
+    cleaned = _validate_config_value(env, value)          # "" clears; raises on an unsafe/invalid value
+    _persist_env(env, cleaned)
+    seq = _record_signed_event(
+        store, owner_key,
+        {"signal": "governor.cloud_config_set", "env": env, "value": cleaned}, reason)
+    return {"ok": True, "action": "set_cloud_config", "env": env, "value": cleaned, "recorded_seq": seq}
+
+
 def check_secret(name: str, *, store, owner_key, reason: str = "") -> dict:
     """Run a LIVE health probe for one secret (does it actually work?) and record the (non-secret) verdict on
     the spine. Returns {ok, name, status, reason, checked_at} — never the value. Fail-closed: an unknown name
@@ -409,7 +474,7 @@ def export_runtime_env(include_secrets: bool = False) -> dict:
     — the signing key must NEVER reach an offense process (A2a red-pen). The GitHub token IS delivered (LAP PR
     push). The uiproxy consumer re-allowlists the same set (defense-in-depth)."""
     env: dict = {}
-    for var in (*PROVIDER_ENV_VARS, *_EXTRA_DELIVERED_ENV):
+    for var in (*PROVIDER_ENV_VARS, *_EXTRA_DELIVERED_ENV, *CLOUD_CONFIG_VARS):
         val = os.environ.get(var, "").strip()
         if val:
             env[var] = val
@@ -487,8 +552,38 @@ def settings_status() -> dict:
         })
     provider_config = {v: os.environ.get(v, "").strip()          # non-secret config values (safe to show)
                        for v in _ALL_CONFIG_VARS if os.environ.get(v, "").strip()}
+    # per-cloud-provider credential view (the detailed Cloud-credentials Settings screen). Each field is a
+    # sealed SECRET (redacted → set/fingerprint/health) or a NON-SECRET config var (value shown). The UI
+    # renders this instead of flat cards for the "cloud" category.
+    cloud_providers = []
+    for prov in CLOUD_PROVIDERS:
+        fields = []
+        for env in prov["fields"]:
+            if env in SECRET_META:
+                meta = SECRET_META[env]
+                val = ss.get(env)
+                present = bool(val)
+                health = cached_health(env) if present else None
+                fields.append({
+                    "env": env, "kind": "secret", "label": meta.get("label", env),
+                    "purpose": meta.get("purpose", ""), "set": present,
+                    "fingerprint": _fingerprint(val) if present else None,
+                    "probeable": bool(meta.get("probe")),
+                    "health": (health or {"status": "unchecked", "reason": "", "checked_at": 0}) if present else None,
+                })
+            elif env in CLOUD_CONFIG_META:
+                cmeta = CLOUD_CONFIG_META[env]
+                cval = os.environ.get(env, "").strip()
+                fields.append({
+                    "env": env, "kind": "config", "label": cmeta.get("label", env),
+                    "placeholder": cmeta.get("placeholder", ""), "optional": bool(cmeta.get("optional")),
+                    "value": cval, "set": bool(cval),
+                })
+        cloud_providers.append({"id": prov["id"], "label": prov["label"], "purpose": prov.get("purpose", ""),
+                                "probe_env": prov["probe_env"], "fields": fields})
     return {
         "secrets": secrets,
+        "cloud_providers": cloud_providers,
         "secret_backend": ss.backend,
         "keys_failing": keys_failing,          # drives the top-bar "N keys failing" badge
         "secret_categories": [{"id": c, "label": _SECRET_CATEGORY_LABEL[c]}

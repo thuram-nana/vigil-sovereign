@@ -2170,6 +2170,70 @@
     ];
   }
 
+  // ---- Cloud credentials: a detailed per-provider card (AWS / Azure / …) --------------------------
+  // Each field is either a SEALED secret (masked input + Seal + set/health status) or a NON-SECRET config
+  // var (text input + Save). One "Test connection" per provider runs the provider's live probe.
+  function drawCloudField(f, reload) {
+    if (f.kind === "secret") {
+      var input = h("input", { type: "password", autocomplete: "off", spellcheck: "false",
+        placeholder: f.set ? "enter a new value to replace it" : "paste the value…" });
+      var save = h("button.btn.owner", { onClick: function () {
+          var v = (input.value || "").trim();
+          if (!v) { V.toast("Paste a value first.", true); return; }
+          save.disabled = true;
+          settingsAct({ action: "set_secret", name: f.env, value: v, reason: "set " + f.env + " (cloud creds)" },
+            (f.label || f.env) + " sealed on this machine.",
+            function () { input.value = ""; reload(); refreshKeysBadge(); })
+            .then(function () { save.disabled = false; });
+        } }, [V.icon("key"), "Seal"]);
+      var status = f.set
+        ? h("div.set-status.ok", null, [V.icon("check"), h("span", null, "Set"),
+            h("span.mono.dim", null, f.fingerprint), f.probeable ? healthChip(f) : null])
+        : h("div.set-status.off", null, [V.icon("info"), h("span", null, "Not set")]);
+      return h("div.field", null, [
+        h("label", null, f.label || f.env), input, status,
+        h("div.acts", { style: { marginTop: "6px" } }, [save]),
+        f.purpose ? h("div.hint", null, f.purpose) : null,
+      ]);
+    }
+    // non-secret config (region / role ARN / tenant / subscription) — value is shown
+    var cin = h("input", { type: "text", autocomplete: "off", spellcheck: "false",
+      value: f.value || "", placeholder: f.placeholder || "" });
+    var csave = h("button.btn", { onClick: function () {
+        csave.disabled = true;
+        settingsAct({ action: "set_cloud_config", env: f.env, value: (cin.value || "").trim(),
+          reason: "set " + f.env }, (f.label || f.env) + " saved.", function () { reload(); })
+          .then(function () { csave.disabled = false; });
+      } }, "Save");
+    return h("div.field", null, [
+      h("label", null, f.label || f.env),
+      h("div.row-flex", null, [cin, csave]),
+    ]);
+  }
+
+  function drawCloudProvider(prov, st, reload) {
+    var probeField = (prov.fields || []).filter(function (f) { return f.env === prov.probe_env; })[0];
+    var test = (probeField && probeField.set) ? h("button.btn", { onClick: function () {
+        test.disabled = true; test.textContent = "Testing…";
+        settingsAct({ action: "check_secret", name: prov.probe_env, reason: "test " + prov.id + " credential" },
+          "", function (r) {
+            if (r && r.status === "ok") V.toast(prov.label + ": working.");
+            else if (r && r.status === "fail") V.toast(prov.label + ": FAILING — " + (r.reason || ""), true);
+            else V.toast(prov.label + ": " + ((r && r.reason) || "can't verify"), true);
+            reload(); refreshKeysBadge();
+          }).then(function () { test.disabled = false; test.textContent = "Test connection"; });
+      } }, [V.icon("bolt"), "Test connection"]) : null;
+    var body = [
+      prov.purpose ? h("div.hint", { style: { marginBottom: "10px" } }, prov.purpose) : null,
+      h("div.grid.cols-2", { style: { alignItems: "start" } },
+        (prov.fields || []).map(function (f) { return drawCloudField(f, reload); })),
+      test ? h("div.acts", { style: { marginTop: "12px" } }, [test])
+           : h("div.hint", { style: { marginTop: "12px" } },
+               "Seal the " + (prov.probe_env || "credential") + " to enable a live connection test."),
+    ];
+    return V.card(prov.label, "OWNER", body, true);
+  }
+
   // ---- API Keys screen (owner plane) — every secret the system uses, grouped, with LIVE health -------
   function renderApiKeys(screen) {
     V.mount(screen, [
@@ -2203,6 +2267,20 @@
     var cats = st.secret_categories || [{ id: "integration", label: "Secrets" }];
     var secrets = st.secrets || [];
     var sections = cats.map(function (cat) {
+      // the "cloud" category renders as detailed PER-PROVIDER credential cards (AWS / Azure / …), each
+      // with its full field set (keys, session token, region, role, tenant/subscription) + a live test.
+      if (cat.id === "cloud") {
+        var provs = st.cloud_providers || [];
+        if (!provs.length) return null;
+        return h("div", { style: { marginTop: "18px" } }, [
+          h("div.screen-head", { style: { marginBottom: "6px" } }, h("h2", null, cat.label)),
+          h("div.hint", { style: { marginBottom: "8px" } },
+            "Enter each cloud provider's credentials for the read-only pentest collectors. Everything is sealed "
+            + "on this machine and never shown back to the browser; a tenant/subscription id is shown, access "
+            + "keys and secrets are masked. Press Test connection to verify a credential is live."),
+          provs.map(function (p) { return drawCloudProvider(p, st, loadApiKeys); }),
+        ]);
+      }
       var inCat = secrets.filter(function (s) { return (s.category || "integration") === cat.id; });
       if (!inCat.length) return null;
       return h("div", { style: { marginTop: "18px" } }, [
