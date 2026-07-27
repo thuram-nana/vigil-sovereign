@@ -51,7 +51,9 @@ _ENC_ON = {"ServerSideEncryptionConfiguration": {"Rules": [
     {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]}}
 _TAG_SENSITIVE = {"TagSet": [{"Key": "data-classification", "Value": "confidential"}]}
 
-_BPA_OFF = "absent"                             # KNOWN: no BPA configured -> not neutralising
+_BPA_OFF = "absent"                             # KNOWN: no BPA configured at this scope -> not neutralising
+_BPA_OFF_FIELDS = {"BlockPublicAcls": False, "IgnorePublicAcls": False,
+                   "BlockPublicPolicy": False, "RestrictPublicBuckets": False}   # a KNOWN account BPA, all off
 _BPA_IGNORE_ACLS = {"PublicAccessBlockConfiguration": {
     "BlockPublicAcls": False, "IgnorePublicAcls": True, "BlockPublicPolicy": False, "RestrictPublicBuckets": False}}
 _BPA_RESTRICT = {"PublicAccessBlockConfiguration": {
@@ -104,10 +106,19 @@ _ACCOUNT_AUTH = {
 # ---------------------------------------------------------------------------
 
 
-def test_bucket_resource_public_via_acl_when_bpa_off():
-    r = bucket_resource(_PUBLIC_BUCKET)
+def test_bucket_resource_public_via_acl_when_both_scopes_bpa_off():
+    # public ACL, bucket BPA absent (known-off) AND account BPA known-off -> CONFIRMED public
+    r = bucket_resource(_PUBLIC_BUCKET, account_bpa=_BPA_OFF_FIELDS)
     assert r["public"] is True and any(g["principal"] == "*" for g in r["grants"])
-    assert r["acl_public"] is True and r["bpa_known"] is True          # raw evidence retained
+    assert r["acl_public"] is True and r["bpa_known"] is True          # both scopes observed
+
+
+def test_public_acl_with_unknown_account_bpa_is_not_confirmed():
+    # BLOCK regression (re-check): bucket BPA known-off but ACCOUNT BPA UNREADABLE (denied) — the account
+    # may enforce IgnorePublicAcls (default-on since 2023), so anonymous reachability is UNCONFIRMED.
+    r = bucket_resource(_PUBLIC_BUCKET, account_bpa=None)
+    assert "public" not in r                       # must NOT mint a public FACT with only one scope known
+    assert r["acl_public"] is True and r["bpa_known"] is False
 
 
 def test_bucket_resource_encryption_and_sensitivity_tri_state():
@@ -119,20 +130,21 @@ def test_bucket_resource_encryption_and_sensitivity_tri_state():
 
 
 def test_bpa_ignore_acls_neutralises_a_public_acl():
-    r = bucket_resource(_ACL_IGNORED)
-    assert "public" not in r                       # IgnorePublicAcls -> ACL does not grant anonymous access
+    # bucket IgnorePublicAcls=true, account known-off -> BOTH scopes known, ACL neutralised -> not public
+    r = bucket_resource(_ACL_IGNORED, account_bpa=_BPA_OFF_FIELDS)
+    assert "public" not in r
     assert r["acl_public"] is True                 # but the raw signal is retained (auditable)
     assert r["bpa"]["IgnorePublicAcls"] is True
 
 
 def test_bpa_restrict_neutralises_a_public_policy():
-    r = bucket_resource(_POLICY_RESTRICTED)
+    r = bucket_resource(_POLICY_RESTRICTED, account_bpa=_BPA_OFF_FIELDS)
     assert "public" not in r                       # RestrictPublicBuckets -> policy grants no anonymous access
     assert r["policy_public"] is True              # raw signal retained
 
 
 def test_public_signal_with_unknown_bpa_is_not_confirmed_public():
-    r = bucket_resource(_BPA_UNKNOWN_BUCKET)       # BPA denied -> cannot confirm reachability
+    r = bucket_resource(_BPA_UNKNOWN_BUCKET)       # both scopes unknown -> cannot confirm reachability
     assert "public" not in r                       # conservative: no false public FACT
     assert r["acl_public"] is True and r["bpa_known"] is False          # retained as an un-promoted lead
 
@@ -183,6 +195,24 @@ def test_deny_subtracted_wildcard_trust_is_NOT_public():
     assert not any(r.get("public") for r in resources)
 
 
+def test_deny_on_a_concrete_principal_does_not_suppress_a_public_role():
+    # L1: a genuinely public Allow:'*' with a Deny on a DIFFERENT concrete principal is STILL public —
+    # the unrelated Deny does not subtract the wildcard grant (only a wildcard Deny does).
+    role = _role("wild-deny-concrete", [
+        {"Effect": "Allow", "Principal": "*", "Action": "sts:AssumeRole"},
+        {"Effect": "Deny", "Principal": {"AWS": "arn:aws:iam::999988887777:root"}, "Action": "sts:AssumeRole"}])
+    _pr, resources = _roles_from({"RoleDetailList": [role]})
+    assert any(r.get("public") for r in resources)              # true positive preserved
+
+
+def test_lowercase_condition_key_still_narrows_the_wildcard():
+    # L2: a Condition under a non-canonical lowercase key must still count as narrowing (defence-in-depth)
+    role = _role("wild-lc-cond", [{"Effect": "Allow", "Principal": "*", "Action": "sts:AssumeRole",
+                                   "condition": {"StringEquals": {"aws:PrincipalOrgID": "o-x"}}}])
+    _pr, resources = _roles_from({"RoleDetailList": [role]})
+    assert not any(r.get("public") for r in resources)         # NOT a false public FACT
+
+
 def test_concrete_trust_builds_a_can_assume_edge_not_a_fact():
     principals, resources = _roles_from({"RoleDetailList": [_ROLE_SCOPED]})
     assert not any(r.get("public") for r in resources)
@@ -204,7 +234,7 @@ def test_oracles_fire_on_true_positives_and_nothing_safe():
     inv = aws_inventory_from_responses(
         buckets=[_PUBLIC_BUCKET, _SECRET_BUCKET, _SAFE_BUCKET, _ACL_IGNORED, _POLICY_RESTRICTED,
                  _BPA_UNKNOWN_BUCKET],
-        account_auth=_ACCOUNT_AUTH)
+        account_auth=_ACCOUNT_AUTH, account_bpa=_BPA_OFF)      # account BPA known-off (both scopes readable)
     facts = confirm_cloud_posture_facts(inv)
     reached = {f["resource"] for f in facts if f["lead_class"] == "public_exposure"}
     # TRUE POSITIVES promoted:
@@ -229,7 +259,7 @@ def _enc_fact_fires(confirm, resource) -> bool:
 
 
 def test_normalize_mints_public_exposure_lead():
-    inv = aws_inventory_from_responses(buckets=[_PUBLIC_BUCKET], account_auth=None)
+    inv = aws_inventory_from_responses(buckets=[_PUBLIC_BUCKET], account_auth=None, account_bpa=_BPA_OFF)
     obs = cloud_observations(normalize_cloud_export(inv), seq=1)
     assert any(getattr(o, "attrs", {}).get("lead_class") == "public_exposure" for o in obs)
 
@@ -291,6 +321,15 @@ def _seed_fake_aws(boto3):
     s3.put_bucket_acl(Bucket="acme-acl-ignored", ACL="public-read")
     s3.put_public_access_block(Bucket="acme-acl-ignored", PublicAccessBlockConfiguration={
         "BlockPublicAcls": False, "IgnorePublicAcls": True, "BlockPublicPolicy": False, "RestrictPublicBuckets": False})
+    # account-level BPA explicitly all-off (a KNOWN off), so a confirmed-public bucket has BOTH scopes read
+    try:
+        acct = boto3.client("sts", region_name="us-east-1").get_caller_identity()["Account"]
+        boto3.client("s3control", region_name="us-east-1").put_public_access_block(
+            AccountId=acct, PublicAccessBlockConfiguration={
+                "BlockPublicAcls": False, "IgnorePublicAcls": False,
+                "BlockPublicPolicy": False, "RestrictPublicBuckets": False})
+    except Exception:
+        pass                                     # moto returns "absent" (known-off) even without this
     iam = boto3.client("iam", region_name="us-east-1")
     iam.create_role(RoleName="wide-open", AssumeRolePolicyDocument=json.dumps(
         {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": "*", "Action": "sts:AssumeRole"}]}))

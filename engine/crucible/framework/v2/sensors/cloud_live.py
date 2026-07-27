@@ -59,9 +59,12 @@ HONEST LIMITATIONS (stated, not papered over):
     requires ``sensitive AND not encrypted``) fires only when the operator has TAGGED the bucket's data
     classification (``sensitive`` / ``classification`` / ``data-classification``) — operator-declared
     sensitivity, never fabricated. Public-exposure and over-broad-trust facts need no such tag.
-  * A public ACL/policy whose Block-Public-Access state cannot be read (denied) stays an un-promoted LEAD
-    rather than a confirmed public FACT (conservative — no false fact; a possible false negative). The C3
-    active-reachability oracle is what definitively CONFIRMS anonymous reach where it matters.
+  * Block-Public-Access neutralises at BOTH the bucket AND the account scope, so a public ACL/policy is
+    confirmed anonymously reachable only when its neutraliser is observed False at BOTH scopes. If EITHER
+    scope's BPA cannot be read — e.g. a scoped read role without ``s3:GetAccountPublicAccessBlock`` (the
+    account-level S3-Control read) — the public signal stays an un-promoted LEAD (conservative — no false
+    fact; a possible false negative). Grant that read for account-wide confirmation; the C3 active-
+    reachability oracle definitively CONFIRMS anonymous reach regardless, where it matters.
   * A Condition-narrowed wildcard trust (the secure org/ExternalId pattern) is NOT promoted; the deep
     evaluation of trust Conditions is deferred to a future oracle that judges the retained raw condition.
 """
@@ -122,14 +125,17 @@ def _bpa_fields(pab: Any) -> dict | None:
     return {k: bool(cfg.get(k)) for k in _BPA_KEYS}
 
 
-def _merge_bpa(bucket_bpa: Any, account_bpa: Any) -> tuple[dict, bool]:
-    """Merge bucket- and account-level BPA field dicts. Account-level BPA applies account-wide, so a
-    ``True`` at EITHER level blocks. ``known`` iff at least one level is a KNOWN dict (else the effective
-    BPA is UNKNOWN and the caller must not confirm public). Returns (merged_fields, known)."""
+def _merge_bpa(bucket_bpa: Any, account_bpa: Any) -> tuple[dict, int]:
+    """Merge the bucket- and account-level BPA field dicts, OR-semantics (a ``True`` at EITHER scope
+    blocks — AWS applies the most-restrictive combination). Returns (merged_fields, observed_scopes)
+    where ``observed_scopes`` ∈ {0,1,2} is how many of the TWO scopes (bucket, account) were actually
+    read. A neutraliser (``IgnorePublicAcls`` / ``RestrictPublicBuckets``) is 'confirmed not blocking'
+    ONLY when it is observed False at BOTH scopes (``observed_scopes == 2`` AND the merged field is
+    False): each scope can independently neutralise, so an UNREAD scope (e.g. a scoped read role without
+    ``s3:GetAccountPublicAccessBlock``) leaves the effective state UNKNOWN — never assumed off."""
     levels = [b for b in (bucket_bpa, account_bpa) if isinstance(b, dict)]
-    if not levels:
-        return ({k: False for k in _BPA_KEYS}, False)
-    return ({k: any(bool(b.get(k)) for b in levels) for k in _BPA_KEYS}, True)
+    merged = {k: any(bool(b.get(k)) for b in levels) for k in _BPA_KEYS}
+    return (merged, len(levels))
 
 
 def _acl_is_public(acl: Any) -> bool:
@@ -222,22 +228,23 @@ def bucket_resource(entry: Any, *, account_bpa: Any = None) -> dict | None:
     res: dict[str, Any] = {"id": name, "kind": "datastore"}
     acl_public = _acl_is_public(entry.get("acl"))
     policy_public = _policy_status_is_public(entry.get("policy_status"))
-    merged, bpa_known = _merge_bpa(_bpa_fields(entry.get("public_access_block")),
-                                   account_bpa if isinstance(account_bpa, dict) else None)
+    merged, observed_scopes = _merge_bpa(_bpa_fields(entry.get("public_access_block")),
+                                         account_bpa if isinstance(account_bpa, dict) else None)
+    both_scopes_known = observed_scopes == 2
     # retain the RAW ground truth as evidence (oracle-inert keys)
     if acl_public:
         res["acl_public"] = True
     if policy_public:
         res["policy_public"] = True
-    res["bpa_known"] = bpa_known
-    if bpa_known:
+    res["bpa_known"] = both_scopes_known          # True only when BOTH bucket + account BPA were read
+    if observed_scopes:
         res["bpa"] = merged
-    # EFFECTIVE anonymous reachability — only a CONFIRMED public state becomes a promotable fact.
-    effective_public = False
-    if (acl_public or policy_public) and bpa_known:
-        effective_public = (acl_public and not merged["IgnorePublicAcls"]) or \
-                           (policy_public and not merged["RestrictPublicBuckets"])
-    if effective_public:
+    # EFFECTIVE anonymous reachability — a public vector is CONFIRMED only when its neutraliser is observed
+    # False at BOTH scopes (bucket AND account). A True at either scope neutralises; an UNREAD scope leaves
+    # it UNCONFIRMED. Either way it is not promoted (conservative — no false public FACT; C3 confirms live).
+    acl_open = both_scopes_known and not merged["IgnorePublicAcls"]
+    policy_open = both_scopes_known and not merged["RestrictPublicBuckets"]
+    if (acl_public and acl_open) or (policy_public and policy_open):
         res["public"] = True
         res["grants"] = [{"principal": "*", "access": "read"}]
     enc = _encryption_state(entry.get("encryption"))
@@ -253,17 +260,17 @@ def _trust_analysis(assume_role_policy_document: Any) -> dict:
     """Analyse an IAM role trust policy (``AssumeRolePolicyDocument``, a dict from
     ``get_account_authorization_details``) into::
 
-        {"concrete": [...],            # concrete principals allowed to assume (topology edges)
-         "public_unconditioned": bool, # an Allow with a '*'/'*:root' principal AND NO Condition (truly anyone)
-         "public_conditioned":  bool,  # an Allow '*' NARROWED by a Condition (org/ExternalId/SourceAccount) — SECURE
-         "has_deny": bool}             # any Deny statement (may subtract the grant — be conservative)
+        {"concrete": [...],             # concrete principals allowed to assume (topology edges)
+         "public_unconditioned": bool,  # an Allow with a '*'/'*:root' principal AND NO Condition (truly anyone)
+         "public_conditioned":  bool,   # an Allow '*' NARROWED by a Condition (org/ExternalId/SourceAccount) — SECURE
+         "has_deny_wildcard": bool}     # a Deny whose OWN principal is a wildcard (subtracts the public grant)
 
     A ``*`` principal carrying ANY ``Condition`` is the standard SECURE cross-account/organisation pattern
     (``aws:PrincipalOrgID`` / ``sts:ExternalId`` / ``aws:SourceAccount``) — it is emphatically NOT publicly
     assumable, so it must never be minted as a public FACT (BLOCK-1). ``Service`` trusts are ignored (a
     service trust is not a user-reachable assume). Total: any odd shape contributes nothing."""
     out: dict[str, Any] = {"concrete": [], "public_unconditioned": False,
-                           "public_conditioned": False, "has_deny": False}
+                           "public_conditioned": False, "has_deny_wildcard": False}
     if not isinstance(assume_role_policy_document, dict):
         return out
     stmts = assume_role_policy_document.get("Statement")
@@ -275,33 +282,54 @@ def _trust_analysis(assume_role_policy_document: Any) -> dict:
         if not isinstance(st, dict):
             continue
         effect = str(st.get("Effect") or "").strip().lower()
+        if effect not in ("allow", "deny"):
+            continue
+        wildcard, concrete = _statement_principals(st.get("Principal"))
         if effect == "deny":
-            out["has_deny"] = True
+            # only a Deny that ITSELF matches the wildcard actually subtracts a public grant; a Deny on a
+            # DIFFERENT concrete principal does not (L1 — avoids suppressing a genuinely-public role).
+            if wildcard:
+                out["has_deny_wildcard"] = True
             continue
-        if effect != "allow":
-            continue
-        conditioned = bool(st.get("Condition"))
-        principal = st.get("Principal")
-        wildcard = False
-        if principal == "*":
-            wildcard = True
-        elif isinstance(principal, dict):
-            aws = principal.get("AWS")
-            vals = [aws] if isinstance(aws, str) else (aws if isinstance(aws, list) else [])
-            for v in vals:
-                v = str(v or "").strip()
-                if not v:
-                    continue
-                if v in _WILDCARD_TRUST:
-                    wildcard = True
-                else:
-                    out["concrete"].append(v)   # a concrete trust is a real assume edge (condition or not)
+        out["concrete"].extend(concrete)   # a concrete trust is a real assume edge (condition or not)
         if wildcard:
-            if conditioned:
+            if _has_condition(st):         # case-insensitive (L2): a narrowing Condition is the secure pattern
                 out["public_conditioned"] = True
             else:
                 out["public_unconditioned"] = True
     return out
+
+
+def _has_condition(statement: dict) -> bool:
+    """True iff an IAM statement carries a non-empty ``Condition`` block — matched CASE-INSENSITIVELY so a
+    non-canonical ``condition`` key still counts (defence-in-depth: AWS canonicalises to PascalCase, but a
+    hand-fed export must not be able to hide a narrowing condition behind odd casing, L2)."""
+    for k, v in statement.items():
+        if str(k).strip().lower() == "condition" and v:
+            return True
+    return False
+
+
+def _statement_principals(principal: Any) -> tuple[bool, list[str]]:
+    """Parse an IAM statement ``Principal`` into (has_wildcard, concrete_principals). A ``"*"`` or an
+    ``{"AWS": "*"|"…:*:root"|[…]}`` wildcard sets the flag; concrete ARNs/accounts are collected;
+    ``Service``/``Federated`` trusts are ignored (not a user-reachable assume). Total."""
+    concrete: list[str] = []
+    if principal == "*":
+        return True, concrete
+    wildcard = False
+    if isinstance(principal, dict):
+        aws = principal.get("AWS")
+        vals = [aws] if isinstance(aws, str) else (aws if isinstance(aws, list) else [])
+        for v in vals:
+            v = str(v or "").strip()
+            if not v:
+                continue
+            if v in _WILDCARD_TRUST:
+                wildcard = True
+            else:
+                concrete.append(v)
+    return wildcard, concrete
 
 
 def _roles_to_inventory(role_detail_list: Any) -> tuple[list[dict], list[dict]]:
@@ -310,10 +338,11 @@ def _roles_to_inventory(role_detail_list: Any) -> tuple[list[dict], list[dict]]:
 
     A role becomes a public ``cloud_resource`` (over-broad trust — the policy-path oracle re-derives the
     anonymous assume path) ONLY when its trust is a wildcard that is UNCONDITIONED and not subtracted by a
-    Deny (``public_unconditioned and not has_deny``). A CONDITION-narrowed wildcard (the secure org/
-    ExternalId pattern) or a wildcard with a Deny is NOT promoted — instead the raw trust analysis is
-    retained on the role PRINCIPAL (``trust_wildcard``/``trust_conditioned``/``trust_has_deny``, oracle-inert
-    attrs) so the config is auditable without a false public FACT. Total: odd entries are skipped."""
+    WILDCARD Deny (``public_unconditioned and not has_deny_wildcard``). A CONDITION-narrowed wildcard (the
+    secure org/ExternalId pattern) or a wildcard-Deny'd wildcard is NOT promoted — instead the raw trust
+    analysis is retained on the role PRINCIPAL (``trust_wildcard``/``trust_conditioned``/
+    ``trust_deny_wildcard``, oracle-inert attrs) so the config is auditable without a false public FACT.
+    Total: odd entries are skipped."""
     principals: list[dict] = []
     resources: list[dict] = []
     can_assume: dict[str, list[str]] = {}
@@ -330,9 +359,9 @@ def _roles_to_inventory(role_detail_list: Any) -> tuple[list[dict], list[dict]]:
         if ta["public_unconditioned"] or ta["public_conditioned"]:
             principal["trust_wildcard"] = True
             principal["trust_conditioned"] = bool(ta["public_conditioned"])
-            principal["trust_has_deny"] = bool(ta["has_deny"])
+            principal["trust_deny_wildcard"] = bool(ta["has_deny_wildcard"])
         principals.append(principal)
-        if ta["public_unconditioned"] and not ta["has_deny"]:
+        if ta["public_unconditioned"] and not ta["has_deny_wildcard"]:
             resources.append({"id": rid, "kind": "cloud_resource", "public": True,
                               "grants": [{"principal": "*", "access": "assume"}]})
         for p in ta["concrete"]:
@@ -403,9 +432,9 @@ def _aws_service_hosts(region: str) -> tuple[str, ...]:
     gov = r.startswith("us-gov-")
     sfx = "amazonaws.com.cn" if china else "amazonaws.com"
     hosts: set[str] = {f"sts.{r}.{sfx}", f"s3.{r}.{sfx}", f"s3-control.{r}.{sfx}"}
-    if not china:                       # commercial + gov expose global STS / S3 aliases
-        hosts.add(f"sts.{sfx}")
-        hosts.add(f"s3.{sfx}")
+    if not china and not gov:           # only the COMMERCIAL partition exposes the global STS / S3 aliases
+        hosts.add("sts.amazonaws.com")
+        hosts.add("s3.amazonaws.com")
     # IAM is a single global endpoint per partition
     hosts.add(f"iam.{r}.{sfx}" if china else ("iam.us-gov.amazonaws.com" if gov else "iam.amazonaws.com"))
     return tuple(sorted(hosts))
@@ -517,12 +546,14 @@ class CloudLiveSensor:
     def _safe_notfound(fn: Any, marker: str) -> Any:
         """Run a read-only call, distinguishing a genuine NOT-CONFIGURED result from a denial/other error:
           * success -> the response;
-          * an exception whose botocore error CODE, exception CLASS name, or message contains ``marker``
-            (e.g. ``ServerSideEncryptionConfigurationNotFound`` / ``NoSuchPublicAccessBlock``) -> the
-            ``"absent"`` sentinel (a KNOWN 'not configured', an explicit fact);
+          * an exception whose botocore error CODE or exception CLASS name contains ``marker`` (e.g.
+            ``ServerSideEncryptionConfigurationNotFound`` / ``NoSuchPublicAccessBlock``) -> the ``"absent"``
+            sentinel (a KNOWN 'not configured', an explicit fact);
           * any other error (AccessDenied, network, throttle, …) -> ``None`` (UNKNOWN — never mistaken for
-            an insecure fact). Robust across boto3 versions: real boto3 raises a ``ClientError`` whose type
-            name is NOT the code, so the error-code check is the load-bearing one."""
+            an insecure fact). The error CODE is authoritative (real boto3 raises a ``ClientError`` whose
+            type name is NOT the code) with the modeled-exception CLASS name as a fallback. The free-text
+            MESSAGE is deliberately NOT matched — a denial whose message happened to quote the marker must
+            not be misread as 'absent' (L3)."""
         try:
             return fn()
         except Exception as e:
@@ -533,7 +564,7 @@ class CloudLiveSensor:
                     code = str((resp.get("Error") or {}).get("Code") or "")
             except Exception:
                 code = ""
-            if marker in code or marker in type(e).__name__ or marker in str(e):
+            if marker in code or marker in type(e).__name__:
                 return "absent"
             return None
 
