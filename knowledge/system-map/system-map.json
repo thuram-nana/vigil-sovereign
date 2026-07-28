@@ -228,6 +228,24 @@
       ]
     },
     {
+      "description": "A live, re-verified, proof-carrying client report — every finding re-checks its certificate offline.",
+      "group": "DO",
+      "id": "report",
+      "label": "Report",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "report",
+        "client",
+        "deliverable",
+        "proof",
+        "certificate",
+        "evidence",
+        "portal",
+        "attestation"
+      ]
+    },
+    {
       "description": "The owner approval queue and safety controls — approve a queued action or trip the kill-switch.",
       "group": "MANAGE",
       "id": "safety",
@@ -288,5 +306,5 @@
       ]
     }
   ],
-  "source_sha": "c55b2d104aa50b117fc2440f84cb961e083fe859a6207eeac87f152804670492"
+  "source_sha": "6d75a8a5a1e6f67ca1a47e5be62375cebf73376b88df0c4d12c39f83a6bcb6e4"
 }
