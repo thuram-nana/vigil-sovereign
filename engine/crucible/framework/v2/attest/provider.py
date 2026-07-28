@@ -29,7 +29,9 @@ it never confirms a security finding. The oracle remains the sole authority.
 from __future__ import annotations
 
 import hashlib
+import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -175,3 +177,71 @@ class TdxAttestationProvider(_HardwareGatedProvider):
     docs/DEFERRED-INFRA.md (X1)."""
 
     backend_name = "tdx"
+
+
+# ---------------------------------------------------------------------------------------------------
+# auto-detect selector — pick the TEE backend when the platform exposes one, else the software fallback.
+# ---------------------------------------------------------------------------------------------------
+
+# The guest attestation devices each TEE exposes. Presence means the platform CAN attest in hardware — but a
+# backend must be IMPLEMENTED (the runbook body) before it can be used; until then the selector detects the
+# device and honestly falls back to software.
+_TEE_DEVICES: tuple[tuple[str, str], ...] = (
+    ("sev-snp", "/dev/sev-guest"),
+    ("tdx", "/dev/tdx_guest"),
+    ("tdx", "/dev/tdx-guest"),
+)
+
+_TEE_PROVIDERS: dict[str, type[AttestationProvider]] = {
+    "sev-snp": SevSnpAttestationProvider,
+    "tdx": TdxAttestationProvider,
+}
+
+
+def detect_tee(*, devices: Optional[tuple[tuple[str, str], ...]] = None) -> Optional[str]:
+    """Probe the platform for a confidential-computing guest attestation device. Returns the backend name
+    (``"sev-snp"`` | ``"tdx"``) if one is present, else ``None``. The ``VIGIL_TEE_BACKEND`` env var overrides
+    detection (``software``/``none``/``off`` forces the fallback; a backend name forces that backend). The
+    device list is resolved from the module global at CALL time (so it stays overridable). Total: any probe
+    error → ``None`` (fall to the software fallback, never raise)."""
+    override = os.environ.get("VIGIL_TEE_BACKEND", "").strip().lower()
+    if override:
+        return None if override in ("software", "none", "off") else override
+    try:
+        for name, path in (devices if devices is not None else _TEE_DEVICES):
+            if Path(path).exists():
+                return name
+    except OSError:
+        return None
+    return None
+
+
+def open_attestation_provider(
+    *, keypair: Optional[KeyPair] = None, prefer_hardware: bool = True,
+) -> tuple[AttestationProvider, str]:
+    """Select the attestation provider for THIS platform, returning ``(provider, note)``. If a TEE device is
+    detected AND ``prefer_hardware`` AND its backend is IMPLEMENTED, use the hardware backend; otherwise fall
+    back to :class:`SoftwareAttestationProvider` (integrity+origin only, NOT hardware confidentiality), with a
+    note stating exactly why.
+
+    This is the "auto-detect on hardware" seam: the day a hardware backend is implemented (its ``__init__``
+    stops raising ``NotImplementedError``), deploying on that silicon activates it AUTOMATICALLY on detection —
+    until then this reports the device honestly and falls back. NEVER raises: an unbuilt/erroring backend
+    degrades to software (fail-soft)."""
+    tee = detect_tee() if prefer_hardware else None
+    if tee and tee in _TEE_PROVIDERS:
+        cls = _TEE_PROVIDERS[tee]
+        try:
+            return cls(), f"{tee} hardware attestation active"
+        except NotImplementedError:
+            return SoftwareAttestationProvider(keypair), (
+                f"{tee} device detected but its backend is not yet implemented (hardware-gated) — using the "
+                f"software/TPM fallback. Implement {cls.__name__} per docs/DEFERRED-INFRA.md (X1) and it will "
+                "activate automatically on this hardware.")
+        except Exception as e:  # noqa: BLE001 — any backend construction error → software (fail-soft)
+            return SoftwareAttestationProvider(keypair), (
+                f"{tee} backend errored ({type(e).__name__}) — using the software/TPM fallback")
+    reason = "hardware disabled by caller" if (not tee and not prefer_hardware) else \
+             "no confidential-computing device detected"
+    return SoftwareAttestationProvider(keypair), (
+        f"{reason} — using the software/TPM fallback (integrity+origin only, NOT hardware confidentiality)")
