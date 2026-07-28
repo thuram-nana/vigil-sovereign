@@ -42,6 +42,21 @@ boundary (P3/P5/P7) — are closed.
 
 ---
 
+## 2.1 This session's merges (UI wiring, dossier, report how-to, graph store, moonshot scaffolds)
+
+Merged and green on `main` in the current program (see `git log` and `docs/DEFERRED-INFRA.md`):
+
+| Area | Module(s) | What it is |
+|------|-----------|------------|
+| Embedded graph store (G1) | `engine/crucible/framework/v2/graph/store.py` | `EmbeddedGraphStore` — a file-backed, **one-way** projection of the append-only spine into nodes/edges (canonical JSON, no wallclock/RNG, byte-identical out for identical events in). No promote/grant/tier surface: a partition is disposable state, never an authority. `Neo4jGraphStore` sits behind the same interface as a `[SCAFFOLD]` (every method raises) — only the live external service is deferred. |
+| Moonshot scaffolds (X1/X2/X3) | `framework/v2/attest/provider.py`, `remediation_binary/tier.py`, `agent_body/interface.py` | `SoftwareAttestationProvider` (a working Ed25519/TPM quote proving integrity + origin, `hardware_backed=False`; SEV-SNP/TDX stubs raise — hardware-gated); `SanitizerSilenceTier` (crash-confirm + `remediated_if_silent` fix-by-oracle-silence over the **existing** sanitizer oracle work; `synthesize_patch` raises — research-gated); `AgentBody` (an interface-only contract, gate-before-execute structurally enforced — research-gated). Honest status matrix in `docs/DEFERRED-INFRA.md`. |
+| Report how-to (R1) | `engine/crucible/framework/v2/report/howto.py`, `export.py` | A deterministic per-finding **"how to verify / test / patch"** block (a pure function of the graded finding — no traffic, no RNG). A FACT points at the real re-executable `python3 -m framework.v2 verify` over its retained `reverifiable.json`; a LEAD says "how to CONFIRM" and never implies proof. Woven into the report **and** the SARIF 2.1.0 / structured-JSON export (a LEAD capped at `note` so it never blocks a CI gate). |
+| One-click dossier (R2/R3) | `report/dossier.py`, `integration/vigil_integration/cli.py` (`vigil dossier`), `framework/v2/console/server.py` (`POST /api/dossier/<run>/build`, `GET /api/dossier/<run>.zip`) | Compiles a whole run into ONE self-contained, tamper-evident `.zip` (reusing the report renderers + lazily the proof bundle) with an out-of-band-pinnable fingerprint. The GET route **streams a pre-built** file only (building is the CSRF-guarded POST); a bad run id fails closed. This is the **first real client download**. Red-pen fixes on merge: stop an evidence-symlink exfil; scrub secrets inside lists. |
+| UI wiring (U0/U1/U2) | `packages/vigil-ui/app.js`, `console/server.py` | New-Assessment **cloud/K8s posture launch** (`actions.launch_cloud`); the **actionable Fixes** screen ("Apply fix (gated)" → `actions.apply_fix` shells `vigil patch`, never `--open-pr`, with an honest provenance pre-check so it's never inert-misleading); the Knowledge screen's **"Pull now"** one-shot feed refresh + **"Draft skills (deep-learn)"** (`/api/knowledge/<slug>/deeplearn`). |
+| Live L1 error-based SQLi | `framework/v2/verify/oracles.py` (`error_signature_oracle`, `ERROR_SIGNATURE`) | `error_based_sqli` routes to the `error_signature` oracle first; over the loopback app it minted a real FACT **re-verified 3/3 offline with no Caido/Docker** (the first-party executor captured the datastore-error bytes). `targets/testphp/charter.md` provisions the byte-identical **external** run (needs network egress). |
+
+---
+
 ## 3. The threshold-destruction gate (`destruction_gate.py`)
 
 The last line before an autonomous, prompt-injectable worker performs an **irreversible** action.
@@ -144,18 +159,32 @@ framework-dependent oracle-adapter in its own process), `strix`, `sigil-governor
 
 ---
 
-## 8. Blocked on infrastructure (the headline moonshot)
+## 8. Moonshots — now SCAFFOLDED (not merely blocked)
 
-Not fakeable without the environment; awaiting the owner's setup:
+Each moonshot now has a **built, tested interface** with a working software fallback/narrow path;
+only the hardware/research frontier behind it is stubbed (the stub raises — no capability is
+overclaimed). The honest per-item activation runbook is [`DEFERRED-INFRA.md`](DEFERRED-INFRA.md).
 
-- **I3 — Claude-Agent-SDK-native agent body.** Port Strix's Kali execution (welded to
-  `openai-agents`) to the Claude Agent SDK, re-exposing Kali tools as in-process MCP servers.
-  Needs `claude-agent-sdk` + a live Kali container. (A multi-week sandbox-layer rebuild.)
-- **I4-TEE — attested sovereign agent.** Intel TDX / AMD SEV-SNP + Anthropic Confidential Inference,
-  attestation-gated key release. Needs TEE hardware. (The threshold-destruction *governance* half of
-  I4 is done, §3.)
-- **I5 — AIxCC binary / auto-patch tier.** LLM-guided fuzzing + concolic/SMT (angr/Z3) +
-  sanitizer-oracle + patch re-verification. Needs Z3/angr + fuzzing infra. (Study ToB "Buttercup".)
+- **Agent body (X3, was I3).** `agent_body/interface.py` — an interface-only `AgentBody` contract
+  that formalizes `think → propose → gate → execute → learn` and structurally enforces
+  gate-before-execute (`execute` unreachable unless the gate authorized). The production Strix
+  tool-runtime is named as one implementation. **`[SCAFFOLD — research-gated]`**: a next-gen body
+  (e.g. porting Strix's Kali execution to the Claude Agent SDK with in-process MCP servers) still
+  needs `claude-agent-sdk` + a live Kali container.
+- **Attestation (X1, was I4-TEE).** `attest/provider.py` — `SoftwareAttestationProvider` works today
+  (Ed25519 quote proving integrity + origin; `hardware_backed=False` always; a software key is
+  readable, so a real trust decision still pins the signer out-of-band). **`[hardware-gated]`**:
+  `SevSnpAttestationProvider` / `TdxAttestationProvider` raise until confidential-computing silicon +
+  Confidential Inference are present. (The threshold-destruction *governance* half of I4 is done, §3.)
+- **Binary / memory-safety auto-patch (X2, was I5).** `remediation_binary/tier.py` —
+  `SanitizerSilenceTier` drives the **existing** `sanitizer_signal_oracle` to `confirm_crash` and to
+  earn `remediated_if_silent` (the A6a "proven by oracle silence, never asserted" pattern). **`[research-gated]`**:
+  `synthesize_patch` raises and `SymbolicCrashRepairTier` is a full stub — the generative localise-and-patch
+  step (a CRS: LLM-guided fuzzing + concolic/SMT, angr/Z3) is unbuilt. (Study ToB "Buttercup".)
 
-Also deferred (need a live target/service): P9 live scope-gated re-drive + the extended Strix
-finding contract; OpenTimestamps anchoring.
+Also still deferred (need a live target/external service): a running **external** Neo4j/OTLP service
+(the embedded file-backed graph store, §2.1, is built); the live-API-key Claude think-step (keyless
+replay used today); a live **external**, network-egress engagement + the extended Strix finding
+contract (the loopback live-fire already executed real tools and minted + re-verified a real FACT —
+`targets/testphp/charter.md` provisions the external run); a per-action cryptographic approval token;
+OpenTimestamps anchoring.
