@@ -3351,7 +3351,47 @@
           : h("div.empty", null, "No proposals yet — the feed has no vulnerability leads for this engagement.")),
     ]);
 
-    V.mount(body, [picker, learnCard, sourcesCard, vulnCard, catCard,
+    // ---- Add & learn a source (K4): manual CVE add + point-at-URL learning ----
+    var ll = K.lastLearn;
+    var learnSourceCard = (learnOn ? h("div.card.owner", null, [
+      h("div.card-h", null, [h("h3", null, "Add & learn a source")]),
+      h("div.hint", { style: { marginBottom: "10px" } },
+        "Add a CVE to the learn queue, or point at a documentation URL to learn from it. URL-learn fetches "
+        + "PUBLIC pages through the scope / robots / SSRF gate; nothing a page asserts becomes a fact — "
+        + "grounded claims are verbatim source spans, everything else is advisory."),
+      h("div.row", { style: { display: "flex", gap: "8px", marginBottom: "8px", flexWrap: "wrap" } }, [
+        h("input#k-manual-vuln", { type: "text", placeholder: "CVE-2024-… (add to learn queue)",
+          style: { flex: "1 1 240px" } }),
+        h("button.btn.sm.owner", { disabled: killed, onClick: function () {
+          var el = V.$("#k-manual-vuln"); var v = (el && el.value || "").trim();
+          if (!v) { V.toast("Enter a CVE id", true); return; }
+          settingsAct({ action: "queue_learn", vuln_id: v, rationale: "manually added" },
+            "Added to the learn queue for your approval.", loadKnowledgeData); } }, "Add to learn queue"),
+      ]),
+      h("div.row", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, [
+        h("input#k-learn-url", { type: "text", placeholder: "https://owasp.org/… (learn from a URL)",
+          style: { flex: "1 1 240px" } }),
+        h("button.btn.sm.owner", { disabled: killed, onClick: function () {
+          var el = V.$("#k-learn-url"); var u = (el && el.value || "").trim();
+          if (!u) { V.toast("Enter an http(s) URL", true); return; }
+          V.toast("Learning — fetching + grounding…");
+          settingsAct({ action: "start_learn", url: u }, "Learned — see the result below.",
+            function (r) { K.lastLearn = r; drawKnowledge(); }); } }, "Learn from URL"),
+      ]),
+      ll ? h("div", { style: { marginTop: "12px" } }, [
+        h("div.kv", null, [h("div.k", null, "Last learn"),
+          h("div.v", null, [
+            h("span.pill.sm.ok", null, (ll.grounded != null ? ll.grounded : 0) + " grounded"),
+            " ", h("span.pill.sm", null, (ll.advisory != null ? ll.advisory : 0) + " advisory"),
+            " ", h("span.hint", null, (ll.url || ll.host || "") + (ll.pages_fetched != null
+              ? " · " + ll.pages_fetched + " page(s)" : ""))])]),
+        ll.text ? h("pre", { style: { whiteSpace: "pre-wrap", fontSize: "var(--fs-xs)", marginTop: "6px",
+          maxHeight: "220px", overflow: "auto", background: "var(--bg-1)", padding: "8px",
+          borderRadius: "6px" } }, String(ll.text).slice(0, 4000)) : null,
+      ]) : null,
+    ]) : null);
+
+    V.mount(body, [picker, learnCard, learnSourceCard, sourcesCard, vulnCard, catCard,
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 

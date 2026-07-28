@@ -57,7 +57,7 @@ def enqueue_learn_proposal(store: SpineStore, proposal: dict, *,
     function does NOT check the autolearn latch / kill-switch: its sole caller (the ``queue_learn`` action)
     gates on both first (fail-closed), so enqueuing is never reached when autolearn is off or STOP is engaged.
     """
-    vuln_id = str(proposal.get("vuln_id") or "").strip()
+    vuln_id = str(proposal.get("vuln_id") or "").strip()[:120]   # bound operator-typed input (manual-add, K4)
     if not vuln_id:
         raise ValueError("learn-proposal requires a vuln_id")
     pending_ids = _pending_vuln_ids(store, trusted_pubkey_b64)

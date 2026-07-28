@@ -48,12 +48,16 @@ class FetchedPage:
 class Frontier:
     def __init__(self, scope: ScrapeScope, *, rate: Optional[RateLimiter] = None,
                  robots: Optional[RobotsCache] = None, fetch: Callable = fetch_raw,
-                 max_pages: int = 25, max_depth: int = 3, max_per_host: int = 15):
+                 max_pages: int = 25, max_depth: int = 3, max_per_host: int = 15,
+                 cancel: Optional[Callable[[], bool]] = None):
         self.scope = scope
         self.rate = rate or RateLimiter()
         self.robots = robots or RobotsCache()
         self._fetch = fetch
         self.max_pages, self.max_depth, self.max_per_host = max_pages, max_depth, max_per_host
+        # Optional STOP hook (e.g. the kill-switch): checked between hops so a slow crawl aborts promptly.
+        # Default None → no check → byte-identical to the prior crawl.
+        self._cancel = cancel
         self.skips: List[Tuple[str, str]] = []
 
     def crawl(self, question: str, seeds: List[str]) -> List[FetchedPage]:
@@ -66,6 +70,9 @@ class Frontier:
             self._push(heap, qtok, s, "", 0, seen, tie)
         results: List[FetchedPage] = []
         while heap and len(results) < self.max_pages:
+            if self._cancel is not None and self._cancel():
+                self.skips.append(("", "stopped"))     # STOP tripped mid-crawl — abort, record it honestly
+                break
             _score, _t, url, depth = heapq.heappop(heap)
             host = self.scope.admit(url)
             if host is None:
