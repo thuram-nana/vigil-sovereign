@@ -245,3 +245,109 @@ def test_cli_without_live_fires_no_traffic(capsys):
 
 def test_cli_unknown_source_errors():
     assert _refresh_vulnintel(_ns(sources="nvd,bogus", live=True)) == 2   # unknown source → exit 2, no pull
+
+
+# ---- ticker: drives the PURE scheduler on real time, stoppably ------------------
+
+def test_ticker_fires_only_on_due_ticks():
+    from framework.v2.intel import ticker
+    calls = []
+    # interval 3 ticks → due at ticks 0, 3, 6; max_ticks 7 → ticks 0..6, injected no-op sleep.
+    summary = ticker.run_feed_daemon(interval_ticks=3, poll_seconds=0,
+                                     refresh=lambda: calls.append(1) or "r",
+                                     max_ticks=7, sleep=lambda _s: None)
+    assert summary == {"ticks": 7, "refreshes": 3}
+    assert len(calls) == 3
+
+
+def test_ticker_cancel_halts_before_any_refresh_or_sleep():
+    from framework.v2.intel import ticker
+    calls = []
+
+    def _no_sleep(_s):
+        raise AssertionError("a cancelled daemon must not sleep")
+
+    summary = ticker.run_feed_daemon(interval_ticks=1, poll_seconds=99,
+                                     refresh=lambda: calls.append(1), cancel=lambda: True,
+                                     max_ticks=100, sleep=_no_sleep)
+    assert summary == {"ticks": 0, "refreshes": 0} and calls == []   # stopped at the top, never fired/slept
+
+
+def test_ticker_stop_after_a_refresh_halts_before_the_next_sleep():
+    # Exercises the PRE-SLEEP re-check: a STOP arriving during a refresh must halt BEFORE waiting a poll.
+    # Distinguishing signal is `sleeps == []` — remove the pre-sleep cancel check and a poll gets slept.
+    from framework.v2.intel import ticker
+    stopped = {"v": False}
+    sleeps: list = []
+
+    def refresh():
+        stopped["v"] = True            # a STOP arrives during/right after the refresh
+        return "r"
+
+    summary = ticker.run_feed_daemon(interval_ticks=1, poll_seconds=5, refresh=refresh,
+                                     cancel=lambda: stopped["v"], max_ticks=10,
+                                     sleep=lambda s: sleeps.append(s))
+    assert summary == {"ticks": 1, "refreshes": 1}    # one refresh fired, then halted
+    assert sleeps == []                                # halted BEFORE sleeping — no wasted poll after STOP
+
+
+def test_feed_daemon_refuses_a_tripped_killswitch(tmp_path, monkeypatch):
+    # --live + an ALREADY-tripped kill-switch → refuse with exit 3 BEFORE building any transport / egress.
+    from framework.v2.common import paths
+    from framework.v2.authority.killswitch import KillSwitch
+    from framework.v2.intel.cli import _feed_daemon
+    ksfile = tmp_path / "ks.json"
+    monkeypatch.setattr(paths, "killswitch_path", lambda slug: ksfile)
+    KillSwitch("a1test").trip("test STOP")
+    assert ksfile.exists()
+    assert _feed_daemon(_ns_daemon(live=True, slug="a1test")) == 3
+
+
+def test_feed_daemon_wires_the_live_killswitch_into_the_loop_cancel(tmp_path, monkeypatch):
+    # Proves the loop `cancel` reflects the LIVE kill-switch (not a constant `lambda: False`): capture the
+    # thunk handed to run_feed_daemon, then trip the real switch and confirm the SAME thunk flips True.
+    from framework.v2.common import paths
+    from framework.v2.authority.killswitch import KillSwitch
+    from framework.v2.intel import cli as intel_cli, ticker
+    ksfile = tmp_path / "ks.json"
+    monkeypatch.setattr(paths, "killswitch_path", lambda slug: ksfile)
+    captured: dict = {}
+
+    def _fake_daemon(*, interval_ticks, poll_seconds, refresh, cancel, on_tick, max_ticks):
+        captured["cancel"] = cancel
+        return {"ticks": 0, "refreshes": 0}
+
+    monkeypatch.setattr(ticker, "run_feed_daemon", _fake_daemon)
+    assert intel_cli._feed_daemon(_ns_daemon(live=True, slug="a1test", max_ticks=1)) == 0
+    cancel = captured["cancel"]
+    assert cancel() is False                           # kill-switch clear at start → loop would run
+    KillSwitch("a1test").trip("mid-run STOP")
+    assert cancel() is True                            # the wired cancel tracks the LIVE switch, not a constant
+
+
+# ---- CLI feed-daemon: fail-closed (no --live → no traffic) ----------------------
+
+def _ns_daemon(**kw):
+    base = {"sources": "", "cve": "", "slug": "", "live": False, "capture": "",
+            "interval": 3600, "poll": 30, "max_ticks": 0}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_feed_daemon_without_live_fires_no_traffic(capsys):
+    from framework.v2.intel.cli import _feed_daemon
+    assert _feed_daemon(_ns_daemon(live=False)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["live"] is False                                    # offline: nothing fetched, no loop entered
+    assert "LIVE recurring egress" in out["note"] and "LEAD" in out["doctrine"]
+
+
+def test_feed_daemon_unknown_source_errors_before_any_traffic():
+    from framework.v2.intel.cli import _feed_daemon
+    assert _feed_daemon(_ns_daemon(sources="nvd,bogus", live=True)) == 2   # exit 2 before the loop/egress
+
+
+def test_feed_daemon_rejects_nonpositive_interval():
+    from framework.v2.intel.cli import _feed_daemon
+    assert _feed_daemon(_ns_daemon(live=True, interval=0)) == 2
+    assert _feed_daemon(_ns_daemon(live=True, poll=0)) == 2

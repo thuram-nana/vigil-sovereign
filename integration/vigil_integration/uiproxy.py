@@ -644,7 +644,8 @@ def _terminate(pid: int, *, grace: float = 5.0) -> bool:
 
 
 def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
-           insecure_no_api_key: bool = False, src_dir: Optional[Path] = None) -> int:
+           insecure_no_api_key: bool = False, src_dir: Optional[Path] = None,
+           with_feed: bool = False, feed_slug: str = "", feed_interval: int = 3600) -> int:
     """Bring the whole unified UI up: refuse a public bind, spawn the three backends in their own
     venvs, capture the cockpit token, assemble the runtime serve dir, and serve the single origin
     behind the reverse proxy. Blocks until SIGINT/SIGTERM, then tears the children + proxy down."""
@@ -737,6 +738,20 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                                             extra_env=console_env)))
     procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log",
                                         extra_env=offense_llm_env)))
+
+    # 3b) OPTIONAL recurring vuln-intel feed sidecar. OFF by default — a recurring LIVE egress pull is a
+    # conscious act, so it needs --with-feed AND an explicit --feed-slug (the persisted store the Knowledge
+    # screen reads). Every tick honours that slug's kill-switch, so STOP halts it. Shares VIGIL_LIVE_DIR with
+    # the console so the feed writes where the UI reads. Absent slug → skip with a note (never a silent no-op).
+    if with_feed:
+        if not feed_slug.strip():
+            print("vigil up: --with-feed needs --feed-slug (the engagement store the feed persists into and "
+                  "the Knowledge screen reads); skipping the feed.", file=sys.stderr)
+        else:
+            feed_argv = [str(crucible_bin), "intel", "feed-daemon", "--live",
+                         "--slug", feed_slug.strip(), "--interval", str(max(1, feed_interval))]
+            procs.append(("offense-feed", _spawn(feed_argv, logs / "offense-feed.log",
+                                                 extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
 
     # 4) assemble the runtime serve dir with the token + federated mount bases.
     try:
