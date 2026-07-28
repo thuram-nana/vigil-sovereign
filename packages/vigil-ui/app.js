@@ -3334,7 +3334,8 @@
       V.getJSON(OFF("/api/vulnintel/" + encodeURIComponent(K.slug || ""))).catch(function () { return null; }),
       V.getJSON(SOV("/api/snapshot")).catch(function () { return null; }),
       V.getJSON(OFF("/api/evolve/" + encodeURIComponent(K.slug || ""))).catch(function () { return null; }),
-    ]).then(function (res) { K.data = res[0]; K.snap = res[1]; K.evolve = res[2]; drawKnowledge(); });
+      V.getJSON(OFF("/api/feed/status")).catch(function () { return null; }),
+    ]).then(function (res) { K.data = res[0]; K.snap = res[1]; K.evolve = res[2]; K.feed = res[3]; drawKnowledge(); });
   }
   function drawKnowledge() {
     var body = V.$("#knowledge-body"); if (!body) return;
@@ -3366,6 +3367,40 @@
       h("div.hint", { style: { marginTop: "8px" } },
         "The live pull is offline by default; enable it with a gated `intel refresh-vulnintel --live`. "
         + "No traffic fires without it, and every source is a fixed, concrete apex host (never the target)."),
+    ]);
+
+    // ---- Vuln-feed pull (K1/U2): one-shot gated 'Pull now' + read-only schedule/egress posture ----
+    var feed = K.feed || {};
+    var feedRec = feed.recurring || {};
+    var feedCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Vuln-feed pull"),
+        h("span.st.st-idle", { style: { marginLeft: "auto" } }, [h("span.dot"),
+          "egress " + (feed.egress_default || "offline") + " by default"])]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "\"Pull now\" is a ONE-SHOT, conscious opt-in egress: it refreshes the feed from the trusted "
+        + "sources (NVD / OSV / CISA-KEV) through the gated transport. Every entry is an intel-tier LEAD, "
+        + "never a fact — only a fired oracle confirms. Recurring auto-pull is a separate sidecar "
+        + "(`intel feed-daemon --live` / `vigil up --with-feed`) — not started or tracked here."),
+      h("div.kv", null, [h("div.k", null, "Recurring schedule"),
+        h("div.v", null, feedRec.managed_here ? "managed here"
+          : "not managed here (sidecar) — no persisted next-run / last-run")]),
+      h("div.row", { style: { marginTop: "10px" } }, [
+        h("button.btn.sm", { disabled: killed || !d.slug,
+          title: killed ? "kill-switch engaged" : (!d.slug ? "select an engagement" : ""),
+          onClick: function () {
+            V.toast("Pulling the vuln feed (gated egress)…");
+            V.postJSON(OFF("/api/feed/" + encodeURIComponent(d.slug) + "/pull"), {}).then(function (r) {
+              if (r && r.ok) {
+                var applied = r.applied != null ? r.applied : 0;
+                V.toast("Feed pulled — " + applied + " lead(s) applied"
+                  + (r.hosts_refused ? " · " + r.hosts_refused + " host(s) refused" : ""));
+              } else { V.toast((r && (r.refused || r.error)) || "Feed pull failed", true); }
+              loadKnowledgeData();
+            }).catch(function () { V.toast("Feed pull failed", true); });
+          } }, "Pull now"),
+        h("span.hint", { style: { marginLeft: "8px" } },
+          "One-shot, kill-switch gated. Leads only — mints no fact, fires no oracle."),
+      ]),
     ]);
 
     var vulnCard = h("div.card", null, [
@@ -3530,7 +3565,30 @@
       h("div.kv", null, [h("div.k", null, "Draft proposals"), h("div.v", null, String((ev.proposals || []).length))]),
       h("div.kv", null, [h("div.k", null, "Unlearned leads"),
         h("div.v", null, String((ev.unlearned_leads || []).length)
-          + ((ev.unlearned_leads || []).length ? " — run learn to draft their skills" : ""))]),
+          + ((ev.unlearned_leads || []).length ? " — draft their skills below" : " — none"))]),
+      (ev.unlearned_leads || []).length ? h("div", { style: { marginTop: "6px" } },
+        (ev.unlearned_leads || []).map(function (vid) {
+          return h("div.kv", null, [
+            h("div.k", null, [h("span.pill.sm", null, "lead"), " ", String(vid)]),
+            h("div.v", null, [
+              h("button.btn.sm", { disabled: killed, title: killed ? "kill-switch engaged" : "",
+                onClick: function () {
+                  V.postJSON(OFF("/api/knowledge/" + encodeURIComponent(d.slug) + "/deeplearn"),
+                    { vuln_id: vid }).then(function (r) {
+                    if (r && r.ok) {
+                      var props = (r.drafted_oracle_proposals || []).length;
+                      V.toast("Drafted advisory skills for " + vid
+                        + (props ? " · " + props + " gated DETECT proposal(s)" : "") + " — mints no fact");
+                    } else { V.toast((r && (r.refused || r.error)) || "Deep-learn failed", true); }
+                    loadKnowledgeData();
+                  }).catch(function () { V.toast("Deep-learn failed", true); });
+                } }, "Draft skills (deep-learn)"),
+            ]),
+          ]);
+        })) : null,
+      (ev.unlearned_leads || []).length ? h("div.hint", { style: { marginTop: "4px" } },
+        "Deep-learn drafts FIND/PREVENT advisory skills + a GATED DETECT proposal (authorise≠apply). "
+        + "It mints no fact, bumps no prior, and fires no oracle.") : null,
       ev.calibration ? h("div.kv", null, [h("div.k", null, "Calibration"),
         h("div.v", null, ev.calibration.resolved + " resolved · Brier "
           + (ev.calibration.brier != null ? Number(ev.calibration.brier).toFixed(3) : "—"))]) : null,
@@ -3570,7 +3628,7 @@
       ]),
     ]);
 
-    V.mount(body, [picker, learnCard, learnSourceCard, evolveCard, sourcesCard, vulnCard, catCard, gitCard,
+    V.mount(body, [picker, learnCard, learnSourceCard, evolveCard, sourcesCard, feedCard, vulnCard, catCard, gitCard,
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
