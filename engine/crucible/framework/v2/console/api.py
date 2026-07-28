@@ -714,7 +714,7 @@ def vulnintel_data(slug: str) -> dict[str, Any]:
     confirms. Nothing here is auto-scanned or promoted."""
     if not slug:
         return {"slug": None, "note": "select an engagement", "vulnerabilities": [], "affects": [],
-                "catalog": _safe(_vuln_catalog, default=[]), "sources": _vuln_sources(),
+                "proposals": [], "catalog": _safe(_vuln_catalog, default=[]), "sources": _vuln_sources(),
                 "doctrine": _VULN_DOCTRINE}
 
     def _read() -> dict[str, Any]:
@@ -745,14 +745,17 @@ def vulnintel_data(slug: str) -> dict[str, Any]:
                                 "exploit_known": bool(a.get("exploit_known"))})
 
         vuln_list = sorted(vulns.values(), key=lambda v: (not v["exploit_known"], v["id"]))
+        from ..knowledge_engine.proposals import draft_proposals
+        proposals = [p.to_dict() for p in draft_proposals(vuln_list)]
         return {"slug": slug, "vulnerabilities": vuln_list, "affects": affects[:200],
+                "proposals": proposals,
                 "catalog": _safe(_vuln_catalog, default=[]), "sources": _vuln_sources(),
                 "counts": {"vulnerabilities": len(vuln_list),
                            "exploit_known": sum(1 for v in vuln_list if v["exploit_known"]),
-                           "affects": len(affects)},
+                           "affects": len(affects), "proposals": len(proposals)},
                 "doctrine": _VULN_DOCTRINE}
 
-    return _safe(_read, default={"slug": slug, "vulnerabilities": [], "affects": [],
+    return _safe(_read, default={"slug": slug, "vulnerabilities": [], "affects": [], "proposals": [],
                                  "catalog": _safe(_vuln_catalog, default=[]),
                                  "sources": _vuln_sources(), "note": "no intel store yet",
                                  "doctrine": _VULN_DOCTRINE})

@@ -341,9 +341,10 @@ def cmd_warden(a) -> None:
 
 
 def cmd_capability(a) -> None:
-    """Enable/disable gesture control or voice control via the owner-signed, tamper-evident capability
-    latch (audit W0). `status` needs no key; toggling is owner-signed. Any disable is fail-safe (takes
-    effect regardless of signature); only an owner-signed enable re-enables."""
+    """Enable/disable gesture control, voice control, or autolearn (the Knowledge-Engine propose loop)
+    via the owner-signed, tamper-evident capability latch (audit W0 / K2). `status` needs no key; toggling
+    is owner-signed. Any disable is fail-safe (takes effect regardless of signature); only an owner-signed
+    enable re-enables. `both` is the physical-input pair (gesture+voice); `autolearn` is toggled explicitly."""
     from .governor import CAPABILITIES, CapabilityGate
     from .governor.identity import ensure_owner_keypair
     store = SpineStore()
@@ -353,9 +354,11 @@ def cmd_capability(a) -> None:
             print(f"  {c}: {st.get(c, 'enabled')}")
         return
     if a.state not in ("on", "off"):
-        print("  usage: sigil capability <gesture|voice|both> <on|off> [--reason ...]", file=sys.stderr)
+        print("  usage: sigil capability <gesture|voice|autolearn|both> <on|off> [--reason ...]",
+              file=sys.stderr)
         sys.exit(2)
-    caps = sorted(CAPABILITIES) if a.target == "both" else [a.target]
+    # "both" is the historical gesture+voice pair — autolearn is NOT swept in (matches the UI action plane).
+    caps = ["gesture", "voice"] if a.target == "both" else [a.target]
     cg = CapabilityGate(store, owner_key=ensure_owner_keypair())
     for c in caps:
         seq = cg.disable(c, reason=a.reason) if a.state == "off" else cg.enable(c, reason=a.reason)
@@ -1237,8 +1240,8 @@ def main(argv=None) -> None:
     pwd.add_argument("--reason", default=None, help="reason recorded on the spine")
     pwd.set_defaults(fn=cmd_warden)
     pcap = sub.add_parser("capability",
-                          help="enable/disable gesture or voice control (owner-signed latch, audit W0)")
-    pcap.add_argument("target", choices=["status", "gesture", "voice", "both"])
+                          help="enable/disable gesture, voice, or autolearn (owner-signed latch, audit W0/K2)")
+    pcap.add_argument("target", choices=["status", "gesture", "voice", "autolearn", "both"])
     pcap.add_argument("state", nargs="?", choices=["on", "off"], help="on|off (omit for `status`)")
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)

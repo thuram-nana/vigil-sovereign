@@ -64,7 +64,7 @@ def test_snapshot_exposes_capability_state():
     srv, port = _serve(_spine())
     try:
         caps = _caps(port)
-        assert caps == {"gesture": "enabled", "voice": "enabled"}
+        assert caps == {"gesture": "enabled", "voice": "enabled", "autolearn": "enabled"}
     finally:
         srv.shutdown()
 
@@ -86,7 +86,8 @@ def test_disable_both():
     try:
         good = {"Origin": f"http://127.0.0.1:{port}", "Host": f"127.0.0.1:{port}"}
         assert _post(port, "/api/action", {"action": "disable_both"}, headers=good)[0] == 200
-        assert _caps(port) == {"gesture": "disabled", "voice": "disabled"}
+        # "both" is gesture+voice only — autolearn is an independent toggle and stays enabled.
+        assert _caps(port) == {"gesture": "disabled", "voice": "disabled", "autolearn": "enabled"}
     finally:
         srv.shutdown()
 

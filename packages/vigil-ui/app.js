@@ -3210,9 +3210,12 @@
     }).catch(function () { K.engagements = []; loadKnowledgeData(); });
   }
   function loadKnowledgeData() {
-    V.getJSON(OFF("/api/vulnintel/" + encodeURIComponent(K.slug || "")))
-      .then(function (d) { K.data = d; drawKnowledge(); })
-      .catch(function () { K.data = null; drawKnowledge(); });
+    // federate the two planes: the feed/proposals come from the OFFENSE mirror; the autolearn latch +
+    // kill-switch come from the SOVEREIGN snapshot (owner-signed governance). One failing plane is tolerated.
+    Promise.all([
+      V.getJSON(OFF("/api/vulnintel/" + encodeURIComponent(K.slug || ""))).catch(function () { return null; }),
+      V.getJSON(SOV("/api/snapshot")).catch(function () { return null; }),
+    ]).then(function (res) { K.data = res[0]; K.snap = res[1]; drawKnowledge(); });
   }
   function drawKnowledge() {
     var body = V.$("#knowledge-body"); if (!body) return;
@@ -3220,6 +3223,11 @@
     if (!d) { V.mount(body, h("div.empty", null, "Offense console offline — cannot load the feed.")); return; }
     var sources = d.sources || [], vulns = d.vulnerabilities || [], cat = d.catalog || [];
     var counts = d.counts || {};
+    var snap = K.snap || {};
+    var caps = snap.capabilities || {};
+    var autolearn = caps.autolearn;                     // "enabled" | "disabled" | undefined (sovereign offline)
+    var learnOn = autolearn === "enabled";
+    var killed = !!(snap.kill_switch === "ENGAGED" || (snap.kill_switch && snap.kill_switch.engaged));
 
     var picker = h("div.row", { style: { display: "flex", gap: "10px", alignItems: "center", marginBottom: "12px" } }, [
       h("label.k", null, "Engagement"),
@@ -3273,7 +3281,55 @@
       })),
     ]);
 
-    V.mount(body, [picker, sourcesCard, vulnCard, catCard,
+    // ---- Learning card: the owner-signed autolearn latch + propose-to-learn queue + STOP ----
+    var proposals = d.proposals || [];
+    var latchLabel = autolearn === undefined ? "unknown (sovereign offline)" : autolearn;
+    var latchTone = learnOn ? "confirmed" : "idle";
+    var learnCard = h("div.card.owner", null, [
+      h("div.card-h", null, [h("h3", null, "Propose-to-learn"),
+        h("span.st.st-" + latchTone, { style: { marginLeft: "auto" } }, [h("span.dot"), "autolearn " + latchLabel])]),
+      h("div.hint", { style: { marginBottom: "10px" } },
+        "Autolearn ranks the vulnerability leads into proposals to deep-learn (find / detect / prevent). "
+        + "A proposal authorises NOTHING — it is a suggestion; accepting one authorises LEARNING, never a "
+        + "fact. Only a fired oracle mints a fact. Turning autolearn off stops proposing; the kill-switch "
+        + "halts all autonomous activity."),
+      h("div.acts", { style: { display: "flex", gap: "8px", marginBottom: "12px", flexWrap: "wrap" } }, [
+        learnOn
+          ? h("button.btn.sm.danger", { onClick: function () {
+              settingsAct({ action: "disable_autolearn", reason: "deactivate from Knowledge" },
+                "Autolearn deactivated.", loadKnowledgeData); } }, "Deactivate autolearn")
+          : h("button.btn.sm.owner", { disabled: autolearn === undefined, onClick: function () {
+              settingsAct({ action: "enable_autolearn", reason: "activate from Knowledge" },
+                "Autolearn activated.", loadKnowledgeData); } }, "Activate autolearn"),
+        killed
+          ? h("button.btn.sm.owner", { onClick: function () {
+              settingsAct({ action: "release", reason: "release from Knowledge" },
+                "Kill-switch released.", loadKnowledgeData); } }, "Release kill-switch")
+          : h("button.btn.sm.danger", { onClick: function () {
+              settingsAct({ action: "kill", reason: "STOP from Knowledge" },
+                "Kill-switch engaged — all autonomous activity halted.", loadKnowledgeData); } },
+              "STOP (emergency halt)"),
+      ]),
+      killed ? h("div.set-status.off", null, [V.icon("info"),
+        h("span", null, "The kill-switch is ENGAGED — all autonomous activity is halted.")]) : null,
+      !learnOn
+        ? h("div.empty", null, autolearn === undefined
+            ? "Sovereign plane offline — cannot read the autolearn latch."
+            : "Autolearn is off. Activate it to review the proposed vulnerabilities to learn.")
+        : (proposals.length
+          ? h("div", null, proposals.map(function (p) {
+              return h("div.kv", null, [
+                h("div.k", null, ["#" + p.rank + " ",
+                  p.exploit_known ? h("span.pill.sm.danger", null, "KEV") : h("span.pill.sm", null, "propose"),
+                  " ", p.vuln_id]),
+                h("div.v", null, [p.severity ? h("span.pill.sm.warn", null, String(p.severity)) : null,
+                  h("span.hint", { style: { marginLeft: "6px" } }, p.rationale || "")]),
+              ]);
+            }))
+          : h("div.empty", null, "No proposals yet — the feed has no vulnerability leads for this engagement.")),
+    ]);
+
+    V.mount(body, [picker, learnCard, sourcesCard, vulnCard, catCard,
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 

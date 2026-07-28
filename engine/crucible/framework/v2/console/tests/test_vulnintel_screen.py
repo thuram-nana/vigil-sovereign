@@ -53,3 +53,15 @@ def test_vulnintel_data_surfaces_ingested_leads(tmp_path, monkeypatch):
     assert hit[0]["exploit_known"] is True                    # cisaExploitAdd → known-exploited LEAD
     assert d["counts"]["exploit_known"] >= 1
     assert d["catalog"] and "LEAD" in d["doctrine"]
+
+    # K2: the read-only propose-to-learn mirror — a proposal for the known-exploited lead, status "proposed"
+    props = d["proposals"]
+    prop = next(p for p in props if p["vuln_id"].upper() == "CVE-2024-5555")
+    assert prop["exploit_known"] is True and prop["status"] == "proposed" and prop["rank"] >= 1
+    assert d["counts"]["proposals"] == len(props)
+
+
+def test_vulnintel_data_empty_and_missing_slug_have_proposals_key():
+    # additive + resilient: `proposals` is present (empty) on both the no-slug and fresh-tree branches.
+    assert api.vulnintel_data("")["proposals"] == []
+    assert api.vulnintel_data("no-such-slug-xyz")["proposals"] == []
