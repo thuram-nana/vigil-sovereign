@@ -1,152 +1,102 @@
 # CRUCIBLE — Licensing
 
-**Copyright © 2026 Junior Thuram Nana (the “Licensor”). All rights reserved.**
+**Copyright © 2026 Junior Thuram Nana (the "Licensor"). All rights reserved.**
 
-CRUCIBLE is **dual-licensed**. You may use it under **either**:
+CRUCIBLE is **dual-licensed** — the same model as the rest of VIGIL. You may use it
+under **either**:
 
-1. the **GNU Affero General Public License, version 3** (AGPL-3.0) — the open-source
-   license in [`LICENSE`](./LICENSE); **or**
-2. a **Commercial License** purchased from the Licensor.
+1. the **PolyForm Noncommercial License 1.0.0** — the free, source-available license
+   (the full text is the repository-root [`/LICENSE`](../../LICENSE)); **or**
+2. a **Commercial License** purchased from the Licensor (see the repository-root
+   [`/LICENSE-COMMERCIAL.md`](../../LICENSE-COMMERCIAL.md)).
 
-You choose. If you have not signed a commercial agreement with the Licensor, your use is
-governed by the AGPL-3.0.
+You choose. If you have not signed a commercial agreement with the Licensor, your use
+is governed by the PolyForm Noncommercial License 1.0.0.
 
-> This document explains the model in plain language. It is **not legal advice**, and it is
-> **not itself a license**. The binding open-source terms are the full text in [`LICENSE`](./LICENSE);
-> commercial terms are the signed agreement you receive from the Licensor. Where this summary and
-> those texts differ, those texts control.
+> This document explains the model in plain language. It is **not legal advice**, and it
+> is **not itself a license**. The binding noncommercial terms are the full text in
+> [`/LICENSE`](../../LICENSE); commercial terms are the signed agreement you receive from
+> the Licensor. Where this summary and those texts differ, those texts control.
 
 > ### ⚠️ Authorized use only — no liability for misuse
 >
-> CRUCIBLE is a **dual-use security tool for lawful, authorized use only.** Regardless of which
-> license you use it under, **you alone are responsible for how you use it** — including obtaining
-> proper authorization before testing any system and complying with all applicable laws.
->
-> **Neither the AGPL-3.0 nor a commercial license makes the Licensor responsible for your use or
-> misuse of the Software.** Both the AGPL-3.0 ([`LICENSE`](./LICENSE) §§ 15–16) and the standalone
-> [`DISCLAIMER.md`](./DISCLAIMER.md) provide that the Software is supplied **“AS IS”, without
-> warranty,** and that **the Licensor is not liable for any damages arising from its use or misuse
-> by anyone.** A commercial license grants warranty/indemnity/support **only** to the extent
-> expressly set out in a signed agreement — absent that, no such obligations exist. See
-> [`DISCLAIMER.md`](./DISCLAIMER.md) for the full authorized-use policy, limitation of liability,
-> and indemnification terms, which every user accepts by using the Software.
+> CRUCIBLE is a **dual-use security tool for lawful, authorized use only.** Regardless of
+> which license you use it under, **you alone are responsible for how you use it** —
+> including obtaining proper authorization before testing any system and complying with all
+> applicable laws. **Neither license makes the Licensor responsible for your use or misuse
+> of the Software.** The Software is supplied **"AS IS", without warranty**; the Licensor is
+> **not liable** for any damages arising from its use or misuse by anyone. A commercial
+> license grants warranty / indemnity / support **only** to the extent expressly set out in
+> a signed agreement. See [`DISCLAIMER.md`](./DISCLAIMER.md).
 
 ---
 
-## Option 1 — AGPL-3.0 (free and open source)
+## Option 1 — PolyForm Noncommercial 1.0.0 (free, source-available)
 
-Use, run, study, modify, and redistribute CRUCIBLE for free, forever, under the AGPL-3.0.
+Use, run, study, modify, and share CRUCIBLE for **any noncommercial purpose**, free of
+charge (for non-government users). Noncommercial use includes personal use, research,
+experimentation, study, hobby projects, and use by charitable / educational / public-research
+organizations. You may modify it and share your changes for noncommercial purposes. You may
+**not** sell it or use it commercially / in production without a commercial license. Read the
+real terms in [`/LICENSE`](../../LICENSE).
 
-The AGPL is a strong **copyleft** license. Its defining obligation (Section 13, *“Remote Network
-Interaction”*) is what makes it the right choice for server / backend / infrastructure software:
-
-- **You may use it for anything.** Personal, academic, commercial, internal — all fine under the AGPL.
-- **If you modify it and let others interact with it over a network** (e.g. you run a modified
-  CRUCIBLE, or a service built on it, that users reach over a network), **you must offer those users
-  the complete corresponding source code of your modified version, under the AGPL-3.0.**
-- **If you distribute it** (modified or not), the recipients get the same AGPL rights and the source.
-- Derivative works and larger works that incorporate CRUCIBLE are themselves subject to the AGPL.
-
-In short: **under the AGPL you may keep nothing proprietary that is built on CRUCIBLE and exposed
-over a network — the source must travel with the service.**
-
-Read the real terms in [`LICENSE`](./LICENSE) before relying on any summary.
-
----
+> ⚠️ **Government & public-sector use is EXCLUDED from the free grant.** Per the Government-Use
+> Supplemental Term in the repo-root [`/LICENSE`](../../LICENSE), use by, for, on behalf of, or
+> funded by any government / agency / military / law-enforcement / public-authority /
+> state-owned entity requires a **Commercial License**, even for an otherwise-noncommercial
+> purpose.
 
 ## Option 2 — Commercial License
 
-Buy a commercial license when you want to use CRUCIBLE **without the AGPL’s obligations**. Typical
-reasons:
-
-- **Keep your modifications private** — you extend CRUCIBLE but do not want to publish your source.
-- **Embed it in a proprietary product or service** you distribute or host, without your product
-  becoming subject to the AGPL.
-- **Offer it (or a service built on it) over a network** without the Section-13 obligation to release
-  your modified source to your users.
-- **Sublicense, OEM, or redistribute** it inside a closed-source offering.
-- You simply want a **warranty, indemnity, support, or SLA** the open-source license does not provide.
-
-A commercial license grants you a private, non-copyleft right to use CRUCIBLE under negotiated terms.
-It removes the AGPL copyleft obligations for your licensed use; the exact scope, support, and terms are
-set out in your signed agreement.
-
-**This dual-licensing model is standard for infrastructure/backend software** (e.g. MongoDB, Grafana,
-Sentry, GitLab, and many others use AGPL-or-similar + commercial): the community gets a genuinely open,
-copyleft product, and organizations that cannot meet the copyleft obligations pay for a commercial
-license instead. The revenue funds continued development.
+Buy a commercial license for any commercial or production use the noncommercial license does
+not permit — deploying CRUCIBLE in production at a for-profit organization, offering it (or a
+service built on it) to customers, embedding it in a commercial product, or obtaining a
+warranty / indemnity / support / SLA.
 
 ### How to obtain a commercial license
 
-Contact the Licensor:
-
 - **Web:** https://thuramnana.com
-- **Email:** thuram@thuramnana.com
-- **Subject:** `CRUCIBLE commercial license`
-- Please include: your company, the product/use case, deployment model (internal / SaaS / distributed),
-  and expected scale.
-
-*(Maintainer: confirm the copyright holder line reflects your legal name/entity, and that
-`thuram@thuramnana.com` is a monitored mailbox, before relying on this for commercial sales.)*
+- **Email:** thuram@thuramnana.com  ·  **Subject:** `VIGIL commercial license`
+- Please include: your company, the product / use case, deployment model (internal / SaaS /
+  distributed), and expected scale.
 
 ---
 
-## Which license applies to you?
+## Note on the prior AGPL license
 
-| Your situation | License |
-|---|---|
-| Personal use, research, evaluation, internal tools you don’t modify-and-expose | **AGPL-3.0** (free) |
-| You modify CRUCIBLE and are happy to publish your source under AGPL-3.0 | **AGPL-3.0** (free) |
-| You modify it and want to keep the changes private | **Commercial** |
-| You embed it in a proprietary product or a hosted service and don’t want AGPL to reach that product | **Commercial** |
-| You want warranty / indemnity / support / SLA | **Commercial** |
+Earlier revisions of CRUCIBLE were offered under the **GNU AGPL-3.0-or-later** (OR
+Commercial). The copyright holder has **replaced the open-source option with the PolyForm
+Noncommercial License 1.0.0**. This narrows the free-use terms from copyleft (which permitted
+commercial use with source disclosure) to **noncommercial use only** — commercial / production
+use now requires a commercial license. A copy obtained under the prior AGPL grant remains
+governed by that grant for that copy.
 
-If in doubt, or if your lawyers want certainty, get a commercial license — or ask us.
+*(Maintainer: this is a licensing-model change with legal consequences — prior AGPL grants,
+contribution history, and vendored dependencies. Have an attorney review it before relying on
+it for commercial sales, and confirm the copyright-holder legal name and that
+`thuram@thuramnana.com` is a monitored mailbox.)*
 
 ---
 
 ## Contributions
 
-To keep dual-licensing possible, the Licensor must hold sufficient rights in **all** of the code it
-licenses commercially. Therefore:
-
-- By submitting a contribution (a pull request, patch, or other change), **you license your
-  contribution to the Licensor under both the AGPL-3.0 and terms that permit the Licensor to also
-  distribute your contribution under the Commercial License**, and you represent that you have the
-  right to do so.
-- Equivalently: contributions are made under the project’s **inbound = AGPL-3.0**, plus a grant that
-  lets the Licensor relicense your contribution commercially (a lightweight Contributor License
-  Agreement / Developer Certificate of Origin grant).
-- If you cannot grant those rights (e.g. employer-owned code), do not submit the contribution without
-  the necessary permission.
-
-A formal `CLA.md` / DCO sign-off may be introduced later; until then, opening a PR constitutes the
-grant above.
+By submitting a contribution, **you license it to the Licensor under both the PolyForm
+Noncommercial License 1.0.0 and terms that permit the Licensor to also distribute your
+contribution under the Commercial License**, and you represent that you have the right to do
+so (inbound = PolyForm-NC + a commercial-relicensing grant). If you cannot grant those rights
+(e.g. employer-owned code), do not submit the contribution without the necessary permission.
 
 ---
 
 ## Trademarks
 
-“CRUCIBLE” and any associated logos are marks of the Licensor. The AGPL and any commercial license
-grant rights in the **software**, not in the Licensor’s **name or marks**. You may state that your
-product “uses CRUCIBLE,” but you may not imply endorsement or use the marks as your own.
-
----
-
-## SPDX
-
-Source files are licensed under:
-
-```
-SPDX-License-Identifier: AGPL-3.0-or-later
-```
-
-with the commercial exception available under a separate signed agreement as described above.
+"CRUCIBLE", "VIGIL", and associated logos are marks of the Licensor. Neither license grants
+rights in the Licensor's **name or marks**. You may state that your product "uses CRUCIBLE,"
+but you may not imply endorsement.
 
 ---
 
 ## Third-party components
 
-CRUCIBLE depends on third-party open-source packages (see `framework/v2/pyproject.toml`), each under
-its own license. Those licenses are unaffected by CRUCIBLE’s dual license and continue to govern their
-respective components.
+CRUCIBLE and VIGIL depend on third-party open-source packages, each under its own license —
+unaffected by the dual license above. See the repository-root [`NOTICE`](../../NOTICE).

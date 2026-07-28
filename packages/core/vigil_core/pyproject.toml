@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "VIGIL shared integrity substrate: signed hash-chain, canonical JSON, Ed25519 + m-of-n threshold crypto, trust-root/chain models."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "PolyForm-Noncommercial-1.0.0 OR Commercial" }  # see repo-root LICENSE + LICENSE-COMMERCIAL.md
 dependencies = [
     "cryptography>=42",
     "pydantic>=2.10,<3",

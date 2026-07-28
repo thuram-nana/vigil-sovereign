@@ -87,7 +87,7 @@ Every contribution is reviewed against the project's doctrine (see
 ## Licensing of contributions
 
 By opening a pull request you agree to the contribution terms in
-[`LICENSING.md`](LICENSING.md) (inbound = AGPL-3.0, plus a grant allowing the
+[`LICENSING.md`](LICENSING.md) (inbound = PolyForm Noncommercial 1.0.0, plus a grant allowing the
 Licensor to also license your contribution commercially). If you cannot grant those
 rights, do not submit the contribution.
 

@@ -14,7 +14,7 @@ name = "sigil"
 description = "A local-first, offense-free sovereign personal AI orchestrator (WARDEN kernel, signed memory spine, gated agent mesh)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { text = "PolyForm-Noncommercial-1.0.0 OR Commercial" }  # see repo-root LICENSE + LICENSE-COMMERCIAL.md
 authors = [{ name = "SIGIL" }]
 keywords = ["ai", "assistant", "local-first", "agents", "personal", "sovereign"]
 classifiers = [

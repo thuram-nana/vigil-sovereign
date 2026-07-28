@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "The inert, signed data seam between the VIGIL offense engine and the sovereign personal core (FATAL-2)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0-OR-Commercial"  # first-party; see repo-root LICENSE + LICENSE-COMMERCIAL.md
 dependencies = ["vigil-core"]  # sovereign-safe: vigil_core only; never framework.* or strix.*
 
 [project.scripts]
