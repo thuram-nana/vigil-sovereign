@@ -181,7 +181,8 @@ jobs:
               apps/sigil/tests/test_voice_nav.py \
               apps/sigil/tests/test_gesture_nav.py \
               apps/sigil/tests/test_hud_status.py \
-              apps/sigil/tests/test_capability_autolearn.py -q
+              apps/sigil/tests/test_capability_autolearn.py \
+              apps/sigil/tests/test_knowledge_proposals.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi

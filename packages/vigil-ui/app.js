@@ -3283,6 +3283,12 @@
 
     // ---- Learning card: the owner-signed autolearn latch + propose-to-learn queue + STOP ----
     var proposals = d.proposals || [];
+    // reconcile the offense-drafted candidates against the SOVEREIGN pending-approval queue (by vuln_id):
+    // a queued proposal shows Accept/Deny (owner-signed); an un-queued one shows "Queue for approval".
+    var pendingByVuln = Object.create(null);
+    (snap.learn_proposals || []).forEach(function (lp) {
+      if (lp && lp.vuln_id != null) pendingByVuln[lp.vuln_id] = lp.seq;
+    });
     var latchLabel = autolearn === undefined ? "unknown (sovereign offline)" : autolearn;
     var latchTone = learnOn ? "confirmed" : "idle";
     var learnCard = h("div.card.owner", null, [
@@ -3318,12 +3324,28 @@
             : "Autolearn is off. Activate it to review the proposed vulnerabilities to learn.")
         : (proposals.length
           ? h("div", null, proposals.map(function (p) {
+              var pseq = pendingByVuln[p.vuln_id];      // spine seq if awaiting approval, else undefined
+              var queued = pseq !== undefined;
+              var actions = queued
+                ? [h("span.pill.sm.warn", { style: { marginRight: "6px" } }, "awaiting approval"),
+                   h("button.btn.sm.owner", { onClick: function () {
+                     settingsAct({ action: "approve", seq: pseq, reason: "accept learn " + p.vuln_id },
+                       "Accepted — learning authorised.", loadKnowledgeData); } }, "Accept"),
+                   h("button.btn.sm.danger", { style: { marginLeft: "6px" }, onClick: function () {
+                     settingsAct({ action: "deny", seq: pseq, reason: "deny learn " + p.vuln_id },
+                       "Denied.", loadKnowledgeData); } }, "Deny")]
+                : [h("button.btn.sm", { disabled: killed, title: killed ? "kill-switch engaged" : "",
+                     onClick: function () {
+                       settingsAct({ action: "queue_learn", vuln_id: p.vuln_id, rank: p.rank,
+                         exploit_known: p.exploit_known, severity: p.severity, rationale: p.rationale },
+                         "Queued for your approval.", loadKnowledgeData); } }, "Queue for approval")];
               return h("div.kv", null, [
                 h("div.k", null, ["#" + p.rank + " ",
                   p.exploit_known ? h("span.pill.sm.danger", null, "KEV") : h("span.pill.sm", null, "propose"),
                   " ", p.vuln_id]),
                 h("div.v", null, [p.severity ? h("span.pill.sm.warn", null, String(p.severity)) : null,
-                  h("span.hint", { style: { marginLeft: "6px" } }, p.rationale || "")]),
+                  h("span.hint", { style: { marginLeft: "6px", marginRight: "8px" } }, p.rationale || "")]
+                  .concat(actions)),
               ]);
             }))
           : h("div.empty", null, "No proposals yet — the feed has no vulnerability leads for this engagement.")),

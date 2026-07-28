@@ -16,8 +16,8 @@ _CAP_ACTIONS = frozenset({"disable_gesture", "enable_gesture", "disable_voice", 
 _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_effort",
                                "check_secret", "check_secrets",
                                "set_cloud_config", "set_cloud_file_secret"})   # + cloud-config/file-cred plane
-ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke"}) | _CAP_ACTIONS \
-    | _SETTINGS_ACTIONS
+ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke", "queue_learn"}) \
+    | _CAP_ACTIONS | _SETTINGS_ACTIONS
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) -> dict:
@@ -46,6 +46,22 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         agent, scope = str(params["agent"]), str(params.get("scope", "*"))
         out = pp.grant(agent, scope) if action == "promote" else pp.revoke(agent, scope)
         return {"ok": out is not None, "action": action, "agent": agent, "scope": scope, "recorded_seq": out}
+    if action == "queue_learn":
+        # K2b: enqueue an offense-drafted learn-proposal for the owner's approval. FAIL-CLOSED and gated:
+        # refused if the kill-switch is engaged OR autolearn is disabled. Enqueuing grants nothing — the
+        # owner-signed `approve` over the returned seq is the sole trust op (and authorises LEARNING, not a
+        # fact). Idempotent by vuln_id.
+        from ..governor import CapabilityGate, KillSwitch
+        from ..knowledge import enqueue_learn_proposal
+        if KillSwitch(store, owner_key=owner).is_engaged():
+            raise ValueError("refused: kill-switch engaged")
+        if not CapabilityGate(store, owner_key=owner).is_enabled("autolearn"):
+            raise ValueError("refused: autolearn is disabled")
+        proposal = {"vuln_id": str(params.get("vuln_id", "")), "rank": params.get("rank"),
+                    "exploit_known": bool(params.get("exploit_known")),
+                    "severity": params.get("severity"), "rationale": str(params.get("rationale", ""))}
+        seq = enqueue_learn_proposal(store, proposal)
+        return {"ok": True, "action": "queue_learn", "vuln_id": proposal["vuln_id"], "recorded_seq": seq}
     if action in _CAP_ACTIONS:
         from ..governor import CapabilityGate
         cg = CapabilityGate(store, owner_key=owner)
