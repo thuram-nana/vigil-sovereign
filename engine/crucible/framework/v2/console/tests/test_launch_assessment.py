@@ -102,6 +102,66 @@ def test_tool_mode_drops_unknown_capability_ids(stub_launch):
         assert bad not in joined, f"unknown/bogus tool id leaked into argv: {bad!r}"
 
 
+# ---- console → live-engine bridge (opt-in, loopback-only, availability-gated) ----
+
+@pytest.fixture
+def graph_env(monkeypatch):
+    """Make graph-backing available: a resolvable `vigil`, NEO4J_URI set, and a connected session."""
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/opt/vigil/bin/vigil")
+    monkeypatch.setenv("NEO4J_URI", "neo4j+s://demo.databases.neo4j.io")
+    from framework.v2.console import sessions
+    monkeypatch.setattr(sessions, "connections_of", lambda sid: ["sess-B"])
+
+
+def test_graph_backed_loopback_routes_to_vigil_engage(stub_launch, graph_env):
+    r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/",
+                                   "session_id": "sess-A", "graph_backed": True, "scan_mode": "standard"})
+    assert r["engine"] == "integration-graph" and r["graph_partition"] == "sess-A"
+    cmd, meta = stub_launch(r["run_id"])
+    assert cmd[0] == "/opt/vigil/bin/vigil" and cmd[1] == "engage" and cmd[2] == "http://127.0.0.1:8000/"
+    assert "--session" in cmd and "sess-A" in cmd
+    assert cmd[cmd.index("--scope") + 1] == "127.0.0.1"       # owner's own machine — no charter downgrade
+    assert cmd[cmd.index("--connect") + 1] == "sess-B"        # F4 connected session unioned as priors
+    assert "-m" not in cmd and "framework.v2" not in cmd      # NOT the offense engine
+    assert meta["engine"] == "integration-graph" and meta["graph_partition"] == "sess-A"
+
+
+def test_graph_backed_falls_back_when_unavailable(stub_launch, monkeypatch):
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: None)   # vigil not installed
+    monkeypatch.delenv("NEO4J_URI", raising=False)
+    r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/",
+                                   "session_id": "sess-A", "graph_backed": True, "scan_mode": "quick"})
+    assert r.get("engine") != "integration-graph"
+    cmd, meta = stub_launch(r["run_id"])
+    assert "framework.v2" in cmd and "scan" in cmd            # fell back to the offense loopback scan
+    assert "graph-backed requested but unavailable" in (meta.get("graph_note") or "")
+
+
+def test_graph_backed_ignored_for_remote_target(stub_launch, graph_env, monkeypatch):
+    # remote stays on the offense engage (its signed-charter gate), NEVER the self-scoped vigil engage.
+    monkeypatch.setattr(actions, "_has_charter", lambda slug: True)
+    r = actions.launch_assessment({"mode": "url", "target": "https://app.example.com/", "slug": "acme",
+                                   "session_id": "sess-A", "graph_backed": True})
+    cmd, meta = stub_launch(r["run_id"])
+    assert "framework.v2" in cmd and "engage" in cmd and meta.get("engine") != "integration-graph"
+
+
+def test_graph_backed_requires_the_opt_in_flag(stub_launch, graph_env):
+    # available infra + a session is NOT enough — WITHOUT graph_backed it stays the normal loopback scan.
+    r = actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/", "session_id": "sess-A"})
+    cmd, meta = stub_launch(r["run_id"])
+    assert "framework.v2" in cmd and "scan" in cmd and meta.get("engine") != "integration-graph"
+
+
+def test_graph_backed_cmd_is_none_without_infra(monkeypatch):
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/opt/vigil/bin/vigil")
+    monkeypatch.delenv("NEO4J_URI", raising=False)
+    assert actions._graph_backed_engage_cmd("http://127.0.0.1/", "s", "sess-A", "standard") is None  # no Neo4j
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: None)
+    monkeypatch.setenv("NEO4J_URI", "neo4j+s://x")
+    assert actions._graph_backed_engage_cmd("http://127.0.0.1/", "s", "sess-A", "standard") is None  # no vigil
+
+
 def test_codebase_routes_to_strix_and_validates_path(stub_launch, tmp_path):
     src = tmp_path / "proj"
     src.mkdir()

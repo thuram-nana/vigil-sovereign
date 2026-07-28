@@ -508,10 +508,13 @@
     const W = { step: 1, mode: "", target: "", slug: "", authorized: false, mount: false,
       scope: [], scopeInput: "", objective: "", scan_mode: "standard", aiTools: true,
       tools: [], apply_fixes: false, keyless: false, model: "", aegis_action: "detect",
+      session_id: "", graph_backed: false, sessions: [],
       caps: null, kernel: null, launching: false };
     // real capability catalog + backend/LLM status (never hardcoded)
     V.getJSON(OFF("/api/capabilities")).then(function (d) { W.caps = d; draw(); }).catch(function () { W.caps = { capabilities: [], scan_modes: [] }; });
     V.getJSON(OFF("/api/kernel")).then(function (d) { W.kernel = d; draw(); }).catch(function () { W.kernel = { backends: [] }; });
+    // permanent sessions (F2) — optional; a graph-backed loopback run partitions this session's Neo4j graph.
+    V.getJSON(OFF("/api/sessions")).then(function (d) { W.sessions = (d && d.sessions) || []; draw(); }).catch(function () { W.sessions = []; });
 
     function set(patch) { Object.assign(W, patch); draw(); }
     function isEngage() { return !!ENGAGE_MODES[W.mode]; }
@@ -678,6 +681,20 @@
           h("div.hint", null, "The model + key come from the environment (Settings). Keys are never shown or entered here.")]),
         checkbox("Run keyless (attest, then only do what needs no model)", W.keyless, function (v) { W.keyless = v; },
           "A keyless run still attests first and never fabricates activity."),
+        // F2/F3/F4: attach this run to a permanent session, and (loopback only) run it GRAPH-BACKED so it
+        // accumulates in — and reuses — that session's Neo4j knowledge graph via the integration `vigil engage`.
+        field("Session (optional)",
+          h("select", { onChange: function (e) { W.session_id = e.target.value; if (!W.session_id) W.graph_backed = false; updateSummary(); draw(); } },
+            [h("option", { value: "", selected: !W.session_id }, "— none —")].concat(
+              (W.sessions || []).map(function (s) { return h("option", { value: s.id, selected: s.id === W.session_id }, s.name || s.id); }))),
+          "Runs sharing a session accumulate and reuse each other's prior context."),
+        (W.session_id && isLoopback())
+          ? checkbox("Graph-backed run (accumulate in this session's knowledge graph)", W.graph_backed,
+              function (v) { W.graph_backed = v; },
+              "Loopback only. Routes the run through `vigil engage --session` so its facts partition this "
+              + "session's Neo4j graph (and union any connected sessions). Falls back to the normal engine "
+              + "if `vigil`/Neo4j isn't available.")
+          : null,
       ];
       return h("div.wizbody", null, [h("h2", null, "Model & keys"),
         h("p.helper", null, "VIGIL runs on your machine with your own key — nothing is sent anywhere else."), h("div", null, body)]);
@@ -742,6 +759,8 @@
         tools: (W.mode !== "tool" && W.aiTools) ? [] : W.tools,
         apply_fixes: W.apply_fixes, keyless: W.keyless, model: W.model,
         mount: W.mount, aegis_action: W.aegis_action,
+        session_id: W.session_id,
+        graph_backed: !!(W.graph_backed && W.session_id && isLoopback()),
       };
       V.postJSON(OFF("/api/launch/assessment"), body).then(function (r) {
         if (r && r.error) { W.launching = false; V.toast(r.error, true); refreshFoot(); return; }
