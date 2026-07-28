@@ -94,8 +94,10 @@ def _cmd_engage(args: argparse.Namespace) -> int:
         replay = ReplayThinker(decisions)
 
     scope = [s.strip() for s in str(getattr(args, "scope", "") or "").split(",") if s.strip()]
+    connect = [c.strip() for c in str(getattr(args, "connect", "") or "").split(",") if c.strip()]
     cfg = EngineConfig(
         slug=args.slug, session_id=str(getattr(args, "session", "") or ""),
+        connections=tuple(connect),
         base_dir=args.base_dir, replay=replay, api_key=None,
         scope=tuple(scope) or ("127.0.0.1",),   # --scope is signed into the authority + enforced end-to-end
         access_log=args.access_log, auth_log=args.auth_log, conn_log=args.conn_log,
@@ -499,6 +501,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the SESSION this run belongs to (F3): the per-session knowledge-graph partition "
                          "key. Runs sharing a session accumulate + reuse each other's prior context; empty "
                          "falls back to the slug. A partition/organisation key only — it grants no authority.")
+    pe.add_argument("--connect", default="",
+                    help="comma-separated CONNECTED session ids (F4) whose graph partitions this run may "
+                         "UNION as priors (a read-time scope; each prior stays origin-tagged + "
+                         "non-authoritative). Pass the ids you connected in the Sessions screen. Empty = isolated.")
     pe.add_argument("--replay", default="", help="a JSON file of scripted decisions (keyless-live)")
     pe.add_argument("--access-log", default="")
     pe.add_argument("--auth-log", default="")
