@@ -58,6 +58,13 @@ def test_enqueue_requires_a_vuln_id():
         enqueue_learn_proposal(_store(), {"rank": 1})
 
 
+def test_enqueue_bounds_operator_typed_vuln_id():
+    # K4 manual-add feeds an operator-typed vuln_id into the spine — bound its length (like rationale[:500]).
+    s = _store()
+    enqueue_learn_proposal(s, {"vuln_id": "CVE-" + "9" * 500})
+    assert len(pending_learn_proposals(s)[0]["vuln_id"]) <= 120
+
+
 def test_enqueue_queue_depth_is_bounded(monkeypatch):
     import sigil.knowledge.proposals as kp
     monkeypatch.setattr(kp, "_MAX_PENDING", 3)

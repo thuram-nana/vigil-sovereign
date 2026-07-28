@@ -16,8 +16,8 @@ _CAP_ACTIONS = frozenset({"disable_gesture", "enable_gesture", "disable_voice", 
 _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_effort",
                                "check_secret", "check_secrets",
                                "set_cloud_config", "set_cloud_file_secret"})   # + cloud-config/file-cred plane
-ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke", "queue_learn"}) \
-    | _CAP_ACTIONS | _SETTINGS_ACTIONS
+ACTIONS = frozenset({"approve", "deny", "kill", "release", "promote", "revoke",
+                     "queue_learn", "start_learn"}) | _CAP_ACTIONS | _SETTINGS_ACTIONS
 
 
 def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) -> dict:
@@ -62,6 +62,27 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
                     "severity": params.get("severity"), "rationale": str(params.get("rationale", ""))}
         seq = enqueue_learn_proposal(store, proposal)
         return {"ok": True, "action": "queue_learn", "vuln_id": proposal["vuln_id"], "recorded_seq": seq}
+    if action == "start_learn":
+        # K4: point-at-a-URL (or topic) learning through the SOVEREIGN scraper's demote-only grounding gate.
+        # FAIL-CLOSED + gated (kill-switch + autolearn latch). A bounded, synchronous fetch; the kill-switch
+        # is passed as a `cancel` hook so a mid-run STOP aborts the crawl. Nothing a page asserts becomes a
+        # fact — grounded claims are verbatim spans, ungrounded are demoted to advisory.
+        from ..governor import CapabilityGate, KillSwitch
+        from ..scrape.learn_source import learn_from_topic, learn_from_url
+        if KillSwitch(store, owner_key=owner).is_engaged():
+            raise ValueError("refused: kill-switch engaged")
+        if not CapabilityGate(store, owner_key=owner).is_enabled("autolearn"):
+            raise ValueError("refused: autolearn is disabled")
+        url = str(params.get("url", "")).strip()
+        topic = str(params.get("topic", "")).strip()
+        cancel = KillSwitch(store, owner_key=owner).is_engaged
+        if url:
+            out = learn_from_url(store, url, cancel=cancel)
+        elif topic:
+            out = learn_from_topic(store, topic, cancel=cancel)
+        else:
+            raise ValueError("start_learn requires a url or a topic")
+        return {"ok": True, "action": "start_learn", **out}
     if action in _CAP_ACTIONS:
         from ..governor import CapabilityGate
         cg = CapabilityGate(store, owner_key=owner)
