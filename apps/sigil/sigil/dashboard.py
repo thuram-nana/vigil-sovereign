@@ -42,6 +42,11 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
             decisions[str(r.payload.get("decision"))] += 1
 
     pend = pending(store, owner_pubkey())
+    from .knowledge import LEARN_SIGNAL
+    learn_proposals = [{"seq": r.seq, "vuln_id": r.payload.get("vuln_id"), "rank": r.payload.get("rank"),
+                        "exploit_known": bool(r.payload.get("exploit_known")),
+                        "severity": r.payload.get("severity"), "rationale": r.payload.get("rationale")}
+                       for r in pend if r.payload.get("signal") == LEARN_SIGNAL]
     return {
         "head_seq": head,
         "kill_switch": "ENGAGED" if KillSwitch(store).is_engaged() else "released",
@@ -50,6 +55,7 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
         "recent_decisions": dict(decisions),
         "pending_approvals": [{"seq": r.seq, "tier": r.payload.get("tier"), "kind": r.kind,
                                "agent": r.actor, "subject": r.payload.get("subject")} for r in pend],
+        "learn_proposals": learn_proposals,   # K2b: pending propose-to-learn items (subset of the approvals)
         "budget_today": {a: {"actions": actions_today[a], "interrupts": interrupts_today[a]}
                          for a in sorted(actions_today)},
         "ingest_lag": {"head_seq": head, "last_checkpoint_seq": last_checkpoint,
