@@ -741,6 +741,108 @@ def knowledge_gitsync(action: str) -> dict:
             **(parsed if isinstance(parsed, dict) else {})}
 
 
+# A vulnerability lead id (CVE-…, GHSA-…, an advisory id) as it reaches the `knowledge learn --vuln`
+# CLI. It is NEVER a shell arg (the spawn is an argv LIST, no shell) — this allowlist is defence in depth
+# so a hostile value can never begin with '-' (mistaken for a flag), carry a separator, or traverse.
+_VULN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z")
+
+# Doctrine surfaced to the Knowledge screen for both new actions — kept honest: leads/advisories only.
+_DEEPLEARN_DOCTRINE = ("Advisory only: deep-learn drafts FIND/PREVENT skills + a GATED DETECT proposal. "
+                       "It mints NO fact, bumps NO prior, fires NO oracle, applies nothing "
+                       "(a DETECT maps onto EXISTING oracle kinds or a gated proposal — authorise≠apply).")
+_FEEDPULL_DOCTRINE = ("Every feed entry is an intel-tier LEAD, never a fact — only a fired oracle mints a "
+                      "FACT. 'Pull now' is a one-shot, conscious opt-in egress; recurring auto-pull stays a "
+                      "separate sidecar, never started here.")
+
+
+def run_deep_learn(slug: str, vuln_id: str) -> dict:
+    """K3 deep-learn for ONE unlearned vuln lead — DRAFT FIND/PREVENT advisory skills + a GATED DETECT
+    proposal, by shelling the SAME gated ``knowledge learn --slug S --vuln V`` CLI a hand-run uses (an argv
+    LIST, no shell — the offense engine's own ``python -m framework.v2``, never the integration ``vigil``).
+
+    It mints NO fact, bumps NO prior, fires NO oracle, and applies nothing: a DETECT resolves onto EXISTING
+    deterministic oracle kinds or drafts a GATED ``ImprovementProposal`` (authorise≠apply). Kill-switch gated
+    — pre-checked HERE (an honest early refusal, no subprocess) AND re-checked by the CLI (exit 3). Fail-closed
+    on a bad slug / vuln id / unresolvable interpreter; never a traceback."""
+    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "select an engagement (slug required)"}
+    vuln_id = str(vuln_id or "").strip()
+    if not _VULN_ID_RE.match(vuln_id):
+        return {"ok": False, "error": "a vulnerability id is required "
+                                      "(e.g. CVE-2024-1234 — letters, digits, '.', '-', '_' only)"}
+    try:
+        from ..authority.killswitch import KillSwitch
+        if KillSwitch(slug).is_tripped():                 # honest early refusal — nothing spawned under STOP
+            return {"ok": False, "refused": "kill-switch tripped", "slug": slug}
+    except Exception as e:  # noqa: BLE001 — a killswitch read hiccup fails closed, never a traceback
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    # argv LIST (no shell); the sanitized slug + allowlisted vuln id are the only operator-derived tokens.
+    cmd = [sys.executable, "-m", "framework.v2", "knowledge", "learn", "--slug", slug, "--vuln", vuln_id]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    if proc.returncode == 3:                               # kill-switch tripped between pre-check and spawn
+        return {"ok": False, "refused": "kill-switch tripped", "slug": slug}
+    if proc.returncode == 2:                               # no such vuln lead for this slug (CLI usage/error)
+        return {"ok": False, "slug": slug, "vuln_id": vuln_id,
+                "error": (proc.stderr or "no such vulnerability lead for this engagement").strip()[:400]}
+    parsed = {}
+    if proc.stdout.strip():
+        try:
+            parsed = json.loads(proc.stdout)
+        except ValueError:
+            parsed = {"raw": proc.stdout[:2000]}
+    d = parsed if isinstance(parsed, dict) else {}
+    return {"ok": proc.returncode == 0, "slug": slug, "vuln_id": vuln_id,
+            "learned": d.get("learned") or [], "drafted_oracle_proposals": d.get("drafted_oracle_proposals"),
+            "doctrine": d.get("doctrine") or _DEEPLEARN_DOCTRINE}
+
+
+def run_feed_pull(slug: str) -> dict:
+    """K1 'Pull now' — a ONE-SHOT gated vuln-feed refresh from the trusted sources (NVD / OSV / CISA-KEV), by
+    shelling the SAME gated ``intel refresh-vulnintel --live --slug S`` CLI (an argv LIST, no shell). ``--live``
+    IS the conscious operator opt-in this click carries; recurring auto-pull stays a separate sidecar, never
+    started here.
+
+    Everything minted is an intel-tier LEAD — NO fact, NO prior, NO oracle fired. Kill-switch gated —
+    pre-checked HERE (an honest early refusal, no traffic) AND re-checked by the CLI before and BETWEEN fetches
+    (exit 3). Fail-closed on an unresolvable interpreter / non-JSON output; never a traceback. In an offline
+    environment the per-source single-host allowlist simply refuses egress (applied 0, hosts_refused N) — honest,
+    not a crash."""
+    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "select an engagement (slug required)"}
+    try:
+        from ..authority.killswitch import KillSwitch
+        if KillSwitch(slug).is_tripped():                 # honest early refusal — no traffic under STOP
+            return {"ok": False, "refused": "kill-switch tripped", "slug": slug}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    cmd = [sys.executable, "-m", "framework.v2", "intel", "refresh-vulnintel", "--live", "--slug", slug]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    if proc.returncode == 3:                               # kill-switch tripped between pre-check and spawn
+        return {"ok": False, "refused": "kill-switch tripped", "slug": slug}
+    parsed = {}
+    if proc.stdout.strip():
+        try:
+            parsed = json.loads(proc.stdout)
+        except ValueError:
+            parsed = {"raw": proc.stdout[:2000]}
+    d = parsed if isinstance(parsed, dict) else {}
+    if proc.returncode != 0 and not d:
+        return {"ok": False, "slug": slug, "error": (proc.stderr or "feed pull failed").strip()[:400]}
+    return {"ok": proc.returncode == 0, "slug": slug, "live": True,
+            "minted_by_source": d.get("minted_by_source"), "applied": d.get("applied"),
+            "queries_run": d.get("queries_run"), "cancelled": d.get("cancelled"),
+            "hosts_refused": d.get("refused"),            # per-source egress refusals (NOT a gating refusal)
+            "doctrine": d.get("doctrine") or _FEEDPULL_DOCTRINE}
+
+
 def proof_export(run_id: str) -> dict:
     """Proof Studio (C1): assemble a CLIENT-VERIFIABLE proof bundle from a run's oracle-confirmed FACTs, so a
     third party can re-verify it OFFLINE with zero trust in VIGIL. Shells the exec-only ``vigil proof-export``

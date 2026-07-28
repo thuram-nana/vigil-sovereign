@@ -760,6 +760,28 @@ def _vuln_sources() -> list[dict]:
     return [{"name": s.name, "host": s.host, "mode": s.mode} for s in TRUSTED_VULN_SOURCES]
 
 
+def feed_status() -> dict[str, Any]:
+    """K1: the READ-ONLY vuln-feed schedule / egress posture for the Knowledge screen.
+
+    HONEST by construction: the ``intel.scheduler`` is a PURE tick predicate and the recurring daemon is a
+    separate sidecar, so the console process persists NO schedule — there is no live 'last run' / 'next run'
+    to read, and this fabricates none. It reports what is TRUE: the trusted sources, that egress is OFFLINE by
+    default (a one-shot 'Pull now' is a conscious opt-in), and that recurring auto-pull is the sidecar path
+    (``intel feed-daemon --live`` / ``vigil up --with-feed``) — never started or tracked here. Sends no
+    traffic; mints nothing."""
+    return {
+        "sources": _safe(_vuln_sources, default=[]),
+        "egress_default": "offline",
+        "recurring": {
+            "managed_here": False,
+            "note": ("recurring auto-pull is a separate sidecar (`intel feed-daemon --live` / "
+                     "`vigil up --with-feed`) — the console neither starts nor tracks it. No persisted "
+                     "schedule exists, so there is no live next-run/last-run to show."),
+        },
+        "doctrine": _VULN_DOCTRINE,
+    }
+
+
 def _vuln_catalog() -> list[dict]:
     """The defensive knowledge CATALOG as a read-only skillset surface (advisory operators, never facts)."""
     from ..knowledge import catalog

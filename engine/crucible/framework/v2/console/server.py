@@ -68,6 +68,7 @@ _EXACT_ROUTES = {
     "/api/toolprofiles": api.tool_profiles_data,
     "/api/capabilities": api.capabilities_data,
     "/api/aegis/status": api.aegis_status,
+    "/api/feed/status": api.feed_status,        # K1: read-only vuln-feed schedule/egress posture
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -399,6 +400,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # predictions, never merges/applies and mints no fact.
                 slug = path[len("/api/evolve/"):-len("/tick")].strip("/")
                 self._json(actions.run_evolve_tick(slug))
+                return
+            if path.startswith("/api/knowledge/") and path.endswith("/deeplearn"):
+                # K3 (U2): DRAFT FIND/PREVENT advisory skills + a GATED DETECT proposal for ONE unlearned
+                # vuln lead. CSRF/rebind-gated above + kill-switch gated inside; shells the SAME gated
+                # `knowledge learn` CLI. Mints NO fact, bumps NO prior, fires NO oracle, applies nothing.
+                slug = path[len("/api/knowledge/"):-len("/deeplearn")].strip("/")
+                self._json(actions.run_deep_learn(slug, str(body.get("vuln_id", ""))))
+                return
+            if path.startswith("/api/feed/") and path.endswith("/pull"):
+                # K1 (U2): ONE-SHOT gated 'Pull now' vuln-feed refresh (opt-in egress; recurring auto-pull
+                # stays a sidecar). CSRF/rebind-gated above + kill-switch gated inside; shells the SAME gated
+                # `intel refresh-vulnintel --live` CLI. Every entry is an intel-tier LEAD, never a fact.
+                slug = path[len("/api/feed/"):-len("/pull")].strip("/")
+                self._json(actions.run_feed_pull(slug))
                 return
             if path.startswith("/api/killswitch/") and path.endswith("/trip"):
                 slug = path[len("/api/killswitch/"):-len("/trip")].strip("/")
