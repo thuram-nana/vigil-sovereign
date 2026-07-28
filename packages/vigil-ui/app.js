@@ -37,6 +37,7 @@
     ]},
     { group: "LEARN", items: [
       { id: "manual", label: "Manual", icon: "book", ready: true },
+      { id: "knowledge", label: "Knowledge Engine", icon: "brain", ready: true },
     ]},
   ];
 
@@ -3187,6 +3188,95 @@
     loadSessions();
   }
 
+  // ---- Knowledge Engine (K1) — vuln-intel feed + defensive CATALOG (read-only) ----
+  var K = { slug: "", data: null, engagements: [] };
+  function renderKnowledge(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Knowledge Engine")]),
+      h("div.hint", { style: { marginBottom: "10px" } },
+        "An auto-updating feed of vulnerability intelligence from trusted sources (NVD, OSV, CISA-KEV), "
+        + "alongside the defensive knowledge catalog. Every feed entry is an intel-tier LEAD, never a "
+        + "fact — only a fired oracle confirms. The live pull is a gated, opt-in egress act; offline is "
+        + "the default."),
+      h("div#knowledge-body", null, h("div.empty", null, "Loading…")),
+    ]);
+    loadKnowledge();
+  }
+  function loadKnowledge() {
+    V.getJSON(OFF("/api/engagements")).then(function (d) {
+      K.engagements = (d && d.engagements ? d.engagements : []).map(function (e) { return e.slug; });
+      if (!K.slug && K.engagements.length) K.slug = K.engagements[0];
+      loadKnowledgeData();
+    }).catch(function () { K.engagements = []; loadKnowledgeData(); });
+  }
+  function loadKnowledgeData() {
+    V.getJSON(OFF("/api/vulnintel/" + encodeURIComponent(K.slug || "")))
+      .then(function (d) { K.data = d; drawKnowledge(); })
+      .catch(function () { K.data = null; drawKnowledge(); });
+  }
+  function drawKnowledge() {
+    var body = V.$("#knowledge-body"); if (!body) return;
+    var d = K.data;
+    if (!d) { V.mount(body, h("div.empty", null, "Offense console offline — cannot load the feed.")); return; }
+    var sources = d.sources || [], vulns = d.vulnerabilities || [], cat = d.catalog || [];
+    var counts = d.counts || {};
+
+    var picker = h("div.row", { style: { display: "flex", gap: "10px", alignItems: "center", marginBottom: "12px" } }, [
+      h("label.k", null, "Engagement"),
+      h("select", { onChange: function (e) { K.slug = e.target.value; loadKnowledgeData(); } },
+        [h("option", { value: "", selected: !K.slug }, "— select —")].concat(
+          K.engagements.map(function (s) { return h("option", { value: s, selected: s === K.slug }, s); }))),
+      d.slug ? h("span.pill.sm", null,
+        (counts.vulnerabilities || 0) + " leads · " + (counts.exploit_known || 0) + " known-exploited") : null,
+    ]);
+
+    var sourcesCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Feed sources")]),
+      h("div", null, sources.map(function (s) {
+        return h("div.kv", null, [h("div.k", null, s.name),
+          h("div.v", null, [h("span.pill.sm", null, s.mode), " ", h("code", null, s.host)])]);
+      })),
+      h("div.hint", { style: { marginTop: "8px" } },
+        "The live pull is offline by default; enable it with a gated `intel refresh-vulnintel --live`. "
+        + "No traffic fires without it, and every source is a fixed, concrete apex host (never the target)."),
+    ]);
+
+    var vulnCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Vulnerability leads")]),
+      vulns.length ? h("div", null, vulns.map(function (v) {
+        return h("div.kv", null, [
+          h("div.k", null, [v.exploit_known
+            ? h("span.pill.sm.danger", { title: "CISA known-exploited" }, "KEV")
+            : h("span.pill.sm", null, "lead"), " ", v.id]),
+          h("div.v", null, [
+            v.severity ? h("span.pill.sm.warn", null, String(v.severity)) : null,
+            v.summary ? h("span", { style: { marginLeft: "6px" } }, String(v.summary)) : null,
+            v.feed ? h("span.hint", { style: { marginLeft: "6px" } }, "· " + v.feed) : null,
+          ]),
+        ]);
+      })) : h("div.empty", null, d.slug
+        ? "No vulnerability leads yet for this engagement — ingest a feed or run a gated refresh."
+        : "Select an engagement to see its feed."),
+    ]);
+
+    var catCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Defensive knowledge catalog"),
+        h("span.pill.sm", { style: { marginLeft: "auto" } }, cat.length + " operators")]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "Read-only skillset — advisory detection/attack operators mapped to ATT&CK/CWE. Never facts."),
+      h("div", null, cat.slice(0, 200).map(function (op) {
+        return h("div.kv", null, [h("div.k", null, op.id),
+          h("div.v", null, [op.name, " "].concat(
+            (op.technique_ref || []).map(function (t) {
+              return h("span.pill.sm", { style: { marginRight: "4px" } }, t);
+            })))]);
+      })),
+    ]);
+
+    V.mount(body, [picker, sourcesCard, vulnCard, catCard,
+      h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+  }
+
   // ---- SIGIL HUD channel (S2) — persistent voice/gesture navigation ----------
   var _hudES = null;
   function startSigilHud() {
@@ -3265,6 +3355,7 @@
     const screen = V.$("#screen"); if (!screen) return;
     if (id === "home") { renderHome(screen); return; }
     if (id === "manual") { renderManual(screen); return; }
+    if (id === "knowledge") { renderKnowledge(screen); return; }
     if (id === "tools") { renderTools(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "chat") { renderChat(screen); return; }

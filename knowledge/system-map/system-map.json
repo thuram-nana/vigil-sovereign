@@ -143,6 +143,22 @@
       ]
     },
     {
+      "description": "The knowledge engine — an auto-updating vulnerability-intelligence feed (leads, never facts) and the defensive knowledge catalog.",
+      "group": "LEARN",
+      "id": "knowledge",
+      "label": "Knowledge Engine",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "knowledge",
+        "knowledge engine",
+        "vulnerabilities",
+        "vuln feed",
+        "cve",
+        "vulnerability intelligence"
+      ]
+    },
+    {
       "description": "Watch an active or recent run stream live — its findings, tools, and events as they happen.",
       "group": "DO",
       "id": "live",
@@ -235,5 +251,5 @@
       ]
     }
   ],
-  "source_sha": "b859d09ecc96a9c207010adc8e41df74ac6d3f64334506d660233bddca0ef296"
+  "source_sha": "c69ba15256c2e8edfc7ba26e257ee09e28f36f634ef73ea68de79dfd5a8b6c74"
 }

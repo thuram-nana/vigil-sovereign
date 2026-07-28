@@ -678,6 +678,48 @@ def observations_from_threat_feed(doc: Any, *, seq: int = 0, fmt: str = "auto") 
     return []
 
 
+# ---- CISA KEV ---------------------------------------------------------------
+# The KEV catalog is not NVD- or OSV-shaped (no `descriptions`/`metrics`/`affected`), so it needs
+# its own thin normaliser onto the SHARED advisory shape. Every KEV entry is, by definition, a
+# known-exploited CVE → exploit_known=True. Still a LEAD (VULN_DB / GROUNDING_INTEL), never a fact.
+
+
+def observations_from_kev(doc: Any, *, seq: int = 0) -> list[Observation]:
+    """CISA Known-Exploited-Vulnerabilities catalog → VULNERABILITY leads (+ AFFECTS the named
+    product) via the SAME ``_advisory_observations`` minter the NVD/OSV paths use. No new node/edge
+    kind; ``exploit_known`` is set True (KEV = observed exploited in the wild). An unrecognised
+    document yields [] (total)."""
+    vulns = doc.get("vulnerabilities") if isinstance(doc, dict) else None
+    if not isinstance(vulns, list):
+        return []
+    out: list[Observation] = []
+    # A feed is untrusted (and KEV is fed by LIVE bytes from www.cisa.gov) — cap the top-level list at
+    # _MAX_ITEMS like every sibling parser, so a MITM'd/anomalous response can never explode node count.
+    for entry in vulns[:_MAX_ITEMS]:
+        if not isinstance(entry, dict):
+            continue
+        cve = str(entry.get("cveID") or "").strip()
+        if not cve:
+            continue
+        vendor = _clip(str(entry.get("vendorProject") or ""))
+        product = str(entry.get("product") or "").strip().lower()
+        cwes = [str(c).strip() for c in (entry.get("cwes") or []) if str(c).strip()][:_MAX_REFS]
+        node_attrs = {
+            "advisory_id": cve, "cve": cve, "feed": "cisa-kev",
+            "aliases": [], "references": [],
+            "summary": _clip(str(entry.get("shortDescription") or "")),
+            "vulnerability_name": _clip(str(entry.get("vulnerabilityName") or "")),
+            "vendor": vendor, "product": _clip(product), "date_added": _clip(str(entry.get("dateAdded") or "")),
+            "cwes": cwes,
+            "known_ransomware": _clip(str(entry.get("knownRansomwareCampaignUse") or "")),
+        }
+        affected = [{"name": product, "ecosystem": vendor, "application": True}] if product else []
+        out.extend(_advisory_observations(
+            cve, source="cisa-kev", seq=seq, node_attrs=node_attrs,
+            affected=affected, exploit_known=True))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # gated live pull — OPT-IN, Tier-2 egress-gated (offline stays the default path)
 # ---------------------------------------------------------------------------
@@ -687,7 +729,12 @@ def observations_from_threat_feed(doc: Any, *, seq: int = 0, fmt: str = "auto") 
 THREATINTEL_LIVE_ENDPOINTS: dict[IntelSourceKind, str] = {
     IntelSourceKind.VULN_DB: "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={query}",
 }
-THREATINTEL_COLLECTOR_HOSTS: tuple[str, ...] = ("services.nvd.nist.gov", "api.osv.dev")
+# CISA Known-Exploited-Vulnerabilities — a single BULK JSON of every CVE CISA has observed exploited
+# in the wild (no per-CVE query). A third-party advisory source, never the target.
+CISA_KEV_ENDPOINT: str = (
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+)
+THREATINTEL_COLLECTOR_HOSTS: tuple[str, ...] = ("services.nvd.nist.gov", "api.osv.dev", "www.cisa.gov")
 
 
 def build_threatintel_live_transport(

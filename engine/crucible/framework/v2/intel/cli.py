@@ -170,6 +170,83 @@ def _ingest_intel(args: argparse.Namespace) -> int:
     return _emit(out)
 
 
+def _refresh_vulnintel(args: argparse.Namespace) -> int:
+    """Refresh the vulnerability-intelligence feed from trusted third-party sources (NVD / OSV /
+    CISA-KEV) → VULNERABILITY leads on the world-model. Everything minted is an intel-tier LEAD, never
+    a fact.
+
+    Fail-closed egress: WITHOUT ``--live`` this makes NO network call — it reports the configured
+    sources and that egress is disabled (offline). A live pull is an explicit ``--live`` opt-in, routed
+    through the gated ``GuardedHttpTransport`` (one CONCRETE apex host per source, never the target,
+    never Strix web_search). Under an engagement ``--slug`` whose kill-switch is tripped it refuses
+    before any traffic; the kill-switch is also honoured BETWEEN fetches (a mid-run STOP halts cleanly).
+    """
+    from ..authority.killswitch import KillSwitch
+    from . import vulnfeed
+
+    names = [n.strip().lower() for n in (args.sources or "").split(",") if n.strip()]
+    if names:
+        resolved = [(n, vulnfeed.source_by_name(n)) for n in names]
+        unknown = [n for n, s in resolved if s is None]
+        if unknown:
+            print(f"error: unknown source(s) {unknown}; known: "
+                  f"{[s.name for s in vulnfeed.TRUSTED_VULN_SOURCES]}", file=sys.stderr)
+            return 2
+        sources = [s for _, s in resolved if s is not None]
+    else:
+        sources = list(vulnfeed.TRUSTED_VULN_SOURCES)
+    cves = [c.strip() for c in (args.cve or "").split(",") if c.strip()]
+
+    _doctrine = ("Every feed entry is an intel-tier LEAD, never a fact. Only a fired oracle mints a FACT.")
+
+    if not args.live:
+        # fail-closed: never a silent unguarded call — report intent only, fire nothing.
+        return _emit({
+            "live": False, "slug": args.slug or "(ephemeral)",
+            "sources": [{"name": s.name, "host": s.host, "mode": s.mode} for s in sources],
+            "cve_queries": cves,
+            "note": "egress disabled (offline). Pass --live to pull through the gated transport.",
+            "doctrine": _doctrine,
+        })
+
+    if args.slug and KillSwitch(args.slug).is_tripped():
+        print(f"refused: kill-switch tripped for engagement {args.slug!r}", file=sys.stderr)
+        return 3
+
+    ks = KillSwitch(args.slug) if args.slug else None
+    cancel = (lambda: ks.is_tripped()) if ks is not None else (lambda: False)
+    capture = Path(args.capture) if args.capture else None
+
+    # Defense-in-depth: under an engagement slug, pass the charter's in-scope hosts so the transport
+    # REFUSES to construct if a source host somehow overlaps target scope (the registry is fixed
+    # third-party infra, so this is belt-and-braces). An absent/unparseable charter → no scope to
+    # enforce; the per-source single-host allowlist still refuses every off-allowlist host before bytes leave.
+    from ..common import ethics
+    try:
+        target_hosts = tuple(ethics.parse_scope(args.slug)) if args.slug else ()
+    except Exception:
+        target_hosts = ()
+
+    def transport_for(source):
+        return vulnfeed.build_vulnintel_transport(source, target_hosts=target_hosts, capture_dir=capture)
+
+    store, istore = _open(args.slug)
+    world = WorldModel()
+    ing = IntelIngest(world, store=istore, engagement_slug=args.slug or "")
+    plan = vulnfeed.plan_for(sources, cves)
+    res = vulnfeed.refresh_vulnintel(plan, transport_for=transport_for, ingest=ing, seq=0, cancel=cancel)
+    out = {
+        "live": True, "slug": args.slug or "(ephemeral)",
+        "sources": [s.name for s in sources], "cve_queries": cves,
+        "minted_by_source": res.minted_by_source, "applied": res.applied,
+        "queries_run": res.queries_run, "cancelled": res.cancelled, "refused": res.refused,
+        "nodes": world.node_count, "edges": world.edge_count, "doctrine": _doctrine,
+    }
+    if store is not None:
+        store.close()
+    return _emit(out)
+
+
 def _resolve(args: argparse.Namespace) -> int:
     store, istore = _open(args.slug)
     if istore is None:
@@ -313,6 +390,19 @@ def main(argv: list[str]) -> int:
                    help="feed format (default: auto-detect)")
     p.add_argument("--slug", default="", help="persist under this engagement slug (kill-switch honored)")
     p.set_defaults(fn=_ingest_intel)
+
+    p = sub.add_parser("refresh-vulnintel",
+                       help="refresh the vuln-intel feed from trusted sources (NVD / OSV / CISA-KEV). "
+                            "Offline by default; --live opts into the gated pull. LEADS, never facts.")
+    p.add_argument("--sources", default="",
+                   help="comma-separated source names (default: all). known: nvd,osv,cisa-kev")
+    p.add_argument("--cve", default="", help="comma-separated CVE ids for per-CVE sources (NVD / OSV)")
+    p.add_argument("--slug", default="", help="persist under this engagement slug (kill-switch honored)")
+    p.add_argument("--live", action="store_true",
+                   help="GATED live pull through the egress transport (opt-in). "
+                        "Without it: offline, no traffic fired.")
+    p.add_argument("--capture", default="", help="mirror live responses to this dir to seed offline fixtures")
+    p.set_defaults(fn=_refresh_vulnintel)
 
     p = sub.add_parser("resolve", help="resolved entities with merge explanations")
     p.add_argument("--slug", required=True)
