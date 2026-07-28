@@ -89,6 +89,7 @@ _PREFIX_ROUTES = {
     "/api/compliance/": api.compliance_data,
     "/api/drift/": api.drift_data,
     "/api/evidence/": api.evidence,
+    "/api/proof/": api.proof_list,
     "/api/remediate/": api.remediate_plan,
     "/api/toolresearch/": api.tool_research_data,
 }

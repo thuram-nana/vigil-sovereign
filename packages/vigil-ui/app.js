@@ -23,6 +23,7 @@
       { id: "chat", label: "Chat", icon: "brain", ready: true },
       { id: "live", label: "Live", icon: "live", ready: true },
       { id: "findings", label: "Findings", icon: "find", ready: true },
+      { id: "proof", label: "Proof Studio", icon: "shield", ready: true },
       { id: "report", label: "Report", icon: "book", ready: true },
       { id: "fixes", label: "Fixes", icon: "fixes", ready: true },
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", ready: true },
@@ -3782,6 +3783,76 @@
     V.mount(body, [picker, summary, h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
+  // ---- Proof Studio (B5): oracle-confirmed, signed, replayable exploit proofs ----
+  var PRF = { run: "", runs: [], data: null };
+  function renderProof(screen) {
+    var body = V.mount(screen, [h("div.screen-head", null, [
+      h("h2", null, "Proof Studio"),
+      h("p.sub", null, "Strix generates an exploit; VIGIL turns it into PROOF. A FACT here means a "
+        + "deterministic oracle FIRED over the executor-captured raw bytes of the reproduction — not the "
+        + "model's word. A LEAD is an honest 'not reproduced'. A DENIED proof had dangerous PoC content "
+        + "refused BEFORE any mint. Read-only.")])]);
+    V.getJSON(OFF("/api/runs")).then(function (d) {
+      PRF.runs = (d && d.runs) || [];
+      if (!PRF.run && PRF.runs.length) PRF.run = PRF.runs[0].run_id;
+      loadProof(body);
+    }).catch(function () { PRF.runs = []; loadProof(body); });
+  }
+  function loadProof(body) {
+    if (!PRF.run) { drawProof(body); return; }
+    V.getJSON(OFF("/api/proof/" + encodeURIComponent(PRF.run))).then(function (d) {
+      PRF.data = d; drawProof(body);
+    }).catch(function () { PRF.data = null; drawProof(body); });
+  }
+  function drawProof(body) {
+    var d = PRF.data || {};
+    var picker = h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Run"),
+      h("select", { onChange: function (e) { PRF.run = e.target.value; loadProof(body); } },
+        [h("option", { value: "", selected: !PRF.run }, "— select a run —")].concat(
+          PRF.runs.map(function (r) {
+            return h("option", { value: r.run_id, selected: r.run_id === PRF.run }, (r.slug || r.run_id));
+          })))]);
+    var summary = h("div.card", null, [h("div.card-h", null, [h("h3", null, "Proofs")]),
+      h("div.kv", null, [
+        h("div.k", null, "Disposition"),
+        h("div.v", null, [
+          h("span.pill.sm", null, (d.facts || 0) + " FACT"),
+          h("span.pill.sm", null, (d.leads || 0) + " lead"),
+          h("span.pill.sm.warn", null, (d.denied || 0) + " denied")])])]);
+    var rows = (d.proofs || []).map(function (p) {
+      var st = p.status === "fact"
+        ? h("span.st.st-confirmed", null, [h("span.dot"), "FACT — oracle re-fired over captured bytes"])
+        : (p.status === "denied"
+            ? h("span.st.st-idle", null, [h("span.dot"), "DENIED — dangerous PoC refused (" + (p.gate_category || "content") + ")"])
+            : h("span.st.st-idle", null, [h("span.dot"), "LEAD — not reproduced"]));
+      var chans = (p.exchanges || []).map(function (e) {
+        return h("span.pill.sm", null, String(e.channel || "?")); });
+      return h("div.card", null, [
+        h("div.card-h", null, [h("h3", null, (p.bug_class || p.finding_ref || "?")),
+          h("span", { style: { marginLeft: "auto" } }, st)]),
+        h("div.kv", null, [h("div.k", null, "Finding"), h("div.v", null, String(p.finding_ref || "—"))]),
+        (p.status === "fact"
+          ? h("div.kv", null, [h("div.k", null, "Oracle"),
+              h("div.v", null, (p.confirmed_by || "—")
+                + (p.confidence != null ? " · confidence " + p.confidence : ""))])
+          : null),
+        (chans.length
+          ? h("div.kv", null, [h("div.k", null, "Reproduced from"), h("div.v", null, chans)])
+          : null),
+        h("div.kv", null, [h("div.k", null, "Crossed to spine"),
+          h("div.v", null, p.spooled
+            ? h("span.st.st-confirmed", null, [h("span.dot"), "signed evidence spooled"])
+            : h("span.hint", null, "not spooled (only a FACT crosses)"))]),
+        (p.reason ? h("div.hint", { style: { marginTop: "4px" } }, String(p.reason)) : null)]);
+    });
+    V.mount(body, [picker, summary,
+      (rows.length ? h("div", null, rows)
+        : h("div.card", null, [h("div.empty", null, d.pending
+            ? "no proofs yet for this run — Strix mints a proof when a reproduction is oracle-confirmed"
+            : "no proofs for this run")])),
+      h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+  }
+
   function route() {
     const id = current();
     teardownLive();               // close any live stream/timers when navigating away
@@ -3797,6 +3868,7 @@
     if (id === "live") { renderLive(screen); return; }
     if (id === "activity") { renderBackground(screen); return; }
     if (id === "findings") { renderFindings(screen); return; }
+    if (id === "proof") { renderProof(screen); return; }
     if (id === "settings") { renderSettings(screen); return; }
     if (id === "apikeys") { renderApiKeys(screen); return; }
     if (id === "safety") { renderSafety(screen); return; }

@@ -243,6 +243,24 @@ async def _do_create(  # noqa: PLR0912
 
         from strix.report.dedupe import check_duplicate
 
+        # VIGIL Proof Studio (B5): best-effort, build the executor-captured exchange bundle from Caido's raw
+        # bytes so the proof_sink can mint over reproduced bytes (never the model's PoC text). ONLY when a
+        # proof_sink is actually installed (VIGIL console run) — standalone Strix does zero extra work, so the
+        # vendored path stays byte-identical. Read-only over already-captured traffic; never re-sends. Never
+        # raises; None ⇒ the finding stays a plain report (an honest LEAD).
+        proof_capture = None
+        try:
+            from strix.report import state as _proof_state
+
+            if getattr(_proof_state, "proof_sink", None) is not None:
+                from strix.report.proof_capture import capture_for_report
+
+                proof_capture = await capture_for_report(
+                    {"finding_class": (cwe or title or "web"), "endpoint": endpoint, "method": method,
+                     "cwe": cwe, "title": title, "description": description})
+        except Exception:
+            logger.debug("proof_capture skipped", exc_info=True)
+
         existing = report_state.get_existing_vulnerabilities()
         candidate = {
             "title": title,
@@ -297,6 +315,7 @@ async def _do_create(  # noqa: PLR0912
             fix_pr_body=fix_pr_body,
             agent_id=agent_id if isinstance(agent_id, str) else None,
             agent_name=agent_name if isinstance(agent_name, str) else None,
+            proof_capture=proof_capture,
         )
     except (ImportError, AttributeError) as e:
         logger.exception("create_vulnerability_report persistence failed")

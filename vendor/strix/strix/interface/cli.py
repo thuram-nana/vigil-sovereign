@@ -134,6 +134,16 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
 
     set_global_report_state(report_state)
 
+    # VIGIL Proof Studio (B5): best-effort assign the reproduce-from-raw proof_sink from the run context the
+    # VIGIL console exports (VIGIL_PROOF_RUN_DIR). Absent that env (Strix launched standalone) this is a
+    # NO-OP and vendored behaviour is byte-identical; the integration package is a soft dependency.
+    try:
+        from vigil_integration.proof.bootstrap import install_from_env
+
+        install_from_env()
+    except Exception:  # noqa: BLE001 — never let proof wiring stop a scan
+        pass
+
     def create_live_status() -> Panel:
         status_text = Text()
         status_text.append("Penetration test in progress", style="bold #22c55e")
