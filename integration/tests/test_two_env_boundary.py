@@ -55,6 +55,10 @@ import sigil.knowledge.learn_grant          # A2b: the sovereign PRODUCER must s
 assert "framework" not in __import__("sys").modules, "learn_grant must not import framework at module scope"
 import vigil_integration.proof.engine        # B3: the proof mint must lazy-import framework (offense-only)
 assert "framework" not in __import__("sys").modules, "proof.engine must not import framework at module scope"
+import vigil_integration.proof.run           # B5: the run-integration seam (mint→persist) — framework LAZY
+assert "framework" not in __import__("sys").modules, "proof.run must not import framework at module scope"
+import vigil_integration.proof.bootstrap     # B5: the Strix proof_sink installer — framework LAZY
+assert "framework" not in __import__("sys").modules, "proof.bootstrap must not import framework at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

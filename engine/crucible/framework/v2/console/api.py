@@ -409,6 +409,38 @@ def evidence(run_id: str) -> dict[str, Any]:
     return _safe(_build, default={"run_id": run_id, "findings": [], "error": "could not re-verify"})
 
 
+_PROOF_DOCTRINE = (
+    "A proof is a FACT only when a deterministic oracle FIRED over the executor-captured raw bytes of the "
+    "reproduction — never over the model's PoC text. A LEAD is an honest 'not reproduced / not oracle-mapped'; "
+    "a DENIED proof had dangerous PoC content refused by the content gate before any mint. Read-only."
+)
+
+
+def proof_list(run_id: str) -> dict[str, Any]:
+    """Proof Studio (B5): the persisted proof records for a run. Each record is written host-side by the
+    keyless offense mint (``vigil_integration.proof.run``) as plain JSON under ``<run_dir>/proofs/`` — so
+    this reader needs NO import of the integration package (no framework→integration dependency) and sends
+    no traffic. Each is an oracle-confirmed FACT, an honest LEAD, or a content-gate DENY."""
+    from . import actions
+
+    d = actions.run_dir(run_id) / "proofs"
+    recs: list[dict] = []
+    if _safe(lambda: d.is_dir(), default=False):
+        for f in sorted(_safe(lambda: list(d.glob("*.json")), default=[]) or []):
+            rec = _safe(lambda f=f: json.loads(f.read_text(encoding="utf-8")), default=None)
+            if isinstance(rec, dict):
+                recs.append(rec)
+    # A stable, honest disposition order: facts first, then leads, then denied — each already deterministic.
+    order = {"fact": 0, "lead": 1, "denied": 2}
+    recs.sort(key=lambda r: (order.get(str(r.get("status")), 3), str(r.get("bug_class", "")), str(r.get("proof_id", ""))))
+    facts = sum(1 for r in recs if r.get("status") == "fact")
+    leads = sum(1 for r in recs if r.get("status") == "lead")
+    denied = sum(1 for r in recs if r.get("status") == "denied")
+    return {"run_id": run_id, "proofs": recs, "total": len(recs),
+            "facts": facts, "leads": leads, "denied": denied,
+            "pending": len(recs) == 0, "doctrine": _PROOF_DOCTRINE}
+
+
 # ---------------------------------------------------------------------------
 # benchmark + coverage
 # ---------------------------------------------------------------------------

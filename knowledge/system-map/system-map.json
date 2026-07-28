@@ -247,6 +247,24 @@
       ]
     },
     {
+      "description": "Oracle-confirmed, signed, replayable exploit proofs — a FACT means an oracle re-fired over captured raw bytes.",
+      "group": "DO",
+      "id": "proof",
+      "label": "Proof Studio",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "proof studio",
+        "poc",
+        "exploit",
+        "reproduction",
+        "mint",
+        "proof of pwn",
+        "replay",
+        "prove the bug"
+      ]
+    },
+    {
       "description": "A live, re-verified, proof-carrying client report — every finding re-checks its certificate offline.",
       "group": "DO",
       "id": "report",
@@ -257,9 +275,8 @@
         "report",
         "client",
         "deliverable",
-        "proof",
+        "deliverable pdf",
         "certificate",
-        "evidence",
         "portal",
         "attestation"
       ]
@@ -325,5 +342,5 @@
       ]
     }
   ],
-  "source_sha": "9909e2948a676933c798d61790c1af433bc5a0cc8939525b2f10d5baadc17089"
+  "source_sha": "049144755f32c0fbd4c4232cd1a7115b84d053d446464d875326f8ef989c4009"
 }

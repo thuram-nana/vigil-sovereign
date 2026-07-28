@@ -11,6 +11,7 @@ from uuid import uuid4
 from agents.usage import Usage
 
 from strix.core.paths import run_dir_for
+from strix.report.proof_capture import CAPTURE_KEY
 from strix.report.sarif import write_sarif
 from strix.report.usage import LLMUsageLedger
 from strix.report.writer import (
@@ -236,6 +237,7 @@ class ReportState:
         dependency_metadata: dict[str, str] | None = None,
         agent_id: str | None = None,
         agent_name: str | None = None,
+        proof_capture: dict[str, Any] | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -290,12 +292,17 @@ class ReportState:
         if agent_name:
             report["agent_name"] = agent_name
 
-        # VIGIL Proof Studio (B2): screen / mint out-of-band BEFORE persistence. Absent hook ⇒ no-op
+        # VIGIL Proof Studio (B2/B5): screen / mint out-of-band BEFORE persistence. Absent hook ⇒ no-op
         # (byte-identical). Fail-safe: a hook error never blocks the report from being persisted.
+        # An executor-captured exchange bundle (built from Caido's raw bytes by proof_capture) rides on the
+        # report under CAPTURE_KEY — its presence is what makes a report mint-eligible (never the model text).
         hook = proof_sink
         if hook is not None:
             try:
-                hook(report)
+                report_for_hook = dict(report)
+                if proof_capture is not None:
+                    report_for_hook[CAPTURE_KEY] = proof_capture
+                hook(report_for_hook)
             except Exception:
                 logger.exception("proof_sink hook failed (non-fatal)")
 

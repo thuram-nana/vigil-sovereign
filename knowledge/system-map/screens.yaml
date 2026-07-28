@@ -49,13 +49,21 @@ screens:
     description: The confirmed findings and attack paths from your runs, oracle-graded.
     synonyms: [findings, results, bugs, vulnerabilities, issues, what did you find]
 
+  - id: proof
+    label: Proof Studio
+    group: DO
+    owner: false
+    plane: unified
+    description: Oracle-confirmed, signed, replayable exploit proofs — a FACT means an oracle re-fired over captured raw bytes.
+    synonyms: [proof studio, poc, exploit, reproduction, mint, proof of pwn, replay, prove the bug]
+
   - id: report
     label: Report
     group: DO
     owner: false
     plane: unified
     description: A live, re-verified, proof-carrying client report — every finding re-checks its certificate offline.
-    synonyms: [report, client, deliverable, proof, certificate, evidence, portal, attestation]
+    synonyms: [report, client, deliverable, deliverable pdf, certificate, portal, attestation]
 
   - id: fixes
     label: Fixes
