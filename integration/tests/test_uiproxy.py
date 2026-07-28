@@ -386,7 +386,10 @@ def test_resolve_offense_llm_env_never_writes_a_file(tmp_path, monkeypatch):
     assert list(workdir.iterdir()) == []     # no stray file holding the captured secret
 
 
-def test_spawn_injects_extra_env(tmp_path):
+def test_spawn_injects_extra_env(tmp_path, monkeypatch):
+    # deterministic regardless of an ambient ANTHROPIC_API_KEY in the runner's environment: the child
+    # inherits the parent env, so a real key present in the session would otherwise make "K=none" flap.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     log = tmp_path / "child.log"
     argv = [_sys.executable, "-c",
             "import os;print('M='+os.environ.get('CRUCIBLE_ANTHROPIC_MODEL','none')+"

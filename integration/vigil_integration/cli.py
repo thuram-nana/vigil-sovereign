@@ -478,6 +478,37 @@ def _cmd_down(args: argparse.Namespace) -> int:
     return run_down(base_dir=args.base_dir)
 
 
+def _cmd_knowledge(args: argparse.Namespace) -> int:
+    """`vigil knowledge sync|push|status` (K6) — the operator-gated `knowledge/` → GitHub sync.
+
+    `sync` regenerates the committed knowledge manifest, SCANS knowledge/ for secrets (refuses the commit if
+    any is found), then `git add knowledge/` + `git commit`. `push` is the SEPARATE, explicit outward act.
+    Committing a file makes nothing a FACT (the graph counterparts stay intel/ungrounded). EXEC-ONLY: imports
+    no framework/strix/sigil engine."""
+    import json
+
+    from . import knowledge_sync as ks
+
+    def _emit(obj: dict) -> None:
+        print(json.dumps(obj, indent=2, default=str))
+
+    if args.knowledge_action == "status":
+        _emit(ks.status())
+        return 0
+    if args.knowledge_action == "push":
+        _emit(ks.push(dry_run=args.dry_run))
+        return 0
+    # sync
+    res = ks.sync(message=args.message, dry_run=args.dry_run)
+    if not res.get("ok"):
+        print(f"vigil knowledge sync: REFUSED — {res.get('refused')}", file=sys.stderr)
+        for relpath, name in res.get("secrets", []):
+            print(f"  secret ({name}): {relpath}", file=sys.stderr)
+        return 3
+    _emit(res)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -672,6 +703,15 @@ def build_parser() -> argparse.ArgumentParser:
     pdn.add_argument("--base-dir", default=".vigil-live",
                      help="engagement home holding the ui/pids file written by `vigil up`")
     pdn.set_defaults(func=_cmd_down)
+
+    pk = sub.add_parser("knowledge", help="operator-gated sync of the living knowledge/ folder to git "
+                                          "(regenerate + secret-scan + commit; push is separate)")
+    pk.add_argument("knowledge_action", choices=["sync", "push", "status"],
+                    help="sync = regenerate+scan+commit knowledge/ · push = git push · status = what would commit")
+    pk.add_argument("-m", "--message", default="", help="commit message for `sync`")
+    pk.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="show the git plan without committing/pushing")
+    pk.set_defaults(func=_cmd_knowledge)
 
     return p
 
