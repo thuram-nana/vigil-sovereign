@@ -366,6 +366,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
                 return
+            if path.startswith("/api/evolve/") and path.endswith("/tick"):
+                # K5: RUN one self-evolve tick that PERSISTS (the GET evolve_data is read-only). CSRF/rebind-
+                # gated above + kill-switch gated inside; it drafts proposals + records calibration
+                # predictions, never merges/applies and mints no fact.
+                slug = path[len("/api/evolve/"):-len("/tick")].strip("/")
+                self._json(actions.run_evolve_tick(slug))
+                return
             if path.startswith("/api/killswitch/") and path.endswith("/trip"):
                 slug = path[len("/api/killswitch/"):-len("/trip")].strip("/")
                 self._json(actions.trip_killswitch(slug, str(body.get("reason", ""))))
