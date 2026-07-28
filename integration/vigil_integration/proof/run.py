@@ -143,9 +143,14 @@ def _persist_reverifiable(run_dir: str | os.PathLike, finding: dict, action_id: 
     if ctx is None:
         return
     embedded_class = str(getattr(ctx, "bug_class", "") or finding.get("bug_class") or "")
+    exs = list(exchanges or [])
+    channel = str(getattr(exs[0], "channel", "") or "") if exs else ""
     entry = {
         "check_id": finding["check_id"],
         "bug_class": embedded_class,
+        # the ORACLE FAMILY this FACT was confirmed on — A6a's remediation oracle pins the patched-build
+        # re-drive to this exact channel, so a mismatched re-drive can't mint a vacuous "silence".
+        "channel": channel,
         "insertion_point": finding.get("insertion_point", ""),
         "confirmed_by": res.confirmed_by,
         "confidence": res.confidence,
