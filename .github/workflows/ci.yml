@@ -41,7 +41,7 @@ jobs:
           pytest framework/v2/evidence framework/v2/entitlement framework/v2/common \
                  framework/v2/verify framework/v2/confidence framework/v2/worldmodel \
                  framework/v2/calibration framework/v2/authority \
-                 framework/v2/console framework/v2/api \
+                 framework/v2/console framework/v2/api framework/v2/report \
                  framework/v2/aegis/tests/test_gateway_ui_sinks.py \
                  framework/v2/agents/tests/test_agent_message.py \
                  framework/v2/intel/tests/test_vulnfeed.py \
