@@ -512,6 +512,40 @@ def _cmd_knowledge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_learn_drain(args: argparse.Namespace) -> int:
+    """`vigil learn-drain` — drain the sovereign→offense learn-grant spool (A2 keystone): verify each
+    owner-signed ``learn_grant`` under the owner PUBLIC key, re-derive the lead from the OFFENSE intel, and
+    run K3 deep-learn. Fail-closed; the offense per-slug kill-switch DEFERS a grant. Signature check is
+    ``vigil_core``-only; ``deep_learn`` is lazy-imported inside the drain (this module imports no framework at
+    module scope, so the two-env boundary holds)."""
+    import json
+    from pathlib import Path
+
+    from . import learn_drain
+
+    owner_pubkey = (args.owner_pubkey or "").strip()
+    if not owner_pubkey:
+        print("vigil learn-drain: --owner-pubkey is required (the sovereign owner PUBLIC key)", file=sys.stderr)
+        return 2
+    if args.skills_dir:
+        skills_dir = Path(args.skills_dir)
+    else:
+        from . import knowledge_sync
+        skills_dir = knowledge_sync.repo_root() / "knowledge" / "skills"
+    watcher = learn_drain.LearnGrantWatcher(spool_dir=args.spool, owner_pubkey=owner_pubkey,
+                                            skills_dir=skills_dir)
+    if args.watch:
+        print(f"  draining learn-grants from {args.spool}/incoming → K3 deep-learn "
+              f"(skills → {skills_dir}); Ctrl-C to stop")
+        try:
+            watcher.watch(interval=args.interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+    print(json.dumps(watcher.drain(), indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -724,6 +758,17 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--dry-run", action="store_true", dest="dry_run",
                     help="show the git plan without committing/pushing")
     pk.set_defaults(func=_cmd_knowledge)
+
+    pld = sub.add_parser("learn-drain",
+                         help="drain the sovereign→offense learn-grant spool: verify each owner-signed grant "
+                              "and run K3 deep-learn (the K2b→K3 bridge; fail-closed, kill-switch-deferred)")
+    pld.add_argument("--spool", required=True, help="the learn-grant spool dir (its incoming/ is drained)")
+    pld.add_argument("--owner-pubkey", required=True, help="the sovereign owner PUBLIC key (base64)")
+    pld.add_argument("--skills-dir", default="",
+                     help="where deep-learn writes FIND/DETECT/PREVENT skills (default: <repo>/knowledge/skills)")
+    pld.add_argument("--watch", action="store_true", help="keep draining as new grants arrive; Ctrl-C to stop")
+    pld.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
+    pld.set_defaults(func=_cmd_learn_drain)
 
     return p
 

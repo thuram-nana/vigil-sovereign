@@ -183,6 +183,7 @@ jobs:
               apps/sigil/tests/test_hud_status.py \
               apps/sigil/tests/test_capability_autolearn.py \
               apps/sigil/tests/test_knowledge_proposals.py \
+              apps/sigil/tests/test_learn_grant.py \
               apps/sigil/tests/test_learn_source.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
