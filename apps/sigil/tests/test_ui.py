@@ -179,6 +179,24 @@ def _get_stream_status(port, token):
         return e.code
 
 
+def test_sigil_hud_requires_the_token_and_streams():
+    # S2: the SIGIL HUD nav channel is a READ-ONLY SSE behind the SAME token gate as /api/stream.
+    srv, port = _serve(_spine())
+    try:
+        url_no = f"http://127.0.0.1:{port}/api/sigil/hud"
+        try:
+            with urllib.request.urlopen(url_no, timeout=3) as r:
+                assert False, f"HUD without a token should 401, got {r.status}"
+        except urllib.error.HTTPError as e:
+            assert e.code == 401                              # no token → 401
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sigil/hud?token={TOKEN}&since=-1")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 200 and "event-stream" in r.headers.get("Content-Type", "")
+            r.read(16)                                        # heartbeat, then close (no history replayed)
+    finally:
+        srv.shutdown()
+
+
 def test_index_embeds_token_and_needs_no_token_itself():
     srv, port = _serve(_spine())
     try:

@@ -78,9 +78,12 @@ def run_mic(*, asr: str = "elevenlabs", wake: str = "energy", tts: str = "eleven
     wake_c = OpenWakeWord() if wake == "oww" else EnergyWake(vad)
     sink = SpeakerSink()
     # voice_channel=True → this live pipeline's dispatch is gated by the `voice` latch (belt-and-suspenders
-    # with the entry guard above, so a mid-session disable also stops dispatch).
-    p = VoicePipeline(vad, wake_c, _make_asr(asr), _make_tts(tts, tts_voice), sink,
-                      KernelDispatch(voice_channel=True))
+    # with the entry guard above, so a mid-session disable also stops dispatch). S2: wrap it in
+    # RoutingDispatch so an unambiguous UI command ("open settings") navigates the cockpit (an A1 sigil.nav
+    # signal), while every other utterance falls through to the KERNEL cognition path unchanged.
+    from .nav import RoutingDispatch
+    dispatch = RoutingDispatch(KernelDispatch(voice_channel=True))
+    p = VoicePipeline(vad, wake_c, _make_asr(asr), _make_tts(tts, tts_voice), sink, dispatch)
     print("SIGIL voice: listening (Ctrl-C to stop) …")
     try:
         p.run(MicAudioSource().frames())
