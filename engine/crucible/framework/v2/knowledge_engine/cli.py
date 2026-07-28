@@ -161,7 +161,9 @@ def _evolve(args: argparse.Namespace) -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 knowledge",
-        description="Knowledge Engine — propose, deep-learn (find/detect/prevent), and retrieve. Advisory.")
+        description="Knowledge Engine — propose, deep-learn (find/detect/prevent), retrieve, evolve. Advisory. "
+                    "NB: the operator-gated knowledge/-folder → git sync is a DIFFERENT surface: "
+                    "`vigil knowledge sync|push|status` (integration).")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("draft", help="rank the vuln leads into a propose-to-learn queue (read-only)")
