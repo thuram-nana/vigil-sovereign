@@ -583,5 +583,70 @@ def test_triage_cypher_are_parameterized_and_confirmed_only():
         assert set(q.params_extra).issubset({"severities"})
 
 
+# =============================================================================================
+# F3 — per-session priors (retrieve_priors): partition-scoped, tagged, deterministic, non-authoritative
+# =============================================================================================
+
+
+def test_retrieve_priors_is_partition_scoped():
+    # each session owns a disjoint partition; retrieve_priors(sess-A) never sees sess-B's findings.
+    store = _Store()
+    Neo4jGraphWriter(_factory(store), group_id="sess-A").rebuild_from_spine(
+        [_confirmed(1, "F-1", severity="critical"), _lead(2, "F-2")])
+    Neo4jGraphWriter(_factory(store), group_id="sess-B").rebuild_from_spine(
+        [_confirmed(3, "F-3", severity="high")])
+    priors_a = Neo4jGraphWriter(_factory(store), group_id="sess-A").retrieve_priors(limit=8)
+    refs = {p["ref"] for p in priors_a}
+    assert "F-1" in refs and "F-2" in refs and "F-3" not in refs        # sess-B is invisible to sess-A
+    assert all(p["origin"] == "sess-A" for p in priors_a)               # every row provenance-tagged
+
+
+def test_retrieve_priors_tags_confirmed_vs_lead_and_never_re_mints_a_fact():
+    store = _Store()
+    Neo4jGraphWriter(_factory(store), group_id="sess-A").rebuild_from_spine(
+        [_confirmed(1, "F-1", severity="critical"), _lead(2, "F-2")])
+    priors = Neo4jGraphWriter(_factory(store), group_id="sess-A").retrieve_priors(limit=8)
+    by_ref = {p["ref"]: p for p in priors}
+    assert by_ref["F-1"]["confirmed"] is True and by_ref["F-2"]["confirmed"] is False
+    # retrieve_priors is RETRIEVAL, not authority — it returns plain summaries, mints nothing, and touches
+    # no store node (the confirmed count in the graph is unchanged by a retrieval).
+    assert store.confirmed_ids(eid="sess-A") == {"finding:F-1"}
+
+
+def test_retrieve_priors_is_deterministic_confirmed_first_then_severity():
+    store = _Store()
+    Neo4jGraphWriter(_factory(store), group_id="sess-A").rebuild_from_spine([
+        _lead(1, "L-low", severity="low"),
+        _confirmed(2, "C-high", severity="high"),
+        _confirmed(3, "C-crit", severity="critical"),
+    ])
+    w = Neo4jGraphWriter(_factory(store), group_id="sess-A")
+    order1 = [p["ref"] for p in w.retrieve_priors(limit=8)]
+    order2 = [p["ref"] for p in w.retrieve_priors(limit=8)]
+    assert order1 == order2                                             # deterministic (no wallclock/rng)
+    # confirmed before lead; within confirmed, higher severity first
+    assert order1.index("C-crit") < order1.index("C-high") < order1.index("L-low")
+
+
+def test_retrieve_priors_extra_partitions_unions_with_origin_tags():
+    # F4 forward-compat: extra_partitions unions the (consented) connected sessions, each row origin-tagged.
+    store = _Store()
+    Neo4jGraphWriter(_factory(store), group_id="sess-A").rebuild_from_spine([_confirmed(1, "A-1")])
+    Neo4jGraphWriter(_factory(store), group_id="sess-B").rebuild_from_spine([_confirmed(2, "B-1")])
+    priors = Neo4jGraphWriter(_factory(store), group_id="sess-A").retrieve_priors(
+        limit=8, extra_partitions=["sess-B"])
+    origins = {p["ref"]: p["origin"] for p in priors}
+    assert origins.get("A-1") == "sess-A" and origins.get("B-1") == "sess-B"
+
+
+def test_retrieve_priors_is_bounded_and_total():
+    store = _Store()
+    recs = [_confirmed(i, f"F-{i}") for i in range(1, 20)]
+    Neo4jGraphWriter(_factory(store), group_id="sess-A").rebuild_from_spine(recs)
+    assert len(Neo4jGraphWriter(_factory(store), group_id="sess-A").retrieve_priors(limit=5)) == 5
+    # no session factory → total, empty (never a raise)
+    assert Neo4jGraphWriter(None, group_id="sess-A").retrieve_priors() == []
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -176,6 +176,49 @@ def test_live_nonfiring_context_stays_a_lead(hermetic_root, tmp_path):
     assert any("UNCONFIRMED" in (ld.title or "") for ld in report.leads)
 
 
+# --- F3: the Neo4j graph partition is the SESSION id (falls back to the slug) -----------------------
+
+class _RecSession:
+    """A recording fake Neo4j session: captures every Cypher param map (so a test can read back which
+    PARTITION the engine's graph reads/writes targeted). Returns an empty result (a read → no rows)."""
+    def __init__(self, calls: list) -> None:
+        self.calls = calls
+
+    def run(self, cypher, parameters=None):
+        self.calls.append(dict(parameters or {}))
+        return []
+
+    def close(self) -> None:
+        pass
+
+
+def _partitions_touched(tmp_path, monkeypatch, *, session_id: str) -> set:
+    from vigil_integration.live import graph_driver
+    calls: list = []
+    # inject a recording Neo4j so build_engine wires a real writer (+ retrieve_priors), no live driver needed.
+    monkeypatch.setattr(graph_driver, "build_neo4j_session_factory",
+                        lambda *a, **k: (lambda: _RecSession(calls)))
+    prov = provision_authority(slug="loopback", scope=["127.0.0.1"])
+    cfg = EngineConfig(slug="loopback", session_id=session_id, base_dir=str(tmp_path / "live"),
+                       replay=ReplayThinker([_use_tool(oracle_context=_FIRING_SQLI), _complete()]),
+                       provisioned=prov, runner=_echo_runner, max_iterations=6, owner_approves_offense=True)
+    build_engine(cfg).engage(LOOPBACK)
+    # retrieve_priors fires on every think (before any fact is projected), so the read Cypher records the
+    # partition regardless of whether a FACT was minted — this is exactly the per-session partition key.
+    return {p["engagement_id"] for p in calls if "engagement_id" in p}
+
+
+def test_graph_partition_is_the_session_id_when_set(hermetic_root, tmp_path, monkeypatch):
+    parts = _partitions_touched(tmp_path, monkeypatch, session_id="sess-XYZ")
+    assert parts == {"sess-XYZ"}, f"the graph must be scoped to the SESSION partition, saw {parts}"
+    assert "loopback" not in parts                                 # NOT the slug when a session is set
+
+
+def test_graph_partition_falls_back_to_slug_without_a_session(hermetic_root, tmp_path, monkeypatch):
+    parts = _partitions_touched(tmp_path, monkeypatch, session_id="")
+    assert parts == {"loopback"}                                   # empty session_id → slug partition
+
+
 def test_live_without_owner_approval_the_offense_tool_queues(hermetic_root, tmp_path):
     # the fail-closed default: no operator approval ⇒ the queued offense tool never runs.
     engine, prov, cfg = _engine(tmp_path, ReplayThinker([_use_tool(oracle_context=_FIRING_SQLI)]),
