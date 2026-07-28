@@ -3195,14 +3195,23 @@
     // Object.create(null) → no inherited prototype keys, so `navIds[id]` is a strict membership test (a
     // payload of "constructor"/"__proto__"/… can never read truthy off the prototype chain).
     var navIds = Object.create(null);
-    NAV.forEach(function (g) { g.items.forEach(function (it) { navIds[it.id] = true; }); });
+    var navOrder = [];
+    NAV.forEach(function (g) { g.items.forEach(function (it) { navIds[it.id] = true; navOrder.push(it.id); }); });
     try {
       // persistent (NOT stored in liveES) so teardownLive() on route changes never closes it. It fans out
       // sigil.nav SIGNALS from the owner-signed spine → a hash navigation, but ONLY to a KNOWN in-app NAV
       // screen id (a spoofed/garbled payload navigates to nothing — never an arbitrary URL or the prototype).
       _hudES = V.sse(SOV("/api/sigil/hud"), function (ev) {
-        if (ev && ev.t === "nav" && ev.screen_id && navIds[ev.screen_id] === true) {
+        if (!ev || ev.t !== "nav") return;
+        if (ev.screen_id && navIds[ev.screen_id] === true) {          // voice / pinch: an absolute screen id
           if (current() !== ev.screen_id) location.hash = "#/" + ev.screen_id;
+        } else if ((ev.direction === "next" || ev.direction === "prev") && navOrder.length) {
+          // gesture swipe: step the NAV list from the current screen (wraps; lands only on a known NAV id).
+          var i = navOrder.indexOf(current());
+          if (i < 0) i = 0;
+          var n = navOrder.length;
+          var j = ev.direction === "next" ? (i + 1) % n : (i - 1 + n) % n;
+          location.hash = "#/" + navOrder[j];
         }
       });
     } catch (e) { _hudES = null; }
