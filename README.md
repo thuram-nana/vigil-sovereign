@@ -249,7 +249,7 @@ This is where the whole system becomes *one running program*.
 - **`live/engine.py`** — the unified, attestation-first loop that wires the brain through *every* subsystem and the *real* gates/oracle/record (no stand-ins). A missing optional service degrades to fail-closed, never to a fake pass.
 - **`live/wiring.py`** — the factory that binds the loop to the real machinery (provisions the signed authority, wires the gate, the oracle, the executor, the record, the spine).
 - **The six live connectors** — the **loopback-pinned tool executor** (`executor.py`, refuses any target that isn't the authorized one before a single byte is sent), the **graph writer** (`graph_neo4j.py`, confirmed-only), the **AI-gauntlet subprocess adapter** (`gauntlet_subproc.py`), the **telemetry exporter** (`otel_export.py`), the **live Claude step** (`think_claude.py`, which can run in keyless "replay" mode with no API key — *the provable layer never depends on the model*), and the **real signed spine** (`spine_vigilcore.py`).
-- **`cli.py`** — the **`vigil`** command: `vigil engage <url>` (run the loop), `vigil ledger who|when` (prove who used it, when), `vigil verify-ledger` (check the chain), `vigil provision` (mint a signed authority).
+- **`cli.py`** — the **`vigil`** command: `vigil engage <url>` (run the loop), `vigil ledger who|when` (prove who used it, when), `vigil verify-ledger` (check the chain), `vigil provision` (mint a signed authority), `vigil dossier` (compile a whole run into one self-contained, tamper-evident `.zip`).
 
 ### The deep-core usage record — `integration/vigil_integration/attestation/`
 The "who used this tool, when, and against what" record, minted *before* anything runs (no attestation → no run). It binds the operator's identity (login name, git name/email, key fingerprint, hostname), a time tied to a never-decreasing counter — a hardware clock when your machine has a secure chip (a TPM), otherwise a software counter — so it can't be back-dated, and the action. This record is itself written into the one spine (so there is a single record, not several). `vigil ledger who|when` replays it; `vigil verify-ledger` proves the chain is intact.
@@ -258,7 +258,7 @@ The "who used this tool, when, and against what" record, minted *before* anythin
 The defensive twin. For each offensive move, a deterministic detection oracle that *proves*, from the target's own access/auth logs, that such an attack happened — shipped as a re-verifiable certificate, not a mere alert. Every oracle ships a mandatory **benign twin** (a false-positive control that must *not* fire). This closes a self-proving loop: one run produces both the offensive fact *and* the matching detection fact.
 
 ### Phase-32 auto-patch — `integration/vigil_integration/autopatch/`
-Takes an oracle-confirmed vulnerability, asks the AI for a minimal code patch, applies it through the gated clone → edit → build → pull-request ladder, and signs "remediated" **only after** the original exploit oracle re-fires against the patched build and goes *silent*. No confirmed fact, no patch; approval timeout auto-rejects; never a blind "commit everything." *(This is the web-finding tier; the deeper binary/memory-safety tier is a future moonshot — see the roadmap.)*
+Takes an oracle-confirmed vulnerability, asks the AI for a minimal code patch, applies it through the gated clone → edit → build → pull-request ladder, and signs "remediated" **only after** the original exploit oracle re-fires against the patched build and goes *silent*. No confirmed fact, no patch; approval timeout auto-rejects; never a blind "commit everything." *(This is the web-finding tier; the deeper binary/memory-safety tier is now **scaffolded** — crash-confirm and fix-by-oracle-silence work; automated patch synthesis stays research-gated — see [`docs/DEFERRED-INFRA.md`](docs/DEFERRED-INFRA.md).)*
 
 ### The offensive engine (CRUCIBLE + AEGIS) — `engine/crucible/`
 The mature prove-don't-guess engine (hundreds of modules). It crawls a web target, attacks each input with real payloads, and only calls something a vulnerability when an oracle fires. It reasons over the proven facts to build attack paths, scores its own confidence, and emits tamper-evident evidence. Driven from the command line via `python3 -m framework.v2 …` with 25+ subcommands (`scan`, `engage`, `verify`, `evidence`, `report`, `intel`, `benchmark`, `console`, and more). It ships safe-by-default (no API key needed for the deterministic parts). Its Claude-operated "senior operator" persona is **OBSIDIAN** (see [`docs/knowledge/constitution-obsidian.md`](docs/knowledge/constitution-obsidian.md)). AEGIS is the same core pointed *inward* as an embeddable AI-attack-detection library for your own app. **Full documentation:** [`engine/crucible/README.md`](engine/crucible/README.md) and [`engine/crucible/HOW-TO-START.md`](engine/crucible/HOW-TO-START.md) — to run it directly against your *own authorized remote* target, use `python3 -m framework.v2 engage …`.
@@ -358,11 +358,16 @@ VIGIL is scrupulous about this (it would be ironic for an anti-hallucination sys
 
 | Status | What |
 |---|---|
-| ✅ **Built & merged (green on `main`)** | The signed core; the egress gate; the two-environment seam; the WARDEN gate; the conjunctive gate; the oracle-confirmation pipeline; challenge oracles; the transparency log; the threshold-destruction gate; the offline-verifiable certificates; the entire F0–F12 agent body. |
-| ✅ **Live end-to-end (on loopback)** | The unified `vigil engage` engine; attestation-first blocking; the real gate (in-scope allowed, out-of-scope hard-denied); no-auto-fire of offensive tools; a real oracle-confirmed SQL-injection fact; the Detection Mirror (7 detection facts); the usage record with its who/when replay; signed spine checkpoints. |
+| ✅ **Built & merged (green on `main`)** | The signed core; the egress gate; the two-environment seam; the WARDEN gate; the conjunctive gate; the oracle-confirmation pipeline; challenge oracles; the transparency log; the threshold-destruction gate; the offline-verifiable certificates; the entire F0–F12 agent body; the unified web UI (cloud/K8s launch, an actionable gated Fixes screen, the deep-learn knowledge engine, one-click dossier download); the embedded file-backed graph store; the moonshot scaffolds. |
+| ✅ **Live end-to-end (on loopback)** | The unified `vigil engage` engine; attestation-first blocking; the real gate (in-scope allowed, out-of-scope hard-denied); no-auto-fire of offensive tools; a real oracle-confirmed SQL-injection fact — including an `error_signature` (error-based SQLi) FACT minted over the loopback app and **re-verified 3/3 offline with no Caido and no Docker** (the first-party executor captured the datastore-error bytes); the Detection Mirror (7 detection facts); the usage record with its who/when replay; signed spine checkpoints. |
 | 🟡 **LEAD-only *by design*** (an honesty choice, not a gap) | Detection planes for which the logs don't exist (command-and-control, identity graph, cloud, session-phishing); any judgment made by another AI; the cognition governors (they re-rank, never decide truth). |
-| ⏳ **Deferred to further owner infrastructure** (logic + wiring built; live service not yet stood up) | A running graph database / telemetry collector; the live-API-key Claude step (replay is used today); live external red-team tools and full real-tool execution; a cryptographic per-action approval token (today's `--approve-offense` is a standing approval); confidential-computing hardware. |
-| 🌙 **Moonshots (blocked on hardware/research)** | A next-generation agent body; an attested confidential-computing sovereign agent; the binary/memory-safety cyber-reasoning auto-patch tier. *(The **web-finding** auto-patch slice **is** built — only the deeper binary tier is deferred.)* |
+| ⏳ **Deferred to further owner infrastructure** (logic + wiring built; the live *external* service not yet stood up) | A running *external* graph database / telemetry collector — **an embedded, file-backed graph store is now built** (`framework/v2/graph/store.py`); only the live external Neo4j/OTLP service is deferred. Live **external** tool execution and a running external red-team service — the loopback live-fire **did** execute real tools and mint + re-verify a real FACT; an *external, network-egress* run is what's outstanding (`targets/testphp/charter.md` provisions it). Still genuinely not built: the live-API-key Claude step (keyless replay is used today) and a cryptographic per-action approval token (today's `--approve-offense` is a standing approval). Confidential-computing hardware stays hardware-gated. |
+| 🌙 **Moonshots — now SCAFFOLDED** (a built interface + a working software fallback/narrow path; the hardware/research frontier honestly stubbed) | The pluggable **agent-body** interface (`agent_body/interface.py`); the **attestation** provider (a software/TPM quote works; the SEV-SNP/TDX stubs raise — hardware-gated); the **binary/memory-safety** auto-patch tier (crash-confirm + fix-by-oracle-silence work; patch synthesis is research-gated). Each is a real, tested contract with a working narrow path — the binary CRS, a real TEE, and a next-generation body still need research/hardware. See [`docs/DEFERRED-INFRA.md`](docs/DEFERRED-INFRA.md). |
+
+> **In final review / landing (not yet on `main`):** a governed **local-only terminal** (`execute_terminal`) whose
+> allowlist cannot egress by construction, tiered A2 → queue → signed record; plus **opt-in** WARDEN-gating of the
+> Strix `exec_command` shell (via `VIGIL_WARDEN_STRIX_GATE` — *gateable*, not gated by default). Reflected here for
+> completeness; treat it as arriving, not shipped, until it merges.
 
 The full, itemized breakdown lives in [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) and [`docs/AS-BUILT.md`](docs/AS-BUILT.md).
 
@@ -504,18 +509,18 @@ offline backend renders an honest empty state, never fake data):
 | Group | Screen | What it does |
 |---|---|---|
 | **DO** | **Home** | Command dashboard: active runs, waiting-for-you, confirmed findings, budget, live feed. |
-| | **New Assessment** | A 5-step wizard → a gated, oracle-confirmed run (codebase / URL / one tool / autonomous suite / AEGIS defense). Requires an authorized-target attestation; a remote target needs a signed charter the UI cannot mint. |
+| | **New Assessment** | A 5-step wizard → a gated, oracle-confirmed run (codebase / URL / one tool / autonomous suite / AEGIS defense / **cloud & K8s posture**). Requires an authorized-target attestation; a remote target needs a signed charter the UI cannot mint. |
 | | **Chat** | Plain-language front door that launches the *same* gated, oracle-confirmed runs. |
 | | **Live** | Real-time run view over the signed reasoning spine (SSE) — the FACT-vs-LEAD reasoning graph, approvals. |
-| | **Findings** | The proven-bug hub: attack graph, offline **evidence browser** (re-verify → sound / tampered / mismatch), coverage, timeline. |
-| | **Fixes** | Remediation + the gated auto-fix ladder (proposes only, queues for approval, never auto-applies). |
+| | **Findings** | The proven-bug hub: attack graph, offline **evidence browser** (re-verify → sound / tampered / mismatch), per-finding **how-to test / verify / patch** (also exported in the report + SARIF/JSON), coverage, timeline, and **one-click dossier download** — the first real client download: a self-contained, tamper-evident `.zip` of the whole run. |
+| | **Fixes** | Remediation + the now-**actionable** gated auto-fix ladder: an **"Apply fix"** button shells `vigil patch` when the run has a signed offense spine (non-destructive — never opens a PR); with no provable spine it shows exactly what's missing rather than misleading you. |
 | | **Defense (AEGIS)** | Put VIGIL in front of an app you run and prove AI attacks in real time. |
 | **MANAGE** | **Sessions** | Permanent, renamable/removable engagement sessions; **connect** a session to share its per-session Neo4j graph as advisory priors. |
 | | **Activity** · **Approvals & Safety** · **API Keys** | Background activity + SIGIL mesh; owner approvals + kill-switch + capability latches; sealed secrets with live "Test" health. |
 | | **Tools** · **Brain** | Host security CLIs (probed live, two-step consented install); memory / benchmark / catalog / intel / planner. |
 | | **Compliance** | Map each oracle-**proven** finding → OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 controls + MITRE ATT&CK (a lead never asserts coverage). |
 | | **Settings** | The reasoning model + provider (secrets live in API Keys). |
-| **LEARN** | **Manual** · **Knowledge Engine** | In-app docs; the auto-updating vuln-intel feed + the propose → **accept → deep-learn (find/detect/prevent)** → self-evolve loop, with the `knowledge/` folder synced to git. |
+| **LEARN** | **Manual** · **Knowledge Engine** | In-app docs; the auto-updating vuln-intel feed with a one-shot **"Pull now"** + the propose → **accept → "Draft skills (deep-learn)" (find/detect/prevent)** → self-evolve loop, with the `knowledge/` folder synced to git. |
 
 ### Feature backends worth calling out
 
@@ -530,9 +535,10 @@ offline backend renders an honest empty state, never fake data):
 - **Proof Studio — deterministic proof generation.** A crypto-grade backend (merged) that turns an agent PoC
   into an oracle-confirmed, signed, replayable, **offline-verifiable** FACT — the mint runs over
   *executor-captured, non-LLM bytes*, screens the generated exploit for dangerous payloads (content gate),
-  binds the raw bytes into the certificate, and re-proves from disk. *(The dedicated Proof Studio screen and
-  the one-command client-verifiable "proof-of-pwn" bundle export are **building** — the crypto core is done;
-  see [`docs/VISION.md`](docs/VISION.md).)*
+  binds the raw bytes into the certificate, and re-proves from disk. The client-verifiable, out-of-band-pinned
+  **proof bundle** and the **one-click dossier** (`vigil dossier` + `GET /api/dossier/<run>.zip`, the first real
+  client download) are now built — each compiles a run into one self-contained, tamper-evident `.zip` that
+  re-verifies offline. *(A dedicated Proof Studio screen is still on the roadmap; see [`docs/VISION.md`](docs/VISION.md).)*
 
 ---
 
@@ -600,10 +606,11 @@ vigil/
 
 ## Status & roadmap
 
-- **Built & merged:** the sovereign core, the four authorities, the full F0–F12 agent body, the transparency log, and offline-verifiable certificates.
-- **Live-validated on the loopback target:** the unified engine, the usage record, the Detection Mirror (edge + auth planes), and the six live connectors.
-- **Deferred to owner infrastructure:** live graph/telemetry services, the live-key Claude step, live real-tool execution, per-action approval tokens.
-- **Moonshots:** a next-generation agent body, confidential-computing attestation, and the binary/memory-safety cyber-reasoning tier.
+- **Built & merged:** the sovereign core, the four authorities, the full F0–F12 agent body, the transparency log, offline-verifiable certificates, the unified web UI (with cloud/K8s launch, an actionable gated Fixes screen, the deep-learn knowledge engine, and one-click dossier download), and an **embedded file-backed graph store**.
+- **Live-validated on the loopback target:** the unified engine, the usage record, the Detection Mirror (edge + auth planes), the six live connectors, and a real `error_signature` SQLi FACT **re-verified 3/3 offline** (no Caido, no Docker).
+- **Deferred to owner infrastructure:** a running *external* graph/telemetry service, live *external* tool execution, the live-key Claude step, and per-action cryptographic approval tokens.
+- **Moonshots (now scaffolded):** a next-generation agent body, confidential-computing attestation, and the binary/memory-safety cyber-reasoning tier — each a built, tested interface with a working software fallback/narrow path; the hardware/research frontier stays honestly stubbed (see [`docs/DEFERRED-INFRA.md`](docs/DEFERRED-INFRA.md)).
+- **In final review / landing (not yet merged):** a governed local-only terminal (`execute_terminal`) plus opt-in WARDEN-gating of the Strix shell (`VIGIL_WARDEN_STRIX_GATE`).
 
 See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized status.
 

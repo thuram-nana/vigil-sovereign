@@ -43,6 +43,15 @@ offense process):
 | **Scope can't be widened by approval** | `_approval_gate` upgrades only WARDEN `queue`, never a CRUCIBLE `deny` | out-of-scope stays denied even with `--approve-offense` |
 | **Signed spine checkpoint (F2b)** | `live.spine_vigilcore.VigilCoreSpine.write_state` | 2 append-only, hash-chained, Ed25519-signed snapshots per run |
 
+### L1 — a real `error_signature` (error-based SQLi) FACT, re-verified 3/3 offline, ZERO external deps
+`framework/v2/verify/oracles.py::error_signature_oracle` (`OracleKind.ERROR_SIGNATURE`). `error_based_sqli`
+routes to this oracle first. Over the loopback vulnapp, the **first-party executor captured the datastore-error
+bytes** (the MySQL "You have an error in your SQL syntax" signature) and the oracle minted a **signed FACT** that
+**re-verified 3/3 offline** — with **no Caido and no Docker** in the loop. This proves the whole error-based
+pipeline end-to-end on a local target with zero external dependency. `targets/testphp/charter.md` provisions the
+**byte-identical external run** against Acunetix's published `testphp.vulnweb.com` — the same oracle path, but it
+needs outbound network egress the authoring sandbox did not have (see §3).
+
 ### The deep-core usage ledger (WS-6) — WHO / WHEN / WHAT, non-repudiable
 `vigil ledger who|when` and `vigil verify-ledger`. The ledger is the signed spine (kind
 `usage_attestation`); it verifies across multiple engagements as one unbroken chain:
@@ -81,7 +90,7 @@ oracle; timeout → REJECT).
 
 ---
 
-## 2. What is LEAD-only (honest, by design)
+## 2. What is LEAD-only (the 🟡 bucket — honest by design, not a gap)
 
 - **Detection telemetry/egress planes** (C2, identity-graph, cloud, session-phish): we do not have the
   DC/CloudTrail/NetFlow logs these need, so they are **LEAD-only / deferred** exactly as the AEGIS doc
@@ -92,22 +101,30 @@ oracle; timeout → REJECT).
 
 ---
 
-## 3. What is DEFERRED to further owner infra (pure logic + wiring built; live sidecar not exercised here)
+## 3. What is DEFERRED to further owner infra (the ⏳ bucket — logic + wiring built; the live *external* piece not stood up)
 
-- **Live Neo4j / OTel collector**: the binders (`live/graph_neo4j.py`, `live/otel_export.py`) are wired
-  and unit-proven; a running Neo4j/OTLP endpoint was not stood up for this validation (the engine
-  degrades these seams to no-op without affecting the run's truth).
-- **Live Claude think-step**: exercised in **replay** (keyless) mode here (no `ANTHROPIC_API_KEY`); the
-  live path (`live/think_claude.think`) builds a real client when a key is present. The provable layer
-  never depends on the model.
-- **Live garak/PyRIT execution** (F8), **live subprocess Kali tools** end-to-end: the executor ran real
-  `nmap`/`httpx` invocations gated + pinned; the deterministic echo runner is used in the CI test so the
-  gate/oracle/spine wiring is validated without requiring the binaries. The gate/oracle/egress checks are
-  byte-identical either way.
-- **Signed per-action operator approval token**: `--approve-offense` encodes the operator's *standing*
-  approval for their own chartered loopback. The cryptographic per-action signed-approval mechanism
-  (the I4 destruction-gate quorum) plugs into the same seam unchanged.
-- **TEE/FROST** (I4): out of scope for this program.
+- **A running *external* graph DB / telemetry collector**: an **embedded, file-backed graph store is now
+  BUILT** — `framework/v2/graph/store.py`'s `EmbeddedGraphStore` projects the spine one-way into
+  nodes/edges (canonical, no wallclock/RNG, no authority surface) and needs no external database. Only the
+  **live external** service is deferred: `Neo4jGraphStore` sits behind the same interface as a `[SCAFFOLD]`
+  (every method raises) and the OTLP exporter (`live/otel_export.py`) still wants a running collector. The
+  engine degrades these seams to no-op without affecting a run's truth.
+- **Live *external* tool execution / a running external red-team service**: the loopback live-fire **did**
+  execute real tools and mint + re-verify a real FACT — L1's `error_signature` FACT was minted over
+  executor-captured datastore-error bytes and re-verified 3/3 offline, **no Caido and no Docker** (§1). What
+  is outstanding is a live **external, network-egress** engagement: real subprocess Kali tools and
+  garak/PyRIT (F8) against an off-box target. `targets/testphp/charter.md` provisions the byte-identical
+  external run against `testphp.vulnweb.com`; it needs outbound egress the authoring sandbox lacked. (In CI
+  the deterministic echo runner validates the gate/oracle/spine wiring without the binaries — byte-identical
+  either way.)
+- **Live-API-key Claude think-step**: genuinely not exercised live — used in **replay** (keyless) mode here
+  (no `ANTHROPIC_API_KEY`). The live path (`live/think_claude.think`) builds a real client when a key is
+  present; the provable layer never depends on the model.
+- **Signed per-action operator approval token**: genuinely not built — `--approve-offense` encodes the
+  operator's *standing* approval for their own chartered loopback. The cryptographic per-action
+  signed-approval mechanism (the I4 destruction-gate quorum) plugs into the same seam unchanged.
+- **TEE / confidential-computing hardware** (I4): hardware-gated — the software/TPM attestation provider is
+  built (§5); SEV-SNP/TDX stay stubbed.
 
 ---
 
@@ -128,3 +145,40 @@ vigil ledger who ; vigil ledger when ; vigil verify-ledger
 CI validates the whole loop: the injected-seam engine tests run in the main integration process
 (`test_engine.py`, 17 tests), and the live validation over the REAL gate + oracle runs in the offense
 process (`test_engine_live.py`, 5 tests, `PYTHONPATH=integration:engine/crucible:gateway`).
+
+---
+
+## 5. Moonshots — now SCAFFOLDED (the 🌙 bucket, upgraded from "blocked")
+
+Each moonshot is no longer merely blocked: it now ships a **built, tested interface plus a working
+software fallback / narrow path**, with only the hardware/research frontier stubbed (the stub raises —
+nothing is overclaimed). The honest per-item activation runbook is
+[`DEFERRED-INFRA.md`](DEFERRED-INFRA.md).
+
+- **Agent body** — `framework/v2/agent_body/interface.py`. `AgentBody` is an interface-only contract
+  (`think → propose → gate → execute → learn`) that structurally enforces gate-before-execute. `[SCAFFOLD —
+  research-gated]`: a next-gen body still needs the research engine (Claude-Agent-SDK port + a live Kali
+  container).
+- **Attestation** — `framework/v2/attest/provider.py`. `SoftwareAttestationProvider` **works today** (an
+  Ed25519/TPM quote proving integrity + origin; `hardware_backed=False` always; a real trust decision still
+  pins the signer out-of-band). `[hardware-gated]`: `SevSnpAttestationProvider` / `TdxAttestationProvider`
+  raise until confidential-computing silicon is present.
+- **Binary / memory-safety auto-patch** — `framework/v2/remediation_binary/tier.py`. `SanitizerSilenceTier`
+  drives the **existing** sanitizer oracle to `confirm_crash` and to earn `remediated_if_silent` (proven by
+  oracle *silence*, never asserted). `[research-gated]`: `synthesize_patch` raises — the generative
+  localise-and-patch CRS (LLM-guided fuzzing + concolic/SMT) is unbuilt.
+
+The binary CRS, a real TEE, and a next-generation body still genuinely need research/hardware — this
+section upgrades the moonshots' status from *blocked* to *scaffolded*, not to *shipped*.
+
+---
+
+## 6. In final review / landing (NOT yet merged — do not treat as shipped)
+
+Reflected here for completeness because it is close, but it is **not on `main`** yet:
+
+- **A governed local-only terminal** (`execute_terminal`): an allowlist that **cannot egress by
+  construction**, tiered A2 → queue → signed record.
+- **Opt-in WARDEN-gating of the Strix `exec_command` shell**: enabled via `VIGIL_WARDEN_STRIX_GATE` — it is
+  **gateable / opt-in**, **not** gated by default. Do not describe it as gated-by-default until it merges
+  and the default flips.
