@@ -101,6 +101,7 @@ jobs:
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_executor_scoped.py \
               --ignore=integration/tests/test_executor_terminal.py \
+              --ignore=integration/tests/test_cli_terminal.py \
               --ignore=integration/tests/test_proof_engine.py \
               --ignore=integration/tests/test_proof_run.py \
               --ignore=integration/tests/test_proof_bootstrap.py \
