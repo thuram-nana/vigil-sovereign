@@ -505,8 +505,16 @@
     { mode: "url", icon: "live", t: "Scan a website / API", d: "Give a URL; VIGIL engages it through the full gate. A 127.0.0.1 target runs a quick loopback scan." },
     { mode: "tool", icon: "bolt", t: "Run one tool", d: "Run a single gated capability pack against a target — the narrow, focused option." },
     { mode: "suite", icon: "brain", t: "Full autonomous suite", d: "The autonomous OODA loop drives the whole arsenal (gated, oracle-adjudicated)." },
+    { mode: "cloud", icon: "live", t: "Cloud / K8s posture", d: "Seedless posture review of a cloud account or Kubernetes cluster (needs a signed charter)." },
     { mode: "aegis", icon: "shield", t: "Defend an app (AEGIS)", d: "Run the defensive dual over your telemetry/logs to detect AI attacks." },
   ];
+  // Seedless cloud/K8s/infra posture sub-modes (map to actions.launch_cloud `mode`); `cloud` also needs a provider.
+  const CLOUD_MODES = [
+    { id: "cloud", label: "Cloud account", d: "Posture over an imported cloud inventory (names a provider)." },
+    { id: "k8s", label: "Kubernetes", d: "kube-bench-style posture over a cluster label." },
+    { id: "infra", label: "Declared service", d: "Posture over a declared-service inventory." },
+  ];
+  const CLOUD_PROVIDERS = ["aws", "gcp", "azure"];
   const ENGAGE_MODES = { url: true, tool: true, suite: true };  // modes that spawn `engage`/`scan`
 
   function renderAssess(screen) {
@@ -514,6 +522,7 @@
       scope: [], scopeInput: "", objective: "", scan_mode: "standard", aiTools: true,
       tools: [], apply_fixes: false, keyless: false, model: "", aegis_action: "detect",
       session_id: "", graph_backed: false, sessions: [],
+      cloud_mode: "cloud", provider: "aws",
       caps: null, kernel: null, launching: false };
     // real capability catalog + backend/LLM status (never hardcoded)
     V.getJSON(OFF("/api/capabilities")).then(function (d) { W.caps = d; draw(); }).catch(function () { W.caps = { capabilities: [], scan_modes: [] }; });
@@ -530,6 +539,8 @@
       if (n === 2) {
         if (W.mode === "codebase") return !!W.target.trim() && W.authorized;
         if (W.mode === "aegis") return !!W.target.trim();
+        if (W.mode === "cloud") return !!W.target.trim() && !!W.slug.trim() && W.authorized
+          && (W.cloud_mode !== "cloud" || !!W.provider);
         return isURL(W.target) && W.authorized;
       }
       if (n === 3) return true;   // scope is optional / validated on launch
@@ -565,6 +576,23 @@
       } else if (W.mode === "aegis") {
         rows.push(field("Telemetry / log file", h("input", { type: "text", value: W.target, placeholder: "/path/to/telemetry-envelope.json",
           onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }), "AEGIS detect runs its defensive oracles over one TelemetryEnvelope/log file."));
+      } else if (W.mode === "cloud") {
+        rows.push(field("Assessment type",
+          h("select", { onChange: function (e) { W.cloud_mode = e.target.value; if (W.cloud_mode !== "cloud") W.provider = ""; else if (!W.provider) W.provider = "aws"; draw(); } },
+            CLOUD_MODES.map(function (m) { return h("option", { value: m.id, selected: m.id === W.cloud_mode }, m.label); })),
+          (CLOUD_MODES.find(function (m) { return m.id === W.cloud_mode; }) || {}).d || ""));
+        if (W.cloud_mode === "cloud") {
+          rows.push(field("Cloud provider",
+            h("select", { onChange: function (e) { W.provider = e.target.value; updateSummary(); refreshFoot(); } },
+              CLOUD_PROVIDERS.map(function (p) { return h("option", { value: p, selected: p === W.provider }, p.toUpperCase()); })),
+            "Named on the task for operator context; the sensor reads your imported inventory, never the live account."));
+        }
+        rows.push(field("Cloud target label", h("input", { type: "text", value: W.target, placeholder: "prod-account-1234   or   cluster: staging-eks",
+          onInput: function (e) { W.target = e.target.value; updateSummary(); refreshFoot(); } }),
+          "An account id / subscription / project / cluster label — NOT a URL, CIDR, or path. Posture is seedless (no traffic to the account)."));
+        rows.push(field("Engagement slug", h("input#wiz-slug", { type: "text", value: W.slug, placeholder: "cloud-prod",
+          onInput: function (e) { W.slug = e.target.value; updateSummary(); refreshFoot(); } }),
+          "Names the charter + reasoning spine. A cloud/K8s posture needs a SIGNED charter under this slug (the console cannot mint it)."));
       } else {
         rows.push(field("Target URL", h("input", { type: "url", value: W.target, placeholder: "https://app.example.com/",
           onInput: function (e) { W.target = e.target.value; if (!W.slug) W.slug = slugify(hostOf(e.target.value), ""); updateSummary(); syncSlug(); refreshFoot(); } }),
@@ -591,11 +619,16 @@
     function syncSlug() { const el = V.$("#wiz-slug"); if (el) el.value = W.slug; }
     function stepScope() {
       if (!isEngage()) {
+        const helper = W.mode === "codebase"
+          ? "A codebase scan reads source only — it sends no traffic, so there is no network scope to set."
+          : W.mode === "cloud"
+            ? "A cloud/K8s posture is seedless — it reads your imported inventory, so there is no network scope to set. Its authority is the signed charter for the slug."
+            : "AEGIS reads your telemetry defensively — there is no offensive scope to set.";
+        const legend = W.mode === "cloud"
+          ? [V.icon("key"), "Needs a SIGNED charter under slug " + (W.slug.trim() ? "\"" + W.slug.trim() + "\"" : "(set one)") + " — the console cannot mint it."]
+          : [V.icon("info"), "Nothing to configure here for this mode."];
         return h("div.wizbody", null, [h("h2", null, "Scope"),
-          h("p.helper", null, W.mode === "codebase"
-            ? "A codebase scan reads source only — it sends no traffic, so there is no network scope to set."
-            : "AEGIS reads your telemetry defensively — there is no offensive scope to set."),
-          h("div.legend", null, [V.icon("info"), "Nothing to configure here for this mode."])]);
+          h("p.helper", null, helper), h("div.legend", null, legend)]);
       }
       if (isLoopback()) {
         return h("div.wizbody", null, [h("h2", null, "Scope"),
@@ -665,11 +698,14 @@
         body.push(checkbox("Apply fixes after discovery", W.apply_fixes, function (v) { W.apply_fixes = v; },
           "Fixes are PROPOSED and queue for your approval — they never auto-apply."));
       } else {
-        body.push(h("div.legend", null, [V.icon("info"),
-          W.mode === "codebase" ? "Strix chooses its own analysis passes over the source."
-            : "AEGIS runs its full defensive oracle set over the telemetry."]));
-        body.push(checkbox("Apply fixes after discovery", W.apply_fixes, function (v) { W.apply_fixes = v; },
-          "Fixes are PROPOSED and queue for your approval — they never auto-apply."));
+        const legendTxt = W.mode === "codebase" ? "Strix chooses its own analysis passes over the source."
+          : W.mode === "cloud" ? "The posture sensor runs its full deterministic check set over your imported inventory."
+            : "AEGIS runs its full defensive oracle set over the telemetry.";
+        body.push(h("div.legend", null, [V.icon("info"), legendTxt]));
+        if (W.mode !== "cloud") {
+          body.push(checkbox("Apply fixes after discovery", W.apply_fixes, function (v) { W.apply_fixes = v; },
+            "Fixes are PROPOSED and queue for your approval — they never auto-apply."));
+        }
       }
       return h("div.wizbody", null, [h("h2", null, "How should it run?"),
         h("p.helper", null, "Choose depth and which capabilities run."), h("div", null, body)]);
@@ -722,12 +758,20 @@
       const put = function (k, v) { rows.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, v)])); };
       const tt = TARGET_TYPES.find(function (x) { return x.mode === W.mode; });
       put("Assessment", tt ? tt.t : "—");
-      put("Target", W.target || "—");
-      if (isEngage()) put("Scope", isLoopback() ? "127.0.0.1 (loopback)" : (W.scope.length ? W.scope.join(", ") : "(host only)"));
-      if (isEngage()) put("Slug", W.slug || slugify(hostOf(W.target), "engagement"));
-      if (isEngage()) put("Depth", W.scan_mode);
-      if (isEngage()) put("Tools", W.mode === "tool" ? (W.tools[0] || "—") : (W.aiTools ? "AI chooses" : (W.tools.join(", ") || "none")));
-      put("Fixes", W.apply_fixes ? "propose (queue for approval)" : "off");
+      if (W.mode === "cloud") {
+        const cm = CLOUD_MODES.find(function (m) { return m.id === W.cloud_mode; });
+        put("Type", cm ? cm.label : (W.cloud_mode || "—"));
+        if (W.cloud_mode === "cloud") put("Provider", (W.provider || "—").toUpperCase());
+        put("Cloud target", W.target || "—");
+        put("Slug", W.slug || "—");
+      } else {
+        put("Target", W.target || "—");
+        if (isEngage()) put("Scope", isLoopback() ? "127.0.0.1 (loopback)" : (W.scope.length ? W.scope.join(", ") : "(host only)"));
+        if (isEngage()) put("Slug", W.slug || slugify(hostOf(W.target), "engagement"));
+        if (isEngage()) put("Depth", W.scan_mode);
+        if (isEngage()) put("Tools", W.mode === "tool" ? (W.tools[0] || "—") : (W.aiTools ? "AI chooses" : (W.tools.join(", ") || "none")));
+        put("Fixes", W.apply_fixes ? "propose (queue for approval)" : "off");
+      }
       put("Model", W.keyless ? "keyless" : "environment / Settings");
       return V.card("What will happen", "SUMMARY", h("div", null, [
         h("div.stack", { style: { gap: "8px" } }, rows),
@@ -758,6 +802,19 @@
     function launch() {
       if (!canLaunch()) return;
       set({ launching: true });
+      // Seedless cloud/K8s/infra posture → its own gated action (needs a signed charter; no seed/scope).
+      if (W.mode === "cloud") {
+        const cbody = { slug: W.slug.trim(), mode: W.cloud_mode, target: W.target.trim(),
+          provider: W.cloud_mode === "cloud" ? W.provider : "" };
+        V.postJSON(OFF("/api/launch/cloud"), cbody).then(function (r) {
+          if (r && r.error) { W.launching = false; V.toast(r.error, true); refreshFoot(); return; }
+          V.toast("Cloud posture launched — watching it live.");
+          location.hash = "#/live?run=" + encodeURIComponent(r.run_id);
+        }).catch(function (e) {
+          W.launching = false; V.toast((e && e.message) || "Launch failed", true); refreshFoot();
+        });
+        return;
+      }
       const body = {
         mode: W.mode, target: W.target.trim(), slug: W.slug.trim(), scope: W.scope,
         objective: W.objective.trim(), scan_mode: W.scan_mode,
