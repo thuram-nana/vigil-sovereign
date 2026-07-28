@@ -3812,13 +3812,40 @@
           PRF.runs.map(function (r) {
             return h("option", { value: r.run_id, selected: r.run_id === PRF.run }, (r.slug || r.run_id));
           })))]);
-    var summary = h("div.card", null, [h("div.card-h", null, [h("h3", null, "Proofs")]),
+    var canExport = !!PRF.run && (d.facts || 0) > 0;
+    var exportBtn = h("button.btn.sm", {
+      title: canExport ? "Assemble a client-verifiable proof bundle (offline, zero-trust re-verify)"
+        : "Export needs at least one oracle-confirmed FACT",
+      disabled: !canExport || PRF.exporting,
+      onClick: function () {
+        PRF.exporting = true; drawProof(body);
+        V.postJSON(OFF("/api/proof/export"), { run: PRF.run }).then(function (r) {
+          PRF.exporting = false; PRF.exported = r;
+          if (r && r.ok) V.toast("Proof bundle written to " + r.bundle);
+          else V.toast((r && r.error) || "export failed", true);
+          drawProof(body);
+        }).catch(function () { PRF.exporting = false; V.toast("export failed", true); drawProof(body); });
+      } }, PRF.exporting ? "Exporting…" : "Export verifiable bundle");
+    var exported = PRF.exported && PRF.exported.ok ? h("div", { style: { marginTop: "8px" } }, [
+      h("div.kv", null, [h("div.k", null, "Bundle"), h("div.v", null, h("code", null, String(PRF.exported.bundle)))]),
+      (PRF.exported.trust_root_fingerprint ? h("div.kv", null, [
+        h("div.k", null, "Trust-root fingerprint"),
+        h("div.v", null, [h("code", null, String(PRF.exported.trust_root_fingerprint)),
+          h("div.hint", null, "PUBLISH this out-of-band — the client pins it so a bundle re-signed under "
+            + "another key is refused.")])]) : null),
+      h("div.kv", null, [h("div.k", null, "Verify offline"),
+        h("div.v", null, h("code", { style: { fontSize: "11px", whiteSpace: "pre-wrap" } },
+          String(PRF.exported.verify_cmd || "")))]),
+      h("div.hint", null, String(PRF.exported.note || ""))]) : null;
+    var summary = h("div.card", null, [h("div.card-h", null, [h("h3", null, "Proofs"),
+      h("span", { style: { marginLeft: "auto" } }, exportBtn)]),
       h("div.kv", null, [
         h("div.k", null, "Disposition"),
         h("div.v", null, [
           h("span.pill.sm", null, (d.facts || 0) + " FACT"),
           h("span.pill.sm", null, (d.leads || 0) + " lead"),
-          h("span.pill.sm.warn", null, (d.denied || 0) + " denied")])])]);
+          h("span.pill.sm.warn", null, (d.denied || 0) + " denied")])]),
+      exported]);
     var rows = (d.proofs || []).map(function (p) {
       var st = p.status === "fact"
         ? h("span.st.st-confirmed", null, [h("span.dot"), "FACT — oracle re-fired over captured bytes"])

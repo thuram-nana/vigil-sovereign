@@ -731,6 +731,46 @@ def knowledge_gitsync(action: str) -> dict:
             **(parsed if isinstance(parsed, dict) else {})}
 
 
+def proof_export(run_id: str) -> dict:
+    """Proof Studio (C1): assemble a CLIENT-VERIFIABLE proof bundle from a run's oracle-confirmed FACTs, so a
+    third party can re-verify it OFFLINE with zero trust in VIGIL. Shells the exec-only ``vigil proof-export``
+    (never imports the integration package), passing the RESOLVED run dir (the integration process can't
+    locate the console's ``.console/runs/<id>`` across the two-env boundary) + the run's slug. Fail-closed on
+    an unresolvable bin / bad run id (``run_dir`` raises ValueError on traversal → do_POST maps it to 404)."""
+    rd = run_dir(run_id)                       # traversal-guarded; raises ValueError on a bad id
+    try:
+        slug = json.loads((rd / "meta.json").read_text(encoding="utf-8")).get("slug") or ""
+    except (OSError, ValueError, AttributeError):
+        slug = ""
+    slug = "".join(c for c in str(slug).strip() if c.isalnum() or c in "-_.")[:120] or "engagement"
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    out = str(rd / "proof-bundle")
+    try:
+        proc = subprocess.run([vigil, "proof-export", "--run-dir", str(rd), "--out", out, "--slug", slug],
+                              capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or proc.stdout or "export failed").strip()[:800]}
+    try:
+        fingerprint = (Path(out) / "TRUST-ROOT-FINGERPRINT.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        fingerprint = ""
+    return {"ok": True, "bundle": out, "output": (proc.stdout or "")[:2000],
+            "trust_root_fingerprint": fingerprint,
+            "verify_cmd": ("cd <bundle> && python -m framework.v2 evidence verify --report reverifiable.json "
+                           "--bundle . --trust-root trust-root.json --evidence-root evidence "
+                           "--trust-root-fingerprint " + (fingerprint or "<published-fingerprint>")),
+            "note": "A third party re-verifies this bundle OFFLINE — no target, no network. They don't trust "
+                    "VIGIL's word: they re-run the deterministic check themselves. Trust reduces to two "
+                    "auditable things — the operator's governance PUBLIC key (identified by the fingerprint "
+                    "above, which you PUBLISH OUT-OF-BAND so the client pins it) and the open-source verifier. "
+                    "One flipped byte fails it closed; an unpinned in-bundle root proves consistency + "
+                    "reproduction but NOT authenticity."}
+
+
 def provision_loopback_authority(slug: str) -> dict:
     """Charter/attestation UI: mint + sign a CRUCIBLE authority for a LOOPBACK engagement slug, scope
     HARD-FIXED to ``127.0.0.1``. The UI can provision a *loopback* charter, but — per the constitution — a
