@@ -493,6 +493,52 @@ def _cmd_proof_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dossier(args: argparse.Namespace) -> int:
+    """`vigil dossier` — compile EVERYTHING a run produced into ONE self-contained, tamper-evident ``.zip``
+    the operator can hand to anyone: the three human reports, the JSON/SARIF exports, the offline-verifiable
+    proof bundle, the secret-scrubbed engagement log, the governance-signed spine chain, any drift record, and
+    a readable ``index.html`` — plus a ``MANIFEST.json`` of sha256s and (when a governance signer is
+    resolvable) an m-of-n signature over the manifest + a ``TRUST-ROOT-FINGERPRINT.txt``. Offense-side
+    (``report.dossier`` reuses the report renderers + lazy-imports the proof bundle); deterministic and
+    path-safe (every entry confined, symlinks never followed)."""
+    import os
+
+    from framework.v2.report.dossier import build_dossier
+
+    run_dir = args.run_dir or os.environ.get("VIGIL_PROOF_RUN_DIR") or ""
+    if not run_dir:
+        print("dossier: no run dir — pass --run-dir <abs> or set VIGIL_PROOF_RUN_DIR", file=sys.stderr)
+        return 1
+    if not Path(run_dir).is_dir():
+        print(f"dossier: run dir not found: {run_dir}", file=sys.stderr)
+        return 1
+    out = args.out or str(Path(run_dir) / "dossier.zip")
+    res = build_dossier(run_dir=run_dir, out_zip=out, engagement_slug=(args.slug or "engagement"),
+                        base_dir=(args.base_dir or None), generated_at=(args.timestamp or None))
+    if not res.get("ok"):
+        print(f"dossier: {res.get('error', 'build failed')}", file=sys.stderr)
+        return 1
+    leads = res.get("leads")
+    print("=== vigil dossier (one-click, tamper-evident run archive) ===")
+    print(f"dossier:      {res['dossier']}")
+    print(f"entries:      {res['entries']}  (facts={res['facts']}"
+          + (f", leads={leads}" if leads is not None else "") + ")")
+    print(f"integrity:    MANIFEST.json sha256={res['manifest_sha256']}")
+    if res.get("signed"):
+        print(f"authenticity: SIGNED — trust-root fingerprint {res.get('trust_root_fingerprint', '')}")
+        print("  PUBLISH this fingerprint OUT-OF-BAND so the dossier's authenticity is pinnable.")
+    else:
+        print("authenticity: UNSIGNED — integrity-checkable (hashes) but no governance signature "
+              "(no signer resolvable).")
+    if res.get("proof_bundle"):
+        print(f"verify facts: cd <unzipped>/proof-bundle && {res.get('verify_cmd', '')}")
+    else:
+        print("verify facts: (no offline proof bundle — this run produced no oracle-confirmed FACT)")
+    for note in res.get("notes", []):
+        print(f"  note: {note}")
+    return 0
+
+
 def _cmd_up(args: argparse.Namespace) -> int:
     """`vigil up` — bring the WHOLE unified UI up at ONE origin and federate the two trust planes
     behind a self-contained reverse proxy. EXEC-ONLY: it spawns the three backends (sigil cockpit,
@@ -755,6 +801,18 @@ def build_parser() -> argparse.ArgumentParser:
     ppe.add_argument("--slug", default="engagement", help="engagement slug stamped into the certificates")
     ppe.add_argument("--base-dir", default="", help="governance-key home (stable signer); default = run dir")
     ppe.set_defaults(func=_cmd_proof_export)
+
+    pdo = sub.add_parser("dossier",
+                         help="compile EVERYTHING a run produced into ONE self-contained, tamper-evident "
+                              ".zip (reports + exports + offline proof bundle + scrubbed log + index.html)")
+    pdo.add_argument("--run-dir", default="", help="the run dir to compile (else $VIGIL_PROOF_RUN_DIR)")
+    pdo.add_argument("--out", default="", help="output .zip path (default <run-dir>/dossier.zip)")
+    pdo.add_argument("--slug", default="engagement", help="engagement slug stamped into the dossier")
+    pdo.add_argument("--base-dir", default="", help="governance-key home (stable signer); default = run dir")
+    pdo.add_argument("--timestamp", default="",
+                     help="OPTIONAL generation timestamp stamped into index.html/README (the only non-"
+                          "deterministic input; omit for a byte-reproducible dossier)")
+    pdo.set_defaults(func=_cmd_dossier)
 
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")

@@ -103,16 +103,25 @@ def is_secret_key(key: str) -> bool:
     return k.endswith(_SECRET_SUFFIXES)
 
 
+def _scrub_value(v: Any) -> Any:
+    """Recurse a value: a nested dict is scrubbed by key; a LIST is scrubbed element-wise (a credential
+    under a secret key inside a list-of-dicts — a realistic structlog header capture — would otherwise slip
+    through, since the old scrubber recursed into dicts but not lists). Any other value passes through."""
+    if isinstance(v, dict):
+        return scrub_log_event(v)
+    if isinstance(v, list):
+        return [_scrub_value(x) for x in v]
+    return v
+
+
 def scrub_log_event(event: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of a structlog event dict with every secret-keyed field's
-    value replaced by the placeholder (recursing into nested dicts). Deterministic
-    and total: an unrecognised value is passed through unchanged."""
+    """Return a copy of a structlog event dict with every secret-keyed field's value replaced by the
+    placeholder, recursing into nested dicts AND lists. Deterministic and total: an unrecognised value is
+    passed through unchanged."""
     out: dict[str, Any] = {}
     for k, v in event.items():
         if isinstance(k, str) and is_secret_key(k):
             out[k] = MASK
-        elif isinstance(v, dict):
-            out[k] = scrub_log_event(v)
         else:
-            out[k] = v
+            out[k] = _scrub_value(v)
     return out
