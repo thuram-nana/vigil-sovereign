@@ -639,6 +639,19 @@ def test_retrieve_priors_extra_partitions_unions_with_origin_tags():
     assert origins.get("A-1") == "sess-A" and origins.get("B-1") == "sess-B"
 
 
+def test_retrieve_priors_never_evicts_own_partition_under_a_large_union():
+    # regression for the F4 fix-introduced eviction: even when the unioned partitions exceed the cap AND
+    # the session's own id sorts lexicographically LAST, its own partition is PINNED and read.
+    store = _Store()
+    Neo4jGraphWriter(_factory(store), group_id="zzz-own").rebuild_from_spine([_confirmed(1, "OWN-1")])
+    extra = [f"p{i:02d}" for i in range(40)]                            # all sort before "zzz-own"
+    for i, part in enumerate(extra):
+        Neo4jGraphWriter(_factory(store), group_id=part).rebuild_from_spine([_confirmed(100 + i, f"E-{i}")])
+    priors = Neo4jGraphWriter(_factory(store), group_id="zzz-own").retrieve_priors(
+        limit=100, extra_partitions=extra)
+    assert any(p["ref"] == "OWN-1" and p["origin"] == "zzz-own" for p in priors)   # own priors retained
+
+
 def test_retrieve_priors_is_bounded_and_total():
     store = _Store()
     recs = [_confirmed(i, f"F-{i}") for i in range(1, 20)]

@@ -258,6 +258,69 @@ def link_run(session_id: str, run_id: str, *, slug: str = "") -> dict:
         return {"ok": True, "session": _public(rec)}
 
 
+_MAX_CONNECTIONS = 32
+
+
+def connect_session(session_id: str, other_id: str) -> dict:
+    """F4: CONNECT session A → B so A's runs may draw on B's knowledge as PRIORS. The connection is
+    DIRECTIONAL (A reads B; B does not read A unless separately connected) and the POST that calls this
+    IS the operator's consent. It stores only B's id in A's ``connections`` set — a read-time scope, NOT a
+    graph merge: nothing of B is copied into A, so ``disconnect`` re-isolates A instantly. Bounded; a
+    session cannot connect to itself; both ids are path-safe. Never mints a fact; never widens scope."""
+    a = _safe_session_id(session_id)
+    b = _safe_session_id(other_id)
+    if a == b:
+        return {"error": "a session cannot connect to itself"}
+    with _LOCK:
+        rec = _read(a)
+        if rec is None:
+            return {"error": f"no such session {a!r}"}
+        if _read(b) is None and _legacy_chat_entry(b) is None:
+            return {"error": f"no such session {b!r} to connect to"}
+        conns = list(rec.get("connections", []) or [])
+        if b in conns:
+            return {"ok": True, "session": _public(rec)}          # idempotent
+        if len(conns) >= _MAX_CONNECTIONS:
+            return {"error": f"too many connections (max {_MAX_CONNECTIONS})"}
+        conns.append(b)
+        rec["connections"] = conns
+        rec["updated_seq"] = _next_seq()
+        rec["updated_ts"] = time.time()
+        _write(rec)
+        return {"ok": True, "session": _public(rec)}
+
+
+def disconnect_session(session_id: str, other_id: str) -> dict:
+    """F4: DISCONNECT A → B. Because the connection is only a read-time scope entry (B was never copied
+    into A), removing it re-isolates A on its NEXT retrieval — no residue. Idempotent."""
+    a = _safe_session_id(session_id)
+    b = _safe_session_id(other_id)
+    with _LOCK:
+        rec = _read(a)
+        if rec is None:
+            return {"error": f"no such session {a!r}"}
+        conns = [c for c in (rec.get("connections", []) or []) if c != b]
+        rec["connections"] = conns
+        rec["updated_seq"] = _next_seq()
+        rec["updated_ts"] = time.time()
+        _write(rec)
+        return {"ok": True, "session": _public(rec)}
+
+
+def connections_of(session_id: str) -> list[str]:
+    """A session's CONSENTED connected-session ids — the partitions a live ``vigil engage --session <id>``
+    run of this session may UNION as priors (pass them as ``--connect``). NB: the console launcher
+    (``launch_assessment``) does NOT yet auto-thread these into its spawned run — the console→live-engine
+    bridge is a follow-up; today a connection takes effect only on a live ``vigil engage --connect`` run.
+    Total: [] for an unknown/legacy/unsafe-guarded session."""
+    try:
+        sid = _safe_session_id(session_id)
+    except ValueError:
+        return []
+    rec = _read(sid)
+    return list(rec.get("connections", []) or []) if rec else []
+
+
 def get_session(session_id: str) -> dict:
     """One session for the UI. Returns the registry record, or — for a legacy chat with no registry
     entry — a synthesized (non-persisted) view so old chats still open. Fail-closed: an unsafe id raises

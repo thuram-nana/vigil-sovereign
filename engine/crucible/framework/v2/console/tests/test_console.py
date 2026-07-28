@@ -209,6 +209,17 @@ def test_session_routes_create_list_rename_delete(tmp_path, monkeypatch) -> None
         # it lists (read route, no CSRF needed)
         _, _, lst = _get(base + "/api/sessions")
         assert any(s["id"] == sid for s in json.loads(lst)["sessions"])
+        # F4: connect it to a second session (the POST is the consent), CSRF-guarded like the rest
+        st, body = _post(base + "/api/session/create", headers=same, data=b'{"name":"Audit B"}')
+        sid_b = json.loads(body)["session"]["id"]
+        st, _ = _post(base + "/api/session/connect", csrf=False, data=json.dumps({"id": sid, "other": sid_b}).encode())
+        assert st == 403                                            # cross-site connect refused
+        st, body = _post(base + "/api/session/connect", headers=same,
+                         data=json.dumps({"id": sid, "other": sid_b}).encode())
+        assert st == 200 and json.loads(body)["session"]["connections"] == [sid_b]
+        st, body = _post(base + "/api/session/disconnect", headers=same,
+                         data=json.dumps({"id": sid, "other": sid_b}).encode())
+        assert st == 200 and json.loads(body)["session"]["connections"] == []
         # rename + soft delete
         st, body = _post(base + "/api/session/rename", headers=same,
                          data=json.dumps({"id": sid, "name": "Audit A2"}).encode())

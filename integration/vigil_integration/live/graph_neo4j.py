@@ -74,6 +74,10 @@ from ..tools import redact_tool_args
 SessionFactory = Callable[[], Any]
 ScopeGate = Callable[[str], bool]
 
+# Defensive bound on how many partitions retrieve_priors will union in one read (own + connected). The F4
+# registry already caps operator consents at 32; this backstops the direct-CLI `--connect` path.
+_MAX_PRIOR_PARTITIONS = 33
+
 # =============================================================================================
 # Neo4j label / relationship-type whitelist — the ONLY literals interpolated into a Cypher string.
 # Everything derived from a record is a bound PARAMETER; these come from the fixed enums, so a finding
@@ -617,7 +621,12 @@ class Neo4jGraphWriter:
         eid = str(group_id) if group_id is not None else self.group_id
         extra = [str(p) for p in extra_partitions] if isinstance(
             extra_partitions, (list, tuple, set, frozenset)) else []
-        parts = sorted({eid, *extra})
+        # defensive cap: bound the number of unioned partitions so a hand-typed `--connect a,b,c,…` with
+        # thousands of ids can't make each think step loop unboundedly. The registry already caps consents
+        # at 32; this is belt-and-suspenders for the direct-CLI path. The session's OWN partition (eid) is
+        # PINNED first so the cap can never slice it out (a session always reads its own priors); the
+        # connected ids are sorted (deterministic) and fill the remaining slots.
+        parts = [eid, *sorted(set(extra) - {eid})[:_MAX_PRIOR_PARTITIONS - 1]]
         lim = max(0, int(limit)) if isinstance(limit, int) and not isinstance(limit, bool) else 8
         out: list[dict[str, Any]] = []
         for part in parts:

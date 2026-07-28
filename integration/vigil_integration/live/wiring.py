@@ -171,6 +171,9 @@ class EngineConfig:
     # owns a disjoint graph + its own accumulating prior context); empty falls back to the slug. It is a
     # partition/organisation key only — it grants no authority and never widens scope.
     session_id: str = ""
+    # F4: the operator-CONSENTED connected session ids whose graph partitions this run may UNION as priors
+    # (a read-time scope; each unioned prior stays origin-tagged and non-authoritative). Empty = isolated.
+    connections: Sequence[str] = ()
     base_dir: str = ".vigil-live"
     scope: Sequence[str] = field(default_factory=lambda: ("127.0.0.1",))
     # think backend
@@ -341,7 +344,11 @@ def build_engine(config: EngineConfig) -> VigilEngine:
     def think_seam(state: AgentState) -> Any:
         ctx = _prompt_ctx(state)
         if graph_writer is not None:
-            priors = graph_writer.retrieve_priors(group_id=graph_partition, limit=8)
+            # F4: union the operator-CONSENTED connected sessions' partitions (read-time; each row stays
+            # origin-tagged + non-authoritative). Empty connections = the session reads only its own partition.
+            priors = graph_writer.retrieve_priors(
+                group_id=graph_partition, limit=8,
+                extra_partitions=[str(c).strip() for c in (config.connections or ()) if str(c).strip()])
             if priors:
                 # PRIOR, NOT FACT: these are non-authoritative summaries from this session's partition (an
                 # earlier run's findings, or this run's so far). A prior confirmed in an earlier run must be

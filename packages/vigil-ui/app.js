@@ -3096,14 +3096,48 @@
                   style: linkStyle }, rid);
               }))
           : h("div.dim", { style: { marginTop: "8px" } }, "No runs yet."),
+        (s.connections && s.connections.length)
+          ? h("div", { style: { marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap",
+              alignItems: "center" } },
+              [h("span.dim", null, "draws on:")].concat(s.connections.map(function (cid) {
+                return h("span", { style: linkStyle, title: "Connected — click ✕ to disconnect" }, [
+                  cid + " ",
+                  h("a", { href: "#", title: "Disconnect", style: { textDecoration: "none" },
+                    onClick: function (e) { e.preventDefault(); disconnectSession(s, cid); } }, "✕"),
+                ]);
+              })))
+          : null,
         h("div", { style: { marginTop: "12px", display: "flex", gap: "8px", flexWrap: "wrap" } }, [
           h("button.btn", { onClick: function () { renameSession(s); } }, "Rename"),
+          h("button.btn", { onClick: function () { connectSession(s, rows); } }, "Connect…"),
           h("button.btn", { onClick: function () { deleteSession(s, false); } }, "Delete"),
           h("button.btn.danger", { onClick: function () { deleteSession(s, true); } }, "Delete permanently"),
         ]),
       ]);
       return V.card(s.name || "(unnamed session)", (s.kind || "session").toUpperCase(), body, true);
     })));
+  }
+
+  function connectSession(s, rows) {
+    var others = (rows || []).filter(function (o) { return o.id !== s.id; });
+    if (!others.length) { V.toast("No other sessions to connect to", true); return; }
+    var listing = others.map(function (o) { return o.id + "  (" + (o.name || "") + ")"; }).join("\n");
+    var other = window.prompt("Connect '" + (s.name || s.id) + "' to another session — a live "
+      + "`vigil engage --session " + s.id + " --connect <id>` run can then draw on that session's knowledge "
+      + "as priors (advisory, never facts). Enter the target session id:\n\n" + listing, others[0].id);
+    if (other === null) return;
+    other = other.trim(); if (!other) return;
+    V.postJSON(OFF("/api/session/connect"), { id: s.id, other: other }).then(function (d) {
+      if (d && d.error) { V.toast(d.error, true); return; }
+      V.toast("Connected"); loadSessions();
+    }).catch(function (e) { V.toast(String(e), true); });
+  }
+
+  function disconnectSession(s, other) {
+    V.postJSON(OFF("/api/session/disconnect"), { id: s.id, other: other }).then(function (d) {
+      if (d && d.error) { V.toast(d.error, true); return; }
+      V.toast("Disconnected"); loadSessions();
+    }).catch(function (e) { V.toast(String(e), true); });
   }
 
   function createSession() {
@@ -3144,9 +3178,10 @@
         h("button.btn.primary", { onClick: createSession }, [V.icon("assess"), "New session"]),
       ]),
       h("div.hint", { style: { marginBottom: "10px" } },
-        "Every chat and assessment is a permanent session you can rename, reopen, and remove. Removing from "
-        + "the list is reversible; 'Delete permanently' takes it out of history — your runs and the signed "
-        + "record are always kept."),
+        "Every chat and assessment is a permanent session you can rename, reopen, connect, and remove. "
+        + "Connecting a session lets a live `vigil engage --session … --connect …` run draw on the other "
+        + "session's knowledge as advisory priors (never facts). Removing from the list is reversible; "
+        + "'Delete permanently' takes it out of history — your runs and the signed record are always kept."),
       h("div#sessions-body", null, h("div.empty", null, "Loading…")),
     ]);
     loadSessions();

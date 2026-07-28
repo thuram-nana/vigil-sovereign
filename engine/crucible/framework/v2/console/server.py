@@ -389,6 +389,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(sessions.delete_session(
                     str(body.get("id", "")), hard=(body.get("hard") is True)))
                 return
+            if path == "/api/session/connect":
+                # F4: connect A → B (directional). The POST IS the consent; stores a read-time scope entry,
+                # never a graph merge. CSRF/rebind-gated above; the registry authorizes nothing.
+                self._json(sessions.connect_session(str(body.get("id", "")), str(body.get("other", ""))))
+                return
+            if path == "/api/session/disconnect":
+                self._json(sessions.disconnect_session(str(body.get("id", "")), str(body.get("other", ""))))
+                return
             if path == "/api/chat/send":
                 # the operator chatbot turn — a natural-language front door to the SAME gated launcher.
                 # CSRF/rebind-gated above; launches only via actions.launch_assessment (scope/charter/gate

@@ -95,6 +95,69 @@ def test_unknown_kind_refused():
     assert sessions.create_session(name="x", kind="wizardry").get("error")
 
 
+# ---- F4: session connect / disconnect (directional, consented, read-time) ---
+
+def test_connect_is_directional_and_disconnect_re_isolates():
+    a = sessions.create_session(name="A")["session"]["id"]
+    b = sessions.create_session(name="B")["session"]["id"]
+    r = sessions.connect_session(a, b)
+    assert r["ok"] and r["session"]["connections"] == [b]
+    assert sessions.connections_of(a) == [b]
+    assert sessions.connections_of(b) == []            # DIRECTIONAL: B does not read A
+    # disconnect re-isolates instantly (it was only a read-time scope entry — nothing of B was copied in)
+    d = sessions.disconnect_session(a, b)
+    assert d["ok"] and d["session"]["connections"] == []
+    assert sessions.connections_of(a) == []
+
+
+def test_connect_refuses_self_unknown_and_caps():
+    a = sessions.create_session(name="A")["session"]["id"]
+    assert sessions.connect_session(a, a).get("error")             # no self-connect
+    assert sessions.connect_session(a, "nonexistent-xyz").get("error")   # unknown target
+    # idempotent (a repeat connect does not duplicate)
+    b = sessions.create_session(name="B")["session"]["id"]
+    sessions.connect_session(a, b)
+    assert sessions.connect_session(a, b)["session"]["connections"] == [b]
+    # bounded
+    for i in range(sessions._MAX_CONNECTIONS + 5):
+        sessions.connect_session(a, sessions.create_session(name=f"C{i}")["session"]["id"])
+    assert len(sessions.connections_of(a)) <= sessions._MAX_CONNECTIONS
+
+
+def test_concurrent_connects_do_not_lose_updates():
+    # F4 mutators run under the F2 _LOCK; concurrent connects to the SAME session must all persist.
+    a = sessions.create_session(name="A")["session"]["id"]
+    targets = [sessions.create_session(name=f"T{i}")["session"]["id"] for i in range(20)]
+    errors: list = []
+    barrier = threading.Barrier(len(targets))
+
+    def _w(t: str) -> None:
+        try:
+            barrier.wait()
+            sessions.connect_session(a, t)
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=_w, args=(t,)) for t in targets]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=20)
+    assert not errors
+    assert set(sessions.connections_of(a)) == set(targets)      # every concurrent connect persisted
+
+
+@pytest.mark.parametrize("bad", ["../etc", "a/b", ".."])
+def test_connect_unsafe_id_raises(bad):
+    a = sessions.create_session(name="A")["session"]["id"]
+    with pytest.raises(ValueError):
+        sessions.connect_session(a, bad)
+    with pytest.raises(ValueError):
+        sessions.connect_session(bad, a)
+    with pytest.raises(ValueError):
+        sessions.disconnect_session(a, bad)
+
+
 # ---- concurrency negative control (the console is a ThreadingHTTPServer) ----
 
 def test_concurrent_creates_are_unique_monotonic_and_lossless():

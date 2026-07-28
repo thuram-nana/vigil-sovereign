@@ -192,14 +192,15 @@ class _RecSession:
         pass
 
 
-def _partitions_touched(tmp_path, monkeypatch, *, session_id: str) -> set:
+def _partitions_touched(tmp_path, monkeypatch, *, session_id: str, connections=()) -> set:
     from vigil_integration.live import graph_driver
     calls: list = []
     # inject a recording Neo4j so build_engine wires a real writer (+ retrieve_priors), no live driver needed.
     monkeypatch.setattr(graph_driver, "build_neo4j_session_factory",
                         lambda *a, **k: (lambda: _RecSession(calls)))
     prov = provision_authority(slug="loopback", scope=["127.0.0.1"])
-    cfg = EngineConfig(slug="loopback", session_id=session_id, base_dir=str(tmp_path / "live"),
+    cfg = EngineConfig(slug="loopback", session_id=session_id, connections=tuple(connections),
+                       base_dir=str(tmp_path / "live"),
                        replay=ReplayThinker([_use_tool(oracle_context=_FIRING_SQLI), _complete()]),
                        provisioned=prov, runner=_echo_runner, max_iterations=6, owner_approves_offense=True)
     build_engine(cfg).engage(LOOPBACK)
@@ -217,6 +218,18 @@ def test_graph_partition_is_the_session_id_when_set(hermetic_root, tmp_path, mon
 def test_graph_partition_falls_back_to_slug_without_a_session(hermetic_root, tmp_path, monkeypatch):
     parts = _partitions_touched(tmp_path, monkeypatch, session_id="")
     assert parts == {"loopback"}                                   # empty session_id → slug partition
+
+
+def test_connected_sessions_union_their_partitions_as_priors(hermetic_root, tmp_path, monkeypatch):
+    # F4: with --connect, the run's prior retrieval UNIONS the consented connected partitions (a read-time
+    # scope) alongside its own — so the recorded reads touch BOTH the session and the connected partition.
+    parts = _partitions_touched(tmp_path, monkeypatch, session_id="sess-A", connections=["sess-B", "sess-C"])
+    assert parts == {"sess-A", "sess-B", "sess-C"}                 # own + consented connections, nothing else
+
+
+def test_no_connections_reads_only_own_partition(hermetic_root, tmp_path, monkeypatch):
+    parts = _partitions_touched(tmp_path, monkeypatch, session_id="sess-A", connections=[])
+    assert parts == {"sess-A"}                                     # isolated by default (no leak)
 
 
 def test_live_without_owner_approval_the_offense_tool_queues(hermetic_root, tmp_path):
