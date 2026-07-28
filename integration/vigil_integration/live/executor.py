@@ -727,21 +727,15 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
 #   * ``argv[0]`` MUST be one of the curated local read/inspect binaries below. Every NETWORK binary
 #     (curl/wget/nc/ssh/scp/…), every INTERPRETER (bash/sh/python/perl/ruby/node/awk/…), and every WRITER
 #     (tee/cp/mv/rm/dd/sed -i/…) is absent from the allowlist and therefore DENIED.
-#   * A FEW allowlisted binaries can nonetheless EXEC a program or WRITE a file through a flag or a trailing
-#     operand — the by-construction argument only holds if those forms are refused too (the same principle
-#     as ``find``'s predicate denylist, generalised). ``_terminal_binary_guard`` closes exactly these:
-#       - ``find``  — the exec/write predicates (``-exec``/``-execdir``/``-ok``/``-okdir``/``-delete``/
-#                     ``-fprint``/``-fprintf``/``-fls``);
-#       - ``env``   — ``env PROG …`` EXECs an arbitrary program → only the bare, argument-free ``env`` (which
-#                     just prints the environment) is permitted;
-#       - ``sort``  — ``--compress-program=PROG`` EXECs, and ``-o``/``--output`` WRITEs a file → refused
-#                     (multi-input ``sort a b c`` to stdout stays allowed);
-#       - ``uniq``  — a SECOND file operand is an OUTPUT file WRITE → refused (numeric flag values ``-f N``
-#                     are not miscounted as operands);
-#       - ``date``  — ``-s``/``--set`` WRITEs the system clock → refused;
-#       - ``file``  — ``-C``/``--compile`` WRITEs a compiled ``.mgc`` magic database → refused;
-#       - ``hostname`` — a NAME operand (or ``-F``/``-b``) SETS the system hostname → only bare ``hostname``
-#                     (which prints it) is permitted; use ``uname -n`` for the node name with flags.
+#   * The few binaries that COULD exec/write are handled by ALLOWLIST, not a spelling denylist — a red-pen
+#     proved a denylist cannot be complete (GNU getopt_long accepts unambiguous prefix ABBREVIATIONS like
+#     `sort --compress=`/`--out=`, and coreutils have positional aliases like `date MMDDhhmm`). So:
+#       - ``sort``/``uniq``/``file``/``env`` — genuinely exec/write-capable; simply NOT on the allowlist.
+#       - ``find``  — every ``-``-leading token must be on the read-only predicate allowlist
+#                     (``_FIND_SAFE_PREDICATES``); the exec/write predicates (-exec/-execdir/-delete/-fprint*/
+#                     -fls/-ok*/…) are refused by OMISSION (no missed spelling can slip through). Non-``-``
+#                     tokens are paths/patterns/values — reads, never a program to run.
+#       - ``date``/``hostname`` — admitted ONLY bare (they print); a flag/operand could set the clock/host.
 #     So no allowlisted binary — under any accepted argv — can open a socket, spawn an interpreter, or
 #     mutate a file/the host: egress and host-write are both impossible by construction.
 #   * ``terminal.run`` classifies A2 under the ONE shared WARDEN classifier (no A3 danger token, not in the
@@ -751,22 +745,40 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
 #     ``ExecRecord`` — reusing the exact machinery ``execute`` uses. Total: any failure is a DENY, never a
 #     raise.
 
-# The curated LOCAL read/inspect allowlist (task-pinned). LOCAL, non-network, non-interpreter, non-writer.
+# The curated LOCAL read/inspect allowlist. Only binaries that can NEITHER exec, write a file, NOR egress
+# under ANY argv are admitted, so "no egress / no host-write by construction" is TRUE, not merely guarded.
+# A red-pen refuted an earlier spelling-DENYLIST guard: GNU getopt_long accepts any unambiguous prefix
+# ABBREVIATION (`sort --compress=` ≡ `--compress-program`, `sort --out=` ≡ `--output`) and coreutils have
+# positional aliases (`date MMDDhhmm` sets the clock, a 2nd `uniq` operand is an output file) — a denylist of
+# spellings can never be complete. So the exec/write-capable binaries (sort/uniq/file/env) are DROPPED; the
+# only capable binary kept is `find`, admitted via a read-only PREDICATE ALLOWLIST (below) that rejects the
+# exec/write predicates by OMISSION (immune to any missed spelling); and the two host-state PRINTERS
+# (date/hostname) are admitted BARE only (a flag/operand could set the clock/hostname).
 _TERMINAL_ALLOWLIST: frozenset = frozenset({
-    "ls", "cat", "head", "tail", "wc", "stat", "file", "pwd", "whoami", "id", "uname",
-    "env", "hostname", "date", "df", "du", "ps", "uptime", "echo", "grep", "sort",
-    "uniq", "cut", "tr", "find",
+    # pure read/print — safe under ANY argv (no exec/write/egress option or operand exists):
+    "ls", "cat", "head", "tail", "wc", "stat", "pwd", "whoami", "id", "uname", "echo",
+    "df", "du", "ps", "uptime", "grep", "cut", "tr",
+    "find",                                  # walk — SAFE-PREDICATE allowlist (_FIND_SAFE_PREDICATES)
+    "date", "hostname",                      # print-only, admitted BARE (see _TERMINAL_BARE_ONLY)
 })
 
-# ``find`` predicates that EXECUTE a program or WRITE a file — rejected even though ``find`` is allowlisted
-# (they would turn a read-only walk into arbitrary exec/write, defeating the by-construction argument).
-_TERMINAL_DENY_FLAGS: frozenset = frozenset({
-    "-exec", "-execdir", "-delete", "-fprint", "-fprintf", "-fls", "-ok", "-okdir",
-})
+# date / hostname: admitted ONLY bare — a flag/operand can SET the system clock/hostname (a host write).
+_TERMINAL_BARE_ONLY: frozenset = frozenset({"date", "hostname"})
 
-# ``uniq`` short flags that take a SEPARATE numeric value (``-f 2``) — so the value is not miscounted as the
-# output-file operand when we refuse a 2nd operand. (Attached forms ``-f2`` need no special handling.)
-_UNIQ_VALUE_FLAGS: frozenset = frozenset({"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"})
+# ``find``: an ALLOWLIST of read-only predicates/operators. Any ``-``-leading token NOT in this set is
+# refused — so every exec/write predicate (-exec/-execdir/-ok/-okdir/-delete/-fprint/-fprint0/-fprintf/-fls)
+# is rejected by OMISSION (a denylist once missed -fprint0; an allowlist cannot miss one). -print/-printf/-ls
+# write to STDOUT only (safe); the file-writing -f* variants are simply absent. A non-``-`` token is a
+# path/pattern/numeric value (a read), never a program to run.
+_FIND_SAFE_PREDICATES: frozenset = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname", "-regex", "-iregex",
+    "-type", "-xtype", "-maxdepth", "-mindepth", "-depth", "-size", "-empty", "-perm", "-links", "-inum",
+    "-newer", "-newermt", "-anewer", "-cnewer", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin",
+    "-user", "-group", "-uid", "-gid", "-nouser", "-nogroup", "-readable", "-writable", "-executable",
+    "-print", "-print0", "-printf", "-ls", "-true", "-false", "-prune", "-quit",
+    "-o", "-a", "-and", "-or", "-not", "-regextype", "-follow", "-mount", "-xdev", "-noleaf",
+    "-ignore_readdir_race", "-noignore_readdir_race", "(", ")", "!",
+})
 
 # Shell metacharacters (+ NUL + backslash): the WHOLE command is refused if any appears. No shell is ever
 # invoked, but this makes "argv is a literal whitespace-split of a benign command" an auditable property —
@@ -824,61 +836,24 @@ def _parse_terminal_command(command: Any) -> tuple[Optional[list], str]:
 
 
 def _terminal_binary_guard(binary: str, argv: list) -> Optional[str]:
-    """Refuse the FEW allowlisted binaries' exec/write forms (``find`` predicates, ``env PROG``, ``sort``
-    ``-o``/``--compress-program``, ``uniq`` output operand, ``date -s``). Returns a refusal reason or None.
-    This is what makes the by-construction "no egress / no host-write" guarantee actually hold across the
-    whole allowlist — the pure-read tools (ls/cat/grep/…) need no guard and fall through to None."""
+    """Second-stage refusal for the two capable classes still on the allowlist. Returns a refusal reason or
+    None. This is ALLOWLIST-based (not a spelling denylist), so it is immune to the getopt_long
+    prefix-abbreviation / positional-alias bypasses a red-pen used against the old guard:
+      * ``date``/``hostname`` — admitted ONLY bare (any flag/operand could set the clock/hostname);
+      * ``find`` — every ``-``-leading token must be on the READ-ONLY predicate allowlist, so the exec/write
+        predicates are refused by OMISSION (no missed spelling can slip through).
+    The pure-read tools (ls/cat/grep/…) can neither exec nor write under any argv and fall through to None."""
     rest = argv[1:]
+    if binary in _TERMINAL_BARE_ONLY and rest:
+        what = "clock" if binary == "date" else "hostname"
+        return (f"{binary!r} is admitted only with NO arguments — a bare `{binary}` prints, but a flag/operand "
+                f"could set the system {what} (a host write). Refused (fail-closed).")
     if binary == "find":
         for tok in rest:
-            if tok in _TERMINAL_DENY_FLAGS:
-                return f"find predicate {tok!r} can execute or write — refused (fail-closed)"
-        return None
-    if binary == "env":
-        # ``env PROG ARGS`` (or ``env NAME=VAL PROG``) EXECs an arbitrary program → allow ONLY bare ``env``.
-        if rest:
-            return "env with operands can execute an arbitrary program — only bare `env` is permitted (fail-closed)"
-        return None
-    if binary == "sort":
-        for tok in rest:
-            if tok.startswith("--output") or tok.startswith("--compress-program"):
-                return f"sort option {tok!r} writes a file or executes a program — refused (fail-closed)"
-            # a single-dash short cluster containing 'o' is the output flag (-o / -oFILE / bundled -uo).
-            if len(tok) >= 2 and tok[0] == "-" and tok[1] != "-" and "o" in tok[1:]:
-                return f"sort short option {tok!r} includes the output flag -o — refused (fail-closed)"
-        return None
-    if binary == "uniq":
-        # uniq's SECOND positional operand is an OUTPUT file WRITE. Count operands, skipping the value of a
-        # separate numeric flag (`-f 2`) so it is not miscounted as the output operand.
-        operands = 0
-        skip_next = False
-        for tok in rest:
-            if skip_next:
-                skip_next = False
-                continue
-            if tok in _UNIQ_VALUE_FLAGS:
-                skip_next = True
-                continue
-            if tok.startswith("-"):
-                continue
-            operands += 1
-        if operands >= 2:
-            return "uniq with two file operands writes the second (output file) — refused (fail-closed)"
-        return None
-    if binary == "date":
-        for tok in rest:
-            if tok == "-s" or tok.startswith("--set"):
-                return f"date option {tok!r} sets the system clock (a host write) — refused (fail-closed)"
-        return None
-    if binary == "file":
-        for tok in rest:
-            if tok == "-C" or tok.startswith("--compile"):
-                return f"file option {tok!r} compiles+writes a magic database — refused (fail-closed)"
-        return None
-    if binary == "hostname":
-        # a NAME operand, or -F/--file, or -b/--boot, SETS the system hostname → allow only bare `hostname`.
-        if rest:
-            return "hostname with operands can set the system hostname — only bare `hostname` is permitted (fail-closed)"
+            if tok.startswith("-") and tok not in _FIND_SAFE_PREDICATES:
+                return (f"find predicate {tok!r} is not on the read-only predicate allowlist — the exec/write "
+                        "predicates (-exec/-execdir/-delete/-fprint*/-fls/-ok*/…) are refused by omission "
+                        "(fail-closed)")
         return None
     return None
 

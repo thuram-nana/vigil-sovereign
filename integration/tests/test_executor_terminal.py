@@ -25,8 +25,9 @@ import pytest
 
 from vigil_integration.agent.state import Phase
 from vigil_integration.live.executor import (
+    _FIND_SAFE_PREDICATES,
     _TERMINAL_ALLOWLIST,
-    _TERMINAL_DENY_FLAGS,
+    _TERMINAL_BARE_ONLY,
     ExecRecord,
     ExecResult,
     RunOutcome,
@@ -95,10 +96,13 @@ def test_allowlist_is_exactly_the_curated_local_read_inspect_set():
     # read/inspect utilities. Pin it exactly so a future edit that adds an egressing/interpreter/writer
     # binary must change this test (and be caught in review).
     assert _TERMINAL_ALLOWLIST == frozenset({
-        "ls", "cat", "head", "tail", "wc", "stat", "file", "pwd", "whoami", "id", "uname",
-        "env", "hostname", "date", "df", "du", "ps", "uptime", "echo", "grep", "sort",
-        "uniq", "cut", "tr", "find",
+        "ls", "cat", "head", "tail", "wc", "stat", "pwd", "whoami", "id", "uname", "echo",
+        "df", "du", "ps", "uptime", "grep", "cut", "tr", "find", "date", "hostname",
     })
+    # the exec/write-capable coreutils are NOT on the allowlist (a spelling denylist can't guard them —
+    # getopt_long prefix abbreviations + positional aliases defeat it; a red-pen proved this).
+    for capable in ("sort", "uniq", "file", "env"):
+        assert capable not in _TERMINAL_ALLOWLIST
 
 
 def test_no_network_interpreter_or_writer_binary_is_allowlisted():
@@ -192,14 +196,16 @@ def test_off_allowlist_binary_refuses(command):
 
 
 @pytest.mark.parametrize("command", [
-    "find . -exec rm {} \\;",   # classic exec (also metachar-refused; either way DENY)
     "find /etc -exec cat",      # exec predicate (metachar-free → hits the find-flag branch)
     "find . -delete",           # delete predicate
     "find / -fprint out",       # fprint writer
+    "find / -fprint0 out",      # RED-PEN BYPASS: -fprint0 was missed by the old denylist; omission catches it
+    "find . -fprintf out fmt",  # fprintf writer
     "find . -fls out",          # fls writer
     "find . -ok cat",           # interactive exec
     "find . -okdir cat",        # interactive exec
     "find . -execdir cat",      # exec in dir
+    "find . -newerXY ref",      # any unknown -predicate is refused by OMISSION (allowlist, not denylist)
 ])
 def test_find_execute_or_write_predicate_refuses(command):
     fr = FakeRun()
@@ -207,10 +213,13 @@ def test_find_execute_or_write_predicate_refuses(command):
     assert res.ran is False and res.outcome == "deny" and not fr.calls
 
 
-def test_find_deny_flags_are_the_pinned_set():
-    assert _TERMINAL_DENY_FLAGS == frozenset({
-        "-exec", "-execdir", "-delete", "-fprint", "-fprintf", "-fls", "-ok", "-okdir",
-    })
+def test_find_predicate_allowlist_omits_every_exec_or_write_predicate():
+    # the allowlist approach: exec/write predicates are refused by OMISSION — none may be present, and the
+    # abbreviation-immune property holds because find predicates are matched EXACTLY, not by getopt prefix.
+    for dangerous in ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"):
+        assert dangerous not in _FIND_SAFE_PREDICATES
+    for safe in ("-name", "-type", "-maxdepth", "-print", "-print0", "-size"):
+        assert safe in _FIND_SAFE_PREDICATES
 
 
 def test_benign_find_runs():
@@ -228,51 +237,60 @@ def test_bare_dotdot_token_refuses():
 
 
 # ================================================================================================
-# (1) exec/write forms of the FEW capable allowlisted binaries (env/sort/uniq/date) are refused —
-# this is what makes the by-construction "no egress / no host-write" guarantee actually hold.
+# (1) every exec/write form is refused — the exec/write-capable coreutils (sort/uniq/file/env) are OFF the
+# allowlist entirely, and date/hostname are admitted BARE-ONLY. Includes the RED-PEN bypasses (getopt_long
+# prefix abbreviations + positional aliases) a spelling-denylist guard would have missed.
 # ================================================================================================
 
 
 @pytest.mark.parametrize("command,why", [
-    ("env curl http://evil", "env exec-wrapper → egress"),
-    ("env FOO=bar id", "env NAME=VAL PROG → exec"),
-    ("env bash", "env interpreter → exec"),
-    ("sort -o /etc/passwd file", "sort -o → file write"),
-    ("sort --output=/etc/passwd file", "sort --output → file write"),
-    ("sort --compress-program=curl file", "sort --compress-program → exec → egress"),
-    ("sort -uo out file", "sort bundled -uo → output write"),
-    ("uniq in out", "uniq 2nd operand → output write"),
-    ("date -s 2020-01-01", "date -s → system-clock write"),
-    ("date --set=2020-01-01", "date --set → system-clock write"),
-    ("file -C -m /tmp/magic", "file -C → compiled magic write"),
-    ("file --compile", "file --compile → magic write"),
-    ("hostname newname", "hostname NAME → sets system hostname"),
-    ("hostname -F /tmp/hn", "hostname -F file → sets hostname"),
+    # exec/write-capable coreutils are OFF the allowlist — refused regardless of the (ab)form:
+    ("env curl http://evil", "env exec-wrapper → egress (off-allowlist)"),
+    ("env FOO=bar id", "env NAME=VAL PROG → exec (off-allowlist)"),
+    ("env bash", "env interpreter → exec (off-allowlist)"),
+    ("sort -o /etc/passwd file", "sort -o → file write (off-allowlist)"),
+    ("sort --output=/etc/passwd file", "sort --output → file write (off-allowlist)"),
+    ("sort --compress-program=curl file", "sort --compress-program → exec → egress (off-allowlist)"),
+    ("sort --compress=curl file", "RED-PEN: --compress abbrev of --compress-program → refused (off-allowlist)"),
+    ("sort --out=/etc/passwd file", "RED-PEN: --out abbrev of --output → refused (off-allowlist)"),
+    ("sort --o=/etc/passwd file", "RED-PEN: --o abbrev of --output → refused (off-allowlist)"),
+    ("uniq in out", "uniq 2nd operand → output write (off-allowlist)"),
+    ("file -C -m /tmp/magic", "file -C → compiled magic write (off-allowlist)"),
+    # date/hostname host-state PRINTERS: any operand/flag is refused (bare-only) — incl. abbrev + positional:
+    ("date -s 2020-01-01", "date -s → clock write (bare-only)"),
+    ("date --set=2020-01-01", "date --set → clock write (bare-only)"),
+    ("date --s 2020", "RED-PEN: --s abbrev of --set → refused (bare-only)"),
+    ("date 010100002025", "RED-PEN: positional MMDDhhmmYY set-clock synopsis → refused (bare-only)"),
+    ("date -u", "any flag on date is refused (bare-only)"),
+    ("hostname newname", "hostname NAME → sets system hostname (bare-only)"),
+    ("hostname -F /tmp/hn", "hostname -F file → sets hostname (bare-only)"),
 ])
-def test_capable_binary_exec_or_write_forms_refuse(command, why):
+def test_every_exec_or_write_form_refuses(command, why):
     fr = FakeRun()
     res = run_term(command, run=fr)
     assert res.ran is False and res.outcome == "deny" and not fr.calls, why
 
 
 @pytest.mark.parametrize("command", [
-    "env",                    # bare env just prints the environment
-    "sort -r file",           # reverse sort to stdout
-    "sort file1 file2 file3",  # multi-input merge to stdout (NOT an output-file write)
-    "sort -n -k2 data",       # numeric sort, key
-    "uniq -c file",           # count-dedup a single input
-    "uniq -f 2 file",         # separate numeric flag value is not the output operand
-    "date -u",                # print UTC date
-    "date +%s",               # NB: '%' and '+' are not metachars; format string is one token
-    "hostname",               # bare hostname prints the name
-    "file /etc/hostname",     # identify a file (read-only)
-    "uname -n",               # node name via uname (the safe hostname-with-flags alternative)
+    "ls -la /etc",            # list a dir (read)
+    "cat /etc/hostname",      # read a file
+    "grep -rn root /etc",     # recursive read-only search
+    "grep -f patterns.txt f", # -f reads a pattern file (a read, not exec/write)
+    "head -c 64 f", "tail -n 5 f", "wc -l f", "stat /etc/hostname",
+    "cut -d: -f1 /etc/passwd", "tr a b", "du -sh .", "df -h", "ps aux", "uptime",
+    "id", "whoami", "uname -a", "echo hello", "pwd",
+    "find . -maxdepth 1 -name passwd -type f",   # read-only walk with SAFE predicates only
+    "date", "hostname",       # the host-state printers, BARE
 ])
-def test_capable_binary_benign_forms_run(command):
+def test_benign_read_commands_run(command):
     fr = FakeRun(stdout="ok")
     res = run_term(command, g=gate(allowed=True), run=fr)
     assert res.ran is True and fr.calls
     assert fr.calls[0] == command.split()
+
+
+def test_bare_only_binaries_are_the_pinned_set():
+    assert _TERMINAL_BARE_ONLY == frozenset({"date", "hostname"})
 
 
 # ================================================================================================
