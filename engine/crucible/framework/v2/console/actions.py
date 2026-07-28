@@ -956,6 +956,41 @@ def apply_fix(run_id: str, finding_ref: str) -> dict:
                      "opening a real PR is a separate m-of-n-gated CLI act (`vigil patch --open-pr`).")}
 
 
+def dossier_path(run_id: str) -> "Path":
+    """The (pre-built) dossier ZIP path for a run — traversal-guarded via ``run_dir``. Never builds."""
+    return run_dir(run_id) / "dossier.zip"
+
+
+def build_dossier(run_id: str) -> dict:
+    """One-click download (R3): build a run's tamper-evident dossier ZIP by shelling the exec-only
+    ``vigil dossier`` (assembles reports + SARIF/JSON + the offline-verifiable proof bundle + scrubbed
+    engagement log + signed spine + a readable index.html + a governance-signed MANIFEST). Non-destructive
+    (packages EXISTING run artifacts; writes only ``<run_dir>/dossier.zip``). Fail-closed: a bad run id
+    (``run_dir`` raises ValueError → do_POST maps to 404) or an unresolvable ``vigil`` bin refuses cleanly.
+    The built file is then STREAMED by the GET route (which never builds)."""
+    rd = run_dir(run_id)                          # traversal-guarded; raises ValueError on a bad id
+    out = rd / "dossier.zip"
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        slug = json.loads((rd / "meta.json").read_text(encoding="utf-8")).get("slug") or ""
+    except (OSError, ValueError, AttributeError):
+        slug = ""
+    slug = "".join(c for c in str(slug).strip() if c.isalnum() or c in "-_.")[:120] or "engagement"
+    try:
+        proc = subprocess.run([vigil, "dossier", "--run-dir", str(rd), "--out", str(out), "--slug", slug],
+                              capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    if proc.returncode != 0 or not out.is_file():
+        return {"ok": False, "error": (proc.stderr or proc.stdout or "dossier build failed").strip()[:800]}
+    return {"ok": True, "download": f"/api/dossier/{run_id}.zip", "output": (proc.stdout or "")[:1500],
+            "note": "One click packages everything about this run into a tamper-evident, offline-verifiable "
+                    "ZIP (reports · SARIF/JSON · the proof bundle that re-verifies in a VIGIL-free venv · "
+                    "scrubbed log · signed spine · a readable index.html + a governance-signed MANIFEST)."}
+
+
 def provision_loopback_authority(slug: str) -> dict:
     """Charter/attestation UI: mint + sign a CRUCIBLE authority for a LOOPBACK engagement slug, scope
     HARD-FIXED to ``127.0.0.1``. The UI can provision a *loopback* charter, but — per the constitution — a

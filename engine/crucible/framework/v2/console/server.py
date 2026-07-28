@@ -246,6 +246,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     return
                 self._sse(vpath)
                 return
+            if path.startswith("/api/dossier/") and path.endswith(".zip"):
+                # R3: stream a PRE-BUILT dossier ZIP as an attachment (the first client download). Never
+                # builds here — building is the CSRF-guarded POST /api/dossier/<run>/build. A bad run id
+                # raises ValueError in dossier_path/run_dir → caught below → 404.
+                self._download_dossier(path[len("/api/dossier/"):-len(".zip")].strip("/"))
+                return
             if path in _EXACT_ROUTES:
                 self._json(_EXACT_ROUTES[path]())
                 return
@@ -263,6 +269,26 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, status=404)
         except Exception as e:  # never 500 the whole console on one bad read
             self._json({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    def _download_dossier(self, run_id: str) -> None:
+        """Stream a PRE-BUILT dossier ZIP as an attachment. Confined to ``<run_dir>/dossier.zip`` (the fixed
+        name; ``dossier_path`` traversal-guards the run id), so it can never stream an arbitrary file. Never
+        builds — that is the CSRF-guarded POST. The download filename is sanitised to a safe token."""
+        p = actions.dossier_path(run_id)          # run_dir guard; raises ValueError on a bad id → 404 in do_GET
+        if not p.is_file():
+            self._json({"error": "no dossier built yet for this run — build it first (the Download button)"},
+                       status=404)
+            return
+        data = p.read_bytes()
+        safe = "".join(c if (c.isalnum() or c in "._-") else "-" for c in f"vigil-dossier-{run_id}.zip")[:120]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
+        self.send_header("Cache-Control", "no-store")
+        self._sec_headers()
+        self.end_headers()
+        self.wfile.write(data)
 
     def _read_body(self) -> dict:
         try:
@@ -387,6 +413,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # re-verify). CSRF/rebind-gated above; shells the exec-only `vigil proof-export`. A bad run id
                 # raises ValueError in run_dir → caught below → clean 404.
                 self._json(actions.proof_export(str(body.get("run", ""))))
+                return
+            if path.startswith("/api/dossier/") and path.endswith("/build"):
+                # R3: build the run's tamper-evident dossier ZIP (CSRF/rebind-gated above; shells the exec-only
+                # `vigil dossier`). The GET /api/dossier/<run>.zip route then streams the built file. A bad run
+                # id raises ValueError in run_dir → caught below → 404.
+                run_id = path[len("/api/dossier/"):-len("/build")].strip("/")
+                self._json(actions.build_dossier(run_id))
                 return
             if path == "/api/authority/provision":
                 # Charter & Attestation screen: mint a LOOPBACK authority (scope hard-fixed to 127.0.0.1 in
