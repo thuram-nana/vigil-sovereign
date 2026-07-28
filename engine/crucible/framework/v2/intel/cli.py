@@ -170,6 +170,41 @@ def _ingest_intel(args: argparse.Namespace) -> int:
     return _emit(out)
 
 
+_VULNFEED_DOCTRINE = "Every feed entry is an intel-tier LEAD, never a fact. Only a fired oracle mints a FACT."
+
+
+def _resolve_vuln_sources(sources_csv: str):
+    """(sources, error) — resolve a comma-separated source allowlist; empty → all TRUSTED_VULN_SOURCES.
+    ``error`` is a message string (caller prints + exits 2) when a name is unknown, else None."""
+    from . import vulnfeed
+    names = [n.strip().lower() for n in (sources_csv or "").split(",") if n.strip()]
+    if not names:
+        return list(vulnfeed.TRUSTED_VULN_SOURCES), None
+    resolved = [(n, vulnfeed.source_by_name(n)) for n in names]
+    unknown = [n for n, s in resolved if s is None]
+    if unknown:
+        return None, (f"unknown source(s) {unknown}; known: "
+                      f"{[s.name for s in vulnfeed.TRUSTED_VULN_SOURCES]}")
+    return [s for _, s in resolved if s is not None], None
+
+
+def _vuln_transport_for(slug: str, capture):
+    """Build the per-source gated-transport factory. Under a slug, the charter's in-scope hosts are passed
+    so the transport REFUSES to construct if a source host overlaps target scope (belt-and-braces; the
+    per-source single-host allowlist still refuses every off-allowlist host before bytes leave)."""
+    from . import vulnfeed
+    from ..common import ethics
+    try:
+        target_hosts = tuple(ethics.parse_scope(slug)) if slug else ()
+    except Exception:
+        target_hosts = ()
+
+    def transport_for(source):
+        return vulnfeed.build_vulnintel_transport(source, target_hosts=target_hosts, capture_dir=capture)
+
+    return transport_for
+
+
 def _refresh_vulnintel(args: argparse.Namespace) -> int:
     """Refresh the vulnerability-intelligence feed from trusted third-party sources (NVD / OSV /
     CISA-KEV) → VULNERABILITY leads on the world-model. Everything minted is an intel-tier LEAD, never
@@ -184,20 +219,13 @@ def _refresh_vulnintel(args: argparse.Namespace) -> int:
     from ..authority.killswitch import KillSwitch
     from . import vulnfeed
 
-    names = [n.strip().lower() for n in (args.sources or "").split(",") if n.strip()]
-    if names:
-        resolved = [(n, vulnfeed.source_by_name(n)) for n in names]
-        unknown = [n for n, s in resolved if s is None]
-        if unknown:
-            print(f"error: unknown source(s) {unknown}; known: "
-                  f"{[s.name for s in vulnfeed.TRUSTED_VULN_SOURCES]}", file=sys.stderr)
-            return 2
-        sources = [s for _, s in resolved if s is not None]
-    else:
-        sources = list(vulnfeed.TRUSTED_VULN_SOURCES)
+    sources, err = _resolve_vuln_sources(args.sources)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
     cves = [c.strip() for c in (args.cve or "").split(",") if c.strip()]
 
-    _doctrine = ("Every feed entry is an intel-tier LEAD, never a fact. Only a fired oracle mints a FACT.")
+    _doctrine = _VULNFEED_DOCTRINE
 
     if not args.live:
         # fail-closed: never a silent unguarded call — report intent only, fire nothing.
@@ -216,19 +244,7 @@ def _refresh_vulnintel(args: argparse.Namespace) -> int:
     ks = KillSwitch(args.slug) if args.slug else None
     cancel = (lambda: ks.is_tripped()) if ks is not None else (lambda: False)
     capture = Path(args.capture) if args.capture else None
-
-    # Defense-in-depth: under an engagement slug, pass the charter's in-scope hosts so the transport
-    # REFUSES to construct if a source host somehow overlaps target scope (the registry is fixed
-    # third-party infra, so this is belt-and-braces). An absent/unparseable charter → no scope to
-    # enforce; the per-source single-host allowlist still refuses every off-allowlist host before bytes leave.
-    from ..common import ethics
-    try:
-        target_hosts = tuple(ethics.parse_scope(args.slug)) if args.slug else ()
-    except Exception:
-        target_hosts = ()
-
-    def transport_for(source):
-        return vulnfeed.build_vulnintel_transport(source, target_hosts=target_hosts, capture_dir=capture)
+    transport_for = _vuln_transport_for(args.slug, capture)
 
     store, istore = _open(args.slug)
     world = WorldModel()
@@ -245,6 +261,71 @@ def _refresh_vulnintel(args: argparse.Namespace) -> int:
     if store is not None:
         store.close()
     return _emit(out)
+
+
+def _feed_daemon(args: argparse.Namespace) -> int:
+    """Run the vuln-intel feed on a recurring, STOPPABLE schedule — the caller that ticks ``intel.scheduler``.
+
+    This is a LIVE, recurring egress act, so it is doubly gated: it fires NO traffic without ``--live`` (it
+    just reports intent), and every refresh + every idle tick honours the engagement kill-switch (a STOP
+    halts within one ``--poll``). ``--interval`` is seconds between refreshes; ``--poll`` is seconds between
+    kill-switch checks. Everything minted stays an intel-tier LEAD. ``--max-ticks`` bounds the loop (for a
+    finite run / tests); omit it for a long-running sidecar under ``vigil up --with-feed``.
+    """
+    from ..authority.killswitch import KillSwitch
+    from . import ticker, vulnfeed
+
+    sources, err = _resolve_vuln_sources(args.sources)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    cves = [c.strip() for c in (args.cve or "").split(",") if c.strip()]
+
+    if not args.live:
+        return _emit({
+            "live": False, "slug": args.slug or "(ephemeral)",
+            "sources": [{"name": s.name, "host": s.host, "mode": s.mode} for s in sources],
+            "interval_seconds": args.interval, "poll_seconds": args.poll,
+            "note": "feed daemon is a LIVE recurring egress act — pass --live to run; without it, no traffic.",
+            "doctrine": _VULNFEED_DOCTRINE,
+        })
+    if args.interval < 1 or args.poll < 1:
+        print("error: --interval and --poll must both be >= 1 (seconds)", file=sys.stderr)
+        return 2
+    if args.slug and KillSwitch(args.slug).is_tripped():
+        print(f"refused: kill-switch tripped for engagement {args.slug!r}", file=sys.stderr)
+        return 3
+
+    ks = KillSwitch(args.slug) if args.slug else None
+    cancel = (lambda: ks.is_tripped()) if ks is not None else (lambda: False)
+    capture = Path(args.capture) if args.capture else None
+    transport_for = _vuln_transport_for(args.slug, capture)
+
+    store, istore = _open(args.slug)
+    world = WorldModel()
+    ing = IntelIngest(world, store=istore, engagement_slug=args.slug or "")
+    plan = vulnfeed.plan_for(sources, cves)
+
+    def refresh():
+        # seq restarts at 0 each refresh; IntelIngest is seq-keyed idempotent, so a re-pull never double-counts.
+        return vulnfeed.refresh_vulnintel(plan, transport_for=transport_for, ingest=ing, seq=0, cancel=cancel)
+
+    def on_tick(tick, result):
+        if result.ran and result.result is not None:
+            r = result.result
+            print(json.dumps({"tick": tick, "refreshed": True, "minted_by_source": r.minted_by_source,
+                              "applied": r.applied, "cancelled": r.cancelled, "refused": r.refused},
+                             default=str), flush=True)
+
+    interval_ticks = max(1, round(args.interval / args.poll))
+    summary = ticker.run_feed_daemon(
+        interval_ticks=interval_ticks, poll_seconds=args.poll, refresh=refresh, cancel=cancel,
+        on_tick=on_tick, max_ticks=(args.max_ticks if args.max_ticks and args.max_ticks > 0 else None))
+    if store is not None:
+        store.close()
+    return _emit({"live": True, "slug": args.slug or "(ephemeral)", "interval_seconds": args.interval,
+                  "poll_seconds": args.poll, "interval_ticks": interval_ticks, **summary,
+                  "nodes": world.node_count, "edges": world.edge_count, "doctrine": _VULNFEED_DOCTRINE})
 
 
 def _resolve(args: argparse.Namespace) -> int:
@@ -403,6 +484,22 @@ def main(argv: list[str]) -> int:
                         "Without it: offline, no traffic fired.")
     p.add_argument("--capture", default="", help="mirror live responses to this dir to seed offline fixtures")
     p.set_defaults(fn=_refresh_vulnintel)
+
+    p = sub.add_parser("feed-daemon",
+                       help="run refresh-vulnintel on a recurring, STOPPABLE schedule (the ticker that drives "
+                            "intel.scheduler). Off unless --live; kill-switch honored every tick. LEADS only.")
+    p.add_argument("--sources", default="",
+                   help="comma-separated source names (default: all). known: nvd,osv,cisa-kev")
+    p.add_argument("--cve", default="", help="comma-separated CVE ids for per-CVE sources (NVD / OSV)")
+    p.add_argument("--slug", default="", help="persist under this engagement slug (kill-switch honored)")
+    p.add_argument("--live", action="store_true",
+                   help="GATED recurring live pull (opt-in). Without it: reports intent, fires nothing.")
+    p.add_argument("--interval", type=int, default=3600, help="seconds between refreshes (default 3600)")
+    p.add_argument("--poll", type=int, default=30,
+                   help="seconds between kill-switch checks (STOP responsiveness; default 30)")
+    p.add_argument("--capture", default="", help="mirror live responses to this dir to seed offline fixtures")
+    p.add_argument("--max-ticks", type=int, default=0, help="stop after N ticks (0 = run until stopped)")
+    p.set_defaults(fn=_feed_daemon)
 
     p = sub.add_parser("resolve", help="resolved entities with merge explanations")
     p.add_argument("--slug", required=True)

@@ -245,3 +245,57 @@ def test_cli_without_live_fires_no_traffic(capsys):
 
 def test_cli_unknown_source_errors():
     assert _refresh_vulnintel(_ns(sources="nvd,bogus", live=True)) == 2   # unknown source → exit 2, no pull
+
+
+# ---- ticker: drives the PURE scheduler on real time, stoppably ------------------
+
+def test_ticker_fires_only_on_due_ticks():
+    from framework.v2.intel import ticker
+    calls = []
+    # interval 3 ticks → due at ticks 0, 3, 6; max_ticks 7 → ticks 0..6, injected no-op sleep.
+    summary = ticker.run_feed_daemon(interval_ticks=3, poll_seconds=0,
+                                     refresh=lambda: calls.append(1) or "r",
+                                     max_ticks=7, sleep=lambda _s: None)
+    assert summary == {"ticks": 7, "refreshes": 3}
+    assert len(calls) == 3
+
+
+def test_ticker_cancel_halts_before_any_refresh_or_sleep():
+    from framework.v2.intel import ticker
+    calls = []
+
+    def _no_sleep(_s):
+        raise AssertionError("a cancelled daemon must not sleep")
+
+    summary = ticker.run_feed_daemon(interval_ticks=1, poll_seconds=99,
+                                     refresh=lambda: calls.append(1), cancel=lambda: True,
+                                     max_ticks=100, sleep=_no_sleep)
+    assert summary == {"ticks": 0, "refreshes": 0} and calls == []   # stopped at the top, never fired/slept
+
+
+# ---- CLI feed-daemon: fail-closed (no --live → no traffic) ----------------------
+
+def _ns_daemon(**kw):
+    base = {"sources": "", "cve": "", "slug": "", "live": False, "capture": "",
+            "interval": 3600, "poll": 30, "max_ticks": 0}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_feed_daemon_without_live_fires_no_traffic(capsys):
+    from framework.v2.intel.cli import _feed_daemon
+    assert _feed_daemon(_ns_daemon(live=False)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["live"] is False                                    # offline: nothing fetched, no loop entered
+    assert "LIVE recurring egress" in out["note"] and "LEAD" in out["doctrine"]
+
+
+def test_feed_daemon_unknown_source_errors_before_any_traffic():
+    from framework.v2.intel.cli import _feed_daemon
+    assert _feed_daemon(_ns_daemon(sources="nvd,bogus", live=True)) == 2   # exit 2 before the loop/egress
+
+
+def test_feed_daemon_rejects_nonpositive_interval():
+    from framework.v2.intel.cli import _feed_daemon
+    assert _feed_daemon(_ns_daemon(live=True, interval=0)) == 2
+    assert _feed_daemon(_ns_daemon(live=True, poll=0)) == 2

@@ -468,7 +468,10 @@ def _cmd_up(args: argparse.Namespace) -> int:
     from .uiproxy import run_up
     return run_up(host=args.host, port=args.port, domain=args.domain, base_dir=args.base_dir,
                   no_browser=args.no_browser,
-                  insecure_no_api_key=getattr(args, "insecure_no_api_key", False))
+                  insecure_no_api_key=getattr(args, "insecure_no_api_key", False),
+                  with_feed=getattr(args, "with_feed", False),
+                  feed_slug=getattr(args, "feed_slug", ""),
+                  feed_interval=getattr(args, "feed_interval", 3600))
 
 
 def _cmd_down(args: argparse.Namespace) -> int:
@@ -697,6 +700,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "proxy adds authentication (otherwise the gated offense api is internet-exposed)")
     pu.add_argument("--base-dir", default=".vigil-live",
                     help="engagement home for the runtime serve dir (.vigil-live/ui/) + pids file")
+    pu.add_argument("--with-feed", action="store_true",
+                    help="also run the recurring vuln-intel feed (NVD/OSV/CISA-KEV) as a gated sidecar. "
+                         "OFF by default (recurring LIVE egress); needs --feed-slug. Honors that slug's "
+                         "kill-switch every tick. Everything minted is an intel LEAD, never a fact.")
+    pu.add_argument("--feed-slug", default="",
+                    help="with --with-feed: the engagement store the feed persists into (and the Knowledge "
+                         "screen reads). Required to actually start the feed.")
+    pu.add_argument("--feed-interval", type=int, default=3600,
+                    help="with --with-feed: seconds between feed refreshes (default 3600)")
     pu.set_defaults(func=_cmd_up)
 
     pdn = sub.add_parser("down", help="stop a running `vigil up` (backends + proxy)")
