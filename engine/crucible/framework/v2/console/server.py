@@ -82,6 +82,7 @@ _PREFIX_ROUTES = {
     "/api/worldmodel/": api.worldmodel,
     "/api/coverage/": api.coverage_data,
     "/api/authority/": api.authority_full,      # re-exposed for the Charter & Attestation screen
+    "/api/charter/": api.charter_status,        # the remote-charter picture (scope, loopback-only?, ceremony)
     "/api/planner/": api.planner_data,
     "/api/intel/": api.intel_data,
     "/api/vulnintel/": api.vulnintel_data,

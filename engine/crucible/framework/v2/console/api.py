@@ -528,6 +528,37 @@ def authority_full(slug: str) -> dict[str, Any]:
     }
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1", "loopback"})
+
+
+def charter_status(slug: str) -> dict[str, Any]:
+    """Charter & Attestation — the REMOTE-charter picture (read-only). Extends ``authority_full`` with the
+    authorized scope broken into loopback vs REMOTE hosts, and the exact OUT-OF-BAND ceremony a remote target
+    requires. This UI provisions LOOPBACK (127.0.0.1) only; it can never mint OR widen a charter for a real
+    remote host — that is a deliberate ceremony on a trusted host that holds the owner key. So the UI HANDLES
+    the remote case by SURFACING + VERIFYING the charter (present? which hosts? window?), never by minting it."""
+    if not slug:
+        return {"slug": None, "note": "select an engagement"}
+    full = authority_full(slug)
+    auth = full.get("authority") or {}
+    scope = [str(h).strip() for h in (auth.get("scope") or []) if str(h).strip()]
+    remote = [h for h in scope if h.lower() not in _LOOPBACK_HOSTS]
+    return {
+        **full,
+        "scope": scope,
+        "is_loopback_only": bool(scope) and not remote,
+        "remote_hosts": remote,
+        "has_remote_authority": bool(remote),
+        "window": {"not_before": auth.get("not_before"), "not_after": auth.get("not_after"),
+                   "environment": auth.get("environment")},
+        # a TEMPLATE only — the UI fills the operator's target in; no secret, and the UI never RUNS it.
+        "ceremony": f"vigil provision --slug {slug} --scope <REMOTE-HOST[,HOST2,...]>",
+        "remote_note": ("A REMOTE target needs a signed charter minted OUT-OF-BAND on a trusted host that holds "
+                        "the owner key. This UI provisions LOOPBACK (127.0.0.1) ONLY and can never mint or widen "
+                        "a remote charter — run the ceremony on that host, then Re-check here. No charter, no run."),
+    }
+
+
 def planner_data(slug: str) -> dict[str, Any]:
     """The goal-tree/plan state for an engagement, if a planner ran (planner-state.json)."""
     def _read() -> dict[str, Any]:
