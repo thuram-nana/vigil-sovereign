@@ -6,7 +6,34 @@ so the UI can never widen it or provision a remote charter); both actions fail c
 
 from __future__ import annotations
 
-from framework.v2.console import actions
+from framework.v2.console import actions, api
+
+
+def test_charter_status_empty_slug_is_guarded():
+    assert api.charter_status("")["slug"] is None
+
+
+def test_charter_status_loopback_only(monkeypatch):
+    monkeypatch.setattr(api, "_authority_state", lambda slug: {"scope": ["127.0.0.1"], "not_after": "2026-01-01"})
+    d = api.charter_status("acme")
+    assert d["scope"] == ["127.0.0.1"]
+    assert d["is_loopback_only"] is True and d["has_remote_authority"] is False and d["remote_hosts"] == []
+    assert d["ceremony"].startswith("vigil provision --slug acme --scope")
+    assert "OUT-OF-BAND" in d["remote_note"]
+
+
+def test_charter_status_surfaces_remote_hosts(monkeypatch):
+    monkeypatch.setattr(api, "_authority_state",
+                        lambda slug: {"scope": ["127.0.0.1", "app.example.com", "*.staging.example.com"]})
+    d = api.charter_status("acme")
+    assert d["has_remote_authority"] is True and d["is_loopback_only"] is False
+    assert d["remote_hosts"] == ["app.example.com", "*.staging.example.com"]   # loopback filtered out
+
+
+def test_charter_status_no_authority_is_not_loopback_only(monkeypatch):
+    monkeypatch.setattr(api, "_authority_state", lambda slug: None)
+    d = api.charter_status("acme")
+    assert d["scope"] == [] and d["is_loopback_only"] is False and d["has_remote_authority"] is False
 
 
 def test_provision_rejects_empty_slug():

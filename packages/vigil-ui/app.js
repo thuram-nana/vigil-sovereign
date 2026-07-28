@@ -3608,24 +3608,41 @@
   }
 
   // ---- Charter & Attestation (owner): authorization + who/when/what ledger ----
-  var CHT = { slug: "loopback", auth: null, ledger: null };
+  var CHT = { slug: "loopback", auth: null, ledger: null, remoteTarget: "" };
+  // Advisory client-side scope check — the AUTHORITATIVE gate is server-side; this only GUIDES the operator.
+  function _scopeCovers(scope, target) {
+    target = String(target || "").trim().toLowerCase();
+    if (!target) return false;
+    return (scope || []).some(function (host) {
+      host = String(host || "").trim().toLowerCase();
+      if (!host) return false;
+      if (host === target) return true;
+      if (host.charAt(0) === "*") {                 // *.example.com — a wildcard grant
+        var suf = host.replace(/^\*\.?/, "");
+        return suf && (target === suf || target.slice(-(suf.length + 1)) === ("." + suf));
+      }
+      return false;
+    });
+  }
   function renderCharter(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Charter & Attestation"),
       h("p.sub", null, "Every target-touching action is gated on a signed engagement charter + a who/when/what "
-        + "usage attestation minted BEFORE anything runs — no attestation, no run. This UI can provision a "
-        + "LOOPBACK authority; a REMOTE target needs a signed charter this UI cannot mint for you.")])]);
+        + "usage attestation minted BEFORE anything runs — no attestation, no run. This UI provisions a "
+        + "LOOPBACK authority; a REMOTE target needs a signed charter this UI cannot mint — it VERIFIES + "
+        + "guides you through the out-of-band ceremony instead.")])]);
     drawCharter(body);
     loadAuthority(body);
   }
   function loadAuthority(body) {
-    V.getJSON(OFF("/api/authority/" + encodeURIComponent(CHT.slug)))
+    V.getJSON(OFF("/api/charter/" + encodeURIComponent(CHT.slug)))
       .then(function (d) { CHT.auth = d; drawCharter(body); })
       .catch(function () { CHT.auth = null; drawCharter(body); });
   }
   function drawCharter(body) {
     var a = CHT.auth || {};
-    var authInfo = a.authority || {};
+    var scope = a.scope || [];
+    var win = a.window || {};
     var slugRow = h("div.card", null, [
       h("label", { style: { marginRight: "8px" } }, "Engagement slug"),
       h("input#cht-slug", { type: "text", value: CHT.slug, style: { width: "220px" },
@@ -3636,22 +3653,54 @@
       h("div.kv", null, [h("div.k", null, "Charter present"),
         h("div.v", null, a.charter_present
           ? h("span.st.st-confirmed", null, [h("span.dot"), "yes"])
-          : h("span.st.st-idle", null, [h("span.dot"), "no — provision below, or add a charter file"]))]),
-      h("div.kv", null, [h("div.k", null, "Authority scope"),
-        h("div.v", null, String(authInfo.scope || authInfo.scopes || "—"))]),
+          : h("span.st.st-idle", null, [h("span.dot"), "no — provision loopback below, or add a charter file"]))]),
+      h("div.kv", null, [h("div.k", null, "Authorized scope"),
+        h("div.v", null, (scope.length ? scope.map(function (x) { return h("span.pill.sm", null, x); })
+          : [h("span.hint", null, "no authority yet")]))]),
+      h("div.kv", null, [h("div.k", null, "Reach"),
+        h("div.v", null, a.has_remote_authority
+          ? h("span.st.st-confirmed", null, [h("span.dot"), "REMOTE authorized — " + (a.remote_hosts || []).join(", ")])
+          : (a.is_loopback_only
+              ? h("span.st.st-idle", null, [h("span.dot"), "loopback only (127.0.0.1)"])
+              : h("span.st.st-idle", null, [h("span.dot"), "none"])))]),
       h("div.kv", null, [h("div.k", null, "Window"),
-        h("div.v", null, String(authInfo.window || authInfo.expires || authInfo.status || "—"))]),
+        h("div.v", null, String((win.not_after ? (win.not_before || "—") + " → " + win.not_after : "—")
+          + (win.environment ? "  (" + win.environment + ")" : "")))]),
       h("div.kv", null, [h("div.k", null, "Gate chain"),
         h("div.v", null, (a.gates || []).map(function (g) { return h("span.pill.sm", null, g); }))])]);
     var provision = h("div.card.owner", null, [h("div.card-h", null, [h("h3", null, "Provision a loopback authority")]),
       h("div.hint", { style: { marginBottom: "8px" } },
-        "Mints + signs a CRUCIBLE authority for this slug, scope HARD-FIXED to 127.0.0.1. A REMOTE target "
-        + "needs a signed charter this UI cannot mint — that stays a deliberate ceremony."),
+        "Mints + signs a CRUCIBLE authority for this slug, scope HARD-FIXED to 127.0.0.1. For a REMOTE target, "
+        + "use the section below — this UI can never mint or widen a remote charter."),
       h("button.btn.sm.owner", { onClick: function () {
         V.postJSON(OFF("/api/authority/provision"), { slug: CHT.slug }).then(function (r) {
           if (r && r.ok) { V.toast("Provisioned a loopback authority for " + CHT.slug); loadAuthority(body); }
           else { V.toast((r && r.error) || "provision failed", true); }
         }).catch(function () { V.toast("provision failed", true); }); } }, "Provision (loopback only)")]);
+    // ---- Remote target: the UI VERIFIES + guides, never mints ----
+    var covered = CHT.remoteTarget ? _scopeCovers(scope, CHT.remoteTarget) : null;
+    var remoteCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Remote target — charter required (out-of-band)")]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        String(a.remote_note || "A REMOTE target needs a signed charter minted OUT-OF-BAND on a trusted host "
+          + "that holds the owner key. This UI can never mint or widen a remote charter — it verifies + guides.")),
+      h("div.kv", null, [h("div.k", null, "Target host"),
+        h("div.v", null, h("input#cht-remote", { type: "text", placeholder: "app.example.com",
+          value: CHT.remoteTarget, style: { width: "260px" },
+          onChange: function (e) { CHT.remoteTarget = (e.target.value || "").trim(); drawCharter(body); } }))]),
+      (CHT.remoteTarget ? h("div.kv", null, [h("div.k", null, "Authorized for this target?"),
+        h("div.v", null, covered
+          ? h("span.st.st-confirmed", null, [h("span.dot"), "yes — a signed charter authorizes this target (advisory; the gate enforces)"])
+          : h("span.st.st-idle", null, [h("span.dot"), "NOT authorized — mint a charter out-of-band (below), then Re-check"]))]) : null),
+      h("div.kv", null, [h("div.k", null, "Out-of-band ceremony"),
+        h("div.v", null, [
+          h("div.hint", { style: { marginBottom: "4px" } },
+            "Run this on a TRUSTED host that holds the owner key — NOT in this UI:"),
+          h("code", { style: { fontSize: "12px", whiteSpace: "pre-wrap", display: "block" } },
+            "vigil provision --slug " + (CHT.slug || "<slug>") + " --scope "
+            + (CHT.remoteTarget || "<REMOTE-HOST[,HOST2,...]>"))])]),
+      h("button.btn.sm", { style: { marginTop: "6px" }, onClick: function () { loadAuthority(body); } },
+        "Re-check charter")]);
     var ledgerCard = h("div.card", null, [
       h("div.card-h", null, [h("h3", null, "Usage attestation ledger — who / when / what")]),
       h("button.btn.sm", { onClick: function () {
@@ -3665,7 +3714,7 @@
             : h("span.st.st-idle", null, [h("span.dot"), "unverified"]))]),
         h("pre", { style: { whiteSpace: "pre-wrap", fontSize: "12px", marginTop: "6px", overflowX: "auto" } },
           String(CHT.ledger.who || CHT.ledger.error || "no records yet"))]) : null)]);
-    V.mount(body, [slugRow, status, provision, ledgerCard,
+    V.mount(body, [slugRow, status, provision, remoteCard, ledgerCard,
       h("div.hint", { style: { marginTop: "10px" } },
         String(a.note || CHT.ledger && CHT.ledger.note
           || "No attestation, no run. The UI can never widen a charter-signed scope."))]);
