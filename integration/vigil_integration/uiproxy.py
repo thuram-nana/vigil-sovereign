@@ -659,7 +659,8 @@ def _terminate(pid: int, *, grace: float = 5.0) -> bool:
 
 def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
            insecure_no_api_key: bool = False, src_dir: Optional[Path] = None,
-           with_feed: bool = False, feed_slug: str = "", feed_interval: int = 3600) -> int:
+           with_feed: bool = False, feed_slug: str = "", feed_interval: int = 3600,
+           with_voice: bool = False, with_gesture: bool = False) -> int:
     """Bring the whole unified UI up: refuse a public bind, spawn the three backends in their own
     venvs, capture the cockpit token, assemble the runtime serve dir, and serve the single origin
     behind the reverse proxy. Blocks until SIGINT/SIGTERM, then tears the children + proxy down."""
@@ -784,6 +785,23 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     else:
         print("vigil up: learn-drain skipped (no owner pubkey resolvable or `vigil` bin unresolved) — the "
               "sovereign producer runs, but grants won't be consumed until both are available.", file=sys.stderr)
+
+    # 3d) OPTIONAL SIGIL embodiment producers (S2/S3). OFF by default (hardware/phone-dependent). The cockpit
+    # already serves /api/sigil/hud and the UI subscribes; these produce the `sigil.nav` the HUD channel
+    # carries. Both are A1 SIGNALS that inject NOTHING into the OS — the UI navigates only to a KNOWN in-app
+    # screen. `--with-voice` spawns the real long-running voice-nav producer (needs a mic). `--with-gesture`
+    # flips the nav-mode latch ON (one-shot) so an owner-armed PHONE gesture session navigates (local camera
+    # gesture is not functional — gesture input is the phone companion).
+    if with_voice:
+        procs.append(("sovereign-voice", _spawn([str(sigil_bin), "voice", "--mic"],
+                                                logs / "sovereign-voice.log")))
+    if with_gesture:
+        try:
+            subprocess.run([str(sigil_bin), "gesture-nav", "on"], env=_child_env(),
+                           timeout=20, capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError):
+            print("vigil up: could not enable gesture nav-mode (`sigil gesture-nav on` failed) — enable it "
+                  "later from the sovereign CLI.", file=sys.stderr)
 
     # 4) assemble the runtime serve dir with the token + federated mount bases.
     try:

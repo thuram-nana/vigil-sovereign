@@ -471,7 +471,9 @@ def _cmd_up(args: argparse.Namespace) -> int:
                   insecure_no_api_key=getattr(args, "insecure_no_api_key", False),
                   with_feed=getattr(args, "with_feed", False),
                   feed_slug=getattr(args, "feed_slug", ""),
-                  feed_interval=getattr(args, "feed_interval", 3600))
+                  feed_interval=getattr(args, "feed_interval", 3600),
+                  with_voice=getattr(args, "with_voice", False),
+                  with_gesture=getattr(args, "with_gesture", False))
 
 
 def _cmd_down(args: argparse.Namespace) -> int:
@@ -743,6 +745,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "screen reads). Required to actually start the feed.")
     pu.add_argument("--feed-interval", type=int, default=3600,
                     help="with --with-feed: seconds between feed refreshes (default 3600)")
+    pu.add_argument("--with-voice", action="store_true",
+                    help="also run SIGIL voice-nav (S2): a long-running `sigil voice --mic` producer of the "
+                         "`sigil.nav` the HUD channel carries. OFF by default (needs a mic). A1 signal — "
+                         "navigates a KNOWN in-app screen only, injects nothing into the OS.")
+    pu.add_argument("--with-gesture", action="store_true",
+                    help="also enable gesture NAV-MODE (S3): flips the latch ON so an owner-armed PHONE "
+                         "gesture session navigates the UI. OFF by default. A1 signal, injects nothing.")
     pu.set_defaults(func=_cmd_up)
 
     pdn = sub.add_parser("down", help="stop a running `vigil up` (backends + proxy)")
