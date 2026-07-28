@@ -45,7 +45,7 @@ jobs:
                  framework/v2/aegis/tests/test_gateway_ui_sinks.py \
                  framework/v2/agents/tests/test_agent_message.py \
                  framework/v2/intel/tests/test_vulnfeed.py \
-                 framework/v2/knowledge_engine/tests/test_proposals.py -q
+                 framework/v2/knowledge_engine -q
 
   gateway:
     name: gateway egress gate (P6)
