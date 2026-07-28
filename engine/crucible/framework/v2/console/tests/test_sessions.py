@@ -110,6 +110,19 @@ def test_connect_is_directional_and_disconnect_re_isolates():
     assert sessions.connections_of(a) == []
 
 
+def test_connections_of_drops_a_tampered_entry():
+    # Defense in depth: connections flow into a `vigil engage --connect <id>` argv token, so
+    # connections_of must NOT trust that connect_session was the only writer. A tampered/legacy record
+    # holding an unsafe id (path traversal, an injected flag) is dropped, never emitted onto the argv.
+    a = sessions.create_session(name="A")["session"]["id"]
+    good = sessions.create_session(name="B")["session"]["id"]
+    sessions.connect_session(a, good)
+    rec = sessions._read(a)
+    rec["connections"] = ["../../etc/passwd", "--scope=0.0.0.0/0", good]   # two hostile ids + one valid
+    sessions._write(rec)
+    assert sessions.connections_of(a) == [good]                            # only the safe id survives
+
+
 def test_connect_refuses_self_unknown_and_caps():
     a = sessions.create_session(name="A")["session"]["id"]
     assert sessions.connect_session(a, a).get("error")             # no self-connect

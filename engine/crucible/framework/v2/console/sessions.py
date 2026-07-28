@@ -308,17 +308,25 @@ def disconnect_session(session_id: str, other_id: str) -> dict:
 
 
 def connections_of(session_id: str) -> list[str]:
-    """A session's CONSENTED connected-session ids — the partitions a live ``vigil engage --session <id>``
-    run of this session may UNION as priors (pass them as ``--connect``). NB: the console launcher
-    (``launch_assessment``) does NOT yet auto-thread these into its spawned run — the console→live-engine
-    bridge is a follow-up; today a connection takes effect only on a live ``vigil engage --connect`` run.
-    Total: [] for an unknown/legacy/unsafe-guarded session."""
+    """A session's CONSENTED connected-session ids — the partitions a ``vigil engage --session <id>`` run may
+    UNION as priors (passed as ``--connect`` by the console→live-engine bridge for a graph-backed loopback
+    run). EVERY returned id is re-validated through ``_safe_session_id`` (defense in depth: these flow into a
+    subprocess argv, so the safety must not rest solely on ``connect_session`` being the only writer — a
+    tampered/legacy entry is dropped, never emitted). Total: [] for an unknown/legacy/unsafe session."""
     try:
         sid = _safe_session_id(session_id)
     except ValueError:
         return []
     rec = _read(sid)
-    return list(rec.get("connections", []) or []) if rec else []
+    if not rec:
+        return []
+    out: list[str] = []
+    for c in (rec.get("connections", []) or []):
+        try:
+            out.append(_safe_session_id(c))
+        except ValueError:
+            continue                          # drop a tampered/unsafe entry — never let it reach the argv
+    return out
 
 
 def get_session(session_id: str) -> dict:
