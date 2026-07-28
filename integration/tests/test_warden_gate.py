@@ -6,12 +6,16 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
+import types
 
 import pytest
 
 from vigil_integration.warden_gate import (
     WardenDenied,
     WardenGateHooks,
+    attach_from_env,
+    compose_run_hooks,
     decide_tool,
     kernel_classifier,
 )
@@ -112,3 +116,103 @@ def test_unresolved_kernel_fails_closed_without_bare_name_exec(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not exec a bare name")))
     classify = kernel_classifier()                              # kernel_bin=None, unresolved
     assert classify("exec_command") == "A3"                    # fail-closed, no subprocess
+
+
+# ---- T3: the Strix runner soft-wire (compose_run_hooks + env-gated attach_from_env) --------------
+#
+# The openai-agents SDK is not vendored on disk, so a MINIMAL fake ``agents.lifecycle.RunHooks`` is
+# injected to exercise the composite; ``live.wiring`` is faked too so these tests never pull the offense
+# engine / framework (they run in the framework-free first CI invocation).
+
+
+def _install_fake_agents(monkeypatch):
+    """Inject a minimal ``agents.lifecycle.RunHooks`` base (async no-op lifecycle methods) so
+    ``compose_run_hooks`` — which lazily subclasses it — can be exercised without the real SDK."""
+    agents = types.ModuleType("agents")
+    lifecycle = types.ModuleType("agents.lifecycle")
+
+    class RunHooks:
+        async def on_agent_start(self, *a, **k): ...
+        async def on_agent_end(self, *a, **k): ...
+        async def on_handoff(self, *a, **k): ...
+        async def on_tool_start(self, *a, **k): ...
+        async def on_tool_end(self, *a, **k): ...
+        async def on_llm_start(self, *a, **k): ...
+        async def on_llm_end(self, *a, **k): ...
+
+    lifecycle.RunHooks = RunHooks
+    agents.lifecycle = lifecycle
+    monkeypatch.setitem(sys.modules, "agents", agents)
+    monkeypatch.setitem(sys.modules, "agents.lifecycle", lifecycle)
+
+
+def _install_fake_wiring(monkeypatch, mapping):
+    """Inject a fake ``vigil_integration.live.wiring`` exposing ``default_classify`` so
+    ``attach_from_env`` composes without importing the real (framework-touching) live engine."""
+    w = types.ModuleType("vigil_integration.live.wiring")
+    w.default_classify = lambda name: mapping.get(name, "A2")
+    monkeypatch.setitem(sys.modules, "vigil_integration.live.wiring", w)
+
+
+def test_compose_fans_out_and_warden_blocks_the_shell(monkeypatch):
+    _install_fake_agents(monkeypatch)
+    accounting: list = []
+
+    class _Base:
+        async def on_llm_end(self, *a, **k):
+            accounting.append(("llm_end", a))
+
+    warden = WardenGateHooks(classify=_stub({"exec_command": "A3", "http.get": "A0"}))
+    comp = compose_run_hooks(_Base(), warden)
+
+    # on_llm_end fans out to the base accounting (the existing ReportUsageHooks role)
+    asyncio.run(comp.on_llm_end("ctx", "agent", "resp"))
+    assert accounting == [("llm_end", ("ctx", "agent", "resp"))]
+
+    # on_tool_start: the WARDEN gate BLOCKS the arbitrary shell (A3 → non-auto → raise)
+    with pytest.raises(WardenDenied):
+        asyncio.run(comp.on_tool_start("ctx", "agent", _FakeTool("exec_command")))
+    assert warden.decisions[-1].tool == "exec_command" and not warden.decisions[-1].auto
+
+
+def test_compose_allows_an_auto_tool(monkeypatch):
+    _install_fake_agents(monkeypatch)
+    # staging posture: a read tool at A1 auto-runs → the composite does NOT raise
+    warden = WardenGateHooks(classify=_stub({"http.get": "A0"}), floor="A1", ceiling="A1")
+    comp = compose_run_hooks(warden)
+    asyncio.run(comp.on_tool_start("c", "a", _FakeTool("http.get")))   # no raise
+    assert warden.decisions[-1].auto
+
+
+def test_attach_from_env_is_noop_when_not_opted_in(monkeypatch):
+    # Absent the opt-in env var, attach_from_env returns the base hooks UNCHANGED (byte-identical Strix).
+    monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)
+    base = object()
+    assert attach_from_env(base) is base
+
+
+def test_attach_from_env_opted_in_composes_and_blocks(monkeypatch):
+    _install_fake_agents(monkeypatch)
+    _install_fake_wiring(monkeypatch, {"exec_command": "A3", "http.get": "A0"})
+    monkeypatch.setenv("VIGIL_WARDEN_STRIX_GATE", "1")
+
+    class _Base:
+        async def on_llm_end(self, *a, **k): ...
+
+    base = _Base()
+    composed = attach_from_env(base)
+    assert composed is not base                       # a composite was attached
+    with pytest.raises(WardenDenied):                 # and it gates Strix's arbitrary shell
+        asyncio.run(composed.on_tool_start("c", "a", _FakeTool("exec_command")))
+
+
+def test_attach_from_env_fails_safe_to_base_when_wiring_broken(monkeypatch):
+    # Opted in but the composition raises (SDK/classifier unavailable) → return the base hooks (a wiring
+    # error must NEVER stop a scan). Here the fake agents module is deliberately NOT installed, so the
+    # lazy `from agents.lifecycle import RunHooks` inside compose_run_hooks fails.
+    monkeypatch.delitem(sys.modules, "agents", raising=False)
+    monkeypatch.delitem(sys.modules, "agents.lifecycle", raising=False)
+    _install_fake_wiring(monkeypatch, {"exec_command": "A3"})
+    monkeypatch.setenv("VIGIL_WARDEN_STRIX_GATE", "1")
+    base = object()
+    assert attach_from_env(base) is base

@@ -226,6 +226,20 @@ async def run_strix_scan(
         )
         hooks = ReportUsageHooks(model=resolved_model, max_budget_usd=max_budget_usd)
 
+        # VIGIL WARDEN gate (T3): OPT-IN, best-effort. Absent the integration package OR the opt-in env var
+        # (VIGIL_WARDEN_STRIX_GATE), this is a NO-OP and vendored Strix behaviour is byte-identical — the
+        # integration package is a soft dependency (FATAL-2: the sovereign never loads it). When a
+        # VIGIL-governed run opts in, the offense-side WARDEN tool-name gate is composed onto the run hooks
+        # so Strix's arbitrary exec_command shell tool is classified + gated (a non-AUTO classification
+        # RAISES WardenDenied → blocks the call). Every path returns valid hooks; a wiring error never stops
+        # a scan.
+        try:
+            from vigil_integration.warden_gate import attach_from_env
+
+            hooks = attach_from_env(hooks)
+        except Exception:  # noqa: BLE001 — never let WARDEN wiring stop a scan; standalone Strix is unchanged
+            pass
+
         scope_context = build_scope_context(scan_config)
         root_context = _merge_root_prompt_context(scope_context, extra_system_prompt_context)
         root_instructions = _compose_root_instructions_override(

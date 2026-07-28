@@ -19,19 +19,29 @@ Classification is delegated to an INJECTABLE classifier (default: the ``sigil-ke
 subprocess, which is env-agnostic and fail-closed), so this module imports neither the SIGIL
 package nor any offense engine — it is import-clean and lives on the shared integration seam.
 
-The SDK wiring (attaching ``WardenGateHooks`` to the Strix ``Runner`` and the tool-invoke wrapper
-that routes a QUEUE decision to the owner-signed approval queue) is a DEFERRED integration gate —
-the openai-agents SDK is not vendored on disk, so it can't be exercised here. The DECISION CORE
-below is complete and fully tested; the hook adapter fails safe (only an AUTO decision runs) until
-that wiring lands.
+The SDK wiring lands in TWO parts. (a) ATTACHING ``WardenGateHooks`` to the Strix ``Runner`` is done by
+:func:`attach_from_env` — an ``install_from_env``-style OPT-IN soft-wire (see the proof_sink bootstrap in
+``vendor/strix``): gated on the ``VIGIL_WARDEN_STRIX_GATE`` env var so standalone / non-governed Strix stays
+byte-identical, it composes this gate onto the run hooks so Strix's arbitrary ``exec_command`` shell tool is
+classified + gated (a non-AUTO classification RAISES ``WardenDenied`` → the tool call is BLOCKED). (b) The
+tool-invoke wrapper that routes a QUEUE decision to the owner-signed approval queue — upgrading QUEUE from
+hard-block to approve-then-run — is still DEFERRED; until it lands the hook fails safe (only an AUTO decision
+runs, everything else hard-blocks). The DECISION CORE is complete and fully tested.
+
+FATAL-2: this module is import-clean (stdlib only at module scope) so it loads in BOTH environments, but it
+is OFFENSE-side — only the offense-env Strix process ever calls :func:`attach_from_env`; the sovereign never
+loads it. The SDK (``agents.lifecycle``) and the classifier (``live.wiring.default_classify``) are imported
+LAZILY inside the wiring functions, so importing this module never drags the offense engine or the SDK into
+the sovereign environment.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 # Tier is represented as the kernel's own string labels ("A0".."A3") + an ordinal, rather than a
 # third copy of the Tier enum (the seam map warned the Rust and Python enums must stay in sync;
@@ -189,3 +199,83 @@ class WardenGateHooks:
                 f"WARDEN gate blocked tool {name!r}: {decision.outcome} ({decision.reason}). "
                 f"Offense tools at/above A2 require owner approval; not yet wired to the queue."
             )
+
+
+# ---------------------------------------------------------------------------------------------------
+# T3 — the Strix runner soft-wire: compose this offense-side gate onto Strix's run hooks, opt-in.
+# ---------------------------------------------------------------------------------------------------
+
+# The explicit opt-in for the Strix WARDEN wire. Absent (or empty) ⇒ :func:`attach_from_env` is a NO-OP and
+# vendored / non-governed Strix behaves byte-identically. A VIGIL-governed run sets this to route Strix's
+# arbitrary shell through the gate. It is a posture switch only — it can never LOWER a tier or auto-allow.
+_STRIX_GATE_ENV = "VIGIL_WARDEN_STRIX_GATE"
+
+
+def compose_run_hooks(*members: Any) -> Any:
+    """Compose N openai-agents ``RunHooks``-shaped objects into ONE ``RunHooks`` that fans each lifecycle
+    callback out to every member in order. Used to run Strix's existing ``ReportUsageHooks`` (SDK usage /
+    budget accounting) AND this module's :class:`WardenGateHooks` (the ``on_tool_start`` tool-name gate) off
+    a single hooks object, because the SDK ``Runner`` accepts only one. A member that does not implement a
+    given callback is skipped; a ``WardenDenied`` raised by a member's ``on_tool_start`` PROPAGATES (that is
+    exactly how a denied classification BLOCKS the tool call). Forwarding is signature-agnostic
+    (``*args, **kwargs``) so it is robust to SDK callback-arity changes.
+
+    The SDK base class (``agents.lifecycle.RunHooks``) is imported LAZILY here — offense-env only — so this
+    module stays import-clean in the sovereign environment (FATAL-2)."""
+    from agents.lifecycle import RunHooks   # lazy — offense/SDK env only; never at module scope (FATAL-2)
+
+    active = [m for m in members if m is not None]
+
+    class _CompositeRunHooks(RunHooks):   # type: ignore[misc,valid-type]
+        async def _fan(self, method: str, *args: Any, **kwargs: Any) -> None:
+            for m in active:
+                fn = getattr(m, method, None)
+                if fn is None:
+                    continue
+                await fn(*args, **kwargs)   # a WardenDenied propagates here → blocks the tool call
+
+        async def on_agent_start(self, *a: Any, **k: Any) -> None:
+            await self._fan("on_agent_start", *a, **k)
+
+        async def on_agent_end(self, *a: Any, **k: Any) -> None:
+            await self._fan("on_agent_end", *a, **k)
+
+        async def on_handoff(self, *a: Any, **k: Any) -> None:
+            await self._fan("on_handoff", *a, **k)
+
+        async def on_tool_start(self, *a: Any, **k: Any) -> None:
+            await self._fan("on_tool_start", *a, **k)
+
+        async def on_tool_end(self, *a: Any, **k: Any) -> None:
+            await self._fan("on_tool_end", *a, **k)
+
+        async def on_llm_start(self, *a: Any, **k: Any) -> None:
+            await self._fan("on_llm_start", *a, **k)
+
+        async def on_llm_end(self, *a: Any, **k: Any) -> None:
+            await self._fan("on_llm_end", *a, **k)
+
+    return _CompositeRunHooks()
+
+
+def attach_from_env(base_hooks: Any) -> Any:
+    """Best-effort compose this offense-side WARDEN tool-name gate onto Strix's run ``base_hooks``, GATED on
+    the explicit opt-in env var ``VIGIL_WARDEN_STRIX_GATE``. Returns ``base_hooks`` UNCHANGED when the gate
+    is not opted in, when the integration/SDK cannot be wired, or on ANY failure — so vendored / non-governed
+    Strix is byte-identical and a wiring error can never stop a scan. When opted in, returns a composite
+    ``RunHooks`` that runs the existing accounting AND the WARDEN ``on_tool_start`` gate, where a non-AUTO
+    classification RAISES ``WardenDenied`` and BLOCKS the tool call (Strix's arbitrary ``exec_command`` shell
+    classifies A3 → blocked).
+
+    The gate uses the SAME classifier the live offense gate uses (``live.wiring.default_classify``) and the
+    module-default floor/ceiling (A2 / A1) — fully fail-closed: an offense tool never auto-runs; it
+    hard-blocks until the signed approval queue is wired (a future slice). Classifier + SDK are imported
+    LAZILY (offense-env only), keeping this module import-clean in the sovereign env (FATAL-2)."""
+    if not os.environ.get(_STRIX_GATE_ENV):
+        return base_hooks
+    try:
+        from .live.wiring import default_classify   # lazy — offense-env only (pulls the live engine)
+        warden = WardenGateHooks(classify=default_classify)
+        return compose_run_hooks(base_hooks, warden)
+    except Exception:  # noqa: BLE001 — never let WARDEN wiring stop a scan; fall back to the base hooks
+        return base_hooks

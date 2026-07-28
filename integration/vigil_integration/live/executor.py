@@ -58,7 +58,7 @@ import os
 import re
 import socket
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, is_dataclass, replace
 from ipaddress import ip_address
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -72,7 +72,7 @@ from ..agent.targets import extract_target
 from ..tools import authorize_tool_call
 from ..tools.mcp_registry import _redact_arg_list, _redact_str
 
-__all__ = ["ExecResult", "ExecRecord", "RunOutcome", "execute", "subprocess_runner"]
+__all__ = ["ExecResult", "ExecRecord", "RunOutcome", "execute", "execute_terminal", "subprocess_runner"]
 
 # Defaults — generous but bounded. A live tool must never hang the loop or fill the spine.
 DEFAULT_TIMEOUT: float = 120.0        # seconds; wall-time budget for the whole subprocess
@@ -704,6 +704,270 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
         tool=name, ran=True, outcome="ran", reason="tool executed under the sovereign gates",
         tier=verdict.tier, destructive=verdict.destructive, requires_quorum=verdict.requires_quorum,
         signed=signed, target=build.target, argv=tuple(record.argv), exit_code=outcome.exit_code,
+        timed_out=outcome.timed_out, truncated=outcome.truncated,
+        stdout=outcome.stdout, stderr=outcome.stderr, record=record,
+    )
+
+
+# ===================================================================================================
+# T1 — a governed LOCAL terminal, safe by CONSTRUCTION (no network target, so no IP-pin to lift)
+# ===================================================================================================
+#
+# ``execute`` above is a TARGET-PINNED network-tool runner: it resolves + pins a loopback/scope IP and the
+# per-tool builder pins the argv to that IP — the never-liftable egress floor. A generic terminal has NO
+# network target, so it cannot ride that path. Instead the floor is preserved BY CONSTRUCTION: the
+# allowlist admits ONLY local, non-network, non-interpreter, non-writer read/inspect utilities. None of
+# them opens a socket, spawns an interpreter, or mutates the host, so a terminal command CANNOT make
+# network egress or persist a change — there is nothing to pin because there is nothing that egresses.
+#
+# The safety argument, stated so the red-pen can attack exactly it:
+#   * NO shell is ever invoked (``subprocess`` runs an argv LIST with ``shell=False``); the command is
+#     split on ASCII whitespace ONLY, and the WHOLE command is refused if it holds any shell metacharacter,
+#     so no token can be interpreted specially (no pipe/redirect/substitution/glob/var-expansion).
+#   * ``argv[0]`` MUST be one of the curated local read/inspect binaries below. Every NETWORK binary
+#     (curl/wget/nc/ssh/scp/…), every INTERPRETER (bash/sh/python/perl/ruby/node/awk/…), and every WRITER
+#     (tee/cp/mv/rm/dd/sed -i/…) is absent from the allowlist and therefore DENIED.
+#   * The few binaries that COULD exec/write are handled by ALLOWLIST, not a spelling denylist — a red-pen
+#     proved a denylist cannot be complete (GNU getopt_long accepts unambiguous prefix ABBREVIATIONS like
+#     `sort --compress=`/`--out=`, and coreutils have positional aliases like `date MMDDhhmm`). So:
+#       - ``sort``/``uniq``/``file``/``env`` — genuinely exec/write-capable; simply NOT on the allowlist.
+#       - ``find``  — every ``-``-leading token must be on the read-only predicate allowlist
+#                     (``_FIND_SAFE_PREDICATES``); the exec/write predicates (-exec/-execdir/-delete/-fprint*/
+#                     -fls/-ok*/…) are refused by OMISSION (no missed spelling can slip through). Non-``-``
+#                     tokens are paths/patterns/values — reads, never a program to run.
+#       - ``date``/``hostname`` — admitted ONLY bare (they print); a flag/operand could set the clock/host.
+#     So no allowlisted binary — under any accepted argv — can open a socket, spawn an interpreter, or
+#     mutate a file/the host: egress and host-write are both impossible by construction.
+#   * ``terminal.run`` classifies A2 under the ONE shared WARDEN classifier (no A3 danger token, not in the
+#     recon auto-set), so under the A1 offense ceiling the conjunctive gate QUEUES it — it can NEVER
+#     auto-run; owner approval is always required (the gate's job; we assert the classification here too).
+#   * No signer ⇒ REFUSE before running (unrecordable = unprovable). Every run is a signed, redacted
+#     ``ExecRecord`` — reusing the exact machinery ``execute`` uses. Total: any failure is a DENY, never a
+#     raise.
+
+# The curated LOCAL read/inspect allowlist. Only binaries that can NEITHER exec, write a file, NOR egress
+# under ANY argv are admitted, so "no egress / no host-write by construction" is TRUE, not merely guarded.
+# A red-pen refuted an earlier spelling-DENYLIST guard: GNU getopt_long accepts any unambiguous prefix
+# ABBREVIATION (`sort --compress=` ≡ `--compress-program`, `sort --out=` ≡ `--output`) and coreutils have
+# positional aliases (`date MMDDhhmm` sets the clock, a 2nd `uniq` operand is an output file) — a denylist of
+# spellings can never be complete. So the exec/write-capable binaries (sort/uniq/file/env) are DROPPED; the
+# only capable binary kept is `find`, admitted via a read-only PREDICATE ALLOWLIST (below) that rejects the
+# exec/write predicates by OMISSION (immune to any missed spelling); and the two host-state PRINTERS
+# (date/hostname) are admitted BARE only (a flag/operand could set the clock/hostname).
+_TERMINAL_ALLOWLIST: frozenset = frozenset({
+    # pure read/print — safe under ANY argv (no exec/write/egress option or operand exists):
+    "ls", "cat", "head", "tail", "wc", "stat", "pwd", "whoami", "id", "uname", "echo",
+    "df", "du", "ps", "uptime", "grep", "cut", "tr",
+    "find",                                  # walk — SAFE-PREDICATE allowlist (_FIND_SAFE_PREDICATES)
+    "date", "hostname",                      # print-only, admitted BARE (see _TERMINAL_BARE_ONLY)
+})
+
+# date / hostname: admitted ONLY bare — a flag/operand can SET the system clock/hostname (a host write).
+_TERMINAL_BARE_ONLY: frozenset = frozenset({"date", "hostname"})
+
+# ``find``: an ALLOWLIST of read-only predicates/operators. Any ``-``-leading token NOT in this set is
+# refused — so every exec/write predicate (-exec/-execdir/-ok/-okdir/-delete/-fprint/-fprint0/-fprintf/-fls)
+# is rejected by OMISSION (a denylist once missed -fprint0; an allowlist cannot miss one). -print/-printf/-ls
+# write to STDOUT only (safe); the file-writing -f* variants are simply absent. A non-``-`` token is a
+# path/pattern/numeric value (a read), never a program to run.
+_FIND_SAFE_PREDICATES: frozenset = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-lname", "-ilname", "-regex", "-iregex",
+    "-type", "-xtype", "-maxdepth", "-mindepth", "-depth", "-size", "-empty", "-perm", "-links", "-inum",
+    "-newer", "-newermt", "-anewer", "-cnewer", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin",
+    "-user", "-group", "-uid", "-gid", "-nouser", "-nogroup", "-readable", "-writable", "-executable",
+    "-print", "-print0", "-printf", "-ls", "-true", "-false", "-prune", "-quit",
+    "-o", "-a", "-and", "-or", "-not", "-regextype", "-follow", "-mount", "-xdev", "-noleaf",
+    "-ignore_readdir_race", "-noignore_readdir_race", "(", ")", "!",
+})
+
+# Shell metacharacters (+ NUL + backslash): the WHOLE command is refused if any appears. No shell is ever
+# invoked, but this makes "argv is a literal whitespace-split of a benign command" an auditable property —
+# a pipe/redirect/substitution/subshell/brace/quote-escape can never survive to a token.
+_TERMINAL_METACHARS: frozenset = frozenset(
+    [";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "\n", "\r", "\x00", "\\"]
+)
+
+_TERMINAL_TOOL = "terminal.run"
+
+
+def _terminal_warden_tier() -> str:
+    """The WARDEN tier ``terminal.run`` classifies to under the ONE shared classifier of record
+    (``vigil_core.warden_tiers``), mirroring ``wiring.default_classify`` for a NON-recon name: A3 if the
+    name carries an A3 danger token, else A2. ``terminal.run`` is not in the offense recon auto-set, so it
+    is A2 — NEVER auto (A0/A1). Checked as a construction invariant (defense in depth): a classifier drift
+    that made a ``terminal.run`` auto-eligible trips the caller's refusal. Total — any import failure
+    yields A3 (the most-gated tier), never an exception."""
+    try:
+        from vigil_core.warden_tiers import has_danger_token
+        return "A3" if has_danger_token(_TERMINAL_TOOL) else "A2"
+    except Exception:  # noqa: BLE001 — cannot import the classifier ⇒ fail-closed to the most-gated tier
+        return "A3"
+
+
+def _parse_terminal_command(command: Any) -> tuple[Optional[list], str]:
+    """Parse + allowlist-validate a LOCAL terminal command into an argv LIST, fail-closed. NO shell is ever
+    consulted: the command is refused whole if it holds any shell metacharacter, then split on ASCII
+    whitespace only. Returns ``(argv, "ok")`` or ``(None, reason)`` on any refusal (metachar / off-allowlist
+    binary / unsafe ``find`` predicate / bare ``..`` token / NUL)."""
+    if not isinstance(command, str):
+        return None, "terminal command must be a string (fail-closed)"
+    cmd = command.strip()
+    if not cmd:
+        return None, "empty terminal command (fail-closed)"
+    bad = sorted(_TERMINAL_METACHARS & set(cmd))
+    if bad:
+        return None, f"terminal command contains disallowed metacharacter(s) {bad!r} — refused (fail-closed)"
+    argv = cmd.split()   # split on ASCII whitespace runs ONLY — no shell, no glob, no variable expansion
+    if not argv:
+        return None, "terminal command produced no argv tokens (fail-closed)"
+    binary = argv[0]
+    if binary not in _TERMINAL_ALLOWLIST:
+        return None, (f"terminal binary {binary!r} is not on the local read/inspect allowlist "
+                      "(network/interpreter/writer binaries are denied) — fail-closed")
+    for tok in argv:
+        if "\x00" in tok:
+            return None, "terminal argv token contains a NUL byte (fail-closed)"
+        if tok == "..":
+            return None, "terminal argv token is a bare '..' traversal — refused (fail-closed)"
+    guard = _terminal_binary_guard(binary, argv)
+    if guard is not None:
+        return None, guard
+    return argv, "ok"
+
+
+def _terminal_binary_guard(binary: str, argv: list) -> Optional[str]:
+    """Second-stage refusal for the two capable classes still on the allowlist. Returns a refusal reason or
+    None. This is ALLOWLIST-based (not a spelling denylist), so it is immune to the getopt_long
+    prefix-abbreviation / positional-alias bypasses a red-pen used against the old guard:
+      * ``date``/``hostname`` — admitted ONLY bare (any flag/operand could set the clock/hostname);
+      * ``find`` — every ``-``-leading token must be on the READ-ONLY predicate allowlist, so the exec/write
+        predicates are refused by OMISSION (no missed spelling can slip through).
+    The pure-read tools (ls/cat/grep/…) can neither exec nor write under any argv and fall through to None."""
+    rest = argv[1:]
+    if binary in _TERMINAL_BARE_ONLY and rest:
+        what = "clock" if binary == "date" else "hostname"
+        return (f"{binary!r} is admitted only with NO arguments — a bare `{binary}` prints, but a flag/operand "
+                f"could set the system {what} (a host write). Refused (fail-closed).")
+    if binary == "find":
+        for tok in rest:
+            if tok.startswith("-") and tok not in _FIND_SAFE_PREDICATES:
+                return (f"find predicate {tok!r} is not on the read-only predicate allowlist — the exec/write "
+                        "predicates (-exec/-execdir/-delete/-fprint*/-fls/-ok*/…) are refused by omission "
+                        "(fail-closed)")
+        return None
+    return None
+
+
+def _safe_terminal_cwd(cwd: Any) -> tuple[Optional[str], str]:
+    """Confine the terminal ``cwd``: ``None`` inherits the process cwd (subprocess default); a string is
+    accepted only if it holds no ``..`` and no NUL and names an existing directory. Any other value → refuse
+    (``(None, reason)``)."""
+    if cwd is None:
+        return None, "ok"
+    if not isinstance(cwd, str) or not cwd:
+        return None, "terminal cwd must be a non-empty string or None (fail-closed)"
+    if ".." in cwd or "\x00" in cwd:
+        return None, "terminal cwd contains a '..' traversal or NUL — refused (fail-closed)"
+    if not os.path.isdir(cwd):
+        return None, "terminal cwd is not an existing directory (fail-closed)"
+    return cwd, "ok"
+
+
+def execute_terminal(
+    command: Any,
+    phase: Any,
+    *,
+    gate: Optional[Callable[..., Any]] = None,
+    view: Any = None,
+    destructive_view: Any = None,
+    run: Callable[..., Any] = subprocess_runner,
+    signer: Optional[Callable[[bytes], Any]] = None,
+    seq: Any = 0,
+    now: Any = 0,
+    timeout: float = DEFAULT_TIMEOUT,
+    output_cap: int = DEFAULT_OUTPUT_CAP,
+    cwd: Optional[str] = None,
+) -> ExecResult:
+    """Run a governed LOCAL terminal command, fail-closed at every stage. REUSES the gate + signed-record
+    machinery of :func:`execute` but SKIPS network target-pinning — because the allowlist admits only local,
+    non-network, non-interpreter, non-writer utilities, a terminal command cannot make network egress, so the
+    egress floor is preserved BY CONSTRUCTION rather than by an IP-pin. Order (all fail-closed): (0) no
+    ``signer`` ⇒ refuse an unrecordable command BEFORE anything; (1) parse + allowlist-validate the command
+    (no shell, argv list, metachar/off-allowlist/unsafe-find refusals deny); (2) confine ``cwd``;
+    (3) authorize via ``authorize_tool_call`` scoped on the LOCAL host ``127.0.0.1`` (CRUCIBLE loopback scope
+    check + kill-switch apply) — ``terminal.run`` is A2 so under the A1 ceiling it QUEUES, never auto;
+    (4) run the argv via the injected ``run`` (``shell=False``); (5) write a signed, redacted ``ExecRecord``
+    and return the RAW output. Never raises — any unexpected condition is a DENY."""
+    try:
+        return _execute_terminal(command, phase, gate=gate, view=view, destructive_view=destructive_view,
+                                 run=run, signer=signer, seq=seq, now=now, timeout=timeout,
+                                 output_cap=output_cap, cwd=cwd)
+    except Exception:  # noqa: BLE001 — total on untrusted input; an internal error is a DENY, never a raise
+        return _deny(_TERMINAL_TOOL, "internal error while executing the terminal command (fail-closed)")
+
+
+def _execute_terminal(command, phase, *, gate, view, destructive_view, run, signer, seq, now, timeout,
+                      output_cap, cwd) -> ExecResult:
+    # (0) An execution MUST be recordable: no signer wired ⇒ we cannot produce the signed spine record, so
+    #     we refuse to run an unrecordable (hence unprovable) command — BEFORE we even parse it.
+    if not callable(signer):
+        return _deny(_TERMINAL_TOOL, "no signer wired — refusing to run an unrecordable command (fail-closed)")
+
+    # (1) Parse + allowlist-validate the command with NO shell (metachar refusal → off-allowlist binary →
+    #     unsafe find predicate → bare '..' / NUL token all DENY here, before any authorization or spawn).
+    argv, why = _parse_terminal_command(command)
+    if argv is None:
+        return _deny(_TERMINAL_TOOL, why)
+
+    # (2) Confine the working directory (default: inherit the process cwd; a '..'/NUL/non-dir cwd denies).
+    safe_cwd, cwd_why = _safe_terminal_cwd(cwd)
+    if safe_cwd is None and cwd is not None:
+        return _deny(_TERMINAL_TOOL, cwd_why)
+
+    # (3) Construction invariant (defense in depth): terminal.run must classify A2/A3 under the ONE shared
+    #     WARDEN classifier — NEVER auto (A0/A1). The conjunctive gate is what actually queues it; this is a
+    #     belt-and-suspenders refusal should a future classifier drift make a terminal.run auto-eligible.
+    warden_tier = _terminal_warden_tier()
+    if warden_tier not in ("A2", "A3"):
+        return _deny(_TERMINAL_TOOL,
+                     f"terminal.run classified {warden_tier!r} (auto-eligible) — refused (fail-closed)",
+                     tier=warden_tier)
+
+    # (4) Authorize through the sovereign core, scoped on the LOCAL host 127.0.0.1 (so the CRUCIBLE loopback
+    #     scope check + kill-switch apply). The phase gate (terminal.run must be registered for the phase),
+    #     the destructive classification, and the injected conjunctive gate all decide here. Proceed ONLY on
+    #     allow; a queue / deny / missing-gate / gate-error is a DENY.
+    verdict = authorize_tool_call(_TERMINAL_TOOL, {"command": command}, phase, gate=gate,
+                                  view=view if isinstance(view, dict) else {},
+                                  destructive_view=destructive_view, resolved_target="127.0.0.1", now=now)
+    if not getattr(verdict, "allowed", False):
+        return _deny(_TERMINAL_TOOL, f"authorization denied: {getattr(verdict, 'reason', '')}",
+                     tier=getattr(verdict, "tier", warden_tier),
+                     destructive=bool(getattr(verdict, "destructive", False)),
+                     requires_quorum=bool(getattr(verdict, "requires_quorum", False)), target="local")
+
+    # Record the call at the WARDEN classification tier (A2/A3 — the tier the OFFENSE gate actually gates a
+    # terminal command at), overriding the network phase-tier label, so the "never auto" property is visible
+    # on the signed spine record; destructive/quorum flags carry over from the real verdict.
+    rec_verdict = replace(verdict, tier=warden_tier) if is_dataclass(verdict) else verdict
+
+    # (5) Run the argv via the injected runner — shell=False, argv LIST, timeout + output cap + confined cwd.
+    try:
+        raw_outcome = run(argv, timeout=timeout, output_cap=output_cap, cwd=safe_cwd)
+    except Exception as exc:  # noqa: BLE001 — a runner outage (incl. a runner that rejects cwd=) never crashes
+        raw_outcome = RunOutcome(exit_code=None, stdout="", stderr=f"runner error: {type(exc).__name__}: {exc}")
+    outcome = _coerce_outcome(raw_outcome, output_cap)
+
+    # (6) Signed, redacted spine record; RAW streams returned for the caller/oracle (never persisted here).
+    record, signed = _build_record(seq=seq, now=now, tool=_TERMINAL_TOOL, phase=phase, verdict=rec_verdict,
+                                   target="local", redacted_argv=_redact_argv(argv), outcome=outcome,
+                                   signer=signer)
+    return ExecResult(
+        tool=_TERMINAL_TOOL, ran=True, outcome="ran",
+        reason="terminal command executed under the sovereign gates",
+        tier=warden_tier, destructive=bool(getattr(verdict, "destructive", False)),
+        requires_quorum=bool(getattr(verdict, "requires_quorum", False)),
+        signed=signed, target="local", argv=tuple(record.argv), exit_code=outcome.exit_code,
         timed_out=outcome.timed_out, truncated=outcome.truncated,
         stdout=outcome.stdout, stderr=outcome.stderr, record=record,
     )

@@ -56,6 +56,11 @@ DEFAULT_TOOL_VIEW: dict[str, list[str]] = {
     "sqlmap": ["exploitation", "post_exploitation"],
     "hydra": ["exploitation", "post_exploitation"],
     "curl": ["informational", "exploitation"],
+    # T1: the governed LOCAL terminal (executor.execute_terminal). Non-network, non-destructive, safe by
+    # CONSTRUCTION (a read/inspect-only allowlist), so it is registered for the phase gate but is NOT in the
+    # destructive view. It classifies A2 (no danger token) → under the A1 offense ceiling the conjunctive
+    # gate QUEUES it for owner approval; it can never auto-run.
+    "terminal.run": ["informational", "exploitation", "post_exploitation"],
 }
 # The operator manifest of destructive tools (authoritative for the m-of-n threshold-destruction leg).
 DEFAULT_DESTRUCTIVE_VIEW: dict[str, bool] = {"sqlmap": True, "hydra": True, "metasploit": True}

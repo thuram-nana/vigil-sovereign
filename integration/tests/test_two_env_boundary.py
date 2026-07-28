@@ -63,6 +63,12 @@ import vigil_integration.proof.bundle        # C1: the client-verifiable bundle 
 assert "framework" not in __import__("sys").modules, "proof.bundle must not import framework at module scope"
 import vigil_integration.remediation.fix_oracle   # A6a: the fix-verification oracle — framework LAZY
 assert "framework" not in __import__("sys").modules, "fix_oracle must not import framework at module scope"
+import vigil_integration.warden_gate         # T3: the offense-side Strix hook adapter — SDK + wiring LAZY
+_m = __import__("sys").modules
+assert "framework" not in _m, "warden_gate must not import framework at module scope"
+assert "agents" not in _m, "warden_gate must not import the openai-agents SDK at module scope"
+assert "strix" not in _m, "warden_gate must not import strix at module scope"
+assert "vigil_integration.live.wiring" not in _m, "warden_gate must not import the live engine at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
