@@ -49,6 +49,10 @@ for mod in ("framework", "framework.v2", "framework.v2.common.ethics", "strix", 
 from sigil.reuse import assert_no_offense
 assert_no_offense()                       # must not raise in a genuinely sovereign env
 import vigil_integration.inert_finding     # the sovereign-safe seam still imports
+import vigil_integration.learn_drain        # A2c: the offense CONSUMER must import framework LAZILY, so
+assert "framework" not in __import__("sys").modules, "learn_drain must not import framework at module scope"
+import sigil.knowledge.learn_grant          # A2b: the sovereign PRODUCER must stay offense-free too
+assert "framework" not in __import__("sys").modules, "learn_grant must not import framework at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

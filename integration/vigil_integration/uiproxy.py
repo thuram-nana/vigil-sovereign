@@ -557,6 +557,20 @@ def _resolve_offense_llm_env(sigil_bin: Path, runtime_dir: "Optional[Path]" = No
     return _materialise_file_secrets(env, runtime_dir)
 
 
+def _resolve_owner_pubkey(sigil_bin: Path) -> "Optional[str]":
+    """Ask the SOVEREIGN venv for the base64 owner PUBLIC key (the pin the offense ``learn-drain`` verifies
+    each learn-grant against). Read-only, subprocess, never logged; the private key never leaves the
+    sovereign store. Returns None if no owner identity exists / any error (the offense drain sidecar is then
+    skipped — fail-safe, never started with a missing pin)."""
+    try:
+        proc = subprocess.run([str(sigil_bin), "owner-pubkey"], capture_output=True, text=True,
+                              env=_child_env(), timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pk = (proc.stdout or "").strip()
+    return pk or None
+
+
 def _console_vigil_bin(crucible_bin: Path) -> "Optional[str]":
     """The `vigil` entrypoint to hand the offense console child as ``VIGIL_BIN``. The console launcher's
     graph-backed engage (``console/actions.py _vigil_bin``) resolves ``VIGIL_BIN`` else ``shutil.which(
@@ -752,6 +766,24 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                          "--slug", feed_slug.strip(), "--interval", str(max(1, feed_interval))]
             procs.append(("offense-feed", _spawn(feed_argv, logs / "offense-feed.log",
                                                  extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+
+    # 3c) the K2b→K3 learn bridge (A2 keystone): the sovereign producer signs a learn_grant for each
+    # owner-approved learn-proposal into a shared spool; the offense consumer verifies it and runs deep-learn.
+    # Both are INERT until the owner approves AND autolearn is latched on (defaults disabled), so they are safe
+    # to run by default. Fail-safe: the offense drain needs the owner PUBLIC key as a verify pin — if no owner
+    # identity exists, the producer still runs but the consumer is skipped (never started without its pin).
+    learn_spool = base.resolve() / "learn-spool"
+    grant_argv = [str(sigil_bin), "knowledge", "export-learn-grants", "--spool", str(learn_spool), "--watch"]
+    procs.append(("sovereign-learn-grants", _spawn(grant_argv, logs / "sovereign-learn-grants.log")))
+    owner_pub = _resolve_owner_pubkey(sigil_bin)
+    if owner_pub and vigil_bin:
+        drain_argv = [vigil_bin, "learn-drain", "--spool", str(learn_spool),
+                      "--owner-pubkey", owner_pub, "--watch"]
+        procs.append(("offense-learn-drain", _spawn(drain_argv, logs / "offense-learn-drain.log",
+                                                    extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+    else:
+        print("vigil up: learn-drain skipped (no owner pubkey resolvable or `vigil` bin unresolved) — the "
+              "sovereign producer runs, but grants won't be consumed until both are available.", file=sys.stderr)
 
     # 4) assemble the runtime serve dir with the token + federated mount bases.
     try:

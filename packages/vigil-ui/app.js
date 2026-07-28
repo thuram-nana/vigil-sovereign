@@ -3358,7 +3358,7 @@
                        "Denied.", loadKnowledgeData); } }, "Deny")]
                 : [h("button.btn.sm", { disabled: killed, title: killed ? "kill-switch engaged" : "",
                      onClick: function () {
-                       settingsAct({ action: "queue_learn", vuln_id: p.vuln_id, rank: p.rank,
+                       settingsAct({ action: "queue_learn", vuln_id: p.vuln_id, slug: K.slug, rank: p.rank,
                          exploit_known: p.exploit_known, severity: p.severity, rationale: p.rationale },
                          "Queued for your approval.", loadKnowledgeData); } }, "Queue for approval")];
               return h("div.kv", null, [
@@ -3387,7 +3387,7 @@
         h("button.btn.sm.owner", { disabled: killed, onClick: function () {
           var el = V.$("#k-manual-vuln"); var v = (el && el.value || "").trim();
           if (!v) { V.toast("Enter a CVE id", true); return; }
-          settingsAct({ action: "queue_learn", vuln_id: v, rationale: "manually added" },
+          settingsAct({ action: "queue_learn", vuln_id: v, slug: K.slug, rationale: "manually added" },
             "Added to the learn queue for your approval.", loadKnowledgeData); } }, "Add to learn queue"),
       ]),
       h("div.row", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } }, [

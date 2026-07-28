@@ -707,6 +707,41 @@ def cmd_inbound(a) -> None:
         print(f"  drained: {r['ingested']} ingested, {r['rejected']} rejected → spine seqs {r['seqs']}")
 
 
+def cmd_knowledge(a) -> None:
+    """Sovereign knowledge ops. ``export-learn-grants`` writes a signed inert ``learn_grant`` for each
+    owner-APPROVED learn-proposal into a spool the OFFENSE side drains (``vigil learn-drain``) to run K3
+    deep-learn (the A2 keystone). Fail-closed + gated on the kill-switch AND the ``autolearn`` latch;
+    idempotent. Only signed bytes cross — the offense side re-derives the lead from its own intel."""
+    from .knowledge import export_approved_grants
+
+    if a.knowledge_cmd != "export-learn-grants":
+        print(f"unknown knowledge command: {a.knowledge_cmd}", file=sys.stderr)
+        sys.exit(2)
+    if getattr(a, "watch", False):
+        import time
+        print(f"  exporting owner-approved learn-grants → {a.spool} "
+              f"(gated on autolearn + kill-switch); Ctrl-C to stop")
+        try:
+            while True:
+                out = export_approved_grants(SpineStore(), spool_dir=a.spool)
+                if out.get("exported"):
+                    print(f"  exported {out['exported']} learn-grant(s)")
+                time.sleep(a.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        print(f"  {export_approved_grants(SpineStore(), spool_dir=a.spool)}")
+
+
+def cmd_owner_pubkey(a) -> None:
+    """Print the base64 owner PUBLIC key (nothing if no owner identity exists). Read-only — the private key
+    never leaves the sovereign store. Used by `vigil up` to hand the offense `learn-drain` its verify pin."""
+    from .governor.identity import owner_pubkey
+    pk = owner_pubkey()
+    if pk:
+        print(pk)
+
+
 def cmd_spine(a) -> None:
     """Segment-rotation ops. `migrate` moves the legacy single file into the segment layout (O(1), one-way,
     idempotent). `status` lists the segment set. Retain-all: no records are ever deleted."""
@@ -1293,6 +1328,17 @@ def main(argv=None) -> None:
     pinb.add_argument("--scope", default="*", help="engagement scope to confine ingest to (default: * = any)")
     pinb.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pinb.set_defaults(fn=cmd_inbound)
+    pkn = sub.add_parser("knowledge", help="sovereign knowledge ops: export owner-approved learn-grants to "
+                                           "the offense spool (the K2b→K3 bridge; gated + fail-closed)")
+    pkn.add_argument("knowledge_cmd", choices=["export-learn-grants"])
+    pkn.add_argument("--spool", required=True,
+                     help="the learn-grant spool dir the offense `vigil learn-drain` consumes")
+    pkn.add_argument("--watch", action="store_true", help="keep exporting as new approvals land; Ctrl-C to stop")
+    pkn.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between export rounds")
+    pkn.set_defaults(fn=cmd_knowledge)
+    pop = sub.add_parser("owner-pubkey",
+                         help="print the base64 owner PUBLIC key (read-only; for pinning the offense learn-drain)")
+    pop.set_defaults(fn=cmd_owner_pubkey)
     pfl = sub.add_parser("floor", help="durable external anti-rollback floor: status; reset (deliberate downward re-seed)")
     pfl.add_argument("action", choices=["status", "reset"])
     pfl.add_argument("--yes", action="store_true", help="confirm `reset` deliberately lowers the floor")

@@ -36,7 +36,8 @@ def pending_learn_proposals(store: SpineStore, trusted_pubkey_b64: Optional[str]
         p = r.payload
         if p.get("signal") != LEARN_SIGNAL:
             continue
-        out.append({"seq": r.seq, "vuln_id": p.get("vuln_id"), "rank": p.get("rank"),
+        out.append({"seq": r.seq, "vuln_id": p.get("vuln_id"), "slug": p.get("slug") or "",
+                    "rank": p.get("rank"),
                     "exploit_known": bool(p.get("exploit_known")), "severity": p.get("severity"),
                     "rationale": p.get("rationale")})
     return out
@@ -60,6 +61,11 @@ def enqueue_learn_proposal(store: SpineStore, proposal: dict, *,
     vuln_id = str(proposal.get("vuln_id") or "").strip()[:120]   # bound operator-typed input (manual-add, K4)
     if not vuln_id:
         raise ValueError("learn-proposal requires a vuln_id")
+    # The engagement slug the lead lives under, so the offense side (K3 deep-learn, reached via the A2
+    # learn-grant bridge) can re-derive the full lead from its OWN intel by (slug, vuln_id). Bounded +
+    # sanitised to a path-safe token (it becomes a `--slug` argv value / IntelStore key); empty = default.
+    slug = "".join(c for c in str(proposal.get("slug") or "").strip()[:120]
+                   if c.isalnum() or c in "-_.")
     pending_ids = _pending_vuln_ids(store, trusted_pubkey_b64)
     existing = pending_ids.get(vuln_id)
     if existing is not None:
@@ -69,7 +75,7 @@ def enqueue_learn_proposal(store: SpineStore, proposal: dict, *,
             f"learn-proposal queue is full ({_MAX_PENDING} awaiting approval); accept or deny some first")
     payload = {
         "signal": LEARN_SIGNAL, "decision": "queued", "status": "awaiting-approval", "tier": _LEARN_TIER,
-        "vuln_id": vuln_id, "rank": proposal.get("rank"),
+        "vuln_id": vuln_id, "slug": slug, "rank": proposal.get("rank"),
         "exploit_known": bool(proposal.get("exploit_known")),
         "severity": proposal.get("severity"), "rationale": str(proposal.get("rationale") or "")[:500],
         "subject": f"learn vuln {vuln_id} (find/detect/prevent) — awaiting approval",

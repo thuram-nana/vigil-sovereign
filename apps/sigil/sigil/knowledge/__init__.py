@@ -8,6 +8,8 @@ never fact-minting — and only a fired oracle ever mints a FACT. Enqueuing gran
 approval is the sole trust operation.
 """
 
+from .learn_grant import approved_learn_grants, export_approved_grants
 from .proposals import LEARN_SIGNAL, enqueue_learn_proposal, pending_learn_proposals
 
-__all__ = ["LEARN_SIGNAL", "enqueue_learn_proposal", "pending_learn_proposals"]
+__all__ = ["LEARN_SIGNAL", "enqueue_learn_proposal", "pending_learn_proposals",
+           "approved_learn_grants", "export_approved_grants"]

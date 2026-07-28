@@ -57,7 +57,8 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
             raise ValueError("refused: kill-switch engaged")
         if not CapabilityGate(store, owner_key=owner).is_enabled("autolearn"):
             raise ValueError("refused: autolearn is disabled")
-        proposal = {"vuln_id": str(params.get("vuln_id", "")), "rank": params.get("rank"),
+        proposal = {"vuln_id": str(params.get("vuln_id", "")), "slug": str(params.get("slug", "")),
+                    "rank": params.get("rank"),
                     "exploit_known": bool(params.get("exploit_known")),
                     "severity": params.get("severity"), "rationale": str(params.get("rationale", ""))}
         seq = enqueue_learn_proposal(store, proposal)
