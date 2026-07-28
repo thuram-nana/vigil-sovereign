@@ -557,6 +557,18 @@ def _resolve_offense_llm_env(sigil_bin: Path, runtime_dir: "Optional[Path]" = No
     return _materialise_file_secrets(env, runtime_dir)
 
 
+def _console_vigil_bin(crucible_bin: Path) -> "Optional[str]":
+    """The `vigil` entrypoint to hand the offense console child as ``VIGIL_BIN``. The console launcher's
+    graph-backed engage (``console/actions.py _vigil_bin``) resolves ``VIGIL_BIN`` else ``shutil.which(
+    "vigil")`` — so if the operator started ``vigil up`` by an absolute path (venv not activated), the child
+    can't find ``vigil`` on PATH and a graph-backed run SILENTLY falls back to the non-graph engine. ``vigil``
+    is the sibling of the already-resolved offense ``crucible`` console-script (both live in
+    ``.venv-offense/bin/``), so hand the child that exact absolute path. Returns None if it does not exist
+    (then the child keeps its PATH fallback — never point it at a bad path)."""
+    cand = crucible_bin.parent / "vigil"
+    return str(cand) if cand.exists() else None
+
+
 def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "Queue[str]"]:
     """Spawn a child whose stdout we both TEE to a log file and scan (for the cockpit token). Returns
     the process and a queue of its stdout lines."""
@@ -716,6 +728,11 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # point the console's chat transcripts at the SAME .vigil-live base the rest of the live plane uses
     # (the console otherwise defaults to a different root); resolved absolute so cwd can't move it.
     console_env = {**offense_llm_env, "VIGIL_LIVE_DIR": str(base.resolve())}
+    # Hand the console child the absolute `vigil` path so its graph-backed engage never SILENTLY falls back
+    # to the non-graph engine when `vigil` isn't on the child's inherited PATH (venv not activated).
+    vigil_bin = _console_vigil_bin(crucible_bin)
+    if vigil_bin:
+        console_env["VIGIL_BIN"] = vigil_bin
     procs.append(("offense-console", _spawn(console_argv, logs / "offense-console.log",
                                             extra_env=console_env)))
     procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log",
