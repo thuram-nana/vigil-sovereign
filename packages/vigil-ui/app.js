@@ -3454,7 +3454,28 @@
       ]),
     ]) : null;
 
-    V.mount(body, [picker, learnCard, learnSourceCard, evolveCard, sourcesCard, vulnCard, catCard,
+    // ---- knowledge/ folder → git (A6c/K6): local regenerate + secret-scan + commit (push is CLI-only) ----
+    var gitCard = h("div.card.owner", null, [
+      h("div.card-h", null, [h("h3", null, "knowledge/ folder → git")]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "Regenerate the system-map, SECRET-SCAN the knowledge/ folder, and commit it locally. A hit REFUSES "
+        + "the commit and lists the files to redact. Pushing to GitHub stays a deliberate `vigil knowledge "
+        + "push` CLI act — this never pushes."),
+      h("div.row", { style: { display: "flex", gap: "8px" } }, [
+        h("button.btn.sm", { onClick: function () {
+          V.postJSON(OFF("/api/knowledge/gitsync"), { action: "status" }).then(function (r) {
+            V.toast(r && r.status !== undefined ? ("git status: " + (r.status || "clean")) : "status checked");
+          }).catch(function () { V.toast("status failed", true); }); } }, "Status"),
+        h("button.btn.sm.owner", { onClick: function () {
+          V.postJSON(OFF("/api/knowledge/gitsync"), { action: "sync" }).then(function (r) {
+            if (r && r.ok) { V.toast("knowledge/ synced + committed locally"); }
+            else if (r && r.refused) { V.toast("REFUSED: " + r.refused, true); }
+            else { V.toast((r && r.error) || "sync failed", true); }
+          }).catch(function () { V.toast("sync failed", true); }); } }, "Regenerate + commit"),
+      ]),
+    ]);
+
+    V.mount(body, [picker, learnCard, learnSourceCard, evolveCard, sourcesCard, vulnCard, catCard, gitCard,
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 

@@ -370,6 +370,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
                 return
+            if path == "/api/knowledge/gitsync":
+                # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
+                # CSRF/rebind-gated above; shells the exec-only vigil, surfacing the secret-scan refusal.
+                self._json(actions.knowledge_gitsync(str(body.get("action", "status"))))
+                return
             if path.startswith("/api/evolve/") and path.endswith("/tick"):
                 # K5: RUN one self-evolve tick that PERSISTS (the GET evolve_data is read-only). CSRF/rebind-
                 # gated above + kill-switch gated inside; it drafts proposals + records calibration

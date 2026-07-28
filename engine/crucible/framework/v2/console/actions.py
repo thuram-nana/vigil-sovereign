@@ -699,6 +699,38 @@ def run_evolve_tick(slug: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+def knowledge_gitsync(action: str) -> dict:
+    """A6c/K6: run ``vigil knowledge status|sync`` from the Knowledge screen and surface the result —
+    ESPECIALLY the secret-scan REFUSAL. ``status`` shows what would commit; ``sync`` regenerates the
+    system-map + secret-scans + commits the ``knowledge/`` folder LOCALLY (it does NOT push — the outward
+    ``vigil knowledge push`` stays a deliberate CLI act). Shells the exec-only ``vigil`` (never imports it),
+    fail-closed on a bad action / unresolvable bin / non-JSON output. On a secret-scan refusal (exit 3) the
+    files are surfaced so the operator can redact."""
+    action = str(action or "").strip()
+    if action not in ("status", "sync"):
+        return {"ok": False, "error": "action must be 'status' or 'sync' (push stays a deliberate CLI act)"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        proc = subprocess.run([vigil, "knowledge", action], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    parsed = {}
+    if proc.stdout.strip():
+        try:
+            parsed = json.loads(proc.stdout)
+        except ValueError:
+            parsed = {"raw": proc.stdout[:2000]}
+    if proc.returncode == 3:      # `vigil knowledge sync` exits 3 on a secret-scan refusal (stderr lists files)
+        return {"ok": False, "action": action,
+                "refused": "secret(s) found in knowledge/ — remove or redact before committing",
+                "stderr": (proc.stderr or "")[:2000],
+                **(parsed if isinstance(parsed, dict) else {})}
+    return {"ok": proc.returncode == 0, "action": action,
+            **(parsed if isinstance(parsed, dict) else {})}
+
+
 # ---------------------------------------------------------------------------
 # AEGIS Defense gateway (P5a) — launch / stop / current-pointer
 #
