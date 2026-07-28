@@ -51,6 +51,15 @@ from .export import (
     to_json,
     to_sarif,
 )
+from .howto import (
+    HowTo,
+    build_howto,
+    finding_specific_remediation,
+    has_howto,
+    howto_export,
+    howto_markdown,
+    parse_surface,
+)
 from .standards import (
     STANDARD_VERSIONS,
     ControlMapping,
@@ -85,6 +94,13 @@ __all__ = [
     "to_sarif",
     "export_json",
     "export_sarif",
+    "HowTo",
+    "build_howto",
+    "has_howto",
+    "howto_markdown",
+    "howto_export",
+    "parse_surface",
+    "finding_specific_remediation",
     "STANDARD_VERSIONS",
     "ControlMapping",
     "controls_for",

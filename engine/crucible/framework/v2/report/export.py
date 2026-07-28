@@ -38,6 +38,7 @@ from .generate import (
     _split,
 )
 from .grounding import GRADE_DEMOTED, GradedFinding, grade_findings
+from .howto import howto_export
 from .priority import effort_size, prioritize, priority_score
 
 # Tool identity, shared with the scanner export so a CI consumer sees one producer.
@@ -122,6 +123,7 @@ def _finding_dict(g: GradedFinding) -> dict:
         "effort": effort_size(f.bug_class),
         "priority_score": priority_score(f.severity, f.bug_class),
         "provenance": _provenance(g),
+        "how_to_verify": howto_export(g),
     }
     cvss = _cvss(g)
     if cvss is not None:
@@ -266,6 +268,9 @@ def to_sarif(graded: list[GradedFinding], meta: ReportMeta | None = None) -> str
                 "confidence": prov["confidence"],
                 "certificate": prov["certificate"],
                 "severity": f.severity,
+                # Per-finding how-to-verify/test/patch. A LEAD's level is still capped at
+                # "note" by _sarif_level; this only ADDS guidance, never lifts the level.
+                "howToVerify": howto_export(g),
             },
         })
     sarif = sarif_document(

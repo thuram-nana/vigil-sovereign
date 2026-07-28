@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from .grounding import GRADE_DEMOTED, GradedFinding, grade_findings
-from .priority import SEVERITY_RANK, effort_size, prioritize, priority_score
+from .priority import SEVERITY_RANK, effort_size, prioritize
 
 _SEVERITIES = ("Critical", "High", "Medium", "Low", "Info")
 
@@ -245,6 +245,9 @@ def render_executive(graded: list[GradedFinding], meta: ReportMeta) -> str:
 
 
 def render_technical(graded: list[GradedFinding], meta: ReportMeta) -> str:
+    # Local import breaks the module cycle: howto imports this module's _remediation_for.
+    from .howto import howto_markdown
+
     facts, leads = _split(graded)
     ordered = _by_severity(graded)
     counts_fact = _severity_counts(facts)
@@ -334,6 +337,12 @@ def render_technical(graded: list[GradedFinding], meta: ReportMeta) -> str:
                 f"_{g.reason}. A lead to verify, NOT a confirmed fact._",
                 "",
             ]
+
+        # ---- per-finding "how to verify / test / patch" block ----
+        # Appends the deterministic howto ONLY when the finding's surface yields concrete
+        # structure (method/parameter) or a reproduce-from-raw PoC; an opaque-surface
+        # finding appends nothing, so its rendered bytes are unchanged.
+        L += howto_markdown(g)
 
         # ---- remediation ----
         L += ["#### Recommended remediation (class-level guidance)", "",
