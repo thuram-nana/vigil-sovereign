@@ -405,15 +405,20 @@ def _has_charter(slug: str) -> bool:
 
 
 def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
-                      capture_report: bool) -> None:
+                      capture_report: bool, env_extra: "dict | None" = None) -> None:
     """Run ``cmd`` as a daemon subprocess, recording status transitions into meta.json. When
     ``capture_report`` (the scan path) and it exits 0 with JSON on stdout, the report is saved for
     the Findings screen; otherwise stdout/stderr are retained for the run detail. Mirrors
-    ``launch_scan``'s runner exactly — a launched run is an ordinary, non-hot-path subprocess."""
+    ``launch_scan``'s runner exactly — a launched run is an ordinary, non-hot-path subprocess.
+
+    ``env_extra`` is merged over ``os.environ`` for the child (used to hand a Strix run its Proof Studio
+    run context — ``VIGIL_PROOF_RUN_DIR`` — so the proof_sink writes proofs under this run's dir)."""
+    child_env = {**os.environ, **env_extra} if env_extra else None
 
     def _run() -> None:
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # noqa: S603
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,  # noqa: S603
+                                  env=child_env)
             ok = proc.returncode == 0
             if capture_report and ok and proc.stdout.strip():
                 (rd / "report.json").write_text(proc.stdout, encoding="utf-8")
@@ -539,7 +544,12 @@ def launch_assessment(body: dict) -> dict:
         slug = _slugify(p.name, fallback="codebase")
         meta = {**base, "slug": slug, "cmd": cmd, "stream": "none", "status": "running"}
         _write_meta(run_id, **meta)
-        _spawn_background(run_id, rd, cmd, meta, capture_report=False)
+        # Proof Studio (B5/C1) activation: hand the Strix child THIS run's dir so its proof_sink
+        # (vigil_integration.proof.bootstrap.install_from_env) mints + persists oracle-confirmed proofs under
+        # <rd>/proofs (+ evidence under <rd>/evidence), which the Export button then bundles. Absent for a
+        # standalone Strix; a NO-OP if the integration package isn't importable.
+        _spawn_background(run_id, rd, cmd, meta, capture_report=False,
+                          env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug})
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none"}
 
     # ---- aegis → the defensive dual (detect over a telemetry/log file) -----

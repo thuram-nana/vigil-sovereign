@@ -102,6 +102,31 @@ def test_tool_mode_drops_unknown_capability_ids(stub_launch):
         assert bad not in joined, f"unknown/bogus tool id leaked into argv: {bad!r}"
 
 
+def test_codebase_run_hands_strix_the_proof_studio_run_dir(tmp_path, monkeypatch):
+    """Proof Studio activation (B5/C1): a codebase (Strix) launch must pass VIGIL_PROOF_RUN_DIR = THIS run's
+    dir (+ the slug) into the child env, so the Strix proof_sink writes proofs under the run the Export
+    button reads. Nothing else (URL/scan) needs it."""
+    monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
+    monkeypatch.setattr(actions, "_docker_ready", lambda: (True, "ready"))
+    captured = {}
+    monkeypatch.setattr(actions, "_spawn_background",
+                        lambda *a, **k: captured.update(run_id=a[0], rd=a[1], env_extra=k.get("env_extra")))
+    r = actions.launch_assessment({"mode": "codebase", "target": str(tmp_path)})
+    assert r["status"] == "running" and r["mode"] == "codebase"
+    env = captured["env_extra"]
+    assert env and env["VIGIL_PROOF_RUN_DIR"] == str(actions.run_dir(r["run_id"]))
+    assert env["VIGIL_ENGAGEMENT"] == r["slug"]
+
+
+def test_loopback_scan_gets_no_proof_env(stub_launch, monkeypatch):
+    """A URL/scan run does NOT get the proof env — the proof_sink is a Strix-only hook (no false wiring)."""
+    captured = {}
+    monkeypatch.setattr(actions, "_spawn_background",
+                        lambda *a, **k: captured.update(env_extra=k.get("env_extra")))
+    actions.launch_assessment({"mode": "url", "target": "http://127.0.0.1:8000/", "scan_mode": "quick"})
+    assert captured["env_extra"] is None
+
+
 # ---- console → live-engine bridge (opt-in, loopback-only, availability-gated) ----
 
 @pytest.fixture
