@@ -373,6 +373,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
                 return
+            if path.startswith("/api/remediate/") and path.endswith("/apply"):
+                # Fixes screen (U1): run the GATED, non-destructive auto-patch ladder for one oracle-confirmed
+                # finding by shelling `vigil patch` (never --open-pr). CSRF/rebind-gated above; a bad run id
+                # raises ValueError in run_dir → caught below → clean 404.
+                mid = path[len("/api/remediate/"):-len("/apply")].strip("/")
+                run_id, _, fref = mid.partition("/")
+                self._json(actions.apply_fix(run_id, fref))
+                return
             if path == "/api/proof/export":
                 # Proof Studio (C1): assemble a client-verifiable proof bundle for a run (offline zero-trust
                 # re-verify). CSRF/rebind-gated above; shells the exec-only `vigil proof-export`. A bad run id

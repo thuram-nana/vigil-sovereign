@@ -286,6 +286,9 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
         # honest gate the Findings hub uses; a lead (unproven) is counted but never offered for auto-fix.
         if f.get("grounding") == "fact":
             fixable.append({
+                # the stable finding reference the gated `vigil patch` ladder keys on (== the reverifiable.json
+                # check_id). Absent → the Fixes screen offers the CLI path, never a broken button.
+                "ref": str(f.get("check_id") or f.get("id") or f.get("ref") or ""),
                 "title": f.get("title", ""), "bug_class": f.get("bug_class", ""),
                 "severity": f.get("severity", ""), "location": f.get("location", ""),
                 "confirmed_by": f.get("confirmed_by", ""),

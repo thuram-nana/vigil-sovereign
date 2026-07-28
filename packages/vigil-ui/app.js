@@ -2831,7 +2831,8 @@
     if (!fixable.length) {
       nodes.push(h("div.empty", null, "No oracle-confirmed findings to fix in this run. Only proven FACTs are eligible — unproven leads are never auto-fixed."));
     } else {
-      nodes.push(V.card("Fixable findings", "CONFIRMED", h("div.stack", null, fixable.map(fixFindingCard)), false));
+      nodes.push(V.card("Fixable findings", "CONFIRMED", h("div.stack", null,
+        fixable.map(function (f, i) { return fixFindingCard(f, plan.run_id, i); })), false));
     }
     nodes.push(V.card("Highest-impact fix points", "IMPACT", h("div#fx-chokes", null, h("div.empty", null, "Loading…")), false));
     V.mount(view, nodes);
@@ -2853,7 +2854,8 @@
     if (s === "medium" || s === "moderate") return "warn";
     return "";
   }
-  function fixFindingCard(f) {
+  function fixFindingCard(f, runId, idx) {
+    var outId = "fx-out-" + idx, btnId = "fx-btn-" + idx;
     return h("div.fix-card", null, [
       h("div.fix-h", null, [
         h("span.vbadge." + (sevClass(f.severity) || "muted"), null, (f.severity || "?").toUpperCase()),
@@ -2863,7 +2865,40 @@
       f.location ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, f.location) : null,
       h("div.fix-rem", null, [h("span.label", null, "Remediation"), h("p", null, f.remediation)]),
       f.confirmed_by ? h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "6px" } }, "confirmed by " + f.confirmed_by) : null,
+      f.ref
+        ? h("div", { style: { marginTop: "10px" } }, [
+            h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
+              [V.icon("bolt"), "Apply fix (gated)"]),
+            h("span.hint", { style: { marginLeft: "8px" } },
+              "Non-destructive — clones, applies into a disposable tree, sandbox-builds. Never opens a PR."),
+            h("div#" + outId, { style: { marginTop: "8px" } }),
+          ])
+        : h("div.hint", { style: { marginTop: "10px" } },
+            "No stable finding reference on record — apply from the CLI with `vigil patch`."),
     ]);
+  }
+  function applyFix(runId, ref, btnId, outId) {
+    var btn = V.$("#" + btnId), out = V.$("#" + outId);
+    if (btn) btn.disabled = true;
+    if (out) V.mount(out, h("div.dim", null, "Running the gated patch ladder (non-destructive)…"));
+    V.postJSON(OFF("/api/remediate/" + encodeURIComponent(runId) + "/" + encodeURIComponent(ref) + "/apply"), {})
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (!out) return;
+        if (r && r.error) { V.mount(out, h("div.legend", null, [V.icon("info"), r.error])); return; }
+        V.mount(out, [
+          h("div.legend", null, [V.icon(r.ok ? "check" : "info"),
+            r.ok ? "The gated ladder ran (non-destructive — your source was not touched)."
+                 : "The gated ladder refused or could not finish — its exact output is below."]),
+          r.command ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, r.command) : null,
+          r.note ? h("div.hint", null, r.note) : null,
+          h("pre.mono", { style: { marginTop: "6px", maxHeight: "260px", overflow: "auto", fontSize: "var(--fs-xs)", whiteSpace: "pre-wrap" } }, r.output || "(no output)"),
+        ]);
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (out) V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "apply failed"]));
+      });
   }
 
   // ---- Brain screen (Memory / Benchmark / Catalog / Intel / Planner) ---------
