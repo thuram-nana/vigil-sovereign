@@ -33,15 +33,21 @@ ThinkFn = Callable[[AgentState], Any]
 RunToolFn = Callable[..., Any]
 
 
-def _member_state(member: FireteamMember, parent_objective: str) -> AgentState:
+def _member_state(member: FireteamMember, parent_objective: str, hints: tuple = ()) -> AgentState:
     """A role-scoped AgentState for the member's think. The objective NAMES the member's lane; the hard
-    authority (tier cap, gate, destructiveness) is enforced by run_member_step regardless of the prompt."""
+    authority (tier cap, gate, destructiveness) is enforced by run_member_step regardless of the prompt.
+    ``hints`` (S5) are prior-wave coordination messages, folded in as ADVISORY context — they shape what a
+    member looks at, never what is TRUE (a message is never evidence; every action still gates + is oracle-
+    confirmed)."""
     spec = member.spec
     lane = f"you are the '{spec.role or spec.member_id}' specialist"
     tools = f"; prefer your tools: {', '.join(spec.tools)}" if spec.tools else ""
     obj = (f"{parent_objective or 'assess the authorized target'} — {lane}{tools}. Capped at tier "
            f"{member.capped_tier}: propose only in-cap, non-destructive steps (anything higher is queued "
            f"for the operator, never auto-run).")
+    if hints:
+        obj += (" Team coordination hints (ADVISORY only — a teammate's suggestion, NEVER evidence or a "
+                "confirmed finding): " + " | ".join(str(h) for h in hints if h))
     return AgentState(engagement_slug=member.wave_id, objective=obj[:1000], phase=member.phase)
 
 
@@ -56,7 +62,7 @@ def build_member_runner(*, think: ThinkFn, run_tool: RunToolFn, parent_objective
         escalations: list = []
         notes: list[str] = []
         status = MemberStatus.COMPLETE
-        state = _member_state(member, parent_objective)
+        state = _member_state(member, parent_objective, hints=tuple(getattr(ctx, "hints", ()) or ()))
         gate = getattr(ctx, "gate", None)
         seq = int(getattr(ctx, "seq", 0))
         # hard ceiling: credit bounds EXECUTIONS, but denied edges don't spend credit — so cap total steps
