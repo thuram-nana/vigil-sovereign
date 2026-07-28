@@ -159,8 +159,12 @@ def subprocess_runner(argv: list, *, timeout: float = DEFAULT_TIMEOUT,
     both default to inherit-parent, so existing callers are unchanged."""
     args = [str(a) for a in argv]
     try:
+        # stdin=DEVNULL: a governed executor is NON-INTERACTIVE — never read the parent's stdin. Without this a
+        # bare stdin-reading allowlisted command (e.g. `cat`/`grep <pat>` with no file operand) would block up
+        # to the wall-time timeout on an inherited interactive/pipe stdin (red-pen T2 LOW). None of the network
+        # tools read stdin either, so this is uniformly correct + fail-fast.
         proc = subprocess.run(args, capture_output=True, timeout=timeout, shell=False, check=False,  # noqa: S603
-                              cwd=cwd, env=env)
+                              cwd=cwd, env=env, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired as exc:
         out, t1 = _cap(_decode(exc.stdout), output_cap)
         err, t2 = _cap(_decode(exc.stderr), output_cap)
