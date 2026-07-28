@@ -102,6 +102,7 @@ jobs:
               --ignore=integration/tests/test_proof_run.py \
               --ignore=integration/tests/test_proof_bootstrap.py \
               --ignore=integration/tests/test_proof_bundle.py \
+              --ignore=integration/tests/test_dossier.py \
               --ignore=integration/tests/test_fix_oracle.py -q
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
@@ -116,6 +117,7 @@ jobs:
               integration/tests/test_proof_run.py \
               integration/tests/test_proof_bootstrap.py \
               integration/tests/test_proof_bundle.py \
+              integration/tests/test_dossier.py \
               integration/tests/test_fix_oracle.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"
