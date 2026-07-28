@@ -71,15 +71,17 @@ _EXACT_ROUTES = {
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
+# NB (A6 cleanup): the unified UI (packages/vigil-ui/app.js) calls `/api/engagements` (plural, list) and
+# `/api/report/<run>` (singular), never `/api/engagement/` (singular), `/api/authority/`, or `/api/reports/`
+# (plural) — those three had zero unified-UI callers (only the retired per-plane SPA), so their HTTP surface
+# is removed here. The api.engagement_detail / api.authority_full / api.reports_data providers REMAIN (and
+# keep their unit tests) — only the dead route exposure is dropped.
 _PREFIX_ROUTES = {
-    "/api/engagement/": api.engagement_detail,
     "/api/session/": api.session_detail,
     "/api/report/": api.run_report,
     "/api/worldmodel/": api.worldmodel,
     "/api/coverage/": api.coverage_data,
-    "/api/authority/": api.authority_full,
     "/api/planner/": api.planner_data,
-    "/api/reports/": api.reports_data,
     "/api/intel/": api.intel_data,
     "/api/vulnintel/": api.vulnintel_data,
     "/api/evolve/": api.evolve_data,

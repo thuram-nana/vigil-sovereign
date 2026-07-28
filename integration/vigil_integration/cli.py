@@ -760,7 +760,9 @@ def build_parser() -> argparse.ArgumentParser:
     pdn.set_defaults(func=_cmd_down)
 
     pk = sub.add_parser("knowledge", help="operator-gated sync of the living knowledge/ folder to git "
-                                          "(regenerate + secret-scan + commit; push is separate)")
+                                          "(regenerate + secret-scan + commit; push is separate). NB: the "
+                                          "deep-learn / self-evolve verbs are `vigil crucible knowledge "
+                                          "draft|learn|skills|evolve` (offense engine), a DIFFERENT surface.")
     pk.add_argument("knowledge_action", choices=["sync", "push", "status"],
                     help="sync = regenerate+scan+commit knowledge/ · push = git push · status = what would commit")
     pk.add_argument("-m", "--message", default="", help="commit message for `sync`")
