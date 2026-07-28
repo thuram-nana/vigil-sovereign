@@ -44,9 +44,10 @@ def _allow_gate(t, tg, d):
     return SimpleNamespace(allowed=True, outcome="allow", reason="ok")
 
 
-def _use(tool="nmap"):
+def _use(tool="nmap", *, exploit=None):
     return LLMDecision(action=ActionType.USE_TOOL, tool=ToolCall(tool_name=tool, tool_args={"target": "t"}),
-                       output_analysis=OutputAnalysis(findings=[{"title": "x", "bug_class": "info"}]))
+                       output_analysis=OutputAnalysis(exploit_succeeded=exploit,
+                                                      findings=[{"title": "x", "bug_class": "info"}]))
 
 
 def _think(*decisions):
@@ -131,7 +132,7 @@ def test_a_hint_never_reaches_claim_raw_output_or_a_fact():
     bb = _FakeBB()
     bb.post(engagement="eng", kind="agent_message", agent_name="a",
             payload={"sender": "a", "recipient": _COORD_RECIPIENT, "topic": "x", "body": secret})
-    runner = build_member_runner(think=lambda s: _use("nmap"), run_tool=_tool_recorder())
+    runner = build_member_runner(think=_think(_use("nmap", exploit=True)), run_tool=_tool_recorder())
     out = asyncio.run(run_fireteam(_plan("eng-w1", ["b"]), runner, phase=Phase.INFORMATIONAL,
                                    gate=_allow_gate, oracle=lambda raw, an: "spine:x",
                                    blackboard=bb, engagement="eng"))
