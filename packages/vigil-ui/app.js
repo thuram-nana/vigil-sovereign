@@ -3437,6 +3437,19 @@
       ev.calibration ? h("div.kv", null, [h("div.k", null, "Calibration"),
         h("div.v", null, ev.calibration.resolved + " resolved · Brier "
           + (ev.calibration.brier != null ? Number(ev.calibration.brier).toFixed(3) : "—"))]) : null,
+      h("div.row", { style: { marginTop: "10px" } }, [
+        h("button.btn.sm", { disabled: killed, title: killed ? "kill-switch engaged" : "",
+          onClick: function () {
+            V.postJSON(OFF("/api/evolve/" + encodeURIComponent(d.slug) + "/tick"), {}).then(function (r) {
+              if (r && r.ok) {
+                V.toast("Evolve tick — " + (r.predictions_recorded || 0) + " prediction(s) recorded");
+              } else { V.toast((r && (r.refused || r.error)) || "Evolve tick failed", true); }
+              loadKnowledgeData();
+            }).catch(function () { V.toast("Evolve tick failed", true); });
+          } }, "Run evolve tick"),
+        h("span.hint", { style: { marginLeft: "8px" } },
+          "Records a calibration prediction per draft — drafts only, never merges or applies, mints no fact."),
+      ]),
     ]) : null;
 
     V.mount(body, [picker, learnCard, learnSourceCard, evolveCard, sourcesCard, vulnCard, catCard,

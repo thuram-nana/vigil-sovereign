@@ -661,6 +661,44 @@ def trip_killswitch(slug: str, reason: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+def run_evolve_tick(slug: str) -> dict:
+    """K5 self-evolve TICK that PERSISTS — unlike the read-only ``api.evolve_data`` GET. Seeds one
+    calibration PREDICTION per DRAFT proposal into the slug's OutcomeLedger, saves it, then RE-PLANS so
+    ``studied_enough`` reflects the now-open predictions. Kill-switch gated. It only DRAFTS proposals +
+    records predictions — it NEVER merges/applies a proposal, fires no oracle, and mints NO fact (the OUTCOME
+    of each prediction is recorded later by a real engagement)."""
+    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "select an engagement (slug required)"}
+    try:
+        from datetime import datetime, timezone
+
+        from ..authority.killswitch import KillSwitch
+        from ..calibration.ledger import OutcomeLedger
+        from ..knowledge_engine.cli import _DEFAULT_SKILLS, _vuln_leads
+        from ..knowledge_engine.evolve import ledger_path, plan_evolution, record_predictions
+
+        if KillSwitch(slug).is_tripped():
+            return {"ok": False, "refused": "kill-switch tripped", "slug": slug}
+        leads = _vuln_leads(slug)
+        now = datetime.now(timezone.utc)                 # wallclock read ONCE at the action boundary
+        lp = ledger_path(slug)
+        ledger = OutcomeLedger.load(lp) if lp.is_file() else OutcomeLedger()
+        plan = plan_evolution(leads, skills_dir=_DEFAULT_SKILLS, now=now, ledger=ledger)
+        recorded = record_predictions(plan, ledger, base_seq=len(ledger))
+        ledger.save(lp)
+        # re-plan AFTER seeding so studied_enough reflects the now-open predictions (else done=True could
+        # flip False on the next read).
+        plan = plan_evolution(leads, skills_dir=_DEFAULT_SKILLS, now=now, ledger=ledger)
+        return {"ok": True, "slug": slug, "predictions_recorded": recorded,
+                "proposals": [p.id for p in plan.proposals], "horizon_gaps": len(plan.horizon_gaps),
+                "coverage_gaps": [{"bug_class": g.bug_class, "priority": g.priority}
+                                  for g in plan.coverage_gaps],
+                "unlearned_leads": plan.unlearned, "studied_enough": plan.studied_enough}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 # ---------------------------------------------------------------------------
 # AEGIS Defense gateway (P5a) — launch / stop / current-pointer
 #
