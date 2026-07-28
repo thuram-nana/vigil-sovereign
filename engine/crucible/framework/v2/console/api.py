@@ -651,7 +651,6 @@ def intel_data(slug: str) -> dict[str, Any]:
 
     def _read() -> dict[str, Any]:
         from ..intel import learn
-        from ..intel.models import IntelSourceKind
         from ..intel.predict import AssetPredictor, assess_prediction
         from ..intel.store import IntelStore
         from ..memory.store import Store
@@ -665,8 +664,6 @@ def intel_data(slug: str) -> dict[str, Any]:
             "why": e.explain(),
         } for e in ents]
 
-        source_kinds = [IntelSourceKind.DNS, IntelSourceKind.CERT_TRANSPARENCY,
-                        IntelSourceKind.RDAP_WHOIS, IntelSourceKind.ASN_BGP]
         yields = _safe(lambda: [{
             **row, "calibrated_prior": learn.source_prior(istore, row["source_kind"],
                                                           archetype=row["archetype"]),
@@ -811,3 +808,30 @@ def evolve_data(slug: str) -> dict[str, Any]:
     return _safe(_read, default={"slug": slug, "horizon_gaps": 0, "coverage_gaps": [], "proposals": [],
                                  "unlearned_leads": [], "studied_enough": {},
                                  "note": "no intel store yet", "doctrine": _EVOLVE_DOCTRINE})
+
+
+_COMPLIANCE_DOCTRINE = (
+    "Standards mapping is HONEST: only an oracle-confirmed FACT (its retained oracle_context RE-FIRES now) "
+    "asserts control coverage; a LEAD is an advisory NOTE that claims no coverage. 'Tested' ≠ 'proven' ≠ "
+    "'not tested' — an untested surface is never implied as covered."
+)
+
+
+def compliance_data(run_id: str) -> dict[str, Any]:
+    """C3: the standards / compliance picture for a run — each oracle-confirmed FACT mapped to OWASP Top 10 /
+    CWE / PCI-DSS / SOC 2 / ISO 27001 controls + MITRE ATT&CK, plus a coverage matrix. The mapper GRADES each
+    finding by RE-EXECUTING its retained oracle_context, so a LEAD can never assert control coverage. Read-only;
+    sends no traffic."""
+    from . import actions
+    from ..report import standards
+
+    rj = actions.run_dir(run_id) / "reverifiable.json"
+    doc = _safe(lambda: json.loads(rj.read_text(encoding="utf-8")), default=None)
+    findings = (doc.get("active_findings") or []) if isinstance(doc, dict) else []
+    if not findings:
+        return {"run_id": run_id, "pending": doc is None, "findings": [], "coverage": {},
+                "standards": standards.STANDARD_VERSIONS, "doctrine": _COMPLIANCE_DOCTRINE}
+    mapped = _safe(lambda: [standards.map_finding(f) for f in findings][:200], default=[])
+    coverage = _safe(lambda: standards.coverage_matrix(findings), default={})
+    return {"run_id": run_id, "findings": mapped, "coverage": coverage,
+            "standards": standards.STANDARD_VERSIONS, "doctrine": _COMPLIANCE_DOCTRINE}
