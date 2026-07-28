@@ -113,6 +113,14 @@ screens:
     description: The reasoning brain — intelligence, memory, priors, and the capability catalog.
     synonyms: [brain, intelligence, reasoning, memory, catalog, capabilities]
 
+  - id: compliance
+    label: Compliance
+    group: MANAGE
+    owner: false
+    plane: unified
+    description: Map oracle-proven findings to OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 controls + MITRE ATT&CK.
+    synonyms: [compliance, standards, owasp, cwe, pci, soc2, iso27001, attack, controls, mapping]
+
   - id: settings
     label: Settings
     group: MANAGE

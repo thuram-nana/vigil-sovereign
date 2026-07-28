@@ -33,6 +33,7 @@
       { id: "apikeys", label: "API Keys", icon: "key", owner: true, ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", ready: true },
+      { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
     ]},
     { group: "LEARN", items: [
@@ -3527,6 +3528,60 @@
   }
 
   // ---- boot ------------------------------------------------------------------
+  // ---- Compliance & ATT&CK (C3): map proven findings → standards controls ----
+  var CMP = { run: "", runs: [], data: null };
+  function renderCompliance(screen) {
+    var body = V.mount(screen, [h("div.screen-head", null, [
+      h("h2", null, "Compliance & ATT&CK"),
+      h("p.sub", null, "Every oracle-confirmed FACT mapped to OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 + "
+        + "MITRE ATT&CK. A lead never asserts control coverage — only a proven fact does.")])]);
+    V.getJSON(OFF("/api/runs")).then(function (d) {
+      CMP.runs = (d && d.runs) || [];
+      if (!CMP.run && CMP.runs.length) CMP.run = CMP.runs[0].run_id;
+      loadCompliance(body);
+    }).catch(function () { CMP.runs = []; loadCompliance(body); });
+  }
+  function loadCompliance(body) {
+    if (!CMP.run) { drawCompliance(body); return; }
+    V.getJSON(OFF("/api/compliance/" + encodeURIComponent(CMP.run))).then(function (d) {
+      CMP.data = d; drawCompliance(body);
+    }).catch(function () { CMP.data = null; drawCompliance(body); });
+  }
+  function _ctrlPills(c) {
+    var out = [];
+    if (c.owasp) out.push(h("span.pill.sm", null, "OWASP " + c.owasp));
+    (c.cwe || []).slice(0, 3).forEach(function (x) { out.push(h("span.pill.sm", null, x)); });
+    (c.attack || []).slice(0, 3).forEach(function (x) { out.push(h("span.pill.sm.warn", null, "ATT&CK " + x)); });
+    (c.pci_dss || []).slice(0, 2).forEach(function (x) { out.push(h("span.pill.sm", null, "PCI " + x)); });
+    return out;
+  }
+  function drawCompliance(body) {
+    var d = CMP.data || {};
+    var picker = h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Run"),
+      h("select", { onChange: function (e) { CMP.run = e.target.value; loadCompliance(body); } },
+        [h("option", { value: "", selected: !CMP.run }, "— select a run —")].concat(
+          CMP.runs.map(function (r) {
+            return h("option", { value: r.run_id, selected: r.run_id === CMP.run }, (r.slug || r.run_id));
+          })))]);
+    var rows = (d.findings || []).map(function (f) {
+      var proven = f.status === "proven";
+      var badge = proven
+        ? h("span.st.st-confirmed", null, [h("span.dot"), "proven"])
+        : h("span.st.st-idle", null, [h("span.dot"), (f.status || "advisory")]);
+      var ctrls = proven && f.controls ? _ctrlPills(f.controls)
+        : [h("span.hint", null, "advisory note only — a lead / unmapped class asserts no control coverage")];
+      return h("div.kv", null, [
+        h("div.k", null, [badge, " ", (f.bug_class || f.finding_ref || "?")]),
+        h("div.v", null, ctrls)]);
+    });
+    V.mount(body, [picker,
+      h("div.card", null, [h("div.card-h", null, [h("h3", null, "Findings → standards controls")]),
+        (rows.length ? h("div", null, rows)
+          : h("div.empty", null, d.pending ? "run pending — no re-verifiable findings yet"
+            : "no findings for this run (only proven facts assert coverage)"))]),
+      h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+  }
+
   function route() {
     const id = current();
     teardownLive();               // close any live stream/timers when navigating away
@@ -3548,6 +3603,7 @@
     if (id === "defense") { renderDefense(screen); return; }
     if (id === "fixes") { renderFixes(screen); return; }
     if (id === "brain") { renderBrain(screen); return; }
+    if (id === "compliance") { renderCompliance(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });
