@@ -3202,7 +3202,9 @@
       // sigil.nav SIGNALS from the owner-signed spine → a hash navigation, but ONLY to a KNOWN in-app NAV
       // screen id (a spoofed/garbled payload navigates to nothing — never an arbitrary URL or the prototype).
       _hudES = V.sse(SOV("/api/sigil/hud"), function (ev) {
-        if (!ev || ev.t !== "nav") return;
+        if (!ev) return;
+        if (ev.t === "state") { updateSigilHud(ev); return; }       // S4: the on-screen SIGIL state HUD
+        if (ev.t !== "nav") return;
         if (ev.screen_id && navIds[ev.screen_id] === true) {          // voice / pinch: an absolute screen id
           if (current() !== ev.screen_id) location.hash = "#/" + ev.screen_id;
         } else if ((ev.direction === "next" || ev.direction === "prev") && navOrder.length) {
@@ -3215,6 +3217,44 @@
         }
       });
     } catch (e) { _hudES = null; }
+  }
+
+  // ---- SIGIL on-screen HUD (S4) — a small corner overlay of SIGIL's state --------------------------
+  var _hudUI = { dismissed: false, minimized: false, last: null };
+  var _HUD_TONE = { listening: "live", thinking: "reconnect", speaking: "owner", idle: "idle" };
+  function sigilHudHost() {
+    var host = V.$("#sigil-hud");
+    if (!host) { host = h("div#sigil-hud"); document.body.appendChild(host); }
+    return host;
+  }
+  function updateSigilHud(ev) {
+    _hudUI.last = ev;
+    var state = (ev && ev.state) || "idle";
+    if (state !== "idle") _hudUI.dismissed = false;      // a new interaction re-shows a dismissed HUD
+    var host = sigilHudHost();
+    if (_hudUI.dismissed) { host.style.display = "none"; return; }
+    host.style.display = "";
+    var tone = _HUD_TONE[state] || "idle";
+    var label = state.charAt(0).toUpperCase() + state.slice(1);
+    var line = state === "speaking" ? (ev.feedback || "") : (ev.transcript || "");
+    if (_hudUI.minimized) {
+      V.mount(host, h("div.pill.sm." + tone, { title: "SIGIL — click to expand",
+        onClick: function () { _hudUI.minimized = false; updateSigilHud(_hudUI.last); } },
+        [h("span.dot"), "SIGIL"]));
+      return;
+    }
+    V.mount(host, h("div.sigil-hud-card", null, [
+      h("div.sigil-hud-head", null, [
+        h("div.pill.sm." + tone, null, [h("span.dot"), "SIGIL · " + label]),
+        h("div.sigil-hud-btns", null, [
+          h("button.sigil-hud-x", { title: "Minimize",
+            onClick: function () { _hudUI.minimized = true; updateSigilHud(_hudUI.last); } }, "–"),
+          h("button.sigil-hud-x", { title: "Dismiss",
+            onClick: function () { _hudUI.dismissed = true; sigilHudHost().style.display = "none"; } }, "×"),
+        ]),
+      ]),
+      line ? h("div.sigil-hud-line", null, line) : null,
+    ]));
   }
 
   // ---- boot ------------------------------------------------------------------

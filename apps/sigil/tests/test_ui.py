@@ -223,6 +223,28 @@ def test_sigil_hud_emits_direction_and_screen_id_and_drops_garbled():
         srv.shutdown()
 
 
+def test_sigil_hud_emits_voice_fsm_state():
+    # S4: the HUD fans out the voice FSM state from the EPHEMERAL 0600 status file (never the spine).
+    import os
+
+    from sigil.voice.hud_status import StatusSink, status_path
+    StatusSink()({"state": "listening", "transcript": "open settings", "feedback": ""})
+    srv, port = _serve(_spine())
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sigil/hud?token={TOKEN}&since=-1")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = r.read(400).decode("utf-8")
+        events = [json.loads(ln[len("data: "):]) for ln in body.splitlines() if ln.startswith("data: ")]
+        st = next(e for e in events if e.get("t") == "state")
+        assert st["state"] == "listening" and st["transcript"] == "open settings"
+    finally:
+        srv.shutdown()
+        try:
+            os.unlink(status_path())                              # don't leak the HUD state to sibling tests
+        except OSError:
+            pass
+
+
 def test_index_embeds_token_and_needs_no_token_itself():
     srv, port = _serve(_spine())
     try:
