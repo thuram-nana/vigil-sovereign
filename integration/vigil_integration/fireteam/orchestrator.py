@@ -42,16 +42,30 @@ from .models import (
 from .spine_queue import SingleWriterSpineQueue
 
 
+# The stable per-engagement recipient the fireteam uses as its coordination channel (S5). A member's
+# discovery is broadcast here as an agent_message; the NEXT wave's members read it at wave-start as an
+# ADVISORY hint. A coordination message is NEVER evidence — no fact-building path reads the agent_message
+# kind (blackboard.inbox), so a hint can never be promoted to a fact.
+_COORD_RECIPIENT = "fireteam:coord"
+# Keep only the last few coordination hints per wave. NB: blackboard.inbox reads the OLDEST ≤1000
+# agent_messages for the engagement (ASC, no cursor), so on a very long-lived log this may serve stale — or
+# zero — hints. That is acceptable: coordination is ADVISORY and fail-safe (it can only ever degrade toward
+# no coordination, never toward a false fact). A recency cursor is a follow-up.
+_MAX_HINTS = 8
+
+
 @dataclass(frozen=True)
 class MemberRunContext:
     """What the injected member ``runner`` is handed. The gate/oracle/spine are the SAME injected
-    callables the parent uses; a member never gets a privileged copy."""
+    callables the parent uses; a member never gets a privileged copy. ``hints`` is a READ-ONLY snapshot of
+    prior-wave coordination messages (advisory only — never evidence)."""
 
     seq: int
     phase: Phase
     gate: Optional[Callable[..., Any]] = None
     oracle: Optional[OracleFn] = None
     spine: Optional[SingleWriterSpineQueue] = None
+    hints: tuple = ()
 
 
 # runner(member, ctx) -> MemberResult (sync or async). Injected so the whole orchestrator is testable
@@ -103,9 +117,17 @@ async def run_fireteam(
     registry: Optional[ConfirmationRegistry] = None,
     max_concurrent: int = FIRETEAM_MAX_CONCURRENT,
     seq_start: int = 0,
+    blackboard: Any = None,
+    engagement: str = "",
 ) -> FireteamOutcome:
     """Deploy a fireteam wave, sovereign-safe and fail-closed. Returns a :class:`FireteamOutcome`; a
-    malformed plan yields ``refused=True`` and spawns NOTHING. Never raises."""
+    malformed plan yields ``refused=True`` and spawns NOTHING. Never raises.
+
+    S5 coordination (optional ``blackboard``): members read a wave-START snapshot of prior-wave coordination
+    hints (advisory only, folded into their objective) and, after the wave, each claim-producing member
+    broadcasts one directed ``agent_message`` (deterministic member order). A message is NEVER evidence — no
+    fact-building path reads it — so this cannot promote anything; ``collect`` still mints facts solely via
+    the oracle over member CLAIMS."""
     validated: Optional[FireteamPlan] = parse_fireteam_plan(plan)
     if validated is None:
         return FireteamOutcome(refused=True, reason="malformed/over-cap/mutex-violating plan (fail-closed)")
@@ -119,11 +141,42 @@ async def run_fireteam(
     conc = max(1, min(conc, FIRETEAM_MAX_CONCURRENT, len(members)))
     sem = asyncio.Semaphore(conc)
 
+    # S5: a READ-ONLY snapshot of prior-wave coordination hints, taken ONCE before any member runs (so intra-
+    # wave concurrency can never race a read against a write — determinism preserved). Stable engagement id
+    # (the slug), not the per-wave id, so hints span waves. Advisory only.
+    eng = engagement or validated.wave_id
+    hints: tuple = ()
+    if blackboard is not None:
+        try:
+            rows = blackboard.inbox(engagement=eng, recipient=_COORD_RECIPIENT, since_id=0)
+            hints = tuple(str((r.payload or {}).get("body", "")) for r in rows if r.payload)[-_MAX_HINTS:]
+        except Exception:  # noqa: BLE001 — coordination is best-effort; a bus error never aborts the wave
+            hints = ()
+
     tasks = []
     for i, member in enumerate(members):
-        ctx = MemberRunContext(seq=seq_start + i, phase=phase, gate=gate, oracle=oracle, spine=spine)
+        ctx = MemberRunContext(seq=seq_start + i, phase=phase, gate=gate, oracle=oracle, spine=spine,
+                               hints=hints)
         tasks.append(_run_one(runner, member, ctx, sem))
     results: list[MemberResult] = list(await asyncio.gather(*tasks))
+
+    # S5: AFTER the wave, each claim-producing member broadcasts one coordination hint, in DETERMINISTIC
+    # member/plan order (never during the concurrent wave). sender == member_id (blackboard anti-spoof). A
+    # bus error is swallowed — coordination is advisory and must never fail the wave.
+    if blackboard is not None:
+        for r in results:
+            if not r.claims:
+                continue
+            srcs = sorted({str(c.source) for c in r.claims if getattr(c, "source", "")})
+            try:
+                blackboard.post(engagement=eng, kind="agent_message", agent_name=r.member_id,
+                                payload={"sender": r.member_id, "recipient": _COORD_RECIPIENT,
+                                         "topic": str(phase),
+                                         "body": (f"{r.member_id} produced {len(r.claims)} lead(s)"
+                                                  + (f" via {', '.join(srcs)}" if srcs else ""))[:2000],
+                                         "refs": []})
+            except Exception:  # noqa: BLE001
+                pass
 
     # single-writer drain of any buffered member spine writes (deterministic order; no interleave).
     spine_refs = spine.flush() if spine is not None else []

@@ -386,11 +386,21 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # privileged copy. run_fireteam validates the plan fail-closed (a malformed/over-cap/mutex plan
         # spawns NOTHING) and collect() re-fires the oracle so only a confirmed claim mints a fact.
         runner = build_member_runner(think=think_seam, run_tool=run_tool, parent_objective=state.objective)
+        # S5 coordination: hand run_fireteam the blackboard keyed to the STABLE engagement slug so a wave's
+        # discoveries reach the next wave's members as ADVISORY hints. Best-effort — a coordination message is
+        # never evidence (no fact-building path reads the agent_message kind) and a bus error never aborts the
+        # wave; honest omission if the blackboard can't be opened.
+        bb = None
+        try:
+            from framework.v2.agents.blackboard import open_blackboard
+            bb = open_blackboard()
+        except Exception:  # noqa: BLE001
+            bb = None
         # No ConfirmationRegistry is passed: a member's over-cap escalation is SURFACED (the engine records
         # it as a queued_edge) but not yet persisted for a later signed action. Fail-closed — a queued
         # member edge never auto-runs; wiring an actionable member-escalation registry is a follow-up.
         return asyncio.run(run_fireteam(plan, runner, phase=state.phase, gate=gate, oracle=oracle,
-                                        seq_start=int(seq)))
+                                        seq_start=int(seq), blackboard=bb, engagement=config.slug))
 
     # -- knowledge-graph projection (F1) — mirror the run's oracle-CONFIRMED facts into a cloud/remote
     # Neo4j read-model, when the operator has connected one (Settings → Knowledge graph). Honest omission:
