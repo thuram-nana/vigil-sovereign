@@ -21,7 +21,27 @@ What makes it *one* system, and what makes it different from every other "AI hac
 
 The AI is only ever allowed to *propose*. A separate "oracle" must *prove*. A gate must *authorize*. Everything is *signed and logged*. You keep the keys. That's the whole idea — and this README explains all of it, in plain language, from top to bottom.
 
-> ⚠️ **Authorized use only.** VIGIL includes autonomous *offensive* security tooling. Use it **only** against systems you own or have **explicit written permission** to test. Unauthorized access to computer systems is illegal (e.g. the US CFAA, the UK Computer Misuse Act, and equivalents worldwide). The software is provided **"as is," without warranty**; **you are solely responsible** for how you use it. See [`engine/crucible/DISCLAIMER.md`](engine/crucible/DISCLAIMER.md) and [`engine/crucible/LICENSING.md`](engine/crucible/LICENSING.md).
+> ## ⚠️ CAUTION — read before you run anything
+>
+> VIGIL includes **autonomous *offensive* security tooling.** Treat it accordingly:
+>
+> - **Authorized targets only.** Use it **only** against systems you **own** or have **explicit written
+>   permission** to test. Unauthorized access to computer systems is a crime (US **CFAA**, UK **Computer
+>   Misuse Act**, and equivalents worldwide). "Just to check" is how incidents start.
+> - **Charter + attestation first.** Every target-touching action is gated on a signed engagement charter and
+>   a who/when/what usage attestation minted *before* anything runs — no attestation, no run. A remote target
+>   needs a signed charter the UI cannot mint for you.
+> - **Third parties are out of scope by default** (payment / identity / CDN / email / hosting providers). You
+>   may test *your own integration* with them; never attack the third party itself.
+> - **Loopback by default; destructive tools are gated.** The reference charter is `127.0.0.1`-only with no
+>   external egress; destructive tools (metasploit / sqlmap / hydra) require an **m-of-n threshold sign-off**
+>   even against loopback. The web UI can never widen a charter-signed scope.
+> - **No warranty, your responsibility.** The software is provided **"AS IS", without warranty**; **you are
+>   solely responsible** for how you use it, and the authors are **not liable** for any use or misuse.
+>
+> See [`engine/crucible/DISCLAIMER.md`](engine/crucible/DISCLAIMER.md), the engagement charter under
+> `targets/<name>/charter.md`, and the license: [`LICENSE`](LICENSE) (PolyForm Noncommercial 1.0.0 — free for
+> noncommercial non-government use) + [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
 ---
 
@@ -38,6 +58,7 @@ The AI is only ever allowed to *propose*. A separate "oracle" must *prove*. A ga
 - [What's live vs. what's still deferred](#whats-live-vs-whats-still-deferred)
 - [Setup](#setup)
 - [Running it](#running-it)
+- [The unified web UI — `vigil up`](#the-unified-web-ui--vigil-up)
 - [Repository layout](#repository-layout)
 - [Security & trust model](#security--trust-model)
 - [Glossary](#glossary)
@@ -450,6 +471,71 @@ The loopback demo above pins to `127.0.0.1` and does **not** need the docker gat
 
 ---
 
+## The unified web UI — `vigil up`
+
+Everything above is also driveable from **one browser UI at one origin**. `vigil up` brings the whole system
+up behind a **self-contained, pure-stdlib reverse proxy** that federates the two trust planes — it spawns the
+three backends in their own venvs (it imports no `framework`/`strix`/`sigil`, so the two trust domains never
+co-load) and serves a no-build static bundle.
+
+```bash
+. .venv-offense/bin/activate
+vigil up                      # → http://127.0.0.1:8770/?token=… (opens a browser on a loopback bind)
+# vigil down                  # stop everything (reaps the backends tracked in the pids file)
+```
+
+- **One origin, two planes.** The proxy binds **127.0.0.1:8770** (loopback, or a private/tunnel IP — a
+  public/`0.0.0.0` bind is refused); it routes `/sovereign/*` → the SIGIL cockpit (127.0.0.1:8733),
+  `/offense/api/v1/*` → the gated action API (8799), and `/offense/*` → the read-only console + SSE (8787).
+- **Hosted mode** (`--domain example.com`) sits behind your own TLS edge proxy (see
+  [`deploy/reverse-proxy/`](deploy/reverse-proxy/)) and **refuses** unless `CRUCIBLE_API_KEY` is set, so the
+  gated API is never exposed unauthenticated.
+- **Cloud graph auto-connect.** Enter Neo4j Aura credentials (`NEO4J_URI` / user in Settings, password sealed
+  in the owner store); `bootstrap.sh` tests the connection through the sovereign check-secret broker (the
+  password never enters argv/logs). Absent → skipped; the engine still runs with the graph projection omitted.
+- **Opt-in sidecars** (off by default — each a conscious act): `--with-feed --feed-slug <s>` runs the
+  recurring vuln-intel feed; `--with-voice` runs voice-nav; `--with-gesture` enables gesture nav-mode.
+
+### The screens
+
+The single bundle (`packages/vigil-ui/app.js`, no build step) presents these screens — each fail-soft (an
+offline backend renders an honest empty state, never fake data):
+
+| Group | Screen | What it does |
+|---|---|---|
+| **DO** | **Home** | Command dashboard: active runs, waiting-for-you, confirmed findings, budget, live feed. |
+| | **New Assessment** | A 5-step wizard → a gated, oracle-confirmed run (codebase / URL / one tool / autonomous suite / AEGIS defense). Requires an authorized-target attestation; a remote target needs a signed charter the UI cannot mint. |
+| | **Chat** | Plain-language front door that launches the *same* gated, oracle-confirmed runs. |
+| | **Live** | Real-time run view over the signed reasoning spine (SSE) — the FACT-vs-LEAD reasoning graph, approvals. |
+| | **Findings** | The proven-bug hub: attack graph, offline **evidence browser** (re-verify → sound / tampered / mismatch), coverage, timeline. |
+| | **Fixes** | Remediation + the gated auto-fix ladder (proposes only, queues for approval, never auto-applies). |
+| | **Defense (AEGIS)** | Put VIGIL in front of an app you run and prove AI attacks in real time. |
+| **MANAGE** | **Sessions** | Permanent, renamable/removable engagement sessions; **connect** a session to share its per-session Neo4j graph as advisory priors. |
+| | **Activity** · **Approvals & Safety** · **API Keys** | Background activity + SIGIL mesh; owner approvals + kill-switch + capability latches; sealed secrets with live "Test" health. |
+| | **Tools** · **Brain** | Host security CLIs (probed live, two-step consented install); memory / benchmark / catalog / intel / planner. |
+| | **Compliance** | Map each oracle-**proven** finding → OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 controls + MITRE ATT&CK (a lead never asserts coverage). |
+| | **Settings** | The reasoning model + provider (secrets live in API Keys). |
+| **LEARN** | **Manual** · **Knowledge Engine** | In-app docs; the auto-updating vuln-intel feed + the propose → **accept → deep-learn (find/detect/prevent)** → self-evolve loop, with the `knowledge/` folder synced to git. |
+
+### Feature backends worth calling out
+
+- **Permanent sessions + per-session knowledge graph.** Each engagement is a durable, connectable object; a
+  session's runs accumulate a **per-session Neo4j partition** (a one-way, rebuildable projection of the signed
+  spine — never a source of truth) that later runs reuse as *priors* (a prior is never a fact).
+- **The self-evolving knowledge engine (end-to-end).** An auto-updating NVD/OSV/CISA-KEV feed proposes CVEs to
+  learn; you **accept** (owner-signed); the offense side then **deep-learns** how to *find / detect / prevent*
+  each one (advisory skills + DETECT mapped only onto **existing** oracle kinds — never an invented soft
+  oracle); a gated self-evolve tick drafts capability-gap proposals and reports when it has "studied everything
+  in scope." Everything learned is a **lead / skill / prior — never an oracle-minted fact.**
+- **Proof Studio — deterministic proof generation.** A crypto-grade backend (merged) that turns an agent PoC
+  into an oracle-confirmed, signed, replayable, **offline-verifiable** FACT — the mint runs over
+  *executor-captured, non-LLM bytes*, screens the generated exploit for dangerous payloads (content gate),
+  binds the raw bytes into the certificate, and re-proves from disk. *(The dedicated Proof Studio screen and
+  the one-command client-verifiable "proof-of-pwn" bundle export are **building** — the crypto core is done;
+  see [`docs/VISION.md`](docs/VISION.md).)*
+
+---
+
 ## Repository layout
 
 ```
@@ -525,13 +611,26 @@ See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized st
 
 ## License & attribution
 
-VIGIL is a fusion of original work and open-source components, tracked in [`NOTICE`](NOTICE):
+**VIGIL's first-party code is dual-licensed: [PolyForm Noncommercial License 1.0.0](LICENSE) OR a
+[Commercial License](LICENSE-COMMERCIAL.md)** (© 2026 Junior Thuram Nana). In plain language:
 
-- **redamon** (MIT) — the AI reasoning-loop *shape* was reimplemented from it.
-- **Strix** (Apache-2.0) — vendored and migrated to Claude in [`vendor/strix/`](vendor/strix/).
-- **pentagi** — used as *design reference* only (ideas reimplemented, no code vendored).
+- **Noncommercial use is free** — use, run, study, modify, and share VIGIL for any noncommercial purpose,
+  under [PolyForm Noncommercial 1.0.0](LICENSE). You may **not** sell it or deploy it commercially/in
+  production without a commercial license.
+- **⚠️ Government & public-sector use is EXCLUDED from the free grant** — a Government-Use Supplemental Term
+  (in [`LICENSE`](LICENSE)) requires any government / agency / ministry / military / law-enforcement /
+  public-authority / state-owned entity to obtain a **Commercial License**, even for a noncommercial purpose.
+- **Commercial or production or government use** requires a commercial license — contact
+  **thuram@thuramnana.com** (subject: `VIGIL commercial license`). See [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
-Component licenses: the gateway and the integration layer are Apache-2.0; see each package's `pyproject.toml`, and [`engine/crucible/LICENSING.md`](engine/crucible/LICENSING.md), for specifics. **Use only against systems you own or are explicitly authorized to test — see the disclaimer at the top.**
+**Third-party components keep their own licenses** (not under PolyForm-NC), tracked in [`NOTICE`](NOTICE):
+**Strix** (vendored, [`vendor/strix/`](vendor/strix/)) remains **Apache-2.0**; adapted **redamon** portions
+remain **MIT**; **pentagi** is design-reference only (no code vendored); AI-Gauntlet tools are invoked as
+subprocesses and keep their own licenses.
+
+> The above is a plain-language summary, **not legal advice** — the binding terms are [`LICENSE`](LICENSE)
+> and any signed commercial agreement. **Use VIGIL only against systems you own or are explicitly authorized
+> to test** — see the caution at the top and [`engine/crucible/DISCLAIMER.md`](engine/crucible/DISCLAIMER.md).
 
 ---
 
