@@ -86,6 +86,7 @@ _PREFIX_ROUTES = {
     "/api/vulnintel/": api.vulnintel_data,
     "/api/evolve/": api.evolve_data,
     "/api/compliance/": api.compliance_data,
+    "/api/drift/": api.drift_data,
     "/api/evidence/": api.evidence,
     "/api/remediate/": api.remediate_plan,
     "/api/toolresearch/": api.tool_research_data,

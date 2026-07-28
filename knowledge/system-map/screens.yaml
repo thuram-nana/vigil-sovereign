@@ -121,6 +121,14 @@ screens:
     description: Map oracle-proven findings to OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 controls + MITRE ATT&CK.
     synonyms: [compliance, standards, owasp, cwe, pci, soc2, iso27001, attack, controls, mapping]
 
+  - id: assurance
+    label: Assurance
+    group: MANAGE
+    owner: false
+    plane: unified
+    description: Continuous proof / drift — diff the oracle-confirmed fact set between two runs (regressions vs fixes).
+    synonyms: [assurance, drift, continuous, regression, delta, proof, diff]
+
   - id: settings
     label: Settings
     group: MANAGE

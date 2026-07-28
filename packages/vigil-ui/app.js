@@ -34,6 +34,7 @@
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", ready: true },
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
+      { id: "assurance", label: "Assurance", icon: "find", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
     ]},
     { group: "LEARN", items: [
@@ -3582,6 +3583,58 @@
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
+  // ---- Assurance (C2): continuous proof / drift between two runs ----
+  var ASR = { curr: "", prev: "", runs: [], data: null };
+  function renderAssurance(screen) {
+    var body = V.mount(screen, [h("div.screen-head", null, [
+      h("h2", null, "Assurance — continuous proof / drift"),
+      h("p.sub", null, "Diff the ORACLE-CONFIRMED fact set between two runs: a fact that newly appears is a "
+        + "regression (a new exposure); one that disappears is a fix. Deterministic + offline — each run's "
+        + "certificates are re-fired, never re-attacked. A lead is never counted.")])]);
+    V.getJSON(OFF("/api/runs")).then(function (d) {
+      ASR.runs = (d && d.runs) || [];
+      if (!ASR.curr && ASR.runs.length) ASR.curr = ASR.runs[0].run_id;
+      if (!ASR.prev && ASR.runs.length > 1) ASR.prev = ASR.runs[1].run_id;
+      loadAssurance(body);
+    }).catch(function () { ASR.runs = []; loadAssurance(body); });
+  }
+  function loadAssurance(body) {
+    if (!ASR.curr) { drawAssurance(body); return; }
+    var arg = encodeURIComponent(ASR.curr + (ASR.prev ? (":" + ASR.prev) : ""));
+    V.getJSON(OFF("/api/drift/" + arg)).then(function (d) { ASR.data = d; drawAssurance(body); })
+      .catch(function () { ASR.data = null; drawAssurance(body); });
+  }
+  function drawAssurance(body) {
+    var d = ASR.data || {};
+    function runSel(which) {
+      return h("select", { onChange: function (e) { ASR[which] = e.target.value; loadAssurance(body); } },
+        [h("option", { value: "" }, "— none —")].concat(
+          ASR.runs.map(function (r) {
+            return h("option", { value: r.run_id, selected: r.run_id === ASR[which] }, (r.slug || r.run_id));
+          })));
+    }
+    var picker = h("div.card", null, [
+      h("label", { style: { marginRight: "6px" } }, "Now"), runSel("curr"),
+      h("label", { style: { margin: "0 6px 0 14px" } }, "vs baseline"), runSel("prev")]);
+    function list(title, ids, cls) {
+      return h("div.card", null, [h("div.card-h", null, [h("h3", null, title + " (" + ids.length + ")")]),
+        (ids.length
+          ? h("div", null, ids.slice(0, 100).map(function (x) {
+              return h("div.kv", null, [h("div.k", null, h("span.pill.sm" + cls, null, String(x)))]); }))
+          : h("div.empty", null, "none"))]);
+    }
+    var summary = d.pending
+      ? h("div.empty", null, "select a run (no re-verifiable findings yet)")
+      : h("div", null, [
+          (d.has_drift
+            ? h("span.st.st-idle", null, [h("span.dot"), "drift detected"])
+            : h("span.st.st-confirmed", null, [h("span.dot"), "no drift — same proven set"])),
+          list("Regressions — newly-proven exposures", d.regressions || [], ".danger"),
+          list("Fixed — no longer proven", d.fixed || [], ""),
+          list("Stable — proven in both", d.stable || [], "")]);
+    V.mount(body, [picker, summary, h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+  }
+
   function route() {
     const id = current();
     teardownLive();               // close any live stream/timers when navigating away
@@ -3604,6 +3657,7 @@
     if (id === "fixes") { renderFixes(screen); return; }
     if (id === "brain") { renderBrain(screen); return; }
     if (id === "compliance") { renderCompliance(screen); return; }
+    if (id === "assurance") { renderAssurance(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });

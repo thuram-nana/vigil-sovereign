@@ -835,3 +835,40 @@ def compliance_data(run_id: str) -> dict[str, Any]:
     coverage = _safe(lambda: standards.coverage_matrix(findings), default={})
     return {"run_id": run_id, "findings": mapped, "coverage": coverage,
             "standards": standards.STANDARD_VERSIONS, "doctrine": _COMPLIANCE_DOCTRINE}
+
+
+_DRIFT_DOCTRINE = (
+    "Continuous proof / drift: the diff is over the ORACLE-CONFIRMED fact set — each run's retained certs are "
+    "RE-FIRED (deterministic, offline). A fact that NEWLY appears is a regression (a new exposure); one that "
+    "DISAPPEARS is a fix (or a lost detection). A lead is never counted — only a re-firing FACT is."
+)
+
+
+def drift_data(arg: str) -> dict[str, Any]:
+    """C2: compare the oracle-confirmed fact set of two runs — ``arg`` is ``"<curr>"`` or ``"<curr>:<prev>"``
+    (the two run ids). Re-fires each run's retained certificates (via ``verify.drift.diff_run_docs``) and
+    reports the drift: ``regressions`` (newly-confirmed = new exposure), ``fixed`` (disappeared), and stable.
+    Deterministic + offline (no traffic). Read-only."""
+    from . import actions
+    from ..verify import drift as drift_mod
+
+    parts = str(arg or "").split(":", 1)
+    curr = parts[0].strip()
+    prev = parts[1].strip() if len(parts) > 1 else ""
+
+    def _doc(rid: str):
+        if not rid:
+            return None
+        p = actions.run_dir(rid) / "reverifiable.json"
+        return _safe(lambda: json.loads(p.read_text(encoding="utf-8")), default=None)
+
+    curr_doc = _doc(curr)
+    if curr_doc is None:
+        return {"curr": curr, "prev": prev, "pending": True, "regressions": [], "fixed": [], "stable": [],
+                "has_drift": False, "doctrine": _DRIFT_DOCTRINE}
+    diff = _safe(lambda: drift_mod.diff_run_docs(_doc(prev) or {}, curr_doc), default=None)
+    return {"curr": curr, "prev": prev,
+            "regressions": list(diff.added) if diff else [],     # newly-confirmed FACT = a new exposure
+            "fixed": list(diff.removed) if diff else [],         # disappeared FACT = fixed / no longer proven
+            "stable": list(diff.unchanged) if diff else [],
+            "has_drift": bool(diff and diff.has_drift), "doctrine": _DRIFT_DOCTRINE}
