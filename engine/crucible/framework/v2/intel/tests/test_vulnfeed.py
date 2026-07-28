@@ -273,6 +273,58 @@ def test_ticker_cancel_halts_before_any_refresh_or_sleep():
     assert summary == {"ticks": 0, "refreshes": 0} and calls == []   # stopped at the top, never fired/slept
 
 
+def test_ticker_stop_after_a_refresh_halts_before_the_next_sleep():
+    # Exercises the PRE-SLEEP re-check: a STOP arriving during a refresh must halt BEFORE waiting a poll.
+    # Distinguishing signal is `sleeps == []` — remove the pre-sleep cancel check and a poll gets slept.
+    from framework.v2.intel import ticker
+    stopped = {"v": False}
+    sleeps: list = []
+
+    def refresh():
+        stopped["v"] = True            # a STOP arrives during/right after the refresh
+        return "r"
+
+    summary = ticker.run_feed_daemon(interval_ticks=1, poll_seconds=5, refresh=refresh,
+                                     cancel=lambda: stopped["v"], max_ticks=10,
+                                     sleep=lambda s: sleeps.append(s))
+    assert summary == {"ticks": 1, "refreshes": 1}    # one refresh fired, then halted
+    assert sleeps == []                                # halted BEFORE sleeping — no wasted poll after STOP
+
+
+def test_feed_daemon_refuses_a_tripped_killswitch(tmp_path, monkeypatch):
+    # --live + an ALREADY-tripped kill-switch → refuse with exit 3 BEFORE building any transport / egress.
+    from framework.v2.common import paths
+    from framework.v2.authority.killswitch import KillSwitch
+    from framework.v2.intel.cli import _feed_daemon
+    ksfile = tmp_path / "ks.json"
+    monkeypatch.setattr(paths, "killswitch_path", lambda slug: ksfile)
+    KillSwitch("a1test").trip("test STOP")
+    assert ksfile.exists()
+    assert _feed_daemon(_ns_daemon(live=True, slug="a1test")) == 3
+
+
+def test_feed_daemon_wires_the_live_killswitch_into_the_loop_cancel(tmp_path, monkeypatch):
+    # Proves the loop `cancel` reflects the LIVE kill-switch (not a constant `lambda: False`): capture the
+    # thunk handed to run_feed_daemon, then trip the real switch and confirm the SAME thunk flips True.
+    from framework.v2.common import paths
+    from framework.v2.authority.killswitch import KillSwitch
+    from framework.v2.intel import cli as intel_cli, ticker
+    ksfile = tmp_path / "ks.json"
+    monkeypatch.setattr(paths, "killswitch_path", lambda slug: ksfile)
+    captured: dict = {}
+
+    def _fake_daemon(*, interval_ticks, poll_seconds, refresh, cancel, on_tick, max_ticks):
+        captured["cancel"] = cancel
+        return {"ticks": 0, "refreshes": 0}
+
+    monkeypatch.setattr(ticker, "run_feed_daemon", _fake_daemon)
+    assert intel_cli._feed_daemon(_ns_daemon(live=True, slug="a1test", max_ticks=1)) == 0
+    cancel = captured["cancel"]
+    assert cancel() is False                           # kill-switch clear at start → loop would run
+    KillSwitch("a1test").trip("mid-run STOP")
+    assert cancel() is True                            # the wired cancel tracks the LIVE switch, not a constant
+
+
 # ---- CLI feed-daemon: fail-closed (no --live → no traffic) ----------------------
 
 def _ns_daemon(**kw):
