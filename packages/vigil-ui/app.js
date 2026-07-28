@@ -31,6 +31,7 @@
       { id: "sessions", label: "Sessions", icon: "book", ready: true },
       { id: "activity", label: "Activity", icon: "live", ready: true },
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
+      { id: "charter", label: "Charter & Attestation", icon: "key", owner: true, ready: true },
       { id: "apikeys", label: "API Keys", icon: "key", owner: true, ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", ready: true },
@@ -3605,6 +3606,70 @@
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
+  // ---- Charter & Attestation (owner): authorization + who/when/what ledger ----
+  var CHT = { slug: "loopback", auth: null, ledger: null };
+  function renderCharter(screen) {
+    var body = V.mount(screen, [h("div.screen-head", null, [
+      h("h2", null, "Charter & Attestation"),
+      h("p.sub", null, "Every target-touching action is gated on a signed engagement charter + a who/when/what "
+        + "usage attestation minted BEFORE anything runs — no attestation, no run. This UI can provision a "
+        + "LOOPBACK authority; a REMOTE target needs a signed charter this UI cannot mint for you.")])]);
+    drawCharter(body);
+    loadAuthority(body);
+  }
+  function loadAuthority(body) {
+    V.getJSON(OFF("/api/authority/" + encodeURIComponent(CHT.slug)))
+      .then(function (d) { CHT.auth = d; drawCharter(body); })
+      .catch(function () { CHT.auth = null; drawCharter(body); });
+  }
+  function drawCharter(body) {
+    var a = CHT.auth || {};
+    var authInfo = a.authority || {};
+    var slugRow = h("div.card", null, [
+      h("label", { style: { marginRight: "8px" } }, "Engagement slug"),
+      h("input#cht-slug", { type: "text", value: CHT.slug, style: { width: "220px" },
+        onChange: function (e) { CHT.slug = (e.target.value || "").trim(); } }),
+      h("button.btn.sm", { style: { marginLeft: "8px" }, onClick: function () {
+        var el = V.$("#cht-slug"); CHT.slug = (el && el.value || "").trim(); loadAuthority(body); } }, "Load")]);
+    var status = h("div.card", null, [h("div.card-h", null, [h("h3", null, "Authorization status")]),
+      h("div.kv", null, [h("div.k", null, "Charter present"),
+        h("div.v", null, a.charter_present
+          ? h("span.st.st-confirmed", null, [h("span.dot"), "yes"])
+          : h("span.st.st-idle", null, [h("span.dot"), "no — provision below, or add a charter file"]))]),
+      h("div.kv", null, [h("div.k", null, "Authority scope"),
+        h("div.v", null, String(authInfo.scope || authInfo.scopes || "—"))]),
+      h("div.kv", null, [h("div.k", null, "Window"),
+        h("div.v", null, String(authInfo.window || authInfo.expires || authInfo.status || "—"))]),
+      h("div.kv", null, [h("div.k", null, "Gate chain"),
+        h("div.v", null, (a.gates || []).map(function (g) { return h("span.pill.sm", null, g); }))])]);
+    var provision = h("div.card.owner", null, [h("div.card-h", null, [h("h3", null, "Provision a loopback authority")]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "Mints + signs a CRUCIBLE authority for this slug, scope HARD-FIXED to 127.0.0.1. A REMOTE target "
+        + "needs a signed charter this UI cannot mint — that stays a deliberate ceremony."),
+      h("button.btn.sm.owner", { onClick: function () {
+        V.postJSON(OFF("/api/authority/provision"), { slug: CHT.slug }).then(function (r) {
+          if (r && r.ok) { V.toast("Provisioned a loopback authority for " + CHT.slug); loadAuthority(body); }
+          else { V.toast((r && r.error) || "provision failed", true); }
+        }).catch(function () { V.toast("provision failed", true); }); } }, "Provision (loopback only)")]);
+    var ledgerCard = h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Usage attestation ledger — who / when / what")]),
+      h("button.btn.sm", { onClick: function () {
+        V.postJSON(OFF("/api/authority/ledger"), {}).then(function (r) { CHT.ledger = r; drawCharter(body); })
+          .catch(function () { CHT.ledger = { error: "failed to load ledger" }; drawCharter(body); }); } },
+        "Load ledger + verify chain"),
+      (CHT.ledger ? h("div", { style: { marginTop: "8px" } }, [
+        h("div.kv", null, [h("div.k", null, "Chain verified"),
+          h("div.v", null, CHT.ledger.verified
+            ? h("span.st.st-confirmed", null, [h("span.dot"), "verified — signed, monotonic, not back-dated"])
+            : h("span.st.st-idle", null, [h("span.dot"), "unverified"]))]),
+        h("pre", { style: { whiteSpace: "pre-wrap", fontSize: "12px", marginTop: "6px", overflowX: "auto" } },
+          String(CHT.ledger.who || CHT.ledger.error || "no records yet"))]) : null)]);
+    V.mount(body, [slugRow, status, provision, ledgerCard,
+      h("div.hint", { style: { marginTop: "10px" } },
+        String(a.note || CHT.ledger && CHT.ledger.note
+          || "No attestation, no run. The UI can never widen a charter-signed scope."))]);
+  }
+
   // ---- Report (C4): a live, re-verified, proof-carrying client report ----
   var RPT = { run: "", runs: [], ev: null, cmp: null };
   function renderReport(screen) {
@@ -3741,6 +3806,7 @@
     if (id === "compliance") { renderCompliance(screen); return; }
     if (id === "assurance") { renderAssurance(screen); return; }
     if (id === "report") { renderReport(screen); return; }
+    if (id === "charter") { renderCharter(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });

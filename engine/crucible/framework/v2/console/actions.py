@@ -731,6 +731,51 @@ def knowledge_gitsync(action: str) -> dict:
             **(parsed if isinstance(parsed, dict) else {})}
 
 
+def provision_loopback_authority(slug: str) -> dict:
+    """Charter/attestation UI: mint + sign a CRUCIBLE authority for a LOOPBACK engagement slug, scope
+    HARD-FIXED to ``127.0.0.1``. The UI can provision a *loopback* charter, but — per the constitution — a
+    REMOTE target needs a signed charter the UI CANNOT mint (that is a deliberate out-of-band ceremony).
+    Shells the exec-only ``vigil provision``; fail-closed. Scope is never taken from the caller."""
+    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "slug required (a path-safe token)"}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    try:
+        # scope is a HARD-CODED literal, never the caller's — the UI cannot widen it or provision a remote charter.
+        proc = subprocess.run([vigil, "provision", "--slug", slug, "--scope", "127.0.0.1"],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": proc.returncode == 0, "slug": slug, "scope": "127.0.0.1",
+            "output": (proc.stdout or "")[:2000], "stderr": (proc.stderr or "")[:1000] if proc.returncode else "",
+            "note": "Provisioned a LOOPBACK authority (scope 127.0.0.1). A REMOTE target needs a signed charter "
+                    "this UI cannot mint — that stays a deliberate `vigil provision` / charter ceremony."}
+
+
+def attestation_ledger() -> dict:
+    """Charter/attestation UI: replay the who/when/what usage-attestation ledger + verify its hash-chain.
+    Shells the exec-only ``vigil ledger who`` + ``vigil verify-ledger`` (read-only) — the ledger is
+    append-only + signed, so this only REPLAYS it, never mints. Fail-closed."""
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable"}
+
+    def _run(args: list) -> tuple:
+        try:
+            p = subprocess.run([vigil, *args], capture_output=True, text=True, timeout=60)
+            return p.returncode, (p.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            return 1, ""
+
+    who_rc, who = _run(["ledger", "who"])
+    ver_rc, ver = _run(["verify-ledger"])
+    return {"ok": who_rc == 0, "who": who[:4000], "verify": ver[:1000], "verified": ver_rc == 0,
+            "note": "The usage attestation (who / when / what) is minted BEFORE any target-touching action — "
+                    "no attestation, no run — and the chain is signed, so a record can't be back-dated."}
+
+
 # ---------------------------------------------------------------------------
 # AEGIS Defense gateway (P5a) — launch / stop / current-pointer
 #

@@ -83,6 +83,25 @@
       ]
     },
     {
+      "description": "Authorization + the who/when/what usage-attestation ledger; provision a loopback authority (a remote charter needs an out-of-band ceremony).",
+      "group": "MANAGE",
+      "id": "charter",
+      "label": "Charter & Attestation",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "charter",
+        "attestation",
+        "authorization",
+        "authority",
+        "ledger",
+        "provision",
+        "who",
+        "when",
+        "scope"
+      ]
+    },
+    {
       "description": "Tell the agent in natural language what to test; it launches the same gated run and streams it here.",
       "group": "DO",
       "id": "chat",
@@ -306,5 +325,5 @@
       ]
     }
   ],
-  "source_sha": "6d75a8a5a1e6f67ca1a47e5be62375cebf73376b88df0c4d12c39f83a6bcb6e4"
+  "source_sha": "9909e2948a676933c798d61790c1af433bc5a0cc8939525b2f10d5baadc17089"
 }

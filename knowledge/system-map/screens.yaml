@@ -97,6 +97,14 @@ screens:
     description: The owner approval queue and safety controls — approve a queued action or trip the kill-switch.
     synonyms: [safety, approvals, approve, approval queue, kill switch, stop everything]
 
+  - id: charter
+    label: Charter & Attestation
+    group: MANAGE
+    owner: true
+    plane: unified
+    description: Authorization + the who/when/what usage-attestation ledger; provision a loopback authority (a remote charter needs an out-of-band ceremony).
+    synonyms: [charter, attestation, authorization, authority, ledger, provision, who, when, scope]
+
   - id: apikeys
     label: API Keys
     group: MANAGE
