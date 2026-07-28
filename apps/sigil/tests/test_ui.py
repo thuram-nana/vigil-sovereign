@@ -197,6 +197,32 @@ def test_sigil_hud_requires_the_token_and_streams():
         srv.shutdown()
 
 
+def test_sigil_hud_emits_direction_and_screen_id_and_drops_garbled():
+    # S3: the HUD fans out a gesture-swipe as {"t":"nav","direction":"next"} and a voice/pinch as
+    # {"t":"nav","screen_id":"settings"}, and DROPS a garbled nav value. Use since=<seq> (not -1) to
+    # stream the pre-appended nav records (since>=0 bypasses the tip-default).
+    p = _spine()                                              # seq 0 = the hello message
+    s = SpineStore(p)
+    s.append(kind="event", source="gesture", actor="OWNER",
+             payload={"signal": "sigil.nav", "nav": "next", "tier": "A1"})            # seq 1
+    s.append(kind="event", source="gesture", actor="OWNER",
+             payload={"signal": "sigil.nav", "nav": "../evil", "tier": "A1"})          # seq 2 → dropped
+    s.append(kind="event", source="voice", actor="OWNER",
+             payload={"signal": "sigil.nav", "screen_id": "settings", "tier": "A1"})   # seq 3
+    srv, port = _serve(p)
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/sigil/hud?token={TOKEN}&since=0")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = r.read(400).decode("utf-8")                # the first poll emits all matching events
+        events = [json.loads(ln[len("data: "):]) for ln in body.splitlines() if ln.startswith("data: ")]
+        assert {"t": "nav", "direction": "next", "seq": 1} in events                   # the swipe
+        assert any(e.get("screen_id") == "settings" for e in events)                   # the voice nav
+        assert all(e.get("direction") != "../evil" for e in events)                    # garbled → dropped
+        assert not any("evil" in json.dumps(e) for e in events)
+    finally:
+        srv.shutdown()
+
+
 def test_index_embeds_token_and_needs_no_token_itself():
     srv, port = _serve(_spine())
     try:

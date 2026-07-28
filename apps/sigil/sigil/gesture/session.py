@@ -27,6 +27,7 @@ _KS_MIN_RESCAN = 0.05  # re-scan the kill-switch at most ~20x/s even on a churni
 from ..agents.base import Tier
 from ..reuse import sha256_hex
 from .components import InputBackend
+from .navmode import nav_mode_on as _nav_mode_on
 from .types import GestureIntent
 
 SESSION_ARMED = "gesture.session_armed"
@@ -43,6 +44,13 @@ INTENT_TOOL = {
     "scroll_left": "hid.pointer.scroll", "scroll_right": "hid.pointer.scroll",
     "drag": "hid.pointer.drag", "type": "hid.type", "combo": "hid.combo", "launch": "hid.app.launch",
 }
+
+# S3: in owner-enabled nav-mode, these DISCRETE gestures NAVIGATE the UI instead of scrolling/clicking —
+# an A1 `sigil.nav` SIGNAL that injects NOTHING (no hid.*). Swipe-right → next screen, swipe-left → prev,
+# pinch → home. Checked ONLY for these kinds, so a 30 fps `move` never reads the nav-mode latch; every
+# other intent (move/drag/type/launch) is unchanged whether nav-mode is on or off.
+_NAV_GESTURE_MAP = {"scroll_right": ("nav", "next"), "scroll_left": ("nav", "prev"),
+                    "click": ("screen_id", "home")}
 
 
 def pending_device_arms(store, trusted_pubkey=None):
@@ -383,6 +391,12 @@ class SessionGate:
         if self.session.expired(time.time()):             # BLOCK-2: a session is bounded, never indefinite
             self.disarm()
             return {"injected": False, "reason": "session expired — disarmed"}
+        # S3: nav-mode — a DISCRETE gesture NAVIGATES the UI (an A1 sigil.nav SIGNAL that injects NOTHING)
+        # instead of scrolling/clicking. Reached only AFTER every per-frame gate above (kill-switch, gesture
+        # capability, device-revoke, live+unexpired armed session) — so a nav gesture is subject to the exact
+        # same guards, and it maps to NO hid.* tool: nothing is ever typed, launched, or injected into the OS.
+        if intent.kind in _NAV_GESTURE_MAP and _nav_mode_on(self.store):
+            return self._emit_nav_gesture(intent.kind)
         tool = INTENT_TOOL.get(intent.kind)
         if tool is None:
             return {"injected": False, "reason": f"unknown intent {intent.kind}"}
@@ -417,6 +431,16 @@ class SessionGate:
                                          "tool": tool, "action_token": token, "args": args,
                                          "subject": f"gesture action {tool} (awaiting approval)"})
         return {"injected": False, "queued": seq, "tier": tier.label(), "tool": tool, "action_token": token}
+
+    def _emit_nav_gesture(self, kind: str) -> dict:
+        """Emit an A1 sigil.nav SIGNAL for a nav-mode gesture and inject NOTHING. Swipe → a relative
+        direction (next/prev, stepped by the browser); pinch → an absolute screen_id ("home"). The payload
+        carries no CONTENT_FIELDS (fully plaintext, no vault). Calls NO input backend — the OS is untouched."""
+        key, val = _NAV_GESTURE_MAP[kind]
+        payload = {"signal": "sigil.nav", "tier": "A1", "decision": "auto", "source": "gesture",
+                   "session_id": self.session.session_id, key: val}
+        seq = self.store.append(kind="event", source="gesture", actor="OWNER", payload=payload)
+        return {"injected": False, "nav": val, "seq": seq, "tool": None}
 
     def _inject(self, intent: GestureIntent) -> None:
         b = self.backend

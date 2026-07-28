@@ -284,10 +284,15 @@ class Handler(BaseHTTPRequestHandler):
                     pay = getattr(store.decrypted_or_raw(r), "payload", None) or {}
                     if isinstance(pay, dict) and pay.get("signal") == "sigil.nav":
                         sid = str(pay.get("screen_id") or "")
-                        if sid:
+                        direction = str(pay.get("nav") or "")
+                        if sid:                                   # voice / pinch: an absolute screen id
                             ev = {"t": "nav", "screen_id": sid, "seq": r.seq}
-                            self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
-                            sent = True
+                        elif direction in ("next", "prev"):        # gesture swipe: a relative step
+                            ev = {"t": "nav", "direction": direction, "seq": r.seq}
+                        else:
+                            continue
+                        self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+                        sent = True
                 self.wfile.write(b": hb\n\n")
                 self.wfile.flush()
                 if not sent:

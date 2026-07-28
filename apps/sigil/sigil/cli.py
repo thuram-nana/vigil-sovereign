@@ -362,6 +362,19 @@ def cmd_capability(a) -> None:
         print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
 
 
+def cmd_gesture_nav(a) -> None:
+    """Toggle gesture NAV-MODE (S3). Off by default (opt-in). While ON, a live owner-armed gesture
+    session's swipes/pinch NAVIGATE the UI (an A1 `sigil.nav` signal that injects NOTHING) instead of
+    scroll/click; every per-frame gesture gate is unchanged. `status` needs no key."""
+    from .gesture.navmode import nav_mode_on, set_nav_mode
+    store = SpineStore()
+    if a.state == "status":
+        print("  gesture nav-mode: " + ("ON" if nav_mode_on(store) else "OFF"))
+        return
+    seq = set_nav_mode(store, a.state == "on")
+    print(f"  gesture nav-mode {'ON' if a.state == 'on' else 'OFF'} (seq {seq})")
+
+
 def cmd_audit(a) -> None:
     from .audit import render_audit, self_audit
     store = SpineStore()
@@ -1229,6 +1242,11 @@ def main(argv=None) -> None:
     pcap.add_argument("state", nargs="?", choices=["on", "off"], help="on|off (omit for `status`)")
     pcap.add_argument("--reason", default="", help="reason recorded on the spine")
     pcap.set_defaults(fn=cmd_capability)
+    pgn = sub.add_parser("gesture-nav",
+                         help="toggle gesture NAV-MODE (S3): in nav-mode a live armed session's swipes/pinch "
+                              "NAVIGATE the UI (an A1 signal that injects nothing) instead of scroll/click")
+    pgn.add_argument("state", nargs="?", choices=["status", "on", "off"], default="status")
+    pgn.set_defaults(fn=cmd_gesture_nav)
     pdo = sub.add_parser("delegate-offense",
                          help="owner-sign delegations over the offense identity (S7b owner-tie ceremony)")
     pdo.add_argument("--offense-identity", required=True,
