@@ -51,6 +51,15 @@ from .export import (
     to_json,
     to_sarif,
 )
+from .standards import (
+    STANDARD_VERSIONS,
+    ControlMapping,
+    compliance_attestation,
+    controls_for,
+    coverage_matrix,
+    known_mapped_classes,
+    map_finding,
+)
 
 __all__ = [
     "GRADE_FACT",
@@ -76,4 +85,11 @@ __all__ = [
     "to_sarif",
     "export_json",
     "export_sarif",
+    "STANDARD_VERSIONS",
+    "ControlMapping",
+    "controls_for",
+    "map_finding",
+    "coverage_matrix",
+    "compliance_attestation",
+    "known_mapped_classes",
 ]
