@@ -71,16 +71,17 @@ _EXACT_ROUTES = {
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
-# NB (A6 cleanup): the unified UI (packages/vigil-ui/app.js) calls `/api/engagements` (plural, list) and
-# `/api/report/<run>` (singular), never `/api/engagement/` (singular), `/api/authority/`, or `/api/reports/`
-# (plural) — those three had zero unified-UI callers (only the retired per-plane SPA), so their HTTP surface
-# is removed here. The api.engagement_detail / api.authority_full / api.reports_data providers REMAIN (and
-# keep their unit tests) — only the dead route exposure is dropped.
+# NB (A6 cleanup): the unified UI calls `/api/engagements` (plural, list) and `/api/report/<run>` (singular),
+# never `/api/engagement/` (singular) or `/api/reports/` (plural) — those had zero unified-UI callers (only
+# the retired per-plane SPA), so their HTTP surface is dropped (the api.engagement_detail / api.reports_data
+# providers REMAIN + keep their unit tests). `/api/authority/` was re-exposed for the Charter & Attestation
+# screen.
 _PREFIX_ROUTES = {
     "/api/session/": api.session_detail,
     "/api/report/": api.run_report,
     "/api/worldmodel/": api.worldmodel,
     "/api/coverage/": api.coverage_data,
+    "/api/authority/": api.authority_full,      # re-exposed for the Charter & Attestation screen
     "/api/planner/": api.planner_data,
     "/api/intel/": api.intel_data,
     "/api/vulnintel/": api.vulnintel_data,
@@ -369,6 +370,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
+                return
+            if path == "/api/authority/provision":
+                # Charter & Attestation screen: mint a LOOPBACK authority (scope hard-fixed to 127.0.0.1 in
+                # the action — the UI cannot provision a remote charter). CSRF/rebind-gated above.
+                self._json(actions.provision_loopback_authority(str(body.get("slug", ""))))
+                return
+            if path == "/api/authority/ledger":
+                # replay the who/when/what usage-attestation ledger + verify its chain (read-only).
+                self._json(actions.attestation_ledger())
                 return
             if path == "/api/knowledge/gitsync":
                 # A6c: run `vigil knowledge status|sync` (regenerate + secret-scan + local commit; NOT push).
