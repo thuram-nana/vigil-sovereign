@@ -47,7 +47,11 @@ from .spine_queue import SingleWriterSpineQueue
 # ADVISORY hint. A coordination message is NEVER evidence — no fact-building path reads the agent_message
 # kind (blackboard.inbox), so a hint can never be promoted to a fact.
 _COORD_RECIPIENT = "fireteam:coord"
-_MAX_HINTS = 8               # bound the wave-start hint snapshot (the coord log is append-only + long-lived)
+# Keep only the last few coordination hints per wave. NB: blackboard.inbox reads the OLDEST ≤1000
+# agent_messages for the engagement (ASC, no cursor), so on a very long-lived log this may serve stale — or
+# zero — hints. That is acceptable: coordination is ADVISORY and fail-safe (it can only ever degrade toward
+# no coordination, never toward a false fact). A recency cursor is a follow-up.
+_MAX_HINTS = 8
 
 
 @dataclass(frozen=True)

@@ -123,6 +123,26 @@ def test_coordination_posts_are_deterministic_member_order():
     assert senders == ["a", "b", "c"]                       # posted in plan order — deterministic
 
 
+def test_a_hint_never_reaches_claim_raw_output_or_a_fact():
+    # THE invariant, locked at the fireteam layer: run the PRODUCTION runner with a hint present + an
+    # always-fire oracle, and prove the hint text reaches NO claim.raw_output (the only thing the oracle
+    # sees) and NO fact — so a future member_runner refactor that leaked a hint into evidence fails CI.
+    secret = "HINT-SENTINEL-never-evidence"
+    bb = _FakeBB()
+    bb.post(engagement="eng", kind="agent_message", agent_name="a",
+            payload={"sender": "a", "recipient": _COORD_RECIPIENT, "topic": "x", "body": secret})
+    runner = build_member_runner(think=lambda s: _use("nmap"), run_tool=_tool_recorder())
+    out = asyncio.run(run_fireteam(_plan("eng-w1", ["b"]), runner, phase=Phase.INFORMATIONAL,
+                                   gate=_allow_gate, oracle=lambda raw, an: "spine:x",
+                                   blackboard=bb, engagement="eng"))
+    assert out.facts                                            # the real nmap claim IS confirmed…
+    for mr in out.member_results:
+        for c in mr.claims:
+            assert secret not in c.raw_output                  # …but the hint never entered the evidence
+    for f in out.facts:
+        assert secret not in (f.title or "")
+
+
 def test_no_blackboard_is_a_clean_no_op():
     # without a blackboard the wave behaves exactly as before (no coordination, no error).
     runner = build_member_runner(think=_think(_use("nmap")), run_tool=_tool_recorder())
