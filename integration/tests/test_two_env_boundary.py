@@ -61,6 +61,8 @@ import vigil_integration.proof.bootstrap     # B5: the Strix proof_sink installe
 assert "framework" not in __import__("sys").modules, "proof.bootstrap must not import framework at module scope"
 import vigil_integration.proof.bundle        # C1: the client-verifiable bundle exporter — framework LAZY
 assert "framework" not in __import__("sys").modules, "proof.bundle must not import framework at module scope"
+import vigil_integration.remediation.fix_oracle   # A6a: the fix-verification oracle — framework LAZY
+assert "framework" not in __import__("sys").modules, "fix_oracle must not import framework at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

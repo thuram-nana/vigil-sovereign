@@ -399,13 +399,20 @@ def _epoch(now_val: Any) -> float:
 def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
                    killswitch: Any = None, operator_present: bool = True,
                    quorum: Optional[Callable[[Any], Any]] = None,
+                   verify_oracle: Optional[Callable[[Any, Any], Any]] = None,
                    now: Optional[Callable[[], float]] = None) -> PatchResult:
     """Run the sovereign auto-patch loop against REAL executors: propose (Claude) → clone → apply-in-sandbox
     → (if ``config.pr_enabled`` AND a ``quorum`` passes AND a GitHub token is provisioned) open a gated PR.
     A confirmed FACT is the only valid input (a lead is refused); edits apply only with ``config.apply_edits``
     (else timeout ⇒ reject); the PR leg needs pr_enabled + the m-of-n ``quorum`` + a token (all off by
-    default ⇒ no PR). ``remediated`` is minted only if a verify ``oracle`` (not wired here — a PR opens as a
-    PROPOSAL) later goes silent. Returns the loop's PatchResult (the full gated ladder + status)."""
+    default ⇒ no PR).
+
+    ``verify_oracle`` (A6a) is the fix-verification oracle threaded into ``autopatch``: it re-fires the
+    ORIGINAL exploit oracle against the patched build and mints ``remediated`` ONLY when it goes silent. Build
+    it with ``remediation.fix_oracle.build_run_fix_oracle(run_dir=…, finding_ref=…, redrive=…, signers=…)`` —
+    the ``redrive`` (exercising the patched build to re-capture bytes) is the caller-provided live capability;
+    absent it (the default ``None``) ``remediated`` stays False and the PR opens as a PROPOSAL, unchanged.
+    Returns the loop's PatchResult (the full gated ladder + status)."""
     session = CodefixSession(config, client=client, killswitch=killswitch, operator_present=operator_present)
     clock = now or time.monotonic
 
@@ -418,7 +425,7 @@ def autopatch_live(finding: Any, *, config: CodefixConfig, client: Any = None,
         return _Quorum(approved=False, reason="m-of-n destruction quorum not provisioned")
 
     return autopatch(
-        finding, gate=session.gate, oracle=None, propose_patch=session.propose,
+        finding, gate=session.gate, oracle=verify_oracle, propose_patch=session.propose,
         clone=session.clone, build=session.build, open_pr=session.open_pr,
         quorum=quorum or _deny_quorum, approval=approval, now=clock,
         target_repo=config.target_repo, target_branch=config.target_branch,
