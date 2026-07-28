@@ -3872,6 +3872,29 @@
 
   // ---- Report (C4): a live, re-verified, proof-carrying client report ----
   var RPT = { run: "", runs: [], ev: null, cmp: null };
+  // R3 — one-click download: build the run's tamper-evident dossier (CSRF-guarded POST), then stream the
+  // pre-built ZIP via an <a download> click (Content-Disposition attachment — the first client download).
+  function downloadDossier(runId, btn, statusEl) {
+    if (!runId) { V.toast("Pick a run first.", true); return; }
+    if (btn) btn.disabled = true;
+    if (statusEl) V.mount(statusEl, h("div.dim", null, "Packaging the dossier (reports + proof bundle + signed manifest)…"));
+    V.postJSON(OFF("/api/dossier/" + encodeURIComponent(runId) + "/build"), {})
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (r && r.error) { if (statusEl) V.mount(statusEl, h("div.legend", null, [V.icon("info"), r.error])); return; }
+        var a = document.createElement("a");
+        a.href = OFF("/api/dossier/" + encodeURIComponent(runId) + ".zip");
+        a.download = "vigil-dossier-" + runId + ".zip";
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        if (statusEl) V.mount(statusEl, [
+          h("div.legend", null, [V.icon("check"), "Dossier downloaded — tamper-evident + offline-verifiable."]),
+          r.note ? h("div.hint", null, r.note) : null,
+        ]);
+        V.toast("Dossier downloaded.");
+      })
+      .catch(function (e) { if (btn) btn.disabled = false; if (statusEl) V.mount(statusEl, h("div.legend", null, [V.icon("x"), (e && e.message) || "dossier failed"])); });
+  }
+
   function renderReport(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Client Report"),
@@ -3923,7 +3946,13 @@
           h("div.v", null, h("code", null, String(f.cert_id).slice(0, 28) + "…"))]) : null),
         (c ? h("div.kv", null, [h("div.k", null, "Standards"), h("div.v", null, _ctrlPills(c))]) : null)]);
     });
-    V.mount(body, [h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Run"), runSel()]),
+    V.mount(body, [h("div.card", null, [
+        h("label", { style: { marginRight: "8px" } }, "Run"), runSel(),
+        RPT.run ? h("button.btn.sm#dossier-btn", { style: { marginLeft: "12px" },
+          onClick: function () { downloadDossier(RPT.run, V.$("#dossier-btn"), V.$("#dossier-status")); } },
+          "⤓ Download dossier") : null,
+        h("div#dossier-status", { style: { marginTop: "8px" } }),
+      ]),
       exec,
       (proven.length ? h("div", null, cards)
         : h("div.card", null, [h("div.empty", null,
