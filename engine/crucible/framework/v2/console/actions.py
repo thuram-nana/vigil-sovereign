@@ -428,6 +428,39 @@ def _spawn_background(run_id: str, rd: Path, cmd: list[str], meta: dict, *,
     threading.Thread(target=_run, daemon=True).start()
 
 
+# ---- console → live-engine bridge (per-session Neo4j graph) ------------------
+# The raw offense `framework.v2 engage` the console spawns uses an in-memory world-model and has NO Neo4j
+# projection (by the two-env boundary — the offense plane carries no Neo4j code). The per-session knowledge
+# graph lives ONLY on the integration `vigil engage` path (partitions by `--session`, unions connected
+# sessions by `--connect`; F3/F4). So a graph-backed run must be routed to that separate `vigil` process —
+# subprocessed, never imported (the console is offense-plane; importing vigil_integration is FATAL-2).
+_GRAPH_ITERS = {"quick": 6, "standard": 12, "deep": 20}
+
+
+def _vigil_bin() -> "str | None":
+    """The integration `vigil` entrypoint if resolvable — a `VIGIL_BIN` override or on PATH. Subprocessed
+    (never imported), exactly as the console already subprocesses the foreign `strix` binary."""
+    return os.environ.get("VIGIL_BIN") or shutil.which("vigil")
+
+
+def _graph_backed_engage_cmd(target: str, slug: str, session_id: str, scan_mode: str) -> "list | None":
+    """The argv for a GRAPH-BACKED loopback engage via `vigil engage`, or None (→ caller falls back to the
+    offense engage) unless BOTH a `vigil` entrypoint is resolvable AND Neo4j is configured (NEO4J_URI). The
+    caller gates on is_loopback, so `--scope 127.0.0.1` is the owner's own machine — no charter downgrade is
+    possible. `--session` partitions the per-session graph; `--connect` unions the operator-connected
+    sessions (each prior stays origin-tagged + non-authoritative)."""
+    vigil = _vigil_bin()
+    if not vigil or not os.environ.get("NEO4J_URI"):
+        return None
+    from . import sessions
+    conns = ",".join(sessions.connections_of(session_id))
+    cmd = [vigil, "engage", target, "--slug", slug, "--scope", "127.0.0.1",
+           "--session", session_id, "--max-iterations", str(_GRAPH_ITERS.get(scan_mode, 12))]
+    if conns:
+        cmd += ["--connect", conns]
+    return cmd
+
+
 def launch_assessment(body: dict) -> dict:
     """Route the New-Assessment wizard body to the SAME gated CLI a hand-run engagement uses and
     spawn it. Returns ``{run_id, status, mode, slug, stream}`` or ``{error}`` (a clean, fail-closed
@@ -531,6 +564,24 @@ def launch_assessment(body: dict) -> dict:
     if not host:
         return {"error": f"target must be an absolute URL (got {target!r})"}
     is_loopback = host in _LOOPBACK
+
+    # console→live-engine bridge (OPT-IN): a session-linked LOOPBACK run can go GRAPH-BACKED through the
+    # integration `vigil engage` — which partitions the per-session Neo4j graph and unions the connected
+    # sessions (F3/F4), the thing the offense engine the console otherwise spawns cannot do. Loopback-only
+    # (owner's own machine — no charter downgrade). If opted-in but `vigil`/Neo4j is unavailable, fall
+    # through to the normal path with an honest note; the run still launches (session linkage is kept).
+    if bool(body.get("graph_backed")) and session_id and is_loopback:
+        gslug = _slugify(body.get("slug") or "loopback", fallback="loopback")
+        gcmd = _graph_backed_engage_cmd(target, gslug, session_id, scan_mode)
+        if gcmd is not None:
+            meta = {**base, "slug": gslug, "cmd": gcmd, "stream": "none", "status": "running",
+                    "engine": "integration-graph", "graph_partition": session_id}
+            _write_meta(run_id, **meta)
+            _spawn_background(run_id, rd, gcmd, meta, capture_report=False)
+            return {"run_id": run_id, "status": "running", "mode": mode, "slug": gslug,
+                    "stream": "none", "engine": "integration-graph", "graph_partition": session_id}
+        base["graph_note"] = ("graph-backed requested but unavailable (needs the `vigil` entrypoint + "
+                              "NEO4J_URI + a loopback target); ran the offense engine — session linkage kept")
 
     # url + loopback → the SAME gated loopback scan (progress-log stream, JSON report captured).
     if mode == "url" and is_loopback:
