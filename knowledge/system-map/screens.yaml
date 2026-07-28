@@ -49,6 +49,14 @@ screens:
     description: The confirmed findings and attack paths from your runs, oracle-graded.
     synonyms: [findings, results, bugs, vulnerabilities, issues, what did you find]
 
+  - id: report
+    label: Report
+    group: DO
+    owner: false
+    plane: unified
+    description: A live, re-verified, proof-carrying client report — every finding re-checks its certificate offline.
+    synonyms: [report, client, deliverable, proof, certificate, evidence, portal, attestation]
+
   - id: fixes
     label: Fixes
     group: DO

@@ -23,6 +23,7 @@
       { id: "chat", label: "Chat", icon: "brain", ready: true },
       { id: "live", label: "Live", icon: "live", ready: true },
       { id: "findings", label: "Findings", icon: "find", ready: true },
+      { id: "report", label: "Report", icon: "book", ready: true },
       { id: "fixes", label: "Fixes", icon: "fixes", ready: true },
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", ready: true },
     ]},
@@ -3604,6 +3605,66 @@
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
+  // ---- Report (C4): a live, re-verified, proof-carrying client report ----
+  var RPT = { run: "", runs: [], ev: null, cmp: null };
+  function renderReport(screen) {
+    var body = V.mount(screen, [h("div.screen-head", null, [
+      h("h2", null, "Client Report"),
+      h("p.sub", null, "A LIVE, always-current report: every finding is re-verified OFFLINE on load, so a "
+        + "FACT is a re-checkable certificate — not a stale PDF, and not the AI's word. Read-only.")])]);
+    V.getJSON(OFF("/api/runs")).then(function (d) {
+      RPT.runs = (d && d.runs) || [];
+      if (!RPT.run && RPT.runs.length) RPT.run = RPT.runs[0].run_id;
+      loadReport(body);
+    }).catch(function () { RPT.runs = []; loadReport(body); });
+  }
+  function loadReport(body) {
+    if (!RPT.run) { drawReport(body); return; }
+    var run = encodeURIComponent(RPT.run);
+    Promise.all([
+      V.getJSON(OFF("/api/evidence/" + run)).catch(function () { return null; }),
+      V.getJSON(OFF("/api/compliance/" + run)).catch(function () { return null; })
+    ]).then(function (r) { RPT.ev = r[0]; RPT.cmp = r[1]; drawReport(body); });
+  }
+  function drawReport(body) {
+    var ev = RPT.ev || {}, cmp = RPT.cmp || {};
+    var findings = ev.findings || [];
+    var proven = findings.filter(function (f) { return f.sound; });
+    var ctrlByClass = {};
+    (cmp.findings || []).forEach(function (m) {
+      if (m.status === "proven" && m.controls) ctrlByClass[m.bug_class] = m.controls; });
+    function runSel() {
+      return h("select", { onChange: function (e) { RPT.run = e.target.value; loadReport(body); } },
+        [h("option", { value: "" }, "— select a run —")].concat(
+          RPT.runs.map(function (r) {
+            return h("option", { value: r.run_id, selected: r.run_id === RPT.run }, (r.slug || r.run_id)); })));
+    }
+    var exec = h("div.card", null, [h("div.card-h", null, [h("h3", null, "Executive summary")]),
+      h("div.kv", null, [h("div.k", null, "Findings re-verified"),
+        h("div.v", null, (ev.reproduced || 0) + " sound of " + (ev.total || 0) + " total")]),
+      h("div.hint", { style: { marginTop: "6px" } },
+        "Every 'sound' finding below carries a certificate anyone can re-check OFFLINE — no target, no trust "
+        + "in this tool. " + (ev.doctrine || ""))]);
+    var cards = proven.map(function (f) {
+      var c = ctrlByClass[f.bug_class];
+      return h("div.card", null, [
+        h("div.card-h", null, [h("h3", null, (f.bug_class || f.ref)),
+          h("span.st.st-confirmed", { style: { marginLeft: "auto" } },
+            [h("span.dot"), "PROVEN — cert re-verified"])]),
+        h("div.kv", null, [h("div.k", null, "Surface"), h("div.v", null, (f.surface || "—"))]),
+        h("div.kv", null, [h("div.k", null, "Oracle"),
+          h("div.v", null, (f.confirmed_by || "—") + " · confidence " + (f.confidence != null ? f.confidence : "—"))]),
+        (f.cert_id ? h("div.kv", null, [h("div.k", null, "Certificate"),
+          h("div.v", null, h("code", null, String(f.cert_id).slice(0, 28) + "…"))]) : null),
+        (c ? h("div.kv", null, [h("div.k", null, "Standards"), h("div.v", null, _ctrlPills(c))]) : null)]);
+    });
+    V.mount(body, [h("div.card", null, [h("label", { style: { marginRight: "8px" } }, "Run"), runSel()]),
+      exec,
+      (proven.length ? h("div", null, cards)
+        : h("div.card", null, [h("div.empty", null,
+            ev.error ? "could not re-verify this run" : "no proven findings yet for this run")]))]);
+  }
+
   // ---- Assurance (C2): continuous proof / drift between two runs ----
   var ASR = { curr: "", prev: "", runs: [], data: null };
   function renderAssurance(screen) {
@@ -3679,6 +3740,7 @@
     if (id === "brain") { renderBrain(screen); return; }
     if (id === "compliance") { renderCompliance(screen); return; }
     if (id === "assurance") { renderAssurance(screen); return; }
+    if (id === "report") { renderReport(screen); return; }
     let item = null;
     NAV.forEach(function (g) { g.items.forEach(function (it) { if (it.id === id) item = it; }); });
     if (item && item.ready) renderHome(screen); else renderStub(screen, item || { label: "Not found", phase: "—" });
