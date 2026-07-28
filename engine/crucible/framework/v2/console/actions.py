@@ -781,6 +781,79 @@ def proof_export(run_id: str) -> dict:
                     "reproduction but NOT authenticity."}
 
 
+def apply_fix(run_id: str, finding_ref: str) -> dict:
+    """Fixes screen (U1): run the GATED, NON-DESTRUCTIVE auto-patch ladder for ONE oracle-confirmed finding by
+    shelling ``vigil patch`` — the SAME provenance-grounded gated verb the CLI uses. The driving finding comes
+    from the engagement's OWN signed spine (``--from-spine``, never raw JSON); ``--apply-edits`` applies the fix
+    into a DISPOSABLE clone + sandbox-build, so the real source is never touched and NO PR is opened. Returns the
+    verb's REAL output — a proof-of-fix on success, or its fail-closed refusal verbatim (e.g. a missing signed
+    spine, or no model to propose a patch). The console NEVER opens a PR: that stays a deliberate m-of-n CLI act
+    (`vigil patch --open-pr`), and `remediated=True` is EARNED only when the driving oracle re-fires SILENT on
+    the rebuilt patch (the live re-drive capability), never asserted here.
+
+    Fail-closed: a bad run id (``run_dir`` raises ValueError → do_POST maps to 404), an unsafe finding ref, a run
+    with no repository to patch (a live-target/URL/cloud run), or an unresolvable ``vigil`` bin each refuse cleanly.
+    """
+    rd = run_dir(run_id)                        # traversal-guarded; raises ValueError on a bad id → 404
+    finding_ref = str(finding_ref or "").strip()
+    # the ref is an argv element AND is echoed into the spine finding lookup — keep it a bare token, never a
+    # path / flag / whitespace-injection (no separators, no '..', no leading dash).
+    if (not finding_ref or len(finding_ref) > 200 or finding_ref.startswith("-") or ".." in finding_ref
+            or any(c in finding_ref for c in "/\\ \t\r\n")):
+        return {"ok": False, "error": "invalid finding reference"}
+    try:
+        meta = json.loads((rd / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"ok": False, "error": f"no such run {run_id!r}"}
+    slug = str(meta.get("slug") or "").strip()
+    if not _valid_slug(slug):
+        return {"ok": False, "error": "this run has no valid engagement slug to ground the fix in."}
+    repo = str(meta.get("target") or "").strip()
+    # only a codebase (Strix) run has a source tree to patch; a live-target (URL/cloud/aegis) run has nothing.
+    if str(meta.get("mode")) != "codebase" or not repo:
+        return {"ok": False, "runnable": False,
+                "error": "this run has no repository to patch — the gated auto-patch applies to a codebase "
+                         "(Strix) run's source. Run a codebase assessment to enable a gated fix here."}
+    vigil = _vigil_bin()
+    if not vigil:
+        return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    # PROVENANCE PRE-CHECK (honesty): `vigil patch --from-spine` grounds the finding in the engagement's OWN
+    # signed offense spine at <base>/<slug>.spine — written ONLY by the integration `vigil engage` flow, NOT by
+    # a console Strix codebase run. So rather than shell the verb only to surface its cryptic fail-closed error,
+    # we check the spine exists first and, if not, return an HONEST, actionable refusal naming exactly what is
+    # needed. `--base-dir` is passed EXPLICITLY so this check and the verb agree on the same base.
+    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    spine = Path(base_dir) / f"{slug}.spine"
+    if not spine.is_file():
+        return {"ok": False, "runnable": False,
+                "error": (f"no signed offense spine for {slug!r} at {spine} — the gated auto-patch grounds the "
+                          "finding in the engagement's OWN signed spine (never raw JSON), and a console Strix "
+                          "codebase run does not emit one yet. To enable a gated fix, run this engagement through "
+                          f"`vigil engage --slug {slug} --base-dir {base_dir}` (which writes the signed spine), "
+                          "then apply the fix here."),
+                "command": (f"vigil patch --from-spine {slug} --finding-ref {finding_ref} "
+                            f"--target-repo <repo> --base-dir {base_dir} --apply-edits")}
+    # NON-DESTRUCTIVE + NEVER --open-pr from the console. The spawn is an argv LIST (no shell); slug + ref are
+    # validated tokens; the repo path lives only in argv (no shell), never interpolated.
+    cmd = [vigil, "patch", "--from-spine", slug, "--finding-ref", finding_ref,
+           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"the patch ladder failed to run: {type(e).__name__}: {e}"}
+    out = ((proc.stdout or "") + (("\n--- stderr ---\n" + proc.stderr) if proc.stderr else "")).strip()[-8000:]
+    return {"ok": proc.returncode == 0, "runnable": True, "rc": proc.returncode,
+            "finding_ref": finding_ref, "slug": slug,
+            "command": ("vigil patch --from-spine " + slug + " --finding-ref " + finding_ref
+                        + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits"),
+            "output": out or "(no output)",
+            "note": ("Non-destructive: `vigil patch` proposes a fix and, IF it can, applies it into a DISPOSABLE "
+                     "clone + sandbox-build — your source is never touched and no PR is opened. The real per-run "
+                     "status/applied_paths/remediated are in the output above. `remediated=True` is EARNED only "
+                     "when the driving oracle re-fires SILENT on the rebuilt patch (the live re-drive capability); "
+                     "opening a real PR is a separate m-of-n-gated CLI act (`vigil patch --open-pr`).")}
+
+
 def provision_loopback_authority(slug: str) -> dict:
     """Charter/attestation UI: mint + sign a CRUCIBLE authority for a LOOPBACK engagement slug, scope
     HARD-FIXED to ``127.0.0.1``. The UI can provision a *loopback* charter, but — per the constitution — a
