@@ -50,6 +50,23 @@
       ]
     },
     {
+      "description": "Continuous proof / drift — diff the oracle-confirmed fact set between two runs (regressions vs fixes).",
+      "group": "MANAGE",
+      "id": "assurance",
+      "label": "Assurance",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "assurance",
+        "drift",
+        "continuous",
+        "regression",
+        "delta",
+        "proof",
+        "diff"
+      ]
+    },
+    {
       "description": "The reasoning brain — intelligence, memory, priors, and the capability catalog.",
       "group": "MANAGE",
       "id": "brain",
@@ -271,5 +288,5 @@
       ]
     }
   ],
-  "source_sha": "e315a51d230edea8b5a57683ea8765e8cc1264523d3d12eccc9937bb429b7fd1"
+  "source_sha": "c55b2d104aa50b117fc2440f84cb961e083fe859a6207eeac87f152804670492"
 }
