@@ -170,6 +170,12 @@ def assemble_serve_dir(src_dir: Path, serve_dir: Path, *, token: str,
     manifest = src_dir / "manifest.json"
     if manifest.exists():
         (serve_dir / "manifest.json").write_text(manifest.read_text(encoding="utf-8"), encoding="utf-8")
+    # S1: the committed system-map (SIGIL's screen/nav manifest) is served same-origin as /system-map.json
+    # so the SPA + SIGIL's voice nav (S2) can fetch it. It is immutable committed DATA (no secret, no token),
+    # copied verbatim; the CI drift-check keeps it in lock-step with the UI's NAV/route().
+    system_map = src_dir.parents[1] / "knowledge" / "system-map" / "system-map.json"
+    if system_map.exists():
+        (serve_dir / "system-map.json").write_text(system_map.read_text(encoding="utf-8"), encoding="utf-8")
     html = (src_dir / "index.html").read_text(encoding="utf-8")
     html = (html.replace("__VIGIL_TOKEN__", token)
                 .replace("__VIGIL_SOVEREIGN__", sovereign_base)

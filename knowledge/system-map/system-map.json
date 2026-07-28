@@ -1,0 +1,239 @@
+{
+  "schema": "vigil.system-map/1",
+  "screens": [
+    {
+      "description": "Background activity across the system — running tasks and recent events.",
+      "group": "MANAGE",
+      "id": "activity",
+      "label": "Activity",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "activity",
+        "background",
+        "tasks",
+        "jobs",
+        "whats running"
+      ]
+    },
+    {
+      "description": "Enter and live-test the API keys and cloud/graph credentials the system needs.",
+      "group": "MANAGE",
+      "id": "apikeys",
+      "label": "API Keys",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "api keys",
+        "keys",
+        "credentials",
+        "secrets",
+        "connect neo4j",
+        "cloud credentials"
+      ]
+    },
+    {
+      "description": "The wizard that launches a gated engagement against a URL, API, codebase, or infra target.",
+      "group": "DO",
+      "id": "assess",
+      "label": "New Assessment",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "new assessment",
+        "assessment",
+        "new scan",
+        "start a scan",
+        "new engagement",
+        "assess",
+        "test something"
+      ]
+    },
+    {
+      "description": "The reasoning brain — intelligence, memory, priors, and the capability catalog.",
+      "group": "MANAGE",
+      "id": "brain",
+      "label": "Brain",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "brain",
+        "intelligence",
+        "reasoning",
+        "memory",
+        "catalog",
+        "capabilities"
+      ]
+    },
+    {
+      "description": "Tell the agent in natural language what to test; it launches the same gated run and streams it here.",
+      "group": "DO",
+      "id": "chat",
+      "label": "Chat",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "chat",
+        "talk",
+        "ask",
+        "conversation",
+        "agent chat"
+      ]
+    },
+    {
+      "description": "The defensive AEGIS side — detections, posture, and the managed gateway.",
+      "group": "DO",
+      "id": "defense",
+      "label": "Defense (AEGIS)",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "defense",
+        "aegis",
+        "defend",
+        "protection",
+        "shield",
+        "blue team"
+      ]
+    },
+    {
+      "description": "The confirmed findings and attack paths from your runs, oracle-graded.",
+      "group": "DO",
+      "id": "findings",
+      "label": "Findings",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "findings",
+        "results",
+        "bugs",
+        "vulnerabilities",
+        "issues",
+        "what did you find"
+      ]
+    },
+    {
+      "description": "Proposed fixes and patches for confirmed findings; each queues for your approval.",
+      "group": "DO",
+      "id": "fixes",
+      "label": "Fixes",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "fixes",
+        "patches",
+        "remediation",
+        "repairs",
+        "fix it"
+      ]
+    },
+    {
+      "description": "The command dashboard — system status, quick actions, and where to go next.",
+      "group": "DO",
+      "id": "home",
+      "label": "Home",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "home",
+        "command",
+        "dashboard",
+        "start page",
+        "overview"
+      ]
+    },
+    {
+      "description": "Watch an active or recent run stream live — its findings, tools, and events as they happen.",
+      "group": "DO",
+      "id": "live",
+      "label": "Live",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "live",
+        "live run",
+        "watch",
+        "stream",
+        "current run",
+        "running"
+      ]
+    },
+    {
+      "description": "The in-app manual — how the system works and how to use each feature.",
+      "group": "LEARN",
+      "id": "manual",
+      "label": "Manual",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "manual",
+        "help",
+        "docs",
+        "documentation",
+        "guide",
+        "how do i"
+      ]
+    },
+    {
+      "description": "The owner approval queue and safety controls — approve a queued action or trip the kill-switch.",
+      "group": "MANAGE",
+      "id": "safety",
+      "label": "Approvals & Safety",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "safety",
+        "approvals",
+        "approve",
+        "approval queue",
+        "kill switch",
+        "stop everything"
+      ]
+    },
+    {
+      "description": "Your permanent engagement sessions — open, rename, connect, and remove them; each has its own knowledge graph.",
+      "group": "MANAGE",
+      "id": "sessions",
+      "label": "Sessions",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "sessions",
+        "session list",
+        "history",
+        "my sessions",
+        "engagements"
+      ]
+    },
+    {
+      "description": "System settings — the AI model, effort, providers, and other configuration.",
+      "group": "MANAGE",
+      "id": "settings",
+      "label": "Settings",
+      "owner": true,
+      "plane": "unified",
+      "synonyms": [
+        "settings",
+        "config",
+        "configuration",
+        "preferences",
+        "options"
+      ]
+    },
+    {
+      "description": "The tool arsenal — what is installed, what each does, and on-demand provisioning.",
+      "group": "MANAGE",
+      "id": "tools",
+      "label": "Tools",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "tools",
+        "arsenal",
+        "toolkit",
+        "install a tool"
+      ]
+    }
+  ],
+  "source_sha": "b859d09ecc96a9c207010adc8e41df74ac6d3f64334506d660233bddca0ef296"
+}
