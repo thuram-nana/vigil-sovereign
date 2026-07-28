@@ -33,6 +33,11 @@ def _intel(argv: list[str]) -> int:
     return intel_cli.main(argv)
 
 
+def _knowledge(argv: list[str]) -> int:
+    from .knowledge_engine import cli as knowledge_cli
+    return knowledge_cli.main(argv)
+
+
 def _kernel(argv: list[str]) -> int:
     from .kernel import cli as kernel_cli
     return kernel_cli.main(argv)
@@ -212,6 +217,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "intake": _intake,
     "memory": _memory,
     "intel": _intel,
+    "knowledge": _knowledge,
     "kernel": _kernel,
     "entitlement": _entitlement,
     "eval": _eval,
