@@ -119,6 +119,42 @@ def test_manifest_hashes_match_every_entry(tmp_path):
         assert any(n.startswith("proof-bundle/") for n in names)
 
 
+def test_evidence_symlink_is_not_shipped_or_vouched(tmp_path):
+    # BLOCK-1 regression: a symlink planted in the run's evidence/ tree must NEVER be followed into the
+    # bundle. The old shutil.copytree(symlinks=False) DEREFERENCED it, materialising an OUTSIDE file's
+    # content into the governance-SIGNED archive (a hand-to-anyone exfiltration the manifest then vouched for).
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("TOP-SECRET-VIA-EVIDENCE-SYMLINK", encoding="utf-8")
+    outdir = tmp_path / "leak-dir-src"; outdir.mkdir(); (outdir / "sekret.txt").write_text("DIR-LEAK", encoding="utf-8")
+    run = tmp_path / "run"; run.mkdir()
+    _mint_a_fact(run)                                    # creates run/evidence/<action_id>/…
+    ev = run / "evidence"
+    assert ev.is_dir()
+    (ev / "leak-file.txt").symlink_to(outside)          # a file symlink → outside the run
+    (ev / "leak-dir").symlink_to(outdir, target_is_directory=True)   # a dir symlink → outside the run
+    out = tmp_path / "dossier.zip"
+    res = build_dossier(run_dir=str(run), out_zip=str(out), engagement_slug="acme", base_dir=str(run))
+    assert res["ok"]
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        blob = b"".join(zf.read(n) for n in names)
+        assert b"TOP-SECRET-VIA-EVIDENCE-SYMLINK" not in blob    # the symlinked file's content never ships
+        assert b"DIR-LEAK" not in blob                           # nor a symlinked dir's content
+        assert not any("leak-file.txt" in n or "leak-dir" in n for n in names)   # nor the link names
+
+
+def test_scrub_recurses_into_lists():
+    # BLOCK-2 regression: a credential under a secret key inside a LIST-of-dicts must be masked (the old
+    # scrubber recursed into dicts but not lists → a realistic structlog header capture leaked).
+    from framework.v2.common.redact import scrub_log_event
+    out = scrub_log_event({"event": "req",
+                           "headers": [{"authorization": "Bearer LISTNEST-SECRET"}, {"x": "ok"}],
+                           "nested": [[{"cookie": "s=DEEP-SECRET"}]], "tokens_in": 7})
+    dumped = json.dumps(out)
+    assert "LISTNEST-SECRET" not in dumped and "DEEP-SECRET" not in dumped   # secrets in lists masked
+    assert out["tokens_in"] == 7 and out["headers"][1]["x"] == "ok"          # non-secrets preserved
+
+
 def test_a_flipped_byte_breaks_the_manifest_check(tmp_path):
     run = tmp_path / "run"; run.mkdir()
     _mint_a_fact(run)

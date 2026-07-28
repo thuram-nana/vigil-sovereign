@@ -158,12 +158,34 @@ def export_bundle(
     _secure_write(out / "README.md", _README)
 
     # copy the raw executor-captured evidence tree the certificates bind (best-effort; a cert with no
-    # artifacts verifies on reproduction alone). Never copies outside the bundle.
-    if evidence_root.is_dir():
+    # artifacts verifies on reproduction alone). SYMLINKS ARE NEVER FOLLOWED OR SHIPPED: shutil.copytree with
+    # the default symlinks=False DEREFERENCES them, materialising an OUTSIDE target's content into the bundle
+    # (a "hand-to-anyone" exfiltration, and a signed manifest that would then vouch for it). We copy only
+    # REGULAR files under REGULAR dirs, pruning every symlink — a certificate binds real captured bytes, never
+    # a link. (Root-cause fix for the dossier BLOCK: the earlier copytree let an evidence-tree symlink escape.)
+    if evidence_root.is_dir() and not evidence_root.is_symlink():
         dst = out / "evidence"
         if dst.exists():
             shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(evidence_root, dst)
+        for root, dirs, files in os.walk(evidence_root, followlinks=False):
+            rootp = Path(root)
+            dirs[:] = [d for d in dirs if not (rootp / d).is_symlink()]   # never descend a symlinked subdir
+            rel = rootp.relative_to(evidence_root)
+            (dst / rel).mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(dst / rel, 0o700)
+            except OSError:
+                pass
+            for name in files:
+                src = rootp / name
+                if src.is_symlink() or not src.is_file():
+                    continue                     # skip symlinks + fifos/sockets/devices — never ship a link
+                target = dst / rel / name
+                shutil.copyfile(src, target)     # src verified a real file → copies bytes, follows no link
+                try:
+                    os.chmod(target, 0o600)
+                except OSError:
+                    pass
 
     return {
         "ok": True,
