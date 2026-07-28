@@ -24,7 +24,12 @@ from .authn import signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
 SIGNAL = "governor.capability"
-CAPABILITIES = frozenset({"gesture", "voice"})
+# gesture / voice are physical-input capabilities; `autolearn` gates the Knowledge Engine's
+# propose-to-learn drafting (K2). All three share the identical owner-signed latch semantics below:
+# default ENABLED, disable is the fail-safe (unsigned) direction, re-enable requires an owner signature.
+# `autolearn` enabled only permits DRAFTING/showing learn proposals — it never learns, applies, or mints
+# a fact; each proposal still needs the owner's signed ACCEPT.
+CAPABILITIES = frozenset({"gesture", "voice", "autolearn"})
 _CORE = ("signal", "capability", "state")
 
 # Cache the authoritative per-capability verdict keyed by (resolved spine path, trusted pubkey, capability)

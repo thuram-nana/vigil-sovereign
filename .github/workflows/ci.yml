@@ -44,7 +44,8 @@ jobs:
                  framework/v2/console framework/v2/api \
                  framework/v2/aegis/tests/test_gateway_ui_sinks.py \
                  framework/v2/agents/tests/test_agent_message.py \
-                 framework/v2/intel/tests/test_vulnfeed.py -q
+                 framework/v2/intel/tests/test_vulnfeed.py \
+                 framework/v2/knowledge_engine/tests/test_proposals.py -q
 
   gateway:
     name: gateway egress gate (P6)
@@ -179,7 +180,8 @@ jobs:
               apps/sigil/tests/test_system_map_sync.py \
               apps/sigil/tests/test_voice_nav.py \
               apps/sigil/tests/test_gesture_nav.py \
-              apps/sigil/tests/test_hud_status.py -q
+              apps/sigil/tests/test_hud_status.py \
+              apps/sigil/tests/test_capability_autolearn.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi

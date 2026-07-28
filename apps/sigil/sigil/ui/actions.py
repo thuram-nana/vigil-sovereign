@@ -11,6 +11,7 @@ from ..spine.store import SpineStore
 
 # the closed set of gated actions the plane will route (fail-closed: anything else is refused)
 _CAP_ACTIONS = frozenset({"disable_gesture", "enable_gesture", "disable_voice", "enable_voice",
+                          "disable_autolearn", "enable_autolearn",
                           "disable_both", "enable_both"})
 _SETTINGS_ACTIONS = frozenset({"set_secret", "set_model", "set_provider", "set_effort",
                                "check_secret", "check_secrets",
@@ -46,10 +47,13 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         out = pp.grant(agent, scope) if action == "promote" else pp.revoke(agent, scope)
         return {"ok": out is not None, "action": action, "agent": agent, "scope": scope, "recorded_seq": out}
     if action in _CAP_ACTIONS:
-        from ..governor import CAPABILITIES, CapabilityGate
+        from ..governor import CapabilityGate
         cg = CapabilityGate(store, owner_key=owner)
         verb, _, which = action.partition("_")          # ("disable","","gesture") / ("enable","","both")
-        caps = sorted(CAPABILITIES) if which == "both" else [which]
+        # "both" is the pair of physical-input capabilities (gesture, voice) — its historical meaning.
+        # `autolearn` (K2) is deliberately NOT swept into "both": it is an independent, explicit toggle,
+        # so the existing panic control's behaviour is unchanged when a new capability is registered.
+        caps = ["gesture", "voice"] if which == "both" else [which]
         seqs = {c: (cg.disable(c, reason=reason) if verb == "disable" else cg.enable(c, reason=reason))
                 for c in caps}
         return {"ok": True, "action": action, "capabilities": caps, "recorded_seqs": seqs}
