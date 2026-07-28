@@ -399,3 +399,17 @@ def test_spawn_injects_extra_env(tmp_path, monkeypatch):
     out = log.read_text(encoding="utf-8")
     assert "M=claude-opus-5" in out            # injected var reached the child
     assert "K=none" in out                     # a var we did NOT inject is absent (no accidental leak)
+
+
+def test_console_vigil_bin_is_the_offense_sibling(tmp_path):
+    # A0: the console child must get an absolute VIGIL_BIN (the offense-venv `vigil`, sibling of `crucible`)
+    # so a graph-backed engage never silently falls back to the non-graph engine when `vigil` isn't on PATH.
+    binroot = tmp_path / ".venv-offense" / "bin"
+    binroot.mkdir(parents=True)
+    crucible = binroot / "crucible"
+    crucible.write_text("#!/bin/sh\n", encoding="utf-8")
+    # no `vigil` sibling yet → None (never point the child at a bad path; it keeps its PATH fallback)
+    assert uiproxy._console_vigil_bin(crucible) is None
+    vigil = binroot / "vigil"
+    vigil.write_text("#!/bin/sh\n", encoding="utf-8")
+    assert uiproxy._console_vigil_bin(crucible) == str(vigil)    # resolves to the sibling, absolute
