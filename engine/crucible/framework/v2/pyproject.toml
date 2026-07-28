@@ -4,11 +4,12 @@ version = "2.0.0a1"
 description = "CRUCIBLE v2 — autonomous, learning offensive-intelligence platform layered onto v1"
 requires-python = ">=3.11"
 authors = [{name = "OBSIDIAN-FORGE"}]
-# Dual-licensed: GNU AGPL-3.0-or-later OR a Commercial License. See ../../LICENSE and ../../LICENSING.md.
-license = {text = "AGPL-3.0-or-later"}
+# Dual-licensed: PolyForm Noncommercial 1.0.0 OR a Commercial License. See the repo-root LICENSE +
+# LICENSE-COMMERCIAL.md (and engine/crucible/LICENSE + LICENSING.md).
+license = {text = "PolyForm-Noncommercial-1.0.0 OR Commercial"}
 readme = "README.md"
 classifiers = [
-  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "License :: Other/Proprietary License",
   "Programming Language :: Python :: 3",
   "Topic :: Security",
 ]

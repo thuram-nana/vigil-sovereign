@@ -1688,20 +1688,12 @@ them to understand the system — they are for when you want to modify or audit 
 
 ## 15. License
 
-CRUCIBLE is **dual-licensed: GNU AGPL-3.0 or a Commercial License** — see [`LICENSING.md`](./LICENSING.md).
+CRUCIBLE is **dual-licensed: PolyForm Noncommercial 1.0.0 or a Commercial License** — see [`LICENSING.md`](./LICENSING.md) and the repo-root [`/LICENSE`](../../LICENSE) + [`/LICENSE-COMMERCIAL.md`](../../LICENSE-COMMERCIAL.md).
 
-- **Open source — [AGPL-3.0](./LICENSE):** free to use, run, study, modify, and redistribute. Because
-  the AGPL is a network-copyleft license, **if you modify CRUCIBLE and let others interact with it over
-  a network, you must release your modified source under the AGPL-3.0** (AGPL §13, *Remote Network
-  Interaction*).
-- **Commercial:** if you want to keep modifications private, embed CRUCIBLE in a proprietary product or
-  hosted service without the AGPL obligations, or need warranty/indemnity/support, purchase a
-  commercial license. Contact **thuram@thuramnana.com** / **https://thuramnana.com** (subject:
-  `CRUCIBLE commercial license`).
+- **Source-available — PolyForm Noncommercial 1.0.0 ([`/LICENSE`](../../LICENSE)):** free to use, run, study, modify, and share for any NONCOMMERCIAL purpose (for non-government users). You may **not** sell it or use it commercially / in production for free.
+- **⚠️ Government / public-sector use is EXCLUDED from the free grant** (a Government-Use Supplemental Term layered over PolyForm-NC): any government / agency / military / law-enforcement / public-authority / state-owned entity needs a **Commercial License**, even for an otherwise-noncommercial purpose.
+- **Commercial:** for commercial / production / government use, to keep modifications private, to embed CRUCIBLE in a product or hosted service, or for warranty/indemnity/support, purchase a commercial license. Contact **thuram@thuramnana.com** / **https://thuramnana.com** (subject: `VIGIL commercial license`).
 
-If you have not signed a commercial agreement, your use is governed by the AGPL-3.0. Contributions are
-accepted under AGPL-3.0 plus a grant allowing commercial relicensing so dual-licensing remains possible
-(see [`LICENSING.md`](./LICENSING.md#contributions)). This summary is not legal advice; the binding
-terms are the [`LICENSE`](./LICENSE) file and any signed commercial agreement.
+If you have not signed a commercial agreement, your (non-government, noncommercial) use is governed by the PolyForm Noncommercial License 1.0.0 as modified by the Government-Use Supplemental Term. Contributions are accepted under PolyForm-NC plus a grant allowing commercial relicensing (see [`LICENSING.md`](./LICENSING.md#contributions)). This summary is not legal advice; the binding terms are the repo-root [`/LICENSE`](../../LICENSE) and any signed commercial agreement.
 
-`SPDX-License-Identifier: AGPL-3.0-or-later`
+`SPDX-License-Identifier: LicenseRef-PolyForm-Noncommercial-1.0.0-OR-Commercial`

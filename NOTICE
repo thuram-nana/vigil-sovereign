@@ -1,6 +1,18 @@
 VIGIL — third-party attributions
 ================================
 
+VIGIL's FIRST-PARTY code (© 2026 Junior Thuram Nana) is dual-licensed under the
+**PolyForm Noncommercial License 1.0.0 OR a Commercial License** — see the
+repository-root LICENSE and LICENSE-COMMERCIAL.md. The third-party components below
+are NOT under that license: they retain their OWN licenses, reproduced here, and are
+unaffected by VIGIL's dual license. In particular:
+
+  * vendored **Strix** (vendor/strix/) remains **Apache-2.0** — its LICENSE and NOTICE
+    are retained in that directory, and modifications made for VIGIL are stated below;
+  * adapted **redamon** portions remain under the **MIT License** (reproduced below);
+  * **AI-Gauntlet** tools (garak, PyRIT, Giskard, promptfoo) are invoked as subprocesses
+    and keep their own upstream licenses, outside VIGIL's process.
+
 This repository incorporates or adapts code and design ideas from third-party
 open-source projects. Their licenses are retained and reproduced below.
 

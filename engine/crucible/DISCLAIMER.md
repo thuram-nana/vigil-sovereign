@@ -66,8 +66,8 @@ does not warrant that the Software is free of defects, that it will meet your
 requirements, that its results are accurate or complete, or that its operation will
 be uninterrupted or error-free. The entire risk as to the quality, safety, legality,
 and performance of the Software, and of your use of it, is with **you**. (This
-reinforces, and does not limit, the “Disclaimer of Warranty” in the AGPL-3.0
-[`LICENSE`](./LICENSE), Section 15.)
+reinforces, and does not limit, the “Disclaimer of Warranty” in the PolyForm Noncommercial 1.0.0
+[`LICENSE`](../../LICENSE) — "No Liability".)
 
 ## 5. Limitation of liability
 
@@ -84,7 +84,7 @@ the Author has been advised of the possibility of such damages.
 **The Author is not liable, in any way, for any use or misuse of the Software by any
 person.** Your sole and exclusive remedy for any dissatisfaction with the Software is
 to stop using it. (This reinforces, and does not limit, the “Limitation of
-Liability” in the AGPL-3.0 [`LICENSE`](./LICENSE), Section 16.)
+Liability” in the PolyForm Noncommercial 1.0.0 [`LICENSE`](../../LICENSE) — "No Liability".)
 
 ## 6. Indemnification — you hold the Author harmless
 
