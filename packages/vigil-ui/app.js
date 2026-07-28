@@ -3215,7 +3215,8 @@
     Promise.all([
       V.getJSON(OFF("/api/vulnintel/" + encodeURIComponent(K.slug || ""))).catch(function () { return null; }),
       V.getJSON(SOV("/api/snapshot")).catch(function () { return null; }),
-    ]).then(function (res) { K.data = res[0]; K.snap = res[1]; drawKnowledge(); });
+      V.getJSON(OFF("/api/evolve/" + encodeURIComponent(K.slug || ""))).catch(function () { return null; }),
+    ]).then(function (res) { K.data = res[0]; K.snap = res[1]; K.evolve = res[2]; drawKnowledge(); });
   }
   function drawKnowledge() {
     var body = V.$("#knowledge-body"); if (!body) return;
@@ -3391,7 +3392,33 @@
       ]) : null,
     ]) : null);
 
-    V.mount(body, [picker, learnCard, learnSourceCard, sourcesCard, vulnCard, catCard,
+    // ---- Self-evolve (K5): bounded horizon → gated DRAFT proposals + completion signal ----
+    var ev = K.evolve;
+    var se = ev && ev.studied_enough || {};
+    var evolveCard = (ev && d.slug) ? h("div.card", null, [
+      h("div.card-h", null, [h("h3", null, "Self-evolve"),
+        (se.done === true
+          ? h("span.st.st-confirmed", { style: { marginLeft: "auto" } }, [h("span.dot"), "studied everything in scope"])
+          : h("span.st.st-idle", { style: { marginLeft: "auto" } }, [h("span.dot"), "in progress"]))]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "A bounded, deterministic horizon over the disclosed leads plus coverage gaps → GATED DRAFT proposals "
+        + "(never merged or applied). \"Studied everything in scope\" means drafted everything for the "
+        + "disclosed leads — not that the system is complete. Only a fired oracle mints a fact."),
+      h("div.kv", null, [h("div.k", null, "Horizon gaps"), h("div.v", null, String(ev.horizon_gaps || 0))]),
+      h("div.kv", null, [h("div.k", null, "Coverage gaps"),
+        h("div.v", null, (ev.coverage_gaps || []).length
+          ? (ev.coverage_gaps || []).map(function (g) { return h("span.pill.sm.warn", { style: { marginRight: "4px" } }, g.bug_class); })
+          : "none")]),
+      h("div.kv", null, [h("div.k", null, "Draft proposals"), h("div.v", null, String((ev.proposals || []).length))]),
+      h("div.kv", null, [h("div.k", null, "Unlearned leads"),
+        h("div.v", null, String((ev.unlearned_leads || []).length)
+          + ((ev.unlearned_leads || []).length ? " — run learn to draft their skills" : ""))]),
+      ev.calibration ? h("div.kv", null, [h("div.k", null, "Calibration"),
+        h("div.v", null, ev.calibration.resolved + " resolved · Brier "
+          + (ev.calibration.brier != null ? Number(ev.calibration.brier).toFixed(3) : "—"))]) : null,
+    ]) : null;
+
+    V.mount(body, [picker, learnCard, learnSourceCard, evolveCard, sourcesCard, vulnCard, catCard,
       h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
   }
 
