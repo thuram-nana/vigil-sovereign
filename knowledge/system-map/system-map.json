@@ -328,6 +328,23 @@
       ]
     },
     {
+      "description": "A governed local terminal — ask in English or type a command; the AI proposes, the allowlist and gate decide, you approve, and only local read-only commands run (every run signed).",
+      "group": "DO",
+      "id": "terminal",
+      "label": "Terminal",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "terminal",
+        "command line",
+        "shell",
+        "console",
+        "run a command",
+        "type a command",
+        "cli"
+      ]
+    },
+    {
       "description": "The tool arsenal — what is installed, what each does, and on-demand provisioning.",
       "group": "MANAGE",
       "id": "tools",
@@ -342,5 +359,5 @@
       ]
     }
   ],
-  "source_sha": "049144755f32c0fbd4c4232cd1a7115b84d053d446464d875326f8ef989c4009"
+  "source_sha": "4d225a04620148bc40ed86e46dae66350766b7ea1f9c299852592bd17eb8df4c"
 }

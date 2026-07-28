@@ -33,6 +33,14 @@ screens:
     description: Tell the agent in natural language what to test; it launches the same gated run and streams it here.
     synonyms: [chat, talk, ask, conversation, agent chat]
 
+  - id: terminal
+    label: Terminal
+    group: DO
+    owner: false
+    plane: unified
+    description: A governed local terminal — ask in English or type a command; the AI proposes, the allowlist and gate decide, you approve, and only local read-only commands run (every run signed).
+    synonyms: [terminal, command line, shell, console, run a command, type a command, cli]
+
   - id: live
     label: Live
     group: DO

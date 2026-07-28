@@ -505,6 +505,78 @@ def _approval_gate(real_gate: Callable[..., Any]) -> Callable[..., Any]:
     return gate
 
 
+# ---------------------------------------------------------------------------------------------------
+# T2: the governed LOCAL terminal runtime — the MINIMAL gate + spine-signer subset build_engine wires
+# ---------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TerminalRuntime:
+    """The minimal governance subset the governed LOCAL terminal needs to call
+    :func:`live.executor.execute_terminal` — the exact building blocks :func:`build_engine` wires, WITHOUT
+    starting a full engagement (no oracle, no graph, no attestation loop). Fail-closed by construction:
+
+      * ``gate`` is ``None`` ⇒ ``execute_terminal``'s ``authorize_tool_call`` DENIES every command (no gate);
+      * ``signer`` is ``None`` ⇒ ``execute_terminal`` refuses BEFORE running (an unrecordable command);
+      * ``approval_gate`` wraps the SAME ``_approval_gate`` the engine uses (a WARDEN 'queue' → 'allow' only
+        when the operator approves) — a DENY (out-of-scope / killswitch / budget) is preserved, never widened.
+
+    ``terminal.run`` classifies A2 under the ONE shared WARDEN classifier, so under the A1 offense ceiling
+    the conjunctive gate QUEUES it: without ``approval_gate`` it can never run; with it (an operator
+    ``--approve``) it is admitted. The allowlist inside ``execute_terminal`` still bounds it to local
+    read/inspect binaries, so no command — approved or not — can egress or write."""
+
+    gate: Optional[Callable[..., Any]]
+    approval_gate: Optional[Callable[..., Any]]
+    signer: Optional[Callable[[bytes], str]]
+    view: dict
+    destructive_view: dict
+    history_path: str
+    slug: str
+
+
+def build_terminal_runtime(*, slug: str = "loopback", base_dir: str) -> TerminalRuntime:
+    """Build the gate + sealed spine signer the governed LOCAL terminal needs, reusing the EXACT building
+    blocks :func:`build_engine` uses: :func:`provision_authority` (signed CRUCIBLE authority under a stable,
+    sealed governance key) → :func:`_build_gate` (the conjunctive gate at the A1 offense ceiling) →
+    :func:`_approval_gate` (the operator's standing approval that upgrades a WARDEN 'queue' to 'allow') →
+    :func:`load_or_create_spine_keypair` (the stable, vault-sealed offense-spine identity) whose Ed25519
+    signature over the ``ExecRecord`` bytes is the executor's ``signer``.
+
+    Loopback scope only — the terminal is LOCAL, so the authority is scoped to ``127.0.0.1``. Never raises
+    a governance-build error to the caller in a way that runs a command: a missing framework gate leaves
+    ``gate=None`` (⇒ deny) rather than faking one."""
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+
+    # The offense worker's own vault (audit G1): the governance key + spine key seal under it when provisioned;
+    # unprovisioned (default) they are plaintext at rest — unchanged, non-bricking (mirrors build_engine).
+    from vigil_core.vault import Vault
+    op_vault = Vault(base / "vault")
+
+    # Provision the SAME signed authority build_engine provisions (stable, sealed governance key under base_dir),
+    # scoped to the local host. Fail-closed: if framework is unavailable, provision_authority raises and the
+    # caller (the CLI verb) maps it to a clean JSON refusal — nothing runs.
+    prov = provision_authority(slug=slug, scope=("127.0.0.1",), base_dir=base_dir, vault=op_vault)
+
+    # The conjunctive gate over the signed authority at the A1 ceiling — terminal.run (A2) QUEUES under it.
+    gate = _build_gate(prov, ceiling="A1")
+    approval_gate = _approval_gate(gate) if gate is not None else None
+
+    # The stable, vault-sealed offense-spine identity; its Ed25519 signature over the ExecRecord bytes is the
+    # executor's signer (byte-identical to build_engine.exec_signer).
+    spine_kp = load_or_create_spine_keypair(path=str(base / DEFAULT_SPINE_KEY_FILE), vault=op_vault)
+
+    def exec_signer(message: bytes) -> str:
+        return sign(spine_kp.private_key_b64, message)
+
+    return TerminalRuntime(
+        gate=gate, approval_gate=approval_gate, signer=exec_signer,
+        view=DEFAULT_TOOL_VIEW, destructive_view=DEFAULT_DESTRUCTIVE_VIEW,
+        history_path=str(base / "terminal-history.jsonl"), slug=slug,
+    )
+
+
 def _build_oracle(prov: Provisioned) -> Callable[[str, Any], Optional[str]]:
     """The CRUCIBLE oracle seam. The deterministic oracle re-fires over an ``oracle_context`` and a signed
     certificate's finding ref is returned ONLY on a real confirmation (else None ⇒ the claim stays a LEAD).

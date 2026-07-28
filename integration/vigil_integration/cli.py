@@ -628,6 +628,88 @@ def _cmd_learn_drain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _terminal_next_seq(history_path: str) -> int:
+    """The next append-only seq coordinate for the terminal history — the count of existing records. Total:
+    an absent/unreadable history yields 0 (a fresh log)."""
+    try:
+        p = Path(history_path)
+        if not p.is_file():
+            return 0
+        return sum(1 for line in p.read_text(encoding="utf-8").splitlines() if line.strip())
+    except OSError:
+        return 0
+
+
+def _append_terminal_history(history_path: str, record: object) -> None:
+    """Append the REDACTED, signed ``ExecRecord`` as one canonical-JSON line to the terminal history log (the
+    console's ``terminal_history`` reads it back, read-only). The record is already redacted + signed by the
+    executor — no raw secret lands here. Total: an append failure is swallowed (the command already ran and is
+    represented in the returned result; the durable history is best-effort, never fatal)."""
+    try:
+        payload = record.model_dump(mode="json")  # type: ignore[attr-defined]
+        line = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        with open(history_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except (OSError, TypeError, ValueError, AttributeError):
+        pass
+
+
+def _cmd_terminal(args: argparse.Namespace) -> int:
+    """`vigil terminal <command...>` — run a governed LOCAL read/inspect command through the SAME conjunctive
+    gate + sealed spine signer the live engine uses (``build_terminal_runtime`` reuses the exact building
+    blocks). ``execute_terminal`` parses + allowlist-validates the command (NO shell, argv list, LOCAL
+    read/print binaries only), classifies ``terminal.run`` at WARDEN A2 (→ QUEUES under the A1 offense ceiling,
+    never auto), runs it, and writes a signed, redacted ``ExecRecord``. ``--approve`` is the operator's
+    approval (the SAME wiring approval path — ``_approval_gate``) that upgrades the A2 queue to allow.
+
+    Fail-closed at every stage: an unbuildable gate/signer, no signer, or an off-allowlist command all yield a
+    clean JSON refusal (``ran=false``), never a raise. Prints the ``ExecResult`` as JSON and returns 0 iff the
+    command ran, else 2."""
+    import time as _time
+
+    from .live.executor import execute_terminal
+
+    command = " ".join(args.command).strip()
+
+    def _refuse(reason: str) -> int:
+        print(json.dumps({"tool": "terminal.run", "ran": False, "outcome": "deny", "tier": "A2",
+                          "reason": reason, "exit_code": None, "stdout": "", "stderr": "",
+                          "record_id": None}, indent=2))
+        return 2
+
+    try:
+        from .live.wiring import build_terminal_runtime
+        rt = build_terminal_runtime(slug=str(getattr(args, "slug", "") or "loopback"), base_dir=args.base_dir)
+    except Exception as e:  # noqa: BLE001 — an unbuildable gate/signer is a clean refusal, never a raise
+        return _refuse(f"could not build the terminal gate/signer ({type(e).__name__}) — refused (fail-closed)")
+
+    if rt.signer is None:
+        return _refuse("no signer wired — refusing to run an unrecordable command (fail-closed)")
+
+    # --approve is the operator's standing approval: execute under the approval gate (WARDEN human leg
+    # satisfied → the A2 queue is upgraded to allow). Without it, the base gate QUEUES terminal.run and
+    # execute_terminal denies at authorization — the command is prepared + gated but never run.
+    active_gate = rt.approval_gate if (args.approve and rt.approval_gate is not None) else rt.gate
+
+    seq = _terminal_next_seq(rt.history_path)
+    res = execute_terminal(
+        command, "informational", gate=active_gate, view=rt.view, destructive_view=rt.destructive_view,
+        signer=rt.signer, seq=seq, now=int(_time.time()),
+    )
+
+    record_id = None
+    if res.ran and res.record is not None:
+        record_id = res.record.record_id
+        _append_terminal_history(rt.history_path, res.record)   # redacted + signed record — read-only history
+
+    print(json.dumps({
+        "tool": res.tool, "ran": bool(res.ran), "outcome": res.outcome, "tier": res.tier,
+        "reason": res.reason, "exit_code": res.exit_code, "stdout": res.stdout, "stderr": res.stderr,
+        "record_id": record_id,
+    }, indent=2))
+    return 0 if res.ran else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -881,6 +963,23 @@ def build_parser() -> argparse.ArgumentParser:
     pld.add_argument("--watch", action="store_true", help="keep draining as new grants arrive; Ctrl-C to stop")
     pld.add_argument("--interval", type=float, default=2.0, help="(watch) seconds between drains")
     pld.set_defaults(func=_cmd_learn_drain)
+
+    pt = sub.add_parser(
+        "terminal",
+        help="run a governed LOCAL read/inspect command through the gate (terminal.run classifies A2 → QUEUES "
+             "for approval, never auto; --approve to run). Local, non-network, read-only allowlist only.")
+    pt.add_argument("command", nargs="+",
+                    help="the local read/inspect command (allowlisted binaries only: ls/cat/head/tail/grep/find/"
+                         "stat/wc/… — no network, no writers, no interpreters). QUOTE a command that contains "
+                         "dashes/flags so they aren't parsed as options, e.g. `vigil terminal \"find . -name x\" "
+                         "--approve` (or put the options first: `vigil terminal --approve -- find . -name x`)")
+    pt.add_argument("--approve", action="store_true",
+                    help="operator approval — upgrade the A2 queue to allow (the SAME wiring approval path the "
+                         "engine uses). Without it the command QUEUES and does not run.")
+    pt.add_argument("--base-dir", default=".vigil-live",
+                    help="engine home (holds the signed-authority gate + the sealed spine signer)")
+    pt.add_argument("--slug", default="loopback", help="loopback engagement slug for the gate authority")
+    pt.set_defaults(func=_cmd_terminal)
 
     return p
 
