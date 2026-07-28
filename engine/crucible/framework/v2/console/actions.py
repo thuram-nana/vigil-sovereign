@@ -817,10 +817,26 @@ def apply_fix(run_id: str, finding_ref: str) -> dict:
     vigil = _vigil_bin()
     if not vigil:
         return {"ok": False, "error": "the `vigil` entrypoint is not resolvable (set VIGIL_BIN / activate the venv)"}
+    # PROVENANCE PRE-CHECK (honesty): `vigil patch --from-spine` grounds the finding in the engagement's OWN
+    # signed offense spine at <base>/<slug>.spine — written ONLY by the integration `vigil engage` flow, NOT by
+    # a console Strix codebase run. So rather than shell the verb only to surface its cryptic fail-closed error,
+    # we check the spine exists first and, if not, return an HONEST, actionable refusal naming exactly what is
+    # needed. `--base-dir` is passed EXPLICITLY so this check and the verb agree on the same base.
+    base_dir = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    spine = Path(base_dir) / f"{slug}.spine"
+    if not spine.is_file():
+        return {"ok": False, "runnable": False,
+                "error": (f"no signed offense spine for {slug!r} at {spine} — the gated auto-patch grounds the "
+                          "finding in the engagement's OWN signed spine (never raw JSON), and a console Strix "
+                          "codebase run does not emit one yet. To enable a gated fix, run this engagement through "
+                          f"`vigil engage --slug {slug} --base-dir {base_dir}` (which writes the signed spine), "
+                          "then apply the fix here."),
+                "command": (f"vigil patch --from-spine {slug} --finding-ref {finding_ref} "
+                            f"--target-repo <repo> --base-dir {base_dir} --apply-edits")}
     # NON-DESTRUCTIVE + NEVER --open-pr from the console. The spawn is an argv LIST (no shell); slug + ref are
     # validated tokens; the repo path lives only in argv (no shell), never interpolated.
     cmd = [vigil, "patch", "--from-spine", slug, "--finding-ref", finding_ref,
-           "--target-repo", repo, "--apply-edits"]
+           "--target-repo", repo, "--base-dir", base_dir, "--apply-edits"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as e:
@@ -829,12 +845,13 @@ def apply_fix(run_id: str, finding_ref: str) -> dict:
     return {"ok": proc.returncode == 0, "runnable": True, "rc": proc.returncode,
             "finding_ref": finding_ref, "slug": slug,
             "command": ("vigil patch --from-spine " + slug + " --finding-ref " + finding_ref
-                        + " --target-repo <repo> --apply-edits"),
+                        + " --target-repo <repo> --base-dir " + base_dir + " --apply-edits"),
             "output": out or "(no output)",
-            "note": ("Non-destructive: the fix was proposed + applied into a DISPOSABLE clone and sandbox-built; "
-                     "your source was not touched and no PR was opened. `remediated=True` is EARNED only when "
-                     "the driving oracle re-fires SILENT on the rebuilt patch (needs the live re-drive "
-                     "capability); opening a real PR is a separate m-of-n-gated CLI act (`vigil patch --open-pr`).")}
+            "note": ("Non-destructive: `vigil patch` proposes a fix and, IF it can, applies it into a DISPOSABLE "
+                     "clone + sandbox-build — your source is never touched and no PR is opened. The real per-run "
+                     "status/applied_paths/remediated are in the output above. `remediated=True` is EARNED only "
+                     "when the driving oracle re-fires SILENT on the rebuilt patch (the live re-drive capability); "
+                     "opening a real PR is a separate m-of-n-gated CLI act (`vigil patch --open-pr`).")}
 
 
 def provision_loopback_authority(slug: str) -> dict:

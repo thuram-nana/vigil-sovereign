@@ -2870,7 +2870,7 @@
             h("button.btn.sm#" + btnId, { onClick: function () { applyFix(runId, f.ref, btnId, outId); } },
               [V.icon("bolt"), "Apply fix (gated)"]),
             h("span.hint", { style: { marginLeft: "8px" } },
-              "Non-destructive — clones, applies into a disposable tree, sandbox-builds. Never opens a PR."),
+              "Runs the gated `vigil patch` ladder when this run has a signed offense spine; otherwise it shows exactly what's needed. Non-destructive — never opens a PR."),
             h("div#" + outId, { style: { marginTop: "8px" } }),
           ])
         : h("div.hint", { style: { marginTop: "10px" } },

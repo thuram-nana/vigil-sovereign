@@ -47,14 +47,34 @@ def test_apply_fix_bad_slug_refuses(tmp_path, monkeypatch):
     assert r["ok"] is False and "engagement slug" in r["error"]
 
 
+def test_apply_fix_no_spine_is_honest_refusal(tmp_path, monkeypatch):
+    # a codebase run with a resolvable vigil bin but NO signed offense spine → an HONEST, actionable refusal
+    # (names the spine path + the `vigil engage` remedy), never a cryptic raw verb error and never a spawn.
+    _mk_run(tmp_path, monkeypatch, {"mode": "codebase", "slug": "acme", "target": "/home/me/proj"})
+    monkeypatch.setattr(actions, "_vigil_bin", lambda: "/bin/vigil")
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path / "no-such-base"))
+    called = {"ran": False}
+    monkeypatch.setattr(actions.subprocess, "run", lambda *a, **k: called.__setitem__("ran", True))
+    r = actions.apply_fix("run1", "chk-1")
+    assert r["ok"] is False and r["runnable"] is False
+    assert "no signed offense spine" in r["error"] and "vigil engage --slug acme" in r["error"]
+    assert called["ran"] is False                        # no spawn when provenance is absent
+
+
 def test_apply_fix_shells_gated_vigil_patch_never_open_pr(tmp_path, monkeypatch):
     _mk_run(tmp_path, monkeypatch, {"mode": "codebase", "slug": "acme", "target": "/home/me/proj"})
     monkeypatch.setattr(actions, "_vigil_bin", lambda: "/bin/vigil")
+    # provision the signed offense spine the gated patch grounds on (the pre-check requires it).
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "acme.spine").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(base))
     captured = {}
 
     class _P:
         returncode = 0
-        stdout = "status         : applied_in_clone\nremediated     : False\n"
+        # the realistic applied-edits, no-PR outcome vocabulary (status: pr-denied, remediated: False).
+        stdout = "--- result ---\nstatus         : pr-denied\napplied_paths  : ['app.py']\nremediated     : False\n"
         stderr = ""
 
     def fake_run(argv, **kw):
@@ -69,8 +89,9 @@ def test_apply_fix_shells_gated_vigil_patch_never_open_pr(tmp_path, monkeypatch)
     assert argv[argv.index("--from-spine") + 1] == "acme"
     assert argv[argv.index("--finding-ref") + 1] == "chk-1"
     assert argv[argv.index("--target-repo") + 1] == "/home/me/proj"
+    assert argv[argv.index("--base-dir") + 1] == str(base)   # base-dir passed explicitly (check + verb agree)
     assert "--apply-edits" in argv
     assert "--open-pr" not in argv                       # the console NEVER opens a PR
-    assert r["ok"] is True and r["runnable"] is True and "applied_in_clone" in r["output"]
+    assert r["ok"] is True and r["runnable"] is True and "pr-denied" in r["output"]
     # honest: the console does not assert remediated — the note says it is oracle-earned on re-drive.
     assert "EARNED only when" in r["note"] and "--open-pr" in r["note"]
