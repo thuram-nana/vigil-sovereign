@@ -173,7 +173,8 @@ jobs:
               apps/sigil/tests/test_capability_ui.py \
               apps/sigil/tests/test_ui.py \
               apps/sigil/tests/test_ui_remote.py \
-              apps/sigil/tests/test_ui_settings.py -q
+              apps/sigil/tests/test_ui_settings.py \
+              apps/sigil/tests/test_system_map_sync.py -q
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi
