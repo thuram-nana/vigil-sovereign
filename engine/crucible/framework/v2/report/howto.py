@@ -14,12 +14,14 @@ class-remediation table (``generate._remediation_for``).
 Honesty is load-bearing and split by grade:
 
   * A **FACT** re-fired its deterministic oracle at report time, so its block names the
-    oracle that fired + its rationale and points at the REAL re-executable proof: the
-    existing ``python3 -m framework.v2 verify`` interface (there is no per-certificate
-    scoping flag, so the finding's certificate digest is referenced in prose to locate its
-    row in the verifier output). If the finding's retained evidence carries a
-    reproduce-from-raw capture (:mod:`evidence.poc`), the block also points at the replay
-    harness that re-drives it.
+    oracle that fired + its rationale and points at the REAL re-executable proof: run
+    ``python3 -m framework.v2 verify`` over the RAW retained ``reverifiable.json`` (its
+    confidence is the raw oracle value, so it re-fires and reports ``OK``). It honestly warns
+    that running ``verify`` over a rendered/calibrated report instead may show a calibration
+    delta (a ``CLAIM-MISMATCH``) that is EXPECTED, not tampering, and that the verifier lists
+    rows by index + the re-fired oracle (never the slug/certificate digest — the digest is a
+    cross-reference only). If the finding's retained evidence carries a reproduce-from-raw
+    capture (:mod:`evidence.poc`), the block also points at the replay harness.
   * A **LEAD** (LLM-advisory, or a recorded oracle proof that no longer re-verifies) has NO
     re-executable proof. Its block says "how to CONFIRM this lead" and never implies the
     finding is proven — ``verify`` re-checks proven certificates, and a lead carries none.
@@ -36,10 +38,13 @@ from .generate import _remediation_for
 from .grounding import GRADE_DEMOTED, GradedFinding
 
 # The ONE real re-verification entry point (see verify/reverify.py). It takes a positional
-# path to the engagement's retained findings/certificate JSON and re-runs each finding's
-# pure oracle over its retained evidence. There is NO per-certificate scoping flag, so the
-# certificate digest is referenced in prose, never invented as a CLI argument.
-VERIFY_COMMAND = "python3 -m framework.v2 verify <findings.json>"
+# path to the retained re-verifiable material and re-fires each finding's pure oracle over
+# its retained evidence, reporting `OK` when it reproduces. It reports `OK` over the RAW
+# reverifiable.json (raw oracle confidence); over a rendered/calibrated report a legitimate
+# calibration delta reads as a CLAIM-MISMATCH (expected, not tampering). There is NO
+# per-certificate scoping flag and it prints rows by index + the re-fired oracle (never the
+# slug/digest) — so neither is invented as a locator the verifier emits.
+VERIFY_COMMAND = "python3 -m framework.v2 verify <reverifiable.json>"
 
 # HTTP methods a surface token may lead with. Used only to split a "GET /path" surface into
 # method + location; a surface that does not lead with one is treated as a bare location.
@@ -120,6 +125,14 @@ def _surface_phrase(method: str | None, location: str | None) -> str:
     return location or method or ""
 
 
+def _safe_span(s: str | None) -> str:
+    """Sanitise a finding-authored token for weaving inside a Markdown code span: strip
+    backticks + control chars so an odd/hostile surface (findings are LLM-authored) can't
+    close the span and inject markup. Display-only — these values are never used as a shell
+    arg or a path, so this is Markdown integrity, not a security control."""
+    return re.sub(r"[`\r\n\t]+", "", str(s or "")).strip()
+
+
 def finding_specific_remediation(finding) -> str:  # noqa: ANN001 - FindingPayload or mapping-like
     """The class-level remediation rule (``generate._remediation_for``) woven with the
     finding's OWN parameter/surface so it reads as finding-specific. Falls back to the
@@ -131,8 +144,8 @@ def finding_specific_remediation(finding) -> str:  # noqa: ANN001 - FindingPaylo
         return base
     where = _surface_phrase(method, location)
     if where:
-        return f"For `{param}` on `{where}`: {base}"
-    return f"For `{param}`: {base}"
+        return f"For `{_safe_span(param)}` on `{_safe_span(where)}`: {base}"
+    return f"For `{_safe_span(param)}`: {base}"
 
 
 def _oracle_context_has_poc(finding) -> bool:  # noqa: ANN001
@@ -186,19 +199,22 @@ def build_howto(g: GradedFinding) -> HowTo:
     certificate = f"sha256:{g.certificate_digest}" if (g.is_fact and g.certificate_digest) else None
 
     if g.is_fact:
-        if certificate:
-            verify_note = (
-                f"Run `{VERIFY_COMMAND}` over the engagement's retained findings/certificate "
-                f"JSON. There is no per-certificate flag, so locate this finding's row by its "
-                f"reference `{f.finding_slug}` / certificate `{certificate}`: it must report "
-                f"`OK` and re-confirm with oracle `{g.oracle_kind or 'the same oracle'}`."
-            )
-        else:
-            verify_note = (
-                f"Run `{VERIFY_COMMAND}` over the engagement's retained findings JSON; this "
-                f"finding's row (`{f.finding_slug}`) must reproduce and re-confirm with oracle "
-                f"`{g.oracle_kind or 'the same oracle'}`."
-            )
+        oracle_name = g.oracle_kind or "its oracle"
+        cert_ref = f" This finding's certificate is `{certificate}` for cross-reference." if certificate else ""
+        # HONEST re-verify guidance: `verify` reports `OK` over the RAW retained re-verifiable
+        # material (reverifiable.json — its confidence is the raw oracle value). Run over a
+        # RENDERED/calibrated report instead and a legitimate calibration delta reads as a
+        # CLAIM-MISMATCH — expected, not tampering. The verifier lists rows by index + the oracle
+        # that re-fired (never the slug or the certificate digest), so we don't claim it prints those.
+        verify_note = (
+            f"Re-run this finding's proof yourself, offline: `{VERIFY_COMMAND}` over the retained "
+            f"re-verifiable material — the `reverifiable.json` written by `scan --reverifiable-out` "
+            f"(or the dossier's `proof-bundle/reverifiable.json`). Each retained oracle_context "
+            f"re-fires its oracle over the captured bytes and reports `OK` when it reproduces; here "
+            f"that oracle is `{oracle_name}`. (Running `verify` over a RENDERED report instead may "
+            f"show a confidence delta from calibration — that is expected, NOT tampering; and the "
+            f"verifier lists rows by index + the re-fired oracle, not by slug or digest.)" + cert_ref
+        )
         poc_replay = None
         if _oracle_context_has_poc(f):
             poc_replay = (
@@ -254,9 +270,9 @@ def has_howto(g: GradedFinding) -> bool:
 
 
 def _surface_line(h: HowTo) -> str:
-    where = _surface_phrase(h.method, h.location) or h.surface or "(unspecified)"
+    where = _safe_span(_surface_phrase(h.method, h.location) or h.surface or "(unspecified)")
     if h.parameter:
-        return f"**Surface:** `{where}` — parameter `{h.parameter}`  "
+        return f"**Surface:** `{where}` — parameter `{_safe_span(h.parameter)}`  "
     return f"**Surface:** `{where}`  "
 
 

@@ -74,6 +74,26 @@ def test_fact_block_names_oracle_surface_and_real_verify_command() -> None:
     assert "--cert" not in md and "--certificate" not in md and "--digest" not in md
 
 
+def test_fact_verify_note_is_honest_about_artifact_and_calibration() -> None:
+    # red-pen BLOCK fix: `verify` reports OK over the RAW reverifiable.json, NOT over a rendered
+    # report (where a calibration delta reads as CLAIM-MISMATCH). The note must say so and must not
+    # falsely claim the verifier locates a row by slug or prints the certificate digest.
+    g = grade_finding(make_fact())
+    md = "\n".join(howto_markdown(g))
+    assert "reverifiable.json" in md                       # the artifact that actually re-verifies
+    assert "calibration" in md and "tampering" in md.lower()
+    assert "locate this finding's row by its" not in md    # the dropped false locator
+    assert "<reverifiable.json>" in VERIFY_COMMAND
+
+
+def test_safe_span_strips_backticks_and_controls() -> None:
+    # LOW-1 fix: a backtick/newline in an LLM-authored surface must not break the Markdown code span.
+    from framework.v2.report.howto import _safe_span
+    assert _safe_span("q`echo pwned`") == "qecho pwned"
+    assert _safe_span("a\nb\tc") == "abc"
+    assert _safe_span(None) == ""
+
+
 def test_fact_export_carries_oracle_and_certificate() -> None:
     h = howto_export(grade_finding(make_fact()))
     assert h["grounding"] == "fact" and h["is_fact"] is True
