@@ -3187,6 +3187,27 @@
     loadSessions();
   }
 
+  // ---- SIGIL HUD channel (S2) — persistent voice/gesture navigation ----------
+  var _hudES = null;
+  function startSigilHud() {
+    if (_hudES) return;
+    // the authoritative allowlist of in-app screens (S1 CI keeps system-map == NAV, so this IS the map).
+    // Object.create(null) → no inherited prototype keys, so `navIds[id]` is a strict membership test (a
+    // payload of "constructor"/"__proto__"/… can never read truthy off the prototype chain).
+    var navIds = Object.create(null);
+    NAV.forEach(function (g) { g.items.forEach(function (it) { navIds[it.id] = true; }); });
+    try {
+      // persistent (NOT stored in liveES) so teardownLive() on route changes never closes it. It fans out
+      // sigil.nav SIGNALS from the owner-signed spine → a hash navigation, but ONLY to a KNOWN in-app NAV
+      // screen id (a spoofed/garbled payload navigates to nothing — never an arbitrary URL or the prototype).
+      _hudES = V.sse(SOV("/api/sigil/hud"), function (ev) {
+        if (ev && ev.t === "nav" && ev.screen_id && navIds[ev.screen_id] === true) {
+          if (current() !== ev.screen_id) location.hash = "#/" + ev.screen_id;
+        }
+      });
+    } catch (e) { _hudES = null; }
+  }
+
   // ---- boot ------------------------------------------------------------------
   function route() {
     const id = current();
@@ -3225,6 +3246,7 @@
     if (!location.hash) location.hash = "#/home";
     route();
     refreshKeysBadge();           // surface any failing API key in the top bar from first paint
+    startSigilHud();              // S2: persistent SIGIL voice/gesture nav channel (survives route changes)
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();

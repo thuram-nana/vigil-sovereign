@@ -166,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._record(path.rsplit("/", 1)[-1])
         if path == "/api/stream":
             return self._sse()
+        if path == "/api/sigil/hud":
+            return self._hud()
         if path == "/api/graph":
             return self._graph()
         if path == "/api/graph/entity":
@@ -250,6 +252,48 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return                                               # client closed — end the stream
+
+    def _hud(self):
+        """S2/S4 — the SIGIL on-screen HUD channel (SSE, token-gated in do_GET). Tails the owner-signed
+        spine for ``sigil.nav`` SIGNALS and emits ``{"t":"nav","screen_id":…}`` so the browser switches to
+        the commanded screen (voice/gesture). It DISPATCHES nothing (read-only signal fan-out; the token
+        gate suffices — no action gate needed). A nav payload is fully plaintext (no CONTENT_FIELDS), so no
+        vault is touched. S4 will add ``state``/``feedback`` events from the ephemeral status file."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Security-Policy", _CSP)
+        self.end_headers()
+        try:
+            since = int(self._query().get("since", ["-1"])[0])
+        except (ValueError, TypeError):
+            since = -1
+        store = self.server.store()
+        cursor = since
+        if since < 0:
+            # default to the CURRENT tip: the HUD drives live navigation, so it must NOT replay historical
+            # sigil.nav records on connect (that would bounce a freshly-loaded page to the last-voiced
+            # screen). One scan at connect to find the tip; then only navs appended AFTER connect stream.
+            for r in store.iter_records(since_seq=-1):
+                cursor = r.seq
+        try:
+            while True:
+                sent = False
+                for r in store.iter_records(since_seq=cursor):
+                    cursor = r.seq
+                    pay = getattr(store.decrypted_or_raw(r), "payload", None) or {}
+                    if isinstance(pay, dict) and pay.get("signal") == "sigil.nav":
+                        sid = str(pay.get("screen_id") or "")
+                        if sid:
+                            ev = {"t": "nav", "screen_id": sid, "seq": r.seq}
+                            self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+                            sent = True
+                self.wfile.write(b": hb\n\n")
+                self.wfile.flush()
+                if not sent:
+                    time.sleep(0.25)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     # --- POST (action plane) ----------------------------------------------------------------------
     def do_POST(self):
