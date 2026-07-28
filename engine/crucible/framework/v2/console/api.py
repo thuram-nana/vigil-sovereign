@@ -685,3 +685,74 @@ def intel_data(slug: str) -> dict[str, Any]:
 
     return _safe(_read, default={"slug": slug, "entities": [], "source_yield": [],
                                  "predictions": [], "note": "no intel store yet"})
+
+
+_VULN_DOCTRINE = (
+    "Every feed entry is an intel-tier LEAD, never a fact. Only a fired oracle mints a FACT. "
+    "The live pull is a gated, opt-in egress act; offline is the default."
+)
+
+
+def _vuln_sources() -> list[dict]:
+    from ..intel.vulnfeed import TRUSTED_VULN_SOURCES
+    return [{"name": s.name, "host": s.host, "mode": s.mode} for s in TRUSTED_VULN_SOURCES]
+
+
+def _vuln_catalog() -> list[dict]:
+    """The defensive knowledge CATALOG as a read-only skillset surface (advisory operators, never facts)."""
+    from ..knowledge import catalog
+    return [{"id": op.id, "name": op.name, "tactic": op.tactic,
+             "technique_ref": list(op.technique_ref)} for op in catalog.CATALOG]
+
+
+def vulnintel_data(slug: str) -> dict[str, Any]:
+    """The vulnerability-intelligence feed picture for an engagement: VULNERABILITY leads (with
+    exploit-known / severity), what they AFFECT, the knowledge CATALOG (read-only), the trusted sources,
+    and the doctrine. Read-only over the durable intel store; safe on a fresh tree (no rows yet).
+
+    Doctrine surfaced explicitly: every entry is an intel-tier LEAD, never a fact — only a fired oracle
+    confirms. Nothing here is auto-scanned or promoted."""
+    if not slug:
+        return {"slug": None, "note": "select an engagement", "vulnerabilities": [], "affects": [],
+                "catalog": _safe(_vuln_catalog, default=[]), "sources": _vuln_sources(),
+                "doctrine": _VULN_DOCTRINE}
+
+    def _read() -> dict[str, Any]:
+        from ..intel.models import IntelSourceKind
+        from ..intel.store import IntelStore
+        from ..memory.store import Store
+        from ..worldmodel.models import NodeKind
+
+        istore = IntelStore(Store())
+        obs = _safe(lambda: istore.observations(engagement_slug=slug), default=[]) or []
+        vuln_obs = [o for o in obs if o.source_kind is IntelSourceKind.VULN_DB]
+
+        vulns: dict[str, dict] = {}
+        affects: list[dict] = []
+        for o in vuln_obs:
+            a = o.attrs or {}
+            if o.relation is None and o.subject.kind is NodeKind.VULNERABILITY:
+                vulns[o.subject.node_id] = {
+                    "id": o.subject.key, "node_id": o.subject.node_id, "source": o.source,
+                    "exploit_known": bool(a.get("exploit_known")),
+                    "severity": a.get("severity"), "cvss": a.get("cvss"),
+                    "summary": a.get("summary"), "feed": a.get("feed"),
+                    "vendor": a.get("vendor"), "product": a.get("product"),
+                }
+            elif o.relation is not None and o.subject.kind is NodeKind.VULNERABILITY and o.object is not None:
+                affects.append({"vuln": o.subject.key, "affects": o.object.key,
+                                "kind": o.object.kind.value, "ecosystem": a.get("ecosystem"),
+                                "exploit_known": bool(a.get("exploit_known"))})
+
+        vuln_list = sorted(vulns.values(), key=lambda v: (not v["exploit_known"], v["id"]))
+        return {"slug": slug, "vulnerabilities": vuln_list, "affects": affects[:200],
+                "catalog": _safe(_vuln_catalog, default=[]), "sources": _vuln_sources(),
+                "counts": {"vulnerabilities": len(vuln_list),
+                           "exploit_known": sum(1 for v in vuln_list if v["exploit_known"]),
+                           "affects": len(affects)},
+                "doctrine": _VULN_DOCTRINE}
+
+    return _safe(_read, default={"slug": slug, "vulnerabilities": [], "affects": [],
+                                 "catalog": _safe(_vuln_catalog, default=[]),
+                                 "sources": _vuln_sources(), "note": "no intel store yet",
+                                 "doctrine": _VULN_DOCTRINE})

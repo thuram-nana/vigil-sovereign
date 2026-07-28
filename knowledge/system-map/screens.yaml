@@ -128,3 +128,11 @@ screens:
     plane: unified
     description: The in-app manual — how the system works and how to use each feature.
     synonyms: [manual, help, docs, documentation, guide, how do i]
+
+  - id: knowledge
+    label: Knowledge Engine
+    group: LEARN
+    owner: false
+    plane: unified
+    description: The knowledge engine — an auto-updating vulnerability-intelligence feed (leads, never facts) and the defensive knowledge catalog.
+    synonyms: [knowledge, knowledge engine, vulnerabilities, vuln feed, cve, vulnerability intelligence]
