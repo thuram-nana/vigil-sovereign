@@ -90,10 +90,11 @@ def _reject_escape(rel: str) -> bool:
     return not (p.is_absolute() or any(part == ".." for part in p.parts))
 
 
-def _materialize(evidence_root: Path, exchanges: Sequence[Any], resolve: ResolveFn) -> None:
-    """Write the resolved raw bytes of each exchange under ``evidence_root`` at its (confined) relative
-    ref, so the EXISTING manifest can hash them into the certificate. Only refs that resolve are written;
-    an unresolvable/escaping ref is skipped (the manifest simply will not carry it)."""
+def _materialize(base: Path, exchanges: Sequence[Any], resolve: ResolveFn) -> None:
+    """Write the resolved raw bytes of each exchange under ``base`` at its (confined) relative ref. ``base``
+    MUST be the manifest root ``evidence_root/action_id`` — ``build_certificate`` hashes exactly that
+    directory into the certificate's artifacts, so writing elsewhere would leave the raw-byte binding empty.
+    Only refs that resolve are written; an unresolvable/escaping ref is skipped."""
     for ex in exchanges or []:
         for ref in (getattr(ex, "request_bytes_ref", "") or "", getattr(ex, "response_bytes_ref", "") or ""):
             if not ref or not _reject_escape(ref):
@@ -101,7 +102,7 @@ def _materialize(evidence_root: Path, exchanges: Sequence[Any], resolve: Resolve
             data = resolve(ref)
             if data is None:
                 continue
-            dest = evidence_root / ref
+            dest = base / ref
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8"))
 
@@ -208,10 +209,13 @@ def mint_proof(
     from framework.v2.evidence.certify import build_certificate, sign_certificate
     from framework.v2.verify.reverify import reverify_context
 
+    from framework.v2.verify.poc_translate import context_from_exchanges
+
     signed = res.signed
+    replay_ctx = oracle_context      # default: re-fire over the in-memory reproduced context
     if evidence_root is not None and action_id:
-        root = Path(evidence_root)
-        _materialize(root, exchanges, resolve)
+        manifest_root = Path(evidence_root) / action_id
+        _materialize(manifest_root, exchanges, resolve)   # write UNDER the dir build_certificate manifests
         enriched = {
             **finding_for_oracle,
             "bug_class": res.bug_class,
@@ -220,19 +224,28 @@ def mint_proof(
         }
         cert = build_certificate(
             enriched, engagement_slug=engagement_slug, seq=seq,
-            evidence_root=root, action_id=action_id,
+            evidence_root=Path(evidence_root), action_id=action_id,
         )
         signed = sign_certificate(cert, signers)
+        # prove replay from the RETAINED ON-DISK bytes (a genuine offline re-proof — it also catches a
+        # materialization/tamper defect): re-resolve each ref from the manifest dir, re-translate, re-verify.
+        def _disk_resolve(r: str) -> "bytes | None":
+            try:
+                return (manifest_root / r).read_bytes()
+            except OSError:
+                return None
+        disk_ctx = context_from_exchanges(exchanges, bug_class=bug_class, resolve=_disk_resolve,
+                                          discriminator=discriminator)
+        replay_ctx = disk_ctx.model_dump(mode="json") if disk_ctx is not None else None
 
-    # prove replay from the retained evidence (fail-closed: a context that will not re-confirm demotes).
-    rr = reverify_context(
-        oracle_context, bug_class=res.bug_class,
-        claimed_confirmed_by=res.confirmed_by, claimed_confidence=res.confidence, ref=res.finding_ref,
-    )
-    if not rr.reproduced:
+    # Fail-closed: a proof that will not re-confirm demotes to a LEAD. reverify compares the bug_class WITHOUT
+    # normalising, so re-fire with the ORIGINAL class the context was built with (NOT the normalized
+    # res.bug_class — that spuriously demotes every alias class).
+    rr = reverify_context(replay_ctx, bug_class=bug_class, ref=res.finding_ref) if replay_ctx is not None else None
+    if rr is None or not rr.reproduced:
         return MintResult(
             status="lead", finding_ref=res.finding_ref or ref, bug_class=res.bug_class,
-            reason="minted certificate did not re-confirm on replay — demoted fail-closed",
+            reason="minted certificate did not re-confirm on replay from the retained evidence — demoted",
             confirmed_by=res.confirmed_by, confidence=float(res.confidence),
         )
 

@@ -104,6 +104,64 @@ def test_a_fact_crosses_the_spine_and_a_lead_never_does(tmp_path):
     assert lead.status == "lead" and not lead.envelope_path           # a LEAD never spools
 
 
+# ---- red-pen BLOCK-1: the certificate actually binds the captured raw bytes ----
+
+def test_a_fact_binds_the_captured_bytes_and_a_tamper_breaks_verification(tmp_path):
+    from framework.v2.evidence.certify import verify_certificate
+    from framework.v2.verify.poc_translate import context_from_exchanges
+    from vigil_core import AuthorizerKey, TrustRoot
+
+    trust = TrustRoot(threshold=1, authorizers=[
+        AuthorizerKey(key_id="root0", name="root0", public_key_b64=SIGNER.public_key_b64)])
+    er = tmp_path / "ev"
+    res = mint_proof(
+        finding={"check_id": "sqli-bind", "bug_class": "sqli_attempt", "poc_script_code": "ok"},
+        exchanges=_sqli_exchange(), resolve=_resolve(b"' OR '1'='1"),
+        engagement_slug="acme", signers=SIGNERS, evidence_root=str(er), action_id="act-1")
+    assert res.is_fact
+    # the raw bytes were materialised UNDER the manifested dir (evidence_root/action_id/<ref>)
+    assert (er / "act-1" / "req").read_bytes() == b"' OR '1'='1"
+    # the certificate binds them: it verifies now…
+    octx = context_from_exchanges(_sqli_exchange(), bug_class="sqli_attempt",
+                                  resolve=_resolve(b"' OR '1'='1")).model_dump(mode="json")
+    # verify_certificate needs the evidence_root to RE-HASH the bound artifacts (fail-closed: "CLAIMED but
+    # NOT checked" is a refusal). It passes now because the manifest matches the on-disk bytes…
+    assert verify_certificate(res.signed, oracle_context=octx, trust_root=trust, evidence_root=str(er)).ok is True
+    # …and a one-byte tamper of the retained artifact breaks ARTIFACT INTEGRITY (the binding is real).
+    (er / "act-1" / "req").write_bytes(b"' OR '1'='2")
+    assert verify_certificate(res.signed, oracle_context=octx, trust_root=trust, evidence_root=str(er)).ok is False
+
+
+def test_replay_demotes_when_the_retained_bytes_do_not_reproduce(tmp_path):
+    # The from-disk replay is a REAL guard: a resolve that returns firing bytes for the initial confirm but
+    # benign bytes when materialising (so the RETAINED on-disk evidence no longer fires) → the signed FACT is
+    # demoted to a LEAD. Removing the demote branch would let this pass as a "fact" — so the guard is covered.
+    calls = {"n": 0}
+
+    def flaky(ref):
+        calls["n"] += 1
+        return b"' OR '1'='1" if calls["n"] == 1 else b"O'Brien"      # fires once, then benign on disk
+
+    res = mint_proof(
+        finding={"check_id": "flaky", "bug_class": "sqli_attempt", "poc_script_code": "ok"},
+        exchanges=_sqli_exchange(), resolve=flaky, engagement_slug="acme", signers=SIGNERS,
+        evidence_root=str(tmp_path / "ev"), action_id="act-2")
+    assert res.status == "lead" and "did not re-confirm on replay" in res.reason
+
+
+# ---- red-pen BLOCK-2: an alias bug_class is not spuriously demoted --------------
+
+def test_an_alias_bug_class_still_mints_a_fact():
+    # nosqli_attempt is an alias of nosql_injection_attempt; the post-confirm replay must re-fire with the
+    # ORIGINAL class (not the normalized one), so an alias FACT is NOT demoted to a LEAD.
+    res = mint_proof(
+        finding={"check_id": "nosql-1", "bug_class": "nosqli_attempt", "poc_script_code": "ok"},
+        exchanges=[_Ex(channel="request_payload", role="username", request_bytes_ref="req",
+                       bug_class="nosqli_attempt")],
+        resolve=_resolve(b'{"$ne": null}'), engagement_slug="acme", signers=SIGNERS)
+    assert res.is_fact and res.signed is not None
+
+
 # ---- minimization (B6) ---------------------------------------------------------
 
 def test_minimize_keeps_only_a_still_reproducing_subset():
