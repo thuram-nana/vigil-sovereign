@@ -110,7 +110,7 @@ The oracles, grouped:
   MySQL/Postgres/MSSQL/Oracle/SQLite/Mongo/LDAP/XPath) that is present in the payload response and
   **absent** from the benign control (so a page that always shows a trace is not mistaken for a bug).
 - `oob_callback_oracle` (`oracles.py:1439`, `OOB_CALLBACK`) — ≥1 inbound interaction against a
-  per-finding unique correlation token: near-unforgeable proof of blind execution (SSRF, blind XXE,
+  per-finding unique correlation token — a near-unforgeable proof of blind execution (SSRF, blind XXE,
   OOB SQLi, deserialization callback).
 
 **AEGIS defensive duals & posture/forgery oracles** — `system_prompt_disclosure_oracle`
