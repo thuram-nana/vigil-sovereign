@@ -26,6 +26,14 @@ _LEARN_TIER = "A2"
 _MAX_PENDING = 200
 
 
+def sanitize_slug(raw) -> str:
+    """A path-safe engagement-slug token (the offense side uses it as a ``--slug`` argv value + an IntelStore
+    key + a ``KillSwitch`` path component). Bounded + restricted to ``[A-Za-z0-9-_.]`` so no separator / ``..``
+    / flag / shell metachar can ride through — applied BOTH at enqueue AND at grant-mint (defense in depth:
+    the mint must not assume every queued record passed through ``enqueue_learn_proposal``)."""
+    return "".join(c for c in str(raw or "").strip()[:120] if c.isalnum() or c in "-_.")
+
+
 def pending_learn_proposals(store: SpineStore, trusted_pubkey_b64: Optional[str] = None) -> list[dict]:
     """The learn-proposals still awaiting the owner's signed decision, oldest first — each with its spine
     ``seq`` (the id the owner approves/denies) and the proposal fields. Read-only; delegates resolution to
@@ -62,10 +70,9 @@ def enqueue_learn_proposal(store: SpineStore, proposal: dict, *,
     if not vuln_id:
         raise ValueError("learn-proposal requires a vuln_id")
     # The engagement slug the lead lives under, so the offense side (K3 deep-learn, reached via the A2
-    # learn-grant bridge) can re-derive the full lead from its OWN intel by (slug, vuln_id). Bounded +
-    # sanitised to a path-safe token (it becomes a `--slug` argv value / IntelStore key); empty = default.
-    slug = "".join(c for c in str(proposal.get("slug") or "").strip()[:120]
-                   if c.isalnum() or c in "-_.")
+    # learn-grant bridge) can re-derive the full lead from its OWN intel by (slug, vuln_id). Sanitised to a
+    # path-safe token (it becomes a `--slug` argv value / IntelStore key); empty = default.
+    slug = sanitize_slug(proposal.get("slug"))
     pending_ids = _pending_vuln_ids(store, trusted_pubkey_b64)
     existing = pending_ids.get(vuln_id)
     if existing is not None:

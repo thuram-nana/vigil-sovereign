@@ -104,6 +104,24 @@ def test_export_ignores_a_forged_approval(owner, tmp_path):
     assert out["exported"] == 0 and _incoming(tmp_path) == []
 
 
+def test_export_sanitizes_a_raw_injected_hostile_slug(owner, tmp_path):
+    # Defense in depth: a raw spine-write can bypass the enqueue sanitizer. The mint must re-sanitise the
+    # slug it OWNER-SIGNS (it becomes an offense `--slug` argv / IntelStore key / KillSwitch path token).
+    s = _store()
+    hostile = "../../../../etc/cron.d/pwn ; rm -rf /"
+    seq = s.append(kind="event", source="knowledge", actor="attacker",
+                   payload={"signal": "knowledge.learn_proposal", "decision": "queued",
+                            "status": "awaiting-approval", "tier": "A2", "vuln_id": "CVE-2024-9999",
+                            "slug": hostile, "subject": "x"})
+    actions.do_action("approve", {"seq": seq, "reason": "accept"}, store=s)
+    export_approved_grants(s, spool_dir=tmp_path, owner_key=OWNER)
+    g = _incoming(tmp_path)[0]
+    assert g["slug"] != hostile                                 # NOT the raw injected value
+    assert all(c.isalnum() or c in "-_." for c in g["slug"])    # only path-safe chars survive
+    assert "/" not in g["slug"] and " " not in g["slug"] and ";" not in g["slug"]
+    assert verify_signed(g, GRANT_CORE_FIELDS, OWNER.public_key_b64) is True   # signed over the SAFE slug
+
+
 def test_export_is_idempotent(owner, tmp_path):
     s = _store()
     _queue_and_approve(s)

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..spine.store import SpineStore
-from .proposals import LEARN_SIGNAL
+from .proposals import LEARN_SIGNAL, sanitize_slug
 
 GRANT_KIND = "learn_grant"
 GRANT_SCHEMA = 1
@@ -68,8 +68,10 @@ def approved_learn_grants(store: SpineStore, trusted_pubkey: str) -> list[dict]:
         if not vuln_id:
             continue
         seen.add(target)
+        # Re-sanitise the slug at mint — a raw spine-write could bypass the enqueue chokepoint, and this
+        # value is owner-SIGNED into a grant the offense side uses as an argv/store/path token.
         grants.append({"schema": GRANT_SCHEMA, "kind": GRANT_KIND,
-                       "slug": str(q.payload.get("slug") or ""), "vuln_id": vuln_id,
+                       "slug": sanitize_slug(q.payload.get("slug")), "vuln_id": vuln_id,
                        "approval_seq": target})
     return grants
 
