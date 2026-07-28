@@ -74,3 +74,21 @@ class Agent(abc.ABC):
     def _advance_cursor(self) -> None:
         """Move the cursor to the latest event id seen."""
         self._cursor = self.bb.latest_event_id(engagement=self.engagement_id)
+
+    # ---- agent-to-agent coordination (S5) ----
+
+    def send_message(self, recipient: str, body: str, *, topic: str = "", refs=None) -> int:
+        """Send a DIRECTED coordination message to another agent. The blackboard forces the sender to this
+        agent's own name (anti-spoof). It is a COORDINATION HINT the recipient may consider on its next
+        tick — NEVER a fact/finding/observation, and it authorizes nothing (the recipient still routes any
+        action it prompts through its own gate + oracle). Returns the new event id."""
+        return self.bb.post(
+            engagement=self.engagement_id, kind="agent_message", agent_name=self.name,
+            payload={"sender": self.name, "recipient": str(recipient), "topic": str(topic)[:200],
+                     "body": str(body)[:2000], "refs": [int(x) for x in (refs or [])]})
+
+    def read_inbox(self, *, since_id: int | None = None) -> list:
+        """The directed messages ADDRESSED to this agent, in id order after ``since_id`` (default: this
+        agent's own cursor — a durable read-once). Consumed as advisory HINTS; never as evidence."""
+        return self.bb.inbox(engagement=self.engagement_id, recipient=self.name,
+                             since_id=self._cursor if since_id is None else since_id)

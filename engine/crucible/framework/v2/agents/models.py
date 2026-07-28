@@ -43,13 +43,16 @@ EventKind = Literal[
     # --- Agentic tool-use / sensor-driving spine kinds (additive; W1.4). ---
     "tool_call",      # the reasoning core invoked a gated tool/sensor (the request)
     "tool_result",    # that invocation's outcome (a PROVENANCE-labelled observation, not a fact)
+    # --- Agent-to-agent coordination (additive; S5). A DIRECTED, addressed message between agents. It is
+    #     COORDINATION ONLY, never promotable to a fact/finding — only a fired oracle mints a fact. ---
+    "agent_message",
 ]
 
 ALL_EVENT_KINDS: tuple[EventKind, ...] = (
     "observation", "hypothesis", "plan", "action",
     "result", "finding", "critique", "decision",
     "reward", "critic_verdict", "reflection", "refusal",
-    "tool_call", "tool_result",
+    "tool_call", "tool_result", "agent_message",
 )
 
 
@@ -291,6 +294,23 @@ class ToolResultPayload(BaseModel):
     note: str = Field(default="", description="Error/refusal reason or an operator-facing note.")
 
 
+class AgentMessagePayload(BaseModel):
+    """A DIRECTED message from one agent to another (S5 agent-to-agent coordination). It is a COORDINATION
+    signal ONLY — a hint the recipient MAY consider on its next tick — and is NEVER promotable to a fact, a
+    finding, or an observation: only a fired deterministic oracle over real evidence mints a fact, and no
+    fact-building path reads this kind. The blackboard enforces ``sender == the posting agent`` (anti-spoof),
+    so a message can never forge its origin; a message that SUGGESTS an action does not authorize it (the
+    recipient still routes any action through its own gate/oracle)."""
+
+    sender: str = Field(description="The posting agent's name — blackboard-enforced to equal the poster.")
+    recipient: str = Field(description="The addressed agent's name.")
+    topic: str = Field(default="", description="A short subject line.")
+    body: str = Field(default="", description="The coordination hint (advisory; never evidence/a fact).")
+    intent: Literal["coordination"] = Field(
+        default="coordination", description="Always 'coordination' — never a fact/finding/observation.")
+    refs: list[int] = Field(default_factory=list, description="Referenced blackboard event ids (context only).")
+
+
 # Map kind -> Pydantic class so the blackboard can validate generically.
 PAYLOAD_BY_KIND: dict[EventKind, type[BaseModel]] = {
     "observation": ObservationPayload,
@@ -307,6 +327,7 @@ PAYLOAD_BY_KIND: dict[EventKind, type[BaseModel]] = {
     "refusal":        RefusalPayload,
     "tool_call":      ToolCallPayload,
     "tool_result":    ToolResultPayload,
+    "agent_message":  AgentMessagePayload,
 }
 
 

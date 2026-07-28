@@ -113,6 +113,77 @@ class Blackboard:
     def _migrate(self) -> None:
         self._conn.executescript(_SCHEMA_SQL.read_text(encoding="utf-8"))
         self._conn.commit()
+        # A v1 store predates the S5 `agent_message` kind, whose CHECK is baked into the events table at
+        # CREATE time — `CREATE TABLE IF NOT EXISTS` cannot widen an existing CHECK. So rebuild the table for
+        # a v1 DB (append-only preserved: every row copied verbatim; the new kind is purely additive).
+        row = self._conn.execute(
+            "SELECT value FROM bb_schema_meta WHERE key = 'version'").fetchone()
+        if row is not None and int(row["value"]) < 2:
+            self._migrate_to_v2()
+
+    def _migrate_to_v2(self) -> None:
+        """Widen ``events.kind`` to include ``agent_message`` by rebuilding the table (SQLite cannot ALTER a
+        CHECK). Every existing row is copied verbatim (a DROP TABLE is not a DELETE, so the append-only
+        no-delete trigger does not fire); the indexes + append-only triggers are recreated.
+
+        CRASH-ATOMIC: the whole rebuild runs inside ONE explicit transaction (SQLite supports transactional
+        DDL), so a failure at any point ROLLS BACK to the intact v1 table — the durable audit spine is never
+        left half-migrated, dropped, or bricked. A leftover ``events_v2`` from an interrupted prior attempt
+        is dropped first (self-healing). FKs are disabled around the rebuild (a no-op inside a transaction,
+        so it is toggled OUTSIDE the txn) and re-enabled in ``finally``; ``foreign_key_check`` after guards
+        against an orphaned parent_id/supersedes_id."""
+        _STMTS = (
+            "DROP TABLE IF EXISTS events_v2",                 # self-heal an interrupted prior rebuild
+            """CREATE TABLE events_v2 (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    engagement_id   INTEGER NOT NULL REFERENCES bb_engagements(id),
+                    kind            TEXT NOT NULL CHECK(kind IN (
+                        'observation','hypothesis','plan','action',
+                        'result','finding','critique','decision',
+                        'reward','critic_verdict','reflection','refusal',
+                        'tool_call','tool_result','agent_message')),
+                    agent_name      TEXT NOT NULL,
+                    posted_at       TEXT NOT NULL,
+                    payload_json    TEXT NOT NULL,
+                    parent_id       INTEGER REFERENCES events_v2(id),
+                    supersedes_id   INTEGER REFERENCES events_v2(id))""",
+            """INSERT INTO events_v2 (id, engagement_id, kind, agent_name, posted_at, payload_json,
+                                      parent_id, supersedes_id)
+                   SELECT id, engagement_id, kind, agent_name, posted_at, payload_json,
+                          parent_id, supersedes_id FROM events""",
+            "DROP TABLE events",
+            "ALTER TABLE events_v2 RENAME TO events",
+            "CREATE INDEX IF NOT EXISTS idx_events_eng_kind   ON events(engagement_id, kind)",
+            "CREATE INDEX IF NOT EXISTS idx_events_eng_id     ON events(engagement_id, id)",
+            "CREATE INDEX IF NOT EXISTS idx_events_agent      ON events(agent_name)",
+            "CREATE INDEX IF NOT EXISTS idx_events_supersedes ON events(supersedes_id)",
+            "CREATE INDEX IF NOT EXISTS idx_events_parent     ON events(parent_id)",
+            "DROP TRIGGER IF EXISTS bb_events_no_update",
+            "CREATE TRIGGER bb_events_no_update BEFORE UPDATE ON events "
+            "BEGIN SELECT RAISE(FAIL, 'blackboard events are append-only; supersede with a new row'); END",
+            "DROP TRIGGER IF EXISTS bb_events_no_delete",
+            "CREATE TRIGGER bb_events_no_delete BEFORE DELETE ON events "
+            "BEGIN SELECT RAISE(FAIL, 'blackboard events are append-only; cannot DELETE'); END",
+            "UPDATE bb_schema_meta SET value = '2' WHERE key = 'version'",
+        )
+        prev_iso = self._conn.isolation_level
+        self._conn.isolation_level = None                    # manual, explicit transaction control
+        self._conn.execute("PRAGMA foreign_keys = OFF")      # (a no-op inside a txn) — toggle outside it
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            for stmt in _STMTS:
+                self._conn.execute(stmt)
+            self._conn.execute("COMMIT")                     # atomic: v1 → v2 all-or-nothing
+        except Exception:
+            self._conn.execute("ROLLBACK")                   # any failure → intact v1, no half-state
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.isolation_level = prev_iso
+        # guard against an orphaned parent_id/supersedes_id surviving the rebuild (fail loud, not silent)
+        bad = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise BlackboardError(f"blackboard v2 migration left {len(bad)} orphaned foreign-key row(s)")
 
     # ---- engagement registry ----
 
@@ -168,6 +239,13 @@ class Blackboard:
             raise BlackboardError(
                 f"payload for kind={kind!r} did not validate: {e}"
             ) from e
+
+        # S5 anti-spoof: a directed agent_message's `sender` MUST equal the posting agent, so a message can
+        # never forge its origin — the RECORDED poster (agent_name) is authoritative, not the payload claim.
+        if kind == "agent_message" and str(validated.get("sender", "")) != str(agent_name):
+            raise BlackboardError(
+                f"agent_message sender={validated.get('sender')!r} does not match the posting agent "
+                f"{agent_name!r} (anti-spoof)")
 
         # If supersedes_id is set, verify the target exists and matches kind/engagement.
         if supersedes_id is not None:
@@ -313,6 +391,16 @@ class Blackboard:
         never-edited history (the audit view). Read-only; the log stays append-only."""
         return self.read(engagement=engagement, since_id=since_id, kinds=kinds,
                          include_superseded=include_superseded, limit=limit)
+
+    def inbox(
+        self, *, engagement: str | int, recipient: str, since_id: int = 0, limit: int = 1000,
+    ) -> list[BlackboardEventRow]:
+        """The directed ``agent_message`` events ADDRESSED to ``recipient``, in strict id order after
+        ``since_id`` (a durable cursor — pass the last id you drained). Read-only over the append-only log.
+        A message is a COORDINATION hint the recipient MAY consider; it is NEVER a fact/finding/observation
+        and no fact-building path reads this kind, so draining an inbox can never promote anything."""
+        rows = self.read(engagement=engagement, since_id=since_id, kinds=["agent_message"], limit=limit)
+        return [r for r in rows if str((r.payload or {}).get("recipient", "")) == str(recipient)]
 
     def count(
         self, *, engagement: str | int, kind: EventKind | None = None,

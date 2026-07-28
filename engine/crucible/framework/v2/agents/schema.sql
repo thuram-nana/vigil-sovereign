@@ -1,5 +1,5 @@
 -- ============================================================================
--- CRUCIBLE v2 — Blackboard schema, version 1.
+-- CRUCIBLE v2 — Blackboard schema, version 2 (v2 widened events.kind to include 'agent_message', S5).
 --
 -- Single SQLite DB at framework/v2/.blackboard/store.sqlite.  All
 -- engagements share the DB; queries filter by engagement_id.  Events
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS bb_schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO bb_schema_meta(key, value) VALUES ('version', '1');
+INSERT OR IGNORE INTO bb_schema_meta(key, value) VALUES ('version', '2');
 
 -- ----------------------------------------------------------------------------
 -- Engagements lookup. Same slug as the MLS engagements table; the IDs
@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS events (
         -- Nervous-System spine kinds (additive; kept in lockstep with agents/models.py).
         'reward','critic_verdict','reflection','refusal',
         -- Agentic tool-use / sensor-driving spine kinds (additive; W1.4).
-        'tool_call','tool_result'
+        'tool_call','tool_result',
+        -- Agent-to-agent coordination (additive; S5). A directed, addressed message — coordination
+        -- ONLY, never promotable to a fact/finding.
+        'agent_message'
     )),
     agent_name      TEXT NOT NULL,
     posted_at       TEXT NOT NULL,
