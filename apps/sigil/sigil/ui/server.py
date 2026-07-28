@@ -276,9 +276,20 @@ class Handler(BaseHTTPRequestHandler):
             # screen). One scan at connect to find the tip; then only navs appended AFTER connect stream.
             for r in store.iter_records(since_seq=-1):
                 cursor = r.seq
+        from ..voice.hud_status import read_status
+        last_state = None
         try:
             while True:
                 sent = False
+                # S4: fan out the voice FSM state (idle/listening/thinking/speaking) from the EPHEMERAL 0600
+                # status file — deduped (emit only on change). It is read-only telemetry, never the spine.
+                st = read_status()
+                if isinstance(st, dict) and st != last_state:
+                    last_state = st
+                    ev = {"t": "state", "state": str(st.get("state", "idle")),
+                          "transcript": str(st.get("transcript", "")), "feedback": str(st.get("feedback", ""))}
+                    self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+                    sent = True
                 for r in store.iter_records(since_seq=cursor):
                     cursor = r.seq
                     pay = getattr(store.decrypted_or_raw(r), "payload", None) or {}

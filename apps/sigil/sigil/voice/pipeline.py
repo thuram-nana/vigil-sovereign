@@ -32,8 +32,13 @@ class State(Enum):
 class VoicePipeline:
     def __init__(self, vad: Vad, wake: WakeWord, asr: Asr, tts: Tts, sink: AudioSink, dispatch: Dispatch,
                  *, silence_frames: int = 25, min_speech_frames: int = 3, listen_timeout_frames: int = 150,
-                 max_utterance_frames: int = 1000, barge_in_frames: int = 4):
+                 max_utterance_frames: int = 1000, barge_in_frames: int = 4,
+                 on_state: Optional[Any] = None):
         self.vad, self.wake, self.asr, self.tts, self.sink, self.dispatch = vad, wake, asr, tts, sink, dispatch
+        # S4: an OPTIONAL observer called once per FSM transition with {state, transcript, feedback} so the
+        # on-screen HUD can reflect idle/listening/thinking/speaking. Default None ⇒ the FSM is byte-identical
+        # + deterministic (no side effect); an observer error is swallowed so it can never break the pipeline.
+        self._on_state = on_state
         self.silence_frames = silence_frames          # ~500 ms of trailing silence ends the utterance
         self.min_speech_frames = min_speech_frames     # require real speech before ending
         self.listen_timeout_frames = listen_timeout_frames  # give up if no speech after wake (~3 s)
@@ -113,6 +118,24 @@ class VoicePipeline:
             self._to_idle()
 
     # --- transitions -------------------------------------------------------------------------
+    def _emit_state(self) -> None:
+        """S4: notify the optional HUD observer of the current FSM state (+ the heard transcript / the
+        first line of the spoken feedback). Pure output — default-None makes it a no-op; an observer error
+        never propagates into the FSM."""
+        if self._on_state is None:
+            return
+        try:
+            feedback = ""
+            if self.state is State.SPEAKING and self.response:
+                feedback = self.response.splitlines()[0][:200] if self.response.strip() else ""
+            self._on_state({
+                "state": self.state.value,
+                "transcript": (str(self.transcript or "")[:200] if self.state is not State.IDLE else ""),
+                "feedback": feedback,
+            })
+        except Exception:  # noqa: BLE001 — the HUD is pure telemetry; a sink error never breaks the pipeline
+            pass
+
     def _to_listening(self, captured: List, speech: int = 0) -> None:
         if self.state is State.IDLE:
             self.events.append("wake→listening")
@@ -121,12 +144,14 @@ class VoicePipeline:
         self._silence = 0
         self._speech = speech
         self._listen = len(captured)
+        self._emit_state()
 
     def _to_thinking(self) -> None:
         self.events.append("listening→thinking")
         self.state = State.THINKING
         # synchronous v1: transcribe → dispatch to the KERNEL → speak the response.
         self.transcript = self.asr.transcribe(self._captured)
+        self._emit_state()                              # HUD: thinking, showing what was heard
         self.response = self.dispatch.send(self.transcript)
         self._to_speaking(self.response)
 
@@ -136,12 +161,14 @@ class VoicePipeline:
         self._tts_iter = iter(self.tts.synth(text))
         self._barge = 0
         self._barge_buf = []
+        self._emit_state()
 
     def _to_idle(self) -> None:
         self.state = State.IDLE
         self._captured = []
         self._tts_iter = None
         self.wake.reset()
+        self._emit_state()
 
     # --- driver: pump an audio source through the machine ------------------------------------
     def run(self, frames) -> None:
