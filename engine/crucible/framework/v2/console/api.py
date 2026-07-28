@@ -759,3 +759,55 @@ def vulnintel_data(slug: str) -> dict[str, Any]:
                                  "catalog": _safe(_vuln_catalog, default=[]),
                                  "sources": _vuln_sources(), "note": "no intel store yet",
                                  "doctrine": _VULN_DOCTRINE})
+
+
+_EVOLVE_DOCTRINE = (
+    "Bounded self-evolve: a deterministic horizon over DISCLOSED leads + coverage gaps → GATED DRAFT "
+    "proposals, never merged or applied. 'Studied everything in scope' = drafted everything for the "
+    "disclosed leads, not 'the system is complete'. Only a fired oracle mints a FACT."
+)
+
+
+def evolve_data(slug: str) -> dict[str, Any]:
+    """The self-evolve picture for an engagement: the horizon + coverage gaps, the DRAFT proposals, the
+    `studied_enough` completion signal, and calibration (if outcomes have been recorded). READ-ONLY: it
+    computes the plan over the disclosed leads + committed skills and persists NO evolve artifact (no
+    gap/proposal/ledger, no fact, no oracle) — a fixed epoch is used for the display-only gap timestamps so
+    the read is deterministic. (Like every console read, opening the intel/memory store may lazily create
+    the store's own files; K5 writes none of its own.)"""
+    if not slug:
+        return {"slug": None, "note": "select an engagement", "horizon_gaps": 0, "coverage_gaps": [],
+                "proposals": [], "unlearned_leads": [], "studied_enough": {}, "doctrine": _EVOLVE_DOCTRINE}
+
+    def _read() -> dict[str, Any]:
+        from datetime import datetime, timezone
+
+        from ..knowledge_engine.cli import _DEFAULT_SKILLS, _vuln_leads
+        from ..knowledge_engine.evolve import ledger_path, plan_evolution
+
+        leads = _vuln_leads(slug)
+        ledger = None
+        lp = ledger_path(slug)
+        if lp.is_file():
+            from ..calibration.ledger import OutcomeLedger
+            ledger = _safe(lambda: OutcomeLedger.load(lp), default=None)
+        # fixed epoch: the console never persists these gaps, so their discovered_at is display-only —
+        # keeping it constant makes the read deterministic and side-effect-free.
+        now = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        plan = plan_evolution(leads, skills_dir=_DEFAULT_SKILLS, now=now, ledger=ledger)
+        calibration = None
+        if ledger is not None and ledger.pairs():
+            from ..calibration.calibrate import brier_score
+            pairs = ledger.pairs()
+            calibration = {"resolved": len(pairs), "brier": _safe(lambda: brier_score(pairs), default=None)}
+        return {"slug": slug, "horizon_gaps": len(plan.horizon_gaps),
+                "coverage_gaps": [{"bug_class": g.bug_class, "priority": g.priority}
+                                  for g in plan.coverage_gaps],
+                "proposals": [{"id": p.id, "title": p.title, "status": p.status.value}
+                              for p in plan.proposals][:200],
+                "unlearned_leads": plan.unlearned, "studied_enough": plan.studied_enough,
+                "calibration": calibration, "doctrine": _EVOLVE_DOCTRINE}
+
+    return _safe(_read, default={"slug": slug, "horizon_gaps": 0, "coverage_gaps": [], "proposals": [],
+                                 "unlearned_leads": [], "studied_enough": {},
+                                 "note": "no intel store yet", "doctrine": _EVOLVE_DOCTRINE})

@@ -107,6 +107,57 @@ def _skills(args: argparse.Namespace) -> int:
     return _emit(retrieve_skillset(args.query, skills_dir=skills_dir))
 
 
+def _evolve(args: argparse.Namespace) -> int:
+    """The HONEST bounded self-evolve tick: disclosed leads → horizon + coverage gaps → DRAFT proposals
+    (never merged/applied) → `studied_enough`. With --record, seeds one calibration prediction per proposal
+    into the slug's OutcomeLedger (the OUTCOME is recorded later by a real engagement). Kill-switch gated."""
+    from datetime import datetime, timezone
+
+    from .evolve import ledger_path, plan_evolution, record_predictions
+
+    if args.slug:
+        from ..authority.killswitch import KillSwitch
+        if KillSwitch(args.slug).is_tripped():
+            print(f"refused: kill-switch tripped for engagement {args.slug!r}", file=sys.stderr)
+            return 3
+
+    leads = _vuln_leads(args.slug)
+    skills_dir = Path(args.skills_dir) if args.skills_dir else _DEFAULT_SKILLS
+    now = datetime.now(timezone.utc)                     # read the wallclock ONCE, at the CLI boundary
+    lp = Path(args.ledger) if args.ledger else ledger_path(args.slug)
+
+    ledger = None
+    if args.record:
+        from ..calibration.ledger import OutcomeLedger
+        ledger = OutcomeLedger.load(lp) if lp.is_file() else OutcomeLedger()
+
+    plan = plan_evolution(leads, skills_dir=skills_dir, now=now, ledger=ledger)
+    recorded = 0
+    if args.record and ledger is not None:
+        recorded = record_predictions(plan, ledger, base_seq=len(ledger))
+        ledger.save(lp)
+        # re-plan AFTER seeding so `studied_enough` reflects the now-open predictions (else a freshly-seeded
+        # run could report done=True alongside predictions_recorded=N, then flip False on the next read).
+        plan = plan_evolution(leads, skills_dir=skills_dir, now=now, ledger=ledger)
+
+    calibration = None
+    if ledger is not None and ledger.pairs():
+        from ..calibration.calibrate import brier_score
+        pairs = ledger.pairs()
+        calibration = {"resolved": len(pairs), "brier": brier_score(pairs)}
+
+    out = {
+        "slug": args.slug, "horizon_gaps": len(plan.horizon_gaps),
+        "coverage_gaps": [{"bug_class": g.bug_class, "priority": g.priority} for g in plan.coverage_gaps],
+        "proposals": [p.id for p in plan.proposals], "unlearned_leads": plan.unlearned,
+        "studied_enough": plan.studied_enough, "predictions_recorded": recorded,
+        "ledger": str(lp) if args.record else None, "calibration": calibration,
+        "doctrine": ("Bounded self-evolve: a deterministic horizon over DISCLOSED leads + coverage gaps → "
+                     "GATED DRAFT proposals, never merged or applied. Only a fired oracle mints a FACT."),
+    }
+    return _emit(out)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m framework.v2 knowledge",
@@ -130,6 +181,15 @@ def main(argv: list[str]) -> int:
     p.add_argument("--query", default="", help="match skills by id/name/desc and operators by technique ref")
     p.add_argument("--skills-dir", default="", dest="skills_dir")
     p.set_defaults(fn=_skills)
+
+    p = sub.add_parser("evolve", help="the bounded self-evolve tick: horizon + coverage gaps → DRAFT "
+                                      "proposals (never merged) + studied_enough. Advisory, kill-switch gated.")
+    p.add_argument("--slug", required=True, help="engagement slug (kill-switch honored)")
+    p.add_argument("--skills-dir", default="", dest="skills_dir")
+    p.add_argument("--ledger", default="", help="OutcomeLedger path (default: the slug's calibration ledger)")
+    p.add_argument("--record", action="store_true",
+                   help="seed one calibration prediction per proposal into the ledger (outcome recorded later)")
+    p.set_defaults(fn=_evolve)
 
     args = parser.parse_args(argv)
     return args.fn(args)
