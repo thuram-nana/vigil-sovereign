@@ -42,6 +42,14 @@ from .models import (
 )
 
 
+def trust_root_fingerprint(trust_root: TrustRoot) -> str:
+    """A stable, content-addressed fingerprint of a trust root's PUBLIC governance material (its threshold +
+    authoriser public keys). The verifier compares this against a value the operator publishes OUT-OF-BAND —
+    that comparison, not the copy of trust-root.json shipped alongside a bundle, is what anchors authenticity.
+    Two byte-identical trust roots share a fingerprint; adding/removing/altering any key changes it."""
+    return "sha256:" + digest_payload(trust_root.model_dump(mode="json"))
+
+
 def build_certificate(
     finding: dict,
     *,

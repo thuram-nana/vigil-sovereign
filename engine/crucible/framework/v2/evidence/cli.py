@@ -91,10 +91,39 @@ def _load_highwater(path: Path) -> int | None:
 
 
 def _verify(args: argparse.Namespace) -> int:
+    from .certify import trust_root_fingerprint
+
     bundle = json.loads((Path(args.bundle) / "evidence-bundle.json").read_text(encoding="utf-8"))
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     trust_root = TrustRoot.model_validate_json(Path(args.trust_root).read_text(encoding="utf-8"))
     evidence_root = Path(args.evidence_root) if args.evidence_root else None
+
+    # AUTHENTICITY ANCHOR (the one thing a verifier must trust): the trust root's public keys. Print its
+    # fingerprint so it can be compared to a value the operator PUBLISHED OUT-OF-BAND. A --trust-root-
+    # fingerprint pin makes that comparison enforceable (mismatch → refuse before any verify). If no pin is
+    # given AND --trust-root resolves INSIDE --bundle, the anchor travels with the evidence, so authenticity
+    # is UNPINNED — a party who controls the bundle could re-sign it under their own key + ship a matching
+    # root; warn loudly (the reproduction/binding/artifact/chain layers still hold, so content cannot be forged).
+    fp = trust_root_fingerprint(trust_root)
+    print(f"  trust-root fingerprint: {fp}  (threshold {trust_root.threshold} of {len(trust_root.authorizers)})")
+    pin = str(getattr(args, "trust_root_fingerprint", "") or "").strip()
+    if pin:
+        want = pin if pin.startswith("sha256:") else ("sha256:" + pin)
+        if want.lower() != fp.lower():
+            print(f"  [BAD] trust-root fingerprint pin MISMATCH — expected {want}, got {fp}", file=sys.stderr)
+            print("bundle NOT SOUND (trust root not the pinned governance key)")
+            return 2
+        print("  trust-root fingerprint: PINNED OK")
+    else:
+        try:
+            tr_inside = Path(args.trust_root).resolve().is_relative_to(Path(args.bundle).resolve())
+        except (OSError, ValueError):
+            tr_inside = False
+        if tr_inside:
+            print("  [WARN] UNPINNED TRUST ROOT — --trust-root is the copy shipped inside the bundle. Exit 0 "
+                  "proves internal consistency + reproduction, NOT authenticity. Obtain the operator's "
+                  f"governance fingerprint OUT-OF-BAND and re-run with --trust-root-fingerprint {fp}",
+                  file=sys.stderr)
 
     # oracle_contexts indexed by finding_ref (the certify ref rule); per-cert digest
     # binding catches any mismatch even if refs collide.
@@ -200,6 +229,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--report", required=True)
     p.add_argument("--bundle", required=True)
     p.add_argument("--trust-root", required=True, dest="trust_root")
+    p.add_argument("--trust-root-fingerprint", default="", dest="trust_root_fingerprint",
+                   help="pin the governance trust root to a fingerprint the operator PUBLISHED OUT-OF-BAND "
+                        "(sha256:… or bare hex); a mismatch refuses the bundle. Without it, an in-bundle "
+                        "trust root is UNPINNED — exit 0 then proves consistency + reproduction, not authenticity")
     p.add_argument("--evidence-root", default="", dest="evidence_root",
                    help="root of the raw evidence tree — REQUIRED to check certificates "
                         "that carry an artifact manifest (they fail closed without it)")

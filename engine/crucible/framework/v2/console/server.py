@@ -372,6 +372,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
                 return
+            if path == "/api/proof/export":
+                # Proof Studio (C1): assemble a client-verifiable proof bundle for a run (offline zero-trust
+                # re-verify). CSRF/rebind-gated above; shells the exec-only `vigil proof-export`. A bad run id
+                # raises ValueError in run_dir → caught below → clean 404.
+                self._json(actions.proof_export(str(body.get("run", ""))))
+                return
             if path == "/api/authority/provision":
                 # Charter & Attestation screen: mint a LOOPBACK authority (scope hard-fixed to 127.0.0.1 in
                 # the action — the UI cannot provision a remote charter). CSRF/rebind-gated above.

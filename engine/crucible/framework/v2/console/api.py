@@ -427,6 +427,8 @@ def proof_list(run_id: str) -> dict[str, Any]:
     recs: list[dict] = []
     if _safe(lambda: d.is_dir(), default=False):
         for f in sorted(_safe(lambda: list(d.glob("*.json")), default=[]) or []):
+            if f.name == "reverifiable.json":     # the C1 re-verifiable report is a sibling, not a proof record
+                continue
             rec = _safe(lambda f=f: json.loads(f.read_text(encoding="utf-8")), default=None)
             if isinstance(rec, dict):
                 recs.append(rec)

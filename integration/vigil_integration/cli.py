@@ -459,6 +459,40 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_proof_export(args: argparse.Namespace) -> int:
+    """`vigil proof-export` — assemble a CLIENT-VERIFIABLE proof bundle from a run's oracle-confirmed FACTs
+    (Proof Studio C1). The bundle re-verifies OFFLINE with zero trust in VIGIL: `python -m framework.v2
+    evidence verify --report reverifiable.json --bundle <out> --trust-root <out>/trust-root.json
+    --evidence-root <out>/evidence` exits 0 iff every certificate's signature, oracle reproduction, bound raw
+    bytes, and the chain/head all hold. Offense-side (bundle.py lazy-imports framework); the governance
+    private key is only ever an in-process argument, never argv — only the public trust root is written."""
+    import os
+
+    from .proof.bundle import export_bundle
+
+    run_dir = args.run_dir or os.environ.get("VIGIL_PROOF_RUN_DIR") or ""
+    if not run_dir:
+        print("proof-export: no run dir — pass --run-dir <abs> or set VIGIL_PROOF_RUN_DIR", file=sys.stderr)
+        return 1
+    if not Path(run_dir).is_dir():
+        print(f"proof-export: run dir not found: {run_dir}", file=sys.stderr)
+        return 1
+    out = args.out or str(Path(run_dir) / "proof-bundle")
+    res = export_bundle(run_dir=run_dir, out_dir=out, engagement_slug=(args.slug or "engagement"),
+                        base_dir=(args.base_dir or None))
+    if not res.get("ok"):
+        print(f"proof-export: {res.get('error', 'export failed')}", file=sys.stderr)
+        return 1
+    print("=== vigil proof-export (client-verifiable proof bundle) ===")
+    print(f"bundle:       {res['bundle']}")
+    print(f"certificates: {res['certificates']} oracle-confirmed FACT(s)")
+    print(f"trust-root fingerprint: {res.get('trust_root_fingerprint', '')}")
+    print("  PUBLISH this fingerprint OUT-OF-BAND — the client pins it (--trust-root-fingerprint) so a "
+          "bundle re-signed under another key is refused.")
+    print(f"verify:       cd {res['bundle']} && {res['verify_cmd']}")
+    return 0
+
+
 def _cmd_up(args: argparse.Namespace) -> int:
     """`vigil up` — bring the WHOLE unified UI up at ONE origin and federate the two trust planes
     behind a self-contained reverse proxy. EXEC-ONLY: it spawns the three backends (sigil cockpit,
@@ -712,6 +746,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="a co-signer as key_id=/path/to/keyfile (repeatable; read from FILE, never argv). "
                             "The owner key comes from VIGIL_DESTRUCTION_OWNER_KEY.")
     pauth.set_defaults(func=_cmd_authorize_destruction)
+
+    ppe = sub.add_parser("proof-export",
+                         help="assemble a client-verifiable proof bundle from a run's oracle-confirmed FACTs "
+                              "(offline, zero-trust re-verify)")
+    ppe.add_argument("--run-dir", default="", help="the run dir to export (else $VIGIL_PROOF_RUN_DIR)")
+    ppe.add_argument("--out", default="", help="output bundle dir (default <run-dir>/proof-bundle)")
+    ppe.add_argument("--slug", default="engagement", help="engagement slug stamped into the certificates")
+    ppe.add_argument("--base-dir", default="", help="governance-key home (stable signer); default = run dir")
+    ppe.set_defaults(func=_cmd_proof_export)
 
     pd = sub.add_parser("detect", help="run the Detection Mirror over log files (defensive oracle plane)")
     pd.add_argument("--access-log", default="", help="a CLF access log (edge/injection/recon oracles)")

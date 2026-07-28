@@ -31,6 +31,7 @@ from .engine import mint_proof
 from .sink import CAPTURE_KEY
 
 PROOFS_SUBDIR = "proofs"
+REVERIFIABLE_NAME = "reverifiable.json"
 
 
 def _proofs_dir(run_dir: str | os.PathLike) -> Path:
@@ -50,6 +51,8 @@ def read_proofs(run_dir: str | os.PathLike) -> list[dict]:
         return []
     out: list[dict] = []
     for f in sorted(d.glob("*.json")):
+        if f.name == REVERIFIABLE_NAME:      # the C1 re-verifiable report is a sibling, not a proof record
+            continue
         try:
             rec = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -114,6 +117,53 @@ def _persist_record(run_dir: str | os.PathLike, res: Any, finding: dict, capture
     return rec
 
 
+def read_reverifiable(run_dir: str | os.PathLike) -> dict:
+    """The run's re-verifiable proof report ({"active_findings": [...]}) — each entry a proven FACT with its
+    ``oracle_context`` + ``action_id``, the material ``vigil proof-export`` builds a client bundle from. An
+    empty ``active_findings`` doc on a missing/unreadable file (never raises)."""
+    path = Path(run_dir) / PROOFS_SUBDIR / REVERIFIABLE_NAME
+    if not path.is_file():
+        return {"active_findings": []}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"active_findings": []}
+    findings = doc.get("active_findings") if isinstance(doc, dict) else None
+    return {"active_findings": findings if isinstance(findings, list) else []}
+
+
+def _persist_reverifiable(run_dir: str | os.PathLike, finding: dict, action_id: str,
+                          exchanges: Any, resolve: Any, res: Any) -> None:
+    """Append (dedup by check_id) a re-verifiable finding — the SAME plain-dict oracle_context shape a
+    scan's reverifiable.json carries, so ``framework.v2 evidence verify`` re-fires it byte-identically. The
+    finding's top-level ``bug_class`` mirrors the class embedded in the context (reverify refuses a flip)."""
+    from framework.v2.verify.poc_translate import context_from_exchanges     # lazy — FATAL-2
+
+    ctx = context_from_exchanges(exchanges, bug_class=str(finding.get("bug_class") or ""), resolve=resolve)
+    if ctx is None:
+        return
+    embedded_class = str(getattr(ctx, "bug_class", "") or finding.get("bug_class") or "")
+    entry = {
+        "check_id": finding["check_id"],
+        "bug_class": embedded_class,
+        "insertion_point": finding.get("insertion_point", ""),
+        "confirmed_by": res.confirmed_by,
+        "confidence": res.confidence,
+        "action_id": action_id,
+        "oracle_context": ctx.model_dump(mode="json"),
+    }
+    doc = read_reverifiable(run_dir)
+    findings = [f for f in doc["active_findings"] if f.get("check_id") != entry["check_id"]]
+    findings.append(entry)
+    findings.sort(key=lambda f: str(f.get("check_id")))
+    path = _proofs_dir(run_dir) / REVERIFIABLE_NAME
+    path.write_text(json.dumps({"active_findings": findings}, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def build_report_mint(
     *,
     run_dir: str | os.PathLike,
@@ -150,15 +200,25 @@ def build_report_mint(
 
         finding = _finding_from_report(report)
         action_id = "poc-" + hashlib.sha256(str(finding["check_id"]).encode("utf-8")).hexdigest()[:16]
+        # Default the evidence root to <run_dir>/evidence so every FACT MATERIALISES its executor-captured
+        # raw bytes into a cert-manifestable tree — that is what makes the exported proof bundle (C1)
+        # artifact-integrity-checkable offline. An explicit evidence_root still wins.
+        ev_root = str(evidence_root) if evidence_root else str(Path(run_dir) / "evidence")
         res = mint_proof(
             finding=finding, exchanges=exchanges, resolve=_resolve,
             engagement_slug=engagement_slug, signers=signers,
-            evidence_root=(str(evidence_root) if evidence_root else None),
-            action_id=(action_id if evidence_root else None),
+            evidence_root=ev_root, action_id=action_id,
             spool_dir=(str(spool_dir) if spool_dir else None),
             quarantine_dir=quarantine_dir,
         )
         _persist_record(run_dir, res, finding, capture)
+        if getattr(res, "is_fact", False):
+            # Retain the re-verifiable material (the oracle_context + action_id) so `vigil proof-export` can
+            # rebuild a client-verifiable bundle later. Best-effort: a serialization hiccup never un-mints.
+            try:
+                _persist_reverifiable(run_dir, finding, action_id, exchanges, _resolve, res)
+            except Exception:  # noqa: BLE001
+                pass
         return res
 
     return mint
