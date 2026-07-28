@@ -249,7 +249,7 @@ This is where the whole system becomes *one running program*.
 - **`live/engine.py`** — the unified, attestation-first loop that wires the brain through *every* subsystem and the *real* gates/oracle/record (no stand-ins). A missing optional service degrades to fail-closed, never to a fake pass.
 - **`live/wiring.py`** — the factory that binds the loop to the real machinery (provisions the signed authority, wires the gate, the oracle, the executor, the record, the spine).
 - **The six live connectors** — the **loopback-pinned tool executor** (`executor.py`, refuses any target that isn't the authorized one before a single byte is sent), the **graph writer** (`graph_neo4j.py`, confirmed-only), the **AI-gauntlet subprocess adapter** (`gauntlet_subproc.py`), the **telemetry exporter** (`otel_export.py`), the **live Claude step** (`think_claude.py`, which can run in keyless "replay" mode with no API key — *the provable layer never depends on the model*), and the **real signed spine** (`spine_vigilcore.py`).
-- **`cli.py`** — the **`vigil`** command: `vigil engage <url>` (run the loop), `vigil ledger who|when` (prove who used it, when), `vigil verify-ledger` (check the chain), `vigil provision` (mint a signed authority), `vigil dossier` (compile a whole run into one self-contained, tamper-evident `.zip`).
+- **`cli.py`** — the **`vigil`** command: `vigil engage <url>` (run the loop), `vigil ledger who|when` (prove who used it, when), `vigil verify-ledger` (check the chain), `vigil provision` (mint a signed authority), `vigil dossier` (compile a whole run into one self-contained, tamper-evident `.zip`), `vigil terminal <command> [--approve]` (run a governed *local* read-only command through the same conjunctive gate + sealed spine signer — `--approve` supplies the operator's approval that upgrades the A2 queue to allow; without it the command is prepared, gated, and QUEUED but never run).
 
 ### The deep-core usage record — `integration/vigil_integration/attestation/`
 The "who used this tool, when, and against what" record, minted *before* anything runs (no attestation → no run). It binds the operator's identity (login name, git name/email, key fingerprint, hostname), a time tied to a never-decreasing counter — a hardware clock when your machine has a secure chip (a TPM), otherwise a software counter — so it can't be back-dated, and the action. This record is itself written into the one spine (so there is a single record, not several). `vigil ledger who|when` replays it; `vigil verify-ledger` proves the chain is intact.
@@ -296,6 +296,7 @@ A vendored, Claude-migrated copy of the open-source Strix autonomous-hacker tool
 - WARDEN danger tiers A0–A3, fail-closed to the strictest tier on anything unknown; offense tools never auto-fire.
 - Deny-by-default network egress; a prompt-injected agent can't reach your home network, third parties, or cloud metadata.
 - Multi-person sign-off for irreversible actions; approval timeouts auto-reject.
+- A governed **local Terminal** (with an English-language AI chatbot): the AI *proposes*, an allowlist of local read-only binaries + your per-command approval *decide*, every run is signed — it cannot egress, write files, or spawn a shell by construction.
 
 **Autonomy**
 - A full attestation-first reasoning loop that plans, acts, confirms, remediates, and checkpoints.
@@ -350,6 +351,33 @@ $ vigil verify-ledger
 
 One offensive fact, seven defensive detection facts, a verified who/when record — all signed, all re-checkable offline.
 
+### The governed Terminal — a local shell where the AI proposes and the gate decides
+
+The **Terminal** screen is a *local-only* shell for inspecting your own machine during an engagement, fronted
+by a plain-English **AI chatbot** for people who don't know the commands. It is the same governing invariant
+applied to a shell: **the AI only proposes; the allowlist + WARDEN gate + your approval decide.** Every
+command — whether typed directly or proposed by the chatbot — travels the identical path:
+
+1. **Parsed with no shell.** The command is refused whole if it contains any shell metacharacter — `;` `&` `|` `>` `<` `$` `(` `)` `{` `}` `\`, a backtick, or a NUL/newline — then split on whitespace into an argv list and run with `shell=False`, so no pipe, redirect, substitution, glob, or variable-expansion can ever survive to a token.
+2. **Allowlist-validated.** `argv[0]` must be one of a curated set of **local read/print binaries only** — `ls cat head tail wc stat pwd whoami id uname echo df du ps uptime grep cut tr`, plus `find` restricted to a read-only *predicate allowlist* (the exec/write predicates `-exec`/`-delete`/`-fprint*`/… are refused *by omission*, not by a denylist), plus `date`/`hostname` admitted **bare only** (a flag/operand could set the clock or hostname — a host write). Every network binary (`curl`/`wget`/`nc`/`ssh`/…), every interpreter (`bash`/`python`/`awk`/…), and every writer (`tee`/`cp`/`rm`/`sed -i`/…) is simply absent, and therefore denied.
+3. **Classified WARDEN A2 → queued for you.** `terminal.run` classifies at tier A2 under the one shared WARDEN classifier, so under the A1 offense ceiling the conjunctive gate **QUEUES** it — it can *never* auto-run. Your **Run** click is the operator approval that upgrades the queue to allow.
+4. **Run, then signed.** The approved argv runs under a timeout + output cap, and the result is written as a **signed, redacted `ExecRecord`** on the tamper-evident spine (no signer wired ⇒ the command is refused *before* it runs, because an unrecordable command is unprovable).
+
+Because of step 2, a Terminal command can **neither reach the network, write or modify a file, nor spawn an
+interpreter — by construction:** no such binary is on the allowlist, so there is nothing to pin and nothing
+that can egress. (The test suite drives a hostile red-pen battery at it — network binaries, interpreters,
+writers, shell metacharacters, unsafe `find` predicates, and even coreutils option-abbreviation bypasses like
+`sort --compress=curl` — and every one is refused.)
+
+**AI proposes, you approve each one.** In the chatbot you describe what you want in English; Claude returns
+**one** candidate command, which is re-parsed and allowlist-checked *exactly like a typed command* and shown
+to you with its gate verdict badge. You then click **Run** (approve + execute), **Edit** (drop it into the
+direct box to change), or **Cancel** — **nothing the AI proposes ever runs on its own.** A hallucinated or
+prompt-injected `rm -rf /` or `curl evil.com` parses to *refused* and can never run; prompt-injection is
+bounded by the allowlist and your approval, not by trusting the model. **No Claude API key?** The chatbot
+says so honestly ("add a key in Settings, or type a command directly") — the direct terminal works with no
+LLM at all. On the command line the same feature is `vigil terminal <command> --approve`.
+
 ---
 
 ## What's live vs. what's still deferred
@@ -358,16 +386,18 @@ VIGIL is scrupulous about this (it would be ironic for an anti-hallucination sys
 
 | Status | What |
 |---|---|
-| ✅ **Built & merged (green on `main`)** | The signed core; the egress gate; the two-environment seam; the WARDEN gate; the conjunctive gate; the oracle-confirmation pipeline; challenge oracles; the transparency log; the threshold-destruction gate; the offline-verifiable certificates; the entire F0–F12 agent body; the unified web UI (cloud/K8s launch, an actionable gated Fixes screen, the deep-learn knowledge engine, one-click dossier download); the embedded file-backed graph store; the moonshot scaffolds. |
+| ✅ **Built & merged (green on `main`)** | The signed core; the egress gate; the two-environment seam; the WARDEN gate; the conjunctive gate; the oracle-confirmation pipeline; challenge oracles; the transparency log; the threshold-destruction gate; the offline-verifiable certificates; the entire F0–F12 agent body; the unified web UI (cloud/K8s launch, an actionable gated Fixes screen, the deep-learn knowledge engine, one-click dossier download, and the **governed local Terminal + AI chatbot**); the embedded file-backed graph store; the **attestation auto-detect selector** (`open_attestation_provider` — auto-picks a TEE backend when the hardware *and* its backend are present, else the software/TPM fallback; runs on any Linux PC); the moonshot scaffolds. Also merged: **opt-in** WARDEN-gating of the vendored Strix `exec_command` shell via `VIGIL_WARDEN_STRIX_GATE` (*gateable*, not gated by default). |
 | ✅ **Live end-to-end (on loopback)** | The unified `vigil engage` engine; attestation-first blocking; the real gate (in-scope allowed, out-of-scope hard-denied); no-auto-fire of offensive tools; a real oracle-confirmed SQL-injection fact — including an `error_signature` (error-based SQLi) FACT minted over the loopback app and **re-verified 3/3 offline with no Caido and no Docker** (the first-party executor captured the datastore-error bytes); the Detection Mirror (7 detection facts); the usage record with its who/when replay; signed spine checkpoints. |
 | 🟡 **LEAD-only *by design*** (an honesty choice, not a gap) | Detection planes for which the logs don't exist (command-and-control, identity graph, cloud, session-phishing); any judgment made by another AI; the cognition governors (they re-rank, never decide truth). |
 | ⏳ **Deferred to further owner infrastructure** (logic + wiring built; the live *external* service not yet stood up) | A running *external* graph database / telemetry collector — **an embedded, file-backed graph store is now built** (`framework/v2/graph/store.py`); only the live external Neo4j/OTLP service is deferred. Live **external** tool execution and a running external red-team service — the loopback live-fire **did** execute real tools and mint + re-verify a real FACT; an *external, network-egress* run is what's outstanding (`targets/testphp/charter.md` provisions it). Still genuinely not built: the live-API-key Claude step (keyless replay is used today) and a cryptographic per-action approval token (today's `--approve-offense` is a standing approval). Confidential-computing hardware stays hardware-gated. |
 | 🌙 **Moonshots — now SCAFFOLDED** (a built interface + a working software fallback/narrow path; the hardware/research frontier honestly stubbed) | The pluggable **agent-body** interface (`agent_body/interface.py`); the **attestation** provider (a software/TPM quote works; the SEV-SNP/TDX stubs raise — hardware-gated); the **binary/memory-safety** auto-patch tier (crash-confirm + fix-by-oracle-silence work; patch synthesis is research-gated). Each is a real, tested contract with a working narrow path — the binary CRS, a real TEE, and a next-generation body still need research/hardware. See [`docs/DEFERRED-INFRA.md`](docs/DEFERRED-INFRA.md). |
 
-> **In final review / landing (not yet on `main`):** a governed **local-only terminal** (`execute_terminal`) whose
-> allowlist cannot egress by construction, tiered A2 → queue → signed record; plus **opt-in** WARDEN-gating of the
-> Strix `exec_command` shell (via `VIGIL_WARDEN_STRIX_GATE` — *gateable*, not gated by default). Reflected here for
-> completeness; treat it as arriving, not shipped, until it merges.
+> **Now merged (PR #157):** the governed **local Terminal** — `execute_terminal` (an allowlist that cannot egress
+> by construction, tiered A2 → queue → signed, redacted record), its natural-language **AI chatbot**
+> (`terminal_propose`/`terminal_dryrun`/`terminal_run`, where the AI proposes and the allowlist + your approval
+> decide), the **Terminal** UI screen, and the `vigil terminal` CLI verb — plus **opt-in** WARDEN-gating of the
+> Strix `exec_command` shell (via `VIGIL_WARDEN_STRIX_GATE` — *gateable*, not gated by default). The
+> *session-omniscient* advanced layer (T2b) is roadmap — see [`docs/VISION.md`](docs/VISION.md).
 
 The full, itemized breakdown lives in [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) and [`docs/AS-BUILT.md`](docs/AS-BUILT.md).
 
@@ -511,6 +541,7 @@ offline backend renders an honest empty state, never fake data):
 | **DO** | **Home** | Command dashboard: active runs, waiting-for-you, confirmed findings, budget, live feed. |
 | | **New Assessment** | A 5-step wizard → a gated, oracle-confirmed run (codebase / URL / one tool / autonomous suite / AEGIS defense / **cloud & K8s posture**). Requires an authorized-target attestation; a remote target needs a signed charter the UI cannot mint. |
 | | **Chat** | Plain-language front door that launches the *same* gated, oracle-confirmed runs. |
+| | **Terminal** | A governed *local-only* shell for inspection, with an AI chatbot on top: the AI **proposes** a command, the **allowlist + WARDEN gate + your Run click** decide, and every run is a signed, redacted record. Local read-only binaries only — no network, no writes, no interpreter — by construction. (Brings the UI to **22 screens**.) |
 | | **Live** | Real-time run view over the signed reasoning spine (SSE) — the FACT-vs-LEAD reasoning graph, approvals. |
 | | **Findings** | The proven-bug hub: attack graph, offline **evidence browser** (re-verify → sound / tampered / mismatch), per-finding **how-to test / verify / patch** (also exported in the report + SARIF/JSON), coverage, timeline, and **one-click dossier download** — the first real client download: a self-contained, tamper-evident `.zip` of the whole run. |
 | | **Fixes** | Remediation + the now-**actionable** gated auto-fix ladder: an **"Apply fix"** button shells `vigil patch` when the run has a signed offense spine (non-destructive — never opens a PR); with no provable spine it shows exactly what's missing rather than misleading you. |
@@ -606,11 +637,11 @@ vigil/
 
 ## Status & roadmap
 
-- **Built & merged:** the sovereign core, the four authorities, the full F0–F12 agent body, the transparency log, offline-verifiable certificates, the unified web UI (with cloud/K8s launch, an actionable gated Fixes screen, the deep-learn knowledge engine, and one-click dossier download), and an **embedded file-backed graph store**.
+- **Built & merged:** the sovereign core, the four authorities, the full F0–F12 agent body, the transparency log, offline-verifiable certificates, the unified web UI (with cloud/K8s launch, an actionable gated Fixes screen, the deep-learn knowledge engine, one-click dossier download, and the **governed local Terminal + AI chatbot**), an **embedded file-backed graph store**, and the **attestation auto-detect selector** (`open_attestation_provider`, "activates on hardware").
 - **Live-validated on the loopback target:** the unified engine, the usage record, the Detection Mirror (edge + auth planes), the six live connectors, and a real `error_signature` SQLi FACT **re-verified 3/3 offline** (no Caido, no Docker).
 - **Deferred to owner infrastructure:** a running *external* graph/telemetry service, live *external* tool execution, the live-key Claude step, and per-action cryptographic approval tokens.
 - **Moonshots (now scaffolded):** a next-generation agent body, confidential-computing attestation, and the binary/memory-safety cyber-reasoning tier — each a built, tested interface with a working software fallback/narrow path; the hardware/research frontier stays honestly stubbed (see [`docs/DEFERRED-INFRA.md`](docs/DEFERRED-INFRA.md)).
-- **In final review / landing (not yet merged):** a governed local-only terminal (`execute_terminal`) plus opt-in WARDEN-gating of the Strix shell (`VIGIL_WARDEN_STRIX_GATE`).
+- **Merged this cycle (PR #157):** the governed local Terminal (`execute_terminal`) + its natural-language AI chatbot + the Terminal UI screen + the `vigil terminal` CLI verb, and opt-in WARDEN-gating of the Strix shell (`VIGIL_WARDEN_STRIX_GATE`). The session-omniscient **T2b** layer (session Q&A, cross-session fusion, ASK/DO modes, a signed replayable transcript in the dossier, teach-mode) is **roadmap** — see [`docs/VISION.md`](docs/VISION.md).
 
 See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized status.
 
