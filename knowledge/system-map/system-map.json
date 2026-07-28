@@ -81,6 +81,26 @@
       ]
     },
     {
+      "description": "Map oracle-proven findings to OWASP / CWE / PCI-DSS / SOC 2 / ISO 27001 controls + MITRE ATT&CK.",
+      "group": "MANAGE",
+      "id": "compliance",
+      "label": "Compliance",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "compliance",
+        "standards",
+        "owasp",
+        "cwe",
+        "pci",
+        "soc2",
+        "iso27001",
+        "attack",
+        "controls",
+        "mapping"
+      ]
+    },
+    {
       "description": "The defensive AEGIS side — detections, posture, and the managed gateway.",
       "group": "DO",
       "id": "defense",
@@ -251,5 +271,5 @@
       ]
     }
   ],
-  "source_sha": "c69ba15256c2e8edfc7ba26e257ee09e28f36f634ef73ea68de79dfd5a8b6c74"
+  "source_sha": "e315a51d230edea8b5a57683ea8765e8cc1264523d3d12eccc9937bb429b7fd1"
 }
