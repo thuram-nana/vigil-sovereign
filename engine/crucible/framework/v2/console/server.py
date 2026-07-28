@@ -69,6 +69,7 @@ _EXACT_ROUTES = {
     "/api/capabilities": api.capabilities_data,
     "/api/aegis/status": api.aegis_status,
     "/api/feed/status": api.feed_status,        # K1: read-only vuln-feed schedule/egress posture
+    "/api/terminal/history": actions.terminal_history,   # T2: recent signed terminal.run records (read-only)
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -499,6 +500,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # launch the managed AEGIS gateway (the SAME gated `aegis gateway` CLI). CSRF/rebind-gated
                 # above; validated fail-closed in actions.aegis_setup before any spawn.
                 self._json(actions.aegis_setup(body))
+                return
+            if path == "/api/terminal/dryrun":
+                # T2: parse + allowlist-preview a command WITHOUT executing (read-only). Advisory badge; the
+                # authoritative check runs inside `vigil terminal` at run time.
+                self._json(actions.terminal_dryrun(str(body.get("command", ""))))
+                return
+            if path == "/api/terminal/propose":
+                # T2: translate a natural-language intent → ONE candidate command via Claude, then dryrun-check
+                # it. The LLM only PROPOSES; nothing runs here. Honest need_key state when no key is present.
+                self._json(actions.terminal_propose(str(body.get("intent", ""))))
+                return
+            if path == "/api/terminal/run":
+                # T2: run an allowlisted LOCAL command by shelling `vigil terminal <command> --approve` (the Run
+                # click IS the operator approval). CSRF/rebind-gated above; the AUTHORITATIVE allowlist + gate +
+                # signed record are enforced inside the verb — the console imports no integration code (FATAL-2).
+                self._json(actions.terminal_run(str(body.get("command", ""))))
                 return
             if path == "/api/aegis/stop":
                 self._json(actions.aegis_stop(body))

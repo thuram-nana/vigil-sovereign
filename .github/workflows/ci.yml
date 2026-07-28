@@ -116,6 +116,7 @@ jobs:
               integration/tests/test_engine_live.py \
               integration/tests/test_executor_scoped.py \
               integration/tests/test_executor_terminal.py \
+              integration/tests/test_cli_terminal.py \
               integration/tests/test_detection_vocabulary.py \
               integration/tests/test_proof_engine.py \
               integration/tests/test_proof_run.py \

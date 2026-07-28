@@ -21,6 +21,7 @@
       { id: "home", label: "Home", icon: "home", ready: true },
       { id: "assess", label: "New Assessment", icon: "assess", ready: true },
       { id: "chat", label: "Chat", icon: "brain", ready: true },
+      { id: "terminal", label: "Terminal", icon: "bolt", ready: true },
       { id: "live", label: "Live", icon: "live", ready: true },
       { id: "findings", label: "Findings", icon: "find", ready: true },
       { id: "proof", label: "Proof Studio", icon: "shield", ready: true },
@@ -2901,6 +2902,172 @@
       });
   }
 
+  // ---- Terminal screen (T2) — AI proposes; allowlist + gate + you approve; only local reads run ----
+  // The chat box translates English → a candidate command via Claude, shows its gate verdict, and waits for
+  // your Run click. That command goes through the SAME gated `vigil terminal` path as a typed command — the
+  // allowlist rejects anything off-list (network / writers / interpreters) even if the AI hallucinates it, and
+  // nothing runs without your approval. Every run is signed. No key ⇒ the direct terminal still works.
+  function termVerdictBadge(v) {
+    var verdict = (v && v.verdict) || "refused";
+    var cls = verdict === "refused" ? "danger" : (verdict === "queued" ? "warn" : "");
+    var label = verdict === "queued" ? "QUEUES FOR YOU" : (verdict === "allowed" ? "ALLOWED" : "REFUSED");
+    return h("span.vbadge." + (cls || "muted"), null, label);
+  }
+  function renderTerminal(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Terminal"),
+        h("span.sub", null, "Ask in plain English or type a command. The AI proposes; you approve; only local read-only commands run.")]),
+      h("div.legend", null, [V.icon("shield"), h("span", null,
+        "The AI proposes a command and shows its gate verdict — you approve it with Run. Every command goes through the same allowlist + gate + signed record: it can only run local, read-only tools (ls, cat, grep, find, stat, …). It cannot reach the network, change files, or run a shell — even if the AI is wrong or prompt-injected, the allowlist refuses it and nothing runs without your approval.")]),
+      // --- the beginner-friendly path: ask in English -------------------------------------------------
+      V.card("Ask in plain English", "AI PROPOSES", h("div.stack", null, [
+        h("div.field", { style: { marginBottom: "0" } }, [
+          h("label", null, "What do you want to inspect?"),
+          h("div.row", { style: { gap: "8px" } }, [
+            h("input#term-intent", { type: "text", placeholder: "e.g. show the last 20 lines of /etc/hostname",
+              style: { flex: "1" },
+              onKeydown: function (e) { if (e.key === "Enter") { e.preventDefault(); termPropose(); } } }),
+            h("button.btn.primary#term-propose-btn", { onClick: termPropose }, [V.icon("brain"), "Propose"]),
+          ]),
+        ]),
+        h("div#term-proposal"),
+      ]), false),
+      // --- the direct path: type a command ------------------------------------------------------------
+      V.card("Or type a command", "DIRECT", h("div.stack", null, [
+        h("div.field", { style: { marginBottom: "0" } }, [
+          h("label", null, "Command (allowlisted local read/inspect binaries only)"),
+          h("div.row", { style: { gap: "8px" } }, [
+            h("input#term-direct", { type: "text", placeholder: "ls -la",
+              style: { flex: "1", fontFamily: "var(--font-mono, monospace)" },
+              onInput: function (e) { termDirectDryrun(e.target.value); },
+              onKeydown: function (e) { if (e.key === "Enter") { e.preventDefault(); termRunDirect(); } } }),
+            h("button.btn#term-direct-btn", { onClick: termRunDirect }, [V.icon("play"), "Run"]),
+          ]),
+          h("div#term-direct-badge", { style: { marginTop: "6px", minHeight: "18px" } }),
+        ]),
+      ]), false),
+      // --- output + history ---------------------------------------------------------------------------
+      V.card("Output", "SIGNED", h("pre.mono#term-output", { style: { maxHeight: "320px", overflow: "auto",
+        whiteSpace: "pre-wrap", margin: "0", fontSize: "var(--fs-xs)" } }, "No command run yet."), false),
+      V.card("Recent commands", "HISTORY", h("div#term-history", null, h("div.empty", null, "Loading…")), false),
+    ]);
+    termLoadHistory();
+  }
+
+  function termPropose() {
+    var input = V.$("#term-intent"), btn = V.$("#term-propose-btn"), out = V.$("#term-proposal");
+    var intent = input ? String(input.value || "").trim() : "";
+    if (!out) return;
+    if (!intent) { V.mount(out, h("div.hint", null, "Describe what you want to inspect.")); return; }
+    if (btn) btn.disabled = true;
+    V.mount(out, h("div.dim", null, "Asking the AI for a command…"));
+    V.postJSON(OFF("/api/terminal/propose"), { intent: intent })
+      .then(function (r) {
+        if (btn) btn.disabled = false;
+        if (r && r.need_key) {
+          V.mount(out, h("div.legend", null, [V.icon("key"), h("span", null, r.note ||
+            "Add a Claude API key in Settings to use natural language, or type a command directly.")]));
+          return;
+        }
+        if (r && r.error) { V.mount(out, h("div.legend", null, [V.icon("info"), r.error])); return; }
+        termRenderProposal(r);
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "propose failed"]));
+      });
+  }
+  function termRenderProposal(r) {
+    var out = V.$("#term-proposal"); if (!out) return;
+    var verdict = r && r.verdict;
+    var refused = !r || !r.ok || (verdict && verdict.verdict === "refused");
+    var nodes = [
+      h("div.row", { style: { gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
+        h("span.label", null, "Proposed"), termVerdictBadge(verdict),
+      ]),
+      h("pre.mono", { style: { margin: "6px 0", whiteSpace: "pre-wrap", fontSize: "var(--fs-sm)" } },
+        (r && r.command) ? r.command : "(the AI proposed no runnable command)"),
+      r && r.explanation ? h("div.hint", null, r.explanation) : null,
+      verdict && verdict.reason ? h("div.dim", { style: { fontSize: "var(--fs-xs)", margin: "4px 0" } }, verdict.reason) : null,
+    ];
+    if (refused || !r.command) {
+      nodes.push(h("div.legend", null, [V.icon("shield"), h("span", null,
+        "This request maps to no allowlisted local command, so nothing will run. Rephrase, or type a command directly.")]));
+    } else {
+      nodes.push(h("div.row", { style: { gap: "8px", marginTop: "8px" } }, [
+        h("button.btn.primary", { onClick: function () { termRun(r.command); } }, [V.icon("play"), "Run"]),
+        h("button.btn", { onClick: function () {
+            var d = V.$("#term-direct"); if (d) { d.value = r.command; d.focus(); termDirectDryrun(r.command); } } },
+          [V.icon("fixes"), "Edit"]),
+        h("button.btn", { onClick: function () { var p = V.$("#term-proposal"); if (p) V.clear(p); } }, "Cancel"),
+      ]));
+    }
+    V.mount(out, nodes);
+  }
+
+  var _termDryrunTimer = null;
+  function termDirectDryrun(command) {
+    var badge = V.$("#term-direct-badge"); if (!badge) return;
+    command = String(command || "").trim();
+    if (_termDryrunTimer) clearTimeout(_termDryrunTimer);
+    if (!command) { V.clear(badge); return; }
+    _termDryrunTimer = setTimeout(function () {
+      V.postJSON(OFF("/api/terminal/dryrun"), { command: command })
+        .then(function (v) {
+          V.mount(badge, h("div.row", { style: { gap: "8px", alignItems: "center" } }, [
+            termVerdictBadge(v),
+            h("span.dim", { style: { fontSize: "var(--fs-xs)" } }, (v && v.reason) || ""),
+          ]));
+        })
+        .catch(function () { V.clear(badge); });
+    }, 300);
+  }
+  function termRunDirect() {
+    var d = V.$("#term-direct"); var command = d ? String(d.value || "").trim() : "";
+    if (command) termRun(command);
+  }
+  function termRun(command) {
+    var out = V.$("#term-output"); if (out) V.mount(out, "Running (gated, signed)…");
+    V.postJSON(OFF("/api/terminal/run"), { command: command })
+      .then(function (r) { termRenderOutput(command, r); termLoadHistory(); })
+      .catch(function (e) {
+        if (out) V.mount(out, "Run failed: " + ((e && e.message) || "error"));
+      });
+  }
+  function termRenderOutput(command, r) {
+    var out = V.$("#term-output"); if (!out) return;
+    if (!r) { V.mount(out, "No result."); return; }
+    var lines = [];
+    lines.push("$ " + command);
+    if (r.error) { lines.push("refused: " + r.error); }
+    lines.push("outcome : " + (r.outcome || "?") + "   tier: " + (r.tier || "?") + "   ran: " + (r.ran ? "yes" : "no"));
+    if (r.reason) lines.push("reason  : " + r.reason);
+    if (r.exit_code != null) lines.push("exit    : " + r.exit_code);
+    if (r.record_id) lines.push("signed record: " + r.record_id);
+    lines.push("");
+    if (r.stdout) lines.push(r.stdout);
+    if (r.stderr) lines.push("[stderr]\n" + r.stderr);
+    V.mount(out, lines.join("\n"));
+  }
+  function termLoadHistory() {
+    var host = V.$("#term-history"); if (!host) return;
+    V.getJSON(OFF("/api/terminal/history"))
+      .then(function (d) {
+        var recs = (d && d.records) || [];
+        if (!recs.length) { V.mount(host, h("div.empty", null, "No commands run yet. Each run is gated and appended here as a signed record.")); return; }
+        V.mount(host, h("div.stack", null, recs.map(function (rec) {
+          var argv = (rec.argv || []).join(" ");
+          return h("div.kv", null, [
+            h("div.k", null, "#" + (rec.seq != null ? rec.seq : "?")),
+            h("div.v.mono", { style: { fontSize: "var(--fs-xs)" } }, argv || "(command)"),
+            h("div.k", null, (rec.tier || "A2")),
+            h("div.v", null, "exit " + (rec.exit_code != null ? rec.exit_code : "?") + (rec.signature ? " · signed" : "")),
+          ]);
+        })));
+      })
+      .catch(function () { V.mount(host, h("div.empty", null, "History is unavailable (start the engine with `vigil up`).")); });
+  }
+
   // ---- Brain screen (Memory / Benchmark / Catalog / Intel / Planner) ---------
   // Every tab is REAL data from an existing read endpoint; honest empty states throughout — no fabricated
   // priors/scores. Reasoning is presented as advisory-only (it never promotes a finding — the oracle does).
@@ -4119,6 +4286,7 @@
     if (id === "tools") { renderTools(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "chat") { renderChat(screen); return; }
+    if (id === "terminal") { renderTerminal(screen); return; }
     if (id === "sessions") { renderSessions(screen); return; }
     if (id === "live") { renderLive(screen); return; }
     if (id === "activity") { renderBackground(screen); return; }
