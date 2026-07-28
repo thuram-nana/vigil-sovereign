@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 _global_report_state: Optional["ReportState"] = None
 
+# VIGIL Proof Studio (B2): an optional hook invoked with the finished report dict just BEFORE the finding is
+# persisted, so the offense-side content gate + reproduce-from-raw proof mint can screen / mint out-of-band.
+# ABSENT (None, the default) ⇒ vendored behaviour is byte-identical. Import-clean: the vendored tree imports
+# nothing from framework/integration; the wiring layer ASSIGNS a callable here at runtime.
+proof_sink: Optional[Callable[[dict[str, Any]], Any]] = None
+
 
 def _strix_version() -> str | None:
     """Best-effort package version for the SARIF tool.driver.version field."""
@@ -283,6 +289,15 @@ class ReportState:
             report["agent_id"] = agent_id
         if agent_name:
             report["agent_name"] = agent_name
+
+        # VIGIL Proof Studio (B2): screen / mint out-of-band BEFORE persistence. Absent hook ⇒ no-op
+        # (byte-identical). Fail-safe: a hook error never blocks the report from being persisted.
+        hook = proof_sink
+        if hook is not None:
+            try:
+                hook(report)
+            except Exception:
+                logger.exception("proof_sink hook failed (non-fatal)")
 
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")

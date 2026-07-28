@@ -53,6 +53,8 @@ import vigil_integration.learn_drain        # A2c: the offense CONSUMER must imp
 assert "framework" not in __import__("sys").modules, "learn_drain must not import framework at module scope"
 import sigil.knowledge.learn_grant          # A2b: the sovereign PRODUCER must stay offense-free too
 assert "framework" not in __import__("sys").modules, "learn_grant must not import framework at module scope"
+import vigil_integration.proof.engine        # B3: the proof mint must lazy-import framework (offense-only)
+assert "framework" not in __import__("sys").modules, "proof.engine must not import framework at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
