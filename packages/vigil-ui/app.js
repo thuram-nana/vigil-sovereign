@@ -155,7 +155,7 @@
     try { snap = await V.getJSON(SOV("/api/snapshot")); } catch (e) { /* sovereign offline */ }
     try { ostat = await V.getJSON(OFF("/api/status")); } catch (e) { /* offense offline */ }
     const waiting = (snap && (snap.pending_approvals || []).length) || 0;
-    const killed = !!(snap && snap.kill_switch && (snap.kill_switch.engaged || snap.kill_switch === "engaged"));
+    const killed = !!(snap && snap.kill_switch && (snap.kill_switch.engaged || snap.kill_switch === "ENGAGED"));
     const findings = (ostat && (ostat.findings_confirmed != null ? ostat.findings_confirmed : (ostat.findings || 0))) || 0;
     const runs = (ostat && (ostat.active_runs != null ? ostat.active_runs : 0)) || 0;
     app.set({ waiting: waiting, killed: killed, live: runs > 0 ? "live" : "idle",
@@ -2404,13 +2404,15 @@
   }
 
   function drawSafety(snap) {
-    var ks = snap.kill_switch || "released";
+    // canonical kill-switch read: the producer emits the STRING "ENGAGED" (dashboard.snapshot); also accept
+    // an object `.engaged` form. (A lowercase `=== "engaged"` here left the Safety tile/banner/button dead.)
+    var engaged = !!(snap.kill_switch === "ENGAGED" || (snap.kill_switch && snap.kill_switch.engaged));
     var pend = snap.pending_approvals || [];
     var caps = snap.capabilities || {};
     // tiles
     var tiles = V.$("#safety-tiles");
     if (tiles) V.mount(tiles, [
-      V.tile("Kill-switch", ks === "engaged" ? "ENGAGED" : "Released", ks === "engaged" ? "mesh halted" : "mesh live", ks === "engaged" ? "danger" : "ok"),
+      V.tile("Kill-switch", engaged ? "ENGAGED" : "Released", engaged ? "mesh halted" : "mesh live", engaged ? "danger" : "ok"),
       V.tile("Waiting", String(pend.length), pend.length ? "need your sign-off" : "all clear", pend.length ? "warn" : "ok"),
       V.tile("Spine head", snap.head_seq != null ? ("#" + snap.head_seq) : "—", "records", null),
       V.tile("Budget today", budgetLabel(snap.budget_today), "spend", null),
@@ -2430,13 +2432,13 @@
     // kill-switch
     var kb = V.$("#safety-kill");
     if (kb) V.mount(kb, [
-      h("div.set-status." + (ks === "engaged" ? "off" : "ok"), null, [
-        V.icon(ks === "engaged" ? "info" : "check"),
-        h("span", null, ks === "engaged"
+      h("div.set-status." + (engaged ? "off" : "ok"), null, [
+        V.icon(engaged ? "info" : "check"),
+        h("span", null, engaged
           ? "The kill-switch is ENGAGED — the agent mesh is halted (perception and memory-read stay alive)."
           : "The kill-switch is released — the agent mesh runs normally."),
       ]),
-      h("div.acts", { style: { marginTop: "12px" } }, ks === "engaged"
+      h("div.acts", { style: { marginTop: "12px" } }, engaged
         ? h("button.btn.owner", { onClick: function () {
             settingsAct({ action: "release", reason: "release from Safety" }, "Kill-switch released.", loadSafety); } }, [V.icon("play"), "Release"])
         : h("button.btn.danger", { onClick: function () {
