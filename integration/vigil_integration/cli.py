@@ -513,8 +513,15 @@ def _cmd_dossier(args: argparse.Namespace) -> int:
         print(f"dossier: run dir not found: {run_dir}", file=sys.stderr)
         return 1
     out = args.out or str(Path(run_dir) / "dossier.zip")
+    # The governed terminal transcript is a session-global signed log, so it lives OUTSIDE the run dir: take
+    # an explicit --terminal-history, else default to a terminal-history.jsonl sitting next to the run.
+    term_hist = getattr(args, "terminal_history", None)
+    if not term_hist:
+        default_hist = Path(run_dir) / "terminal-history.jsonl"
+        term_hist = str(default_hist) if default_hist.is_file() else None
     res = build_dossier(run_dir=run_dir, out_zip=out, engagement_slug=(args.slug or "engagement"),
-                        base_dir=(args.base_dir or None), generated_at=(args.timestamp or None))
+                        base_dir=(args.base_dir or None), generated_at=(args.timestamp or None),
+                        terminal_history=(term_hist or None))
     if not res.get("ok"):
         print(f"dossier: {res.get('error', 'build failed')}", file=sys.stderr)
         return 1
@@ -891,6 +898,10 @@ def build_parser() -> argparse.ArgumentParser:
     pdo.add_argument("--out", default="", help="output .zip path (default <run-dir>/dossier.zip)")
     pdo.add_argument("--slug", default="engagement", help="engagement slug stamped into the dossier")
     pdo.add_argument("--base-dir", default="", help="governance-key home (stable signer); default = run dir")
+    pdo.add_argument("--terminal-history", default="",
+                     help="OPTIONAL path to the governed terminal-history.jsonl (the operator's signed "
+                          "terminal.run records) to include as logs/terminal-transcript.jsonl; default = a "
+                          "terminal-history.jsonl next to the run dir if present")
     pdo.add_argument("--timestamp", default="",
                      help="OPTIONAL generation timestamp stamped into index.html/README (the only non-"
                           "deterministic input; omit for a byte-reproducible dossier)")

@@ -1513,9 +1513,15 @@ def build_dossier(run_id: str) -> dict:
     except (OSError, ValueError, AttributeError):
         slug = ""
     slug = "".join(c for c in str(slug).strip() if c.isalnum() or c in "-_.")[:120] or "engagement"
+    # Include the operator's signed terminal transcript (a session-global log) when one exists, so the
+    # dossier records every governed terminal command too. Already redacted at source + re-scrubbed by the
+    # compiler; covered by the dossier manifest+signature.
+    argv = [vigil, "dossier", "--run-dir", str(rd), "--out", str(out), "--slug", slug]
+    term_hist = Path(_terminal_base_dir()) / "terminal-history.jsonl"
+    if term_hist.is_file():
+        argv += ["--terminal-history", str(term_hist)]
     try:
-        proc = subprocess.run([vigil, "dossier", "--run-dir", str(rd), "--out", str(out), "--slug", slug],
-                              capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=600)
     except (OSError, subprocess.SubprocessError) as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
     if proc.returncode != 0 or not out.is_file():
