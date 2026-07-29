@@ -12,7 +12,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from vigil_core import generate_keypair
+from vigil_core import IntegrityError, generate_keypair
 
 from vigil_integration.live.approval_token import (
     ApprovalAction,
@@ -172,8 +172,9 @@ def test_blank_nonce_and_bad_inputs_refuse(tmp_path):
 
 
 def test_weak_owner_key_is_rejected_at_authority_construction():
-    # A non-canonical / low-order public key can never become a trust root (load_public_key bars it).
-    with pytest.raises(Exception):
+    # A non-canonical / low-order public key can never become a trust root (load_public_key bars it). The
+    # all-zero 32-byte key is a LOW-ORDER point — assert that SPECIFIC rejection, not merely "some error".
+    with pytest.raises(IntegrityError):
         ApprovalAuthority(owner_key_id="owner", owner_public_key_b64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 
 
