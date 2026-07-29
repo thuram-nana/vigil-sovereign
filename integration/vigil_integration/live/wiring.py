@@ -38,8 +38,10 @@ from ..attestation.identity import load_or_create_operator_keypair, operator_sig
 from ..attestation.ledger import make_ledger_writer, read_ledger, require_attestation
 from ..detection.registry import run_all_detections
 from ..oracle_adapter import confirm_and_certify
+from .approval_token import ApprovalAuthority
 from .engine import EngineSeams, VigilEngine
 from .executor import _TERMINAL_TOOL, execute, execute_terminal
+from .nonce_ledger import NonceLedger
 from .governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
 from .spine_identity import DEFAULT_SPINE_KEY_FILE, SPINE_KEY_ID, load_or_create_spine_keypair
 from .spine_vigilcore import VigilCoreSpine
@@ -212,6 +214,15 @@ class EngineConfig:
     # authorization (the `vigil engage --approve-offense` invocation); CRUCIBLE scope is enforced
     # regardless, so an out-of-scope target is still denied even with approval granted.
     owner_approves_offense: bool = False
+    # M2 — the HIGH-ASSURANCE per-action approval path (opt-in). When ``approval_authority`` is set, the
+    # engine's approval gate becomes :func:`build_approval_gate`: a queued offense tool is upgraded to allow
+    # ONLY by a valid, single-use, owner-signed, action-bound token (never a blanket standing boolean).
+    # ``approval_token_source()`` returns the (ApprovalToken, ApprovalAction) bound to the action currently
+    # being authorized; ``approval_nonce_dir`` is the atomic single-use ledger directory. Left None ⇒ the
+    # engine keeps the standing ``owner_approves_offense`` behaviour (a lower-assurance, explicit mode).
+    approval_authority: Optional[ApprovalAuthority] = None
+    approval_token_source: Optional[Callable[[], Optional[tuple]]] = None
+    approval_nonce_dir: Optional[str] = None
 
 
 def _offense_scope_source(slug: str, trust_root: Any):
@@ -305,7 +316,20 @@ def build_engine(config: EngineConfig) -> VigilEngine:
 
     _seq = {"n": 0}
 
-    approval_gate = _approval_gate(gate) if gate is not None else None
+    # The approval gate (the WARDEN human leg): the HIGH-ASSURANCE per-action token path when the operator
+    # provisioned an ApprovalAuthority, else the standing-boolean fallback. Either way a CRUCIBLE deny /
+    # tripped kill-switch is preserved — approval never widens scope.
+    if gate is None:
+        approval_gate = None
+    elif config.approval_authority is not None:
+        import time as _time
+        _nonce_dir = config.approval_nonce_dir or str(base / "approval-nonces")
+        approval_gate = build_approval_gate(
+            gate, authority=config.approval_authority, ledger=NonceLedger(_nonce_dir),
+            now=_time.time, token_source=config.approval_token_source or (lambda: None),
+        )
+    else:
+        approval_gate = _approval_gate(gate)
 
     def run_tool(tool: Any, phase: Phase, seq: int, *, approved: bool = False) -> Any:
         _seq["n"] = seq
@@ -520,6 +544,65 @@ def _approval_gate(real_gate: Callable[..., Any]) -> Callable[..., Any]:
                                f"owner-approved (WARDEN human leg satisfied); {getattr(verdict, 'reason', '')}",
                                getattr(verdict, "crucible_allowed", True), getattr(verdict, "warden", None))
         return verdict
+
+    return gate
+
+
+def build_approval_gate(
+    real_gate: Callable[..., Any],
+    *,
+    authority: ApprovalAuthority,
+    ledger: NonceLedger,
+    now: Callable[[], float],
+    token_source: Callable[[], Optional[tuple]],
+) -> Callable[..., Any]:
+    """M2 — the HIGH-ASSURANCE per-action approval gate: a WARDEN 'queue' is upgraded to 'allow' ONLY by a
+    valid, single-use, owner-signed, action-bound token for THIS exact ``(tool_name, target)`` action (see
+    :mod:`live.approval_token`). Unlike :func:`_approval_gate` (a STANDING blanket boolean), each upgrade
+    spends one owner signature bound to one action, atomically (the nonce is burned here — the single
+    execution-authorization point, called once per action inside ``execute``/``execute_terminal``).
+
+    A CRUCIBLE 'deny' (out of scope / tripped kill-switch / budget) is a 'deny', NOT a 'queue', so it is
+    returned UNTOUCHED — a token can NEVER widen scope, lift the kill-switch, or authorize a denied action;
+    it only satisfies the WARDEN human leg for an already-in-envelope action. No token (or an
+    invalid/expired/replayed one) leaves the 'queue' in place (the executor then denies), never auto-runs.
+
+    ``token_source()`` returns the ``(ApprovalToken, ApprovalAction)`` bound to the action currently being
+    authorized (or ``None``). ``now()`` is the real clock the token window is checked against (the
+    dead-man's-switch is inherently time-based; this is NOT oracle/learning math)."""
+
+    def gate(tool_name: str, target: str, destructive: bool = False, **kw: Any) -> Any:
+        verdict = real_gate(tool_name, target, destructive, **kw)
+        if getattr(verdict, "outcome", "deny") != "queue":
+            return verdict                       # allow stays allow; DENY stays DENY (token never widens scope)
+
+        pend = None
+        try:
+            pend = token_source() if callable(token_source) else None
+        except Exception:  # noqa: BLE001 — a token-source error leaves the action queued (fail-closed)
+            pend = None
+        if not (isinstance(pend, tuple) and len(pend) == 2):
+            return verdict                       # no per-action token → stays queued (the executor denies)
+        token, action = pend
+
+        # Bind the token to THIS gate call: its named tool+target must equal what is being authorized. (The
+        # finer args-digest is bound inside the token and verified against `action.action_digest` by
+        # consume_token; the caller populates `action` from the SAME action it is executing.)
+        if getattr(action, "tool_name", None) != tool_name or getattr(action, "target", None) != target:
+            return verdict
+
+        try:
+            from .approval_token import consume_token
+            decision = consume_token(token, action, authority=authority, now=float(now()), ledger=ledger)
+        except Exception:  # noqa: BLE001 — any verification/burn error leaves the action queued (fail-closed)
+            return verdict
+        if not decision.authorized:
+            return verdict                       # invalid / expired / replayed token → stays queued
+
+        from ..conjunctive_gate import GateVerdict
+        return GateVerdict(True, "allow",
+                           f"owner-approved (per-action token, single-use); {getattr(verdict, 'reason', '')}",
+                           getattr(verdict, "crucible_allowed", True), getattr(verdict, "warden", None))
 
     return gate
 
