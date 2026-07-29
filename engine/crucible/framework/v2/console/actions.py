@@ -1118,15 +1118,23 @@ _CTX_MAX_CHARS = 6000
 # for credential shapes too. Each entry is (regex, replacement); a key/value or header form keeps the NAME and
 # masks the VALUE, an opaque vendor token / JWT / PEM block is masked whole. Deterministic + total.
 _CTX_SECRET_SUBS = [
-    # credential header / secret key=value form: keep the NAME + separator, mask the following value token.
+    # AUTH HEADERS: keep the NAME + separator, mask the WHOLE value to end-of-line. A `scheme token` value has
+    # TWO tokens (`Bearer <tok>`, `Basic <b64>`), so masking only the first token leaked the credential
+    # (red-pen BLOCK — `(\S+)` stopped at the space after `Bearer`). Over-masking here is the SAFE direction.
     (re.compile(
-        r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|"
-        r"x-session-token|x-csrf-token|x-xsrf-token|x-amz-security-token|x-relay-key|password|passwd|pwd|"
-        r"secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|"
-        r"private[_-]?key|secret[_-]?key|signing[_-]?key|session[_-]?key)(\s*[:=]\s*)(\S+)"),
+        r"(?i)\b(authorization|proxy-authorization|www-authenticate|cookie|set-cookie|x-api-key|api-key|"
+        r"x-auth-token|x-session-token|x-amz-security-token|x-relay-key)(\s*[:=]\s*)([^\r\n]+)"),
      r"\1\2" + MASK),
-    # a Bearer scheme with an opaque token after it.
-    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{6,}"), "Bearer " + MASK),
+    # a standalone auth SCHEME + opaque token (Bearer/Basic/Negotiate/Digest) anywhere — mask the token.
+    (re.compile(r"(?i)\b(bearer|basic|negotiate|digest)\s+[A-Za-z0-9+/=._\-]{6,}"), r"\1 " + MASK),
+    # a password in a URL userinfo (scheme://user:PASS@host) — mask the password, keep scheme+user (red-pen BLOCK).
+    (re.compile(r"(?i)([a-z][a-z0-9+.\-]*://[^/@\s:]+):[^/@\s]+@"), r"\1:" + MASK + "@"),
+    # other secret KEY=VALUE / secret key names: keep the NAME + separator, mask the value TOKEN.
+    (re.compile(
+        r"(?i)\b(x-csrf-token|x-xsrf-token|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
+        r"refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|secret[_-]?key|signing[_-]?key|"
+        r"session[_-]?key)(\s*[:=]\s*)(\S+)"),
+     r"\1\2" + MASK),
     # well-known opaque vendor credentials — masked whole (sk-ant first: it is a prefix of sk-).
     (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{6,}"), MASK),
     (re.compile(r"\bsk-[A-Za-z0-9]{16,}"), MASK),
@@ -1151,9 +1159,10 @@ def _redact_context_text(s):
 
 
 def _redact_ctx(obj):
-    """Recursively apply the free-text credential masker to every string in a JSON-ish structure. Combined
-    with ``scrub_log_event`` (which masks by secret KEY name), this gives two independent redaction passes
-    over the session context before it can leave the host."""
+    """Recursively apply the free-text credential masker to every string in a JSON-ish structure. This is the
+    LOAD-BEARING redaction for the context (which is rebuilt from hardcoded non-secret keys, so it scans the
+    VALUES for credential shapes — auth headers whole, URL userinfo, vendor tokens, JWT, PEM, kv secrets).
+    ``scrub_log_event`` is applied as a defense-in-depth key-NAME pass on top."""
     if isinstance(obj, str):
         return _redact_context_text(obj)
     if isinstance(obj, dict):
@@ -1167,9 +1176,10 @@ def _session_terminal_context(run_id=None, session_id=None) -> dict:
     """Assemble a COMPACT, secret-REDACTED snapshot of the session for the terminal chatbot to reason over:
     the run's findings (FACT/LEAD title + bug_class + surface), recent runs, and recent terminal commands.
     Built ONLY from EXISTING read providers (``api.list_runs`` / ``api.run_report`` / ``terminal_history``) —
-    it invents no data and runs nothing. Every string is passed through ``_redact_ctx`` (free-text credential
-    masker) AND ``scrub_log_event`` (secret-key masker) before return, because this context EGRESSES to the
-    model. Total: any provider failure degrades to an empty section, never a traceback."""
+    it invents no data and runs nothing. Every string is passed through ``_redact_ctx`` — the load-bearing
+    free-text credential-shape masker (auth headers, URL userinfo, vendor tokens, JWT, PEM, kv secrets) — plus
+    a defense-in-depth ``scrub_log_event`` key-name pass, because this context EGRESSES to the model. Total:
+    any provider failure degrades to an empty section, never a traceback."""
     from . import api  # lazy: avoid an actions<->api import cycle
 
     ctx: dict = {"run_id": None, "findings": [], "recent_runs": [], "recent_commands": []}
@@ -1224,7 +1234,8 @@ def _session_terminal_context(run_id=None, session_id=None) -> dict:
         if isinstance(rec, dict):
             ctx["recent_commands"].append({"argv": rec.get("argv") or [], "exit_code": rec.get("exit_code")})
 
-    # MANDATORY: two independent redaction passes before this context can leave the host.
+    # MANDATORY before this context leaves the host: the load-bearing free-text credential-shape masker
+    # (_redact_ctx), then a defense-in-depth secret-key-name pass (scrub_log_event).
     return scrub_log_event(_redact_ctx(ctx))
 
 

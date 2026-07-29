@@ -162,17 +162,21 @@ def test_session_context_redacts_secrets_before_egress(monkeypatch):
     # Plant secrets in a finding (free-text credential shapes) and assert they are ABSENT from the assembled
     # context that egresses to the model — while non-secret grounding (bug_class) survives.
     vendor_secret = "sk-ant-TOPSECRETVALUE0123456789"
-    jwt_secret = "eyJhbGciOiJIUzI1NiJ9.PAYLOADPAYLOADXX.SIGSIGSIGSIG"
     aws_secret = "AKIAIOSFODNN7EXAMPLE"
+    # an OPAQUE bearer token (NOT a JWT / vendor prefix) — this must be masked by the auth-HEADER rule itself,
+    # not incidentally by a JWT/vendor rule (red-pen BLOCK-1: `(\S+)` stopped at the space after `Bearer`).
+    bearer_opaque = "aQ7kZ9pR2mN4wX6vB8tL0cD5F1gH3jK"
+    basic_b64 = "YWRtaW46U3VwZXJTZWNyZXRQYXNz"                 # base64(admin:SuperSecretPass)
+    url_password = "SuperSecretURLpass"                        # a password in the target URL's userinfo
 
     monkeypatch.setattr(api, "list_runs", lambda: {"runs": [
-        {"run_id": "run-1", "target": "http://127.0.0.1", "mode": "url", "status": "done",
-         "findings": 1, "has_report": True}]})
+        {"run_id": "run-1", "target": "http://admin:" + url_password + "@10.0.0.5/login", "mode": "url",
+         "status": "done", "findings": 1, "has_report": True}]})
     monkeypatch.setattr(api, "run_report", lambda rid: {"findings": [
         {"grounding": "fact",
          "title": "Auth bypass; response leaked " + vendor_secret + " and " + aws_secret,
          "bug_class": "broken-auth",
-         "surface": "Authorization: Bearer " + jwt_secret,
+         "surface": "Authorization: Bearer " + bearer_opaque + " ; Authorization: Basic " + basic_b64,
          "severity": "high"}]})
     monkeypatch.setattr(actions, "terminal_history", lambda: {"ok": True, "records": [
         {"argv": ["cat", "app.log"], "exit_code": 0}]})
@@ -180,9 +184,12 @@ def test_session_context_redacts_secrets_before_egress(monkeypatch):
     ctx = actions._session_terminal_context("run-1")
     blob = json.dumps(ctx)
 
-    # every planted secret VALUE is gone from what egresses:
+    # every planted secret VALUE is gone from what egresses — incl. the opaque Bearer token, the Basic
+    # credential, and the URL-userinfo password (the two red-pen BLOCKs):
     assert vendor_secret not in blob
-    assert "eyJhbGciOiJIUzI1NiJ9" not in blob                  # JWT masked whole
+    assert bearer_opaque not in blob                           # opaque Bearer token masked by the header rule
+    assert basic_b64 not in blob                               # Basic credential masked
+    assert url_password not in blob                            # URL-userinfo password masked
     assert aws_secret not in blob
     # a redaction placeholder was applied, and non-secret grounding is preserved (context stays useful):
     assert actions.MASK in blob
