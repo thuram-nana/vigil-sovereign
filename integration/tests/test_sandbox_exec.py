@@ -77,6 +77,30 @@ def test_no_network_egress_from_inside(tmp_path):
 
 
 @_needs_bwrap
+def test_no_host_unix_socket_egress(tmp_path):
+    # RED-PEN regression: a wholesale --ro-bind / / carried host daemon sockets (docker.sock, D-Bus) INTO the
+    # box, and --unshare-net does NOT isolate PATHNAME unix sockets (they live in the mount ns) — so an in-box
+    # connect() reached host Docker (= host root) + D-Bus. The minimal bind (no /run, /var, /home) removes
+    # them: prove an in-box connect() to each host socket finds NOTHING to connect to.
+    ws = tmp_path / "ws"; ws.mkdir()
+    prog = ("python3 - <<'PYEOF'\n"
+            "import socket\n"
+            "paths=('/run/docker.sock','/var/run/docker.sock','/run/dbus/system_bus_socket','/run/user/1000/bus')\n"
+            "for p in paths:\n"
+            "    s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(2)\n"
+            "    try:\n"
+            "        s.connect(p); print('CONNECTED', p)\n"
+            "    except OSError as e:\n"
+            "        print('no-socket', p, type(e).__name__)\n"
+            "    finally:\n"
+            "        s.close()\n"
+            "PYEOF\n")
+    out = run_sandboxed(prog, workspace=ws, timeout=20)
+    assert "CONNECTED" not in out.stdout        # NO host daemon socket is reachable from inside the box
+    assert "no-socket" in out.stdout            # the connects were actually attempted (not skipped)
+
+
+@_needs_bwrap
 def test_arbitrary_shell_composition_works_inside(tmp_path):
     # the whole point of the tier: a full shell (pipes, redirects, subshells) works — safely, because isolated.
     ws = tmp_path / "ws"; ws.mkdir()
@@ -115,9 +139,12 @@ def test_argv_shape_enforces_the_floors():
     assert argv[0] == "/usr/bin/bwrap"
     assert "--unshare-all" in argv                                     # net (+ pid/ipc/…) unshared
     assert "--new-session" in argv                                     # blocks TIOCSTI stdin injection
-    # host root mounted read-only; the ONLY writable bind is the workspace
+    # a MINIMAL read-only bind (program dirs), NEVER the wholesale root bind (which would carry host daemon
+    # sockets into the box); the ONLY writable bind is the workspace.
     j = " ".join(argv)
-    assert "--ro-bind / /" in j and f"--bind {ws} {ws}" in j and f"--chdir {ws}" in j
+    assert "--ro-bind /usr /usr" in j
+    assert "--ro-bind / /" not in j
+    assert f"--bind {ws} {ws}" in j and f"--chdir {ws}" in j
     # the command is the LAST element after `-- /bin/sh -c`, so it cannot inject into bwrap's own options
     assert argv[-3:] == ["/bin/sh", "-c", "id; whoami"] and "--" in argv
 

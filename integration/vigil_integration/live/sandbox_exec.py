@@ -5,9 +5,16 @@ by KERNEL isolation, not by an allowlist:
 
   * **NO EGRESS** — the network namespace is unshared (``--unshare-net``), so nothing inside can reach any
     host (DNS fails, every connect fails). This is the never-liftable egress floor, by construction.
-  * **NO WRITE OUTSIDE THE WORKSPACE** — the host root is mounted READ-ONLY (``--ro-bind / /``); the ONLY
-    writable paths are the bound workspace dir (``--bind ws ws``) and an ephemeral ``--tmpfs /tmp``. A write
-    anywhere else fails with EROFS.
+  * **NO WRITE OUTSIDE THE WORKSPACE** — only a MINIMAL set of program/library/config dirs is mounted
+    READ-ONLY (``--ro-bind /usr /usr`` …, NOT a wholesale ``--ro-bind / /``); the ONLY writable paths are the
+    bound workspace dir (``--bind ws ws``) and an ephemeral ``--tmpfs /tmp``. A write anywhere else fails.
+
+**Why NOT ``--ro-bind / /``** (a red-pen BLOCK): a wholesale root bind carries the host ``/run`` — and every
+host daemon socket in it (``/run/docker.sock`` = host-root-equivalent, the system/session D-Bus) — INTO the
+box. Unix-domain sockets live in the MOUNT namespace, so ``--unshare-net`` does NOT isolate them: an in-box
+command could ``connect()`` the host Docker/D-Bus socket and pivot to host root. So we bind ONLY the specific
+read paths the tier needs (no ``/run``, no ``/home``, no ``/var``), and the egress floor holds because no
+host socket is present in the box at all — the net-namespace unshare then covers IP + abstract sockets.
 
 Inside those floors the command may be ARBITRARY (a full ``/bin/sh -c``), because the box cannot egress or
 escape the workspace — this is the "do everything a local shell can" tier, made safe by ISOLATION rather
@@ -31,14 +38,25 @@ from typing import Callable, Optional
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_OUTPUT_CAP = 1_000_000  # 1 MB per stream
 
-# The isolation profile. --unshare-all unshares the net/pid/ipc/uts/cgroup (and user) namespaces; the
-# load-bearing one for the egress floor is the NET unshare. --ro-bind mounts the host root READ-ONLY; a
-# fresh --proc/--dev keep the box from leaking host process/device state; --tmpfs /tmp is ephemeral scratch;
-# --die-with-parent kills the box if we die; --new-session blocks TIOCSTI stdin-injection escapes. The
-# workspace bind + --chdir are appended per call (the ONLY writable host path).
+# The isolation profile. --unshare-all unshares the net/pid/ipc/uts/cgroup/user namespaces; the load-bearing
+# one for the egress floor is the NET unshare (which covers IP + ABSTRACT unix sockets). We mount ONLY a
+# MINIMAL read-only allowlist of program/library/config dirs — NEVER a wholesale `--ro-bind / /`, which would
+# carry host daemon sockets (/run/docker.sock, D-Bus) into the box; PATHNAME unix sockets are in the MOUNT
+# namespace, so --unshare-net does NOT isolate them, and a bound host socket = a pivot to host root (red-pen
+# BLOCK). No /run, /home, or /var is bound, so no host socket exists in the box. --ro-bind-try tolerates a
+# dir that is absent on a given distro (e.g. /lib64 on some). A fresh --proc/--dev avoid host process/device
+# leaks; --tmpfs /tmp is ephemeral scratch; --die-with-parent reaps the box; --new-session blocks TIOCSTI
+# stdin-injection. The workspace bind + --chdir (the ONLY writable host path) are appended per call.
 _BWRAP_BASE_FLAGS = (
     "--unshare-all", "--die-with-parent", "--new-session",
-    "--ro-bind", "/", "/",
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind-try", "/bin", "/bin",
+    "--ro-bind-try", "/sbin", "/sbin",
+    "--ro-bind-try", "/lib", "/lib",
+    "--ro-bind-try", "/lib32", "/lib32",
+    "--ro-bind-try", "/lib64", "/lib64",
+    "--ro-bind-try", "/libx32", "/libx32",
+    "--ro-bind-try", "/etc", "/etc",
     "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
 )
 
