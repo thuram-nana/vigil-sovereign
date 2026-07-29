@@ -257,6 +257,24 @@ def inbox(slug: str) -> dict[str, Any]:
         return payload
 
 
+def telemetry() -> dict[str, Any]:
+    """G2 — the live assurance/metrics snapshot the ``vigil up --with-telemetry`` collector materializes from
+    the signed spine (per-engagement fact/lead/refusal/tool counts + totals). Read-only: the console just
+    SERVES the collector's snapshot file — a pure one-way projection of the append-only spine (nothing is read
+    back into it; it never mints a fact). Total: an absent file (collector not running) or any read error
+    yields an honest ``running: false`` marker with a start hint, never a traceback."""
+    import os
+
+    base = os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live"
+    path = Path(base) / "live-ui" / "telemetry.json"
+    doc = _safe(lambda: json.loads(path.read_text(encoding="utf-8")), default=None)
+    if not isinstance(doc, dict):
+        return {"ok": True, "running": False, "engagements": [], "totals": {},
+                "note": "the assurance/telemetry collector is not running — start it with "
+                        "`vigil up --with-telemetry` (a read-only, no-egress projection of the signed spine)."}
+    return {"ok": True, "running": True, **doc}
+
+
 def run_report(run_id: str) -> dict[str, Any]:
     """The saved `build_report` document for a console run (findings + attack_paths +
     summary), or an error marker if it has not finished yet."""

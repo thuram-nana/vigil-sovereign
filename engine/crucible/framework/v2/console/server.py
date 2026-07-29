@@ -69,6 +69,7 @@ _EXACT_ROUTES = {
     "/api/capabilities": api.capabilities_data,
     "/api/aegis/status": api.aegis_status,
     "/api/feed/status": api.feed_status,        # K1: read-only vuln-feed schedule/egress posture
+    "/api/telemetry": api.telemetry,            # G2: live assurance/metrics snapshot over the signed spine
     "/api/terminal/history": actions.terminal_history,   # T2: recent signed terminal.run records (read-only)
 }
 
