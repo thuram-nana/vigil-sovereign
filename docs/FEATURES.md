@@ -1,5 +1,7 @@
 # VIGIL — feature catalog (every feature, and how it works)
 
+> 📺 **See it in action:** [the full end-to-end demo video](https://youtu.be/iPIpk9QCKVw) walks through every feature below — live, with oracle-proven findings and the SIGIL sovereign voice.
+
 The exhaustive, code-grounded inventory of what VIGIL does and **how each piece works** — one entry
 per feature, each citing the `file:line` that implements it and its **honest status** (live / opt-in /
 gated / scaffold / stub / conditional). This is the "nothing left out" companion to

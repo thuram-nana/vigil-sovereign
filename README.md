@@ -6,6 +6,10 @@
 
 **Sovereign · Provable · Autonomous — security testing and a personal AI assistant, on hardware you own.**
 
+### 📺 [Watch the full end-to-end demo →](https://youtu.be/iPIpk9QCKVw)
+
+*A complete walkthrough — every feature end-to-end, live oracle-proven findings, the interaction-driven UI, and the SIGIL sovereign voice.*
+
 </div>
 
 ---
