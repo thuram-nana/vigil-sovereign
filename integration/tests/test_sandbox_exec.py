@@ -149,7 +149,10 @@ def test_argv_shape_enforces_the_floors():
     assert argv[-3:] == ["/bin/sh", "-c", "id; whoami"] and "--" in argv
 
 
-def test_injected_runner_receives_the_bwrap_argv(tmp_path):
+def test_injected_runner_receives_the_bwrap_argv(tmp_path, monkeypatch):
+    # This unit-tests the argv construction + the injected-runner seam, so it must NOT require a real bwrap on
+    # the host (CI has none) — pin bwrap_path to a fake path so the argv builds and the fake runner is reached.
+    monkeypatch.setattr("vigil_integration.live.sandbox_exec.bwrap_path", lambda: "/usr/bin/bwrap")
     ws = tmp_path / "ws"; ws.mkdir()
     seen = {}
 
