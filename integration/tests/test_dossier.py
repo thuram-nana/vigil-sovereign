@@ -411,3 +411,50 @@ def test_vigil_dossier_cli_verb(tmp_path):
         man = _manifest(zf)
         for e in man["entries"]:
             assert hashlib.sha256(zf.read(e["path"])).hexdigest() == e["sha256"]
+
+
+# --------------------------------------------------------------------------------------------------
+# the governed terminal transcript — included, scrubbed, and manifest-covered
+# --------------------------------------------------------------------------------------------------
+
+
+def _terminal_history_with_secret(path: Path) -> None:
+    # a signed terminal.run ExecRecord + a secret under a secret-named key (redacted at source in production;
+    # planted here to prove the compiler re-scrubs it) + an unparseable line (must be dropped, not shipped).
+    path.write_text(
+        json.dumps({"seq": 1, "tool": "terminal.run", "argv": ["cat", "/etc/hostname"], "exit_code": 0,
+                    "tier": "A2", "signature": "sig-abc", "authorization": "Bearer TERMSECRET-XYZ"}) + "\n" +
+        "this line is not json\n", encoding="utf-8")
+
+
+def test_terminal_transcript_included_scrubbed_and_manifested(tmp_path):
+    run = tmp_path / "run"; run.mkdir()
+    _findings_json(run)
+    hist = tmp_path / "terminal-history.jsonl"
+    _terminal_history_with_secret(hist)
+    out = tmp_path / "dossier.zip"
+    res = build_dossier(run_dir=str(run), out_zip=str(out), engagement_slug="acme", base_dir=str(run),
+                        terminal_history=str(hist))
+    assert res["ok"]
+    with zipfile.ZipFile(out) as zf:
+        names = _entries(zf)
+        assert "logs/terminal-transcript.jsonl" in names           # the transcript is in the archive
+        body = zf.read("logs/terminal-transcript.jsonl").decode("utf-8")
+        assert "terminal.run" in body and "cat" in body            # the command is recorded
+        assert "TERMSECRET-XYZ" not in body                        # the planted secret was scrubbed
+        assert "this line is not json" not in body                 # the unparseable line was dropped
+        man = _manifest(zf)                                         # tamper-evident: manifest covers it
+        listed = {e["path"] for e in man["entries"]}
+        assert "logs/terminal-transcript.jsonl" in listed
+        for e in man["entries"]:
+            assert hashlib.sha256(zf.read(e["path"])).hexdigest() == e["sha256"]
+
+
+def test_no_terminal_history_no_transcript_entry(tmp_path):
+    run = tmp_path / "run"; run.mkdir()
+    _findings_json(run)
+    out = tmp_path / "dossier.zip"
+    res = build_dossier(run_dir=str(run), out_zip=str(out), engagement_slug="acme", base_dir=str(run))
+    assert res["ok"]
+    with zipfile.ZipFile(out) as zf:
+        assert "logs/terminal-transcript.jsonl" not in _entries(zf)   # absent when no transcript is supplied

@@ -201,6 +201,37 @@ def _scrub_log(run_dir: Path) -> tuple[Optional[str], int]:
     return ("\n".join(out_lines) + ("\n" if out_lines else ""), dropped)
 
 
+def _scrub_jsonl_file(path: Path) -> tuple[Optional[str], int]:
+    """SCRUB one explicit JSONL file (the governed terminal transcript) the SAME way as the engagement log:
+    every parseable object line through ``common.logging._scrub`` then re-dumped deterministically; an
+    unparseable line is DROPPED, never shipped in the clear. The terminal ExecRecords are ALREADY redacted
+    at source (redacted argv + redacted stdout/stderr); this is a defense-in-depth key-name pass on top.
+    Path-safe: a symlink / non-file / unreadable path yields ``(None, 0)``, never a traceback."""
+    if not (path.is_file() and not path.is_symlink()):
+        return (None, 0)
+    text = _read_text(path)
+    if text is None:
+        return (None, 0)
+    out_lines: list[str] = []
+    dropped = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            dropped += 1
+            continue
+        if not isinstance(obj, dict):
+            dropped += 1
+            continue
+        out_lines.append(json.dumps(_scrub(None, "", obj), sort_keys=True, default=str))
+    if not out_lines and dropped == 0:
+        return (None, 0)
+    return ("\n".join(out_lines) + ("\n" if out_lines else ""), dropped)
+
+
 def _find_spine(run_dir: Path, base_dir: Optional[str]) -> dict[str, bytes]:
     """Any hash-linked, governance-signed spine artifact present (already redacted at rest). Searches
     ``run_dir`` for the json head/chain forms and ``run_dir``/``base_dir`` for a ``<slug>.spine`` file.
@@ -408,7 +439,7 @@ code.inl { background: rgba(127,127,127,.16); padding: .05rem .35rem; border-rad
 def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
                   proof: dict, spine_names: list[str], has_drift: bool, has_log: bool,
                   signed: bool, fingerprint: str, generated_at: Optional[str],
-                  included: list[str]) -> str:
+                  included: list[str], has_terminal: bool = False) -> str:
     """Build the self-contained index.html. Reflects EXACTLY what the run produced: FACTs from the
     reverifiable set, findings/remediation from the report export when present, and the REAL offline
     verify command for the embedded proof bundle. Never fabricates a fact, never overclaims a lead."""
@@ -539,6 +570,8 @@ def _render_index(*, engagement_slug: str, facts: list[dict], reports: _Reports,
     extras = []
     if has_log:
         extras.append("a secret-scrubbed engagement log")
+    if has_terminal:
+        extras.append("the signed terminal transcript (the operator's governed terminal commands, scrubbed)")
     if spine_names:
         extras.append("the hash-linked, governance-signed spine chain")
     if has_drift:
@@ -676,6 +709,7 @@ def build_dossier(
     base_dir: Optional[str] = None,
     vault: Any = None,
     generated_at: Optional[str] = None,
+    terminal_history: Optional[str] = None,
 ) -> dict:
     """Assemble EVERYTHING a run produced into one self-contained, tamper-evident ``.zip`` at ``out_zip``.
 
@@ -727,6 +761,20 @@ def build_dossier(
         if dropped:
             notes.append(f"engagement log: dropped {dropped} unparseable line(s) (not shipped in the clear)")
 
+    # 4b) the governed terminal transcript (the operator's signed terminal.run ExecRecords) — an optional,
+    #     session-global log (NOT run-specific): every command the operator ran through the governed terminal,
+    #     already redacted at source, secret-scrubbed again here, and covered by the dossier manifest+signature
+    #     so it is tamper-evident inside the archive.
+    has_terminal = False
+    if terminal_history:
+        term_text, term_dropped = _scrub_jsonl_file(Path(terminal_history))
+        if term_text is not None:
+            entries["logs/terminal-transcript.jsonl"] = term_text.encode("utf-8")
+            has_terminal = True
+            if term_dropped:
+                notes.append(f"terminal transcript: dropped {term_dropped} unparseable line(s) "
+                             "(not shipped in the clear)")
+
     # 5) spine chain (verbatim, already redacted)
     spine = _find_spine(run, base_dir)
     for name, b in sorted(spine.items()):
@@ -757,7 +805,7 @@ def build_dossier(
 
     index_html = _render_index(
         engagement_slug=engagement_slug, facts=facts, reports=reports, proof=proof,
-        spine_names=sorted(spine), has_drift=has_drift, has_log=has_log,
+        spine_names=sorted(spine), has_drift=has_drift, has_log=has_log, has_terminal=has_terminal,
         signed=signed, fingerprint=fingerprint, generated_at=generated_at,
         included=included_preview)
     entries["index.html"] = index_html.encode("utf-8")
