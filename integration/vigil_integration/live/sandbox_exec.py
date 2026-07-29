@@ -16,6 +16,12 @@ command could ``connect()`` the host Docker/D-Bus socket and pivot to host root.
 read paths the tier needs (no ``/run``, no ``/home``, no ``/var``), and the egress floor holds because no
 host socket is present in the box at all — the net-namespace unshare then covers IP + abstract sockets.
 
+**Documented residuals (reviewed, NOT escapes):** (1) ``--ro-bind /etc /etc`` exposes the host ``/etc``
+READ-ONLY inside the box (glibc/NSS needs it) — a minor host-config disclosure (``/etc/passwd`` etc.), but
+``/etc/shadow`` is mode-640 and unreadable to the box user, and there is no egress to exfiltrate it. (2) A
+host-side attacker who can race the workspace path between ``_safe_workspace``'s resolve and bwrap's bind
+(a classic TOCTOU) is out of the in-sandbox threat model — the untrusted IN-box command cannot exploit it.
+
 Inside those floors the command may be ARBITRARY (a full ``/bin/sh -c``), because the box cannot egress or
 escape the workspace — this is the "do everything a local shell can" tier, made safe by ISOLATION rather
 than by the read-only allowlist that the un-sandboxed host path (``live.executor.execute_terminal``) uses.
