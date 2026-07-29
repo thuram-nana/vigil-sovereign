@@ -827,6 +827,7 @@ _TERMINAL_METACHARS: frozenset = frozenset(
 )
 
 _TERMINAL_TOOL = "terminal.run"
+_SANDBOX_TOOL = "sandbox.exec"
 
 
 def _terminal_warden_tier() -> str:
@@ -839,6 +840,17 @@ def _terminal_warden_tier() -> str:
     try:
         from vigil_core.warden_tiers import has_danger_token
         return "A3" if has_danger_token(_TERMINAL_TOOL) else "A2"
+    except Exception:  # noqa: BLE001 — cannot import the classifier ⇒ fail-closed to the most-gated tier
+        return "A3"
+
+
+def _sandbox_warden_tier() -> str:
+    """The WARDEN tier ``sandbox.exec`` classifies to under the ONE shared classifier — A3 (it carries an A3
+    danger token; arbitrary exec is the most-gated capability). NEVER auto (A0/A1). Checked as a construction
+    invariant in the executor. Total — any import failure yields A3 (fail-closed to the most-gated tier)."""
+    try:
+        from vigil_core.warden_tiers import has_danger_token
+        return "A3" if has_danger_token(_SANDBOX_TOOL) else "A2"
     except Exception:  # noqa: BLE001 — cannot import the classifier ⇒ fail-closed to the most-gated tier
         return "A3"
 
@@ -1126,6 +1138,115 @@ def _execute_terminal(command, phase, *, gate, view, destructive_view, run, run_
     return ExecResult(
         tool=_TERMINAL_TOOL, ran=True, outcome="ran",
         reason="terminal command executed under the sovereign gates",
+        tier=warden_tier, destructive=bool(getattr(verdict, "destructive", False)),
+        requires_quorum=bool(getattr(verdict, "requires_quorum", False)),
+        signed=signed, target="local", argv=tuple(record.argv), exit_code=outcome.exit_code,
+        timed_out=outcome.timed_out, truncated=outcome.truncated,
+        stdout=outcome.stdout, stderr=outcome.stderr, record=record,
+    )
+
+
+# ===================================================================================================
+# sandbox.exec — the GATED entry over the network-isolated bwrap sandbox (live.sandbox_exec)
+# ===================================================================================================
+#
+# Where ``execute_terminal`` runs an ALLOWLISTED read-only command on the host, ``execute_sandbox`` runs an
+# ARBITRARY command inside the bwrap sandbox (safe by KERNEL isolation — no egress, workspace-confined write).
+# It reuses the SAME gate + signed-record machinery: (0) no signer ⇒ refuse; (1) validate command + workspace;
+# (2) construction invariant — sandbox.exec must classify A2/A3 (never auto); (3) authorize through the
+# conjunctive gate scoped on 127.0.0.1 (CRUCIBLE loopback scope + kill-switch + the owner-approval / M2
+# per-action-token leg — sandbox.exec is A3 so under the A1 ceiling it QUEUES, never auto); (4) run inside the
+# isolated box (a missing bwrap / unsafe workspace is a DENY — NEVER an un-sandboxed run); (5) signed, redacted
+# ExecRecord. Never raises — any unexpected condition is a DENY.
+
+
+def execute_sandbox(
+    command: Any,
+    phase: Any,
+    *,
+    workspace: Any = None,
+    gate: Optional[Callable[..., Any]] = None,
+    view: Any = None,
+    destructive_view: Any = None,
+    run_sandbox: Optional[Callable[..., Any]] = None,
+    signer: Optional[Callable[[bytes], Any]] = None,
+    seq: Any = 0,
+    now: Any = 0,
+    timeout: float = DEFAULT_TIMEOUT,
+    output_cap: int = DEFAULT_OUTPUT_CAP,
+) -> ExecResult:
+    """Run an ARBITRARY ``command`` inside the network-isolated, workspace-confined bwrap sandbox, gated +
+    signed exactly like every other governed tool. Fail-closed at every stage; never raises."""
+    try:
+        return _execute_sandbox(command, phase, workspace=workspace, gate=gate, view=view,
+                                destructive_view=destructive_view, run_sandbox=run_sandbox, signer=signer,
+                                seq=seq, now=now, timeout=timeout, output_cap=output_cap)
+    except Exception:  # noqa: BLE001 — total on untrusted input; an internal error is a DENY, never a raise
+        return _deny(_SANDBOX_TOOL, "internal error while executing the sandbox command (fail-closed)")
+
+
+def _execute_sandbox(command, phase, *, workspace, gate, view, destructive_view, run_sandbox, signer, seq,
+                     now, timeout, output_cap) -> ExecResult:
+    from .sandbox_exec import SandboxUnavailable
+    from .sandbox_exec import run_sandboxed as _run_sandboxed
+    run_sandbox = run_sandbox or _run_sandboxed
+
+    # (0) recordable — no signer ⇒ refuse an unrecordable (hence unprovable) command before anything.
+    if not callable(signer):
+        return _deny(_SANDBOX_TOOL, "no signer wired — refusing to run an unrecordable command (fail-closed)")
+    cmd = command if isinstance(command, str) else str(command or "")
+    if not cmd.strip():
+        return _deny(_SANDBOX_TOOL, "empty sandbox command (fail-closed)")
+    if not workspace:                                    # None / empty — the runner's _safe_workspace does the rest
+        return _deny(_SANDBOX_TOOL, "no sandbox workspace wired (fail-closed)")
+
+    # (1) construction invariant (defense in depth): sandbox.exec must classify A2/A3 — NEVER auto (A0/A1).
+    warden_tier = _sandbox_warden_tier()
+    if warden_tier not in ("A2", "A3"):
+        return _deny(_SANDBOX_TOOL,
+                     f"sandbox.exec classified {warden_tier!r} (auto-eligible) — refused (fail-closed)",
+                     tier=warden_tier)
+
+    # (2) authorize — scoped on the LOCAL host 127.0.0.1 (CRUCIBLE loopback scope check + kill-switch), the
+    #     phase gate (sandbox.exec must be registered for the phase), the destructive classification, and the
+    #     injected conjunctive gate (owner-approval / M2 per-action token). Proceed ONLY on allow.
+    verdict = authorize_tool_call(_SANDBOX_TOOL, {"command": cmd}, phase, gate=gate,
+                                  view=view if isinstance(view, dict) else {},
+                                  destructive_view=destructive_view, resolved_target="127.0.0.1", now=now)
+    if not getattr(verdict, "allowed", False):
+        return _deny(_SANDBOX_TOOL, f"authorization denied: {getattr(verdict, 'reason', '')}",
+                     tier=getattr(verdict, "tier", warden_tier),
+                     destructive=bool(getattr(verdict, "destructive", False)),
+                     requires_quorum=bool(getattr(verdict, "requires_quorum", False)), target="local")
+    rec_verdict = replace(verdict, tier=warden_tier) if is_dataclass(verdict) else verdict
+
+    # (3) run inside the network-isolated, workspace-confined bwrap sandbox. A missing bwrap or an unsafe
+    #     workspace is a DENY (fail-closed — there is NEVER an un-sandboxed fallback). The command is ARBITRARY:
+    #     it is safe by KERNEL isolation (no egress, no write outside the workspace), not by an allowlist.
+    try:
+        sout = run_sandbox(cmd, workspace=workspace, timeout=timeout, output_cap=output_cap)
+        outcome = _coerce_outcome(sout, output_cap)      # SandboxOutcome duck-types (stdout/stderr/exit_code/…)
+    except SandboxUnavailable as e:
+        return _deny(_SANDBOX_TOOL, f"sandbox unavailable — refused (fail-closed): {e}", tier=warden_tier,
+                     destructive=bool(getattr(verdict, "destructive", False)),
+                     requires_quorum=bool(getattr(verdict, "requires_quorum", False)), target="local")
+    except ValueError as e:
+        return _deny(_SANDBOX_TOOL, f"unsafe sandbox workspace — refused (fail-closed): {e}", tier=warden_tier,
+                     destructive=bool(getattr(verdict, "destructive", False)),
+                     requires_quorum=bool(getattr(verdict, "requires_quorum", False)), target="local")
+    except Exception as exc:  # noqa: BLE001 — a runner outage is a captured failure, never a crash
+        outcome = _coerce_outcome(
+            RunOutcome(exit_code=None, stdout="", stderr=f"sandbox runner error: {type(exc).__name__}: {exc}"),
+            output_cap)
+
+    # (4) signed, redacted spine record; RAW streams returned for the caller (never persisted here). The
+    #     command is recorded (redacted) as a single argv element — the exact string the sandbox shell ran.
+    record, signed = _build_record(seq=seq, now=now, tool=_SANDBOX_TOOL, phase=phase, verdict=rec_verdict,
+                                   target="local", redacted_argv=_redact_argv([cmd]), outcome=outcome,
+                                   signer=signer)
+    return ExecResult(
+        tool=_SANDBOX_TOOL, ran=True, outcome="ran",
+        reason="sandbox command executed under the sovereign gates + kernel isolation",
         tier=warden_tier, destructive=bool(getattr(verdict, "destructive", False)),
         requires_quorum=bool(getattr(verdict, "requires_quorum", False)),
         signed=signed, target="local", argv=tuple(record.argv), exit_code=outcome.exit_code,

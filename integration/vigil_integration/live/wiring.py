@@ -63,6 +63,11 @@ DEFAULT_TOOL_VIEW: dict[str, list[str]] = {
     # destructive view. It classifies A2 (no danger token) → under the A1 offense ceiling the conjunctive
     # gate QUEUES it for owner approval; it can never auto-run.
     "terminal.run": ["informational", "exploitation", "post_exploitation"],
+    # sandbox.exec: the network-isolated bwrap write/exec tier (executor.execute_sandbox). It runs an
+    # ARBITRARY command, safe by KERNEL isolation (no egress, workspace-confined write). It carries an A3
+    # danger token → classifies A3, the MOST-gated tier → under the A1 offense ceiling the conjunctive gate
+    # QUEUES it for a per-action owner approval (the M2 token), never auto. Registered for the phase gate.
+    "sandbox.exec": ["informational", "exploitation", "post_exploitation"],
 }
 # The operator manifest of destructive tools (authoritative for the m-of-n threshold-destruction leg).
 DEFAULT_DESTRUCTIVE_VIEW: dict[str, bool] = {"sqlmap": True, "hydra": True, "metasploit": True}

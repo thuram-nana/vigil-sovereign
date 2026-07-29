@@ -717,6 +717,62 @@ def _cmd_terminal(args: argparse.Namespace) -> int:
     return 0 if res.ran else 2
 
 
+def _cmd_sandbox(args: argparse.Namespace) -> int:
+    """`vigil sandbox <command...>` — run an ARBITRARY command inside the network-isolated, workspace-confined
+    bwrap sandbox (``executor.execute_sandbox``), gated + signed exactly like ``vigil terminal`` (reusing
+    ``build_terminal_runtime``'s conjunctive gate + sealed spine signer). ``sandbox.exec`` classifies WARDEN A3
+    (→ QUEUES under the A1 offense ceiling, never auto); ``--approve`` upgrades the queue to allow. The command
+    runs safe by KERNEL isolation — no network egress, writes confined to ``<base_dir>/sandbox-workspace`` — so
+    it is the "do anything a local shell can" tier; a missing bwrap is a clean refusal (NO un-sandboxed
+    fallback). Fail-closed at every stage. Prints the ``ExecResult`` as JSON; returns 0 iff the command ran."""
+    import time as _time
+    from pathlib import Path as _Path
+
+    from .live.executor import execute_sandbox
+
+    command = " ".join(args.command).strip()
+
+    def _refuse(reason: str) -> int:
+        print(json.dumps({"tool": "sandbox.exec", "ran": False, "outcome": "deny", "tier": "A3",
+                          "reason": reason, "exit_code": None, "stdout": "", "stderr": "",
+                          "record_id": None}, indent=2))
+        return 2
+
+    try:
+        from .live.wiring import build_terminal_runtime
+        rt = build_terminal_runtime(slug=str(getattr(args, "slug", "") or "loopback"), base_dir=args.base_dir)
+    except Exception as e:  # noqa: BLE001 — an unbuildable gate/signer is a clean refusal, never a raise
+        return _refuse(f"could not build the sandbox gate/signer ({type(e).__name__}) — refused (fail-closed)")
+    if rt.signer is None:
+        return _refuse("no signer wired — refusing to run an unrecordable command (fail-closed)")
+
+    workspace = _Path(args.base_dir) / "sandbox-workspace"        # the ONLY writable path inside the box
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return _refuse(f"could not create the sandbox workspace ({type(e).__name__}) — refused (fail-closed)")
+    history = str(_Path(args.base_dir) / "sandbox-history.jsonl")
+
+    active_gate = rt.approval_gate if (args.approve and rt.approval_gate is not None) else rt.gate
+    seq = _terminal_next_seq(history)
+    res = execute_sandbox(
+        command, "informational", workspace=str(workspace), gate=active_gate, view=rt.view,
+        destructive_view=rt.destructive_view, signer=rt.signer, seq=seq, now=int(_time.time()),
+    )
+
+    record_id = None
+    if res.ran and res.record is not None:
+        record_id = res.record.record_id
+        _append_terminal_history(history, res.record)            # redacted + signed record — read-only history
+
+    print(json.dumps({
+        "tool": res.tool, "ran": bool(res.ran), "outcome": res.outcome, "tier": res.tier,
+        "reason": res.reason, "exit_code": res.exit_code, "stdout": res.stdout, "stderr": res.stderr,
+        "record_id": record_id,
+    }, indent=2))
+    return 0 if res.ran else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vigil", description="the VIGIL sovereign engine — one control plane over two isolated processes",
@@ -991,6 +1047,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="engine home (holds the signed-authority gate + the sealed spine signer)")
     pt.add_argument("--slug", default="loopback", help="loopback engagement slug for the gate authority")
     pt.set_defaults(func=_cmd_terminal)
+
+    psb = sub.add_parser(
+        "sandbox",
+        help="run an ARBITRARY command inside a network-isolated, workspace-confined bwrap sandbox "
+             "(sandbox.exec classifies A3 → QUEUES for approval, never auto; --approve to run). Safe by KERNEL "
+             "isolation: no network egress, writes confined to <base-dir>/sandbox-workspace. Needs bwrap.")
+    psb.add_argument("command", nargs="+",
+                     help="the command to run inside the sandbox (a full shell — pipes/redirects/subshells are "
+                          "fine, it is isolated). QUOTE it so flags aren't parsed as options, e.g. "
+                          "`vigil sandbox \"echo hi > out.txt; cat out.txt\" --approve`")
+    psb.add_argument("--approve", action="store_true",
+                     help="operator approval — upgrade the A3 queue to allow (the SAME wiring approval path). "
+                          "Without it the command QUEUES and does not run.")
+    psb.add_argument("--base-dir", default=".vigil-live",
+                     help="engine home (holds the signed-authority gate + the sealed spine signer + the "
+                          "sandbox-workspace)")
+    psb.add_argument("--slug", default="loopback", help="loopback engagement slug for the gate authority")
+    psb.set_defaults(func=_cmd_sandbox)
 
     return p
 
