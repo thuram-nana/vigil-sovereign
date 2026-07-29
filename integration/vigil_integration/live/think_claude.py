@@ -11,9 +11,13 @@ PROPOSAL**. The pipeline is:
      ``safety.prompt_safety.wrap_untrusted`` and the standing ``UNTRUSTED_OUTPUT_GUIDANCE`` directive.
      Secrets in the prior-action args are masked first via the F3 ``tools.redact_tool_args`` (one
      redaction vocabulary, one path), so a credential never enters the prompt (nor any span/log).
-  2. **Ask for ONE structured decision.** A single ``client.messages.create`` call is made against
-     Claude (``anthropic`` SDK). The client is injected — a fake in tests, a caller-built real client
-     in production, or one this module builds from a resolved API key.
+  2. **Ask for ONE structured decision.** One Messages call is made against Claude (``anthropic`` SDK).
+     On current-generation models it uses adaptive extended thinking (``thinking: {type: "adaptive"}``)
+     plus the UI-chosen effort, and it STREAMS (``.get_final_message()``) to avoid request timeouts on long
+     input / output — falling back to a plain ``create`` for a client without ``.messages.stream``. The
+     client is injected — a fake in tests, a caller-built real client in production, or one this module
+     builds from a resolved API key. Any thinking blocks in the reply are ignored; only the JSON decision
+     text is parsed.
   3. **Parse FAIL-CLOSED.** The raw model text is handed to ``agent.react.parse_decision``, which turns
      it into a typed ``LLMDecision`` and downgrades any malformed / garbage / oversized response to the
      SAFEST action (an inert ``ASK_USER`` human pause) — never an action-bearing edge synthesised from
@@ -79,6 +83,19 @@ def _effort_kwargs(model: str) -> dict:
         return {}
     level = (os.environ.get("CRUCIBLE_EFFORT") or "").strip().lower()
     return {"output_config": {"effort": level}} if level in _EFFORT_LEVELS else {}
+
+
+def _thinking_kwargs(model: str) -> dict:
+    """{"thinking": {"type": "adaptive"}} for current-generation models — the think step is a genuine
+    multi-step reasoning call (pick the next action from the world-model + untrusted context), exactly what
+    adaptive extended thinking is for. Older (pre-4.6) models take the deprecated ``budget_tokens`` shape and
+    REJECT ``adaptive`` (a 400), so we send nothing for them and let them use their default. The prefix set
+    is the SAME one ``_effort_kwargs`` gates on, so the two current-model controls stay in lockstep. Never
+    raises. (Thinking blocks in the response are skipped by ``_extract_text`` — only the JSON text is parsed.)"""
+    m = str(model or "")
+    if any(m.startswith(p) for p in _CURRENT_MODEL_PREFIXES):
+        return {"thinking": {"type": "adaptive"}}
+    return {}
 
 # Defensive bounds. Truncating UNTRUSTED data is always safe (worst case a valid-but-huge decision
 # truncates and parse_decision fails closed to the safest action — never up). These also cap regex
@@ -252,18 +269,38 @@ def _extract_text(resp: object) -> str:
 # ---------------------------------------------------------------------------------------------------
 
 
+def _invoke(client: Any, params: dict) -> Any:
+    """Issue ONE Messages call, preferring STREAMING (``client.messages.stream(...).get_final_message()``)
+    when the client supports it — streaming avoids request timeouts on long input / long output / high
+    max_tokens (the think prompt carries the whole untrusted context and adaptive thinking can be lengthy),
+    per the Claude API guidance. A client without ``.messages.stream`` (the injected test fakes, an older
+    SDK) transparently falls back to a plain ``.create``. May raise — the sole caller fail-closes on any
+    error. Secret-free: only ``params`` (never a key) is passed."""
+    messages = getattr(client, "messages", None)
+    stream = getattr(messages, "stream", None)
+    if callable(stream):
+        with stream(**params) as s:
+            return s.get_final_message()           # the assembled final Message (thinking + text blocks)
+    return client.messages.create(**params)
+
+
 def _think_via_client(client: Any, system: str, user: str, *, model: str, max_tokens: int) -> LLMDecision:
-    """One live think call through an injected/real client, fail-closed on ANY error. The response text
-    is parsed by ``parse_decision`` (garbage/oversized → safest). Secret-free: nothing here logs the
-    request, the response, or any credential."""
+    """One live think call through an injected/real client, fail-closed on ANY error. Current-generation
+    models get adaptive extended thinking (``thinking: {type: "adaptive"}``) and the effort chosen in the UI;
+    the call STREAMS when the client supports it (``.get_final_message()``), else a plain create. The
+    response text is parsed by ``parse_decision`` (garbage/oversized → safest); any thinking blocks are
+    ignored — only the JSON decision text is read. Secret-free: nothing here logs the request, the response,
+    or any credential."""
+    params = dict(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        **_effort_kwargs(model),       # output_config.effort for current models when CRUCIBLE_EFFORT is set
+        **_thinking_kwargs(model),     # thinking: {type: "adaptive"} for current models
+    )
     try:
-        resp = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            **_effort_kwargs(model),   # output_config.effort for current models when CRUCIBLE_EFFORT is set
-        )
+        resp = _invoke(client, params)
     except Exception as exc:  # noqa: BLE001 — any SDK/transport error is a fail-closed pause, never raised
         logger.warning("live think call failed (%s) — fail-closed to safest action", type(exc).__name__)
         return _safest("the live think call failed", "the model call failed — how should I proceed?")
