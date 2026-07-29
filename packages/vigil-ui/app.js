@@ -466,7 +466,9 @@
   function isLoopbackHost(h) { return h === "127.0.0.1" || h === "localhost" || h === "::1" || /^127\./.test(h); }
   function slugify(s, fb) { const v = String(s || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48); return v || fb; }
 
-  // -- the 14 offense event kinds: plain-language label + icon + one-line summary --
+  // -- the offense event kinds: plain-language label + icon + one-line summary --
+  // (14 reasoning/finding kinds + the S5 `agent_message` coordination kind, which is ADVISORY — a message
+  //  is never evidence; no fact-building path reads it — so it renders in the `review` lane, not as a finding)
   const KIND_META = {
     observation:   { label: "Observed", icon: "find", cat: "observe",
       sum: function (p) { return (p.source ? p.source + ": " : "") + (p.summary || p.surface || ""); } },
@@ -496,6 +498,8 @@
       sum: function (p) { return (p.source || "") + (p.signal ? " · " + p.signal : "") + " · r=" + (p.reward != null ? p.reward : "?"); } },
     refusal:       { label: "Refusal", icon: "x", cat: "review",
       sum: function (p) { return (p.gate || "gate") + " refused: " + (p.action_refused || "") + (p.fatal ? " (fatal)" : ""); } },
+    agent_message: { label: "Message", icon: "brain", cat: "review",
+      sum: function (p) { return (p.sender || "?") + " → " + (p.recipient || "?") + (p.topic ? " [" + p.topic + "]" : "") + (p.body ? " · " + p.body : "") + " · advisory coordination (not evidence)"; } },
   };
   function kindIcon(kind, p) { const m = KIND_META[kind]; if (!m) return "dot"; return typeof m.icon === "function" ? m.icon(p || {}) : m.icon; }
   function isFact(p) { return !!(p && p.verified_by_oracle); }
