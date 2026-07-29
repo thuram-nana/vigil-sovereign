@@ -560,7 +560,18 @@ def _cmd_up(args: argparse.Namespace) -> int:
                   feed_slug=getattr(args, "feed_slug", ""),
                   feed_interval=getattr(args, "feed_interval", 3600),
                   with_voice=getattr(args, "with_voice", False),
-                  with_gesture=getattr(args, "with_gesture", False))
+                  with_gesture=getattr(args, "with_gesture", False),
+                  with_telemetry=getattr(args, "with_telemetry", False),
+                  telemetry_interval=getattr(args, "telemetry_interval", 15))
+
+
+def _cmd_telemetry(args: argparse.Namespace) -> int:
+    """`vigil telemetry --out <path> [--interval N] [--once]` — the G2 live assurance/metrics collector: a
+    read-only, one-way projection of the signed spine into a fact/lead/refusal/tool snapshot. Started for the
+    operator by `vigil up --with-telemetry`; runnable standalone. Fail-soft (no spine → an honest empty
+    snapshot). The blackboard is lazy-imported inside the collector (no framework import at CLI load)."""
+    from .telemetry import run_collector
+    return run_collector(out=args.out, interval=args.interval, once=args.once)
 
 
 def _cmd_down(args: argparse.Namespace) -> int:
@@ -1002,7 +1013,22 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--with-gesture", action="store_true",
                     help="also enable gesture NAV-MODE (S3): flips the latch ON so an owner-armed PHONE "
                          "gesture session navigates the UI. OFF by default. A1 signal, injects nothing.")
+    pu.add_argument("--with-telemetry", action="store_true",
+                    help="also run the live assurance/metrics collector (G2): a sidecar that tails the signed "
+                         "spine and materializes a continuous fact/lead/refusal/tool snapshot the UI reads. "
+                         "OFF by default. Read-only, loopback, no egress — a pure projection of the spine.")
+    pu.add_argument("--telemetry-interval", type=int, default=15,
+                    help="with --with-telemetry: seconds between spine snapshots (default 15)")
     pu.set_defaults(func=_cmd_up)
+
+    ptel = sub.add_parser("telemetry",
+                          help="live assurance/metrics collector over the signed spine (G2): write a "
+                               "fact/lead/refusal/tool snapshot to --out every --interval seconds (or --once). "
+                               "Read-only projection; started for you by `vigil up --with-telemetry`.")
+    ptel.add_argument("--out", required=True, help="snapshot JSON path (atomically rewritten each tick)")
+    ptel.add_argument("--interval", type=float, default=15.0, help="seconds between snapshots (default 15)")
+    ptel.add_argument("--once", action="store_true", help="write one snapshot and exit")
+    ptel.set_defaults(func=_cmd_telemetry)
 
     pdn = sub.add_parser("down", help="stop a running `vigil up` (backends + proxy)")
     pdn.add_argument("--base-dir", default=".vigil-live",

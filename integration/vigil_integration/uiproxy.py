@@ -660,7 +660,8 @@ def _terminate(pid: int, *, grace: float = 5.0) -> bool:
 def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool,
            insecure_no_api_key: bool = False, src_dir: Optional[Path] = None,
            with_feed: bool = False, feed_slug: str = "", feed_interval: int = 3600,
-           with_voice: bool = False, with_gesture: bool = False) -> int:
+           with_voice: bool = False, with_gesture: bool = False,
+           with_telemetry: bool = False, telemetry_interval: int = 15) -> int:
     """Bring the whole unified UI up: refuse a public bind, spawn the three backends in their own
     venvs, capture the cockpit token, assemble the runtime serve dir, and serve the single origin
     behind the reverse proxy. Blocks until SIGINT/SIGTERM, then tears the children + proxy down."""
@@ -767,6 +768,20 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                          "--slug", feed_slug.strip(), "--interval", str(max(1, feed_interval))]
             procs.append(("offense-feed", _spawn(feed_argv, logs / "offense-feed.log",
                                                  extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+
+    # 3b') OPTIONAL live assurance/metrics collector (G2). OFF by default. A READ-ONLY, one-way projection of
+    # the signed spine (no egress, mints nothing) — it tails the blackboard and writes a continuous
+    # fact/lead/refusal/tool snapshot the console's Assurance view reads. Runs the `vigil telemetry` verb (the
+    # blackboard is lazy-imported inside it). Skipped with a note if the `vigil` bin is unresolved.
+    if with_telemetry:
+        if vigil_bin:
+            tel_out = base.resolve() / "live-ui" / "telemetry.json"
+            tel_argv = [vigil_bin, "telemetry", "--out", str(tel_out), "--interval", str(max(1, telemetry_interval))]
+            procs.append(("offense-telemetry", _spawn(tel_argv, logs / "offense-telemetry.log",
+                                                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+        else:
+            print("vigil up: --with-telemetry skipped (`vigil` bin unresolved) — the console still computes "
+                  "assurance metrics on demand.", file=sys.stderr)
 
     # 3c) the K2b→K3 learn bridge (A2 keystone): the sovereign producer signs a learn_grant for each
     # owner-approved learn-proposal into a shared spool; the offense consumer verifies it and runs deep-learn.
