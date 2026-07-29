@@ -19,14 +19,19 @@ Classification is delegated to an INJECTABLE classifier (default: the ``sigil-ke
 subprocess, which is env-agnostic and fail-closed), so this module imports neither the SIGIL
 package nor any offense engine — it is import-clean and lives on the shared integration seam.
 
-The SDK wiring lands in TWO parts. (a) ATTACHING ``WardenGateHooks`` to the Strix ``Runner`` is done by
-:func:`attach_from_env` — an ``install_from_env``-style OPT-IN soft-wire (see the proof_sink bootstrap in
-``vendor/strix``): gated on the ``VIGIL_WARDEN_STRIX_GATE`` env var so standalone / non-governed Strix stays
-byte-identical, it composes this gate onto the run hooks so Strix's arbitrary ``exec_command`` shell tool is
-classified + gated (a non-AUTO classification RAISES ``WardenDenied`` → the tool call is BLOCKED). (b) The
-tool-invoke wrapper that routes a QUEUE decision to the owner-signed approval queue — upgrading QUEUE from
-hard-block to approve-then-run — is still DEFERRED; until it lands the hook fails safe (only an AUTO decision
-runs, everything else hard-blocks). The DECISION CORE is complete and fully tested.
+The SDK wiring: :func:`attach_from_env` composes ``WardenGateHooks`` onto the Strix ``Runner``'s hooks and is
+**ON BY DEFAULT** for any VIGIL-governed run — Strix's arbitrary ``exec_command`` shell tool is classified +
+gated as of the first tool call, no opt-in required. An EXPLICIT opt-*out* (``VIGIL_WARDEN_STRIX_GATE`` in
+{``0``,``off``,``false``,``no``}) turns it off, reserved for the byte-identical-vendor test / a deliberately
+ungoverned standalone run; and if the ``vigil_integration`` package is not importable (a bare vendored Strix
+checkout) the runner's soft-import guard leaves the vendor byte-identical. A non-AUTO (QUEUE) decision no
+longer hard-blocks: it is routed to the per-action, single-use, owner-signed approval BROKER
+(:mod:`live.approval_broker`) — the hook publishes a pending request, waits (bounded by
+``VIGIL_APPROVAL_WAIT_SECONDS``, default 0 ⇒ non-blocking) for a token the owner signs for THIS exact call
+(``vigil approve sign`` / the Safety screen), verifies it against the deployment-pinned owner key, and spends
+its nonce ONCE — then the call runs. No authority provisioned, or no valid token in the window ⇒ the call is
+BLOCKED (fail-safe). A hard class ``deny`` (denylist / empty name) always raises immediately. The DECISION
+CORE + the approval token/ledger are complete and fully tested.
 
 FATAL-2: this module is import-clean (stdlib only at module scope) so it loads in BOTH environments, but it
 is OFFENSE-side — only the offense-env Strix process ever calls :func:`attach_from_env`; the sovereign never
@@ -41,7 +46,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional
 
 # Tier is represented as the kernel's own string labels ("A0".."A3") + an ordinal, rather than a
 # third copy of the Tier enum (the seam map warned the Rust and Python enums must stay in sync;
@@ -176,11 +181,16 @@ class WardenGateHooks:
         floor: str = DEFAULT_FLOOR,
         ceiling: str = DEFAULT_CEILING,
         denylist: Iterable[str] = (),
+        approver: Optional[Callable[[str, str, Any], bool]] = None,
     ):
         self._classify = classify
         self._floor = floor
         self._ceiling = ceiling
         self._denylist = tuple(denylist)
+        # The per-action owner-approval callback for a QUEUE decision: (tool_name, target, args) -> approved?
+        # It publishes a pending request + (bounded) waits for a single-use owner-signed token + spends it.
+        # None ⇒ no authority provisioned ⇒ a QUEUE hard-blocks (fail-safe).
+        self._approver = approver
         self.decisions: list[ToolDecision] = []
 
     def evaluate(self, tool_name: str) -> ToolDecision:
@@ -194,21 +204,133 @@ class WardenGateHooks:
     async def on_tool_start(self, context, agent, tool) -> None:
         name = getattr(tool, "name", None) or str(tool)
         decision = self.evaluate(name)
-        if not decision.auto:
+        # A hard class deny (denylist / empty name) never runs — raise immediately.
+        if decision.outcome == "deny":
             raise WardenDenied(
-                f"WARDEN gate blocked tool {name!r}: {decision.outcome} ({decision.reason}). "
-                f"Offense tools at/above A2 require owner approval; not yet wired to the queue."
+                f"WARDEN gate DENIED tool {name!r}: {decision.reason} (hard class deny — never runs)."
             )
+        # AUTO (<= A1 and <= ceiling): allowed.
+        if decision.auto:
+            return
+        # QUEUE (>= A2 / above the offense ceiling) — the WARDEN human leg. Route to the per-action,
+        # single-use, owner-signed approval broker. No approver wired (no authority provisioned) ⇒ fail-safe
+        # hard-block, exactly as before. A valid, action-bound, single-use owner token ⇒ this ONE call runs.
+        if self._approver is None:
+            raise WardenDenied(
+                f"WARDEN gate blocked tool {name!r}: {decision.outcome} ({decision.reason}); no approval "
+                f"authority provisioned (run `vigil approve provision-authority`)."
+            )
+        target = _strix_target(tool)
+        args = _strix_args(tool)
+        try:
+            approved = bool(self._approver(name, target, args))
+        except Exception as exc:  # noqa: BLE001 — an approver error is fail-closed (block)
+            raise WardenDenied(
+                f"WARDEN gate blocked tool {name!r}: approval errored ({type(exc).__name__}) — fail-closed."
+            )
+        if not approved:
+            raise WardenDenied(
+                f"WARDEN gate blocked tool {name!r}: {decision.outcome} — no valid owner approval within the "
+                f"window (sign it with `vigil approve sign` / the Safety screen, then it runs)."
+            )
+        # owner-approved (per-action, single-use token consumed) → allow this ONE call.
 
 
 # ---------------------------------------------------------------------------------------------------
 # T3 — the Strix runner soft-wire: compose this offense-side gate onto Strix's run hooks, opt-in.
 # ---------------------------------------------------------------------------------------------------
 
-# The explicit opt-in for the Strix WARDEN wire. Absent (or empty) ⇒ :func:`attach_from_env` is a NO-OP and
-# vendored / non-governed Strix behaves byte-identically. A VIGIL-governed run sets this to route Strix's
-# arbitrary shell through the gate. It is a posture switch only — it can never LOWER a tier or auto-allow.
+# The Strix WARDEN gate is ON BY DEFAULT. This env is an explicit opt-OUT (values below) reserved for the
+# byte-identical-vendor test / a deliberately ungoverned standalone run. It is a posture switch only — when on
+# it can never LOWER a tier or auto-allow; when off the vendored Strix behaves byte-identically.
 _STRIX_GATE_ENV = "VIGIL_WARDEN_STRIX_GATE"
+_STRIX_GATE_OFF_VALUES = frozenset({"0", "off", "false", "no"})
+
+
+def _strix_gate_on() -> bool:
+    """The Strix WARDEN gate default: ON. Absent env (or any value not in the OFF set) ⇒ ON. An EXPLICIT
+    ``VIGIL_WARDEN_STRIX_GATE`` in {0,off,false,no} ⇒ OFF (byte-identical vendor / ungoverned standalone)."""
+    val = os.environ.get(_STRIX_GATE_ENV)
+    if val is None:
+        return True
+    return val.strip().lower() not in _STRIX_GATE_OFF_VALUES
+
+
+def _strix_base_dir() -> str:
+    """The engagement base dir the approvals root + persisted authority live under (matches the console/CLI
+    ``VIGIL_BASE_DIR`` convention; defaults to ``.vigil-live``)."""
+    return os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+
+
+def _strix_target(tool: Any) -> str:
+    """Best-effort approval-binding target for a Strix tool call. Strix's shell/exec tools have NO network
+    target (they run locally), so bind them to a constant local sentinel — the single-use nonce still makes
+    each queued invocation independently owner-approved."""
+    return "strix:exec"
+
+
+def _strix_args(tool: Any) -> Any:
+    """Best-effort args for the approval action-digest. The SDK ``on_tool_start`` may not carry the concrete
+    arguments; bind whatever is present (the tool name at minimum) so the digest is stable + non-empty."""
+    for attr in ("params", "arguments", "args", "input"):
+        v = getattr(tool, attr, None)
+        if isinstance(v, (dict, str)):
+            return v
+    return {"tool": getattr(tool, "name", None) or str(tool)}
+
+
+# The Strix arbitrary-execution chokepoint. EVERY CLI invocation the agent makes — nmap, ffuf, python3,
+# curl, agent-browser — flows through ``exec_command`` (``write_stdin`` streams input to a still-running
+# exec_command process). So gating THESE two names gates all arbitrary execution, while Strix's benign,
+# sandbox-contained tools (thinking / notes / todo / web_search / apply_patch / reporting / view_image /
+# load_skill / finish) auto-run and the agent stays functional. This is precisely the audit's gap — the
+# ungoverned agent shell — and nothing more.
+_STRIX_EXEC_TOOLS = frozenset({"exec_command", "write_stdin"})
+
+
+def _strix_shell_classifier(name: str) -> str:
+    """A3 for the Strix arbitrary-exec chokepoint (``exec_command`` / ``write_stdin``) so it QUEUES for owner
+    approval under the A1 ceiling; A0 (auto) for every other Strix tool. Deliberately NOT the offense
+    ``default_classify`` — that rates every non-recon name A2, which under a default-on gate would block the
+    whole agent. This targets the shell and only the shell."""
+    return "A3" if str(name or "").strip() in _STRIX_EXEC_TOOLS else "A0"
+
+
+def _build_strix_approver(base_dir: str) -> Optional[Callable[[str, str, Any], bool]]:
+    """Offense-side per-action approver for the Strix shell gate: bind the tool call, publish a pending
+    request, (bounded) wait for the owner-signed token, verify it against the deployment-pinned owner key, and
+    spend its nonce ONCE. Returns None when no authority is provisioned ⇒ the hook hard-blocks (fail-safe).
+    Verification uses the PUBLIC key only, all imports are offense-side + lazy (FATAL-2)."""
+    try:
+        import time
+        from pathlib import Path
+
+        from .live.approval_broker import ApprovalBroker, approvals_root, load_authority
+        from .live.approval_token import ApprovalAction, action_digest, consume_token
+        from .live.nonce_ledger import NonceLedger
+    except Exception:  # noqa: BLE001 — integration/SDK not importable ⇒ no approver ⇒ hard-block (safe)
+        return None
+    authority = load_authority(base_dir)
+    if authority is None:
+        return None
+    broker = ApprovalBroker(approvals_root(base_dir))
+    ledger = NonceLedger(Path(base_dir) / "approval-nonces")
+
+    def approve(tool_name: str, target: str, args: Any) -> bool:
+        try:
+            act = ApprovalAction(tool_name, target, action_digest(tool_name, target, args))
+        except Exception:  # noqa: BLE001 — a non-serialisable action can't be bound ⇒ deny (fail-closed)
+            return False
+        broker.bind(act, args_preview=args)
+        pend = broker.token_source()  # publishes the pending request + (bounded) polls for a signed token
+        if not (isinstance(pend, tuple) and len(pend) == 2):
+            return False
+        token, action = pend
+        return bool(
+            consume_token(token, action, authority=authority, now=time.time(), ledger=ledger).authorized
+        )
+
+    return approve
 
 
 def compose_run_hooks(*members: Any) -> Any:
@@ -259,23 +381,24 @@ def compose_run_hooks(*members: Any) -> Any:
 
 
 def attach_from_env(base_hooks: Any) -> Any:
-    """Best-effort compose this offense-side WARDEN tool-name gate onto Strix's run ``base_hooks``, GATED on
-    the explicit opt-in env var ``VIGIL_WARDEN_STRIX_GATE``. Returns ``base_hooks`` UNCHANGED when the gate
-    is not opted in, when the integration/SDK cannot be wired, or on ANY failure — so vendored / non-governed
-    Strix is byte-identical and a wiring error can never stop a scan. When opted in, returns a composite
-    ``RunHooks`` that runs the existing accounting AND the WARDEN ``on_tool_start`` gate, where a non-AUTO
-    classification RAISES ``WardenDenied`` and BLOCKS the tool call (Strix's arbitrary ``exec_command`` shell
-    classifies A3 → blocked).
+    """Compose this offense-side WARDEN tool-name gate onto Strix's run ``base_hooks``. **ON BY DEFAULT** —
+    returns a composite ``RunHooks`` (existing accounting + the WARDEN ``on_tool_start`` gate) unless the
+    explicit opt-OUT ``VIGIL_WARDEN_STRIX_GATE`` in {0,off,false,no} is set, or the integration/SDK cannot be
+    wired, or ANY failure — in which cases it returns ``base_hooks`` UNCHANGED so a bare vendored Strix stays
+    byte-identical and a wiring error can never stop a scan.
 
-    The gate uses the SAME classifier the live offense gate uses (``live.wiring.default_classify``) and the
-    module-default floor/ceiling (A2 / A1) — fully fail-closed: an offense tool never auto-runs; it
-    hard-blocks until the signed approval queue is wired (a future slice). Classifier + SDK are imported
-    LAZILY (offense-env only), keeping this module import-clean in the sovereign env (FATAL-2)."""
-    if not os.environ.get(_STRIX_GATE_ENV):
+    The classifier is :func:`_strix_shell_classifier` (floor A0, ceiling A1): it QUEUES exactly the
+    arbitrary-exec chokepoint (``exec_command`` / ``write_stdin``) and auto-runs every other (sandbox-
+    contained) Strix tool, so the agent stays functional while its shell is governed. A QUEUE is routed to the
+    per-action, single-use, owner-signed approval broker via :func:`_build_strix_approver` — the call runs
+    ONLY on a valid owner token for THIS exact call; no authority provisioned / no token in the window ⇒
+    hard-block (fail-safe). The SDK + broker are imported LAZILY (offense-env only), keeping this module
+    import-clean in the sovereign env (FATAL-2)."""
+    if not _strix_gate_on():
         return base_hooks
     try:
-        from .live.wiring import default_classify   # lazy — offense-env only (pulls the live engine)
-        warden = WardenGateHooks(classify=default_classify)
+        approver = _build_strix_approver(_strix_base_dir())
+        warden = WardenGateHooks(classify=_strix_shell_classifier, floor="A0", approver=approver)
         return compose_run_hooks(base_hooks, warden)
     except Exception:  # noqa: BLE001 — never let WARDEN wiring stop a scan; fall back to the base hooks
         return base_hooks

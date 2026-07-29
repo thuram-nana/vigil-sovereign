@@ -549,8 +549,12 @@ def launch_assessment(body: dict) -> dict:
         # (vigil_integration.proof.bootstrap.install_from_env) mints + persists oracle-confirmed proofs under
         # <rd>/proofs (+ evidence under <rd>/evidence), which the Export button then bundles. Absent for a
         # standalone Strix; a NO-OP if the integration package isn't importable.
+        # A1: hand the Strix child the engagement base dir so its DEFAULT-ON WARDEN gate finds the same
+        # approvals root + persisted owner authority the operator signs against (`vigil approve --base-dir`).
+        # The gate is on regardless (safe hard-block if no authority is provisioned in that base).
         _spawn_background(run_id, rd, cmd, meta, capture_report=False,
-                          env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug})
+                          env_extra={"VIGIL_PROOF_RUN_DIR": str(rd), "VIGIL_ENGAGEMENT": slug,
+                                     "VIGIL_BASE_DIR": os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"})
         return {"run_id": run_id, "status": "running", "mode": mode, "slug": slug, "stream": "none"}
 
     # ---- aegis → the defensive dual (detect over a telemetry/log file) -----

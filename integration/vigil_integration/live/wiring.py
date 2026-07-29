@@ -321,20 +321,65 @@ def build_engine(config: EngineConfig) -> VigilEngine:
 
     _seq = {"n": 0}
 
-    # The approval gate (the WARDEN human leg): the HIGH-ASSURANCE per-action token path when the operator
-    # provisioned an ApprovalAuthority, else the standing-boolean fallback. Either way a CRUCIBLE deny /
-    # tripped kill-switch is preserved — approval never widens scope.
+    # The approval gate (the WARDEN human leg). Precedence (A2): an explicit ``config.approval_authority``
+    # wins (tests / an externally-managed authority); else ATTEMPT to load the operator-provisioned authority
+    # persisted at ``<base>/approval-authority.json`` (PUBLIC key only — safe offense-side). If EITHER is
+    # present, the HIGH-ASSURANCE per-action token path is the default: a queued offense tool is upgraded to
+    # allow ONLY by a valid, single-use, owner-signed, action-bound token (never a blanket standing boolean).
+    # If NEITHER is present, behaviour is EXACTLY today's — the standing-boolean ``_approval_gate`` — so the
+    # default is NEVER more permissive than before. Either way a CRUCIBLE deny / tripped kill-switch is
+    # PRESERVED: approval never widens scope.
+    from .approval_broker import ApprovalBroker, approvals_root, load_authority
+    effective_authority = config.approval_authority or load_authority(config.base_dir)
+    approval_broker: Optional[ApprovalBroker] = None
+
     if gate is None:
         approval_gate = None
-    elif config.approval_authority is not None:
+    elif effective_authority is not None:
         import time as _time
         _nonce_dir = config.approval_nonce_dir or str(base / "approval-nonces")
+        if config.approval_token_source is not None:
+            _token_source = config.approval_token_source        # injectable (tests)
+        else:
+            approval_broker = ApprovalBroker(approvals_root(config.base_dir), now=_time.time)
+            _token_source = approval_broker.token_source
         approval_gate = build_approval_gate(
-            gate, authority=config.approval_authority, ledger=NonceLedger(_nonce_dir),
-            now=_time.time, token_source=config.approval_token_source or (lambda: None),
+            gate, authority=effective_authority, ledger=NonceLedger(_nonce_dir),
+            now=_time.time, token_source=_token_source,
         )
     else:
         approval_gate = _approval_gate(gate)
+
+    # The per-action token gate is the ACTIVE authority mechanism only when an authority is provisioned AND
+    # the gate wired. In that mode a queued TOOL call is routed to the token gate (the real, per-action,
+    # single-use check happens at execution); it is NEVER a blanket allow of phase-escalation/fireteam.
+    _token_gate_active = effective_authority is not None and approval_gate is not None
+
+    def _bind_approval_action(tool: Any, is_terminal: bool) -> None:
+        # Bind (into the broker) the EXACT action the gate will authorize, so a matching owner-signed token
+        # upgrades ONLY this action. The (tool_name, target) is derived by the ONE shared executor helper
+        # (``derive_gate_binding``) so it equals the gate-seen pair BYTE-FOR-BYTE; the action_digest binds the
+        # args. Underivable target / non-broker mode ⇒ bind nothing ⇒ the action stays QUEUED (fail-closed).
+        if approval_broker is None:
+            return
+        from .approval_token import ApprovalAction, action_digest
+        from .executor import derive_gate_binding
+        if is_terminal:
+            ta = getattr(tool, "tool_args", None)
+            command = ta.get("command") if isinstance(ta, dict) else None
+            command = command if isinstance(command, str) else str(command or "")
+            args_for_digest: Any = {"command": command}
+            binding = derive_gate_binding(_TERMINAL_TOOL, args_for_digest, scope=offense_scope)
+        else:
+            args_for_digest = getattr(tool, "tool_args", None)
+            binding = derive_gate_binding(getattr(tool, "tool_name", None), args_for_digest,
+                                          scope=offense_scope)
+        if binding is None:
+            approval_broker.bind(None)
+            return
+        gtool, gtarget = binding
+        act = ApprovalAction(gtool, gtarget, action_digest(gtool, gtarget, args_for_digest))
+        approval_broker.bind(act, args_preview=args_for_digest)
 
     def run_tool(tool: Any, phase: Phase, seq: int, *, approved: bool = False) -> Any:
         _seq["n"] = seq
@@ -342,6 +387,15 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # An owner-approved offense tool executes under the approval gate (WARDEN human leg satisfied);
         # everything else under the base gate. Either way CRUCIBLE scope + the loopback pin still gate it.
         active_gate = approval_gate if (approved and approval_gate is not None) else gate
+
+        is_terminal = (isinstance(getattr(tool, "tool_name", None), str)
+                       and tool.tool_name.strip().lower() == _TERMINAL_TOOL)
+
+        # Per-action binding (A2 §4): when the broker-backed per-action token gate is the active gate, bind
+        # the action it will authorize BEFORE execution, so the gate's ``token_source()`` publishes the
+        # pending request + spends only a token bound to THIS exact (tool, target, args).
+        if approved and active_gate is approval_gate and approval_broker is not None:
+            _bind_approval_action(tool, is_terminal)
 
         # T3 — AUTONOMOUS TERMINAL: the governed LOCAL terminal is a DISTINCT executor path. execute_terminal
         # REUSES the same conjunctive gate + signed ExecRecord but SKIPS network target-pinning — its allowlist
@@ -351,7 +405,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # QUEUES it → an owner approval is the human leg), and execute_terminal RE-authorizes it (defense in
         # depth). The engine treats a terminal record's local output as ADVISORY: it never enters oracle intake,
         # so an autonomous terminal command can never mint a FACT.
-        if isinstance(getattr(tool, "tool_name", None), str) and tool.tool_name.strip().lower() == _TERMINAL_TOOL:
+        if is_terminal:
             ta = getattr(tool, "tool_args", None)
             command = ta.get("command") if isinstance(ta, dict) else None
             command = command if isinstance(command, str) else str(command or "")
@@ -369,8 +423,14 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         )
 
     def approval(decision: Any, state: Any) -> bool:
-        # The operator's standing approval for their own chartered loopback engagement. A real signed
-        # per-action approval (the I4 destruction-gate mechanism) plugs in here unchanged.
+        # TOKEN MODE: route a queued TOOL call to the per-action token gate (the real, per-action, single-use
+        # check is re-made at execution — a queued tool with no valid token is DENIED there, never run). A
+        # phase escalation / fireteam deploy is NOT re-gated by that gate, so it stays behind the operator's
+        # STANDING approval (unchanged) — token mode is never MORE permissive than today for those.
+        # STANDING MODE (no authority): the operator's standing approval, exactly as before.
+        from ..agent.state import ActionType
+        if _token_gate_active and getattr(decision, "action", None) == ActionType.USE_TOOL:
+            return True
         return bool(config.owner_approves_offense)
 
     def checkpoint(state: AgentState, seq: int) -> Any:

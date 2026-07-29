@@ -72,7 +72,8 @@ from ..agent.targets import extract_target
 from ..tools import authorize_tool_call
 from ..tools.mcp_registry import _redact_arg_list, _redact_str
 
-__all__ = ["ExecResult", "ExecRecord", "RunOutcome", "execute", "execute_terminal", "subprocess_runner"]
+__all__ = ["ExecResult", "ExecRecord", "RunOutcome", "execute", "execute_terminal", "subprocess_runner",
+           "derive_gate_binding"]
 
 # Defaults — generous but bounded. A live tool must never hang the loop or fill the spine.
 DEFAULT_TIMEOUT: float = 120.0        # seconds; wall-time budget for the whole subprocess
@@ -587,6 +588,37 @@ _BUILDERS: dict[str, Callable[[Any, _Pinned], Optional[_Build]]] = {
 # ---------------------------------------------------------------------------------------------------
 # the governed executor
 # ---------------------------------------------------------------------------------------------------
+
+
+def derive_gate_binding(tool_name: Any, tool_args: Any, *, scope: Any = None,
+                        allowed_ips: Optional[frozenset] = None) -> Optional[tuple[str, str]]:
+    """The EXACT ``(tool_name, target)`` the conjunctive gate will be called with for THIS tool call — the
+    single reused derivation so an approval action bound to this matches the gate-seen pair BYTE-FOR-BYTE
+    (the per-action approval binding, VIGIL A2 §4). It reproduces what :func:`execute` /
+    :func:`execute_terminal` / :func:`execute_sandbox` pass to :func:`tools.governance.authorize_tool_call`
+    (which forwards it verbatim to ``gate(tool_name, target, ...)``):
+
+      * ``terminal.run`` / ``sandbox.exec`` authorize under the CONSTANT tool name + the fixed local host
+        ``"127.0.0.1"`` (they skip network target-pinning).
+      * a network tool authorizes under the caller's ORIGINAL ``tool_name`` (unchanged) + ``_scope_target``
+        of the resolve-and-pinned target (the validated hostname[:port] — resolution-independent, so a second
+        resolution here yields the same string as ``execute``'s).
+
+    Returns None if the target cannot be derived (an unparseable/unresolvable/out-of-scope target, or a
+    non-string tool name) — the caller then binds nothing, so the action stays QUEUED (fail-closed: a
+    mismatch or an underivable target is NEVER upgraded to allow). ``scope``/``allowed_ips`` MUST be the same
+    the executor is called with, else a legitimate remote target could fail to bind (still fail-closed)."""
+    name = tool_name.strip().lower() if isinstance(tool_name, str) else ""
+    if name == _TERMINAL_TOOL:
+        return _TERMINAL_TOOL, "127.0.0.1"     # execute_terminal: authorize_tool_call(_TERMINAL_TOOL, …, "127.0.0.1")
+    if name == _SANDBOX_TOOL:
+        return _SANDBOX_TOOL, "127.0.0.1"       # execute_sandbox: authorize_tool_call(_SANDBOX_TOOL, …, "127.0.0.1")
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        return None
+    pinned, _why = _resolve_scoped_target(extract_target(tool_args), scope=scope, allowed_ips=allowed_ips)
+    if pinned is None:
+        return None
+    return tool_name, _scope_target(pinned)     # execute: authorize_tool_call(tool_name, …, _scope_target(pinned))
 
 
 def _phase_str(phase: Any) -> str:

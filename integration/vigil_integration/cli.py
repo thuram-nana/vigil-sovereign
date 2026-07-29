@@ -315,6 +315,89 @@ def _cmd_authorize_destruction(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_approve_provision(args: argparse.Namespace) -> int:
+    """Mint + persist the OWNER approval AUTHORITY (VIGIL A2). Prints the owner PRIVATE key ONCE (never
+    stored) — export it as VIGIL_APPROVAL_OWNER_KEY to sign approvals; the PUBLIC key is persisted under
+    --base-dir so the offense engine + the Strix gate default to PER-ACTION owner approval for offense tools."""
+    from .live.approval_broker import authority_path, provision_authority_material
+
+    existing = authority_path(args.base_dir)
+    if existing.exists() and not args.force:
+        print(f"vigil approve provision-authority: an authority already exists at {existing}. Re-provisioning "
+              "ROTATES the owner key and invalidates any tokens signed by the old key — pass --force to do it.",
+              file=sys.stderr)
+        return 2
+    path, _pub, priv = provision_authority_material(args.base_dir, key_id=args.key_id)
+    print("=== vigil approve provision-authority — per-action owner approval ===")
+    print(f"authority (public): {path}")
+    print(f"owner key_id      : {args.key_id}")
+    print()
+    print("OWNER PRIVATE KEY — shown ONCE; NOT stored by this command. Save it now:")
+    print(f"    {priv}")
+    print("    → export as VIGIL_APPROVAL_OWNER_KEY (or paste into the Safety screen) to sign approvals.")
+    print()
+    print("Offense tools now default to PER-ACTION approval: each queued tool call must be signed with")
+    print(f"    vigil approve sign --base-dir {args.base_dir} --request-id <id>   (see `vigil approve list`).")
+    return 0
+
+
+def _cmd_approve_list(args: argparse.Namespace) -> int:
+    """List the pending per-action approval requests an offense run has published (each is public-safe — no
+    secret). The owner signs one with `vigil approve sign`."""
+    from .live.approval_broker import approvals_root, list_pending
+
+    pend = list_pending(approvals_root(args.base_dir))
+    if not pend:
+        print("(no pending approval requests)")
+        return 0
+    print(f"=== pending per-action approvals ({len(pend)}) — {approvals_root(args.base_dir)} ===")
+    for r in pend:
+        print(f"  request_id : {r.request_id}")
+        print(f"    tool     : {r.tool_name}")
+        print(f"    target   : {r.target}")
+        print(f"    args     : {r.args_preview}")
+        print(f"    created  : {r.created_at_iso}")
+        print(f"    sign     : vigil approve sign --base-dir {args.base_dir} --request-id {r.request_id}")
+    return 0
+
+
+def _cmd_approve_sign(args: argparse.Namespace) -> int:
+    """Sign ONE pending action with the owner key (read from VIGIL_APPROVAL_OWNER_KEY — never argv), minting a
+    single-use, action-bound, window-bounded token the offense worker spends ONCE. A CRUCIBLE deny is never
+    widened — a token only satisfies the WARDEN human leg for an in-envelope (queued) action."""
+    import os
+    import time
+
+    from .live.approval_broker import approvals_root, list_pending, load_authority, write_signed_token
+    from .live.approval_token import DEFAULT_POLICY, ApprovalAction, mint_token
+
+    owner_priv = os.environ.get("VIGIL_APPROVAL_OWNER_KEY", "").strip()
+    if not owner_priv:
+        print("vigil approve sign: no owner signing key — set VIGIL_APPROVAL_OWNER_KEY (run "
+              "`vigil approve provision-authority`).", file=sys.stderr)
+        return 2
+    root = approvals_root(args.base_dir)
+    match = next((r for r in list_pending(root) if r.request_id == args.request_id), None)
+    if match is None:
+        print(f"vigil approve sign: no pending request {args.request_id!r} under {root}", file=sys.stderr)
+        return 2
+    auth = load_authority(args.base_dir)
+    if auth is not None and auth.owner_key_id != args.key_id:
+        print(f"vigil approve sign: WARNING key_id {args.key_id!r} != pinned authority {auth.owner_key_id!r}; "
+              "the offense verifier will REJECT this token (key pin).", file=sys.stderr)
+    ttl = max(1.0, min(float(args.ttl), DEFAULT_POLICY.max_token_lifetime))
+    now = time.time()
+    action = ApprovalAction(match.tool_name, match.target, match.action_digest)
+    token = mint_token(action, owner_private_key_b64=owner_priv, key_id=args.key_id,
+                       nonce=match.nonce, not_before=now, not_after=now + ttl)
+    path = write_signed_token(root, match.request_id, token)
+    print(f"=== vigil approve sign — {args.request_id} ({match.tool_name} @ {match.target}) ===")
+    print(f"signed by : {args.key_id}   window: {int(ttl)}s (single-use; within the 900s dead-man's-switch)")
+    print(f"written   : {path}")
+    print("The offense worker spends this token ONCE the next time it authorizes that exact action.")
+    return 0
+
+
 def _load_and_verify_ledger(path: str, *, base_dir: str) -> tuple[list, object]:
     from .attestation.identity import operator_key_resolver
     from .attestation.ledger import read_ledger, verify_ledger
@@ -948,6 +1031,32 @@ def build_parser() -> argparse.ArgumentParser:
                        help="a co-signer as key_id=/path/to/keyfile (repeatable; read from FILE, never argv). "
                             "The owner key comes from VIGIL_DESTRUCTION_OWNER_KEY.")
     pauth.set_defaults(func=_cmd_authorize_destruction)
+
+    # A2 — per-action owner approval for offense tools (the DEFAULT high-assurance path once an authority is
+    # provisioned). Three sub-actions: provision-authority | list | sign.
+    pap = sub.add_parser(
+        "approve",
+        help="per-action owner approval for offense tools (provision-authority | list | sign)")
+    pap_sub = pap.add_subparsers(dest="approve_cmd", required=True)
+
+    papp = pap_sub.add_parser("provision-authority",
+                              help="mint + persist the owner approval authority (public key under --base-dir)")
+    papp.add_argument("--base-dir", default=".vigil-live")
+    papp.add_argument("--key-id", default="owner", help="the owner signer's key id")
+    papp.add_argument("--force", action="store_true", help="re-provision (ROTATES the key; invalidates old tokens)")
+    papp.set_defaults(func=_cmd_approve_provision)
+
+    papl = pap_sub.add_parser("list", help="list pending per-action approval requests")
+    papl.add_argument("--base-dir", default=".vigil-live")
+    papl.set_defaults(func=_cmd_approve_list)
+
+    paps = pap_sub.add_parser("sign", help="sign ONE pending action with the owner key (VIGIL_APPROVAL_OWNER_KEY)")
+    paps.add_argument("--base-dir", default=".vigil-live")
+    paps.add_argument("--request-id", required=True, help="the request_id from `vigil approve list`")
+    paps.add_argument("--ttl", type=float, default=300.0,
+                      help="validity window in seconds (single-use; capped at the 900s dead-man's-switch)")
+    paps.add_argument("--key-id", default="owner", help="the owner signer's key id (must match provisioning)")
+    paps.set_defaults(func=_cmd_approve_sign)
 
     ppe = sub.add_parser("proof-export",
                          help="assemble a client-verifiable proof bundle from a run's oracle-confirmed FACTs "

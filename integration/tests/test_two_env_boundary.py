@@ -69,6 +69,9 @@ assert "framework" not in _m, "warden_gate must not import framework at module s
 assert "agents" not in _m, "warden_gate must not import the openai-agents SDK at module scope"
 assert "strix" not in _m, "warden_gate must not import strix at module scope"
 assert "vigil_integration.live.wiring" not in _m, "warden_gate must not import the live engine at module scope"
+import vigil_integration.live.approval_broker  # A2: the offense-side per-action approval queue/broker
+assert "framework" not in _m, "approval_broker must not import framework at module scope"
+assert "strix" not in _m, "approval_broker must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 
