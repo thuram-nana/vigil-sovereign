@@ -607,8 +607,12 @@ def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "
     return proc, q
 
 
-def _await_token(q: "Queue[str]", proc: subprocess.Popen, timeout: float = 20.0) -> Optional[str]:
-    """Read the cockpit's stdout lines until its ``?token=`` appears (or it exits / times out)."""
+def _await_token(q: "Queue[str]", proc: subprocess.Popen,
+                 timeout: float = float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))) -> Optional[str]:
+    """Read the cockpit's stdout lines until its ``?token=`` appears (or it exits / times out).
+
+    Timeout is the cockpit cold-start budget (embedding model + spine/graph rebuild on a large
+    spine can exceed the old 20s). Override with ``VIGIL_UP_COCKPIT_TIMEOUT`` (seconds)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
