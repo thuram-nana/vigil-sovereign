@@ -8,6 +8,8 @@
 
 ### 📺 [Watch the full end-to-end demo →](https://youtu.be/iPIpk9QCKVw)
 
+### 🖼️ [Browse the UI screenshots →](docs/screenshots/)
+
 *A complete walkthrough — every feature end-to-end, live oracle-proven findings, the interaction-driven UI, and the SIGIL sovereign voice.*
 
 </div>
