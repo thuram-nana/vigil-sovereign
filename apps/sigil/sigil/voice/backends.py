@@ -205,13 +205,16 @@ class ElevenLabsTts:
     play/barge-in at the frame level. Needs ELEVENLABS_API_KEY (env or ~/.sigil/sigil.env). NOTE:
     a third-party service — the response TEXT leaves the machine; the local `PiperTts` is the
     sovereign alternative."""
-    def __init__(self, voice_id: str | None = None, model_id: str = "eleven_flash_v2_5",
+    def __init__(self, voice_id: str | None = None, model_id: str | None = None,
                  api_key: str | None = None, timeout: int = 30):
         import os
         # the JARVIS voice_id (found via find_voices/`--find-voice jarvis`) is persisted as
         # SIGIL_TTS_VOICE_ID; fall back to the stock 'Rachel' only if nothing is configured.
         self.voice_id = voice_id or os.environ.get("SIGIL_TTS_VOICE_ID") or "21m00Tcm4TlvDq8ikWAM"
-        self.model_id, self.timeout = model_id, timeout
+        # model is env-selectable (SIGIL_TTS_MODEL) — e.g. "eleven_v3" for the most humanlike voice, or
+        # the default "eleven_flash_v2_5" for lowest latency in the full-duplex loop.
+        self.model_id = model_id or os.environ.get("SIGIL_TTS_MODEL") or "eleven_flash_v2_5"
+        self.timeout = timeout
         self.api_key = api_key or os.environ.get("SIGIL_ELEVENLABS_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
 
     def synth(self, text: str) -> Iterator[np.ndarray]:
