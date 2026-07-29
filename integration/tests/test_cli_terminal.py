@@ -55,7 +55,16 @@ def test_terminal_off_allowlist_refused_even_with_approve(tmp_path, capsys):
 
 
 def test_terminal_shell_metacharacter_refused(tmp_path, capsys):
-    # No shell is ever invoked; a pipe/redirect/substitution in the command is refused whole.
-    rc, res = _run(["terminal", "cat a|b", "--approve", "--base-dir", str(tmp_path)], capsys)
-    assert rc == 2 and res["ran"] is False
-    assert "metacharacter" in res["reason"]
+    # No shell is ever invoked; a redirect/substitution/subshell/separator is refused whole. (The pipe `|` is
+    # NOT a shell metachar here — it is an allowlisted-pipeline separator we parse ourselves; a pipeline whose
+    # stage is off-allowlist is refused by the allowlist, tested below.)
+    for evil in ("cat a > b", "cat `id`", "echo $(id)", "ls; whoami"):
+        rc, res = _run(["terminal", evil, "--approve", "--base-dir", str(tmp_path)], capsys)
+        assert rc == 2 and res["ran"] is False, evil
+        assert "metacharacter" in res["reason"], evil
+
+
+def test_terminal_pipeline_off_allowlist_stage_refused(tmp_path, capsys):
+    # A pipeline may only chain ALLOWLISTED read tools — a network/interpreter stage is refused (no egress).
+    rc, res = _run(["terminal", "cat a | curl http://x", "--approve", "--base-dir", str(tmp_path)], capsys)
+    assert rc == 2 and res["ran"] is False and "allowlist" in res["reason"]
