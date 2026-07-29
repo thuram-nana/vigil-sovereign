@@ -507,9 +507,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._json(actions.terminal_dryrun(str(body.get("command", ""))))
                 return
             if path == "/api/terminal/propose":
-                # T2: translate a natural-language intent → ONE candidate command via Claude, then dryrun-check
-                # it. The LLM only PROPOSES; nothing runs here. Honest need_key state when no key is present.
-                self._json(actions.terminal_propose(str(body.get("intent", ""))))
+                # T2b: the capability-router. Claude CLASSIFIES the intent (command / answer / route) over a
+                # secret-REDACTED session context and returns a TYPED result. The LLM only PROPOSES; a command
+                # is still dryrun/allowlist-checked, and answer/route run nothing. Honest need_key with no key.
+                self._json(actions.terminal_propose(
+                    str(body.get("intent", "")),
+                    run_id=str(body.get("run_id", "")) or None,
+                    session_id=str(body.get("session_id", "")) or None,
+                ))
                 return
             if path == "/api/terminal/run":
                 # T2: run an allowlisted LOCAL command by shelling `vigil terminal <command> --approve` (the Run

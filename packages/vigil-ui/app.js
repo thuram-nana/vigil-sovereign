@@ -2913,25 +2913,72 @@
     var label = verdict === "queued" ? "QUEUES FOR YOU" : (verdict === "allowed" ? "ALLOWED" : "REFUSED");
     return h("span.vbadge." + (cls || "muted"), null, label);
   }
+  // --- T2b: the chat DOCK (minimize / maximize, persisted across navigations) ----------------------
+  // A collapsible chat panel. "min" collapses it to a slim pill (the terminal gets full height); "max"
+  // focuses the chat (tall, scrollable); "open" is the default. State persists in localStorage. Every
+  // control is a real focusable button, and Escape restores from a min/max state — keyboard-accessible.
+  var TERM_DOCK_KEY = "vigil-term-dock";
+  var _termEsc = null;
+  function termDockState() {
+    try { var s = localStorage.getItem(TERM_DOCK_KEY); return (s === "min" || s === "max") ? s : "open"; }
+    catch (e) { return "open"; }
+  }
+  function termApplyDock(state) {
+    var body = V.$("#term-dock-body"), pill = V.$("#term-dock-pill"),
+        ctrls = V.$("#term-dock-ctrls"), maxBtn = V.$("#term-dock-max"), minBtn = V.$("#term-dock-min");
+    var minimized = state === "min", maximized = state === "max";
+    if (body) {
+      body.style.display = minimized ? "none" : "";
+      body.style.minHeight = maximized ? "46vh" : "";
+      body.style.maxHeight = maximized ? "62vh" : "";
+      body.style.overflowY = maximized ? "auto" : "";
+    }
+    if (pill) pill.style.display = minimized ? "flex" : "none";
+    if (ctrls) ctrls.style.display = minimized ? "none" : "flex";
+    if (minBtn) minBtn.setAttribute("aria-pressed", String(minimized));
+    if (maxBtn) { maxBtn.textContent = maximized ? "Restore" : "Maximize"; maxBtn.setAttribute("aria-pressed", String(maximized)); }
+  }
+  function termToggleDock(target) {
+    var next = termDockState() === target ? "open" : target;   // clicking the active control restores
+    try { localStorage.setItem(TERM_DOCK_KEY, next); } catch (e) {}
+    termApplyDock(next);
+  }
+
   function renderTerminal(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Terminal"),
         h("span.sub", null, "Ask in plain English or type a command. The AI proposes; you approve; only local read-only commands run.")]),
       h("div.legend", null, [V.icon("shield"), h("span", null,
-        "The AI proposes a command and shows its gate verdict — you approve it with Run. Every command goes through the same allowlist + gate + signed record: it can only run local, read-only tools (ls, cat, grep, find, stat, …). It cannot reach the network, change files, or run a shell — even if the AI is wrong or prompt-injected, the allowlist refuses it and nothing runs without your approval.")]),
-      // --- the beginner-friendly path: ask in English -------------------------------------------------
-      V.card("Ask in plain English", "AI PROPOSES", h("div.stack", null, [
-        h("div.field", { style: { marginBottom: "0" } }, [
-          h("label", null, "What do you want to inspect?"),
-          h("div.row", { style: { gap: "8px" } }, [
-            h("input#term-intent", { type: "text", placeholder: "e.g. show the last 20 lines of /etc/hostname",
-              style: { flex: "1" },
-              onKeydown: function (e) { if (e.key === "Enter") { e.preventDefault(); termPropose(); } } }),
-            h("button.btn.primary#term-propose-btn", { onClick: termPropose }, [V.icon("brain"), "Propose"]),
+        "The AI is a capability-router: it can propose an allowlisted command (you approve with Run), answer a question about this session from retained findings, or point you at the right screen for a scan. Every command goes through the same allowlist + gate + signed record — it can only run local, read-only tools (ls, cat, grep, find, stat, …), never reach the network, change files, or run a shell. Even if the AI is wrong or prompt-injected, the allowlist refuses it and nothing runs without your approval. Answers and routes run nothing.")]),
+      // --- the beginner-friendly path: ask in English (a minimize/maximize chat DOCK) -----------------
+      h("div.card#term-dock", null, [
+        h("div.card-h", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" } }, [
+          h("div", null, [h("span.label", null, "AI CHAT"), h("h3", { style: { margin: "0" } }, "Ask in plain English")]),
+          h("div#term-dock-ctrls.row", { style: { gap: "6px" } }, [
+            h("button.btn.sm#term-dock-min", { type: "button", "aria-label": "Minimize the chat dock", "aria-pressed": "false",
+              onClick: function () { termToggleDock("min"); } }, "Minimize"),
+            h("button.btn.sm#term-dock-max", { type: "button", "aria-label": "Maximize the chat dock", "aria-pressed": "false",
+              onClick: function () { termToggleDock("max"); } }, "Maximize"),
           ]),
         ]),
-        h("div#term-proposal"),
-      ]), false),
+        h("div#term-dock-pill", { style: { display: "none", alignItems: "center", justifyContent: "space-between", gap: "8px", padding: "4px 2px" } }, [
+          h("span.dim", null, "Chat dock minimized — the terminal has full height."),
+          h("button.btn.sm", { type: "button", "aria-label": "Restore the chat dock",
+            onClick: function () { termToggleDock("min"); } }, "Restore chat"),
+        ]),
+        h("div#term-dock-body.stack", null, [
+          h("div.field", { style: { marginBottom: "0" } }, [
+            h("label", null, "What do you want to inspect or ask?"),
+            h("div.row", { style: { gap: "8px" } }, [
+              h("input#term-intent", { type: "text", placeholder: "e.g. show the last 20 lines of /etc/hostname — or: what did we prove this session?",
+                style: { flex: "1" },
+                onKeydown: function (e) { if (e.key === "Enter") { e.preventDefault(); termPropose(); } } }),
+              h("button.btn.primary#term-propose-btn", { onClick: termPropose }, [V.icon("brain"), "Ask"]),
+            ]),
+          ]),
+          h("div#term-proposal"),
+        ]),
+      ]),
       // --- the direct path: type a command ------------------------------------------------------------
       V.card("Or type a command", "DIRECT", h("div.stack", null, [
         h("div.field", { style: { marginBottom: "0" } }, [
@@ -2951,6 +2998,15 @@
         whiteSpace: "pre-wrap", margin: "0", fontSize: "var(--fs-xs)" } }, "No command run yet."), false),
       V.card("Recent commands", "HISTORY", h("div#term-history", null, h("div.empty", null, "Loading…")), false),
     ]);
+    termApplyDock(termDockState());              // restore the persisted dock state
+    if (_termEsc) document.removeEventListener("keydown", _termEsc);
+    _termEsc = function (e) {
+      if (e.key === "Escape" && V.$("#term-dock") && termDockState() !== "open") {
+        try { localStorage.setItem(TERM_DOCK_KEY, "open"); } catch (_) {}
+        termApplyDock("open");
+      }
+    };
+    document.addEventListener("keydown", _termEsc);
     termLoadHistory();
   }
 
@@ -2958,10 +3014,11 @@
     var input = V.$("#term-intent"), btn = V.$("#term-propose-btn"), out = V.$("#term-proposal");
     var intent = input ? String(input.value || "").trim() : "";
     if (!out) return;
-    if (!intent) { V.mount(out, h("div.hint", null, "Describe what you want to inspect.")); return; }
+    if (!intent) { V.mount(out, h("div.hint", null, "Describe what you want to inspect, or ask about this session.")); return; }
     if (btn) btn.disabled = true;
-    V.mount(out, h("div.dim", null, "Asking the AI for a command…"));
-    V.postJSON(OFF("/api/terminal/propose"), { intent: intent })
+    V.mount(out, h("div.dim", null, "Thinking (the AI is deciding whether this needs a command, an answer, or a scan)…"));
+    var q = hashQuery();
+    V.postJSON(OFF("/api/terminal/propose"), { intent: intent, run_id: q.run || "", session_id: q.id || "" })
       .then(function (r) {
         if (btn) btn.disabled = false;
         if (r && r.need_key) {
@@ -2977,13 +3034,18 @@
         V.mount(out, h("div.legend", null, [V.icon("x"), (e && e.message) || "propose failed"]));
       });
   }
+  // ASK vs DO: render the router's three modes. answer → a cited bubble (no Run); route → a suggestion +
+  // link to the right screen (no Run); command → the proposal + verdict + Run/Edit/Cancel (as T2).
   function termRenderProposal(r) {
     var out = V.$("#term-proposal"); if (!out) return;
+    var mode = (r && r.mode) || ((r && r.command) ? "command" : "");
+    if (mode === "answer") { termRenderAnswer(r); return; }
+    if (mode === "route") { termRenderRoute(r); return; }
     var verdict = r && r.verdict;
     var refused = !r || !r.ok || (verdict && verdict.verdict === "refused");
     var nodes = [
       h("div.row", { style: { gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
-        h("span.label", null, "Proposed"), termVerdictBadge(verdict),
+        h("span.label", null, "Proposed command"), termVerdictBadge(verdict),
       ]),
       h("pre.mono", { style: { margin: "6px 0", whiteSpace: "pre-wrap", fontSize: "var(--fs-sm)" } },
         (r && r.command) ? r.command : "(the AI proposed no runnable command)"),
@@ -3003,6 +3065,33 @@
       ]));
     }
     V.mount(out, nodes);
+  }
+  function termRenderAnswer(r) {
+    var out = V.$("#term-proposal"); if (!out) return;
+    var cites = (r && r.cites) || [];
+    V.mount(out, h("div.card", { style: { background: "var(--surface-2, rgba(120,150,255,0.06))", padding: "10px 12px", margin: "0" } }, [
+      h("div.row", { style: { gap: "8px", alignItems: "center", marginBottom: "4px" } }, [
+        h("span.label", null, "ANSWER"), h("span.vbadge.muted", null, "READ-ONLY · NOTHING RAN"),
+      ]),
+      h("div", { style: { whiteSpace: "pre-wrap" } }, (r && r.answer) || ""),
+      cites.length ? h("div.dim", { style: { fontSize: "var(--fs-xs)", marginTop: "8px" } },
+        [h("span.label", null, "Cites: "), cites.join("  ·  ")]) : null,
+      h("div.hint", { style: { marginTop: "6px" } }, "Answered from the retained session data only — no command was run and no traffic was sent."),
+    ]));
+  }
+  function termRenderRoute(r) {
+    var out = V.$("#term-proposal"); if (!out) return;
+    var screen = (r && r.screen) || "assess";
+    V.mount(out, h("div.card", { style: { padding: "10px 12px", margin: "0" } }, [
+      h("div.row", { style: { gap: "8px", alignItems: "center", marginBottom: "4px" } }, [
+        h("span.label", null, "USE THE ENGAGEMENT PATH"), h("span.vbadge.muted", null, "NOTHING RAN"),
+      ]),
+      h("div", { style: { whiteSpace: "pre-wrap" } }, (r && r.suggestion) || "This needs the gated engagement path."),
+      h("div.row", { style: { gap: "8px", marginTop: "8px" } }, [
+        h("button.btn.primary", { onClick: function () { location.hash = "#/" + screen; } }, [V.icon("bolt"), "Go to " + (screen === "assess" ? "New Assessment" : screen)]),
+      ]),
+      h("div.hint", { style: { marginTop: "6px" } }, "The local terminal is read-only and offline — a scan, crawl, or exploit runs on the gated engagement path with its own approvals."),
+    ]));
   }
 
   var _termDryrunTimer = null;
