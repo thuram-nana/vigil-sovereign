@@ -155,6 +155,48 @@ def test_oracle_silence_keeps_the_claim_a_lead():
     assert any("UNCONFIRMED" in (f.title or "") for f in rep.leads)
 
 
+# --- autonomous terminal output is ADVISORY: it never reaches the oracle, never mints a fact ---------
+
+
+def _use_terminal(*, command="cat /etc/hostname"):
+    # An autonomous terminal.run proposal that ALSO claims an exploit + a finding — the loop must ignore
+    # BOTH for a terminal command (its host output is not target-produced evidence).
+    return LLMDecision(
+        action=ActionType.USE_TOOL,
+        tool=ToolCall(tool_name="terminal.run", tool_args={"command": command, "target": TARGET}),
+        output_analysis=OutputAnalysis(exploit_succeeded=True,
+                                       findings=[{"title": "candidate", "bug_class": "sqli"}]),
+    )
+
+
+def _run_tool_terminal(tool, phase, seq):
+    # A terminal ExecResult whose LOCAL output looks exactly like a firing oracle context — it must still
+    # never be handed to the oracle.
+    return SimpleNamespace(ran=True, outcome="ran", stdout="SQL error: unrecognized token near 'x'",
+                           stderr="", tool="terminal.run", tier="A2", target="local",
+                           destructive=False, record=SimpleNamespace(record_id="term-rec-1"))
+
+
+def test_terminal_output_is_advisory_and_never_mints_a_fact():
+    # Even a terminal command whose stdout WOULD fire the oracle, with the LLM claiming exploit_succeeded,
+    # mints NEITHER a fact NOR a lead — the oracle is never called on host output. The signed call IS recorded.
+    calls = {"n": 0}
+
+    def oracle(raw_output, analysis):
+        calls["n"] += 1
+        return "spine:" + "e" * 60                    # WOULD mint a fact if it were ever reached
+
+    eng = _engine(EngineSeams(attest=_attest_allow,
+                              think=ReplayThinker([_use_terminal(), _complete()]),
+                              gate=_allow_gate, run_tool=_run_tool_terminal, oracle=oracle))
+    rep = eng.engage(TARGET)
+    assert calls["n"] == 0                            # the oracle NEVER saw terminal host output
+    assert rep.fact_count == 0                        # no fact minted
+    assert not any((f.bug_class or "") == "sqli" for f in rep.leads)   # not even a lead from the claim
+    assert any(t.tool == "terminal.run" and t.outcome == "ran" for t in rep.tool_calls)  # but it IS recorded
+    assert rep.done is True
+
+
 # --- the gate authorizes actions -------------------------------------------------------------------
 
 
