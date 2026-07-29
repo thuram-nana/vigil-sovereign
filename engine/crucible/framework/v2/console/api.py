@@ -209,6 +209,54 @@ def session_detail(session_id: str) -> dict[str, Any]:
     return {"session": sess, "runs": runs}
 
 
+def inbox(slug: str) -> dict[str, Any]:
+    """U3 — read-only view of the directed agent-to-agent COORDINATION messages on one engagement's spine
+    (the S5 ``agent_message`` kind: sender/recipient/topic/body/refs). LOAD-BEARING HONESTY: a message is
+    NOT evidence — no fact-building path reads this kind, so draining it can never promote a finding; the UI
+    renders it as advisory coordination only. Total: an unregistered/absent engagement (no ``--spine`` run
+    has posted for this slug yet) or any read error yields an empty list, never a traceback."""
+    s = str(slug or "").strip()
+    if not s:
+        return {"ok": True, "slug": "", "advisory": True, "messages": []}
+
+    def _read() -> list[dict[str, Any]]:
+        from ..agents.blackboard import open_blackboard
+        bb = open_blackboard()
+        try:
+            rows = bb.read(engagement=s, kinds=["agent_message"], limit=200)   # raises for an unregistered slug
+        finally:
+            try:
+                bb.close()
+            except Exception:  # noqa: BLE001
+                pass
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            p = getattr(r, "payload", None) or {}
+            out.append({
+                "id": getattr(r, "id", None),
+                "posted_at": getattr(r, "posted_at", None),
+                "sender": str(p.get("sender", "")),
+                "recipient": str(p.get("recipient", "")),
+                "topic": str(p.get("topic", "")),
+                "body": str(p.get("body", "")),
+                "refs": [x for x in (p.get("refs") or []) if isinstance(x, int)],
+            })
+        return out[-100:]                                   # most recent 100 — advisory, bounded
+
+    messages = _safe(_read, default=[]) or []
+    payload = {"ok": True, "slug": s, "advisory": True, "messages": messages}
+    # Agent messages are agent-authored free text that EGRESSES to the UI, so apply the SAME two-pass
+    # redaction the terminal-context egress uses: the load-bearing free-text credential-shape masker
+    # (actions._redact_ctx — catches an sk-ant / JWT / URL-userinfo secret INSIDE a message body, which a
+    # key-NAME scrub alone would miss) then scrub_log_event as a defense-in-depth key-name pass.
+    try:
+        from ..common.redact import scrub_log_event
+        from . import actions
+        return scrub_log_event(actions._redact_ctx(payload))
+    except Exception:  # noqa: BLE001 — redaction unavailable ⇒ still return the (agent-authored) messages
+        return payload
+
+
 def run_report(run_id: str) -> dict[str, Any]:
     """The saved `build_report` document for a console run (findings + attack_paths +
     summary), or an error marker if it has not finished yet."""
