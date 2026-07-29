@@ -103,13 +103,14 @@ def test_allowlist_is_exactly_the_curated_local_read_inspect_set():
         "nl", "tac", "rev", "fold", "expand", "column", "paste", "comm", "cmp", "diff",
         "readlink", "realpath", "basename", "dirname",
         "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
-        "base64", "base32", "od", "xxd", "hexdump", "strings",
+        "base64", "base32", "od", "hexdump", "strings",
         "arch", "nproc", "lscpu", "lsblk", "free", "cal", "groups", "locale",
         "find", "sort", "uniq", "file", "date", "hostname",
     })
-    # EGRESS/secret binaries stay OFF: getent (`getent hosts` → DNS lookup = egress), env/printenv (secret
-    # dump / `env PROG` execs) — plus every network / interpreter / writer family.
-    for excluded in ("getent", "env", "printenv", "curl", "wget", "nc", "ssh",
+    # EGRESS/secret/WRITE binaries stay OFF: getent (`getent hosts` → DNS lookup = egress), env/printenv
+    # (secret dump / `env PROG` execs), xxd (`xxd -r - OUT` WRITES a file — red-pen BLOCK) — plus every
+    # network / interpreter / writer family.
+    for excluded in ("getent", "env", "printenv", "xxd", "curl", "wget", "nc", "ssh",
                      "bash", "sh", "python", "python3", "perl", "awk", "rm", "tee", "cp", "sed", "dd"):
         assert excluded not in _TERMINAL_ALLOWLIST, f"{excluded!r} must never be allowlisted"
 
@@ -163,12 +164,35 @@ def test_reAdded_capable_binaries_write_or_exec_forms_still_refuse():
 
 
 @pytest.mark.parametrize("command", [
-    "sha256sum /etc/hostname", "diff a b", "readlink -f /etc/hostname", "od -c f", "xxd f",
+    "sha256sum /etc/hostname", "diff a b", "readlink -f /etc/hostname", "od -c f",
     "strings /bin/ls", "lsblk", "nproc", "rev f", "nl f", "base64 f", "comm a b", "sort -r f", "uniq -c f",
 ])
 def test_expanded_read_tools_are_allowlisted(command):
     stages, why = _parse_terminal_pipeline(command)
     assert stages is not None, why
+
+
+@pytest.mark.parametrize("command", ["xxd f out", "xxd -r - /home/kali/.bashrc", "xxd file"])
+def test_xxd_is_off_allowlist_and_refused(command):
+    # red-pen BLOCK: `xxd -r - OUT` writes an arbitrary file; xxd is EXCLUDED (od/hexdump are the read subs).
+    stages, why = _parse_terminal_pipeline(command)
+    assert stages is None and "allowlist" in why
+
+
+def test_pipeline_honors_the_injected_run_pipeline_seam():
+    # red-pen HIGH: a 2+-stage pipeline must go through the INJECTED run_pipeline (confinement/instrumentation
+    # seam), never a hardcoded subprocess. A blocking injected pipeline runner is CALLED and nothing spawns.
+    called = {}
+
+    def blocking_pipeline(stages, *, timeout, output_cap, cwd=None):
+        called["stages"] = stages
+        return RunOutcome(exit_code=0, stdout="via-injected-pipeline", stderr="")
+
+    res = execute_terminal("echo hi | tr a-z A-Z | wc -w", Phase.INFORMATIONAL, gate=gate(),
+                           view=_view(), destructive_view={}, run=FakeRun(), run_pipeline=blocking_pipeline,
+                           signer=det_signer, seq=1, now=7)
+    assert res.ran is True and res.stdout == "via-injected-pipeline"
+    assert called["stages"] == [["echo", "hi"], ["tr", "a-z", "A-Z"], ["wc", "-w"]]
 
 
 def test_no_network_interpreter_or_writer_binary_is_allowlisted():

@@ -766,7 +766,8 @@ _TERMINAL_ALLOWLIST: frozenset = frozenset({
     "nl", "tac", "rev", "fold", "expand", "column", "paste", "comm", "cmp", "diff",
     "readlink", "realpath", "basename", "dirname",
     "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
-    "base64", "base32", "od", "xxd", "hexdump", "strings",
+    "base64", "base32", "od", "hexdump", "strings",   # NB `xxd` EXCLUDED: `xxd -r - OUT` WRITES a file (its
+    #   2nd positional is an output path) — od/hexdump are the read-only hex-dump substitutes (red-pen BLOCK).
     "arch", "nproc", "lscpu", "lsblk", "free", "cal", "groups", "locale",
     # NB deliberately EXCLUDED: `getent` — `getent hosts <name>` does a DNS lookup (network egress), which
     #   breaks the never-liftable egress floor; `env`/`printenv` — dump secrets / `env PROG` execs; and every
@@ -1027,6 +1028,7 @@ def execute_terminal(
     view: Any = None,
     destructive_view: Any = None,
     run: Callable[..., Any] = subprocess_runner,
+    run_pipeline: Callable[..., Any] = _run_pipeline,
     signer: Optional[Callable[[bytes], Any]] = None,
     seq: Any = 0,
     now: Any = 0,
@@ -1046,14 +1048,14 @@ def execute_terminal(
     and return the RAW output. Never raises — any unexpected condition is a DENY."""
     try:
         return _execute_terminal(command, phase, gate=gate, view=view, destructive_view=destructive_view,
-                                 run=run, signer=signer, seq=seq, now=now, timeout=timeout,
-                                 output_cap=output_cap, cwd=cwd)
+                                 run=run, run_pipeline=run_pipeline, signer=signer, seq=seq, now=now,
+                                 timeout=timeout, output_cap=output_cap, cwd=cwd)
     except Exception:  # noqa: BLE001 — total on untrusted input; an internal error is a DENY, never a raise
         return _deny(_TERMINAL_TOOL, "internal error while executing the terminal command (fail-closed)")
 
 
-def _execute_terminal(command, phase, *, gate, view, destructive_view, run, signer, seq, now, timeout,
-                      output_cap, cwd) -> ExecResult:
+def _execute_terminal(command, phase, *, gate, view, destructive_view, run, run_pipeline, signer, seq, now,
+                      timeout, output_cap, cwd) -> ExecResult:
     # (0) An execution MUST be recordable: no signer wired ⇒ we cannot produce the signed spine record, so
     #     we refuse to run an unrecordable (hence unprovable) command — BEFORE we even parse it.
     if not callable(signer):
@@ -1112,7 +1114,7 @@ def _execute_terminal(command, phase, *, gate, view, destructive_view, run, sign
         if len(stages) == 1:
             raw_outcome = run(stages[0], timeout=timeout, output_cap=output_cap, cwd=safe_cwd)
         else:
-            raw_outcome = _run_pipeline(stages, timeout=timeout, output_cap=output_cap, cwd=safe_cwd)
+            raw_outcome = run_pipeline(stages, timeout=timeout, output_cap=output_cap, cwd=safe_cwd)
     except Exception as exc:  # noqa: BLE001 — a runner outage (incl. a runner that rejects cwd=) never crashes
         raw_outcome = RunOutcome(exit_code=None, stdout="", stderr=f"runner error: {type(exc).__name__}: {exc}")
     outcome = _coerce_outcome(raw_outcome, output_cap)
