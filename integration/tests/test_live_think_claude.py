@@ -357,3 +357,77 @@ def test_think_never_raises_on_broken_state():
             raise RuntimeError("no attrs")
     d = think(_Broken(), {"weird": object()}, client=FakeClient(text="not json"))
     assert isinstance(d, LLMDecision) and d.action == ActionType.ASK_USER
+
+
+# --- M1: adaptive thinking + streaming --------------------------------------------------------------
+
+_DECISION = json.dumps({"action": "use_tool", "tool": {"tool_name": "nmap", "tool_args": {"target": "127.0.0.1"}}})
+
+
+def test_adaptive_thinking_sent_for_current_model_not_older(state):
+    # A current-gen model gets thinking:{type:"adaptive"}; a pre-4.6 model gets none (it would 400).
+    fake = FakeClient(text=_DECISION)
+    think(state, {"prior": "x"}, client=fake, model="claude-opus-5")
+    assert fake.captured.get("thinking") == {"type": "adaptive"}
+    assert "budget_tokens" not in fake.captured                  # never the deprecated shape
+    old = FakeClient(text=_DECISION)
+    think(state, {"prior": "x"}, client=old, model="claude-3-5-sonnet-20241022")
+    assert "thinking" not in old.captured
+
+
+class _Stream:
+    """A stand-in for the SDK streaming context manager: get_final_message() returns the scripted Message."""
+    def __init__(self, outer: "StreamingClient", kwargs: dict) -> None:
+        self._outer, self._kwargs = outer, kwargs
+
+    def __enter__(self):
+        self._outer.captured = self._kwargs
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get_final_message(self):
+        # a current-gen reply carries a thinking block THEN the text block — _extract_text must skip the
+        # thinking block and read only the JSON decision.
+        r = _Response(self._outer.text)
+        r.content = [_Block("thinking", "deliberating..."), _Block("text", self._outer.text)]
+        return r
+
+
+class _StreamMessages:
+    def __init__(self, outer: "StreamingClient") -> None:
+        self._outer = outer
+
+    def stream(self, **kwargs):
+        return _Stream(self._outer, kwargs)
+
+    def create(self, **kwargs):  # present but must NOT be used when stream() exists
+        self._outer.create_called = True
+        return _Response(self._outer.text)
+
+
+class StreamingClient:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.captured: dict = {}
+        self.create_called = False
+        self.messages = _StreamMessages(self)
+
+
+def test_streaming_used_when_client_supports_it_and_thinking_blocks_ignored(state):
+    sc = StreamingClient(text=_DECISION)
+    d = think(state, {"prior": "banner"}, client=sc, model="claude-opus-5")
+    assert d.action == ActionType.USE_TOOL and d.tool.tool_name == "nmap"   # parsed from the text block only
+    assert sc.captured.get("thinking") == {"type": "adaptive"}              # streamed WITH adaptive thinking
+    assert sc.create_called is False                                        # streaming path taken, not create
+
+
+def test_streaming_error_fails_closed_to_safest(state):
+    class _BoomStream:
+        def stream(self, **kwargs):
+            raise RuntimeError("stream transport error")
+    class _C:
+        messages = _BoomStream()
+    d = think(state, {"x": 1}, client=_C(), model="claude-opus-5")
+    assert d.action == ActionType.ASK_USER                                  # a streaming error is a safe pause
