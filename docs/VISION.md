@@ -228,6 +228,32 @@ always the deciders.
   authority chain, not a way around it — you can ask in English, but the charter-signed `--scope` the UI
   can never widen is what actually binds the run.
 
+- **Governed local Terminal + natural-language chatbot.** `[BUILT]` *(PR #157)*
+  A *local-only* inspection shell with a plain-English AI chatbot on top, shipped as the 22nd UI screen and
+  the `vigil terminal` verb. It is the governing invariant applied to a shell: **the AI proposes; an
+  allowlist of local read-only binaries + the WARDEN gate + your per-command Run approval decide; every run
+  is a signed, redacted record.** By construction it can neither reach the network, write files, nor spawn
+  an interpreter (no such binary is on the allowlist — the test suite's hostile red-pen battery, from network
+  binaries to coreutils option-abbreviation bypasses, is refused across the board), so a hallucinated or
+  prompt-injected command is simply refused and never runs. This is the base surface the
+  session-omniscient copilot below builds on.
+
+- **Session-omniscient terminal copilot (T2b).** `[ROADMAP]` *(base Terminal is BUILT, above)*
+  The next increment on top of the shipped Terminal, all still bound by the same allowlist + approve-each +
+  signed-record discipline — the copilot only ever *proposes*:
+  - a **session-omniscient AI** that knows the whole session's findings, runs, and graph, so "what did we
+    prove on the login form?" is answerable in the terminal itself;
+  - **cross-session knowledge fusion** — link one session to another (via *session-connect*) and the AI
+    reasons over both, as advisory priors, never as facts;
+  - **ASK + DO modes** — a read-only session Q&A mode alongside the gated command (DO) mode;
+  - a **minimize / maximize chat dock** so the copilot rides along every screen;
+  - a **signed, replayable terminal transcript** exported inside the one-click dossier, re-verifiable offline
+    like every other artifact;
+  - **teach-mode** — the copilot explains *why* each proposed command is safe and what its output means, so
+    an operator who doesn't know the commands learns them.
+  Every item here is a proposal generator layered over the built gate; none of it can mint a fact, widen a
+  scope, or run a command you did not approve.
+
 - **Agent-to-agent coordination.** `[BUILDING — this program]` *(A5)*
   Fireteam members pass directed hints to next-phase siblings, folded into an **advisory objective only**.
   The load-bearing property: a message is *structurally* not evidence — the inbox filters to

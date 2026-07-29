@@ -173,12 +173,46 @@ section upgrades the moonshots' status from *blocked* to *scaffolded*, not to *s
 
 ---
 
-## 6. In final review / landing (NOT yet merged — do not treat as shipped)
+## 6. The governed local Terminal + AI chatbot (T2/T3 — MERGED, PR #157)
 
-Reflected here for completeness because it is close, but it is **not on `main`** yet:
+Now on `main`. A **local-only** inspection shell (it never touches the engagement target) with a
+plain-English **AI chatbot** on top, built on the same governing invariant: **the AI proposes; the
+allowlist + WARDEN gate + owner approval decide.**
 
-- **A governed local-only terminal** (`execute_terminal`): an allowlist that **cannot egress by
-  construction**, tiered A2 → queue → signed record.
-- **Opt-in WARDEN-gating of the Strix `exec_command` shell**: enabled via `VIGIL_WARDEN_STRIX_GATE` — it is
-  **gateable / opt-in**, **not** gated by default. Do not describe it as gated-by-default until it merges
-  and the default flips.
+- **`execute_terminal`** (`live/executor.py`) — the authoritative path. Order, all fail-closed: no signer
+  wired ⇒ refuse *before* running (an unrecordable command is unprovable) → parse with **NO shell** (refuse
+  the whole command on any shell metacharacter, then split on whitespace into an argv list, `shell=False`)
+  → **allowlist-validate** to local read/print binaries only (`ls cat head tail wc stat pwd whoami id uname
+  echo df du ps uptime grep cut tr`; `find` via a read-only *predicate* allowlist `_FIND_SAFE_PREDICATES`
+  where the exec/write predicates `-exec`/`-delete`/`-fprint*`/… are refused **by omission**; `date`/`hostname`
+  admitted **bare-only**) → confine `cwd` (no `..`/NUL, must exist) → classify **WARDEN A2** and authorize
+  through the conjunctive gate scoped on `127.0.0.1` (A2 **QUEUES** under the A1 ceiling — **never auto**) →
+  on approval, run under a timeout + output cap → write a **signed, redacted `ExecRecord`** to the spine.
+  Network egress and host-writes are impossible **by construction** — no allowlisted binary can open a socket,
+  spawn an interpreter, or mutate a file — so there is nothing to IP-pin. The test suite's **hostile red-pen
+  battery** (network binaries, interpreters, writers, shell metacharacters, unsafe `find` predicates, and
+  coreutils option-abbreviation bypasses such as `sort --compress=curl` / `--out=`) is **refused across the
+  board.**
+- **`build_terminal_runtime`** (`live/wiring.py`) — reuses the exact building blocks `build_engine` uses
+  (signed CRUCIBLE authority → conjunctive gate at the A1 ceiling → the standing `_approval_gate` →
+  vault-sealed spine keypair as the `ExecRecord` signer), loopback-scoped. `gate=None` ⇒ deny every command;
+  `signer=None` ⇒ refuse before running.
+- **The AI chatbot** (`console/actions.py`) — `terminal_propose(intent)` has Claude return **exactly one**
+  candidate command, which is **re-parsed + allowlist-checked exactly like a typed command** (`terminal_dryrun`);
+  a hallucinated / prompt-injected off-allowlist command (`rm -rf /`, `curl evil.com`) is **refused here and
+  can never run**. `terminal_run` shells `vigil terminal <command> --approve` — the UI **Run** click *is* the
+  operator approval. No `ANTHROPIC_API_KEY` ⇒ an honest `need_key` state ("add a key or type a command
+  directly"); the direct terminal needs no LLM. The console's `_TERM_*` allowlist is an **advisory mirror**
+  for the dryrun badge only (a drifted copy can only mislead the *preview* — `vigil terminal` re-parses with
+  the authoritative allowlist at run time; the offense console must not import the executor — FATAL-2).
+- **CLI** — `vigil terminal <command> [--approve]` (`_cmd_terminal`). Without `--approve` the command is
+  parsed, gated, and **QUEUED** but never run; `--approve` upgrades the A2 queue to allow. Prints the
+  `ExecResult` JSON and returns 0 iff it ran. **UI** — the **Terminal** screen (`renderTerminal`, DO group)
+  with an *Ask in plain English* card (AI proposes → Run / Edit / Cancel), an *Or type a command* card (live
+  dryrun badge), a *SIGNED* output pane, and a read-only signed *history* — the **22nd** screen.
+- **Opt-in WARDEN-gating of the Strix `exec_command` shell** (T3): the vendored Strix agent's arbitrary shell
+  is now WARDEN-**gateable** via `VIGIL_WARDEN_STRIX_GATE` — **opt-in / gateable, NOT gated by default.**
+
+The *session-omniscient* advanced layer (**T2b** — session Q&A, cross-session knowledge fusion, ASK/DO modes,
+a minimize/maximize chat dock, a signed replayable transcript exported in the one-click dossier, teach-mode)
+is **roadmap**, not built — see [`VISION.md`](VISION.md).
