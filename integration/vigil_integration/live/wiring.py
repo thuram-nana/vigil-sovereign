@@ -39,7 +39,7 @@ from ..attestation.ledger import make_ledger_writer, read_ledger, require_attest
 from ..detection.registry import run_all_detections
 from ..oracle_adapter import confirm_and_certify
 from .engine import EngineSeams, VigilEngine
-from .executor import execute
+from .executor import _TERMINAL_TOOL, execute, execute_terminal
 from .governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_governance_keypair
 from .spine_identity import DEFAULT_SPINE_KEY_FILE, SPINE_KEY_ID, load_or_create_spine_keypair
 from .spine_vigilcore import VigilCoreSpine
@@ -313,6 +313,25 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         # An owner-approved offense tool executes under the approval gate (WARDEN human leg satisfied);
         # everything else under the base gate. Either way CRUCIBLE scope + the loopback pin still gate it.
         active_gate = approval_gate if (approved and approval_gate is not None) else gate
+
+        # T3 — AUTONOMOUS TERMINAL: the governed LOCAL terminal is a DISTINCT executor path. execute_terminal
+        # REUSES the same conjunctive gate + signed ExecRecord but SKIPS network target-pinning — its allowlist
+        # admits ONLY local read/inspect utilities, so egress/write/exec are impossible BY CONSTRUCTION.
+        # terminal.run has NO argv builder in the network `execute` path (it would be denied as "unknown tool"),
+        # so it MUST route here. It already passed authorize_edge upstream (terminal.run classifies A2 → the gate
+        # QUEUES it → an owner approval is the human leg), and execute_terminal RE-authorizes it (defense in
+        # depth). The engine treats a terminal record's local output as ADVISORY: it never enters oracle intake,
+        # so an autonomous terminal command can never mint a FACT.
+        if isinstance(getattr(tool, "tool_name", None), str) and tool.tool_name.strip().lower() == _TERMINAL_TOOL:
+            ta = getattr(tool, "tool_args", None)
+            command = ta.get("command") if isinstance(ta, dict) else None
+            command = command if isinstance(command, str) else str(command or "")
+            return execute_terminal(
+                command, phase.value,
+                gate=active_gate, signer=exec_signer, seq=seq,
+                view=DEFAULT_TOOL_VIEW, destructive_view=DEFAULT_DESTRUCTIVE_VIEW, **kw,
+            )
+
         return execute(
             tool.tool_name, tool.tool_args, phase.value,
             gate=active_gate, signer=exec_signer, seq=seq,

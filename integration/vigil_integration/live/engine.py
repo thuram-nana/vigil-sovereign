@@ -44,6 +44,11 @@ from pydantic import BaseModel, Field
 from ..agent.react import apply_intake, authorize_edge, intake_result
 from ..agent.state import ActionType, AgentState, Finding, LLMDecision, Phase
 
+# The governed LOCAL terminal tool name (mirrors executor._TERMINAL_TOOL — kept as a local literal so engine
+# imports nothing from executor). A terminal command inspects HOST state; its output is advisory, never
+# target-produced evidence, so the loop must NEVER feed it to oracle intake (it can never mint a FACT).
+_TERMINAL_TOOL = "terminal.run"
+
 # ---------------------------------------------------------------------------------------------------
 # seam types — the fixed, simple callables the loop drives. build_engine adapts the real binders to
 # these; tests inject fakes. Every seam is Optional and its absence is fail-closed (never a fake pass).
@@ -253,6 +258,22 @@ class VigilEngine:
                 self._emit(getattr(exec_res, "record", None))
                 self._checkpoint(state, seq, report)
                 seq += 1
+                continue
+
+            # T3 — a governed LOCAL terminal command inspects HOST state (a file, a process, uname): its output
+            # is NOT target-produced evidence, so it is ADVISORY ONLY and must NEVER enter oracle intake — a
+            # terminal record can never mint a FACT (nor even a LEAD from output_analysis, which is meant for a
+            # real tool's target output). The signed ExecRecord is still emitted + checkpointed for the audit
+            # trail; the loop then continues to the next think. This is the load-bearing "autonomous terminal
+            # never fabricates a finding" property.
+            _ran_tool = decision.tool.tool_name if decision.tool else ""
+            if isinstance(_ran_tool, str) and _ran_tool.strip().lower() == _TERMINAL_TOOL:
+                self._emit(getattr(exec_res, "record", None))
+                self._checkpoint(state, seq, report)
+                seq += 1
+                state.execution_trace.append(
+                    {"iteration": it, "action": "use_tool", "tool": _ran_tool, "outcome": "ran",
+                     "facts": 0, "leads": 0, "advisory": "terminal"})
                 continue
 
             # ORACLE INTAKE — the LLM's claims become LEADs; only the oracle re-firing over the RAW

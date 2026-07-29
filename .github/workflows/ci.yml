@@ -99,6 +99,7 @@ jobs:
             PYTHONPATH=integration:gateway python -m pytest integration/tests \
               --ignore=integration/tests/test_oracle_adapter.py \
               --ignore=integration/tests/test_engine_live.py \
+              --ignore=integration/tests/test_engine_terminal.py \
               --ignore=integration/tests/test_executor_scoped.py \
               --ignore=integration/tests/test_executor_terminal.py \
               --ignore=integration/tests/test_cli_terminal.py \
@@ -115,6 +116,7 @@ jobs:
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               integration/tests/test_oracle_adapter.py \
               integration/tests/test_engine_live.py \
+              integration/tests/test_engine_terminal.py \
               integration/tests/test_executor_scoped.py \
               integration/tests/test_executor_terminal.py \
               integration/tests/test_cli_terminal.py \
