@@ -1111,6 +1111,10 @@ _CTX_MAX_FINDINGS = 15
 _CTX_MAX_RUNS = 8
 _CTX_MAX_COMMANDS = 8
 _CTX_MAX_CHARS = 6000
+# Cross-session fusion (F4): how many OPERATOR-CONSENTED connected sessions to fold in, and how many of each
+# one's findings. Kept small — a connected session's findings are non-authoritative background, not the focus.
+_CTX_MAX_CONNECTED = 3
+_CTX_MAX_CONNECTED_FINDINGS = 6
 
 # Free-text credential shapes to mask before the session context egresses to the model. This is deliberately
 # STRICTER than common.redact's at-rest header/key masking: that layer must not over-mask evidence bodies, but
@@ -1172,17 +1176,58 @@ def _redact_ctx(obj):
     return obj
 
 
+def _finding_summaries(rep, cap) -> list:
+    """Compact, non-authoritative summaries of a run report's findings (kind + title + bug_class + surface +
+    severity), capped at ``cap``. Shared by the primary-session and the connected-session paths so both are
+    summarised identically. Total: a non-dict report / non-dict finding is skipped, never a traceback."""
+    out: list = []
+    findings = rep.get("findings", []) if isinstance(rep, dict) else []
+    for f in findings[:cap]:
+        if not isinstance(f, dict):
+            continue
+        grounding = str(f.get("grounding") or "").lower()
+        kind = "FACT" if grounding == "fact" else ("LEAD" if grounding else "finding")
+        out.append({
+            "kind": kind, "title": f.get("title", ""), "bug_class": f.get("bug_class", ""),
+            "surface": f.get("surface") or f.get("location") or "", "severity": f.get("severity", ""),
+        })
+    return out
+
+
+def _newest_report_for_session(session_id):
+    """The (run_id, report_doc) of a session's newest run that actually has findings, or ``(None, {})``.
+    Walks the session's ``run_ids`` newest-first and returns the first non-pending report with findings.
+    Uses only the read providers (``api.session_detail`` / ``api.run_report``); the id is re-validated inside
+    ``session_detail`` (unsafe ⇒ ValueError ⇒ handled). Total: any provider failure ⇒ ``(None, {})``."""
+    from . import api
+    try:
+        sd = api.session_detail(str(session_id).strip()) or {}
+    except Exception:  # noqa: BLE001 — unsafe/unknown id ⇒ contribute nothing
+        return None, {}
+    rids = ((sd.get("session") or {}).get("run_ids")) or []
+    for rid in reversed([str(r) for r in rids if r]):
+        try:
+            rep = api.run_report(rid) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(rep, dict) and not rep.get("pending") and rep.get("findings"):
+            return rid, rep
+    return None, {}
+
+
 def _session_terminal_context(run_id=None, session_id=None) -> dict:
     """Assemble a COMPACT, secret-REDACTED snapshot of the session for the terminal chatbot to reason over:
-    the run's findings (FACT/LEAD title + bug_class + surface), recent runs, and recent terminal commands.
-    Built ONLY from EXISTING read providers (``api.list_runs`` / ``api.run_report`` / ``terminal_history``) —
-    it invents no data and runs nothing. Every string is passed through ``_redact_ctx`` — the load-bearing
-    free-text credential-shape masker (auth headers, URL userinfo, vendor tokens, JWT, PEM, kv secrets) — plus
-    a defense-in-depth ``scrub_log_event`` key-name pass, because this context EGRESSES to the model. Total:
-    any provider failure degrades to an empty section, never a traceback."""
+    the run's findings (FACT/LEAD title + bug_class + surface), recent runs, recent terminal commands, and —
+    when the operator has explicitly CONNECTED other sessions — a fused, origin-tagged summary of those
+    connected sessions' findings (cross-session knowledge fusion, F4). Built ONLY from EXISTING read providers
+    (``api.list_runs`` / ``api.run_report`` / ``api.session_detail`` / ``terminal_history``) — it invents no
+    data and runs nothing. Every string is passed through ``_redact_ctx`` — the load-bearing free-text
+    credential-shape masker (auth headers, URL userinfo, vendor tokens, JWT, PEM, kv secrets) — plus a
+    defense-in-depth ``scrub_log_event`` key-name pass, because this context EGRESSES to the model. Total: any
+    provider failure degrades to an empty section, never a traceback."""
     from . import api  # lazy: avoid an actions<->api import cycle
 
-    ctx: dict = {"run_id": None, "findings": [], "recent_runs": [], "recent_commands": []}
+    ctx: dict = {"run_id": None, "findings": [], "recent_runs": [], "recent_commands": [], "connected": []}
     try:
         runs = (api.list_runs() or {}).get("runs", []) or []
     except Exception:  # noqa: BLE001 — a read provider hiccup must not break a proposal
@@ -1215,16 +1260,29 @@ def _session_terminal_context(run_id=None, session_id=None) -> dict:
             rep = api.run_report(chosen) or {}
         except Exception:  # noqa: BLE001
             rep = {}
-        findings = rep.get("findings", []) if isinstance(rep, dict) else []
-        for f in findings[:_CTX_MAX_FINDINGS]:
-            if not isinstance(f, dict):
+        ctx["findings"] = _finding_summaries(rep, _CTX_MAX_FINDINGS)
+
+    # Cross-session knowledge fusion (F4): fold in the findings of the OPERATOR-CONSENTED connected sessions.
+    # ``connections_of`` is DIRECTIONAL (THIS session reads the other; the POST that linked them WAS the
+    # operator's consent — see sessions.connect_session) and path-safe (each id re-validated). We include only a
+    # compact, origin-tagged summary — nothing of the other session is copied into this one, so it stays a
+    # read-time union, and the entries are marked non-authoritative background for the model. Bounded + redacted
+    # like everything else here. Total: any failure contributes nothing rather than raising.
+    sid = str(session_id or "").strip()
+    if sid:
+        try:
+            from . import sessions
+            linked = sessions.connections_of(sid)
+        except Exception:  # noqa: BLE001
+            linked = []
+        for other in linked[:_CTX_MAX_CONNECTED]:
+            crun, crep = _newest_report_for_session(other)
+            if not crun:
                 continue
-            grounding = str(f.get("grounding") or "").lower()
-            kind = "FACT" if grounding == "fact" else ("LEAD" if grounding else "finding")
-            ctx["findings"].append({
-                "kind": kind, "title": f.get("title", ""), "bug_class": f.get("bug_class", ""),
-                "surface": f.get("surface") or f.get("location") or "", "severity": f.get("severity", ""),
-            })
+            fnd = _finding_summaries(crep, _CTX_MAX_CONNECTED_FINDINGS)
+            if fnd:
+                ctx["connected"].append({"session": other, "run_id": crun,
+                                         "authoritative": False, "findings": fnd})
 
     try:
         hist = (terminal_history() or {}).get("records", []) or []
@@ -1265,8 +1323,12 @@ _TERM_ROUTER_SYSTEM = (
     "it: return an EMPTY command and explain that the allowlist forbids it. The explanation should say why the "
     "terminal is the right tool.\n"
     "- \"answer\": the request is a QUESTION about THIS session (its findings, coverage, what was proven, "
-    "recent activity). Answer ONLY from the SESSION CONTEXT below and CITE the finding title / run id you drew "
-    "from in \"cites\". If the context does not contain the answer, say so honestly — NEVER invent a finding.\n"
+    "recent activity) OR about its OPERATOR-CONNECTED sessions (the SESSION CONTEXT's \"connected\" array — "
+    "other sessions the operator explicitly linked; each entry carries its origin \"session\" id and is "
+    "non-authoritative background). Answer ONLY from the SESSION CONTEXT below and CITE the finding title / run "
+    "id you drew from in \"cites\" — for a fact taken from a connected session, cite its \"session\" id too so "
+    "the operator can tell it came from a linked session. If the context does not contain the answer, say so "
+    "honestly — NEVER invent a finding.\n"
     "- \"route\": the request needs a NETWORK tool or an ENGAGEMENT action the local terminal cannot do (a "
     "scan, crawling a URL, exploiting a target, opening a connection). Do NOT propose a terminal command; "
     "explain it needs the gated engagement path (e.g. the New Assessment screen) and why the local read-only "

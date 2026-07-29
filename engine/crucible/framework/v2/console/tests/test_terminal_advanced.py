@@ -20,7 +20,7 @@ import json
 import sys
 import types
 
-from framework.v2.console import actions, api
+from framework.v2.console import actions, api, sessions
 
 
 # --- fakes (same shape as test_terminal_ui) ----------------------------------------------------------
@@ -231,3 +231,74 @@ def test_propose_need_key_without_key_builds_no_context(monkeypatch):
     monkeypatch.setattr(actions, "_session_terminal_context", boom)
     r = actions.terminal_propose("what did we find?")
     assert r["ok"] is False and r["need_key"] is True
+
+
+# --- cross-session knowledge fusion (F4) --------------------------------------------------------------
+
+def _fusion_providers(monkeypatch, *, connections):
+    # sess-A is the current session (run-a); sess-B is a candidate connected session (run-b).
+    _forbid_subprocess(monkeypatch)                             # fusion is pure read providers, never spawns
+    monkeypatch.setattr(api, "list_runs", lambda: {"runs": []})
+    monkeypatch.setattr(actions, "terminal_history", lambda: {"ok": True, "records": []})
+    monkeypatch.setattr(api, "session_detail", lambda sid: {
+        "sess-A": {"session": {"run_ids": ["run-a"]}},
+        "sess-B": {"session": {"run_ids": ["run-b"]}},
+    }.get(sid, {"error": "no such session"}))
+    monkeypatch.setattr(api, "run_report", lambda rid: {
+        "run-a": {"findings": [{"grounding": "fact", "title": "Primary SQLi",
+                                "bug_class": "sqli", "surface": "/a?q=", "severity": "high"}]},
+        "run-b": {"findings": [{"grounding": "fact", "title": "Linked XSS",
+                                "bug_class": "xss", "surface": "/b?x=", "severity": "medium"}]},
+    }.get(rid, {"pending": True}))
+    # connections_of is the CONSENT gate — the fusion path folds in exactly what it returns, nothing more.
+    monkeypatch.setattr(sessions, "connections_of", lambda s: connections if s == "sess-A" else [])
+
+
+def test_cross_session_fusion_unions_connected_findings(monkeypatch):
+    # With the operator having CONNECTED sess-A → sess-B, sess-B's findings appear in the context, origin-tagged
+    # and explicitly non-authoritative — while the primary session's own findings remain the focus.
+    _fusion_providers(monkeypatch, connections=["sess-B"])
+    ctx = actions._session_terminal_context(session_id="sess-A")
+
+    assert ctx["run_id"] == "run-a"
+    assert any(f["title"] == "Primary SQLi" for f in ctx["findings"])   # primary session's own findings
+    assert len(ctx["connected"]) == 1
+    linked = ctx["connected"][0]
+    assert linked["session"] == "sess-B" and linked["run_id"] == "run-b"
+    assert linked["authoritative"] is False                             # marked non-authoritative background
+    assert any(f["title"] == "Linked XSS" for f in linked["findings"])  # the connected session's finding folded in
+
+
+def test_cross_session_fusion_absent_without_connection(monkeypatch):
+    # No connection ⇒ NOTHING of another session leaks in (consent + isolation): connections_of returns [],
+    # so `connected` stays empty even though sess-B exists and has findings.
+    _fusion_providers(monkeypatch, connections=[])
+    ctx = actions._session_terminal_context(session_id="sess-A")
+    assert ctx["connected"] == []
+    assert any(f["title"] == "Primary SQLi" for f in ctx["findings"])   # the primary session is unaffected
+
+
+def test_cross_session_fusion_redacts_connected_secrets(monkeypatch):
+    # A secret planted in a CONNECTED session's finding is masked before the fused context egresses — the
+    # connected path goes through the SAME two-pass redaction as the primary path.
+    vendor_secret = "sk-ant-CONNECTEDLEAK0123456789"
+    _forbid_subprocess(monkeypatch)
+    monkeypatch.setattr(api, "list_runs", lambda: {"runs": []})
+    monkeypatch.setattr(actions, "terminal_history", lambda: {"ok": True, "records": []})
+    monkeypatch.setattr(api, "session_detail", lambda sid: {
+        "sess-A": {"session": {"run_ids": ["run-a"]}},
+        "sess-B": {"session": {"run_ids": ["run-b"]}},
+    }.get(sid, {"error": "no"}))
+    monkeypatch.setattr(api, "run_report", lambda rid: {
+        "run-a": {"findings": [{"grounding": "fact", "title": "Primary", "bug_class": "sqli",
+                                "surface": "/a", "severity": "high"}]},
+        "run-b": {"findings": [{"grounding": "fact", "title": "Leaked " + vendor_secret,
+                                "bug_class": "auth", "surface": "/b", "severity": "high"}]},
+    }.get(rid, {"pending": True}))
+    monkeypatch.setattr(sessions, "connections_of", lambda s: ["sess-B"] if s == "sess-A" else [])
+
+    ctx = actions._session_terminal_context(session_id="sess-A")
+    blob = json.dumps(ctx)
+    assert vendor_secret not in blob                            # connected-session secret masked before egress
+    assert actions.MASK in blob
+    assert "auth" in blob                                       # non-secret grounding from the connected run survives
