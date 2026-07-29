@@ -759,15 +759,49 @@ def _execute(tool_name: Any, tool_args: Any, phase: Any, *, gate, view, destruct
 # exec/write predicates by OMISSION (immune to any missed spelling); and the two host-state PRINTERS
 # (date/hostname) are admitted BARE only (a flag/operand could set the clock/hostname).
 _TERMINAL_ALLOWLIST: frozenset = frozenset({
-    # pure read/print — safe under ANY argv (no exec/write/egress option or operand exists):
+    # pure read/print — safe under ANY argv (no exec/write/egress option or operand exists). Read files,
+    # dirs, and system state; transform stdin→stdout; hash/inspect/compare — the full LOCAL read toolkit:
     "ls", "cat", "head", "tail", "wc", "stat", "pwd", "whoami", "id", "uname", "echo",
     "df", "du", "ps", "uptime", "grep", "cut", "tr",
-    "find",                                  # walk — SAFE-PREDICATE allowlist (_FIND_SAFE_PREDICATES)
+    "nl", "tac", "rev", "fold", "expand", "column", "paste", "comm", "cmp", "diff",
+    "readlink", "realpath", "basename", "dirname",
+    "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
+    "base64", "base32", "od", "xxd", "hexdump", "strings",
+    "arch", "nproc", "lscpu", "lsblk", "free", "cal", "groups", "locale",
+    # NB deliberately EXCLUDED: `getent` — `getent hosts <name>` does a DNS lookup (network egress), which
+    #   breaks the never-liftable egress floor; `env`/`printenv` — dump secrets / `env PROG` execs; and every
+    #   network / interpreter / writer binary. Egress + host-write stay impossible by construction.
+    # capable-but-GUARDED: admitted via a read-only FLAG allowlist that rejects their write/exec forms by
+    # OMISSION (immune to getopt_long prefix-abbreviation — the red-pen bypass), so composition (pipelines)
+    # gets the classic `sort`/`uniq` without their `-o`/output-operand writes or `--compress-program` exec:
+    "find",                                  # read-only predicate allowlist (_FIND_SAFE_PREDICATES)
+    "sort", "uniq",                          # read-only flag allowlist (_SORT_SAFE_FLAGS / _UNIQ_SAFE_FLAGS)
+    "file",                                  # read-only; -C/--compile (magic-db WRITE) rejected
     "date", "hostname",                      # print-only, admitted BARE (see _TERMINAL_BARE_ONLY)
 })
 
 # date / hostname: admitted ONLY bare — a flag/operand can SET the system clock/hostname (a host write).
 _TERMINAL_BARE_ONLY: frozenset = frozenset({"date", "hostname"})
+
+# ``sort``: read-only FLAG allowlist — any ``-``-leading token NOT here is refused, so `-o`/`--output` (WRITE)
+# and `--compress-program` (EXEC) are rejected by OMISSION, immune to any abbreviation (`--out=`/`--compress=`).
+# Non-``-`` tokens are input FILES (reads) or flag values. Value-taking flags (-k/-t/-S/…) pass their value as
+# the next non-``-`` token.
+_SORT_SAFE_FLAGS: frozenset = frozenset({
+    "-b", "-c", "-C", "-d", "-f", "-g", "-h", "-i", "-k", "-M", "-m", "-n", "-r", "-R", "-s", "-t", "-u", "-V", "-z",
+    "--check", "--dictionary-order", "--ignore-case", "--general-numeric-sort", "--ignore-leading-blanks",
+    "--human-numeric-sort", "--ignore-nonprinting", "--merge", "--month-sort", "--numeric-sort", "--reverse",
+    "--random-sort", "--sort", "--stable", "--field-separator", "--key", "--unique", "--version-sort",
+    "--zero-terminated", "--buffer-size", "--parallel",
+})
+# ``uniq``: read-only FLAG allowlist. uniq has no write FLAG — its write is a SECOND positional (the output
+# file), so we also refuse ≥2 file operands (skipping the value of a separate numeric flag `-f N`).
+_UNIQ_SAFE_FLAGS: frozenset = frozenset({
+    "-c", "-d", "-D", "-f", "-i", "-s", "-u", "-w", "-z",
+    "--count", "--repeated", "--all-repeated", "--ignore-case", "--skip-fields", "--skip-chars",
+    "--check-chars", "--unique", "--zero-terminated", "--group",
+})
+_UNIQ_VALUE_FLAGS: frozenset = frozenset({"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"})
 
 # ``find``: an ALLOWLIST of read-only predicates/operators. Any ``-``-leading token NOT in this set is
 # refused — so every exec/write predicate (-exec/-execdir/-ok/-okdir/-delete/-fprint/-fprint0/-fprintf/-fls)
@@ -859,7 +893,115 @@ def _terminal_binary_guard(binary: str, argv: list) -> Optional[str]:
                         "predicates (-exec/-execdir/-delete/-fprint*/-fls/-ok*/…) are refused by omission "
                         "(fail-closed)")
         return None
+    if binary == "sort":
+        # EXACT flag membership: `-o`/`--output` (WRITE) and `--compress-program` (EXEC) are refused by
+        # omission, immune to any abbreviation (`--out=`/`--compress=`) or bundling (`-ro`). Use separate
+        # flags (`-r -n -k 2`), not bundled/attached forms.
+        for tok in rest:
+            if tok.startswith("-") and tok != "-" and tok not in _SORT_SAFE_FLAGS:
+                return (f"sort option {tok!r} is not on the read-only flag allowlist — its write/exec flags "
+                        "(-o/--output, --compress-program) are refused by omission; use separate flags "
+                        "like `-r -n -k 2` (fail-closed)")
+        return None
+    if binary == "uniq":
+        # EXACT flag membership + refuse a SECOND file operand (uniq's write is `uniq IN OUT`), skipping the
+        # value of a separate numeric flag (`-f 2`) so it is not miscounted as the output operand.
+        operands, skip_next = 0, False
+        for tok in rest:
+            if skip_next:
+                skip_next = False
+                continue
+            if tok.startswith("-") and tok != "-":
+                if tok not in _UNIQ_SAFE_FLAGS:
+                    return f"uniq option {tok!r} is not on the read-only flag allowlist — refused (fail-closed)"
+                if tok in _UNIQ_VALUE_FLAGS:
+                    skip_next = True
+                continue
+            operands += 1
+        if operands >= 2:
+            return "uniq with two file operands WRITES the second (the output file) — refused (fail-closed)"
+        return None
+    if binary == "file":
+        # file's only write is -C/--compile (compile a magic database). Refuse it + every `--compile` prefix.
+        for tok in rest:
+            if tok == "-C" or (tok.startswith("--") and len(tok) > 2 and "compile".startswith(tok[2:])):
+                return f"file option {tok!r} compiles + WRITES a magic database — refused (fail-closed)"
+        return None
     return None
+
+
+_MAX_PIPELINE_STAGES: int = 8              # bound a pipeline's length (defense in depth)
+_PIPELINE_INTERMEDIATE_CAP: int = 8_000_000   # bytes; cap the data flowing BETWEEN stages (memory bound)
+
+
+def _parse_terminal_pipeline(command: Any) -> tuple[Optional[list], str]:
+    """Parse a LOCAL terminal command that MAY be a pipeline of allowlisted read tools (``A | B | C``) into a
+    LIST of stage-argvs, fail-closed. NO shell is ever consulted: the ``|`` is split HERE and each stage is
+    validated by the SAME single-command allowlist parser (:func:`_parse_terminal_command`), which still
+    refuses every OTHER metacharacter (`;&><$()\\{}` backtick, NUL, backslash, newline), every off-allowlist
+    binary, every unsafe ``find`` predicate, and ``..``/NUL tokens. Because every stage is an allowlisted
+    read/print tool, a pipeline can neither egress, write, nor exec — composition is safe BY CONSTRUCTION,
+    exactly like a single command. Returns ``(stages, "ok")`` (a plain command → a single stage) or
+    ``(None, reason)`` on any refusal."""
+    if not isinstance(command, str):
+        return None, "terminal command must be a string (fail-closed)"
+    cmd = command.strip()
+    if not cmd:
+        return None, "empty terminal command (fail-closed)"
+    # refuse every dangerous metachar EXCEPT the pipe (which we handle ourselves, never via a shell) up front,
+    # so a redirect/subshell/substitution/etc. ANYWHERE in the whole command is rejected before we split.
+    bad = sorted((_TERMINAL_METACHARS - {"|"}) & set(cmd))
+    if bad:
+        return None, f"terminal command contains disallowed metacharacter(s) {bad!r} — refused (fail-closed)"
+    raw_stages = cmd.split("|")
+    if len(raw_stages) > _MAX_PIPELINE_STAGES:
+        return None, f"pipeline has too many stages (>{_MAX_PIPELINE_STAGES}) — refused (fail-closed)"
+    stages: list = []
+    for raw in raw_stages:
+        s = raw.strip()
+        if not s:
+            return None, "empty pipeline stage (a leading/trailing/double '|') — refused (fail-closed)"
+        argv, why = _parse_terminal_command(s)   # allowlist + no-metachar (a stage has no '|') + find/bare guards
+        if argv is None:
+            return None, why
+        stages.append(argv)
+    return stages, "ok"
+
+
+def _run_pipeline(stages: list, *, timeout: float = DEFAULT_TIMEOUT, output_cap: int = DEFAULT_OUTPUT_CAP,
+                  cwd: Optional[str] = None) -> RunOutcome:
+    """Run an allowlisted pipeline (2+ stages) SEQUENTIALLY, feeding each stage's captured stdout as the next
+    stage's stdin — NO shell, argv LISTs, ``stdin`` closed (DEVNULL) for the head. Sequential (not concurrent
+    Popen) so there are no fd/deadlock hazards; the data flowing between stages is capped (memory bound) and
+    each stage is time-boxed to an equal slice of ``timeout``. Total: a stage timeout / spawn error degrades
+    to a ``RunOutcome`` (never raises)."""
+    per_stage = max(1.0, float(timeout) / max(1, len(stages)))
+    data: Optional[bytes] = None              # None → the head stage reads NO stdin (DEVNULL)
+    exit_code: Optional[int] = 0
+    stderr, truncated = "", False
+    for i, argv in enumerate(stages):
+        args = [str(a) for a in argv]
+        try:
+            proc = subprocess.run(  # noqa: S603 — argv LIST, shell=False; every stage is allowlist-validated
+                args, input=data, capture_output=True, timeout=per_stage, shell=False, cwd=cwd,
+                stdin=(subprocess.DEVNULL if data is None else None))
+        except subprocess.TimeoutExpired:
+            return RunOutcome(exit_code=None, stdout="", stderr=f"pipeline stage {i} ({args[0]}) timed out",
+                              timed_out=True, truncated=True)
+        except (OSError, ValueError) as exc:
+            return RunOutcome(exit_code=None, stdout="",
+                              stderr=f"pipeline stage {i} ({args[0]}) spawn failed: {type(exc).__name__}: {exc}")
+        exit_code = proc.returncode
+        stderr = _decode(proc.stderr)
+        out_bytes = proc.stdout or b""
+        if i < len(stages) - 1:
+            if len(out_bytes) > _PIPELINE_INTERMEDIATE_CAP:   # bound the data handed to the next stage
+                out_bytes, truncated = out_bytes[:_PIPELINE_INTERMEDIATE_CAP], True
+            data = out_bytes
+        else:
+            final_out, t = _cap(_decode(out_bytes), output_cap)
+            return RunOutcome(exit_code=exit_code, stdout=final_out, stderr=stderr, truncated=truncated or t)
+    return RunOutcome(exit_code=exit_code, stdout="", stderr=stderr, truncated=truncated)
 
 
 def _safe_terminal_cwd(cwd: Any) -> tuple[Optional[str], str]:
@@ -917,11 +1059,20 @@ def _execute_terminal(command, phase, *, gate, view, destructive_view, run, sign
     if not callable(signer):
         return _deny(_TERMINAL_TOOL, "no signer wired — refusing to run an unrecordable command (fail-closed)")
 
-    # (1) Parse + allowlist-validate the command with NO shell (metachar refusal → off-allowlist binary →
-    #     unsafe find predicate → bare '..' / NUL token all DENY here, before any authorization or spawn).
-    argv, why = _parse_terminal_command(command)
-    if argv is None:
+    # (1) Parse + allowlist-validate the command with NO shell. Supports an allowlisted PIPELINE (`A | B | C`):
+    #     the '|' is split here and EACH stage is validated by the same single-command parser, so a stage that
+    #     is off-allowlist / holds any other metachar / is an unsafe find predicate DENIES the whole command.
+    #     Every stage is a read/print tool → the pipeline can neither egress, write, nor exec (safe by
+    #     construction). A plain command is just a one-stage pipeline.
+    stages, why = _parse_terminal_pipeline(command)
+    if stages is None:
         return _deny(_TERMINAL_TOOL, why)
+    # a flat, '|'-separated token list for the signed record (redacted); the display of what actually ran.
+    flat_argv: list = []
+    for i, st in enumerate(stages):
+        flat_argv += list(st)
+        if i < len(stages) - 1:
+            flat_argv.append("|")
 
     # (2) Confine the working directory (default: inherit the process cwd; a '..'/NUL/non-dir cwd denies).
     safe_cwd, cwd_why = _safe_terminal_cwd(cwd)
@@ -955,16 +1106,20 @@ def _execute_terminal(command, phase, *, gate, view, destructive_view, run, sign
     # on the signed spine record; destructive/quorum flags carry over from the real verdict.
     rec_verdict = replace(verdict, tier=warden_tier) if is_dataclass(verdict) else verdict
 
-    # (5) Run the argv via the injected runner — shell=False, argv LIST, timeout + output cap + confined cwd.
+    # (5) Run: a single stage goes through the INJECTED runner (shell=False, argv LIST); a 2+-stage pipeline
+    #     runs via _run_pipeline (sequential stdout→stdin, no shell). Both time-boxed + output-capped + confined.
     try:
-        raw_outcome = run(argv, timeout=timeout, output_cap=output_cap, cwd=safe_cwd)
+        if len(stages) == 1:
+            raw_outcome = run(stages[0], timeout=timeout, output_cap=output_cap, cwd=safe_cwd)
+        else:
+            raw_outcome = _run_pipeline(stages, timeout=timeout, output_cap=output_cap, cwd=safe_cwd)
     except Exception as exc:  # noqa: BLE001 — a runner outage (incl. a runner that rejects cwd=) never crashes
         raw_outcome = RunOutcome(exit_code=None, stdout="", stderr=f"runner error: {type(exc).__name__}: {exc}")
     outcome = _coerce_outcome(raw_outcome, output_cap)
 
     # (6) Signed, redacted spine record; RAW streams returned for the caller/oracle (never persisted here).
     record, signed = _build_record(seq=seq, now=now, tool=_TERMINAL_TOOL, phase=phase, verdict=rec_verdict,
-                                   target="local", redacted_argv=_redact_argv(argv), outcome=outcome,
+                                   target="local", redacted_argv=_redact_argv(flat_argv), outcome=outcome,
                                    signer=signer)
     return ExecResult(
         tool=_TERMINAL_TOOL, ran=True, outcome="ran",
