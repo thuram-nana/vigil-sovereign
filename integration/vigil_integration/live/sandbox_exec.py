@@ -152,16 +152,21 @@ def run_sandboxed(
     acceptable); an unsafe/absent workspace or an empty command raises ``ValueError``. Otherwise returns the
     captured :class:`SandboxOutcome`. The ``run`` seam is injectable for tests; the real default spawns bwrap
     with no outer shell."""
+    # Validate the INPUTS (command, workspace) first — a bad input is a ValueError regardless of whether the
+    # bwrap ENVIRONMENT is present — THEN check the environment. (Checking bwrap first made an unsafe-workspace
+    # call raise SandboxUnavailable on a host without bwrap, and blocked the injected test runner — a CI bug:
+    # input validation must not depend on the runtime being installed. The two refusals are both fail-closed,
+    # so their order carries no security weight.)
     cmd = command if isinstance(command, str) else str(command or "")
     if not cmd.strip():
         raise ValueError("refusing to run an empty sandbox command")
+    ws = _safe_workspace(workspace)
+    if ws is None:
+        raise ValueError(f"unsafe or missing sandbox workspace: {workspace!r}")
     bwrap = bwrap_path()
     if not bwrap:
         raise SandboxUnavailable(
             "bubblewrap (bwrap) is not installed — the isolated write/exec tier cannot run; install bwrap "
             "(apt install bubblewrap). There is deliberately NO un-sandboxed fallback.")
-    ws = _safe_workspace(workspace)
-    if ws is None:
-        raise ValueError(f"unsafe or missing sandbox workspace: {workspace!r}")
     argv = build_bwrap_argv(cmd, ws, bwrap=bwrap)
     return run(argv, timeout=timeout, output_cap=output_cap)
