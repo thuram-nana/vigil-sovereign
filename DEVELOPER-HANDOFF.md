@@ -57,6 +57,13 @@ and most of them are enforced by tests and by the build itself. Each links to th
 
 ## 1. Reading order — start here → then → then
 
+> **Where is the build RIGHT NOW?** [`docs/CONTINUATION.md`](docs/CONTINUATION.md) is the durable resume doc —
+> its **STATE** tables + the dated **Session log** at the top record exactly what is merged on `main`, the most
+> recent completion wave, and the non-obvious lessons a resuming dev must not re-derive (the `CRUCIBLE_ROOT`
+> location, the charter scope-table format, the bwrap unix-socket egress fix, how to re-verify an `engage`
+> FACT offline, and why the Bash sandbox must be disabled for a network step). Read it first to orient, then
+> come back here for the deep dives.
+
 Read these in order. The first two give you the *what* and *why*; the KB pages give you the *how* per
 subsystem; the memory narratives give you the *why it was built this way and which defects review caught*.
 

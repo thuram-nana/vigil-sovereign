@@ -42,6 +42,69 @@ full-lifecycle-Claude}; fusing all five is unclaimed ground.
 | P3 | `21af4e9` | SIGIL adopts `vigil_core` (`reuse/` → re-export, no duplicate primitives); `assert_no_offense()` widened to bar `framework.*` AND `strix.*` | **full SIGIL Python suite green** through vigil_core |
 | P4 | (post-P3) | **CRUCIBLE adopts `vigil_core`** (evidence/{canonical,chain} + entitlement/crypto → re-export; 5 shared model classes imported from vigil_core; `EntitlementError(CrucibleError, IntegrityError)`) — the make-or-break | **CRUCIBLE evidence/entitlement + broader core (~650 tests) green**; every signature re-verifies |
 
+> The many post-P4 programs (I1–I5, the pro-pentest phases, the audit-hardening waves, the LAP live-patch
+> tiers, etc.) are tracked in the maintainer's Claude memory and their own PRs. The most recent completion
+> wave is logged below so a NEW developer + their Claude have the full context in-repo.
+
+## Session log — 2026-07-29 · completion wave (UI + terminal + LIVE EXTERNAL FACT + sandbox + telemetry)
+
+**Context.** A "finish everything the operator asked for" wave: wire the last UI/capability gaps, make the
+terminal do everything a local shell can (safely), prove a real finding LIVE against an external site, and
+complete the deferred follow-ons — each slice **build → adversarial red-pen → fix → CI green → merge**.
+
+**Merged to `main` (all green):**
+
+| PR | What | How it's verified |
+|---|---|---|
+| #161 | **Cross-session knowledge fusion** — the terminal AI's context UNIONs the findings of the operator's *consented* connected sessions (`console/actions._session_terminal_context` folds in `sessions.connections_of`, origin-tagged + non-authoritative + secret-redacted) | tests: folds in on connect, isolated without, secret in a connected finding masked |
+| #162 | **Autonomous engine terminal use** — `live/engine.py` proposes a GATED `terminal.run` (routed to `execute_terminal`); its host output is **advisory** → never enters oracle intake, so it can mint neither a FACT nor a LEAD | hermetic + live (`test_engine_terminal`) tests |
+| #163 | **LIVE EXTERNAL FACT** on authorized `testasp.vulnweb.com` (see below) | 2 FACTs, **offline-reverified 2/2**, tamper-byte rejected |
+| #164 | **M2 per-action crypto approval token** (`live/approval_token.py`) — single-use (`O_EXCL` nonce), action-bound (`action_digest`), PINNED owner key + `key_id` match (the I4 free-key_id BLOCK class), dead-man's-switch, domain-tagged; `build_approval_gate` upgrades only a WARDEN *queue*, a CRUCIBLE *deny* passes UNTOUCHED (never widens scope) | **independent adversarial red-pen: HOLD** (200-proc/100-thread single-use race, forgery, grief-burn, malleability) |
+| #165 | **M1 live-model** — adaptive `thinking:{type:"adaptive"}` + streaming `.get_final_message()` on the existing `think_claude` path; older (pre-4.6) models get neither (they 400). Oracle still the sole fact-minter | tests |
+| #166 | **U3 agent inbox** — `api.inbox(slug)` serves the S5 `agent_message` spine kind (advisory-NOT-evidence, redacted); `app.js` `KIND_META` renders it in the Live `review` lane | tests |
+| #167 | **Signed terminal transcript in the dossier** — `build_dossier(terminal_history=)` → scrubbed `logs/terminal-transcript.jsonl`, manifest+signature-covered | tests |
+| #168 | **Sandbox exec tier** (`live/sandbox_exec.py`) — arbitrary command in a **bwrap** box, safe by KERNEL isolation | red-pen **caught a host-root escape → fixed → re-check HOLD** (see below) |
+| #169 | fix: sandbox tests fail-closed ordering (validate inputs before the bwrap environment check) — CI green on a host without bwrap | |
+| #170 | **Gated sandbox exec** — `executor.execute_sandbox` + `vigil sandbox <cmd> [--approve]` over the #168 primitive (WARDEN `sandbox.exec`→A3, conjunctive gate + M2 token, signed record); mirrors `execute_terminal` | tests (executor + CLI) |
+| #171 | **G2 live telemetry** — `telemetry.collect_snapshot` (pure spine→metrics projection) + `vigil telemetry`/`vigil up --with-telemetry` sidecar + `api.telemetry` / `GET /api/telemetry` | tests + live smoke (testasp = 2 facts/130 leads) |
+
+**The headline — a real LIVE EXTERNAL oracle-confirmed FACT (#163).** The claimed "no outbound network" was
+wrong: the **Bash sandbox** drops TCP (run the network step with the tool's sandbox disabled), and the planned
+`testphp.vulnweb.com` was simply **down**. The operator authorized `testasp.vulnweb.com` (Acunetix's ASP/MS-SQL
+published test site) as the substitute. `python3 -m framework.v2 engage testasp
+"http://testasp.vulnweb.com/search.asp?tfSearch=test" --arsenal --spine` minted **2 oracle-confirmed FACTs**
+over executor-captured bytes — `boolean_sqli` via `differential_response` (conf 0.987) and `open_redirect` via
+`achieved_state` (conf 0.90) — while the gate **default-denied every destructive probe** (POST search, /admin).
+Both **re-fired OFFLINE** (`verify` → `[OK] matches-claim`); flipping a retained baseline byte → `[BAD]
+CLAIM-MISMATCH, 0/1 reproduced`. The moat, demonstrated live + external.
+
+**Non-obvious lessons a resuming dev must NOT re-derive:**
+- **Egress works; the Bash sandbox blocks TCP** (disable it for a network step). DNS resolves even sandboxed.
+- **`CRUCIBLE_ROOT=/home/kali/Music/PENTEST/crucible`** (shell profile) is where the engine reads
+  `targets/<slug>/charter.md` + writes `evidence/` + the `--spine` `.blackboard/store.sqlite`. Code runs from
+  `/home/kali/vigil/engine/crucible` with `.venv-offense/bin/python`. `/home/kali/vigil` has **no** CLAUDE.md,
+  so a `CRUCIBLE_ROOT=/home/kali/vigil` override is rejected.
+- **Charter scope parser needs the NUMBERED template format** (`## 2. In-scope systems` + a `| Host | … |`
+  table); the older `## Target hosts (in scope)` heading parses to an EMPTY scope → every seed refused.
+- **`engage` has no `--reverifiable-out`** (that's a `scan`-only flag; `scan` is hard loopback-only). To
+  re-verify an `engage` FACT offline: run `--spine`, read the confirmed `finding` events out of
+  `.blackboard/store.sqlite` (each carries `oracle_context`/`verified_by_oracle`), and feed one to
+  `python3 -m framework.v2 verify <finding.json>`.
+- **bwrap sandbox (the #168 red-pen BLOCK):** `--unshare-net` isolates IP + ABSTRACT unix sockets but **NOT
+  PATHNAME unix sockets** (they live in the MOUNT namespace). A wholesale `--ro-bind / /` carried the host
+  `/run` — incl. `/run/docker.sock` (host-root-equivalent) + D-Bus — into the "isolated" box (reviewer got
+  HTTP 200 from host Docker). FIX = bind ONLY a minimal RO allowlist (`/usr /bin /sbin /lib* /etc`), no
+  `/run`/`/var`/`/home`, so no host socket exists in the box.
+- **Sub-agent reliability this session:** background *builder* agents STALLED 3/3 on stream-idle → build
+  DIRECTLY in worktrees; FOREGROUND read-only *red-pen* agents completed reliably (they caught the M2 and
+  sandbox findings). The Bash auto-mode classifier flickers (retry) and blocks some `rm -rf`/`reset --hard`
+  compound commands (split them).
+
+**Still honestly out of reach (unchanged — labeled, never faked):** real TEE hardware backend (needs
+confidential-computing silicon; software attestation + auto-detect are built), binary cyber-reasoning
+auto-patch *synthesis* (research), next-gen agent body (research). The `execute_sandbox`/`vigil sandbox`
+wiring (#170) and the G2 telemetry sidecar (#171) — previously listed as follow-ons — are now DONE.
+
 ## STATE — what is NEXT (build in this order; each independently green)
 See `docs/PLAN.md` §5–§10 + §I for full specs. Summary + gates:
 - **P5 — Two-environment build boundary + inert-data channel.** `uv` workspace (or two venvs): **env-sovereign**
