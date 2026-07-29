@@ -171,7 +171,7 @@
       V.tile("Active runs", String(runs), runs ? "in progress" : "nothing running"),
       V.tile("Waiting for you", String(waiting), waiting ? "needs approval" : "all clear", waiting ? "down" : "up"),
       V.tile("Confirmed findings", String(findings), "proven by oracle"),
-      V.tile("Budget today", (snap && snap.budget_today != null ? "$" + snap.budget_today : "—"), "spend so far"),
+      V.tile("Budget today", budgetLabel(snap && snap.budget_today), "spend so far"),
     ]);
     // merged recent activity (sovereign spine snapshot has recent_by_agent / recent_decisions)
     const rows = [];
