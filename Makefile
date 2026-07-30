@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup up down services services-down logs smoke strix systemd envs clean-services
+.PHONY: help setup up down services services-down logs smoke strix systemd envs clean-services bench
 
 # extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
 ARGS ?=
@@ -21,6 +21,10 @@ setup: ## full one-command setup on a fresh machine (venvs + kernel + services +
 up: ## bring the WHOLE unified UI up at ONE origin (vigil up; ARGS=... for --domain/--host/--no-browser)
 	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }
 	$(VIGIL) up $(ARGS)
+
+bench: ## run the public benchmark → a SIGNED, tamper-evident, independently-verifiable scorecard
+	PYTHONPATH=engine/crucible .venv-offense/bin/python -m framework.v2 benchmark --no-incumbents \
+	  --report docs/benchmark-scoreboard.md --json docs/benchmark-results.json --sign
 
 down: ## stop a running `vigil up` (backends + reverse proxy)
 	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }
