@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigil.dev/proof-carrying-finding/schemas/evidence-certificate.schema.json",
+  "title": "EvidenceCertificate",
+  "description": "The signable, verifiable claim about ONE confirmed finding. This schema reflects the ACTUAL serialized (model_dump(mode=\"json\")) shape of framework.v2.evidence.models.EvidenceCertificate. It is fully deterministic (no wall-clock; `seq` is the monotonic order), so its canonical bytes are stable across producer and verifier. The certificate's canonical form is the sha256 preimage of its `cert_digest` and of the m-of-n governance signature over it (under the `crucible-evidence-v1\\u0000` domain tag). The three additive members `report_claims`, `oracle_version`, and `how_to_verify` are DROPPED from the serialized form when empty (a model_serializer wrap), so a certificate built without them hashes and signs BYTE-IDENTICALLY to a pre-additive certificate. `additionalProperties:false` mirrors the model's `extra=\"forbid\"`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "engagement_slug",
+    "finding_ref",
+    "bug_class",
+    "surface",
+    "confirmed_by",
+    "confidence",
+    "oracle_context_digest",
+    "artifacts",
+    "seq"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1 for a plain certificate; 2 when it carries `report_claims`."
+    },
+    "engagement_slug": {
+      "type": "string",
+      "description": "The engagement scope. Default \"\" (still emitted)."
+    },
+    "finding_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "check_id / finding slug. The only member with no default."
+    },
+    "bug_class": {
+      "type": "string",
+      "description": "The oracle-provable class the certificate asserts. Default \"\"."
+    },
+    "surface": {
+      "type": "string",
+      "description": "Insertion point / parameter. Default \"\"."
+    },
+    "confirmed_by": {
+      "type": "string",
+      "description": "The oracle kind that fired. Default \"\"."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Oracle confidence in [0,1]. Default 0.0."
+    },
+    "oracle_context_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 (bare lowercase hex) of the canonical oracle_context the oracle adjudicated. The signature cannot be lifted onto different evidence: a verifier recomputes digest_payload(oracle_context) and requires equality (the BINDING layer)."
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "Per-file sha256 manifest of the raw on-disk evidence the oracle saw, sorted by relative path. May be empty (a certificate then verifies on reproduction + binding alone).",
+      "items": { "$ref": "#/$defs/ArtifactRef" }
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic order (NOT a wall-clock) — the chain links certificates in this order."
+    },
+    "report_claims": {
+      "description": "ADDITIVE (schema v2). Atomic report sentences bound into (and signed with) the certificate. DROPPED from the serialized form when null/empty, so an older certificate is byte-identical. When present it is sorted by (sentence, bug_class) for deterministic canonical bytes.",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/ReportClaim" } }
+      ]
+    },
+    "oracle_version": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "ADDITIVE. The content-derived id@version of the oracle that fired, stamped at mint time (thus signed). DROPPED from the serialized form when \"\". A verifier compares it to the current oracle version to detect a stale proof (the oracle body changed since issue)."
+    },
+    "how_to_verify": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ADDITIVE. A deterministic per-finding 'how to verify / test / patch' note (surface + firing oracle + class remediation). DROPPED from the serialized form when \"\". Signed when present, so it travels tamper-evident."
+    }
+  },
+  "$defs": {
+    "ArtifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "description": "One raw evidence file, bound by digest so the certificate proves WHICH bytes it was judged on.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative to the engagement evidence root. MUST be relative and MUST NOT contain a '..' component (rejected at parse time and re-confined at verify time)."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Bare lowercase hex sha256 of the file bytes."
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "File size in bytes."
+        }
+      }
+    },
+    "ReportClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sentence"],
+      "description": "One report sentence bound into the certificate. Its text is tamper-evident because the whole certificate is signed. A `render_as == \"fact\"` claim is additionally re-admitted through the veracity firewall by the VIGIL verifier (framework-specific).",
+      "properties": {
+        "sentence": { "type": "string" },
+        "bug_class": { "type": "string", "description": "Default \"\"." },
+        "render_as": {
+          "type": "string",
+          "default": "analyst-commentary",
+          "description": "The producer's claim; verify re-derives fact truth and never trusts the label for grounding."
+        }
+      }
+    }
+  }
+}

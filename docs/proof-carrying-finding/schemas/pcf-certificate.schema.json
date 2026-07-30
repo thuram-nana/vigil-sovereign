@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigil.dev/proof-carrying-finding/schemas/pcf-certificate.schema.json",
+  "title": "Proof-Carrying Finding (PCF v0.1) certificate",
+  "description": "The PCF v0.1 wire format a party re-verifies OFFLINE. Reflects the object produced by framework.v2.evidence.pcf.to_pcf (and, wrapped as {\"pcf_certificates\":[...]}, by `evidence pcf-export`). The PCF cert is a PURE PROJECTION of the signed EvidenceCertificate embedded under `_crucible.certificate`: every authenticated field here (claim, subject, evidence.oracle_context.digest, oracle, verdict, provenance, grounding, id) is a deterministic function of that certificate. The m-of-n Ed25519 signature covers the EMBEDDED certificate's canonical bytes (under the crucible-evidence-v1 domain), so any lying-wrapper mutation of a projected field is detected by re-deriving the view. PCF_VERSION=\"0.1\"; the claim vocabulary is pinned by PCF_VOCABULARY=\"pcf-classes/1\".",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pcf_version",
+    "id",
+    "claim",
+    "subject",
+    "evidence",
+    "oracle",
+    "verdict",
+    "provenance",
+    "grounding",
+    "signature",
+    "_crucible"
+  ],
+  "properties": {
+    "pcf_version": { "const": "0.1" },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "The embedded certificate's cert_digest (bare hex sha256 of its canonical bytes)."
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "vocabulary", "statement"],
+      "properties": {
+        "class": { "type": "string", "description": "The oracle-provable bug class; drawn from the pinned vocabulary." },
+        "vocabulary": { "const": "pcf-classes/1" },
+        "statement": { "type": "string", "description": "The first bound report sentence, else a derived 'CLASS confirmed by ORACLE' statement." }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "context"],
+      "properties": {
+        "identifier": { "type": "string", "description": "The finding_ref." },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surface", "engagement"],
+          "properties": {
+            "surface": { "type": "string" },
+            "engagement": { "type": "string" }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "description": "The evidence digest-set (PCF §4.5). `oracle_context` is one item carrying the retained value so the oracle is re-runnable (PCF 'complete'); each additional key is one raw artifact, referenced by digest.",
+      "required": ["oracle_context"],
+      "properties": {
+        "oracle_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["digest", "value"],
+          "properties": {
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "digest_payload(value); MUST equal the embedded cert's oracle_context_digest." },
+            "value": { "type": "object", "description": "The retained oracle_context the oracle re-runs over." }
+          }
+        }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["digest", "size", "by_reference"],
+        "description": "One raw artifact (key = its relative path).",
+        "properties": {
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "size": { "type": "integer", "minimum": 0 },
+          "by_reference": { "const": true }
+        }
+      }
+    },
+    "oracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "binding"],
+      "properties": {
+        "id": { "type": "string", "description": "The oracle kind that fired (confirmed_by)." },
+        "version": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The content-derived oracle id@version at mint time. REQUIRED for a FACT; a verifier rejects a version mismatch against the current oracle body (stale proof)."
+        },
+        "binding": { "type": "string", "description": "The canonical verify binding, e.g. crucible/verify:<oracle_kind>." }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fired", "confidence"],
+      "properties": {
+        "fired": { "const": true, "description": "A PCF certificate exists only for a CONFIRMED finding." },
+        "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collected_by", "sequence"],
+      "properties": {
+        "collected_by": { "type": "string", "description": "Fixed to the emitting authority (crucible/evidence)." },
+        "sequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "grounding": { "const": "FACT" },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme", "domain", "signatures"],
+      "properties": {
+        "scheme": { "const": "ed25519" },
+        "domain": { "const": "crucible-evidence-v1", "description": "The domain-separation label; the signed bytes are b\"crucible-evidence-v1\\u0000\" + canonical_json(embedded certificate)." },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key_id", "sig"],
+            "properties": {
+              "key_id": { "type": "string", "minLength": 1 },
+              "sig": { "type": "string", "minLength": 1, "description": "base64 of the 64-byte Ed25519 signature (note: the PCF wire member is `sig`, not `signature_b64`)." }
+            }
+          }
+        }
+      }
+    },
+    "_crucible": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["certificate"],
+      "description": "The AUTHORITATIVE signed object the signature actually covers. A verifier reconstructs it, re-derives the signed bytes AND the projected view, and rejects any drift.",
+      "properties": {
+        "certificate": { "$ref": "evidence-certificate.schema.json" }
+      }
+    }
+  }
+}

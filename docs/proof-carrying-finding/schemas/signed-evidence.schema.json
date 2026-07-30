@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigil.dev/proof-carrying-finding/schemas/signed-evidence.schema.json",
+  "title": "SignedEvidence",
+  "description": "An EvidenceCertificate plus the m-of-n governance signatures over its canonical bytes. The signed bytes are `b\"crucible-evidence-v1\\u0000\" + canonical_json(certificate)`, where `certificate` is exactly the object under `certificate` here (the serialized form, with empty additive members dropped). Reflects framework.v2.evidence.models.SignedEvidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["certificate", "signatures"],
+  "properties": {
+    "certificate": {
+      "$ref": "evidence-certificate.schema.json",
+      "description": "The signed certificate. Its canonical JSON (sorted keys, compact separators) under the evidence domain tag is the exact byte string every signature covers."
+    },
+    "signatures": {
+      "type": "array",
+      "description": "Governance authoriser signatures. Verification counts DISTINCT valid authorisers present in the trust root and compares to the trust root's threshold (m-of-n).",
+      "items": { "$ref": "#/$defs/Signature" }
+    }
+  },
+  "$defs": {
+    "Signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "signature_b64"],
+      "description": "One authoriser signature over a canonicalised document.",
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable authoriser id; must match a key_id in the trust root to count."
+        },
+        "signature_b64": {
+          "type": "string",
+          "minLength": 1,
+          "description": "base64 of the 64-byte Ed25519 signature."
+        }
+      }
+    }
+  }
+}
