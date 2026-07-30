@@ -181,7 +181,12 @@ class _BaseGraphStore(ABC):
         s = str(raw or "default")
         # a partition becomes a filename / DB label — no separators, traversal, or control chars.
         cleaned = "".join(c for c in s if c.isalnum() or c in "-_.")
-        cleaned = cleaned.strip(".") or "default"
+        # Do NOT strip trailing/leading dots: that collapsed DISTINCT session ids (e.g. "abc" and "abc.")
+        # onto one partition file — a cross-session leak + collateral drop (red-pen MED). The charset above
+        # already excludes separators, so f"{cleaned}.json" can never traverse; only an all-dots key is
+        # degenerate, so fold just that to "default". Distinct valid ids now map to distinct partitions.
+        if not cleaned or set(cleaned) <= {"."}:
+            cleaned = "default"
         if len(cleaned) > _MAX_PARTITION:
             raise ValueError(f"partition id too long (> {_MAX_PARTITION})")
         return cleaned

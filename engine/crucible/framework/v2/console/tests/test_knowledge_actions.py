@@ -164,11 +164,14 @@ def test_feed_pull_surfaces_cli_killswitch_refusal(tmp_path, monkeypatch):
 # ---- feed_status read helper ------------------------------------------------
 
 
-def test_feed_status_is_honest_about_the_schedule():
+def test_feed_status_is_honest_about_the_schedule(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIGIL_LIVE_DIR", str(tmp_path))       # fresh live dir → no tracked sidecar
     d = api.feed_status()
     assert d["egress_default"] == "offline"
-    assert d["recurring"]["managed_here"] is False            # recurring auto-pull is a sidecar, not here
-    # HONEST: no fabricated live schedule state is surfaced
+    # B5: recurring start/stop is now supervised HERE, so the console reports its tracked sidecars…
+    assert d["recurring"]["managed_here"] is True
+    assert d["recurring"]["sidecars"] == []                   # …none running on a fresh tree
+    # HONEST: still NO fabricated live schedule state (no persisted next-run/last-run)
     assert "next_run" not in d["recurring"] and "last_run" not in d["recurring"]
     assert isinstance(d["sources"], list)
     assert "LEAD" in d["doctrine"]

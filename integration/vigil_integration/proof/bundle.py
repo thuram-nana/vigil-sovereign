@@ -75,6 +75,12 @@ Exit code 0 means SOUND. For every certificate the verifier independently checks
 
 Flip a single byte in any file and the verify fails closed. `trust-root.json` carries only PUBLIC keys.
 
+## Step 3 — per-finding guidance
+
+`HOW-TO-VERIFY.md` lists, for EACH finding, the exact surface it concerns, the deterministic oracle that
+proved it, a scoped re-check note, and a finding-specific fix. The same note is signed into each certificate
+(the `how_to_verify` field), so it is tamper-evident, not just documentation.
+
 ## What you trust (and what you don't)
 
 You do NOT trust VIGIL's claims — the reproduction + binding + artifact + chain layers are re-run by the
@@ -91,6 +97,35 @@ def _secure_write(path: Path, data: str) -> None:
         os.write(fd, data.encode("utf-8"))
     finally:
         os.close(fd)
+
+
+def _howto_md(signed_certs: list) -> str:
+    """A deterministic, per-finding 'how to verify / patch' companion for the bundle, built from the signed
+    certificates' own ``how_to_verify`` note (populated at mint from each finding's surface + firing oracle +
+    class remediation). So a recipient sees, per finding, exactly what it concerns and how to re-check + fix
+    it — not just the one bulk verify command. Pure (ordered by the certs' seq)."""
+    lines = [
+        "# How to verify + patch each finding",
+        "",
+        "Every finding below is proven by a signed, re-runnable certificate in `evidence-bundle.json`. Run the",
+        "Step-1 command in `README.md` to re-verify ALL of them at once; the notes here tell you, per finding,",
+        "the exact surface it concerns, the deterministic oracle that proved it, and how to re-check + fix it.",
+        "",
+    ]
+    for sc in signed_certs:
+        c = sc.certificate
+        title = c.finding_ref + (f" — `{c.bug_class}`" if c.bug_class else "")
+        lines.append(f"## {title}")
+        if c.surface:
+            lines.append(f"- **Surface:** `{c.surface}`")
+        if c.confirmed_by:
+            lines.append(f"- **Proven by oracle:** `{c.confirmed_by}`")
+        note = (getattr(c, "how_to_verify", "") or "").strip()
+        if note:
+            lines.append(f"- {note}")
+        lines.append(f"- **Certificate digest:** `sha256:{c.cert_digest}`")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def export_bundle(
@@ -156,6 +191,9 @@ def export_bundle(
     _secure_write(out / "TRUST-ROOT-FINGERPRINT.txt", fingerprint + "\n")
     _secure_write(out / "reverifiable.json", json.dumps({"active_findings": findings}, sort_keys=True))
     _secure_write(out / "README.md", _README)
+    # Per-finding "how to verify + patch" companion — built from the signed certs' own how_to_verify note, so
+    # a recipient sees each finding's surface + firing oracle + fix, not just the one bulk verify command.
+    _secure_write(out / "HOW-TO-VERIFY.md", _howto_md(signed_certs))
 
     # copy the raw executor-captured evidence tree the certificates bind (best-effort; a cert with no
     # artifacts verifies on reproduction alone). SYMLINKS ARE NEVER FOLLOWED OR SHIPPED: shutil.copytree with

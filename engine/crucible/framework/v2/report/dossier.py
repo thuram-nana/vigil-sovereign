@@ -40,6 +40,7 @@ import html
 import io
 import json
 import os
+import re
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
@@ -226,7 +227,7 @@ def _scrub_jsonl_file(path: Path) -> tuple[Optional[str], int]:
         if not isinstance(obj, dict):
             dropped += 1
             continue
-        out_lines.append(json.dumps(_scrub(None, "", obj), sort_keys=True, default=str))
+        out_lines.append(json.dumps(_deep_redact_values(_scrub(None, "", obj)), sort_keys=True, default=str))
     if not out_lines and dropped == 0:
         return (None, 0)
     return ("\n".join(out_lines) + ("\n" if out_lines else ""), dropped)
@@ -621,11 +622,13 @@ def _render_readme(*, engagement_slug: str, n_facts: int, proof: dict, signed: b
 # --------------------------------------------------------------------------------------------------
 
 
-def _build_manifest(entries: dict[str, bytes], engagement_slug: str) -> bytes:
+def _build_manifest(entries: dict[str, bytes], engagement_slug: str,
+                    kind: str = "vigil-run-dossier/v1") -> bytes:
     """The tamper-evidence manifest: every content entry + its sha256, sorted by path. Pure function of
-    the entry CONTENT — no wallclock — so two builds over the same inputs produce identical bytes."""
+    the entry CONTENT — no wallclock — so two builds over the same inputs produce identical bytes. ``kind``
+    names the dossier flavour (run vs session) in the manifest; it does not affect the entry hashing."""
     manifest = {
-        "dossier": "vigil-run-dossier/v1",
+        "dossier": kind,
         "engagement_slug": engagement_slug,
         "entry_count": len(entries),
         "entries": [{"path": name, "sha256": _sha256(entries[name])}
@@ -853,5 +856,290 @@ def build_dossier(
         "trust_root_fingerprint": (fingerprint or None),
         "manifest_sha256": manifest_sha,
         "proof_bundle": bool(proof.get("ok")),
+        "notes": notes,
+    }
+
+
+# --------------------------------------------------------------------------------------------------
+# the session handoff dossier (B6) — a whole SESSION's runs + chat + graph pointer + open threads,
+# packaged into ONE signed zip. Reuses the per-run `build_dossier` verbatim (each run stays
+# independently re-verifiable) and the SAME manifest/signature discipline for the outer archive.
+# --------------------------------------------------------------------------------------------------
+
+
+def _canon_json(obj: Any) -> bytes:
+    """Canonical JSON bytes (sorted keys, no wallclock) so an added artifact is a PURE function of its
+    content — two builds over the same input produce identical bytes (the outer MANIFEST then stays stable)."""
+    return json.dumps(obj, indent=2, sort_keys=True, default=str).encode("utf-8")
+
+
+# Value-level secret patterns (red-pen BLOCK): the session artifacts carry targets / names / labels / chat
+# text as VALUES under NON-secret keys, so the key-name masker alone lets a URL with basic-auth or a pasted
+# token ship in the clear. These strip the credential from the value itself.
+_URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+(?::[^/\s@]*)?@")
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/\-]+=*")
+_TOKENLIKE_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_\-]{8,}|ghp_[A-Za-z0-9]{20,}|gh[opsu]_[A-Za-z0-9]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9\-]{8,}|AKIA[0-9A-Z]{12,}"
+    r"|eyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{4,})\b")
+_INLINE_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth(?:orization)?)\b"
+    r"\s*[:=]\s*\S+")
+
+
+def _redact_value_secrets(s: Any) -> Any:
+    """Best-effort VALUE-level secret redaction for a free-text / URL string (complements the KEY-NAME
+    masker): strips URL credentials (``scheme://user:pass@host`` → ``scheme://[redacted]@host``), Bearer /
+    JWT / API tokens, and inline ``secret=…``. Deterministic; a non-string passes through unchanged. This is
+    best-effort pattern matching, not a guarantee every conceivable secret is caught — but it closes the
+    common URL-userinfo + token leaks on a hand-to-anyone artifact."""
+    if not isinstance(s, str) or not s:
+        return s
+    out = _URL_USERINFO_RE.sub(lambda m: m.group(1) + "[redacted]@", s)
+    out = _BEARER_RE.sub("Bearer [redacted]", out)
+    out = _TOKENLIKE_RE.sub("[redacted]", out)
+    out = _INLINE_SECRET_RE.sub(lambda m: m.group(1) + "=[redacted]", out)
+    return out
+
+
+def _deep_redact_values(o: Any) -> Any:
+    """Recursively apply :func:`_redact_value_secrets` to every string in a JSON-ish structure."""
+    if isinstance(o, dict):
+        return {k: _deep_redact_values(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_deep_redact_values(x) for x in o]
+    return _redact_value_secrets(o)
+
+
+def _scrub_dict(obj: dict) -> dict:
+    """Scrub a session artifact BOTH ways (red-pen BLOCK fix): the engagement-log KEY-NAME masker
+    (``common.logging._scrub``) PLUS a VALUE-level redactor over every string (URL credentials, bearer / JWT
+    / API tokens, inline ``secret=…``). These artifacts carry targets / names / labels as VALUES under
+    non-secret keys, where a URL with basic-auth or a pasted token would otherwise ship in the clear. Total:
+    any failure still returns a best-effort value-redacted (or raw) dict — the handoff never aborts."""
+    try:
+        return _deep_redact_values(_scrub(None, "", dict(obj)))
+    except Exception:  # noqa: BLE001 — never let scrubbing abort the handoff
+        try:
+            return _deep_redact_values(dict(obj))
+        except Exception:  # noqa: BLE001
+            return dict(obj)
+
+
+def _render_session_index(*, session_id: str, engagement_slug: str, run_summaries: list[dict],
+                          graph: Optional[dict], open_threads: list, has_chat: bool, n_facts: int,
+                          signed: bool, fingerprint: str, generated_at: Optional[str],
+                          included: list[str]) -> str:
+    n_nodes = len(graph.get("nodes", [])) if isinstance(graph, dict) else 0
+    n_edges = len(graph.get("edges", [])) if isinstance(graph, dict) else 0
+    rows = "".join(
+        f"<tr><td><a href='runs/{_e(r['run_id'])}/dossier.zip'>{_e(r['run_id'])}</a></td>"
+        f"<td>{_e(r.get('facts'))}</td><td>{_e(r.get('leads'))}</td>"
+        f"<td>{'signed' if r.get('signed') else 'unsigned'}</td>"
+        f"<td>{'yes' if r.get('proof_bundle') else 'no'}</td></tr>"
+        for r in run_summaries) or "<tr><td colspan='5'><em>no runs linked to this session</em></td></tr>"
+    threads = "".join(
+        f"<li>{_e(t.get('run_id'))} — {_e(t.get('status'))}"
+        + (f" ({_e(t.get('target'))})" if t.get('target') else "") + "</li>"
+        for t in open_threads) or "<li><em>none — every linked run reached a terminal state</em></li>"
+    auth = (f"<p><strong>authenticity:</strong> SIGNED — trust-root fingerprint <code>{_e(fingerprint)}</code> "
+            "(pin it OUT-OF-BAND).</p>") if signed else (
+        "<p><strong>authenticity:</strong> UNSIGNED — integrity-checkable via MANIFEST.json hashes, but no "
+        "governance signature was resolvable.</p>")
+    stamp = f"<p>generated at {_e(generated_at)}</p>" if generated_at else ""
+    files = "".join(f"<li><code>{_e(n)}</code></li>" for n in included)
+    return (
+        "<!doctype html><meta charset='utf-8'><title>VIGIL session handoff — "
+        f"{_e(session_id)}</title>"
+        "<style>body{font:14px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem}"
+        "table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.35rem .6rem;text-align:left}"
+        "code{background:#f2f2f2;padding:.1rem .3rem;border-radius:3px}</style>"
+        f"<h1>VIGIL session handoff</h1><p>session <code>{_e(session_id)}</code> · engagement "
+        f"<code>{_e(engagement_slug)}</code></p>{stamp}"
+        f"<p><strong>{len(run_summaries)}</strong> run(s) · <strong>{n_facts}</strong> oracle-confirmed "
+        f"FACT(s) · graph partition <code>{_e(session_id)}</code> = {n_nodes} node(s)/{n_edges} edge(s) "
+        f"(a pure one-way projection of the signed spine — authorizes nothing) · chat transcript "
+        f"{'included' if has_chat else 'none'}.</p>{auth}"
+        "<h2>Runs</h2><table><tr><th>run</th><th>facts</th><th>leads</th><th>signed</th><th>proof bundle</th></tr>"
+        f"{rows}</table>"
+        "<p>Each <code>runs/&lt;run&gt;/dossier.zip</code> is itself independently offline-re-verifiable — "
+        "unzip it and follow its own <code>index.html</code> (its MANIFEST + proof bundle + verify command).</p>"
+        f"<h2>Open threads (unfinished work)</h2><ul>{threads}</ul>"
+        f"<h2>Contents</h2><ul>{files}</ul>")
+
+
+def _render_session_readme(*, session_id: str, engagement_slug: str, n_runs: int, n_facts: int,
+                           signed: bool, fingerprint: str, included: list[str], notes: list[str]) -> str:
+    lines = [
+        f"# VIGIL session handoff — {session_id}",
+        "",
+        f"Engagement slug: `{engagement_slug}`  ·  runs: {n_runs}  ·  oracle-confirmed FACTs: {n_facts}",
+        "",
+        ("Authenticity: **SIGNED** — trust-root fingerprint `" + fingerprint + "` (pin OUT-OF-BAND)."
+         if signed else
+         "Authenticity: **UNSIGNED** — integrity-checkable via `MANIFEST.json` hashes; no governance signer "
+         "was resolvable."),
+        "",
+        "This handoff bundles the whole session: each run's own tamper-evident dossier "
+        "(`runs/<run>/dossier.zip`, itself independently offline-re-verifiable), the chat transcript, the "
+        "per-session graph partition (a pure ONE-WAY projection of the signed spine — it authorizes "
+        "nothing), the open (unfinished) threads, and a run index. `MANIFEST.json` lists every entry's "
+        "sha256; `MANIFEST.sig.json` + `TRUST-ROOT-FINGERPRINT.txt` (when present) authenticate the whole.",
+        "",
+        "## Contents",
+        *[f"- `{n}`" for n in included],
+    ]
+    if notes:
+        lines += ["", "## Notes", *[f"- {n}" for n in notes]]
+    return "\n".join(lines) + "\n"
+
+
+def build_session_dossier(
+    *,
+    session_id: str,
+    run_dirs: list,
+    out_zip: str | os.PathLike,
+    engagement_slug: str = "engagement",
+    base_dir: Optional[str] = None,
+    vault: Any = None,
+    generated_at: Optional[str] = None,
+    session_meta: Optional[dict] = None,
+    chat_transcript: Optional[str | os.PathLike] = None,
+    graph: Optional[dict] = None,
+    open_threads: Optional[list] = None,
+    terminal_history: Optional[str] = None,
+) -> dict:
+    """Assemble a whole SESSION — each of its runs + the chat transcript + the per-session graph partition
+    pointer + the open (unfinished) threads — into ONE self-contained, tamper-evident handoff ``.zip``.
+
+    Each run is packaged by the EXACT per-run ``build_dossier`` (so ``runs/<run_id>/dossier.zip`` is itself
+    independently offline-re-verifiable — its own MANIFEST + proof bundle + verify command). On top, the
+    session-level artifacts are added and ONE governance MANIFEST + m-of-n signature + a
+    ``TRUST-ROOT-FINGERPRINT.txt`` authenticate the whole handoff — the SAME discipline as the run dossier.
+    Secrets are BEST-EFFORT scrubbed in every added artifact — BOTH key-name masking (``common.logging._scrub``)
+    AND value-level redaction (URL credentials, bearer/JWT/API tokens, inline ``secret=…``) over the chat
+    transcript, the session record, the graph partition, and open-threads, so a target/name/label carrying a
+    ``user:pass@`` URL or a pasted token does not ship in the clear (this is pattern-based, not a guarantee
+    every conceivable secret is caught). Deterministic: sorted entries, no wallclock in the hashed content
+    (``generated_at`` is the only optional stamp). Path-safe: every entry confined; symlinks never followed. Returns ``{ok, dossier, session_id, runs, entries, facts, signed,
+    trust_root_fingerprint, manifest_sha256, open_threads, graph_nodes, notes}``.
+
+    NB: ``graph`` is a POINTER + its projected nodes/edges (payload DIGESTS only) — a pure ONE-WAY view of
+    the spine; nothing in this dossier is ever read back as an authority."""
+    entries: dict[str, bytes] = {}
+    notes: list[str] = []
+    run_summaries: list[dict] = []
+    total_facts = 0
+    signer_run: Optional[Path] = None
+
+    with tempfile.TemporaryDirectory(prefix="vigil-session-dossier-") as td:
+        for rd_raw in (run_dirs or []):
+            rd = Path(rd_raw)
+            rid = rd.name
+            arc = f"runs/{rid}/dossier.zip"
+            if not _is_safe_rel(arc):
+                notes.append(f"run {rid!r}: unsafe archive name — skipped")
+                continue
+            if not rd.is_dir():
+                notes.append(f"run {rid}: dir not found ({rd}) — skipped")
+                continue
+            if signer_run is None:
+                signer_run = rd
+            inner = Path(td) / f"{rid}.zip"
+            try:
+                res = build_dossier(run_dir=str(rd), out_zip=str(inner), engagement_slug=engagement_slug,
+                                    base_dir=base_dir, vault=vault, generated_at=generated_at,
+                                    terminal_history=terminal_history)
+            except Exception as e:  # noqa: BLE001 — one bad run never aborts the session handoff
+                notes.append(f"run {rid}: dossier build errored ({e}) — skipped")
+                continue
+            if not res.get("ok"):
+                notes.append(f"run {rid}: dossier build failed ({res.get('error')}) — skipped")
+                continue
+            b = _read_bytes(inner)
+            if b is None:
+                notes.append(f"run {rid}: inner dossier unreadable — skipped")
+                continue
+            entries[arc] = b
+            total_facts += int(res.get("facts") or 0)
+            run_summaries.append({
+                "run_id": rid, "facts": res.get("facts"), "leads": res.get("leads"),
+                "signed": res.get("signed"), "proof_bundle": res.get("proof_bundle"),
+                "manifest_sha256": res.get("manifest_sha256"), "verify_cmd": res.get("verify_cmd"),
+            })
+
+        # ---- session-level artifacts (non-secret, but scrubbed defense-in-depth) ----
+        if session_meta is not None:
+            entries["session/session.json"] = _canon_json(_scrub_dict(session_meta))
+        if chat_transcript:
+            ct, dropped = _scrub_jsonl_file(Path(chat_transcript))
+            if ct is not None:
+                entries["session/chat-transcript.jsonl"] = ct.encode("utf-8")
+                if dropped:
+                    notes.append(f"chat transcript: dropped {dropped} unparseable line(s) "
+                                 "(not shipped in the clear)")
+        # Scrub ONCE and reuse the redacted graph/threads for BOTH the json entries AND the readable index,
+        # so no raw secret reaches index.html (red-pen BLOCK: the index rendered raw open-thread targets).
+        r_graph = _scrub_dict(dict(graph)) if graph is not None else None
+        if r_graph is not None:
+            entries["session/graph-partition.json"] = _canon_json(r_graph)
+        r_threads_doc = (_scrub_dict({"session_id": session_id, "open_threads": list(open_threads)})
+                         if open_threads is not None else None)
+        if r_threads_doc is not None:
+            entries["session/open-threads.json"] = _canon_json(r_threads_doc)
+        entries["session/run-index.json"] = _canon_json({"session_id": session_id, "runs": run_summaries})
+
+        if len(entries) == 1:  # only run-index → an empty session (no runs, no chat/graph/threads)
+            notes.append("session has no runs and no session-level artifact beyond the run index")
+
+        # ---- readable index + README (resolve the signer up-front so the text reflects signed/fingerprint) ----
+        signer_base = signer_run if signer_run is not None else Path(out_zip).parent
+        probe_sig, probe_fp, sign_notes = _sign_manifest(b"probe", engagement_slug, base_dir, signer_base, vault)
+        signed = probe_sig is not None
+        fingerprint = probe_fp or ""
+
+        entries["index.html"] = _render_session_index(
+            session_id=session_id, engagement_slug=engagement_slug, run_summaries=run_summaries,
+            graph=r_graph, open_threads=(r_threads_doc.get("open_threads") if r_threads_doc else []),
+            has_chat="session/chat-transcript.jsonl" in entries, n_facts=total_facts,
+            signed=signed, fingerprint=fingerprint, generated_at=generated_at,
+            included=sorted(entries)).encode("utf-8")
+        entries["README.md"] = _render_session_readme(
+            session_id=session_id, engagement_slug=engagement_slug, n_runs=len(run_summaries),
+            n_facts=total_facts, signed=signed, fingerprint=fingerprint,
+            included=sorted(entries), notes=notes).encode("utf-8")
+
+        # ---- one MANIFEST over the FINAL content entries, then the governance signature over it ----
+        manifest_bytes = _build_manifest(entries, engagement_slug, kind="vigil-session-dossier/v1")
+        manifest_sha = _sha256(manifest_bytes)
+        all_entries = dict(entries)
+        all_entries["MANIFEST.json"] = manifest_bytes
+        sig_bytes, sig_fp, real_sign_notes = _sign_manifest(
+            manifest_bytes, engagement_slug, base_dir, signer_base, vault)
+        if sig_bytes is not None:
+            all_entries["MANIFEST.sig.json"] = sig_bytes
+            all_entries["TRUST-ROOT-FINGERPRINT.txt"] = (sig_fp + "\n").encode("utf-8")
+            signed = True
+            fingerprint = sig_fp or fingerprint
+        else:
+            signed = False
+            notes += real_sign_notes or sign_notes
+
+        out = Path(out_zip)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        _write_zip(out, all_entries)
+
+    return {
+        "ok": True,
+        "dossier": str(out),
+        "session_id": session_id,
+        "runs": len(run_summaries),
+        "entries": len(all_entries),
+        "facts": total_facts,
+        "signed": signed,
+        "trust_root_fingerprint": (fingerprint or None),
+        "manifest_sha256": manifest_sha,
+        "open_threads": len(open_threads or []),
+        "graph_nodes": (len(graph.get("nodes", [])) if isinstance(graph, dict) else None),
         "notes": notes,
     }

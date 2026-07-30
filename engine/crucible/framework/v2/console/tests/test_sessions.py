@@ -255,3 +255,151 @@ def test_api_sessions_list_and_detail():
     with pytest.raises(ValueError):
         api.session_detail("../secret")
     assert api.session_detail("nope-nonexistent").get("error")
+
+
+# ---- F3: per-session GRAPH partition (a pure, ONE-WAY projection of the signed spine) ---------------
+
+from dataclasses import dataclass  # noqa: E402
+from typing import Any, Optional  # noqa: E402
+
+from framework.v2.agents import blackboard as bb_mod  # noqa: E402
+from framework.v2.graph.store import project_events  # noqa: E402
+
+
+@dataclass
+class _Ev:
+    """Duck-typed to a BlackboardEventRow (the projection consumes the shape, never imports the class).
+    ``posted_at`` is a wallclock the projection MUST ignore."""
+    id: int
+    engagement_id: int
+    kind: str
+    agent_name: str
+    payload: dict
+    parent_id: Optional[int] = None
+    supersedes_id: Optional[int] = None
+    posted_at: str = "IGNORED-WALLCLOCK"
+
+
+class _FakeBlackboard:
+    """A stand-in spine: records every read so a test can assert the FULL audit history is projected."""
+    def __init__(self, by_slug: dict[str, list]) -> None:
+        self._by = by_slug
+        self.reads: list[tuple[str, bool]] = []
+
+    def read(self, *, engagement: str, include_superseded: bool = False, limit: int = 1000, **_: Any):
+        self.reads.append((str(engagement), bool(include_superseded)))
+        return list(self._by.get(str(engagement), []))
+
+    def close(self) -> None:
+        pass
+
+
+def _seed_spine(monkeypatch, by_slug: dict[str, list]) -> _FakeBlackboard:
+    fake = _FakeBlackboard(by_slug)
+    monkeypatch.setattr(bb_mod, "open_blackboard", lambda **kw: fake)
+    return fake
+
+
+_SPINE = [
+    _Ev(1, 7, "recon", "scout", {"host": "t"}),
+    _Ev(2, 7, "hypothesis", "planner", {"h": "sqli"}, parent_id=1),
+    _Ev(3, 7, "hypothesis", "planner", {"h": "sqli-2"}, parent_id=1, supersedes_id=2),
+]
+
+
+def test_project_session_graph_is_a_pure_one_way_spine_projection(monkeypatch):
+    fake = _seed_spine(monkeypatch, {"acme": _SPINE})
+    sid = sessions.create_session(name="acme audit", kind="engagement")["session"]["id"]
+    sessions.link_run(sid, "20260101-000000-001", slug="acme")
+
+    res = sessions.project_session_graph(sid)
+    assert res["ok"] and res["partition"] == sid and res["engagements"] == ["acme"]
+    assert res["backend"] == "EmbeddedGraphStore"          # embedded is the DEFAULT backend (no Neo4j needed)
+
+    # the partition is EXACTLY project_events over the session's spine — a pure function of the events.
+    pure = project_events(_SPINE)
+    view = sessions.session_graph(sid, project=False)
+    assert view["nodes"] == pure["nodes"] and view["edges"] == pure["edges"]
+    assert res["nodes"] == len(pure["nodes"]) and res["edges"] == len(pure["edges"])
+    # the supersedes edge is present ⇒ the FULL audit history was read (include_superseded=True)
+    assert ("acme", True) in fake.reads
+    assert any(e["rel"] == "supersedes" for e in view["edges"])
+
+
+def test_partition_projection_is_deterministic_and_wallclock_free(monkeypatch, _isolate):
+    _seed_spine(monkeypatch, {"acme": _SPINE})
+    sid = sessions.create_session(name="a")["session"]["id"]
+    sessions.link_run(sid, "20260101-000000-002", slug="acme")
+
+    part = Path(_isolate) / "live" / "graph" / (sid + ".json")
+    sessions.project_session_graph(sid)
+    first = part.read_bytes()
+    # mutate the ignored wallclock, reproject → byte-identical partition on disk
+    _SPINE[0].posted_at = "a-totally-different-time"
+    sessions.project_session_graph(sid)
+    assert part.read_bytes() == first
+    _SPINE[0].posted_at = "IGNORED-WALLCLOCK"
+
+
+def test_session_graph_exposes_no_authority_readback(monkeypatch):
+    """The one-way invariant at the sessions layer: the graph view returns ONLY nodes/edges/partition — no
+    tier/grant/authority is ever readable back out, and the module exposes no such surface."""
+    _seed_spine(monkeypatch, {"acme": _SPINE})
+    sid = sessions.create_session(name="a")["session"]["id"]
+    sessions.link_run(sid, "20260101-000000-003", slug="acme")
+    view = sessions.session_graph(sid)
+    assert set(view) == {"partition", "nodes", "edges"}
+    forbidden = {"grant", "promote", "authorize", "set_tier", "mint", "confirm", "certify"}
+    assert forbidden.isdisjoint(set(dir(sessions)))
+
+
+def test_link_run_projects_the_partition(monkeypatch):
+    _seed_spine(monkeypatch, {"acme": _SPINE})
+    sid = sessions.create_session(name="a")["session"]["id"]
+    # before any run the partition is empty; linking a run projects it best-effort
+    assert sessions.session_graph(sid, project=False)["nodes"] == []
+    sessions.link_run(sid, "20260101-000000-004", slug="acme")
+    assert len(sessions.session_graph(sid, project=False)["nodes"]) == len(project_events(_SPINE)["nodes"])
+
+
+def test_hard_delete_drops_the_graph_partition(monkeypatch):
+    _seed_spine(monkeypatch, {"acme": _SPINE})
+    sid = sessions.create_session(name="a")["session"]["id"]
+    sessions.link_run(sid, "20260101-000000-005", slug="acme")
+    sessions.project_session_graph(sid)
+    assert sid in sessions._open_graph_store().partitions()
+    sessions.delete_session(sid, hard=True)
+    assert sid not in sessions._open_graph_store().partitions()   # rebuildable projection dropped
+    assert sessions.session_graph(sid, project=False)["nodes"] == []
+
+
+def test_open_threads_are_the_non_terminal_runs(monkeypatch, _isolate):
+    _seed_spine(monkeypatch, {"acme": _SPINE})
+    sid = sessions.create_session(name="a")["session"]["id"]
+    # two runs: one finished, one still running (an open thread)
+    for rid, status in (("20260101-000000-006", "done"), ("20260101-000000-007", "running")):
+        rd = actions_mod.run_dir(rid)
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "meta.json").write_text(json.dumps({"slug": "acme", "status": status, "target": "127.0.0.1"}),
+                                      encoding="utf-8")
+        sessions.link_run(sid, rid, slug="acme")
+    threads = sessions.open_threads(sid)
+    assert [t["run_id"] for t in threads] == ["20260101-000000-007"]
+    assert threads[0]["status"] == "running"
+
+
+def test_project_unknown_session_is_a_clean_error(monkeypatch):
+    _seed_spine(monkeypatch, {})
+    assert sessions.project_session_graph("nope-nonexistent").get("error")
+    with pytest.raises(ValueError):
+        sessions.project_session_graph("../escape")
+
+
+def test_neo4j_optin_falls_safe_to_the_embedded_default(monkeypatch):
+    """Opting into the OPTIONAL Neo4j backend (with creds present) must NEVER crash and must fall SAFE to the
+    embedded default — Neo4jGraphStore is a documented scaffold today, and Neo4j is never required to run."""
+    monkeypatch.setenv("VIGIL_GRAPH_BACKEND", "neo4j")
+    monkeypatch.setenv("NEO4J_URI", "bolt://localhost:7687")
+    monkeypatch.setenv("NEO4J_USERNAME", "neo4j")
+    monkeypatch.setenv("NEO4J_PASSWORD", "sealed-by-the-broker")
+    assert type(sessions._open_graph_store()).__name__ == "EmbeddedGraphStore"

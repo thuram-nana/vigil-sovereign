@@ -102,17 +102,25 @@ class EvidenceCertificate(BaseModel):
     # (see the serializer), so a certificate built without a stamped version — and every existing evidence
     # bundle — serialises BYTE-IDENTICALLY, keeping its signature valid.
     oracle_version: str = ""
+    # A human-readable, per-finding "how to verify / test / patch" note (deterministic, derived from the
+    # finding's own surface + firing oracle + class remediation). Signed when present, so it travels with the
+    # certificate tamper-evident. Kept "" by default and dropped from the canonical form when empty (below),
+    # so a certificate built without it — and every existing evidence bundle — serialises BYTE-IDENTICALLY,
+    # keeping its signature valid.
+    how_to_verify: str = ""
 
     @model_serializer(mode="wrap")
     def _ser(self, handler):
-        """Drop the additive ``report_claims`` / ``oracle_version`` members from the canonical form when
-        they are empty, so a certificate built without them hashes/signs exactly as it did before those
-        fields existed (default-safety: no existing evidence bundle changes bytes)."""
+        """Drop the additive ``report_claims`` / ``oracle_version`` / ``how_to_verify`` members from the
+        canonical form when they are empty, so a certificate built without them hashes/signs exactly as it did
+        before those fields existed (default-safety: no existing evidence bundle changes bytes)."""
         data = handler(self)
         if not data.get("report_claims"):
             data.pop("report_claims", None)
         if not data.get("oracle_version"):
             data.pop("oracle_version", None)
+        if not data.get("how_to_verify"):
+            data.pop("how_to_verify", None)
         return data
 
     @property

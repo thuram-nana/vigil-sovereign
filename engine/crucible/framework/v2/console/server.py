@@ -74,19 +74,18 @@ _EXACT_ROUTES = {
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
-# NB (A6 cleanup): the unified UI calls `/api/engagements` (plural, list) and `/api/report/<run>` (singular),
-# never `/api/engagement/` (singular) or `/api/reports/` (plural) — those had zero unified-UI callers (only
-# the retired per-plane SPA), so their HTTP surface is dropped (the api.engagement_detail / api.reports_data
-# providers REMAIN + keep their unit tests). `/api/authority/` was re-exposed for the Charter & Attestation
-# screen.
+# NB (A6 / B7 cleanup): the unified UI calls `/api/engagements` (plural, list) and `/api/report/<run>`
+# (singular), never `/api/engagement/`, `/api/reports/`, `/api/session/<id>`, or `/api/authority/<slug>` —
+# those had zero unified-UI GET callers (only the retired per-plane SPA), so their HTTP surface is dropped.
+# The PROVIDERS REMAIN + keep their unit tests and their INTERNAL callers: api.session_detail is used by the
+# dossier/report assembly (actions.py) and api.authority_full by charter_status + framework.v2.api.reads; the
+# unified UI reaches the same governance picture via `/api/charter/<slug>` (charter_status), not authority_full.
 _PREFIX_ROUTES = {
-    "/api/session/": api.session_detail,
     "/api/inbox/": api.inbox,                   # U3: read-only agent-to-agent coordination messages (advisory)
     "/api/approvals/": api.approvals,           # A2: read-only pending per-action owner-approval requests (KEYLESS — lists only, never signs)
     "/api/report/": api.run_report,
     "/api/worldmodel/": api.worldmodel,
     "/api/coverage/": api.coverage_data,
-    "/api/authority/": api.authority_full,      # re-exposed for the Charter & Attestation screen
     "/api/charter/": api.charter_status,        # the remote-charter picture (scope, loopback-only?, ceremony)
     "/api/planner/": api.planner_data,
     "/api/intel/": api.intel_data,
@@ -379,12 +378,6 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         body = self._read_body()
         try:
-            if path == "/api/launch/scan":
-                self._json(actions.launch_scan(
-                    str(body.get("target", "")),
-                    max_pages=int(body.get("max_pages", 60)),
-                ))
-                return
             if path == "/api/launch/assessment":
                 # The New-Assessment wizard's one action. It spawns only the SAME gated CLIs; it
                 # cannot relax scope (charter-signed, never an arg) or bypass a gate. A clean JSON
@@ -459,6 +452,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # `intel refresh-vulnintel --live` CLI. Every entry is an intel-tier LEAD, never a fact.
                 slug = path[len("/api/feed/"):-len("/pull")].strip("/")
                 self._json(actions.run_feed_pull(slug))
+                return
+            if path.startswith("/api/feed/") and path.endswith("/start"):
+                # B5: START the RECURRING vuln-feed sidecar (`intel feed-daemon --live`) as a console-tracked
+                # background subprocess. CSRF/rebind-gated above + kill-switch gated inside; opt-in recurring
+                # egress the operator turns on here. Every tick honours the kill-switch; LEADS only, no fact.
+                slug = path[len("/api/feed/"):-len("/start")].strip("/")
+                self._json(actions.run_feed_start(slug, interval=body.get("interval", 3600)))
+                return
+            if path.startswith("/api/feed/") and path.endswith("/stop"):
+                # B5: STOP the tracked recurring vuln-feed sidecar for this engagement (SIGTERM→SIGKILL, then
+                # untrack). CSRF/rebind-gated above; idempotent (an untracked slug is a clean no-op).
+                slug = path[len("/api/feed/"):-len("/stop")].strip("/")
+                self._json(actions.run_feed_stop(slug))
                 return
             if path.startswith("/api/killswitch/") and path.endswith("/trip"):
                 slug = path[len("/api/killswitch/"):-len("/trip")].strip("/")
