@@ -8,15 +8,24 @@ Persistence: ``<VIGIL_LIVE_DIR>/sessions/<id>/session.json`` (dir 0700, file 060
 registry lives on the operator's machine next to the chat transcripts; it stores operator free-text (a name)
 + run pointers, never a secret.
 
-Ordering coordinate: a MONOTONIC per-registry ``seq`` (NOT wallclock). It becomes the per-session graph's
-temporal/priority coordinate in F3/F4, which forbid wallclock/rng — so ``created_seq``/``updated_seq`` are
+Ordering coordinate: a MONOTONIC per-registry ``seq`` (NOT wallclock). It is the per-session graph
+partition's coordinate (the graph forbids wallclock/rng) — so ``created_seq``/``updated_seq`` are
 counter-derived. A separate wallclock ``updated_ts`` drives UI sort only.
+
+Per-session GRAPH (wired, not planned): every session owns a graph PARTITION keyed by its id, materialised
+by the DEFAULT embedded (file-backed) ``graph.store`` — a PURE, ONE-WAY projection of the append-only signed
+spine of the session's engagement(s). ``project_session_graph`` (re)builds it from spine events ONLY (no
+wallclock/rng), so the same spine yields a byte-identical partition. The load-bearing invariant: NOTHING
+here is EVER read back into a tier / grant / authorization / FACT — the store structurally exposes no such
+surface; this module only PROJECTS (write) and READS nodes/edges for the UI/handoff. A partition is
+rebuildable, disposable state: dropping it loses no authority (the spine, the sole authority, is untouched).
+Neo4j is an OPTIONAL backend behind the SAME interface — its sealed password reaches this plane only via the
+sovereign check-secret broker's env delivery — and is NEVER required to run; the embedded store is the default.
 
 Authority: the registry mints NO facts, reads NO tier/grant, and authorizes nothing. Creating / renaming /
 deleting a session changes no finding and no gate. Deletion is fail-safe: SOFT tombstones (retains the chat
 transcript, the linked run metas, and — always — the append-only signed spine); HARD additionally removes the
-registry entry (and, once F3 wires per-session graph partitions, drops that rebuildable partition) but never
-touches the spine or a FACT.
+registry entry and drops the rebuildable per-session graph partition, but never touches the spine or a FACT.
 """
 
 from __future__ import annotations
@@ -209,8 +218,8 @@ def rename_session(session_id: str, name: str) -> dict:
 
 def delete_session(session_id: str, *, hard: bool = False) -> dict:
     """SOFT (default): tombstone — the chat transcript, linked run metas, and the append-only spine are
-    all retained. HARD: additionally remove the registry entry (and, once F3 wires per-session graph
-    partitions, drop that rebuildable partition). Neither ever touches the signed spine or a FACT."""
+    all retained. HARD: additionally remove the registry entry and drop the rebuildable per-session graph
+    partition. Neither ever touches the signed spine or a FACT."""
     sid = _safe_session_id(session_id)
     with _LOCK:
         rec = _read(sid)
@@ -223,9 +232,12 @@ def delete_session(session_id: str, *, hard: bool = False) -> dict:
                 p.parent.rmdir()           # remove the now-empty per-session dir; ignore if not empty
             except OSError:
                 pass
-            # NB (F3): a per-session Neo4j partition, when it exists, is a rebuildable PROJECTION and may be
-            # dropped here; the signed spine (the authority) is never touched. F1/F2 partitions are slug-keyed,
-            # so there is no per-session partition to drop yet.
+            # Drop the rebuildable per-session graph PARTITION — a ONE-WAY projection of the spine. The signed
+            # spine (the authority) is NEVER touched; dropping a projection loses no authority or FACT.
+            try:
+                _open_graph_store().drop_partition(sid)
+            except Exception:  # noqa: BLE001 — a projection is disposable; a drop failure never blocks delete
+                pass
             return {"ok": True, "deleted": "hard", "id": sid}
         rec["deleted"] = True
         rec["updated_seq"] = _next_seq()
@@ -255,7 +267,168 @@ def link_run(session_id: str, run_id: str, *, slug: str = "") -> dict:
         rec["updated_seq"] = _next_seq()
         rec["updated_ts"] = time.time()
         _write(rec)
-        return {"ok": True, "session": _public(rec)}
+        result = {"ok": True, "session": _public(rec)}
+    # The per-session graph PARTITION tracks the session's runs: re-project it (best-effort, OUTSIDE the
+    # registry lock) from the append-only spine now that a run is linked. A projection failure never breaks
+    # the link — the partition is a rebuildable derived view, and the spine (the authority) is untouched.
+    _try_project_session_graph(sid)
+    return result
+
+
+# --- per-session GRAPH partition (a pure, ONE-WAY projection of the signed spine) -------------------
+# Every session owns a graph PARTITION keyed by its id, materialised by the DEFAULT embedded (file-backed)
+# graph.store as a PURE projection of the append-only spine of the session's engagement(s): same spine in →
+# byte-identical partition out (no wallclock/rng). The load-bearing invariant is ONE-WAY — nothing here is
+# EVER read back into a tier/grant/authorization/FACT. The store structurally exposes no such surface; this
+# module only PROJECTS (write) and READS nodes/edges for the UI/handoff. A partition is rebuildable,
+# disposable state: dropping it loses no authority (the spine, the sole authority, is untouched).
+
+_GRAPH_BACKEND_ENV = "VIGIL_GRAPH_BACKEND"
+
+
+def _graph_dir() -> Path:
+    """The operator-machine base for per-session graph partitions (next to the sessions registry + chats)."""
+    d = _live_dir() / "graph"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)                 # a projection can mirror non-public engagement structure
+    except OSError:
+        pass
+    return d
+
+
+def _open_graph_store():
+    """The DEFAULT per-session graph backend: the embedded, file-backed store (no external DB required).
+
+    Neo4j is an OPTIONAL backend behind the SAME interface, selected only when the operator has opted in
+    (``VIGIL_GRAPH_BACKEND=neo4j``) AND sealed Neo4j creds are present in this plane's env (delivered by
+    ``vigil up`` from the sovereign Settings / check-secret broker — never argv, never logged). Neo4j is a
+    documented scaffold today, so if it cannot be constructed we fail SAFE back to the embedded default
+    (honest omission): the embedded store is always the working default and Neo4j is never required to run."""
+    if (os.environ.get(_GRAPH_BACKEND_ENV) or "").strip().lower() == "neo4j":
+        uri = (os.environ.get("NEO4J_URI") or "").strip()
+        user = (os.environ.get("NEO4J_USERNAME") or "").strip()
+        pw = (os.environ.get("NEO4J_PASSWORD") or "").strip()
+        if uri and user and pw:
+            try:
+                from ..graph.store import Neo4jGraphStore
+                return Neo4jGraphStore(uri, auth=(user, pw))
+            except Exception:  # noqa: BLE001 — scaffold/unreachable ⇒ honest omission, embedded default
+                pass
+    from ..graph.store import EmbeddedGraphStore
+    return EmbeddedGraphStore(_graph_dir())
+
+
+def _session_engagements(rec: dict) -> list[str]:
+    """The engagement slug(s) whose spine a session projects: the session's own ``slug`` plus each linked
+    run's ``meta.json`` slug. Deterministic (sorted, deduped). A read error on a run meta is skipped (the
+    projection stays total). Never a secret — a slug is the charter engagement name."""
+    slugs: set[str] = set()
+    top = str(rec.get("slug") or "").strip()
+    if top:
+        slugs.add(top)
+    for rid in (rec.get("run_ids", []) or []):
+        try:
+            meta = json.loads((actions.run_dir(str(rid)) / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(meta, dict):
+            sl = str(meta.get("slug") or "").strip()
+            if sl:
+                slugs.add(sl)
+    return sorted(slugs)
+
+
+def session_graph_partition(session_id: str) -> str:
+    """The graph PARTITION key for a session — its path-safe id. A POINTER only: resolving it to nodes/edges
+    is a pure re-projection of the spine (``session_graph``); nothing is ever read back as an authority."""
+    return _safe_session_id(session_id)
+
+
+def project_session_graph(session_id: str) -> dict:
+    """(Re)build the session's graph PARTITION as a PURE, ONE-WAY projection of the signed spine.
+
+    A FULL rebuild from the append-only spine events of the session's engagement(s) — a pure function of
+    those events (no wallclock/rng), so the same spine yields a byte-identical partition. The projection
+    NEVER reads a tier/grant/FACT back (the store has no such surface); it only WRITES the partition and
+    returns counts + the partition pointer for the UI/handoff. Total + fail-safe: an unregistered slug or a
+    spine read error is skipped, never raised. Returns ``{ok, session_id, partition, engagements, nodes,
+    edges, backend}`` or ``{error}`` for an unknown session."""
+    sid = _safe_session_id(session_id)
+    rec = _read(sid)
+    if rec is None:
+        rec = _legacy_chat_entry(sid)      # a legacy chat has no linked runs → an (empty) but valid partition
+    if rec is None:
+        return {"error": f"no such session {sid!r}"}
+    slugs = _session_engagements(rec)
+    events: list = []
+    if slugs:
+        from ..agents.blackboard import open_blackboard   # lazy: only touch the spine when projecting
+        bb = open_blackboard()
+        try:
+            for slug in slugs:
+                try:
+                    # include_superseded=True → the FULL audit history so the projection carries the
+                    # supersedes edges; project_events sorts by spine id, so the read order never matters.
+                    events.extend(bb.read(engagement=slug, include_superseded=True, limit=100_000))
+                except Exception:  # noqa: BLE001 — unregistered slug / read error ⇒ skip (total)
+                    continue
+        finally:
+            try:
+                bb.close()
+            except Exception:  # noqa: BLE001
+                pass
+    store = _open_graph_store()
+    store.project_from_spine(events, partition=sid)      # one-way WRITE; the spine is never mutated
+    return {"ok": True, "session_id": sid, "partition": sid, "engagements": slugs,
+            "nodes": len(store.nodes(sid)), "edges": len(store.edges(sid)),
+            "backend": type(store).__name__}
+
+
+def _try_project_session_graph(session_id: str) -> None:
+    """Best-effort projection: the partition is a rebuildable derived view, so a projection failure (an
+    absent spine, an unavailable backend) must NEVER break a registry mutation or a read. Swallow all."""
+    try:
+        project_session_graph(session_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def session_graph(session_id: str, *, project: bool = True) -> dict:
+    """The session's partition nodes/edges — the UI/handoff view. With ``project=True`` (default) it first
+    re-projects from the spine so the view is current. READ-ONLY: nothing returned here is ever an authority
+    (the graph mints nothing, grants nothing). Total: an unknown session yields an empty partition."""
+    sid = _safe_session_id(session_id)
+    if project:
+        _try_project_session_graph(sid)
+    store = _open_graph_store()
+    return {"partition": sid, "nodes": store.nodes(sid), "edges": store.edges(sid)}
+
+
+def open_threads(session_id: str) -> list[dict]:
+    """A HANDOFF hint: the session's runs NOT in a terminal state (``done``/``error``/…) — the unfinished
+    lines of work a successor should pick up. Derived from each linked run's ``meta.json`` (deterministic
+    given the metas); ADVISORY only — it mints nothing and reads no authority. Total: an unreadable meta is
+    treated as an open thread (status unknown), never a raise."""
+    sid = _safe_session_id(session_id)
+    rec = _read(sid)
+    if rec is None:
+        return []
+    terminal = {"done", "complete", "completed", "finished", "error", "failed", "cancelled", "canceled"}
+    out: list[dict] = []
+    for rid in (rec.get("run_ids", []) or []):
+        status, target, slug = "unknown", None, None
+        try:
+            meta = json.loads((actions.run_dir(str(rid)) / "meta.json").read_text(encoding="utf-8"))
+            if isinstance(meta, dict):
+                status = str(meta.get("status", "unknown") or "unknown")
+                target = meta.get("target")
+                slug = meta.get("slug")
+        except (OSError, ValueError):
+            pass
+        if status.strip().lower() not in terminal:
+            out.append({"run_id": str(rid), "status": status, "target": target, "slug": slug})
+    return out
 
 
 _MAX_CONNECTIONS = 32

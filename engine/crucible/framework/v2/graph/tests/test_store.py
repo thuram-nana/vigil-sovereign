@@ -130,3 +130,29 @@ def test_neo4j_backend_is_a_gated_stub() -> None:
 
 def test_embedded_store_satisfies_the_protocol(tmp_path: Path) -> None:
     assert isinstance(EmbeddedGraphStore(tmp_path), GraphStore)
+
+
+# --- per-session usage (B2): a partition keyed by a session id, unioning the session's engagement(s) ----
+
+def test_partition_keyed_by_session_id_roundtrips(tmp_path: Path) -> None:
+    """The per-session backend keys a partition by the (path-safe) session id — the exact shape
+    console.sessions mints (``<run-id>-s<seq>``). It must project + read back unchanged."""
+    s = EmbeddedGraphStore(tmp_path)
+    sid = "20260101-000000-001-s7"
+    s.project_from_spine(_spine(), partition=sid)
+    assert (tmp_path / (sid + ".json")).is_file()
+    assert len(s.nodes(sid)) == 5 and sid in s.partitions()
+
+
+def test_partition_unions_multiple_engagements_without_collision(tmp_path: Path) -> None:
+    """A session may link runs across >1 engagement; projecting their union into ONE partition namespaces
+    every event node by engagement id (``event:<eng>:<id>``), so two engagements never collide and the
+    result stays deterministic (input order irrelevant)."""
+    s1 = EmbeddedGraphStore(tmp_path / "a")
+    s2 = EmbeddedGraphStore(tmp_path / "b")
+    union = _spine() + [_FakeEvent(1, 9, "recon", "scout", {"host": "u"})]
+    s1.project_from_spine(union, partition="sess")
+    s2.project_from_spine(list(reversed(union)), partition="sess")          # order must not matter
+    node_ids = {n["id"] for n in s1.nodes("sess")}
+    assert {"event:7:1", "event:9:1"} <= node_ids                          # both engagements, no collision
+    assert (tmp_path / "a" / "sess.json").read_bytes() == (tmp_path / "b" / "sess.json").read_bytes()
