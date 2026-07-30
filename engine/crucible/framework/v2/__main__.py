@@ -161,6 +161,15 @@ def _report(argv: list[str]) -> int:
     return report_cli.main(argv)
 
 
+def _attack_paths(argv: list[str]) -> int:
+    # READ-ONLY graph-theoretic triage over the asset topology projected from the signed
+    # spine: shortest attack path, chokepoint ranking, reachability-bounded blast radius.
+    # LAZY import — nothing under worldmodel is loaded until this subcommand runs, so the
+    # scan/engage/benchmark gate path never touches it. Sends no traffic; mutates nothing.
+    from .worldmodel import attack_paths as attack_paths_mod
+    return attack_paths_mod.main(argv)
+
+
 def _status(argv: list[str]) -> int:
     """One-shot environment summary: which backends are reachable, which
     paths resolve, which optional deps are installed."""
@@ -235,6 +244,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "aegis": _aegis,
     "evidence": _evidence,
     "report": _report,
+    "attack-paths": _attack_paths,
     "collaborator": _collaborator,
     "benchmark": _benchmark,
     "console": _console,
