@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigil.dev/proof-carrying-finding/schemas/evidence-bundle.schema.json",
+  "title": "evidence-bundle.json",
+  "description": "The signed public artifact at the root of a VIGIL proof bundle. Reflects the object written by proof.bundle.export_bundle / `python -m framework.v2 evidence certify`: a set of SignedEvidence certificates, the hash chain over their cert_digests (in order), and the governance-signed chain head. The chain's cert_digest sequence MUST equal the certificates' cert_digests, in order (nothing suppressed/injected/reordered).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["engagement_slug", "certificates", "chain", "head"],
+  "properties": {
+    "engagement_slug": { "type": "string" },
+    "certificates": {
+      "type": "array",
+      "items": { "$ref": "signed-evidence.schema.json" }
+    },
+    "chain": {
+      "type": "array",
+      "items": { "$ref": "chain.schema.json#/$defs/ChainEntry" }
+    },
+    "head": {
+      "oneOf": [
+        { "type": "null", "description": "An UNSIGNED bundle (no --signer). Then only chain linkage is checkable, not governance authenticity." },
+        { "$ref": "chain.schema.json#/$defs/SignedChainHead" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigil.dev/proof-carrying-finding/schemas/chain.schema.json",
+  "title": "Evidence chain (ChainEntry + SignedChainHead)",
+  "description": "The tamper-evident spine that binds the certificate SET. Each ChainEntry hash-links to its predecessor; a SignedChainHead anchors the whole chain under an m-of-n governance signature with a monotonic `last_seq` (anti-rollback). Reflects framework.v2.evidence.models.ChainEntry and vigil_core.models.SignedChainHead. Both are serialized in full (model_dump(mode=\"json\")) — the head always emits its v2 members even for a v1 head, but the v2 members are DROPPED from the head's SIGNING payload when schema_version < 2 (see SPEC.md), so a v1 head signs byte-identically to a pre-v2 head.",
+  "$defs": {
+    "hex64": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "signature_b64"],
+      "properties": {
+        "key_id": { "type": "string", "minLength": 1 },
+        "signature_b64": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ChainEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "prev_hash", "cert_digest", "entry_hash"],
+      "description": "One link in the spine. entry_hash = sha256(canonical_json({\"cert_digest\":cert_digest,\"prev_hash\":prev_hash,\"seq\":seq})).",
+      "properties": {
+        "seq": { "type": "integer", "minimum": 0, "description": "Monotonic; contiguous within a chain." },
+        "prev_hash": {
+          "allOf": [{ "$ref": "#/$defs/hex64" }],
+          "description": "The predecessor's entry_hash, or the genesis constant (64 zero hex chars) for the first link (or a re-based live window's base_prev_hash)."
+        },
+        "cert_digest": {
+          "allOf": [{ "$ref": "#/$defs/hex64" }],
+          "description": "The linked certificate's cert_digest (sha256 of its canonical bytes). The chain's cert_digest sequence MUST equal the certificates' own cert_digests, in order, so none was suppressed/injected/reordered."
+        },
+        "entry_hash": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "SignedChainHead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "engagement_slug",
+        "last_seq",
+        "entry_count",
+        "head_hash",
+        "base_seq",
+        "base_prev_hash",
+        "base_count",
+        "cumulative_merkle_root",
+        "snapshot_seq",
+        "prev_head_hash",
+        "signatures"
+      ],
+      "description": "The signed anchor of the spine.",
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1, "description": "1 = no-prune head (v2 fields carry their identity defaults and are excluded from the signing payload); 2 = cold-archive/hard-prune head (v2 fields are signed)." },
+        "engagement_slug": { "type": "string" },
+        "last_seq": { "type": "integer", "minimum": 0, "description": "seq of the last entry; monotonic across accepted heads (anti-rollback high-water)." },
+        "entry_count": { "type": "integer", "minimum": 0, "description": "ABSOLUTE record count = base_count + len(live window)." },
+        "head_hash": {
+          "allOf": [{ "$ref": "#/$defs/hex64" }],
+          "description": "The last entry's entry_hash (or the genesis constant for an empty chain)."
+        },
+        "base_seq": { "type": "integer", "minimum": 0, "description": "First RETAINED seq (0 = nothing pruned)." },
+        "base_prev_hash": { "$ref": "#/$defs/hex64" },
+        "base_count": { "type": "integer", "minimum": 0, "description": "Absolute count of pruned records [0..base_seq)." },
+        "cumulative_merkle_root": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$",
+          "description": "Running Merkle accumulator over all pruned leaves; \"\" when nothing pruned."
+        },
+        "snapshot_seq": { "type": "integer", "minimum": -1, "description": "seq of the snapshot record this head commits; -1 = none." },
+        "prev_head_hash": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$",
+          "description": "sha256 of the prior accepted head's signing bytes (meta-chain); \"\" for a v1 head."
+        },
+        "signatures": { "type": "array", "items": { "$ref": "#/$defs/Signature" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vigil.dev/proof-carrying-finding/schemas/trust-root.schema.json",
+  "title": "TrustRoot",
+  "description": "The authoriser set + threshold a deployment trusts (m-of-n; 1 covers a solo owner). Only PUBLIC key material appears here. The trust root's authenticity is anchored NOT by the copy shipped in a bundle but by its fingerprint, which the operator publishes OUT-OF-BAND: fingerprint = \"sha256:\" + digest_payload(this object). Reflects vigil_core.models.TrustRoot / AuthorizerKey.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "threshold", "authorizers"],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "m in m-of-n. MUST be <= number of authorizers."
+    },
+    "authorizers": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The governance authorisers. key_ids MUST be distinct.",
+      "items": { "$ref": "#/$defs/AuthorizerKey" }
+    }
+  },
+  "$defs": {
+    "AuthorizerKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "name", "public_key_b64"],
+      "properties": {
+        "key_id": { "type": "string", "minLength": 1, "description": "Stable authoriser id." },
+        "name": { "type": "string", "minLength": 1, "description": "Human-readable authoriser name." },
+        "public_key_b64": {
+          "type": "string",
+          "minLength": 1,
+          "description": "base64 of the 32-byte raw Ed25519 public key. A conforming verifier rejects a non-canonical (y >= 2^255-19) or small-order (low-subgroup) point before using it."
+        }
+      }
+    }
+  }
+}
