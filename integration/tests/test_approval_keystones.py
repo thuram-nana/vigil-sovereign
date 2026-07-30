@@ -178,12 +178,14 @@ def _run(coro):
 
 
 def _ctx(tool_name, arguments_json):
-    # The REAL SDK contract on_tool_start receives: a ToolContext carrying .tool_name + .tool_arguments (the
-    # raw args STRING of the ACTUAL call) — NOT the static tool definition. Using the real type keeps this
-    # test honest about the arg source (red-pen MED-1: the old stub never exercised tool_arguments).
-    from agents.tool_context import ToolContext
+    # Mirrors the SDK ToolContext contract on_tool_start receives — verified against
+    # agents.tool_context.ToolContext: `tool_name: str` and `tool_arguments: str` (the RAW args string of the
+    # ACTUAL call, NOT the static tool definition). A plain namespace with those exact fields keeps the test
+    # SDK-independent (portable across CI groups) while exercising the exact arg SOURCE the hook must read —
+    # the thing the old stub never touched (red-pen MED-1) and that BLOCK-1 got wrong.
+    import types
 
-    return ToolContext(context=None, tool_name=tool_name, tool_call_id="call-1", tool_arguments=arguments_json)
+    return types.SimpleNamespace(tool_name=tool_name, tool_arguments=arguments_json)
 
 
 def test_strix_hook_auto_class_runs():
