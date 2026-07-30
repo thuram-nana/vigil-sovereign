@@ -126,9 +126,13 @@ def _atomic_write_json(path: Path, obj: dict) -> None:
 
 
 def _safe_component(value: Any) -> str:
-    """A filesystem-safe id component: no separators, no ``..``, no NUL. Returns "" if unsafe."""
+    """A filesystem-safe id component: no separators, no ``..``, no NUL, no whitespace/control chars (a
+    newline could otherwise name a ``signed/a\\nb.json`` file). Returns "" if unsafe. request_ids are 16-hex
+    digests in practice; this is defence-in-depth (red-pen LOW-2)."""
     s = str(value or "").strip()
-    if not s or "/" in s or "\\" in s or ".." in s or "\x00" in s:
+    if not s or "/" in s or "\\" in s or ".." in s:
+        return ""
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in s):
         return ""
     return s
 

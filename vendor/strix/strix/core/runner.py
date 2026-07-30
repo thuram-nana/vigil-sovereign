@@ -226,13 +226,14 @@ async def run_strix_scan(
         )
         hooks = ReportUsageHooks(model=resolved_model, max_budget_usd=max_budget_usd)
 
-        # VIGIL WARDEN gate (T3): OPT-IN, best-effort. Absent the integration package OR the opt-in env var
-        # (VIGIL_WARDEN_STRIX_GATE), this is a NO-OP and vendored Strix behaviour is byte-identical — the
-        # integration package is a soft dependency (FATAL-2: the sovereign never loads it). When a
-        # VIGIL-governed run opts in, the offense-side WARDEN tool-name gate is composed onto the run hooks
-        # so Strix's arbitrary exec_command shell tool is classified + gated (a non-AUTO classification
-        # RAISES WardenDenied → blocks the call). Every path returns valid hooks; a wiring error never stops
-        # a scan.
+        # VIGIL WARDEN gate (A1): ON BY DEFAULT, best-effort. When the integration package is importable
+        # (a VIGIL-governed run), the offense-side WARDEN gate is composed onto the run hooks so Strix's
+        # arbitrary exec_command / write_stdin shell is classified + routed to per-action owner approval
+        # (a queued call runs only on a valid single-use owner token; no authority / no token ⇒ blocked).
+        # An EXPLICIT opt-out (VIGIL_WARDEN_STRIX_GATE in {0,off,false,no}), or the integration package
+        # simply not being importable (a bare vendored Strix checkout — FATAL-2: the sovereign never loads
+        # it), leaves the base hooks unchanged and Strix byte-identical. A wiring error also falls back to
+        # the base hooks so it never stops a scan (best-effort); the gate is default-ON, not opt-in.
         try:
             from vigil_integration.warden_gate import attach_from_env
 

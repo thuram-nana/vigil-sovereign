@@ -202,7 +202,10 @@ class WardenGateHooks:
         return d
 
     async def on_tool_start(self, context, agent, tool) -> None:
-        name = getattr(tool, "name", None) or str(tool)
+        # The SDK passes the ACTUAL call arguments on ``context`` (a ToolContext: ``.tool_name`` /
+        # ``.tool_arguments`` — the raw args string); ``tool`` is only the static definition. Read the
+        # context so the approval binds + displays the REAL command, not a constant (red-pen BLOCK-1).
+        name = getattr(context, "tool_name", None) or getattr(tool, "name", None) or str(tool)
         decision = self.evaluate(name)
         # A hard class deny (denylist / empty name) never runs — raise immediately.
         if decision.outcome == "deny":
@@ -221,7 +224,7 @@ class WardenGateHooks:
                 f"authority provisioned (run `vigil approve provision-authority`)."
             )
         target = _strix_target(tool)
-        args = _strix_args(tool)
+        args = _strix_args(getattr(context, "tool_arguments", None))
         try:
             approved = bool(self._approver(name, target, args))
         except Exception as exc:  # noqa: BLE001 — an approver error is fail-closed (block)
@@ -269,14 +272,24 @@ def _strix_target(tool: Any) -> str:
     return "strix:exec"
 
 
-def _strix_args(tool: Any) -> Any:
-    """Best-effort args for the approval action-digest. The SDK ``on_tool_start`` may not carry the concrete
-    arguments; bind whatever is present (the tool name at minimum) so the digest is stable + non-empty."""
-    for attr in ("params", "arguments", "args", "input"):
-        v = getattr(tool, attr, None)
-        if isinstance(v, (dict, str)):
-            return v
-    return {"tool": getattr(tool, "name", None) or str(tool)}
+def _strix_args(raw_arguments: Any) -> Any:
+    """Normalize the SDK ``ToolContext.tool_arguments`` — the RAW arguments STRING of the ACTUAL tool call
+    (NOT the static ``tool`` definition, which carries no call args) — into the value the approval binds and
+    the owner sees. A JSON-object string is parsed to a dict (so secret values can be masked in the preview);
+    a non-JSON string is bound verbatim (still command-specific); anything else is a stable non-empty
+    sentinel. THIS is what makes the token per-command: the ``action_digest`` covers the command, and the
+    owner sees the exact command before signing (red-pen BLOCK-1: reading ``tool`` bound a constant)."""
+    import json as _json
+
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if isinstance(raw_arguments, str) and raw_arguments.strip():
+        try:
+            parsed = _json.loads(raw_arguments)
+        except Exception:  # noqa: BLE001 — a non-JSON args string still binds verbatim (command-specific)
+            return raw_arguments
+        return parsed if isinstance(parsed, (dict, list, str, int, float)) else raw_arguments
+    return {"_": "no-args"}
 
 
 # The Strix arbitrary-execution chokepoint. EVERY CLI invocation the agent makes — nmap, ffuf, python3,
