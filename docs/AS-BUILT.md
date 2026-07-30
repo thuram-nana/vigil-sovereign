@@ -12,6 +12,40 @@ its tests win — update this doc.
 > data a real target produced.** The LLM proposes; the oracle confirms; the signature attests; the
 > gates constrain. Nothing else promotes a claim to a fact.
 
+## What's assured now (2026-07 hardening program — merged & CI-green on `main`)
+
+Every item below merged only after adversarial red-pen + all 6 required CI jobs green (required status
+checks are now enforced on protected `main` — nothing merges without them):
+
+- **Per-action owner approval is the default offense authority** (#178). A queued offense action, and the
+  vendored agent's arbitrary shell (`exec_command`/`write_stdin`, gated by default), runs only on a
+  single-use, action-bound, owner-signed token (`vigil approve`); no authority / no token ⇒ blocked.
+- **Every finding tells you how to re-verify it** (#179), on all five surfaces (report · SARIF/JSON ·
+  signed certificate · proof bundle `HOW-TO-VERIFY.md` · UI drawer); per-session graph as a real
+  spine-projection backend; `dossier --session` handoff; Inbox/assurance/feed UI.
+- **The live claims match the on-disk spine** (#180): a loopback `error_signature` SQLi FACT re-verified
+  3/3 offline, and an external `testasp.vulnweb.com` run that minted 4 cert-backed FACTs through the full
+  gate (destructive probes default-denied) onto the signed spine.
+- **A finding is independently verifiable without trusting or running VIGIL** (#181): an open
+  proof-carrying-finding spec + JSON Schemas + a **standalone VIGIL-free verifier**
+  (`docs/proof-carrying-finding/`), with canonical-bytes parity proven and tamper rejection.
+- **Falsifiable, tamper-evident benchmark** (#182): `make bench` → a signed scorecard (precision/recall/FPR
+  with safe negative controls; m-of-n Ed25519 + out-of-band fingerprint pin).
+- **Attack-path + chokepoint triage** (#181): `vigil attack-paths <slug>` — shortest paths, the ranked
+  chokepoint ("which one fix breaks the most attack paths"), blast radius, and a what-if, over a pure
+  spine→world-model projection.
+- **Confidence calibration** (#183, `calibration report`: ECE/Brier/reliability bins — display-only, never
+  promotes) and **coverage-guided, oracle-gated, non-evasive discovery** (#183, `scanner/coverage.py`:
+  re-ranks effort, never gates a surface out, never confirms without an oracle).
+
+**Honestly not-yet / gated** (capabilities present; refinement or external dependency remains): the
+cross-engagement meta-learning *auto-loop* + `engage --learn` (its primitives — OutcomeLedger, memory
+priors, bandit seeding, postmortem — exist and are used; the auto-seed/persist convenience is the last
+wire); the Assurance reliability-diagram panel (lands once the OODA loop writes a per-engagement outcome
+ledger); and the genuinely external/hardware-gated items — a real TEE (silicon), the live Claude-API step
+(needs a provisioned key), and a full binary cyber-reasoning auto-repair engine (research) — all shipped as
+honestly-labelled scaffold + software fallback + activation runbook, never claimed as active.
+
 ---
 
 ## 1. Architecture in one paragraph
