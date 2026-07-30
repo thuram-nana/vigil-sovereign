@@ -45,12 +45,23 @@ offense process):
 
 ### L1 — a real `error_signature` (error-based SQLi) FACT, re-verified 3/3 offline, ZERO external deps
 `framework/v2/verify/oracles.py::error_signature_oracle` (`OracleKind.ERROR_SIGNATURE`). `error_based_sqli`
-routes to this oracle first. Over the loopback vulnapp, the **first-party executor captured the datastore-error
-bytes** (the MySQL "You have an error in your SQL syntax" signature) and the oracle minted a **signed FACT** that
-**re-verified 3/3 offline** — with **no Caido and no Docker** in the loop. This proves the whole error-based
-pipeline end-to-end on a local target with zero external dependency. `targets/testphp/charter.md` provisions the
-**byte-identical external run** against Acunetix's published `testphp.vulnweb.com` — the same oracle path, but it
-needs outbound network egress the authoring sandbox did not have (see §3).
+routes to this oracle first. Over the loopback vulnapp (`infra/loopback/vulnapp.py`, a string-concatenated
+**SQLite** query), the **first-party executor captured the datastore-error bytes** — the SQLite
+`unrecognized token` error a broken injection (`?q=admin'`) surfaces — and the oracle minted a **signed
+`error_based_sqli` FACT** alongside a `boolean_sqli` FACT (`differential_response`) and an `xss` FACT
+(`reflection_context`); **all three re-verified 3/3 offline**, with **no Caido and no Docker** in the loop.
+Reproduce it yourself (the vulnapp bound to `127.0.0.1:18080`):
+
+```
+python3 -m framework.v2 scan "http://127.0.0.1:18080/search?q=1" --format json \
+    --reverifiable-out /tmp/loopback-rev.json
+python3 -m framework.v2 verify /tmp/loopback-rev.json
+#  → [OK] error_signature conf=0.880 matches-claim ... re-verified 3/3 certificate(s)
+```
+
+This proves the whole error-based pipeline end-to-end on a local target with zero external dependency.
+`targets/testphp/charter.md` provisions the **byte-identical external run** against Acunetix's published
+`testphp.vulnweb.com` — the same oracle path, but it needs outbound network egress (see §3).
 
 ### The deep-core usage ledger (WS-6) — WHO / WHEN / WHAT, non-repudiable
 `vigil ledger who|when` and `vigil verify-ledger`. The ledger is the signed spine (kind
