@@ -10,9 +10,19 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from framework.v2.console import api
-from vigil_integration.live.approval_broker import approvals_root, publish_pending
-from vigil_integration.live.approval_token import ApprovalAction, action_digest
+
+# The provider imports approval_broker LAZILY (FATAL-2: the console plane never imports vigil_integration at
+# module scope). This test needs it directly to SEED pending requests, so skip cleanly in the framework-only
+# CI job where vigil_integration is not installed — the provider can't function there anyway.
+_ab = pytest.importorskip("vigil_integration.live.approval_broker")
+_at = pytest.importorskip("vigil_integration.live.approval_token")
+approvals_root = _ab.approvals_root
+publish_pending = _ab.publish_pending
+ApprovalAction = _at.ApprovalAction
+action_digest = _at.action_digest
 
 
 def _seed(base, tool_name, target, args, *, nonce="a" * 32):
