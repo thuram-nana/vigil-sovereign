@@ -2452,8 +2452,12 @@
           V.card("Live governance feed", "LIVE", h("div.feed#safety-feed", null, h("div.empty", null, "Connecting to the sovereign spine…")), false),
         ]),
       ]),
+      h("div.grid", { style: { marginTop: "4px" } }, [
+        V.card("Pending approvals", "READ-ONLY", h("div#safety-pending", null, h("div.empty", null, "Loading…")), false),
+      ]),
     ]);
     loadSafety();
+    loadPendingApprovals();
   }
 
   function loadSafety() {
@@ -2551,6 +2555,52 @@
         h("button.btn.danger", { onClick: function () {
           settingsAct({ action: "deny", seq: a.seq, reason: "deny from Safety" }, "Denied.", loadSafety); } }, [V.icon("x"), "Deny"]),
       ]),
+    ]);
+  }
+
+  // ---- Pending approvals (OFFENSE plane, READ-ONLY / KEYLESS) ----------------
+  // The offense worker publishes a public-safe pending request per queued action; the OWNER signs it
+  // out-of-band with `vigil approve sign` (owner PRIVATE key held off-box). This console is KEYLESS — it
+  // LISTS pending requests and shows the exact sign command, but it can NEVER sign (FATAL-2): there is no
+  // POST here, GET only. Distinct from the sovereign snapshot's approve/deny card above.
+  function loadPendingApprovals() {
+    function refresh() {
+      V.getJSON(OFF("/api/approvals/loopback")).then(drawPendingApprovals).catch(function () {
+        var box = V.$("#safety-pending");
+        if (box) V.mount(box, h("div.empty", null, "The offense console is offline. Start it with `vigil up`."));
+      });
+    }
+    refresh();
+    liveTimers.push(setInterval(refresh, 5000));    // cleaned up by teardownLive() on navigation
+  }
+
+  function drawPendingApprovals(data) {
+    var box = V.$("#safety-pending"); if (!box) return;
+    var pend = (data && data.pending) || [];
+    var base = (data && data.base_dir) || ".vigil-live";
+    if (!pend.length) { V.mount(box, h("div.empty", null, "No actions awaiting approval.")); return; }
+    V.mount(box, [
+      h("div.hint", { style: { marginBottom: "10px" } },
+        "These offense actions are queued and awaiting your signature. This console is keyless and cannot sign — sign with your owner key via the CLI (or the sovereign cockpit)."),
+      h("div.stack", null, pend.map(function (p) { return pendingApprovalCard(p, base); })),
+    ]);
+  }
+
+  function pendingApprovalCard(p, base) {
+    var cmd = "vigil approve sign --base-dir " + base + " --request-id " + p.request_id;
+    return h("div.approval", null, [
+      h("div.ah", null, [V.icon("key"), h("span.t", null, (p.tool_name || "action") + " → " + (p.target || "—"))]),
+      h("div.why", null, [
+        h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } },
+          "request " + (p.request_id || "—") + (p.created_at_iso ? (" · " + p.created_at_iso) : "")),
+        p.args_preview ? h("div.mono.dim", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all", marginTop: "4px" } }, p.args_preview) : null,
+      ]),
+      h("div", { style: { marginTop: "10px", display: "flex", gap: "8px", alignItems: "stretch" } }, [
+        h("pre.code", { style: { flex: "1", margin: "0" } }, cmd),
+        h("button.btn.sm", { title: "Copy the sign command", onClick: function () { copyText(cmd); } }, "Copy"),
+      ]),
+      h("div.hint", { style: { marginTop: "8px" } },
+        "Signing uses your owner key via `vigil approve sign` (or the sovereign cockpit) — never from this screen."),
     ]);
   }
 

@@ -275,6 +275,37 @@ def telemetry() -> dict[str, Any]:
     return {"ok": True, "running": True, **doc}
 
 
+def approvals(slug: str = "") -> dict[str, Any]:
+    """A2 — read-only list of the offense worker's PENDING per-action owner-approval requests.
+
+    When an offense tool is queued, the offense worker publishes a PUBLIC-SAFE pending request under
+    ``<base>/approvals/pending/<id>.json`` (tool, the gate-seen target, the action-digest, a single-use nonce,
+    and a REDACTED args preview — NEVER a secret, NEVER the owner PRIVATE key). The owner signs it OUT-OF-BAND
+    with ``vigil approve sign`` — the owner private key is held off-box as ``VIGIL_APPROVAL_OWNER_KEY`` (the
+    SOVEREIGN side). This console is KEYLESS: it may READ + serve these public-safe requests, but it MUST NEVER
+    sign (FATAL-2). So this provider is READ-ONLY — it lists what is awaiting a signature and the UI surfaces
+    the exact CLI the operator runs to sign; there is NO signing route in this offense plane.
+
+    ``base_dir`` is echoed so the UI can render the exact ``vigil approve sign --base-dir <base> ...`` command.
+    ``slug`` is accepted for the prefix-route shape but the pending queue is machine-wide (rooted at
+    ``VIGIL_BASE_DIR``), not per-engagement. Total: an absent/unreadable approvals dir yields
+    ``{"pending": []}``, never a traceback."""
+    import os
+
+    base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+
+    def _read() -> list[dict[str, Any]]:
+        # approval_broker is import-clean (vigil_core + stdlib only) — safe to import in the offense plane
+        # (unlike the rest of vigil_integration, which is FATAL-2 to import here). It holds NO private key.
+        from vigil_integration.live.approval_broker import approvals_root, list_pending
+        return [{"request_id": p.request_id, "tool_name": p.tool_name, "target": p.target,
+                 "action_digest": p.action_digest, "nonce": p.nonce, "args_preview": p.args_preview,
+                 "created_at_iso": p.created_at_iso} for p in list_pending(approvals_root(base))]
+
+    pending = _safe(_read, default=[]) or []
+    return {"ok": True, "slug": str(slug or ""), "base_dir": base, "pending": pending}
+
+
 def run_report(run_id: str) -> dict[str, Any]:
     """The saved `build_report` document for a console run (findings + attack_paths +
     summary), or an error marker if it has not finished yet."""

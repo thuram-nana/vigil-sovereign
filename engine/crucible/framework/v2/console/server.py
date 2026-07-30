@@ -82,6 +82,7 @@ _EXACT_ROUTES = {
 _PREFIX_ROUTES = {
     "/api/session/": api.session_detail,
     "/api/inbox/": api.inbox,                   # U3: read-only agent-to-agent coordination messages (advisory)
+    "/api/approvals/": api.approvals,           # A2: read-only pending per-action owner-approval requests (KEYLESS — lists only, never signs)
     "/api/report/": api.run_report,
     "/api/worldmodel/": api.worldmodel,
     "/api/coverage/": api.coverage_data,
