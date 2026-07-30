@@ -14,7 +14,10 @@ per-subsystem developer pages under [`../knowledge/kb/`](../knowledge/kb/).
 > this doc says so **inline** — an honest catalog is worth more than an impressive one.
 > **When this doc and the code disagree, the code and its tests win — fix this doc.**
 
-**Coverage: 247 features across 7 domains.** This catalog was produced by a per-domain code-reading
+**Coverage: 247 features across 7 domains** (plus the **2026-07 hardening additions** catalogued in §7 —
+per-action approval, gated Strix shell, how-to-verify everywhere, the proof-carrying-finding standard +
+standalone verifier, attack-path/chokepoint, signed benchmark, calibration, coverage-guided discovery, and
+the `engage --learn` auto-loop). This catalog was produced by a per-domain code-reading
 inventory pass, then an **adversarial honesty + completeness re-read** of every section against the
 cited code: that pass applied **68 inline honesty qualifiers/corrections** (e.g. it caught a draft
 claiming `vigil authorize-destruction` opens its file `O_EXCL` when the code actually uses
@@ -813,6 +816,53 @@ This domain covers the **four** framework/v2 "moonshot" seams (attestation, bina
 **Runbook provenance (corrected — verified against `docs/DEFERRED-INFRA.md`):** the four scaffolds' activation runbooks live in `docs/DEFERRED-INFRA.md` at sections **G1** (graph), **X1** (attest), **X2** (binary tier), **X3** (agent-body) — confirmed by grep, those are the only sections in that file. The two integration collectors are **not** deferred scaffolds: `telemetry.py` is BUILT and self-labels "VIGIL G2" (`telemetry.py:1`) but has **no** G2 section in `DEFERRED-INFRA.md`; `think_claude.py` is BUILT and self-labels "VIGIL-LIVE, §12 WS1e" (`think_claude.py:2`). Neither has a deferred-infra activation runbook because neither is deferred.
 
 The load-bearing invariant across every module here: **none of them mint a fact, promote a lead, or grant a tier — the oracle remains the sole authority, and the conjunctive gate remains the sole authorizer.**
+
+### 2026-07 hardening program — the pending / stalled / scaffolded software features, now completed & merged
+
+Every item below is **built, tested, and merged** behind the 6 required CI checks (see `AS-BUILT.md` §"What's
+assured now"). This closes the software-completable backlog; only genuinely external/hardware/research-gated
+items remain (listed at the end of this section, honestly stubbed).
+
+- **Per-action owner approval is the DEFAULT offense authority** — LIVE. `live/approval_broker.py` (file-backed
+  pending queue + owner-signed-token inbox) + `live/approval_token.py` (single-use `O_EXCL` nonce,
+  action-bound, owner-signed) + `vigil approve provision-authority | list | sign` (`cli.py`). The engine
+  defaults to `build_approval_gate`; the standing `--approve-offense` is an explicit lower-assurance mode.
+- **Strix `exec_command`/`write_stdin` shell gated by DEFAULT** — LIVE. `warden_gate.py:attach_from_env` is
+  on by default (opt-out `VIGIL_WARDEN_STRIX_GATE`); a QUEUE routes to the per-action approval broker (bind
+  the REAL command from the `ToolContext`, publish, wait for a signed token, spend once), else hard-block.
+- **Per-finding how-to-verify on every surface** — LIVE. `report/howto.py` woven into the report + SARIF/JSON,
+  the signed certificate (`evidence/models.py` `how_to_verify`, dropped-when-empty for byte-identity), the
+  proof bundle (`proof/bundle.py` `HOW-TO-VERIFY.md`), and the UI finding drawer (`packages/vigil-ui/app.js`
+  `p3HowToVerify`).
+- **Per-session graph as the default backend + `dossier --session`** — LIVE. `graph/store.py` wired as the
+  per-session backend (pure one-way spine projection) via `console/sessions.py`; `report/dossier.py`
+  `build_session_dossier` packages a session's runs + chat + graph + open threads into one governance-signed,
+  value-redacted zip.
+- **Agent Inbox + live assurance/telemetry + feed start/stop UI, orphan-route cleanup** — LIVE
+  (`packages/vigil-ui/app.js` + `console/{api,server,actions}.py`).
+- **Proof-carrying finding: an OPEN STANDARD + a VIGIL-free standalone verifier** — LIVE.
+  `docs/proof-carrying-finding/` (SPEC.md + 6 JSON Schemas + `verify_pcf.py`, stdlib+cryptography only,
+  canonical-bytes parity proven, tamper rejection) — a third party verifies a finding without trusting or
+  running VIGIL.
+- **Attack-path + chokepoint triage** — LIVE. `worldmodel/spine_projector.py` (signed spine → asset
+  `WorldModel`) + `worldmodel/attack_paths.py` + `vigil attack-paths <slug>`: shortest paths, ranked
+  chokepoints ("which one fix breaks the most attack paths"), blast radius, what-if.
+- **Signed, independently-verifiable benchmark** — LIVE. `eval/benchmark_run.py` `sign_scorecard` /
+  `verify_scorecard` (m-of-n Ed25519 over canonical bytes + out-of-band fingerprint pin) + `benchmark --sign`
+  + `make bench` (precision/recall/FPR with safe negative controls).
+- **Confidence-calibration report** — LIVE. `calibration/report.py` + `vigil calibration report` (ECE / Brier /
+  reliability bins). Invariant: re-scores DISPLAYED confidence only — never promotes a lead to a fact.
+- **Coverage-guided, oracle-gated, non-evasive discovery** — LIVE (opt-in). `scanner/coverage.py`:
+  response-behavior coverage buckets + a Thompson-bandit scheduler that RE-RANKS effort (asserted never gates
+  a surface out), never confirms without a fired oracle, and — the hard line — never hides from a defender.
+- **`engage --learn` cross-run auto-loop** — LIVE. The OutcomeLedger→calibrator half (autonomous OODA) plus,
+  now, the bandit half: `--learn` auto-persists + warm-starts a per-target Thompson bandit
+  (`engage.py:_resolve_bandit_path`), non-circular (re-rank only).
+
+**Honestly still gated (unchanged — scaffold + software fallback + activation runbook, never claimed active):**
+a real confidential-computing TEE (SEV-SNP/TDX — hardware), the live Claude-API step at runtime (needs a
+provisioned key; keyless-replay fallback keeps tests hermetic), and full binary cyber-reasoning patch
+*synthesis* (research). The scaffolds below document these precisely.
 
 ### The pluggable agent-body contract — SCAFFOLD (research-gated), interface-only
 
