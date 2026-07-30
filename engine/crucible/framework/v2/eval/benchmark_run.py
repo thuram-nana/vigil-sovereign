@@ -284,6 +284,70 @@ def write_json_report(measured: list[MeasuredBoard], path: str | Path) -> Path:
     return p
 
 
+def _scorecard_fingerprint(authorizers: list[dict]) -> str:
+    """A stable out-of-band pin for the signing trust root: sha256 over the canonical authorizer set
+    (key_id + public key). A reader compares this to a fingerprint the operator publishes independently."""
+    import hashlib
+
+    from vigil_core import canonical_json
+    body = canonical_json(sorted(authorizers, key=lambda a: a["key_id"]))
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def sign_scorecard(scorecard_json_path: str | Path, *, signers: list[tuple[str, str]],
+                   authorizers: list[dict], threshold: int) -> dict:
+    """Sign a benchmark scorecard JSON so its published numbers are TAMPER-EVIDENT + independently
+    checkable (with the proof-carrying-finding verifier's ``verify_threshold`` over the SAME canonical
+    bytes). Deterministic: the signature covers ``vigil_core.canonical_json(scorecard)`` — the exact bytes a
+    verifier re-derives from the loaded JSON. Keys are passed IN (FATAL-2: no key provisioning here). Writes
+    ``<name>.sig.json`` + ``<name>.fingerprint.txt`` beside the scorecard and returns the signature envelope."""
+    import hashlib
+
+    from vigil_core import canonical_json, sign
+    p = Path(scorecard_json_path).expanduser()
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    body = canonical_json(doc)
+    digest = "sha256:" + hashlib.sha256(body).hexdigest()
+    sig_env = {
+        "schema": "vigil-benchmark-scorecard-sig/1",
+        "scorecard": p.name,
+        "scorecard_digest": digest,
+        "threshold": int(threshold),
+        "trust_root": {"threshold": int(threshold),
+                       "authorizers": sorted(authorizers, key=lambda a: a["key_id"])},
+        "signatures": sorted(({"key_id": kid, "signature_b64": sign(priv, body)} for kid, priv in signers),
+                             key=lambda s: s["key_id"]),
+    }
+    sig_path = p.with_suffix(".sig.json")
+    sig_path.write_text(json.dumps(sig_env, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    p.with_suffix(".fingerprint.txt").write_text(_scorecard_fingerprint(authorizers) + "\n", encoding="utf-8")
+    return sig_env
+
+
+def verify_scorecard(scorecard_json_path: str | Path, sig_env: dict) -> bool:
+    """Re-verify a signed scorecard offline: re-derive the canonical digest from the JSON on disk and check
+    an m-of-n threshold of DISTINCT authorizers' Ed25519 signatures over those bytes. Fail-closed on any
+    mismatch (a flipped number → digest changes → every signature fails)."""
+    import hashlib
+
+    from vigil_core import canonical_json, verify_one
+    try:
+        doc = json.loads(Path(scorecard_json_path).read_text(encoding="utf-8"))
+        body = canonical_json(doc)
+        if ("sha256:" + hashlib.sha256(body).hexdigest()) != sig_env.get("scorecard_digest"):
+            return False
+        tr = sig_env.get("trust_root", {})
+        pub = {a["key_id"]: a["public_key_b64"] for a in tr.get("authorizers", [])}
+        good = set()
+        for s in sig_env.get("signatures", []):
+            kid = s.get("key_id")
+            if kid in pub and kid not in good and verify_one(pub[kid], body, s.get("signature_b64", "")):
+                good.add(kid)
+        return len(good) >= int(tr.get("threshold", 1))
+    except Exception:  # noqa: BLE001 — any error is fail-closed (not verified)
+        return False
+
+
 def _default_baseline_path() -> Path:
     """The committed in-process benchmark baseline — the always-runnable CI spine."""
     return Path(__file__).resolve().parent / "baselines" / "benchmark-app.json"
@@ -369,6 +433,13 @@ def main(argv: list[str]) -> int:
                         help="Overwrite the baseline with this run's scoreboards (accept the new numbers).")
     parser.add_argument("--baseline", default=None,
                         help="Baseline JSON path (default: the committed in-process benchmark baseline).")
+    parser.add_argument("--sign", action="store_true",
+                        help="Sign the JSON scorecard (m-of-n Ed25519) → a tamper-evident, "
+                             "independently-verifiable artifact + an out-of-band fingerprint pin.")
+    parser.add_argument("--signing-key", default=None,
+                        help="Owner governance private key (b64) to sign with; default mints a fresh key "
+                             "and prints its fingerprint to pin out-of-band.")
+    parser.add_argument("--key-id", default="benchmark-owner", help="Signer key id for --sign.")
     args = parser.parse_args(argv)
 
     if args.corpus:
@@ -386,7 +457,29 @@ def main(argv: list[str]) -> int:
 
     report_path = write_report(boards, args.report, metrics=metrics)
     print(f"\nwrote {report_path}")
-    if args.json:
-        json_path = write_json_report(measured, args.json)
+    json_target = args.json or ("benchmark-results.json" if args.sign else None)
+    if json_target:
+        json_path = write_json_report(measured, json_target)
         print(f"wrote {json_path}")
+        if args.sign:
+            from vigil_core import generate_keypair
+            if args.signing_key:
+                # derive the public key from the raw-32-byte Ed25519 private seed (vigil_core key format)
+                import base64 as _b64
+
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+                from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+                priv = args.signing_key
+                _pk = Ed25519PrivateKey.from_private_bytes(_b64.b64decode(priv))
+                pub = _b64.b64encode(_pk.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode("ascii")
+            else:
+                kp = generate_keypair()
+                priv, pub = kp.private_key_b64, kp.public_key_b64
+                print("NOTE: no --signing-key given — minted a FRESH governance key for this scorecard.")
+            authorizers = [{"key_id": args.key_id, "public_key_b64": pub}]
+            sig = sign_scorecard(json_path, signers=[(args.key_id, priv)],
+                                 authorizers=authorizers, threshold=1)
+            print(f"signed scorecard: {Path(json_path).with_suffix('.sig.json')}")
+            print(f"trust-root fingerprint (PIN OUT-OF-BAND): {sig['scorecard_digest']}")
+            print(f"                                          {Path(json_path).with_suffix('.fingerprint.txt')}")
     return 0
