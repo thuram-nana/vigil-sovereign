@@ -184,35 +184,45 @@ def test_compose_allows_an_auto_tool(monkeypatch):
     assert warden.decisions[-1].auto
 
 
-def test_attach_from_env_is_noop_when_not_opted_in(monkeypatch):
-    # Absent the opt-in env var, attach_from_env returns the base hooks UNCHANGED (byte-identical Strix).
-    monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)
-    base = object()
-    assert attach_from_env(base) is base
-
-
-def test_attach_from_env_opted_in_composes_and_blocks(monkeypatch):
+def test_attach_from_env_default_on_gates_only_the_shell(monkeypatch, tmp_path):
+    # A1: the gate is ON BY DEFAULT (no env needed). It gates ONLY the arbitrary-exec chokepoint
+    # (exec_command / write_stdin) and auto-runs every other (sandbox-contained) Strix tool — so the agent
+    # stays functional while its shell is governed. No authority in this base dir ⇒ the shell hard-blocks.
     _install_fake_agents(monkeypatch)
-    _install_fake_wiring(monkeypatch, {"exec_command": "A3", "http.get": "A0"})
-    monkeypatch.setenv("VIGIL_WARDEN_STRIX_GATE", "1")
+    monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path))
 
     class _Base:
         async def on_llm_end(self, *a, **k): ...
 
     base = _Base()
     composed = attach_from_env(base)
-    assert composed is not base                       # a composite was attached
-    with pytest.raises(WardenDenied):                 # and it gates Strix's arbitrary shell
+    assert composed is not base                                   # gated by default
+    with pytest.raises(WardenDenied):                             # the arbitrary shell is gated
         asyncio.run(composed.on_tool_start("c", "a", _FakeTool("exec_command")))
+    with pytest.raises(WardenDenied):
+        asyncio.run(composed.on_tool_start("c", "a", _FakeTool("write_stdin")))
+    # a benign Strix tool auto-runs (targeted gating keeps the agent functional).
+    asyncio.run(composed.on_tool_start("c", "a", _FakeTool("web_search")))
+    asyncio.run(composed.on_tool_start("c", "a", _FakeTool("apply_patch")))
 
 
-def test_attach_from_env_fails_safe_to_base_when_wiring_broken(monkeypatch):
-    # Opted in but the composition raises (SDK/classifier unavailable) → return the base hooks (a wiring
-    # error must NEVER stop a scan). Here the fake agents module is deliberately NOT installed, so the
-    # lazy `from agents.lifecycle import RunHooks` inside compose_run_hooks fails.
-    monkeypatch.delitem(sys.modules, "agents", raising=False)
-    monkeypatch.delitem(sys.modules, "agents.lifecycle", raising=False)
-    _install_fake_wiring(monkeypatch, {"exec_command": "A3"})
-    monkeypatch.setenv("VIGIL_WARDEN_STRIX_GATE", "1")
+def test_attach_from_env_explicit_optout_is_noop(monkeypatch):
+    # The EXPLICIT opt-out (byte-identical vendor / ungoverned standalone) returns the base hooks UNCHANGED.
+    for v in ("0", "off", "false", "no", "OFF"):
+        monkeypatch.setenv("VIGIL_WARDEN_STRIX_GATE", v)
+        base = object()
+        assert attach_from_env(base) is base
+
+
+def test_attach_from_env_fails_safe_to_base_when_wiring_broken(monkeypatch, tmp_path):
+    # A composition error must NEVER stop a scan → return the base hooks UNCHANGED. Force the SDK wire
+    # (compose_run_hooks) to raise, deterministically.
+    import vigil_integration.warden_gate as wg
+
+    monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)   # default-on
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(wg, "compose_run_hooks",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("SDK unavailable")))
     base = object()
     assert attach_from_env(base) is base
