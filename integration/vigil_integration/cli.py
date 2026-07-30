@@ -583,8 +583,15 @@ def _cmd_dossier(args: argparse.Namespace) -> int:
     a readable ``index.html`` — plus a ``MANIFEST.json`` of sha256s and (when a governance signer is
     resolvable) an m-of-n signature over the manifest + a ``TRUST-ROOT-FINGERPRINT.txt``. Offense-side
     (``report.dossier`` reuses the report renderers + lazy-imports the proof bundle); deterministic and
-    path-safe (every entry confined, symlinks never followed)."""
+    path-safe (every entry confined, symlinks never followed).
+
+    With ``--session <id>`` it instead packages a whole SESSION (its run(s) + chat transcript + the
+    per-session graph partition pointer + the open threads) into ONE signed handoff zip — see
+    ``_cmd_session_dossier``."""
     import os
+
+    if getattr(args, "session", ""):
+        return _cmd_session_dossier(args)
 
     from framework.v2.report.dossier import build_dossier
 
@@ -624,6 +631,75 @@ def _cmd_dossier(args: argparse.Namespace) -> int:
         print(f"verify facts: cd <unzipped>/proof-bundle && {res.get('verify_cmd', '')}")
     else:
         print("verify facts: (no offline proof bundle — this run produced no oracle-confirmed FACT)")
+    for note in res.get("notes", []):
+        print(f"  note: {note}")
+    return 0
+
+
+def _cmd_session_dossier(args: argparse.Namespace) -> int:
+    """`vigil dossier --session <id>` — package a whole SESSION into ONE signed handoff zip: each of its
+    run(s) (as an independently re-verifiable ``runs/<run>/dossier.zip``), the chat transcript, the
+    per-session graph partition pointer (B2 — a pure ONE-WAY projection of the signed spine), and the open
+    (unfinished) threads. It resolves the session via the console registry, projects the graph from the spine,
+    and reuses ``report.dossier.build_session_dossier``. Framework imports stay LAZY (FATAL-2)."""
+    import os
+
+    from framework.v2.console import actions, sessions
+    from framework.v2.report.dossier import build_session_dossier
+
+    try:
+        got = sessions.get_session(args.session)          # raises ValueError on an unsafe id
+    except ValueError as e:
+        print(f"dossier: unsafe session id: {e}", file=sys.stderr)
+        return 1
+    if got.get("error"):
+        print(f"dossier: {got['error']}", file=sys.stderr)
+        return 1
+    sess = got["session"]
+    sid = sess["id"]
+
+    # resolve the session's runs → run dirs; each run id is re-validated by the console traversal guard, so a
+    # tampered/legacy unsafe id is DROPPED (never turned into a path). Missing dirs are noted by the builder.
+    run_dirs: list[str] = []
+    for rid in (sess.get("run_ids", []) or []):
+        try:
+            run_dirs.append(str(actions.run_dir(str(rid))))
+        except ValueError:
+            continue
+
+    live_dir = Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live")
+    chat_path = live_dir / "chats" / (sid + ".jsonl")
+    chat_transcript = str(chat_path) if chat_path.is_file() else None
+
+    # B2: project the per-session graph partition from the spine, then take its read view (pointer + counts).
+    graph = sessions.session_graph(sid)                   # {"partition","nodes","edges"} — one-way projection
+    threads = sessions.open_threads(sid)                  # unfinished lines of work (advisory)
+
+    slug = args.slug if (args.slug and args.slug != "engagement") else (sess.get("slug") or "engagement")
+    out = args.out or str(live_dir / "sessions" / sid / "dossier.zip")
+
+    res = build_session_dossier(
+        session_id=sid, run_dirs=run_dirs, out_zip=out, engagement_slug=slug,
+        base_dir=(args.base_dir or None), generated_at=(args.timestamp or None),
+        session_meta=sess, chat_transcript=chat_transcript, graph=graph, open_threads=threads,
+        terminal_history=(getattr(args, "terminal_history", None) or None))
+    if not res.get("ok"):
+        print(f"dossier: {res.get('error', 'session handoff build failed')}", file=sys.stderr)
+        return 1
+    print("=== vigil dossier --session (one-click, tamper-evident SESSION handoff) ===")
+    print(f"dossier:      {res['dossier']}")
+    print(f"session:      {res['session_id']}  ({res['runs']} run(s), {res['facts']} oracle-confirmed FACT(s))")
+    print(f"graph:        partition {res['session_id']} = {res.get('graph_nodes')} node(s) "
+          "(pure one-way spine projection; authorizes nothing)")
+    print(f"open threads: {res['open_threads']}")
+    print(f"integrity:    MANIFEST.json sha256={res['manifest_sha256']}")
+    if res.get("signed"):
+        print(f"authenticity: SIGNED — trust-root fingerprint {res.get('trust_root_fingerprint', '')}")
+        print("  PUBLISH this fingerprint OUT-OF-BAND so the handoff's authenticity is pinnable.")
+    else:
+        print("authenticity: UNSIGNED — integrity-checkable (hashes) but no governance signature "
+              "(no signer resolvable).")
+    print("verify runs:  unzip → each runs/<run>/dossier.zip is independently offline-re-verifiable")
     for note in res.get("notes", []):
         print(f"  note: {note}")
     return 0
@@ -1069,7 +1145,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pdo = sub.add_parser("dossier",
                          help="compile EVERYTHING a run produced into ONE self-contained, tamper-evident "
-                              ".zip (reports + exports + offline proof bundle + scrubbed log + index.html)")
+                              ".zip (reports + exports + offline proof bundle + scrubbed log + index.html); "
+                              "or --session <id> to package a whole session's runs + chat + graph + threads")
+    pdo.add_argument("--session", default="",
+                     help="package a whole SESSION by id — its run(s) (each an independently re-verifiable "
+                          "runs/<run>/dossier.zip), the chat transcript, the per-session graph partition "
+                          "pointer, and the open threads — into ONE signed handoff zip (resolves via the "
+                          "console session registry; ignores --run-dir)")
     pdo.add_argument("--run-dir", default="", help="the run dir to compile (else $VIGIL_PROOF_RUN_DIR)")
     pdo.add_argument("--out", default="", help="output .zip path (default <run-dir>/dossier.zip)")
     pdo.add_argument("--slug", default="engagement", help="engagement slug stamped into the dossier")
