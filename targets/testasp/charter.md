@@ -94,6 +94,19 @@ divergence makes `verify` report `[BAD] CLAIM-MISMATCH (tampered?)` → `0/1 rep
 The proof re-fires deterministically for genuine evidence and rejects a tampered byte
 — the "the machine cannot lie about a finding" property, demonstrated LIVE and EXTERNAL.
 
+**Re-corroborated 2026-07-30.** A fresh chartered run of the §6 command reproduced the
+result live through the full gate chain — the executor **default-denied** every destructive
+probe (POST `search.asp`, `/admin*`) with no TTY confirmation — and minted **4 oracle-confirmed,
+certificate-backed findings** onto the signed spine (`.blackboard/store.sqlite`, `--spine`):
+`boolean_sqli` @ `query_value:0` (`differential_response`, conf 0.99), `open_redirect` @
+`query_value:0` (`achieved_state`, 0.90), and two `request_smuggling` (`differential_response`,
+CL.TE / TE.TE, 0.70). This resolves the audit's telemetry-vs-charter discrepancy: the per-run
+`.vigil-live/live-ui/telemetry.json` seen earlier reflected a run whose destructive edges were
+denied (a refusal-heavy view), whereas the **signed spine carries the confirmed edge-plane
+FACTs** — a fresh run mints them durably. The self-contained 3/3 offline re-verify is
+demonstrated on-box by the **loopback** L1 FACT (`docs/AS-BUILT-LIVE.md` §L1); this external run
+is corroborated by minting through the full gate + the tamper negative-control above.
+
 > This is byte-for-byte the same oracle path L1 proved on loopback, now against a real
 > published site. `testphp.vulnweb.com` (verbose-error MySQL, the near-guaranteed
 > error-based FACT) was OFFLINE at run time; `testasp` suppresses verbose errors, so the
