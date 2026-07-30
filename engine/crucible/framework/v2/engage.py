@@ -1330,11 +1330,13 @@ def main(argv: list[str]) -> int:
                              "off-route leaf. Still gated, still deterministic; it only re-ranks which "
                              "open leaf runs next and never promotes a finding.")
     parser.add_argument("--learn", action="store_true",
-                        help="LEARN (opt-in; requires --autonomous): write this run's confirm/refute "
-                             "outcomes to targets/<slug>/outcomes.json, closing the learning loop the "
-                             "meta-monitor reads next run. Off by default (it mutates the target dir). "
-                             "Labels stay non-circular: a single-oracle reverify is DISPUTED, never a "
-                             "fact.")
+                        help="LEARN (opt-in): persist this run's learning so the NEXT run warms up — the "
+                             "Thompson effort-ranking bandit (targets/<slug>/bandit.json, warm-started + "
+                             "saved across runs) AND, under --autonomous, the confirm/refute OutcomeLedger "
+                             "(targets/<slug>/outcomes.json) the meta-monitor reads next run. Off by default "
+                             "(it mutates the target dir). Non-circular: a single-oracle reverify is "
+                             "DISPUTED never a fact, and the bandit only RE-RANKS effort — it never promotes "
+                             "a finding or gates a surface out.")
     args = parser.parse_args(argv)
 
     # NW-3: auto-enable sensor fusion when the operator has authored a targets/<slug>/fusion.json
@@ -1392,10 +1394,35 @@ def main(argv: list[str]) -> int:
     return _engage_body(args, spine)
 
 
+def _learn_bandit_path(slug: str) -> str:
+    """P5 — the per-target persistent Thompson bandit under ``--learn``. WebScanCampaign warm-starts it at a
+    run's start (``_resolve_bandit`` loads the file if present) and saves it at the end, so effort-ranking
+    learns ACROSS engagements automatically. Non-circular: the bandit only re-ranks/defers effort — it never
+    promotes a finding, gates a surface out, or feeds an oracle/SCE input."""
+    from .common import paths
+    return str(paths.target_dir(slug) / "bandit.json")
+
+
+def _resolve_bandit_path(bandit_file: str | None, learn: bool, slug: str) -> str | None:
+    """The bandit-persistence rule (P5): an explicit ``--bandit-file`` wins; else ``--learn`` auto-persists a
+    per-target bandit (warm-start + save across runs); else None (no persistence — the --ephemeral / default
+    path). Pure so the auto-loop rule is unit-testable without a full engagement."""
+    if bandit_file:
+        return bandit_file
+    if learn:
+        return _learn_bandit_path(slug)
+    return None
+
+
 def _engage_body(args: argparse.Namespace, spine: object) -> int:
     """Run the engagement and print its report. Split out of ``main`` so it can run either
     directly (persisting) or inside the ``ephemeral_session`` context (tmpfs + ZDR) without
     duplicating the ~120-line report renderer."""
+    # P5 auto-loop: ``--learn`` auto-persists the Thompson bandit per target (warm-start + save across runs),
+    # so cross-engagement effort-ranking learns WITHOUT the operator managing ``--bandit-file``. This closes
+    # the bandit half of the loop (the OutcomeLedger→calibrator half already auto-closes under --learn). An
+    # explicit ``--bandit-file`` still wins; ``--ephemeral`` already forced both off before this point.
+    _bandit_path = _resolve_bandit_path(args.bandit_file, getattr(args, "learn", False), args.slug)
     try:
         result = run_engagement(
             args.slug, args.seed_url,
@@ -1403,7 +1430,7 @@ def _engage_body(args: argparse.Namespace, spine: object) -> int:
             request_budget=args.request_budget,
             max_pages=args.max_pages,
             max_audit_requests=args.max_audit_requests,
-            bandit_path=args.bandit_file,
+            bandit_path=_bandit_path,
             enable_domxss=args.domxss,
             enable_browser_xss=args.browser_xss,
             enable_spa_crawl=args.spa,
