@@ -40,6 +40,7 @@ import html
 import io
 import json
 import os
+import re
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
@@ -226,7 +227,7 @@ def _scrub_jsonl_file(path: Path) -> tuple[Optional[str], int]:
         if not isinstance(obj, dict):
             dropped += 1
             continue
-        out_lines.append(json.dumps(_scrub(None, "", obj), sort_keys=True, default=str))
+        out_lines.append(json.dumps(_deep_redact_values(_scrub(None, "", obj)), sort_keys=True, default=str))
     if not out_lines and dropped == 0:
         return (None, 0)
     return ("\n".join(out_lines) + ("\n" if out_lines else ""), dropped)
@@ -872,14 +873,57 @@ def _canon_json(obj: Any) -> bytes:
     return json.dumps(obj, indent=2, sort_keys=True, default=str).encode("utf-8")
 
 
+# Value-level secret patterns (red-pen BLOCK): the session artifacts carry targets / names / labels / chat
+# text as VALUES under NON-secret keys, so the key-name masker alone lets a URL with basic-auth or a pasted
+# token ship in the clear. These strip the credential from the value itself.
+_URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s:@]+(?::[^/\s@]*)?@")
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/\-]+=*")
+_TOKENLIKE_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_\-]{8,}|ghp_[A-Za-z0-9]{20,}|gh[opsu]_[A-Za-z0-9]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9\-]{8,}|AKIA[0-9A-Z]{12,}"
+    r"|eyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{4,})\b")
+_INLINE_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth(?:orization)?)\b"
+    r"\s*[:=]\s*\S+")
+
+
+def _redact_value_secrets(s: Any) -> Any:
+    """Best-effort VALUE-level secret redaction for a free-text / URL string (complements the KEY-NAME
+    masker): strips URL credentials (``scheme://user:pass@host`` → ``scheme://[redacted]@host``), Bearer /
+    JWT / API tokens, and inline ``secret=…``. Deterministic; a non-string passes through unchanged. This is
+    best-effort pattern matching, not a guarantee every conceivable secret is caught — but it closes the
+    common URL-userinfo + token leaks on a hand-to-anyone artifact."""
+    if not isinstance(s, str) or not s:
+        return s
+    out = _URL_USERINFO_RE.sub(lambda m: m.group(1) + "[redacted]@", s)
+    out = _BEARER_RE.sub("Bearer [redacted]", out)
+    out = _TOKENLIKE_RE.sub("[redacted]", out)
+    out = _INLINE_SECRET_RE.sub(lambda m: m.group(1) + "=[redacted]", out)
+    return out
+
+
+def _deep_redact_values(o: Any) -> Any:
+    """Recursively apply :func:`_redact_value_secrets` to every string in a JSON-ish structure."""
+    if isinstance(o, dict):
+        return {k: _deep_redact_values(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_deep_redact_values(x) for x in o]
+    return _redact_value_secrets(o)
+
+
 def _scrub_dict(obj: dict) -> dict:
-    """Run a dict through the SAME secret masker the engagement log uses (``common.logging._scrub``) —
-    defense in depth. These session artifacts are non-secret (a session name, run statuses, spine payload
-    DIGESTS), but a target/name field must never ship a credential-shaped value in the clear."""
+    """Scrub a session artifact BOTH ways (red-pen BLOCK fix): the engagement-log KEY-NAME masker
+    (``common.logging._scrub``) PLUS a VALUE-level redactor over every string (URL credentials, bearer / JWT
+    / API tokens, inline ``secret=…``). These artifacts carry targets / names / labels as VALUES under
+    non-secret keys, where a URL with basic-auth or a pasted token would otherwise ship in the clear. Total:
+    any failure still returns a best-effort value-redacted (or raw) dict — the handoff never aborts."""
     try:
-        return _scrub(None, "", dict(obj))
+        return _deep_redact_values(_scrub(None, "", dict(obj)))
     except Exception:  # noqa: BLE001 — never let scrubbing abort the handoff
-        return dict(obj)
+        try:
+            return _deep_redact_values(dict(obj))
+        except Exception:  # noqa: BLE001
+            return dict(obj)
 
 
 def _render_session_index(*, session_id: str, engagement_slug: str, run_summaries: list[dict],
@@ -972,10 +1016,12 @@ def build_session_dossier(
     independently offline-re-verifiable — its own MANIFEST + proof bundle + verify command). On top, the
     session-level artifacts are added and ONE governance MANIFEST + m-of-n signature + a
     ``TRUST-ROOT-FINGERPRINT.txt`` authenticate the whole handoff — the SAME discipline as the run dossier.
-    Secrets are scrubbed in every added artifact (the chat transcript through the log scrubber; the session
-    record / graph / open-threads through ``_scrub``). Deterministic: sorted entries, no wallclock in the
-    hashed content (``generated_at`` is the only optional stamp). Path-safe: every entry confined; symlinks
-    never followed. Returns ``{ok, dossier, session_id, runs, entries, facts, signed,
+    Secrets are BEST-EFFORT scrubbed in every added artifact — BOTH key-name masking (``common.logging._scrub``)
+    AND value-level redaction (URL credentials, bearer/JWT/API tokens, inline ``secret=…``) over the chat
+    transcript, the session record, the graph partition, and open-threads, so a target/name/label carrying a
+    ``user:pass@`` URL or a pasted token does not ship in the clear (this is pattern-based, not a guarantee
+    every conceivable secret is caught). Deterministic: sorted entries, no wallclock in the hashed content
+    (``generated_at`` is the only optional stamp). Path-safe: every entry confined; symlinks never followed. Returns ``{ok, dossier, session_id, runs, entries, facts, signed,
     trust_root_fingerprint, manifest_sha256, open_threads, graph_nodes, notes}``.
 
     NB: ``graph`` is a POINTER + its projected nodes/edges (payload DIGESTS only) — a pure ONE-WAY view of
@@ -1032,11 +1078,15 @@ def build_session_dossier(
                 if dropped:
                     notes.append(f"chat transcript: dropped {dropped} unparseable line(s) "
                                  "(not shipped in the clear)")
-        if graph is not None:
-            entries["session/graph-partition.json"] = _canon_json(_scrub_dict(dict(graph)))
-        if open_threads is not None:
-            entries["session/open-threads.json"] = _canon_json(
-                _scrub_dict({"session_id": session_id, "open_threads": list(open_threads)}))
+        # Scrub ONCE and reuse the redacted graph/threads for BOTH the json entries AND the readable index,
+        # so no raw secret reaches index.html (red-pen BLOCK: the index rendered raw open-thread targets).
+        r_graph = _scrub_dict(dict(graph)) if graph is not None else None
+        if r_graph is not None:
+            entries["session/graph-partition.json"] = _canon_json(r_graph)
+        r_threads_doc = (_scrub_dict({"session_id": session_id, "open_threads": list(open_threads)})
+                         if open_threads is not None else None)
+        if r_threads_doc is not None:
+            entries["session/open-threads.json"] = _canon_json(r_threads_doc)
         entries["session/run-index.json"] = _canon_json({"session_id": session_id, "runs": run_summaries})
 
         if len(entries) == 1:  # only run-index → an empty session (no runs, no chat/graph/threads)
@@ -1050,7 +1100,7 @@ def build_session_dossier(
 
         entries["index.html"] = _render_session_index(
             session_id=session_id, engagement_slug=engagement_slug, run_summaries=run_summaries,
-            graph=graph, open_threads=open_threads or [],
+            graph=r_graph, open_threads=(r_threads_doc.get("open_threads") if r_threads_doc else []),
             has_chat="session/chat-transcript.jsonl" in entries, n_facts=total_facts,
             signed=signed, fingerprint=fingerprint, generated_at=generated_at,
             included=sorted(entries)).encode("utf-8")
