@@ -106,6 +106,11 @@ def _benchmark(argv: list[str]) -> int:
     return benchmark_run.main(argv)
 
 
+def _calibration(argv: list[str]) -> int:
+    from .calibration import report as calibration_report
+    return calibration_report.main(argv)
+
+
 def _console(argv: list[str]) -> int:
     from .console import cli as console_cli
     return console_cli.main(argv)
@@ -247,6 +252,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "attack-paths": _attack_paths,
     "collaborator": _collaborator,
     "benchmark": _benchmark,
+    "calibration": _calibration,
     "console": _console,
     "mcp": _mcp,
     "api": _api,

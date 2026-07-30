@@ -58,6 +58,7 @@ from . import (
     cdp,
     check_synthesis,
     constraints,
+    coverage,
     detection_cost,
     discovery,
     domxss,
@@ -103,6 +104,16 @@ from .adaptive import AdaptResult, EvolveResult, evolve, waf_adapt
 from .benchmark import BenchmarkReport, run_benchmark
 from .detection_cost import detection_cost_of_technique, path_detection_cost, rank_paths
 from .learning import ContextualBandit, arm_key, context_key
+from .coverage import (
+    PAYLOAD_FAMILIES,
+    AttemptOutcome,
+    CoverageGuidedScheduler,
+    CoverageState,
+    buckets_of,
+    coverage_gain,
+    produces_fact,
+    signal_bucket,
+)
 from .quantum_era import PqcReport, anneal_path_portfolio, classify_kex, classify_signature, pqc_scan
 from .race import RaceResult, race_burst, race_check, raw_race
 from .self_improve import CapabilityGap, CapabilityProposal, MergeGate, analyze_gaps, draft_proposals
@@ -242,6 +253,16 @@ __all__ = [
     "ContextualBandit",
     "arm_key",
     "context_key",
+    # coverage-guided, oracle-gated discovery (opt-in; NOT evasion)
+    "coverage",
+    "signal_bucket",
+    "buckets_of",
+    "coverage_gain",
+    "produces_fact",
+    "CoverageState",
+    "CoverageGuidedScheduler",
+    "AttemptOutcome",
+    "PAYLOAD_FAMILIES",
     # evolving payloads + WAF-adaptive bypass
     "adaptive",
     "evolve",
