@@ -848,6 +848,166 @@ def run_feed_pull(slug: str) -> dict:
             "doctrine": d.get("doctrine") or _FEEDPULL_DOCTRINE}
 
 
+# ---------------------------------------------------------------------------
+# recurring vuln-feed SIDECAR (start / stop) — the console-managed `intel feed-daemon`
+# ---------------------------------------------------------------------------
+# The one-shot `run_feed_pull` above is a single conscious egress click. The recurring pull is a long-running
+# sidecar the operator starts/stops HERE — the same `intel feed-daemon --live` `vigil up --with-feed` spawns,
+# but console-supervised (pids tracked in a console-owned JSON, terminated SIGTERM→SIGKILL exactly like the
+# uiproxy sidecars). It is triple-safe: OFF until an explicit Start (opt-in egress), pre-checked against the
+# engagement kill-switch here AND re-checked by the daemon every `--poll` (STOP halts within one poll), and it
+# mints only intel-tier LEADS — never a fact, never an oracle. It is spawned by SUBPROCESSING the offense
+# engine's OWN CLI (never importing vigil_integration — that would be FATAL-2), so the pids live in a
+# console-owned file, distinct from `vigil up`'s supervised children; the Stop button (or a kill-switch trip)
+# is how it ends.
+_FEED_INTERVAL_MIN = 60
+_FEED_INTERVAL_MAX = 86400
+
+
+def _feed_live_dir() -> Path:
+    """The console-owned live dir (shared with the telemetry reader): ``$VIGIL_LIVE_DIR`` or ``.vigil-live``."""
+    return Path(os.environ.get("VIGIL_LIVE_DIR") or ".vigil-live")
+
+
+def _feed_pids_path() -> Path:
+    return _feed_live_dir() / "live-ui" / "feed-sidecars.json"
+
+
+def _read_feed_pids() -> dict:
+    try:
+        doc = json.loads(_feed_pids_path().read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_feed_pids(entries: dict) -> None:
+    p = _feed_pids_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(entries, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists but not ours to signal — still alive
+    return True
+
+
+def _feed_terminate(pid: int, *, grace: float = 5.0) -> bool:
+    """SIGTERM a pid, then SIGKILL after a grace period — mirrors ``uiproxy._terminate``. Returns True if a
+    live process was signalled."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return True
+
+
+def feed_sidecars() -> list[dict]:
+    """The console-managed recurring feed sidecars, each with its pid, configured interval, and whether the pid
+    is still alive. Read-only projection of the tracked pids file — HONEST by construction: it reports the live
+    pid + the interval the operator chose, and NO fabricated next-run/last-run (the schedule lives inside the
+    daemon process, not persisted here)."""
+    out: list[dict] = []
+    for slug, e in sorted(_read_feed_pids().items()):
+        if not isinstance(e, dict):
+            continue
+        pid = int(e.get("pid", 0) or 0)
+        out.append({"slug": str(slug), "pid": pid, "interval": e.get("interval"),
+                    "poll": e.get("poll"), "started": e.get("started"), "alive": _pid_alive(pid)})
+    return out
+
+
+def run_feed_start(slug: str, interval: int = 3600) -> dict:
+    """Start the recurring vuln-feed sidecar for ``slug`` — spawn the SAME gated ``intel feed-daemon --live``
+    CLI as a tracked background subprocess (never imports vigil_integration; FATAL-2). ``--live`` IS the
+    conscious recurring-egress opt-in this Start carries. Kill-switch gated: refused here under STOP, and the
+    daemon re-checks every ``--poll`` (a trip halts it within one poll). Everything minted is an intel-tier
+    LEAD. Idempotent — a live sidecar for the slug is reported, never double-spawned. Fail-closed on a bad slug
+    / unspawnable child; never a traceback."""
+    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "select an engagement (slug required)"}
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 3600
+    interval = max(_FEED_INTERVAL_MIN, min(_FEED_INTERVAL_MAX, interval))
+    try:
+        from ..authority.killswitch import KillSwitch
+        if KillSwitch(slug).is_tripped():                 # no recurring egress under STOP
+            return {"ok": False, "refused": "kill-switch tripped", "slug": slug}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    entries = _read_feed_pids()
+    cur = entries.get(slug)
+    if isinstance(cur, dict) and _pid_alive(int(cur.get("pid", 0) or 0)):
+        return {"ok": True, "slug": slug, "already_running": True, "running": True,
+                "pid": int(cur.get("pid", 0) or 0), "interval": cur.get("interval", interval),
+                "doctrine": _FEEDPULL_DOCTRINE}
+    poll = max(1, min(30, interval))
+    cmd = [sys.executable, "-m", "framework.v2", "intel", "feed-daemon", "--live",
+           "--slug", slug, "--interval", str(interval), "--poll", str(poll)]
+    log_dir = _feed_live_dir() / "live-ui"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"feed-{slug}.log"
+    try:
+        log = open(log_path, "ab", buffering=0)  # noqa: SIM115 — the child owns the fd until it exits
+        # start_new_session: a proper detached background sidecar (its own session), ended only by Stop or a
+        # kill-switch trip — not by a stray signal to the console's group.
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
+                                start_new_session=True)
+    except (OSError, ValueError) as e:
+        return {"ok": False, "slug": slug, "error": f"{type(e).__name__}: {e}"}
+    entries[slug] = {"pid": proc.pid, "interval": interval, "poll": poll, "started": time.time()}
+    _write_feed_pids(entries)
+    return {"ok": True, "slug": slug, "pid": proc.pid, "interval": interval, "poll": poll,
+            "running": True, "doctrine": _FEEDPULL_DOCTRINE}
+
+
+def run_feed_stop(slug: str) -> dict:
+    """Stop the tracked recurring feed sidecar for ``slug`` (SIGTERM→SIGKILL, then reap + untrack). Idempotent:
+    an untracked slug is a clean no-op. Fail-closed on a bad slug; never a traceback."""
+    slug = "".join(c for c in str(slug or "").strip() if c.isalnum() or c in "-_.")[:120]
+    if not slug:
+        return {"ok": False, "error": "select an engagement (slug required)"}
+    entries = _read_feed_pids()
+    cur = entries.get(slug)
+    if not isinstance(cur, dict):
+        return {"ok": True, "slug": slug, "stopped": False,
+                "note": "no feed sidecar is tracked for this engagement"}
+    pid = int(cur.get("pid", 0) or 0)
+    signalled = _feed_terminate(pid) if pid else False
+    try:                                                  # reap our child so a stopped daemon leaves no zombie
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass                                              # not our child (console restarted) / already reaped
+    entries.pop(slug, None)
+    _write_feed_pids(entries)
+    return {"ok": True, "slug": slug, "stopped": bool(signalled), "pid": pid}
+
+
 def proof_export(run_id: str) -> dict:
     """Proof Studio (C1): assemble a CLIENT-VERIFIABLE proof bundle from a run's oracle-confirmed FACTs, so a
     third party can re-verify it OFFLINE with zero trust in VIGIL. Shells the exec-only ``vigil proof-export``

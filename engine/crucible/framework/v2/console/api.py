@@ -863,20 +863,25 @@ def _vuln_sources() -> list[dict]:
 def feed_status() -> dict[str, Any]:
     """K1: the READ-ONLY vuln-feed schedule / egress posture for the Knowledge screen.
 
-    HONEST by construction: the ``intel.scheduler`` is a PURE tick predicate and the recurring daemon is a
-    separate sidecar, so the console process persists NO schedule — there is no live 'last run' / 'next run'
-    to read, and this fabricates none. It reports what is TRUE: the trusted sources, that egress is OFFLINE by
-    default (a one-shot 'Pull now' is a conscious opt-in), and that recurring auto-pull is the sidecar path
-    (``intel feed-daemon --live`` / ``vigil up --with-feed``) — never started or tracked here. Sends no
-    traffic; mints nothing."""
+    HONEST by construction: the ``intel.scheduler`` is a PURE tick predicate with no persisted schedule, so
+    this fabricates NO next-run/last-run. It reports what is TRUE: the trusted sources, that egress is OFFLINE
+    by default (both the one-shot 'Pull now' AND the recurring sidecar are conscious opt-ins), and — via
+    ``actions.feed_sidecars`` — which recurring ``intel feed-daemon --live`` sidecars the console is currently
+    supervising (start/stop is managed here now), each with its live pid + configured interval. It sends no
+    traffic and mints nothing itself."""
+    from . import actions
+    sidecars = _safe(actions.feed_sidecars, default=[]) or []
     return {
         "sources": _safe(_vuln_sources, default=[]),
         "egress_default": "offline",
         "recurring": {
-            "managed_here": False,
-            "note": ("recurring auto-pull is a separate sidecar (`intel feed-daemon --live` / "
-                     "`vigil up --with-feed`) — the console neither starts nor tracks it. No persisted "
-                     "schedule exists, so there is no live next-run/last-run to show."),
+            "managed_here": True,
+            "sidecars": sidecars,
+            "note": ("recurring auto-pull runs as a console-managed sidecar you Start/Stop here "
+                     "(`intel feed-daemon --live`); it also runs under `vigil up --with-feed`. Each tick "
+                     "honours the engagement kill-switch (STOP halts it within one poll) and mints only "
+                     "intel-tier LEADS. No persisted schedule exists, so there is no fabricated "
+                     "next-run/last-run — only the live pid + the interval you chose."),
         },
         "doctrine": _VULN_DOCTRINE,
     }

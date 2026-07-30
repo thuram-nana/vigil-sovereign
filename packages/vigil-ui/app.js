@@ -862,7 +862,8 @@
   }
 
   function renderLive(screen) {
-    const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null };
+    const L = { run: null, runs: [], events: [], seen: {}, filter: "all", snapshot: null, started: null,
+      inbox: [], inboxLoaded: false, inboxLoading: false };
     const want = hashQuery().run || "";
 
     V.mount(screen, [
@@ -885,6 +886,7 @@
       teardownLive();
       L.run = L.runs.find(function (r) { return r.run_id === runId; }) || null;
       L.events = []; L.seen = {}; L.snapshot = null; L.started = L.run && L.run.started;
+      L.inbox = []; L.inboxLoaded = false; L.inboxLoading = false;   // per-engagement advisory inbox (B4)
       history.replaceState(null, "", "#/live?run=" + encodeURIComponent(runId));
       if (L.run) attachStream();
       drawBody();
@@ -896,6 +898,8 @@
       pollSnapshot();
       liveTimers.push(setInterval(pollSnapshot, 4000));
       liveTimers.push(setInterval(function () { updateHeader(); }, 1000)); // elapsed ticker
+      // B4: keep the advisory agent inbox fresh, but only while its tab is open (torn down on nav).
+      liveTimers.push(setInterval(function () { if (L.filter === "inbox") loadInbox(); }, 8000));
       if (run.stream === "blackboard" && run.slug) {
         // the 14-kind reasoning spine. EventSource resumes from Last-Event-ID (durable cursor).
         liveES = V.sse(OFF("/api/blackboard?slug=" + encodeURIComponent(run.slug)), function (ev) {
@@ -1021,8 +1025,52 @@
 
     // ---- graph + timeline ----
     function drawGraph() { const g = V.$("#live-graph"); if (g) liveGraph(g, L.events); }
+    // ---- agent inbox (B4): advisory agent-to-agent coordination — NOT evidence ----
+    // The console GETs one engagement's `agent_message` spine kind. Load-bearing honesty: no fact-building
+    // path reads these messages, so nothing here can promote a finding — the tab renders them as coordination
+    // only. Read-only; keyed by the selected run's engagement slug.
+    function loadInbox() {
+      const slug = L.run && L.run.slug;
+      if (!slug) { L.inbox = []; L.inboxLoaded = true; if (L.filter === "inbox") drawTimeline(); return; }
+      L.inboxLoading = true;
+      V.getJSON(OFF("/api/inbox/" + encodeURIComponent(slug))).then(function (d) {
+        L.inbox = (d && d.messages) || []; L.inboxLoaded = true; L.inboxLoading = false;
+        if (L.filter === "inbox") drawTimeline();
+      }).catch(function () {
+        L.inbox = []; L.inboxLoaded = true; L.inboxLoading = false;
+        if (L.filter === "inbox") drawTimeline();
+      });
+    }
+    function drawInbox(host) {
+      if (!L.run || !L.run.slug) {
+        V.mount(host, h("div.empty", null, "This run has no engagement — an agent inbox is per-engagement.")); return;
+      }
+      if (!L.inboxLoaded) { if (!L.inboxLoading) loadInbox(); V.mount(host, h("div.empty", null, "Loading inbox…")); return; }
+      const note = h("div.legend", { style: { marginBottom: "10px" } }, [V.icon("info"),
+        "Advisory coordination only. These are agent-to-agent messages — NOT evidence. No fact-building path "
+        + "reads them, so nothing here can promote a finding. Only a fired oracle mints a FACT."]);
+      if (!L.inbox.length) {
+        V.mount(host, [note, h("div.empty", null, "No coordination messages on this engagement yet.")]); return;
+      }
+      const rows = [];
+      for (let i = L.inbox.length - 1; i >= 0; i--) {   // newest first
+        const msg = L.inbox[i]; const p = msg || {};
+        rows.push(h("div.trow.kind-agent_message", null, [
+          h("div.ico", null, V.icon("brain")),
+          h("div.body", null, [
+            h("div.k", null, [
+              h("span.pill.sm", null, "advisory"),
+              h("b", { style: { marginLeft: "6px" } }, (p.sender || "?") + " → " + (p.recipient || "all")),
+              p.topic ? h("span", { style: { marginLeft: "6px", opacity: 0.8 } }, "· " + p.topic) : null]),
+            h("div.m", null, String(p.body || "—"))]),
+          h("div.meta", null, [h("span.t", null, p.posted_at ? String(p.posted_at).slice(11, 19) : (p.id != null ? "#" + p.id : ""))]),
+        ]));
+      }
+      V.mount(host, [note].concat(rows));
+    }
     function drawTimeline() {
       const host = V.$("#live-timeline"); if (!host) return;
+      if (L.filter === "inbox") { drawInbox(host); return; }
       let rows = L.events;
       if (L.filter === "facts") rows = rows.filter(function (e) { return e.kind === "finding" && isFact(e.payload); });
       else if (L.filter === "leads") rows = rows.filter(function (e) { return e.kind === "finding" && !isFact(e.payload); });
@@ -1094,8 +1142,8 @@
       ]);
       const legend = h("div.legend", { style: { marginTop: "12px" } }, [V.icon("shield"),
         "Only a fired ORACLE confirms a finding (FACT). Critics, the LLM, and rewards only advise — they never promote a LEAD to a FACT."]);
-      const filterSeg = h("div.segmented", null, [["all", "All"], ["facts", "Facts"], ["leads", "Leads"]].map(function (f) {
-        return h("button" + (L.filter === f[0] ? ".on" : ""), { onClick: function () { L.filter = f[0]; drawBody(); } }, f[1]);
+      const filterSeg = h("div.segmented", null, [["all", "All"], ["facts", "Facts"], ["leads", "Leads"], ["inbox", "Inbox"]].map(function (f) {
+        return h("button" + (L.filter === f[0] ? ".on" : ""), { onClick: function () { L.filter = f[0]; if (f[0] === "inbox" && !L.inboxLoaded) loadInbox(); drawBody(); } }, f[1]);
       }));
       V.mount(body, [
         picker,
@@ -3617,7 +3665,7 @@
   }
 
   // ---- Knowledge Engine (K1) — vuln-intel feed + defensive CATALOG (read-only) ----
-  var K = { slug: "", data: null, engagements: [] };
+  var K = { slug: "", data: null, engagements: [], feedInterval: 3600, feedBusy: false };
   function renderKnowledge(screen) {
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Knowledge Engine")]),
@@ -3679,9 +3727,12 @@
         + "No traffic fires without it, and every source is a fixed, concrete apex host (never the target)."),
     ]);
 
-    // ---- Vuln-feed pull (K1/U2): one-shot gated 'Pull now' + read-only schedule/egress posture ----
+    // ---- Vuln-feed pull (K1/U2): one-shot gated 'Pull now' + recurring sidecar Start/Stop (B5) ----
     var feed = K.feed || {};
     var feedRec = feed.recurring || {};
+    var sidecars = feedRec.sidecars || [];
+    var mine = d.slug ? sidecars.filter(function (s) { return s.slug === d.slug; })[0] : null;
+    var running = !!(mine && mine.alive);
     var feedCard = h("div.card", null, [
       h("div.card-h", null, [h("h3", null, "Vuln-feed pull"),
         h("span.st.st-idle", { style: { marginLeft: "auto" } }, [h("span.dot"),
@@ -3689,13 +3740,9 @@
       h("div.hint", { style: { marginBottom: "8px" } },
         "\"Pull now\" is a ONE-SHOT, conscious opt-in egress: it refreshes the feed from the trusted "
         + "sources (NVD / OSV / CISA-KEV) through the gated transport. Every entry is an intel-tier LEAD, "
-        + "never a fact — only a fired oracle confirms. Recurring auto-pull is a separate sidecar "
-        + "(`intel feed-daemon --live` / `vigil up --with-feed`) — not started or tracked here."),
-      h("div.kv", null, [h("div.k", null, "Recurring schedule"),
-        h("div.v", null, feedRec.managed_here ? "managed here"
-          : "not managed here (sidecar) — no persisted next-run / last-run")]),
-      h("div.row", { style: { marginTop: "10px" } }, [
-        h("button.btn.sm", { disabled: killed || !d.slug,
+        + "never a fact — only a fired oracle confirms."),
+      h("div.row", { style: { marginTop: "4px" } }, [
+        h("button.btn.sm", { disabled: killed || !d.slug || K.feedBusy,
           title: killed ? "kill-switch engaged" : (!d.slug ? "select an engagement" : ""),
           onClick: function () {
             V.toast("Pulling the vuln feed (gated egress)…");
@@ -3710,6 +3757,44 @@
           } }, "Pull now"),
         h("span.hint", { style: { marginLeft: "8px" } },
           "One-shot, kill-switch gated. Leads only — mints no fact, fires no oracle."),
+      ]),
+      // --- Recurring sidecar (B5): Start/Stop the `intel feed-daemon --live` this console supervises ---
+      h("div.card-h", { style: { marginTop: "12px" } }, [h("h3", null, "Recurring feed sidecar"),
+        (running
+          ? h("span.st.st-confirmed", { style: { marginLeft: "auto" } }, [h("span.dot"),
+              "running · pid " + mine.pid + " · every " + (mine.interval || "?") + "s"])
+          : h("span.st.st-idle", { style: { marginLeft: "auto" } }, [h("span.dot"), "stopped"]))]),
+      h("div.hint", { style: { marginBottom: "8px" } },
+        "Recurring auto-pull is an OPT-IN, kill-switch-gated egress the console supervises. Each tick honours "
+        + "this engagement's kill-switch (STOP halts it within one poll) and mints only intel-tier LEADS. "
+        + "There is no persisted schedule — only the live pid and the interval you choose."),
+      h("div.row", { style: { marginTop: "6px", display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } }, [
+        h("label.k", null, "Interval (s)"),
+        h("input", { type: "number", min: "60", max: "86400", step: "60",
+          style: { width: "110px" }, value: String(K.feedInterval), disabled: running,
+          onInput: function (e) { K.feedInterval = parseInt(e.target.value, 10) || 3600; } }),
+        h("button.btn.sm", { disabled: killed || !d.slug || running || K.feedBusy,
+          title: killed ? "kill-switch engaged" : (!d.slug ? "select an engagement" : (running ? "already running" : "")),
+          onClick: function () {
+            K.feedBusy = true; drawKnowledge();
+            V.postJSON(OFF("/api/feed/" + encodeURIComponent(d.slug) + "/start"), { interval: K.feedInterval })
+              .then(function (r) {
+                K.feedBusy = false;
+                if (r && r.ok) V.toast(r.already_running ? "Feed sidecar already running." : "Feed sidecar started (leads only).");
+                else V.toast((r && (r.refused || r.error)) || "Could not start the feed sidecar", true);
+                loadKnowledgeData();
+              }).catch(function () { K.feedBusy = false; V.toast("Could not start the feed sidecar", true); loadKnowledgeData(); });
+          } }, "Start"),
+        h("button.btn.sm.danger", { disabled: !running || K.feedBusy,
+          onClick: function () {
+            K.feedBusy = true; drawKnowledge();
+            V.postJSON(OFF("/api/feed/" + encodeURIComponent(d.slug) + "/stop"), {})
+              .then(function (r) {
+                K.feedBusy = false;
+                V.toast(r && r.stopped ? "Feed sidecar stopped." : "No running feed sidecar to stop.");
+                loadKnowledgeData();
+              }).catch(function () { K.feedBusy = false; V.toast("Could not stop the feed sidecar", true); loadKnowledgeData(); });
+          } }, "Stop"),
       ]),
     ]);
 
@@ -4270,13 +4355,18 @@
   }
 
   // ---- Assurance (C2): continuous proof / drift between two runs ----
-  var ASR = { curr: "", prev: "", runs: [], data: null };
+  var ASR = { curr: "", prev: "", runs: [], data: null, telemetry: null };
   function renderAssurance(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Assurance — continuous proof / drift"),
       h("p.sub", null, "Diff the ORACLE-CONFIRMED fact set between two runs: a fact that newly appears is a "
         + "regression (a new exposure); one that disappears is a fix. Deterministic + offline — each run's "
         + "certificates are re-fired, never re-attacked. A lead is never counted.")])]);
+    // B3: the live assurance/metrics PROJECTION over the signed spine (read-only, mints nothing). One-way —
+    // no new authority, no scope widening. A separate fetch so a missing collector never blocks the drift view.
+    ASR.telemetry = null;
+    V.getJSON(OFF("/api/telemetry")).then(function (t) { ASR.telemetry = t; drawAssurance(body); })
+      .catch(function () { ASR.telemetry = { ok: false }; drawAssurance(body); });
     V.getJSON(OFF("/api/runs")).then(function (d) {
       ASR.runs = (d && d.runs) || [];
       if (!ASR.curr && ASR.runs.length) ASR.curr = ASR.runs[0].run_id;
@@ -4318,7 +4408,59 @@
           list("Regressions — newly-proven exposures", d.regressions || [], ".danger"),
           list("Fixed — no longer proven", d.fixed || [], ""),
           list("Stable — proven in both", d.stable || [], "")]);
-    V.mount(body, [picker, summary, h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+    V.mount(body, [telemetryCard(), picker, summary, h("div.hint", { style: { marginTop: "10px" } }, d.doctrine || "")]);
+  }
+
+  // B3: the live assurance/metrics PROJECTION — a read-only, one-way view of the signed spine the
+  // `vigil up --with-telemetry` collector materializes (per-engagement FACT/LEAD/refusal/tool counts + a
+  // by-kind histogram + totals). It confers NO authority and widens NO scope — it only reflects what the
+  // oracle + gate already recorded. The telemetry snapshot exposes counts, not a graph; the attack-path /
+  // asset graph is per-run (World Model on the Findings screen), so this panel does not fabricate one.
+  function telemetryCard() {
+    var t = ASR.telemetry;
+    if (!t) return h("div.card", null, [h("div.card-h", null, [h("h3", null, "Live assurance projection")]),
+      h("div.empty", null, "Loading telemetry…")]);
+    var head = h("div.card-h", null, [h("h3", null, "Live assurance projection"),
+      (t.running
+        ? h("span.st.st-confirmed", { style: { marginLeft: "auto" } }, [h("span.dot"), "collector running"])
+        : h("span.st.st-idle", { style: { marginLeft: "auto" } }, [h("span.dot"), "collector not running"]))]);
+    var intro = h("div.hint", { style: { marginBottom: "8px" } },
+      "A read-only, one-way projection of the signed spine — it mints no fact and widens no scope; it only "
+      + "reflects what the oracle and gate already recorded.");
+    if (!t.running) {
+      return h("div.card", null, [head, intro,
+        h("div.empty", null, (t.note || "The telemetry collector is not running.")
+          + " Metrics still compute on demand elsewhere; start the live projection with `vigil up --with-telemetry`.")]);
+    }
+    var tot = t.totals || {};
+    var tiles = h("div.grid.cols-4", { style: { marginTop: "4px", marginBottom: "10px" } }, [
+      V.tile("Facts", String(tot.facts || 0), "oracle-confirmed"),
+      V.tile("Leads", String(tot.leads || 0), "unconfirmed"),
+      V.tile("Refusals", String(tot.refusals || 0), "gates fired"),
+      V.tile("Tool calls", String(tot.tool_calls || 0), "actions"),
+    ]);
+    var engs = (t.engagements || []);
+    var perEng = engs.length
+      ? h("div", null, engs.map(function (e) {
+          return h("div.kv", null, [h("div.k", null, String(e.slug || "?")),
+            h("div.v", null, [
+              h("span.pill.sm", null, (e.facts || 0) + " FACT"),
+              h("span.pill.sm", { style: { marginLeft: "4px" } }, (e.leads || 0) + " lead"),
+              h("span.pill.sm.warn", { style: { marginLeft: "4px" } }, (e.refusals || 0) + " refused"),
+              h("span.hint", { style: { marginLeft: "6px" } }, (e.events || 0) + " events")])]);
+        }))
+      : h("div.empty", null, "No engagements on the spine yet.");
+    var byKind = tot.by_kind || {};
+    var kinds = Object.keys(byKind).sort(function (a, b) { return byKind[b] - byKind[a]; });
+    var histo = kinds.length
+      ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "8px" } },
+          kinds.map(function (k) { return h("span.pill.sm", null, k + " · " + byKind[k]); }))
+      : null;
+    return h("div.card", null, [head, intro, tiles,
+      h("div.card-h", null, [h("h3", null, "Per engagement")]), perEng,
+      histo ? h("div.card-h", { style: { marginTop: "8px" } }, [h("h3", null, "By kind")]) : null, histo,
+      h("div.hint", { style: { marginTop: "8px" } },
+        "Attack-path / asset graphs are per-run — see the World Model on the Findings screen.")]);
   }
 
   // ---- Proof Studio (B5): oracle-confirmed, signed, replayable exploit proofs ----
