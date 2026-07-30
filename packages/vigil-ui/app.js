@@ -1658,6 +1658,25 @@
     }).catch(function () { V.mount(host, offlineEmpty()); });
   }
 
+  function p3HowToVerify(f) {
+    // Per-finding how-to (B1): prefer the authoritative server-derived note if the provider supplied one,
+    // else derive a concise, HONEST note from the finding's own fields — a fact points at the offline
+    // re-verify of its retained proof; a lead says how to CONFIRM it and never implies proof.
+    if (f.how_to_verify) return String(f.how_to_verify);
+    var surface = p3Surface(f);
+    var oracle = p3Oracle(f);
+    var oracleRef = (oracle && oracle !== "—") ? "`" + oracle + "`" : "a deterministic";
+    if (p3IsFact(f)) {
+      return "Re-run this finding's retained proof OFFLINE (the Re-verify button below, or "
+        + "`python3 -m framework.v2 verify` over the run's reverifiable material): the " + oracleRef
+        + " oracle re-fires over the captured bytes and reports OK when it reproduces. Surface: " + surface
+        + ". Then apply the remediation below and re-verify that the oracle goes silent.";
+    }
+    return "This is a LEAD, not a proven fact — no deterministic oracle fired for it. To CONFIRM it, reproduce "
+      + "the test against " + surface + " and capture the oracle signal (a divergent response, an out-of-band "
+      + "callback, an achieved state); only a fired oracle promotes it to a fact.";
+  }
+
   function p3OpenFindingDrawer(run, f) {
     const kv = [];
     const put = function (k, v) { if (v == null || v === "") return; kv.push(h("div.kv", null, [h("div.k", null, k), h("div.v", null, String(v))])); };
@@ -1688,6 +1707,8 @@
       rationale ? h("pre.code", { style: { marginTop: "8px" } }, rationale)
         : h("p.muted", { style: { marginTop: "6px" } }, fact ? "(no rationale text retained)" : "No oracle fired — this is a lead, not a proven fact.")]));
 
+    sections.push(h("div.dsection", null, [h("span.label", null, "HOW TO VERIFY & TEST"),
+      h("p.muted", { style: { marginTop: "6px", lineHeight: "1.55" } }, p3HowToVerify(f))]));
     if (f.remediation) sections.push(h("div.dsection", null, [h("span.label", null, "REMEDIATION"),
       h("p.muted", { style: { marginTop: "6px", lineHeight: "1.55" } }, f.remediation)]));
     if (f.references && f.references.length) sections.push(h("div.dsection", null, [h("span.label", null, "REFERENCES"),
