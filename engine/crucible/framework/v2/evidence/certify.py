@@ -88,7 +88,34 @@ def build_certificate(
         seq=seq,
         report_claims=claims,
         oracle_version=ov,
+        how_to_verify=_cert_how_to_verify(finding),
     )
+
+
+def _cert_how_to_verify(finding: dict) -> str:
+    """A deterministic, human per-finding 'how to verify / patch' note for the certificate — derived from the
+    finding's OWN surface + firing oracle + class remediation via the report.howto primitives (reused, so the
+    cert and the report describe verification identically). Pure; any failure yields "" (dropped from the
+    canonical form → byte-identical). Import is lazy to avoid a report<->evidence module cycle."""
+    try:
+        from ..report.howto import VERIFY_COMMAND, finding_specific_remediation, parse_surface
+    except Exception:  # noqa: BLE001 — howto unavailable ⇒ no note (byte-identical, never fatal)
+        return ""
+    try:
+        surface = str(finding.get("insertion_point") or finding.get("param")
+                      or finding.get("surface") or "").strip()
+        method, location, param = parse_surface(surface or None)
+        oracle = str(finding.get("confirmed_by", "")).strip() or "the deterministic oracle"
+        where = location or surface or "the affected surface"
+        param_note = f" (parameter `{param}`)" if param else ""
+        remediation = finding_specific_remediation(finding)
+        return (
+            f"Verify: re-run this finding's retained proof offline with `{VERIFY_COMMAND}` over the "
+            f"reverifiable material — the `{oracle}` oracle re-fires over the captured bytes and reports OK "
+            f"when it reproduces. Surface: {where}{param_note}. Fix: {remediation}"
+        )
+    except Exception:  # noqa: BLE001 — a malformed finding ⇒ no note (fail-open to byte-identical)
+        return ""
 
 
 def build_path_certificate(attack_path, *, backing_cert_digests: list[str],

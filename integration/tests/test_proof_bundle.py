@@ -65,11 +65,19 @@ def test_exported_bundle_verifies_offline(tmp_path):
     out = tmp_path / "bundle"
     res = export_bundle(run_dir=run_dir, out_dir=out, engagement_slug="acme")
     assert res["ok"] and res["certificates"] == 1
-    for name in ("evidence-bundle.json", "trust-root.json", "reverifiable.json", "README.md"):
+    for name in ("evidence-bundle.json", "trust-root.json", "reverifiable.json", "README.md",
+                 "HOW-TO-VERIFY.md"):
         assert (out / name).is_file(), f"{name} missing from the bundle"
 
     proc = _verify(out)
     assert proc.returncode == 0, f"a sound bundle must verify (rc={proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+
+    # B1: the per-finding how-to companion carries real per-finding guidance (surface + oracle + verify),
+    # and the same note is signed into the certificate (tamper-evident, not just docs).
+    howto = (out / "HOW-TO-VERIFY.md").read_text()
+    assert "How to verify" in howto and "oracle" in howto.lower() and "Verify:" in howto
+    bundle_json = json.loads((out / "evidence-bundle.json").read_text())
+    assert bundle_json["certificates"][0]["certificate"]["how_to_verify"], "the cert must carry how_to_verify"
 
 
 def test_a_flipped_evidence_byte_makes_the_bundle_not_sound(tmp_path):
