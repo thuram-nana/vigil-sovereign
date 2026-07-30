@@ -27,7 +27,9 @@ from framework.v2.agents import blackboard as bb_mod
 from framework.v2.console import actions as actions_mod
 from framework.v2.console import sessions
 from framework.v2.report.dossier import build_session_dossier
-from vigil_integration import cli
+
+# NB: the CLI leg (below) imports vigil_integration LAZILY per-test via pytest.importorskip, so the
+# framework-only CI job (no vigil_integration) still runs the builder tests and skips only the CLI cases.
 
 
 # ---- a stand-in spine (the projection consumes the row shape, never imports the class) --------------
@@ -126,6 +128,7 @@ def test_build_session_dossier_tolerates_a_missing_run(tmp_path: Path) -> None:
 # ---- the CLI: resolve a session id → its runs → a re-verifiable handoff zip -------------------------
 
 def test_cli_dossier_session_resolves_and_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = pytest.importorskip("vigil_integration.cli")   # CLI leg — skip where vigil_integration is absent
     # isolate the live plane (sessions + chats + graph) and the console run store at tmp
     monkeypatch.setenv("VIGIL_LIVE_DIR", str(tmp_path / "live"))
     monkeypatch.setattr(actions_mod, "console_dir", lambda: tmp_path / ".console")
@@ -169,6 +172,7 @@ def test_cli_dossier_session_resolves_and_builds(tmp_path: Path, monkeypatch: py
 
 
 def test_cli_dossier_session_unknown_id_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cli = pytest.importorskip("vigil_integration.cli")   # CLI leg — skip where vigil_integration is absent
     monkeypatch.setenv("VIGIL_LIVE_DIR", str(tmp_path / "live"))
     monkeypatch.setattr(actions_mod, "console_dir", lambda: tmp_path / ".console")
     (tmp_path / ".console" / "runs").mkdir(parents=True, exist_ok=True)
