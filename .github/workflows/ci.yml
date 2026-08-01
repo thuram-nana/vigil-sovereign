@@ -111,7 +111,8 @@ jobs:
               --ignore=integration/tests/test_dossier.py \
               --ignore=integration/tests/test_session_dossier.py \
               --ignore=integration/tests/test_fix_oracle.py \
-              --ignore=integration/tests/test_remediation_cert.py -q
+              --ignore=integration/tests/test_remediation_cert.py \
+              --ignore=integration/tests/test_remediation_conformance.py -q
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
             # vigil_gateway.scope_source → CRUCIBLE host_matches_scope, so it belongs here (it would load
@@ -132,7 +133,8 @@ jobs:
               integration/tests/test_dossier.py \
               integration/tests/test_session_dossier.py \
               integration/tests/test_fix_oracle.py \
-              integration/tests/test_remediation_cert.py -q
+              integration/tests/test_remediation_cert.py \
+              integration/tests/test_remediation_conformance.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"
           fi
