@@ -7,10 +7,10 @@ of possession — into one gated flow and classifies the result into exactly one
 
     REMEDIATED · STILL_VULNERABLE · INCONCLUSIVE · REFUSED
 
-The distinction that carries the weight: **REFUSED** = testing must not begin (authorization failed);
-**INCONCLUSIVE** = testing occurred but the negative claim was not earned (a control failed, freshness was not
-established, identity drifted, too few valid trials, …). Both still produce a **signed** certificate, so an
-INCONCLUSIVE reason cannot be stripped and re-read as success.
+The distinction that carries the weight: **REFUSED** = testing must not begin (authorization failed, or this
+mode cannot certify this oracle family); **INCONCLUSIVE** = testing occurred but the negative claim was not
+earned (a control failed, freshness was not established, identity drifted, too few valid trials, …). Both still
+produce a **signed** certificate, so an INCONCLUSIVE reason cannot be stripped and re-read as success.
 
 The live side is behind :class:`LiveTargetAdapter`, so the entire protocol logic here is exercised offline
 against a fake adapter that can produce each state; the real executor adapter (a live re-drive against a
@@ -26,6 +26,7 @@ protocol-required trials.*
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -35,7 +36,6 @@ from vigil_core import (
     CapabilityError,
     IdentityAttestation,
     WielderProof,
-    authorize_reverification,
     canonical_json,
     digest_payload,
     identity_digest,
@@ -45,6 +45,7 @@ from vigil_core import (
     verify_capability,
     verify_identity_attestation,
     verify_one,
+    verify_wielder_proof,
 )
 from vigil_core.crypto import load_public_key
 
@@ -54,9 +55,6 @@ _CERT_DOMAIN = b"vigil-remediation-prove-cert-v1\x00"
 _CHALLENGE_DOMAIN = b"vigil-remediation-freshness-challenge-v1\x00"
 
 
-# --------------------------------------------------------------------------------------------------------
-# Verdict states + reason codes (the four-state machine).
-# --------------------------------------------------------------------------------------------------------
 class State:
     REMEDIATED = "REMEDIATED"
     STILL_VULNERABLE = "STILL_VULNERABLE"
@@ -80,7 +78,8 @@ class Reason:
     DESTRUCTIVE_UNDER_NONDESTRUCTIVE = "destructive_recipe_under_nondestructive_capability"
     SCOPE_MISMATCH = "scope_mismatch"
     BUDGET_EXHAUSTED = "action_budget_exhausted"
-    UNPROVABLE_ORACLE_FAMILY = "oracle_family_has_no_deterministic_remediation_rule"
+    UNPROVABLE_ORACLE_FAMILY = "oracle_family_not_certifiable_by_silence"
+    STATISTICAL_RULE_UNIMPLEMENTED = "statistical_stopping_rule_not_yet_implemented"
     # INCONCLUSIVE (testing occurred, claim not earned)
     CONTROL_FAILED = "positive_control_failed"
     TARGET_UNAVAILABLE = "target_unavailable"
@@ -93,51 +92,75 @@ class Reason:
     RATE_LIMIT_INTERRUPTED = "rate_limit_interrupted"
     COLLECTOR_FAILED = "evidence_collector_failed"
     DEPLOYMENT_CHANGED = "deployment_changed_during_run"
-    STATISTICAL_RULE_UNIMPLEMENTED = "statistical_stopping_rule_not_yet_implemented"
 
 
-# Freshness hierarchy (recorded on the cert; never assumed — the adapter reports what it can PROVE).
 class Freshness:
     F0_NONCE_GENERATED = 0        # a fresh client challenge exists
     F1_TARGET_ECHOES = 1         # the target returned the challenge (responsive)
-    F2_PATH_TRAVERSED = 2        # the challenge passed through the relevant application path
-    F3_BOUND_TO_EVIDENCE = 3     # the challenge is bound into the exploit/control evidence
+    F2_PATH_TRAVERSED = 2        # the challenge is present in the retained evidence the oracle judged
+    F3_BOUND_TO_EVIDENCE = 3     # the challenge is bound into the exploit/control evidence (structural)
     F4_INDEPENDENT_SIGNED = 4    # an independent collector / the target key signed the nonce-bound observation
 
 
 # --------------------------------------------------------------------------------------------------------
-# Per-oracle-family repeat policy — protocol-defined, NOT chosen ad hoc by the CLI.
+# Per-oracle-CLASS repeat policy — protocol-defined, keyed on the AUTHORIZED bug_class (never a free field),
+# and normalised through the canonical timing/race aliases so no real statistical class slips the gate.
+# `certifiable_by_silence` is fail-CLOSED: only classes we KNOW silence-across-N soundly proves are certifiable;
+# statistical families (timing/race) and any UNKNOWN class cannot reach REMEDIATED.
 # --------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class RepeatPolicy:
-    family: str
-    min_valid_trials: int             # valid treatment (+control) trials required before a verdict
-    requires_significance: bool = False   # timing/race need a statistical rule (not yet implemented → INCONCLUSIVE)
+    bug_class: str
+    min_valid_trials: int
+    certifiable_by_silence: bool          # can oracle SILENCE across N valid trials soundly prove remediation?
+    requires_significance: bool = False   # statistical family (timing/race) — needs an equivalence/power rule
     unique_token_per_trial: bool = False  # OOB families must not reuse a token across trials
     note: str = ""
 
 
-REPEAT_POLICY: dict[str, RepeatPolicy] = {
-    "deterministic_state_change": RepeatPolicy("deterministic_state_change", 1,
-        note="one valid treatment + controls suffices for a deterministic effect"),
-    "error_based_sqli": RepeatPolicy("error_based_sqli", 3, note="multiple treatment/control pairs"),
-    "error_signature": RepeatPolicy("error_signature", 3),
-    "reflected_xss": RepeatPolicy("reflected_xss", 3, note="repeated render-path pairs"),
-    "differential_response": RepeatPolicy("differential_response", 3, note="repeated baseline/treatment pairing"),
-    "boolean_sqli": RepeatPolicy("boolean_sqli", 3),
-    "oob_callback": RepeatPolicy("oob_callback", 3, unique_token_per_trial=True,
-        note="a unique / derivation-bound token per trial"),
-    "ssrf": RepeatPolicy("ssrf", 3, unique_token_per_trial=True),
-    "timing_sqli": RepeatPolicy("timing_sqli", 8, requires_significance=True,
-        note="statistical sample floor + significance threshold — deterministic rule not yet implemented"),
-    "race_condition": RepeatPolicy("race_condition", 8, requires_significance=True),
-    "auth_flaw": RepeatPolicy("auth_flaw", 3, note="multiple independent sessions"),
+# Canonical statistical classes (+ their known aliases) — silence is absence-of-evidence, NOT evidence of
+# absence, at these sample sizes. Certifying remediation needs a significance/equivalence rule (not yet built).
+_STATISTICAL_CLASSES = frozenset({
+    "time_based_sqli", "time_based", "time_based_command_injection", "time_based_ci", "timing", "timing_sqli",
+    "blind_time", "request_race", "race_condition", "toctou", "race",
+})
+# Deterministic classes where silence across N valid, fresh trials IS a sound negative proof.
+_DETERMINISTIC_CLASSES: dict[str, dict] = {
+    "error_based_sqli": {"min": 3},
+    "error_signature": {"min": 3},
+    "boolean_sqli": {"min": 3},
+    "reflected_xss": {"min": 3},
+    "dom_xss": {"min": 3},
+    "differential_response": {"min": 3},
+    "open_redirect": {"min": 2},
+    "path_traversal": {"min": 2},
+    "os_command_injection": {"min": 2},
+    "ssti": {"min": 2},
+    "xxe": {"min": 2, "oob": True},
+    "ssrf": {"min": 3, "oob": True},
+    "oob_callback": {"min": 3, "oob": True},
 }
-_DEFAULT_POLICY = RepeatPolicy("_default", 3, note="conservative default for an unclassified oracle family")
 
 
-def repeat_policy_for(family: str) -> RepeatPolicy:
-    return REPEAT_POLICY.get(str(family or ""), _DEFAULT_POLICY)
+def _normalize_class(bug_class: str) -> str:
+    return str(bug_class or "").strip().lower()
+
+
+def repeat_policy_for(bug_class: str) -> RepeatPolicy:
+    """The repeat policy for the AUTHORIZED ``bug_class`` (normalised). Fail-closed: a statistical family is
+    non-certifiable (needs a significance rule); an UNKNOWN class is non-certifiable too (we cannot reason
+    about its stopping rule, so we never certify remediation for it — extend the table to add one)."""
+    bc = _normalize_class(bug_class)
+    if bc in _STATISTICAL_CLASSES:
+        return RepeatPolicy(bc, min_valid_trials=8, certifiable_by_silence=False, requires_significance=True,
+                            note="statistical family — silence needs an equivalence/power rule (not implemented)")
+    spec = _DETERMINISTIC_CLASSES.get(bc)
+    if spec is not None:
+        return RepeatPolicy(bc, min_valid_trials=int(spec["min"]), certifiable_by_silence=True,
+                            unique_token_per_trial=bool(spec.get("oob", False)),
+                            note="deterministic family — silence across N valid fresh trials is a sound negative")
+    return RepeatPolicy(bc, min_valid_trials=3, certifiable_by_silence=False,
+                        note="UNCLASSIFIED oracle family — fail-closed: cannot certify remediation by silence")
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -146,10 +169,11 @@ def repeat_policy_for(family: str) -> RepeatPolicy:
 def build_freshness_challenge(*, run_id: str, finding_id: str, original_certificate_digest: str,
                               identity_policy_digest: str, capability_chain_digest: str,
                               target_identity_digest: str, sequence: int, nonce: str) -> str:
-    """H(domain ‖ canonical(all causal digests + nonce)). A bare nonce echoed by a generic endpoint proves
-    only responsiveness; binding the finding / original-cert / identity-policy / capability-chain / target
-    identity means an echo of THIS challenge can only have come from a run authorized for THIS finding against
-    THIS target. ``nonce`` MUST be a fresh, unpredictable value the caller supplies."""
+    """H(domain ‖ canonical(all causal digests + nonce)). Binding the finding / original-cert / identity-policy
+    / capability-chain / target identity means that IF the target's retained evidence contains this challenge
+    string (verified deterministically at F2+, see :func:`_challenge_in_context`), that evidence can only have
+    come from a run authorized for THIS finding against THIS target. ``nonce`` MUST be a fresh, unpredictable
+    value the caller supplies; distinct runs → distinct challenge (domain-separated hash, no collision)."""
     core = {
         "protocol_version": PROTOCOL_VERSION, "run_id": str(run_id), "finding_id": str(finding_id),
         "original_certificate_digest": str(original_certificate_digest),
@@ -161,7 +185,6 @@ def build_freshness_challenge(*, run_id: str, finding_id: str, original_certific
 
 
 def capability_chain_digest(cap: Capability, attenuations: "list[Attenuation] | None") -> str:
-    """A stable digest over the base capability + its ordered attenuation chain (binds the whole delegation)."""
     return digest_payload({
         "capability": cap.model_dump(mode="json"),
         "attenuations": [a.model_dump(mode="json") for a in (attenuations or [])],
@@ -172,27 +195,46 @@ def target_identity_digest_of(identity_sample: dict) -> str:
     return digest_payload({str(k): identity_sample[k] for k in sorted(identity_sample or {})})
 
 
+def _challenge_in_context(challenge: str, oracle_context: dict) -> bool:
+    """DETERMINISTIC freshness check: is the challenge string actually present in the retained evidence the
+    oracle judged? The grounding confirms standard HTTP oracle_contexts retain the response BODY verbatim, so
+    a body-echoed challenge is recoverable here — this is what lets the core VERIFY F2 rather than trust the
+    adapter's self-reported level."""
+    try:
+        return str(challenge).encode("utf-8") in canonical_json(oracle_context)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # --------------------------------------------------------------------------------------------------------
-# EffectiveAuthorization — an IMMUTABLE execution envelope derived from a VERIFIED capability. Every send
-# consumes it; there is no path from raw arguments to the executor. Closes the validate→execute TOCTOU.
+# EffectiveAuthorization — an IMMUTABLE execution envelope + an ATOMIC, orchestrator-owned budget.
 # --------------------------------------------------------------------------------------------------------
 class BudgetExhausted(RuntimeError):
-    """The action budget was consumed — raised by AtomicBudget.spend before any traffic is sent."""
+    """The action budget was consumed — raised by AtomicBudget.spend BEFORE any traffic is sent."""
 
 
-@dataclass
 class AtomicBudget:
-    """Consume-BEFORE-send request budget. The core is serial, but ``spend`` decrements first and raises on
-    overrun so a (future) concurrent executor cannot let two workers each observe remaining capacity and
-    collectively exceed the authorized limit — the check and the decrement are one step."""
-    remaining: int
+    """Consume-BEFORE-send request budget, guarded by a lock so the check-and-decrement is a single atomic
+    step — a concurrent executor cannot let two workers each observe remaining capacity and collectively
+    exceed the authorized limit. The ORCHESTRATOR (not the adapter) spends one unit before each adapter call,
+    so the trial loop is bounded by the budget regardless of adapter behaviour."""
+
+    def __init__(self, remaining: int) -> None:
+        self._remaining = int(remaining)
+        self._lock = threading.Lock()
+
+    @property
+    def remaining(self) -> int:
+        with self._lock:
+            return self._remaining
 
     def spend(self, n: int = 1) -> None:
         if n <= 0:
             raise ValueError("budget spend must be positive")
-        if self.remaining - n < 0:
-            raise BudgetExhausted(f"action budget exhausted (need {n}, have {self.remaining})")
-        self.remaining -= n
+        with self._lock:
+            if self._remaining - n < 0:
+                raise BudgetExhausted(f"action budget exhausted (need {n}, have {self._remaining})")
+            self._remaining -= n
 
 
 @dataclass(frozen=True)
@@ -219,13 +261,10 @@ class EffectiveAuthorization:
 
 
 # --------------------------------------------------------------------------------------------------------
-# The live-target adapter interface + its observation types. The real executor implements this; tests inject
-# a fake. The core NEVER re-drives directly — it calls the adapter, which is the single egress point.
+# Live-target adapter interface + observation types.
 # --------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ControlObservation:
-    """Result of the positive-control twin: proof the vuln-class observation CHANNEL is alive (not a recreation
-    of the vuln). ``oracle_context`` is the twin context the SAME oracle must re-fire on."""
     reachable: bool
     channel_alive: bool
     oracle_context: dict
@@ -236,8 +275,6 @@ class ControlObservation:
 
 @dataclass(frozen=True)
 class TrialObservation:
-    """One re-drive of the ORIGINAL exploit probe. ``valid`` marks a usable trial; an invalid trial (probe
-    couldn't be sent, response malformed, token reused, …) is recorded but not counted toward the policy."""
     reachable: bool
     valid: bool
     oracle_context: Optional[dict]
@@ -249,8 +286,6 @@ class TrialObservation:
 
 @runtime_checkable
 class LiveTargetAdapter(Protocol):
-    """The single egress interface. Attributes describe the ORIGINAL exploit (bound into the cert so the
-    re-drive is the original method, never a model-regenerated approximation)."""
     bug_class: str
     oracle_family: str
     oracle_id: str
@@ -260,30 +295,24 @@ class LiveTargetAdapter(Protocol):
     destructive: bool
 
     def identity_sample(self) -> dict: ...
-    def run_positive_control(self, *, challenge: str, auth: EffectiveAuthorization,
-                             budget: AtomicBudget) -> ControlObservation: ...
-    def run_exploit_trial(self, *, challenge: str, trial_index: int, auth: EffectiveAuthorization,
-                          budget: AtomicBudget) -> TrialObservation: ...
+    def run_positive_control(self, *, challenge: str, auth: EffectiveAuthorization) -> ControlObservation: ...
+    def run_exploit_trial(self, *, challenge: str, trial_index: int,
+                          auth: EffectiveAuthorization) -> TrialObservation: ...
 
 
-# --------------------------------------------------------------------------------------------------------
-# Policy for the run (what the deployment REQUIRES — the downgrade floor).
-# --------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ProvePolicy:
     """The required floor. A run that would deliver LESS than this is REFUSED (downgrade resistance) — there
-    are deliberately no --skip-identity / --no-control / --allow-stale knobs in prove mode."""
+    are deliberately no --skip-identity / --no-control / --allow-stale knobs. ``require_proof_of_possession``
+    is a HARD floor: a bearer ("*") capability cannot satisfy it (no key to prove) and is REFUSED under it."""
     require_identity_match: bool = True
     require_positive_control: bool = True
     require_proof_of_possession: bool = True
     require_fresh_revocation: bool = True
     minimum_freshness_level: int = Freshness.F1_TARGET_ECHOES
-    single_instance_scope: bool = True   # this cert speaks for the sampled instance, not a fleet (recorded)
+    single_instance_scope: bool = True
 
 
-# --------------------------------------------------------------------------------------------------------
-# The outcome + the orchestrator.
-# --------------------------------------------------------------------------------------------------------
 @dataclass
 class ProveOutcome:
     state: str
@@ -293,10 +322,6 @@ class ProveOutcome:
     trials_attempted: int = 0
     trials_valid: int = 0
     achieved_freshness: int = Freshness.F0_NONCE_GENERATED
-
-
-def _refused(reason: str, detail: str, cert: dict) -> ProveOutcome:
-    return ProveOutcome(state=State.REFUSED, reason_code=reason, certificate=cert, detail=detail)
 
 
 def prove_remediation(
@@ -319,70 +344,75 @@ def prove_remediation(
     policy: ProvePolicy = ProvePolicy(),
     requested_min_freshness: Optional[int] = None,
 ) -> ProveOutcome:
-    """Run the gated remediation-proof flow and return a four-state, signed outcome. See the module docstring
-    for the invariants. ``now`` / ``run_id`` / ``pop_challenge`` / ``freshness_nonce`` are caller-supplied
-    (fresh, unpredictable) — determinism is preserved and the run is reproducible in tests."""
+    """Run the gated remediation-proof flow and return a four-state, signed outcome. ``now`` / ``run_id`` /
+    ``pop_challenge`` / ``freshness_nonce`` are caller-supplied (fresh, unpredictable) — determinism is
+    preserved and the run is reproducible in tests."""
     if not signers:
         raise ValueError("prove_remediation: governance signers are required (never an unsigned certificate)")
-
-    # ---- DOWNGRADE RESISTANCE (step 0): a request weaker than the policy floor never starts. ----
-    if requested_min_freshness is not None and int(requested_min_freshness) < int(policy.minimum_freshness_level):
-        return _refused(Reason.DOWNGRADE_REQUESTED,
-                        f"requested freshness F{requested_min_freshness} < policy floor "
-                        f"F{policy.minimum_freshness_level}",
-                        _mint_cert(State.REFUSED, Reason.DOWNGRADE_REQUESTED, adapter=adapter, identity=identity,
-                                   capability=capability, attenuations=attenuations, finding_id=finding_id,
-                                   original_certificate_digest=original_certificate_digest, run_id=run_id,
-                                   freshness_challenge="", policy=policy, signers=signers))
-    if policy.require_proof_of_possession and wielder_proof is None and capability.audience != "*":
-        return _refused(Reason.DOWNGRADE_REQUESTED, "policy requires proof of possession but none was supplied",
-                        _mint_cert(State.REFUSED, Reason.DOWNGRADE_REQUESTED, adapter=adapter, identity=identity,
-                                   capability=capability, attenuations=attenuations, finding_id=finding_id,
-                                   original_certificate_digest=original_certificate_digest, run_id=run_id,
-                                   freshness_challenge="", policy=policy, signers=signers))
-
     chain_digest = capability_chain_digest(capability, attenuations)
+    # The effective required freshness is the STRONGER of the policy floor and any caller request (a request
+    # ABOVE the floor is enforced, not ignored; a request BELOW is a downgrade → refused).
+    eff_min_freshness = max(int(policy.minimum_freshness_level),
+                            int(requested_min_freshness) if requested_min_freshness is not None else 0)
+
+    def mk(state: str, reason: str, **kw) -> dict:
+        return _mint_cert(state, reason, adapter=adapter, identity=identity, capability=capability,
+                          attenuations=attenuations, finding_id=finding_id,
+                          original_certificate_digest=original_certificate_digest, run_id=run_id,
+                          policy=policy, signers=signers, capability_chain_digest=chain_digest, **kw)
 
     def refuse(reason: str, detail: str) -> ProveOutcome:
-        return _refused(reason, detail,
-                        _mint_cert(State.REFUSED, reason, adapter=adapter, identity=identity,
-                                   capability=capability, attenuations=attenuations, finding_id=finding_id,
-                                   original_certificate_digest=original_certificate_digest, run_id=run_id,
-                                   freshness_challenge="", policy=policy, signers=signers,
-                                   capability_chain_digest=chain_digest))
+        return ProveOutcome(State.REFUSED, reason, mk(State.REFUSED, reason, freshness_challenge=""), detail)
 
-    # ---- REFUSED gate (steps 1-9 pre-execution): authorization must fully hold before ANY traffic. ----
+    # ---- DOWNGRADE RESISTANCE: a request weaker than the floor, or one that cannot meet the PoP floor. ----
+    if requested_min_freshness is not None and int(requested_min_freshness) < int(policy.minimum_freshness_level):
+        return refuse(Reason.DOWNGRADE_REQUESTED,
+                      f"requested F{requested_min_freshness} < policy floor F{policy.minimum_freshness_level}")
+    if policy.require_proof_of_possession and capability.audience == "*":
+        return refuse(Reason.DOWNGRADE_REQUESTED,
+                      "policy requires proof of possession but the capability is bearer ('*') — no key to prove")
+
+    # ---- REFUSED gate (pre-execution, NO target traffic): full authorization must hold first. ----
     if adapter.destructive:
         return refuse(Reason.DESTRUCTIVE_UNDER_NONDESTRUCTIVE,
                       "the original probe recipe is destructive; the capability is non-destructive")
-
-    # (a) owner-attested identity is valid for this engagement.
     try:
         verify_identity_attestation(identity, trusted_owner_pubkey=trusted_owner_pubkey, now=now,
                                     engagement=engagement)
     except CapabilityError as e:
         return refuse(Reason.INVALID_CAPABILITY, f"identity attestation invalid: {e}")
-
-    # (b) the capability verifies (structure/owner/window/revocation) — map the sub-reason by the failure.
     try:
         eff = verify_capability(capability, trusted_owner_pubkey=trusted_owner_pubkey, now=now,
                                 engagement=engagement, attenuations=attenuations, revoked_ids=revoked_ids)
     except CapabilityError as e:
         msg = str(e)
         reason = (Reason.EXPIRED_CAPABILITY if "not valid at now" in msg or "expired" in msg
-                  else Reason.REVOKED_CAPABILITY if "revoked" in msg
-                  else Reason.INVALID_CAPABILITY)
+                  else Reason.REVOKED_CAPABILITY if "revoked" in msg else Reason.INVALID_CAPABILITY)
         return refuse(reason, f"capability rejected: {e}")
-
-    # (c) the bug class is in the (attenuated) allowlist.
     if adapter.bug_class not in set(eff.class_allowlist):
         return refuse(Reason.UNAUTHORIZED_BUG_CLASS,
                       f"bug_class {adapter.bug_class!r} not in {sorted(eff.class_allowlist)}")
 
-    # (d) acquire the FIRST live identity sample and match it against the signed policy (before execution).
+    # ---- Repeat policy keyed on the AUTHORIZED bug_class; a non-certifiable family never reaches REMEDIATED,
+    #      so we refuse BEFORE any traffic rather than run a test we could not conclude from. ----
+    rp = repeat_policy_for(adapter.bug_class)
+    if not rp.certifiable_by_silence:
+        reason = Reason.STATISTICAL_RULE_UNIMPLEMENTED if rp.requires_significance else Reason.UNPROVABLE_ORACLE_FAMILY
+        return refuse(reason, f"prove mode cannot certify remediation for oracle family {adapter.bug_class!r} "
+                              f"(silence is not a sound negative proof without a significance/known rule)")
+
+    # ---- Proof-of-possession BEFORE the first target touch (a PoP failure costs no live probe). ----
+    if eff.audience != "*":
+        try:
+            verify_wielder_proof(wielder_proof, expected_audience=eff.audience, challenge=pop_challenge,
+                                 capability=capability)
+        except CapabilityError as e:
+            return refuse(Reason.POP_FAILURE, f"wielder proof of possession failed: {e}")
+
+    # ---- (first target touch) acquire + policy-match the live identity. ----
     try:
         sample1 = adapter.identity_sample()
-    except Exception as e:  # noqa: BLE001 — a target we cannot even identify is unavailable, not authorized
+    except Exception as e:  # noqa: BLE001
         return refuse(Reason.TARGET_UNAVAILABLE, f"could not sample target identity: {e}")
     if policy.require_identity_match and not identity_matches(identity.policy, sample1):
         return refuse(Reason.IDENTITY_POLICY_MISMATCH,
@@ -390,21 +420,8 @@ def prove_remediation(
     tid_digest = target_identity_digest_of(sample1)
     identity_samples = [tid_digest]
 
-    # (e) the FULL authorization gate incl. proof-of-possession (the only thing (a)-(d) did not already cover).
-    try:
-        authorize_reverification(capability, identity, trusted_owner_pubkey=trusted_owner_pubkey, now=now,
-                                 engagement=engagement, bug_class=adapter.bug_class, identity_sample=sample1,
-                                 challenge=pop_challenge, wielder_proof=wielder_proof,
-                                 attenuations=attenuations, revoked_ids=revoked_ids)
-    except CapabilityError as e:
-        # (a)-(d) already passed, so a failure here is the wielder proof of possession.
-        return refuse(Reason.POP_FAILURE, f"wielder proof of possession failed: {e}")
-
-    # ---- Repeat policy: some oracle families have no deterministic remediation rule yet → REFUSED honestly. ----
-    rp = repeat_policy_for(adapter.oracle_family)
-
-    # ---- Build the execution envelope + budget. Budget must cover control + the required trials. ----
-    required_sends = 1 + rp.min_valid_trials      # 1 control + N trials (minimum; invalid trials cost budget too)
+    # ---- Execution envelope + orchestrator-owned budget (must cover 1 control + the required trials). ----
+    required_sends = 1 + rp.min_valid_trials
     auth = EffectiveAuthorization(
         target_identity_digest=tid_digest, allowed_bug_classes=tuple(sorted(eff.class_allowlist)),
         maximum_requests=int(eff.rate_limit), not_before=int(eff.not_before), expires_at=int(eff.not_after),
@@ -413,58 +430,51 @@ def prove_remediation(
         return refuse(Reason.BUDGET_EXHAUSTED,
                       f"rate_limit {auth.maximum_requests} < required {required_sends} "
                       f"(1 control + {rp.min_valid_trials} trials)")
-    budget = AtomicBudget(remaining=auth.maximum_requests)
+    budget = AtomicBudget(auth.maximum_requests)
 
-    # From here testing has STARTED → failures are INCONCLUSIVE (never silently REMEDIATED), except a firing
-    # oracle (STILL_VULNERABLE) or a clean silence across the required trials (REMEDIATED).
-    def inconclusive(reason: str, detail: str, *, freshness: int = Freshness.F0_NONCE_GENERATED,
-                     attempted: int = 0, valid: int = 0) -> ProveOutcome:
-        cert = _mint_cert(State.INCONCLUSIVE, reason, adapter=adapter, identity=identity, capability=capability,
-                          attenuations=attenuations, finding_id=finding_id,
-                          original_certificate_digest=original_certificate_digest, run_id=run_id,
-                          freshness_challenge=challenge, policy=policy, signers=signers,
-                          capability_chain_digest=chain_digest, effective_authority_digest=auth.digest(),
-                          identity_samples=identity_samples, trial_policy=_policy_dict(rp),
-                          trial_results={"attempted": attempted, "valid": valid}, achieved_freshness=freshness)
-        return ProveOutcome(state=State.INCONCLUSIVE, reason_code=reason, certificate=cert, detail=detail,
-                            trials_attempted=attempted, trials_valid=valid, achieved_freshness=freshness)
-
-    # ---- (step 10) mint the causal-chain-bound freshness challenge. ----
     challenge = build_freshness_challenge(
         run_id=run_id, finding_id=finding_id, original_certificate_digest=original_certificate_digest,
         identity_policy_digest=identity_digest(identity), capability_chain_digest=chain_digest,
         target_identity_digest=tid_digest, sequence=0, nonce=freshness_nonce)
 
-    if rp.requires_significance:
-        # timing/race remediation needs a statistical stopping rule we do not yet implement — refuse to fake it.
-        return inconclusive(Reason.STATISTICAL_RULE_UNIMPLEMENTED,
-                            f"oracle family {adapter.oracle_family!r} needs a significance rule (not implemented)")
+    def inconclusive(reason: str, detail: str, *, freshness: int = Freshness.F0_NONCE_GENERATED,
+                     attempted: int = 0, valid: int = 0) -> ProveOutcome:
+        cert = mk(State.INCONCLUSIVE, reason, freshness_challenge=challenge, effective_authority_digest=auth.digest(),
+                  identity_samples=identity_samples, trial_policy=_policy_dict(rp, eff_min_freshness),
+                  trial_results={"attempted": attempted, "valid": valid}, achieved_freshness=freshness)
+        return ProveOutcome(State.INCONCLUSIVE, reason, cert, detail, attempted, valid, freshness)
 
-    # ---- (step 11) positive-control twin: prove the observation channel is alive. ----
+    # ---- (step 11) positive-control twin: prove the observation channel is alive. ORCHESTRATOR spends first. ----
     try:
-        control = adapter.run_positive_control(challenge=challenge, auth=auth, budget=budget)
+        budget.spend(1)
+        control = adapter.run_positive_control(challenge=challenge, auth=auth)
     except BudgetExhausted as e:
         return inconclusive(Reason.RATE_LIMIT_INTERRUPTED, f"budget interrupted the control: {e}")
     except Exception as e:  # noqa: BLE001
         return inconclusive(Reason.COLLECTOR_FAILED, f"control execution failed: {e}")
     if not control.reachable:
         return inconclusive(Reason.TARGET_UNAVAILABLE, "target unreachable for the positive control")
-    if policy.require_positive_control and not (control.channel_alive and _fires(control.oracle_context,
-                                                                                 adapter.bug_class, finding_id)):
+    if policy.require_positive_control and not (control.channel_alive
+                                                and _fires(control.oracle_context, adapter.bug_class, finding_id)):
         return inconclusive(Reason.CONTROL_FAILED,
                             "the positive control did NOT fire — silence would be an artefact, not a fix")
 
-    # ---- (step 12) identity continuity #2 (before exploit trials). ----
+    # ---- identity continuity #2 (before exploit trials). ----
     if not _same_identity(adapter, identity, policy, tid_digest, identity_samples):
         return inconclusive(Reason.IDENTITY_CHANGED, "identity changed before the exploit trials")
 
-    # ---- (steps 13-16) re-drive the ORIGINAL exploit under the repeat policy; re-fire the oracle. ----
+    # ---- re-drive the ORIGINAL exploit under the repeat policy; re-fire the ORIGINAL oracle. ----
     attempted = valid = 0
     achieved_freshness = Freshness.F0_NONCE_GENERATED
     seen_contexts: list[dict] = []
+    max_iterations = auth.maximum_requests   # belt-and-suspenders bound on top of the budget
     while valid < rp.min_valid_trials:
+        if attempted >= max_iterations:
+            return inconclusive(Reason.RATE_LIMIT_INTERRUPTED, "trial iteration bound reached",
+                                attempted=attempted, valid=valid, freshness=achieved_freshness)
         try:
-            trial = adapter.run_exploit_trial(challenge=challenge, trial_index=attempted, auth=auth, budget=budget)
+            budget.spend(1)   # consume-before-send; the orchestrator owns the bound, not the adapter
+            trial = adapter.run_exploit_trial(challenge=challenge, trial_index=attempted, auth=auth)
         except BudgetExhausted as e:
             return inconclusive(Reason.RATE_LIMIT_INTERRUPTED, f"budget interrupted the trials: {e}",
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
@@ -476,47 +486,46 @@ def prove_remediation(
             return inconclusive(Reason.TARGET_UNAVAILABLE, "target became unreachable mid-run",
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
         if not trial.valid or trial.oracle_context is None:
-            # an invalid trial is recorded but not counted; guard against an unbounded invalid streak by budget.
-            continue
-        # FRESHNESS: the trial must establish at least the policy floor (echo must be present & bound).
+            continue   # recorded but not counted; the budget bounds an invalid streak
+        # FRESHNESS — the echo must be present AND (at F2+) the challenge must ACTUALLY appear in the retained
+        # evidence the oracle judged. The adapter's claimed level is CAPPED by what the core can verify.
         if not trial.nonce_echoed:
             return inconclusive(Reason.FRESHNESS_ECHO_MISSING,
                                 "the target did not echo the run challenge — cannot prove fresh (not replayed)",
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
-        if int(trial.freshness_level) < int(policy.minimum_freshness_level):
+        verified_level = int(trial.freshness_level)
+        if verified_level >= Freshness.F2_PATH_TRAVERSED and not _challenge_in_context(challenge,
+                                                                                       trial.oracle_context):
+            verified_level = Freshness.F1_TARGET_ECHOES   # adapter claimed F2+ but the challenge is not in the bytes
+        if verified_level < eff_min_freshness:
             return inconclusive(Reason.INSUFFICIENT_FRESHNESS,
-                                f"achieved F{trial.freshness_level} < policy floor F{policy.minimum_freshness_level}",
-                                attempted=attempted, valid=valid, freshness=int(trial.freshness_level))
-        achieved_freshness = max(achieved_freshness, int(trial.freshness_level))
-        # ORACLE AUTHORITY: re-fire the ORIGINAL oracle over this fresh evidence.
+                                f"verified F{verified_level} < required floor F{eff_min_freshness}",
+                                attempted=attempted, valid=valid, freshness=verified_level)
+        achieved_freshness = max(achieved_freshness, verified_level)
+        # ORACLE AUTHORITY — re-fire the ORIGINAL oracle over this fresh evidence.
         if _fires(trial.oracle_context, adapter.bug_class, finding_id):
-            cert = _mint_cert(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, adapter=adapter, identity=identity,
-                              capability=capability, attenuations=attenuations, finding_id=finding_id,
-                              original_certificate_digest=original_certificate_digest, run_id=run_id,
-                              freshness_challenge=challenge, policy=policy, signers=signers,
-                              capability_chain_digest=chain_digest, effective_authority_digest=auth.digest(),
-                              identity_samples=identity_samples, trial_policy=_policy_dict(rp),
-                              trial_results={"attempted": attempted, "valid": valid + 1},
-                              achieved_freshness=achieved_freshness, fresh_oracle_context=trial.oracle_context)
-            return ProveOutcome(state=State.STILL_VULNERABLE, reason_code=Reason.ORACLE_FIRED, certificate=cert,
-                                detail="the original exploit oracle fired over fresh evidence",
-                                trials_attempted=attempted, trials_valid=valid + 1,
-                                achieved_freshness=achieved_freshness)
+            cert = mk(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, freshness_challenge=challenge,
+                      effective_authority_digest=auth.digest(), identity_samples=identity_samples,
+                      trial_policy=_policy_dict(rp, eff_min_freshness),
+                      trial_results={"attempted": attempted, "valid": valid + 1},
+                      achieved_freshness=achieved_freshness, fresh_oracle_context=trial.oracle_context)
+            return ProveOutcome(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, cert,
+                                "the original exploit oracle fired over fresh evidence", attempted, valid + 1,
+                                achieved_freshness)
         valid += 1
         seen_contexts.append(trial.oracle_context)
 
-    # ---- (step 12 again) identity continuity #3 (after exploit trials). ----
+    # ---- identity continuity #3 (after trials) and #4 (before mint). ----
     if not _same_identity(adapter, identity, policy, tid_digest, identity_samples):
         return inconclusive(Reason.IDENTITY_CHANGED, "identity changed after the exploit trials",
                             attempted=attempted, valid=valid, freshness=achieved_freshness)
-
-    # ---- (steps 17-18) all required trials were valid, fresh, and SILENT → REMEDIATED. Mint the embedded
-    #      controlled RemediationCertificate (re-fires the oracle: control fires, patched silent, live). ----
-    if not _same_identity(adapter, identity, policy, tid_digest, identity_samples):   # #4 before mint
+    if not _same_identity(adapter, identity, policy, tid_digest, identity_samples):
         return inconclusive(Reason.IDENTITY_CHANGED, "identity changed before minting",
                             attempted=attempted, valid=valid, freshness=achieved_freshness)
 
-    from .remediation_cert import mint_remediation_certificate  # lazy — needs framework (FATAL-2)
+    # ---- REMEDIATED: mint the embedded controlled RemediationCertificate (re-fires: control fires, patched
+    #      silent, live) — the sole promoter of the negative claim; the orchestrator only sequenced. ----
+    from .remediation_cert import mint_remediation_certificate   # lazy — needs framework (FATAL-2)
     try:
         embedded = mint_remediation_certificate(
             finding_ref=finding_id, bug_class=adapter.bug_class, patched_oracle_context=seen_contexts[-1],
@@ -524,31 +533,25 @@ def prove_remediation(
             surface="", original_finding_cert_digest=original_certificate_digest,
             freshness_nonce=challenge, repeats=valid)
     except ValueError as e:
-        # the controlled mint enforces the same controls; a refusal here means the negative claim was not earned.
         return inconclusive(Reason.INSUFFICIENT_REPETITIONS, f"controlled remediation mint refused: {e}",
                             attempted=attempted, valid=valid, freshness=achieved_freshness)
 
-    cert = _mint_cert(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, adapter=adapter, identity=identity,
-                      capability=capability, attenuations=attenuations, finding_id=finding_id,
-                      original_certificate_digest=original_certificate_digest, run_id=run_id,
-                      freshness_challenge=challenge, policy=policy, signers=signers,
-                      capability_chain_digest=chain_digest, effective_authority_digest=auth.digest(),
-                      identity_samples=identity_samples, trial_policy=_policy_dict(rp),
-                      trial_results={"attempted": attempted, "valid": valid}, achieved_freshness=achieved_freshness,
-                      fresh_oracle_context=seen_contexts[-1], embedded_remediation_cert=embedded,
-                      control_context=control.oracle_context)
-    return ProveOutcome(state=State.REMEDIATED, reason_code=Reason.ORACLE_SILENT_ACROSS_TRIALS, certificate=cert,
-                        detail="the original exploit oracle did not reproduce across the protocol-required trials",
-                        trials_attempted=attempted, trials_valid=valid, achieved_freshness=achieved_freshness)
+    cert = mk(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, freshness_challenge=challenge,
+              effective_authority_digest=auth.digest(), identity_samples=identity_samples,
+              trial_policy=_policy_dict(rp, eff_min_freshness),
+              trial_results={"attempted": attempted, "valid": valid}, achieved_freshness=achieved_freshness,
+              fresh_oracle_context=seen_contexts[-1], embedded_remediation_cert=embedded,
+              control_context=control.oracle_context)
+    return ProveOutcome(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, cert,
+                        "the original exploit oracle did not reproduce across the protocol-required trials",
+                        attempted, valid, achieved_freshness)
 
 
 # --------------------------------------------------------------------------------------------------------
 # Helpers.
 # --------------------------------------------------------------------------------------------------------
 def _fires(context: dict, bug_class: str, ref: str) -> bool:
-    """Re-fire the ORIGINAL oracle over ``context``; True iff it CONFIRMS. Any reverify error → not-firing
-    (fail-closed). Lazy framework import (FATAL-2)."""
-    from framework.v2.verify.reverify import reverify_context
+    from framework.v2.verify.reverify import reverify_context   # lazy — FATAL-2
     try:
         return bool(reverify_context(context, bug_class=bug_class, ref=ref).reproduced)
     except Exception:  # noqa: BLE001
@@ -557,8 +560,6 @@ def _fires(context: dict, bug_class: str, ref: str) -> bool:
 
 def _same_identity(adapter: LiveTargetAdapter, identity: IdentityAttestation, policy: ProvePolicy,
                    expected_digest: str, samples: list[str]) -> bool:
-    """Sample identity again; record it; True iff it still matches the policy AND equals the first sample's
-    digest (no drift between patched/unpatched replicas, rotation, redeploy)."""
     if not policy.require_identity_match:
         return True
     try:
@@ -570,10 +571,13 @@ def _same_identity(adapter: LiveTargetAdapter, identity: IdentityAttestation, po
     return identity_matches(identity.policy, s) and d == expected_digest
 
 
-def _policy_dict(rp: RepeatPolicy) -> dict:
-    return {"family": rp.family, "min_valid_trials": rp.min_valid_trials,
+def _policy_dict(rp: RepeatPolicy, eff_min_freshness: int) -> dict:
+    return {"bug_class": rp.bug_class, "min_valid_trials": rp.min_valid_trials,
+            "certifiable_by_silence": rp.certifiable_by_silence,
             "requires_significance": rp.requires_significance,
-            "unique_token_per_trial": rp.unique_token_per_trial, "stopping_rule": "all_required_trials_silent"}
+            "unique_token_per_trial": rp.unique_token_per_trial,
+            "required_freshness_level": int(eff_min_freshness),
+            "stopping_rule": "all_required_trials_valid_fresh_and_silent"}
 
 
 def _cert_signing_bytes(cert_without_sig: dict) -> bytes:
@@ -588,8 +592,6 @@ def _mint_cert(state: str, reason: str, *, adapter: LiveTargetAdapter, identity:
                trial_policy: "dict | None" = None, trial_results: "dict | None" = None,
                achieved_freshness: int = Freshness.F0_NONCE_GENERATED, fresh_oracle_context: "dict | None" = None,
                embedded_remediation_cert: "dict | None" = None, control_context: "dict | None" = None) -> dict:
-    """Assemble + SIGN the full causal-chain ProveCertificate for ANY state (so an INCONCLUSIVE/REFUSED reason
-    is tamper-evident — no unsigned sidecar can change its interpretation)."""
     cert: dict[str, Any] = {
         "schema": _CERT_SCHEMA,
         "protocol_version": PROTOCOL_VERSION,
@@ -644,13 +646,11 @@ def _mint_cert(state: str, reason: str, *, adapter: LiveTargetAdapter, identity:
 
 
 def verify_prove_certificate(cert: dict, *, signer_pubkeys: "dict[str, str]") -> tuple[bool, str]:
-    """Offline verification of a ProveCertificate: (1) the whole-cert Ed25519 signature verifies against a
-    pinned governance key (so the state, reason, and every bound digest are tamper-evident); (2) for a
-    REMEDIATED cert, the embedded controlled RemediationCertificate independently RE-EXECUTES to ``ok`` (the
-    oracle is silent on the patched context, the positive control fires, the target answered). Fail-closed.
-
-    NOTE: authenticity + internal consistency are checkable with stdlib + Ed25519; re-executing the oracle
-    (the REMEDIATED case) needs the framework (lazy import), exactly like the base RemediationCertificate."""
+    """Offline verification: (1) the whole-cert Ed25519 signature verifies against a pinned governance key (so
+    state, reason, and every bound digest are tamper-evident); (2) the verdict block agrees with the state;
+    (3) for REMEDIATED, the embedded controlled RemediationCertificate independently RE-EXECUTES to ok AND is
+    cross-bound to this outer cert (same finding, bug_class, freshness challenge, and evidence digest — so a
+    valid embedded cert from another run cannot be spliced in). Fail-closed."""
     if not isinstance(cert, dict) or cert.get("schema") != _CERT_SCHEMA:
         return False, "not a vigil-remediation-prove-cert-v1"
     state = str(cert.get("state") or "")
@@ -671,7 +671,6 @@ def verify_prove_certificate(cert: dict, *, signer_pubkeys: "dict[str, str]") ->
     except Exception:  # noqa: BLE001
         return False, "malformed signature/key material — fail closed"
 
-    # the verdict block must agree with the top-level state (no split-brain relabelling).
     verdict = cert.get("verdict") or {}
     if str(verdict.get("remediation_state")) != state:
         return False, "verdict.remediation_state disagrees with the certificate state"
@@ -682,9 +681,21 @@ def verify_prove_certificate(cert: dict, *, signer_pubkeys: "dict[str, str]") ->
         embedded = ((cert.get("evidence") or {}).get("embedded_remediation_cert"))
         if not isinstance(embedded, dict):
             return False, "REMEDIATED cert has no embedded RemediationCertificate to re-execute"
+        of = cert.get("original_finding") or {}
+        ex = cert.get("execution") or {}
+        ev = cert.get("evidence") or {}
+        # cross-binding: the embedded negative proof must be about THIS finding/class/run, not spliced in.
+        if str(embedded.get("finding_ref")) != str(of.get("finding_id")):
+            return False, "embedded remediation cert finding_ref != outer finding_id"
+        if str(embedded.get("bug_class")) != str(of.get("bug_class")):
+            return False, "embedded remediation cert bug_class != outer bug_class"
+        if str((embedded.get("controls") or {}).get("freshness_nonce")) != str(ex.get("freshness_challenge")):
+            return False, "embedded remediation cert freshness_nonce != outer freshness_challenge"
+        if str(embedded.get("patched_context_sha256")) != str(ev.get("fresh_oracle_context_digest")):
+            return False, "embedded patched-context digest != outer fresh_oracle_context_digest"
         from .remediation_cert import verify_remediation_certificate   # lazy — FATAL-2
         v = verify_remediation_certificate(embedded, signer_pubkeys=signer_pubkeys)
         if not v.ok:
             return False, f"embedded remediation cert does not re-execute: {v.reason}"
-        return True, "REMEDIATED: signed + embedded remediation re-executes (oracle silent, control fires, live)"
+        return True, "REMEDIATED: signed + cross-bound + embedded remediation re-executes (silent, control fires, live)"
     return True, f"{state}: signed and internally consistent"

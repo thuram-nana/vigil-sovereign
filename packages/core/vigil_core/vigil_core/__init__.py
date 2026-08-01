@@ -19,7 +19,7 @@ from .canonical import canonical_json, digest_payload, evidence_signing_bytes, s
 from .capability import (
     Attenuation, Capability, CapabilityError, EffectiveCapability, IdentityAttestation, WielderProof,
     attenuate, authorize_reverification, identity_digest, identity_matches, prove_wielder, sign_capability,
-    sign_identity_attestation, verify_capability, verify_identity_attestation,
+    sign_identity_attestation, verify_capability, verify_identity_attestation, verify_wielder_proof,
 )
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from .crypto import IntegrityError, KeyPair, generate_keypair, sign, verify_one, verify_threshold
@@ -37,5 +37,5 @@ __all__ = [
     "IdentityAttestation", "Capability", "Attenuation", "EffectiveCapability", "WielderProof",
     "CapabilityError", "sign_identity_attestation", "verify_identity_attestation", "identity_digest",
     "identity_matches", "sign_capability", "attenuate", "verify_capability", "authorize_reverification",
-    "prove_wielder",
+    "prove_wielder", "verify_wielder_proof",
 ]

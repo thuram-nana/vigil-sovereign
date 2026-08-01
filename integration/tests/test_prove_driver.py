@@ -3,7 +3,10 @@
 Exercises the FOUR-STATE machine and the brief's adversarial matrix without a live target: the live side is
 behind LiveTargetAdapter, so a configurable fake produces each state and each failure. The oracle re-fire is
 REAL (framework reverify) — a REMEDIATED verdict requires genuine oracle silence over the fake's benign
-contexts and a firing positive control, exactly like the base RemediationCertificate.
+contexts and a firing positive control, exactly like the base RemediationCertificate. Includes the red-pen
+regressions: policy keyed on the AUTHORIZED bug_class (timing/race + unknown families non-certifiable),
+bearer-voids-PoP downgrade closed, PoP checked before the first target touch, orchestrator-owned budget bounds
+the loop, and F2 freshness is VERIFIED from the retained evidence (not trusted from the adapter).
 
 Needs framework (reverify + the controlled mint) → PYTHONPATH=integration:engine/crucible:gateway.
 """
@@ -17,7 +20,7 @@ from vigil_core import (
 from vigil_integration.remediation import prove_driver as pd
 from vigil_integration.remediation.prove_driver import (
     ControlObservation, Freshness, ProvePolicy, Reason, State, TrialObservation,
-    prove_remediation, verify_prove_certificate,
+    prove_remediation, repeat_policy_for, verify_prove_certificate,
 )
 
 OWNER = generate_keypair()
@@ -46,16 +49,18 @@ def _context(body: bytes) -> dict:
 
 
 class FakeAdapter:
-    """A configurable LiveTargetAdapter. Trials return SILENT (benign) contexts by default → REMEDIATED path;
-    knobs flip individual behaviours to drive each other state."""
+    """A configurable LiveTargetAdapter. Trials return SILENT (benign) contexts by default → REMEDIATED; knobs
+    flip individual behaviours to drive each other state. The orchestrator owns the budget, so the adapter does
+    NOT spend. When echoing at F2+, the fake embeds the challenge into the response body so the core can VERIFY
+    freshness from the retained evidence."""
 
-    def __init__(self, *, bug_class=BUG, oracle_family=BUG, destructive=False, identity=None,
-                 trial_fires=False, trial_valid=True, trial_reachable=True, nonce_echoed=True,
-                 trial_freshness=Freshness.F2_PATH_TRAVERSED, control_fires=True, control_reachable=True,
-                 drift_identity_after=None, raise_on_trial=False, spend_per_call=1):
+    def __init__(self, *, bug_class=BUG, destructive=False, identity=None, trial_fires=False, trial_valid=True,
+                 trial_reachable=True, nonce_echoed=True, trial_freshness=Freshness.F2_PATH_TRAVERSED,
+                 embed_challenge=True, control_fires=True, control_reachable=True, drift_identity_after=None,
+                 raise_on_trial=False):
         self.bug_class = bug_class
-        self.oracle_family = oracle_family
-        self.oracle_id = "oracle:error_based_sqli"
+        self.oracle_family = bug_class
+        self.oracle_id = "oracle:" + bug_class
         self.oracle_version = "1.0"
         self.original_probe_recipe_digest = "sha256:probe"
         self.execution_profile_digest = "sha256:profile"
@@ -66,54 +71,50 @@ class FakeAdapter:
         self._trial_reachable = trial_reachable
         self._nonce_echoed = nonce_echoed
         self._trial_freshness = trial_freshness
+        self._embed = embed_challenge
         self._control_fires = control_fires
         self._control_reachable = control_reachable
         self._drift_after = drift_identity_after
         self._raise_on_trial = raise_on_trial
-        self._spend = spend_per_call
-        self._id_calls = 0
+        self.id_calls = 0
 
     def identity_sample(self):
-        self._id_calls += 1
-        if self._drift_after is not None and self._id_calls > self._drift_after:
+        self.id_calls += 1
+        if self._drift_after is not None and self.id_calls > self._drift_after:
             return {"host": "different.host"}
         return dict(self._identity)
 
-    def run_positive_control(self, *, challenge, auth, budget):
-        budget.spend(self._spend)
-        ctx = _context(_SQL_ERROR) if self._control_fires else _context(_BENIGN)
+    def run_positive_control(self, *, challenge, auth):
+        ctx = _context(_SQL_ERROR if self._control_fires else _BENIGN)
         return ControlObservation(reachable=self._control_reachable, channel_alive=self._control_fires,
                                   oracle_context=ctx, freshness_level=self._trial_freshness,
                                   definition_digest="sha256:control")
 
-    def run_exploit_trial(self, *, challenge, trial_index, auth, budget):
-        budget.spend(self._spend)
+    def run_exploit_trial(self, *, challenge, trial_index, auth):
         if self._raise_on_trial:
             raise RuntimeError("collector boom")
-        ctx = _context(_SQL_ERROR) if self._trial_fires else _context(_BENIGN)
-        return TrialObservation(reachable=self._trial_reachable, valid=self._trial_valid, oracle_context=ctx,
-                                freshness_level=self._trial_freshness, nonce_echoed=self._nonce_echoed)
+        base = _SQL_ERROR if self._trial_fires else _BENIGN
+        if self._embed and self._nonce_echoed and self._trial_freshness >= Freshness.F2_PATH_TRAVERSED:
+            base = base + b" echo=" + challenge.encode()   # the challenge is now IN the retained body
+        return TrialObservation(reachable=self._trial_reachable, valid=self._trial_valid,
+                                oracle_context=_context(base), freshness_level=self._trial_freshness,
+                                nonce_echoed=self._nonce_echoed)
 
 
 def _identity_att(policy=None, not_after=9_000):
     return sign_identity_attestation(OWNER, engagement=ENG, policy=(policy or POLICY), not_after=not_after)
 
 
-def _cap(*, id_digest=None, classes=None, not_before=0, not_after=9_000, rate_limit=10, revocation_id="rev-1",
-         audience=None):
+def _run(adapter, *, policy=ProvePolicy(), revoked_ids=frozenset(), requested_min_freshness=None, now=NOW,
+         audience="wielder", classes=None, not_after=9_000, rate_limit=10, revocation_id="rev-1",
+         wielder_proof="auto", pop_challenge="pop-1"):
     ident = _identity_att()
-    return sign_capability(OWNER, engagement=ENG, identity_digest=(id_digest or identity_digest(ident)),
-                           class_allowlist=(classes or [BUG]), not_before=not_before, not_after=not_after,
-                           rate_limit=rate_limit, revocation_id=revocation_id,
-                           audience=(audience or WIELDER.public_key_b64))
-
-
-def _run(adapter, *, identity=None, capability=None, wielder_proof="auto", pop_challenge="pop-1",
-         policy=ProvePolicy(), revoked_ids=frozenset(), requested_min_freshness=None, now=NOW):
-    ident = identity or _identity_att()
-    cap = capability or _cap(id_digest=identity_digest(ident))
+    aud = {"wielder": WIELDER.public_key_b64, "bearer": "*", "attacker": ATTACKER.public_key_b64}.get(audience)
+    cap = sign_capability(OWNER, engagement=ENG, identity_digest=identity_digest(ident),
+                          class_allowlist=(classes or [adapter.bug_class]), not_before=0, not_after=not_after,
+                          rate_limit=rate_limit, revocation_id=revocation_id, audience=aud)
     if wielder_proof == "auto":
-        wielder_proof = prove_wielder(WIELDER, challenge=pop_challenge, capability=cap)
+        wielder_proof = None if aud == "*" else prove_wielder(WIELDER, challenge=pop_challenge, capability=cap)
     return prove_remediation(
         adapter=adapter, identity=ident, capability=cap, wielder_proof=wielder_proof,
         trusted_owner_pubkey=OWNER.public_key_b64, engagement=ENG, finding_id="errsqli-1",
@@ -123,40 +124,67 @@ def _run(adapter, *, identity=None, capability=None, wielder_proof="auto", pop_c
 
 
 # ============================ happy paths ============================
-def test_remediated_and_certificate_reexecutes():
+def test_remediated_with_verified_f2_and_reexecuting_cert():
     out = _run(FakeAdapter())
     assert out.state == State.REMEDIATED, out
     assert out.reason_code == Reason.ORACLE_SILENT_ACROSS_TRIALS
     assert out.trials_valid == 3 and out.achieved_freshness == Freshness.F2_PATH_TRAVERSED
     ok, reason = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
     assert ok, reason
-    # the embedded controlled remediation cert is present and the causal chain is recorded
+    assert "cross-bound" in reason
     assert out.certificate["evidence"]["embedded_remediation_cert"] is not None
-    assert out.certificate["execution"]["freshness_challenge"]
-    assert out.certificate["target"]["target_identity_digest"]
 
 
 def test_still_vulnerable_when_oracle_fires():
     out = _run(FakeAdapter(trial_fires=True))
     assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED
     ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
-    assert ok
-    assert out.certificate["verdict"]["oracle_fired"] is True
+    assert ok and out.certificate["verdict"]["oracle_fired"] is True
+
+
+def test_bearer_capability_allowed_only_when_pop_not_required():
+    out = _run(FakeAdapter(), audience="bearer", policy=ProvePolicy(require_proof_of_possession=False))
+    assert out.state == State.REMEDIATED, out
+
+
+# ============================ BLOCK-1 regression: statistical / unknown families are non-certifiable ============
+def test_repeat_policy_classifies_canonical_families():
+    for bc in ("time_based_sqli", "time_based", "time_based_command_injection", "request_race", "race_condition"):
+        assert repeat_policy_for(bc).certifiable_by_silence is False, bc
+    for bc in ("error_based_sqli", "reflected_xss", "boolean_sqli", "ssrf"):
+        assert repeat_policy_for(bc).certifiable_by_silence is True, bc
+    assert repeat_policy_for("some_brand_new_class").certifiable_by_silence is False   # fail-closed
+
+
+def test_refused_statistical_timing_family():
+    out = _run(FakeAdapter(bug_class="time_based_sqli"))
+    assert out.state == State.REFUSED and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED
+
+
+def test_refused_unknown_family():
+    out = _run(FakeAdapter(bug_class="totally_new_class"))
+    assert out.state == State.REFUSED and out.reason_code == Reason.UNPROVABLE_ORACLE_FAMILY
+
+
+# ============================ BLOCK-2 regression: bearer must not void require_proof_of_possession ============
+def test_refused_bearer_under_require_pop():
+    out = _run(FakeAdapter(), audience="bearer")   # default policy require_proof_of_possession=True
+    assert out.state == State.REFUSED and out.reason_code == Reason.DOWNGRADE_REQUESTED
 
 
 # ============================ REFUSED (authorization) ============================
 def test_refused_expired_capability():
-    out = _run(FakeAdapter(), capability=_cap(not_after=NOW - 1))
+    out = _run(FakeAdapter(), not_after=NOW - 1)
     assert out.state == State.REFUSED and out.reason_code == Reason.EXPIRED_CAPABILITY
 
 
 def test_refused_revoked_capability():
-    out = _run(FakeAdapter(), capability=_cap(revocation_id="rev-boom"), revoked_ids=frozenset({"rev-boom"}))
+    out = _run(FakeAdapter(), revocation_id="rev-boom", revoked_ids=frozenset({"rev-boom"}))
     assert out.state == State.REFUSED and out.reason_code == Reason.REVOKED_CAPABILITY
 
 
 def test_refused_unauthorized_bug_class():
-    out = _run(FakeAdapter(), capability=_cap(classes=["reflected_xss"]))
+    out = _run(FakeAdapter(), classes=["reflected_xss"])
     assert out.state == State.REFUSED and out.reason_code == Reason.UNAUTHORIZED_BUG_CLASS
 
 
@@ -165,33 +193,35 @@ def test_refused_identity_policy_mismatch():
     assert out.state == State.REFUSED and out.reason_code == Reason.IDENTITY_POLICY_MISMATCH
 
 
-def test_refused_proof_of_possession_failure():
-    # a wielder proof by the WRONG key (thief) for a pinned capability
-    cap = _cap()
+def test_refused_pop_failure_and_no_target_touch():
+    # a wielder proof by the WRONG key; PoP is checked BEFORE the first identity probe (LOW-1)
+    adapter = FakeAdapter()
+    ident = _identity_att()
+    cap = sign_capability(OWNER, engagement=ENG, identity_digest=identity_digest(ident), class_allowlist=[BUG],
+                          not_before=0, not_after=9_000, rate_limit=10, revocation_id="rev-1",
+                          audience=WIELDER.public_key_b64)
     bad = prove_wielder(ATTACKER, challenge="pop-1", capability=cap)
-    out = _run(FakeAdapter(), capability=cap, wielder_proof=bad)
+    out = prove_remediation(adapter=adapter, identity=ident, capability=cap, wielder_proof=bad,
+                            trusted_owner_pubkey=OWNER.public_key_b64, engagement=ENG, finding_id="errsqli-1",
+                            original_certificate_digest="sha256:orig", signers=SIGNERS, now=NOW, run_id="run-1",
+                            pop_challenge="pop-1", freshness_nonce="n")
     assert out.state == State.REFUSED and out.reason_code == Reason.POP_FAILURE
+    assert adapter.id_calls == 0   # NO target touch before authorization completed
 
 
-def test_refused_destructive_recipe_under_nondestructive_capability():
+def test_refused_destructive_recipe():
     out = _run(FakeAdapter(destructive=True))
     assert out.state == State.REFUSED and out.reason_code == Reason.DESTRUCTIVE_UNDER_NONDESTRUCTIVE
 
 
 def test_refused_budget_exhausted_precheck():
-    # rate_limit below 1 control + 3 trials
-    out = _run(FakeAdapter(), capability=_cap(rate_limit=2))
+    out = _run(FakeAdapter(), rate_limit=2)   # below 1 control + 3 trials
     assert out.state == State.REFUSED and out.reason_code == Reason.BUDGET_EXHAUSTED
 
 
-def test_refused_downgrade_requested_below_floor():
+def test_refused_downgrade_below_floor():
     out = _run(FakeAdapter(), requested_min_freshness=Freshness.F0_NONCE_GENERATED,
                policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
-    assert out.state == State.REFUSED and out.reason_code == Reason.DOWNGRADE_REQUESTED
-
-
-def test_refused_downgrade_missing_pop_for_pinned_cap():
-    out = _run(FakeAdapter(), wielder_proof=None)
     assert out.state == State.REFUSED and out.reason_code == Reason.DOWNGRADE_REQUESTED
 
 
@@ -213,19 +243,34 @@ def test_inconclusive_freshness_echo_missing():
 
 def test_inconclusive_insufficient_freshness_level():
     out = _run(FakeAdapter(trial_freshness=Freshness.F1_TARGET_ECHOES),
-               policy=ProvePolicy(minimum_freshness_level=Freshness.F3_BOUND_TO_EVIDENCE))
+               policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
+
+
+def test_inconclusive_adapter_lies_about_freshness_core_caps_it():
+    # adapter CLAIMS F2 but does NOT embed the challenge → the core verifies from the bytes and caps to F1 →
+    # under an F2 floor this is INSUFFICIENT (the adapter's self-report is not trusted).
+    out = _run(FakeAdapter(trial_freshness=Freshness.F2_PATH_TRAVERSED, embed_challenge=False),
+               policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
+
+
+def test_inconclusive_requested_freshness_above_floor_is_enforced():
+    # policy floor F1, but the caller REQUESTS F2 and the adapter only proves F1 → enforced → INCONCLUSIVE.
+    out = _run(FakeAdapter(trial_freshness=Freshness.F1_TARGET_ECHOES),
+               requested_min_freshness=Freshness.F2_PATH_TRAVERSED)
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
 
 
 def test_inconclusive_identity_changed_mid_run():
-    # first sample (pre-exec) matches; drift on the 2nd sample (continuity #2 before trials)
     out = _run(FakeAdapter(drift_identity_after=1))
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.IDENTITY_CHANGED
 
 
 def test_inconclusive_rate_limit_interrupted_by_invalid_trials():
-    # rate_limit exactly covers 1 control + 3 trials, but invalid trials burn budget → interrupted
-    out = _run(FakeAdapter(trial_valid=False, spend_per_call=1), capability=_cap(rate_limit=4))
+    # rate_limit covers 1 control + 3 trials, but the orchestrator spends per iteration and invalid trials
+    # never count → the budget is exhausted before 3 VALID trials → interrupted.
+    out = _run(FakeAdapter(trial_valid=False), rate_limit=4)
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.RATE_LIMIT_INTERRUPTED
 
 
@@ -234,21 +279,16 @@ def test_inconclusive_collector_failed():
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.COLLECTOR_FAILED
 
 
-def test_inconclusive_statistical_family_not_yet_provable():
-    out = _run(FakeAdapter(oracle_family="timing_sqli"), capability=_cap(classes=[BUG]))
-    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED
-
-
 # ============================ certificate tampering ============================
 def test_tampered_state_fails_verification():
     out = _run(FakeAdapter())
     out.certificate["state"] = State.STILL_VULNERABLE
-    ok, reason = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
+    ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
     assert not ok
 
 
 def test_tampered_reason_code_fails_verification():
-    out = _run(FakeAdapter(control_fires=False))    # INCONCLUSIVE / CONTROL_FAILED
+    out = _run(FakeAdapter(control_fires=False))
     out.certificate["verdict"]["reason_code"] = Reason.ORACLE_SILENT_ACROSS_TRIALS
     ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
     assert not ok
@@ -264,7 +304,7 @@ def test_stripped_embedded_cert_fails_remediated_verification():
     out = _run(FakeAdapter())
     out.certificate["evidence"]["embedded_remediation_cert"] = None
     ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
-    assert not ok   # signature breaks (embedded cert is signed into the whole cert) → fail-closed
+    assert not ok
 
 
 def test_relabelled_verdict_state_split_brain_fails():
