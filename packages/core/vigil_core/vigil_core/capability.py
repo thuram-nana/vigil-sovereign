@@ -50,6 +50,7 @@ _SCHEMA = 1
 _IDENTITY_DOMAIN = DOMAIN_TAGS["identity"]
 _CAPABILITY_DOMAIN = DOMAIN_TAGS["capability"]
 _ATTENUATION_DOMAIN = DOMAIN_TAGS["attenuation"]
+_WIELDER_POP_DOMAIN = DOMAIN_TAGS["wielder-pop"]
 
 _WILDCARD_AUDIENCE = "*"
 
@@ -247,6 +248,35 @@ class EffectiveCapability(BaseModel):
     audience: str
 
 
+class WielderProof(BaseModel):
+    """A proof that the presenter HOLDS the private key of the capability's (effective) audience — the answer to
+    "the audience is a *public* key stored in the inert bytes, so a bare wielder==audience string compare proves
+    nothing." The wielder signs a fresh, caller-supplied ``challenge`` bound to the capability digest under the
+    wielder-pop domain; the gate verifies that signature against the effective audience key. A thief who holds
+    the bytes but not the audience private key cannot produce it. The signature is bound to ``cap_digest`` so a
+    proof for one capability cannot be replayed onto another; freshness of ``challenge`` is the CALLER's
+    responsibility (a fresh, unpredictable nonce per authorization — the §5 Mode-L nonce), exactly as ``now``
+    must come from a trusted clock."""
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = _SCHEMA
+    challenge: str
+    cap_digest: str
+    sig: str = ""
+
+    def _core(self) -> dict:
+        return {"schema_version": self.schema_version, "challenge": self.challenge, "cap_digest": self.cap_digest}
+
+
+def prove_wielder(wielder_key, *, challenge: str, capability: Capability) -> WielderProof:
+    """The wielder (the party the capability's effective audience names) produces a possession proof over a
+    fresh ``challenge``, bound to ``capability``. Raises CapabilityError on an empty challenge."""
+    if not isinstance(challenge, str) or not challenge.strip():
+        raise CapabilityError("a wielder proof needs a non-empty challenge")
+    proof = WielderProof(challenge=str(challenge), cap_digest=capability._digest())
+    return proof.model_copy(update={"sig": sign(wielder_key.private_key_b64, _msg(_WIELDER_POP_DOMAIN, proof._core()))})
+
+
 def sign_capability(owner_key, *, engagement: str, identity_digest: str, class_allowlist: list[str],
                     not_before: int, not_after: int, rate_limit: int, revocation_id: str,
                     audience: str = _WILDCARD_AUDIENCE, non_destructive: bool = True) -> Capability:
@@ -312,18 +342,18 @@ def _validate_audience(audience: str) -> None:
 
 
 def verify_capability(cap: Capability, *, trusted_owner_pubkey: str, now: int, engagement: str,
-                      attenuations: list[Attenuation] | None = None, wielder_pubkey: str | None = None,
+                      attenuations: list[Attenuation] | None = None, expected_audience: str | None = None,
                       revoked_ids: frozenset[str] = frozenset()) -> EffectiveCapability:
     """Return the EffectiveCapability iff ``cap`` is owner-signed for ``engagement``, its attenuation chain is
-    intact and NARROW-ONLY, it is within its (attenuated) window at ``now``, non-destructive, not revoked, and
-    (if ``wielder_pubkey`` given) the final audience admits that wielder. Fail-closed: raises CapabilityError
-    on any failure.
+    intact and NARROW-ONLY, it is within its (attenuated) window at ``now``, non-destructive, and not revoked.
+    Fail-closed: raises CapabilityError on any failure.
 
-    This is the low-level INSPECTION primitive: ``wielder_pubkey`` is optional so a caller may examine a
-    capability's effective grant without a wielder in mind (audit/display). **Omitting it does NOT bind the
-    wielder** — a pinned capability is usable by anyone if you never pass the wielder. Any executor / authorizer
-    that gates a real re-drive MUST bind the wielder; use :func:`authorize_reverification` (where it is
-    required), or pass ``wielder_pubkey`` here explicitly."""
+    This is the low-level INSPECTION primitive — it verifies the OWNER's grant and the delegation chain, NOT
+    the wielder. ``expected_audience`` is an optional non-authenticating filter: it string-compares the effective
+    audience so a caller can select "only capabilities delegated to key X" for display/audit. It is **NOT**
+    proof-of-possession (the audience is a public key sitting in the inert bytes — anyone holding them can name
+    it). To actually AUTHORIZE a wielder for a re-drive, use :func:`authorize_reverification`, which requires a
+    :class:`WielderProof` (a signature by the audience's private key over a fresh challenge)."""
     if not isinstance(cap, Capability):
         raise CapabilityError("not a capability")
     if int(cap.schema_version) != _SCHEMA:
@@ -412,8 +442,9 @@ def verify_capability(cap: Capability, *, trusted_owner_pubkey: str, now: int, e
         raise CapabilityError(f"capability not valid at now {int(now)} (window [{eff_not_before}, {eff_not_after}])")
     if cap.revocation_id in revoked_ids:
         raise CapabilityError(f"capability revocation_id {cap.revocation_id!r} is revoked")
-    if wielder_pubkey is not None and cur_audience != _WILDCARD_AUDIENCE and wielder_pubkey != cur_audience:
-        raise CapabilityError("wielder is not the capability's audience")
+    # NON-authenticating display filter only (see docstring) — never treat this as wielder authorization.
+    if expected_audience is not None and cur_audience != _WILDCARD_AUDIENCE and expected_audience != cur_audience:
+        raise CapabilityError("effective audience does not match the expected_audience filter")
 
     return EffectiveCapability(engagement=cap.engagement, identity_digest=cap.identity_digest,
                                class_allowlist=sorted(eff_allow), not_before=eff_not_before,
@@ -423,29 +454,61 @@ def verify_capability(cap: Capability, *, trusted_owner_pubkey: str, now: int, e
 
 def authorize_reverification(cap: Capability, identity: IdentityAttestation, *, trusted_owner_pubkey: str,
                              now: int, engagement: str, bug_class: str, identity_sample: dict[str, str],
-                             wielder_pubkey: str, attenuations: list[Attenuation] | None = None,
+                             challenge: str, wielder_proof: WielderProof | None = None,
+                             attenuations: list[Attenuation] | None = None,
                              revoked_ids: frozenset[str] = frozenset()) -> EffectiveCapability:
     """The one call the executor / a third-party verifier makes before a Mode-L re-drive: prove the whole
     chain at once. Returns the EffectiveCapability iff (a) the OWNER attested this target's identity for the
     engagement, (b) the capability is owner-minted, chained narrow-only, in-window, non-destructive, and not
     revoked, (c) the capability is BOUND to exactly that identity attestation, (d) ``bug_class`` is in the
-    (attenuated) allowlist, (e) the live ``identity_sample`` SATISFIES the attested policy, and (f) the
-    presenting ``wielder_pubkey`` is admitted by the (attenuated) audience. Fail-closed.
+    (attenuated) allowlist, (e) the live ``identity_sample`` SATISFIES the attested policy, and (f) — for a
+    PINNED (non-bearer) effective audience — the presenter supplies a :class:`WielderProof` that VERIFIES
+    against that audience key over ``challenge`` (proof-of-possession). Fail-closed.
 
-    ``wielder_pubkey`` is REQUIRED (no default): the authorization gate can never be invoked without declaring
-    who is wielding, so a pinned capability can never be used by a non-audience holder through this path. For a
-    bearer ("*") capability any wielder is admitted, but the caller still declares its identity for the audit
-    trail."""
-    if not isinstance(wielder_pubkey, str) or not wielder_pubkey.strip():
-        raise CapabilityError("authorize_reverification requires a non-empty wielder_pubkey")
+    Why a proof, not a pubkey: the audience is a *public* key stored in the inert capability bytes, so any
+    thief who holds the bytes can name it — a wielder==audience string compare authenticates nothing. The
+    proof is a signature by the audience's *private* key over the fresh ``challenge`` bound to the capability
+    digest; a byte-holding thief without that private key cannot produce it. ``challenge`` MUST be a fresh,
+    unpredictable per-authorization nonce the caller controls (the §5 Mode-L nonce) — its freshness is the
+    caller's responsibility, exactly like ``now``. For a bearer ("*") effective audience there is no key to
+    prove, so ``wielder_proof`` is not required (bearer = anyone holding the bytes may wield, by design)."""
+    if not isinstance(challenge, str) or not challenge.strip():
+        raise CapabilityError("authorize_reverification requires a non-empty, fresh challenge")
     id_digest = verify_identity_attestation(identity, trusted_owner_pubkey=trusted_owner_pubkey, now=now,
                                             engagement=engagement)
     eff = verify_capability(cap, trusted_owner_pubkey=trusted_owner_pubkey, now=now, engagement=engagement,
-                            attenuations=attenuations, wielder_pubkey=wielder_pubkey, revoked_ids=revoked_ids)
+                            attenuations=attenuations, revoked_ids=revoked_ids)
     if eff.identity_digest != id_digest:
         raise CapabilityError("capability is not bound to this identity attestation")
     if bug_class not in set(eff.class_allowlist):
         raise CapabilityError(f"bug_class {bug_class!r} is not in the capability's allowlist")
     if not identity_matches(identity.policy, identity_sample):
         raise CapabilityError("the live target's identity sample does not satisfy the attested policy")
+    # Proof-of-possession of the EFFECTIVE (post-attenuation) audience key — the anti-theft step. Skipped only
+    # for a bearer audience (no key to prove). A stolen-bytes thief lacks the audience private key → refused.
+    if eff.audience != _WILDCARD_AUDIENCE:
+        _verify_wielder_proof(wielder_proof, expected_audience=eff.audience, challenge=challenge,
+                              cap_digest=cap._digest())
     return eff
+
+
+def _verify_wielder_proof(proof: WielderProof | None, *, expected_audience: str, challenge: str,
+                          cap_digest: str) -> None:
+    """Fail-closed proof-of-possession: ``proof`` must be a WielderProof over EXACTLY this ``challenge`` and
+    ``cap_digest``, signed by the private key of ``expected_audience``."""
+    if not isinstance(proof, WielderProof):
+        raise CapabilityError("a pinned capability requires a WielderProof (proof of possession)")
+    if int(proof.schema_version) != _SCHEMA:
+        raise CapabilityError(f"wielder proof unsupported schema_version {proof.schema_version!r}")
+    if proof.challenge != challenge:
+        raise CapabilityError("wielder proof challenge does not match the authorization challenge (stale/replayed)")
+    if proof.cap_digest != cap_digest:
+        raise CapabilityError("wielder proof is bound to a different capability")
+    if not proof.sig or not isinstance(proof.sig, str):
+        raise CapabilityError("wielder proof is unsigned")
+    try:
+        ok = verify_one(expected_audience, _msg(_WIELDER_POP_DOMAIN, proof._core()), proof.sig)
+    except (IntegrityError, TypeError) as e:
+        raise CapabilityError(f"wielder proof signature is malformed: {e}") from e
+    if not ok:
+        raise CapabilityError("wielder proof does not verify against the capability's audience key")

@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from .canonical import canonical_json, digest_payload, evidence_signing_bytes, sha256_hex
 from .capability import (
-    Attenuation, Capability, CapabilityError, EffectiveCapability, IdentityAttestation,
-    attenuate, authorize_reverification, identity_digest, identity_matches, sign_capability,
+    Attenuation, Capability, CapabilityError, EffectiveCapability, IdentityAttestation, WielderProof,
+    attenuate, authorize_reverification, identity_digest, identity_matches, prove_wielder, sign_capability,
     sign_identity_attestation, verify_capability, verify_identity_attestation,
 )
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
@@ -34,7 +34,8 @@ __all__ = [
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
     "Vault", "VaultLocked",
-    "IdentityAttestation", "Capability", "Attenuation", "EffectiveCapability", "CapabilityError",
-    "sign_identity_attestation", "verify_identity_attestation", "identity_digest", "identity_matches",
-    "sign_capability", "attenuate", "verify_capability", "authorize_reverification",
+    "IdentityAttestation", "Capability", "Attenuation", "EffectiveCapability", "WielderProof",
+    "CapabilityError", "sign_identity_attestation", "verify_identity_attestation", "identity_digest",
+    "identity_matches", "sign_capability", "attenuate", "verify_capability", "authorize_reverification",
+    "prove_wielder",
 ]

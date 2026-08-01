@@ -20,10 +20,12 @@ from vigil_core.capability import (
     Capability,
     CapabilityError,
     IdentityAttestation,
+    WielderProof,
     attenuate,
     authorize_reverification,
     identity_digest,
     identity_matches,
+    prove_wielder,
     sign_capability,
     sign_identity_attestation,
     verify_capability,
@@ -37,6 +39,7 @@ SUBAUDITOR = generate_keypair()
 
 ENG = "acme"
 NOW = 1_000
+CHALLENGE = "nonce-abc123"   # a fresh per-authorization challenge the caller supplies (the §5 Mode-L nonce)
 POLICY = {"host": ["shop.acme.test"], "tls_spki_sha256": ["aa" * 32, "bb" * 32]}
 SAMPLE_OK = {"host": "shop.acme.test", "tls_spki_sha256": "aa" * 32, "extra": "ignored"}
 
@@ -62,7 +65,7 @@ def test_full_authorization_holds():
     cap = _cap(id_digest=identity_digest(ident))
     eff = authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                                    engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
-                                   wielder_pubkey=AUDITOR.public_key_b64)
+                                   challenge=CHALLENGE)   # bearer cap → no wielder proof required
     assert eff.engagement == ENG and "error_based_sqli" in eff.class_allowlist
     # round-trips as inert JSON
     assert IdentityAttestation.model_validate_json(ident.model_dump_json()) == ident
@@ -123,7 +126,7 @@ def test_transplant_to_a_different_target_is_refused_end_to_end():
         authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                                  engagement=ENG, bug_class="error_based_sqli",
                                  identity_sample={"host": "evil.test", "tls_spki_sha256": "aa" * 32},
-                                 wielder_pubkey=AUDITOR.public_key_b64)
+                                 challenge=CHALLENGE)
 
 
 # --- capability core ---------------------------------------------------------------------------------
@@ -164,7 +167,7 @@ def test_class_not_in_allowlist_is_refused_end_to_end():
     with pytest.raises(CapabilityError, match="not in the capability's allowlist"):
         authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                                  engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
-                                 wielder_pubkey=AUDITOR.public_key_b64)
+                                 challenge=CHALLENGE)
 
 
 def test_capability_bound_to_wrong_identity_is_refused():
@@ -174,7 +177,7 @@ def test_capability_bound_to_wrong_identity_is_refused():
     with pytest.raises(CapabilityError, match="not bound to this identity"):
         authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                                  engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
-                                 wielder_pubkey=AUDITOR.public_key_b64)
+                                 challenge=CHALLENGE)
 
 
 def test_tampered_capability_field_breaks_signature():
@@ -193,7 +196,7 @@ def test_attenuation_narrows_and_holds():
     att = attenuate(AUDITOR, prev=cap, next_audience=SUBAUDITOR.public_key_b64,
                     class_subset=["error_based_sqli"], not_after=1_500, rate_limit=2)
     eff = verify_capability(cap, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW, engagement=ENG,
-                            attenuations=[att], wielder_pubkey=SUBAUDITOR.public_key_b64)
+                            attenuations=[att], expected_audience=SUBAUDITOR.public_key_b64)
     assert eff.class_allowlist == ["error_based_sqli"] and eff.not_after == 1_500 and eff.rate_limit == 2
     assert eff.audience == SUBAUDITOR.public_key_b64
 
@@ -250,11 +253,16 @@ def test_reordering_attenuations_breaks_the_chain():
                           attenuations=[a2, a1])
 
 
-def test_wrong_wielder_is_refused():
+def test_expected_audience_is_a_non_authenticating_filter():
+    # verify_capability's expected_audience is an inspection FILTER, not authorization — it string-compares the
+    # effective audience so a caller can select a cap by its delegate. It is NOT proof-of-possession.
     cap = _cap(audience=AUDITOR.public_key_b64)
-    with pytest.raises(CapabilityError, match="wielder is not the capability's audience"):
+    with pytest.raises(CapabilityError, match="does not match the expected_audience filter"):
         verify_capability(cap, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW, engagement=ENG,
-                          wielder_pubkey=ATTACKER.public_key_b64)
+                          expected_audience=ATTACKER.public_key_b64)
+    eff = verify_capability(cap, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW, engagement=ENG,
+                            expected_audience=AUDITOR.public_key_b64)
+    assert eff.audience == AUDITOR.public_key_b64
 
 
 def test_forged_attenuation_signature_is_refused():
@@ -266,35 +274,87 @@ def test_forged_attenuation_signature_is_refused():
                           attenuations=[forged])
 
 
-# --- FINDING-1 regression: the authorization GATE must bind the wielder (was fail-open by default) ----
-def test_authorize_refuses_a_non_audience_wielder_through_the_gate():
-    # a capability PINNED to the auditor must not be usable by a thief through authorize_reverification —
-    # the documented "one call" gate. (Before the fix this returned success when wielder_pubkey defaulted.)
+# --- FINDING-1 / BLOCK-1 regression: the GATE must require proof-of-POSSESSION, not a plaintext pubkey ----
+def _authorize(cap, ident, *, proof=None, challenge=CHALLENGE, bug_class="error_based_sqli",
+               sample=SAMPLE_OK, attenuations=None):
+    return authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
+                                    engagement=ENG, bug_class=bug_class, identity_sample=sample,
+                                    challenge=challenge, wielder_proof=proof, attenuations=attenuations)
+
+
+def test_legit_wielder_with_proof_is_admitted():
     ident = _identity()
     cap = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64)
-    with pytest.raises(CapabilityError, match="wielder is not the capability's audience"):
-        authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
-                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
-                                 wielder_pubkey=ATTACKER.public_key_b64)
-    # the legitimate auditor is admitted
-    eff = authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
-                                   engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
-                                   wielder_pubkey=AUDITOR.public_key_b64)
+    proof = prove_wielder(AUDITOR, challenge=CHALLENGE, capability=cap)
+    eff = _authorize(cap, ident, proof=proof)
     assert eff.audience == AUDITOR.public_key_b64
 
 
-def test_authorize_requires_a_wielder():
-    # the gate cannot be invoked without declaring who wields: missing -> TypeError (required kwarg),
-    # empty -> a typed CapabilityError. Neither may silently authorize.
+def test_byte_replay_thief_is_refused_even_naming_the_audience():
+    # THE BLOCK-1 THREAT: a thief holds the inert bytes and copies the PUBLIC audience string out of them.
+    # Naming the audience is not enough — without the audience PRIVATE key they cannot forge a WielderProof.
+    ident = _identity()
+    cap = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64)
+    # (a) thief supplies no proof at all
+    with pytest.raises(CapabilityError, match="requires a WielderProof"):
+        _authorize(cap, ident, proof=None)
+    # (b) thief forges a proof with THEIR OWN key (they don't hold AUDITOR's private key)
+    thief_proof = prove_wielder(ATTACKER, challenge=CHALLENGE, capability=cap)
+    with pytest.raises(CapabilityError, match="does not verify against the capability's audience"):
+        _authorize(cap, ident, proof=thief_proof)
+
+
+def test_wielder_proof_is_challenge_bound_no_replay():
+    # a proof made for an OLD challenge cannot be replayed under a fresh one
+    ident = _identity()
+    cap = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64)
+    stale = prove_wielder(AUDITOR, challenge="old-nonce", capability=cap)
+    with pytest.raises(CapabilityError, match="challenge does not match"):
+        _authorize(cap, ident, proof=stale, challenge="fresh-nonce")
+
+
+def test_wielder_proof_is_capability_bound():
+    # a valid proof for capability A cannot authorize capability B (different digest)
+    ident = _identity()
+    capA = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64, revocation_id="A")
+    capB = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64, revocation_id="B")
+    proof_for_A = prove_wielder(AUDITOR, challenge=CHALLENGE, capability=capA)
+    with pytest.raises(CapabilityError, match="bound to a different capability"):
+        _authorize(capB, ident, proof=proof_for_A)
+
+
+def test_proof_must_be_by_the_EFFECTIVE_post_attenuation_audience():
+    # after redelegation to the sub-auditor, only the SUB-auditor's proof authorizes; the original auditor's
+    # (and a thief copying next_audience) cannot.
+    ident = _identity()
+    cap = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64)
+    att = attenuate(AUDITOR, prev=cap, next_audience=SUBAUDITOR.public_key_b64)
+    with pytest.raises(CapabilityError, match="does not verify against the capability's audience"):
+        _authorize(cap, ident, proof=prove_wielder(AUDITOR, challenge=CHALLENGE, capability=cap),
+                   attenuations=[att])
+    eff = _authorize(cap, ident, proof=prove_wielder(SUBAUDITOR, challenge=CHALLENGE, capability=cap),
+                     attenuations=[att])
+    assert eff.audience == SUBAUDITOR.public_key_b64
+
+
+def test_authorize_requires_a_fresh_challenge():
+    # the gate cannot be invoked without a challenge (missing -> TypeError; empty -> CapabilityError).
     ident = _identity()
     cap = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64)
     with pytest.raises(TypeError):
         authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                                  engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK)
-    with pytest.raises(CapabilityError, match="requires a non-empty wielder_pubkey"):
-        authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
-                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
-                                 wielder_pubkey="")
+    with pytest.raises(CapabilityError, match="non-empty, fresh challenge"):
+        _authorize(cap, ident, proof=prove_wielder(AUDITOR, challenge="", capability=cap) if False else None,
+                   challenge="")
+
+
+def test_bearer_capability_needs_no_proof():
+    # a bearer ("*") cap has no audience key to prove; any holder may wield (by design).
+    ident = _identity()
+    cap = _cap(id_digest=identity_digest(ident), audience="*")
+    eff = _authorize(cap, ident, proof=None)
+    assert eff.audience == "*"
 
 
 # --- LOW-2 regressions: weak-key rejection + cross-domain replay (verified sound; now pinned) ---------
