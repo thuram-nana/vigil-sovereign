@@ -90,3 +90,26 @@ genuine oracle fire (`vigil_integration.proof.bundle.export_bundle`), then:
    re-implemented bytes are byte-identical to the real serializer;
 5. validates a real certificate and the whole bundle against the JSON Schemas, and a real PCF cert
    against `pcf-certificate.schema.json`.
+
+## Companion design specs (the Verifiable-Fact program — drafts)
+
+The files above cover the **positive** proof-carrying finding that ships today. These are the
+design-first specs for the extensions that turn it into a portable, witnessed, continuously re-proven
+security fact. Each states its assumptions and what breaks it, and is written to be reviewed and
+independently implemented **before** the live driver is built on it — a novel trustless-attestation
+protocol is the textbook "don't roll your own," so external review is warranted.
+
+- **`REMEDIATION-SEMANTICS.md`** — the **negative** proof (the exploit that provably worked is now
+  provably dead, earned by oracle SILENCE), its negative-proof controls (positive-control twin must
+  still fire; liveness; freshness; repetition), and the formal state machine
+  (UNKNOWN → EXPLOITABLE\@T → REMEDIATED\@T′ → REGRESSED / INDETERMINATE). Implemented core:
+  `integration/vigil_integration/remediation/remediation_cert.py` + the conformance corpus.
+- **`PROTOCOL.md`** — the interaction between mutually-distrusting parties: the object binding chain,
+  the three trust-gradient modes (R replay / L live-nonce / W witnessed), freshness, downgrade
+  resistance, owner-attested identity, and the delegable/scoped/revocable capability. Implemented
+  identity + authorization objects (with wielder proof-of-possession):
+  `packages/core/vigil_core/vigil_core/capability.py`.
+- **`WITNESS-TRUST.md`** — the witness trust model (independence, collusion tolerance
+  `≤ 2t − n − 1`, the strict-majority requirement), the honest clock model (a median quorum time that
+  bounds *witnessing*, not *re-proof*), and the RFC3161/OpenTimestamps external-anchor fallback.
+  Primitives built: `integration/vigil_integration/transparency.py`, `scitt.py`.
