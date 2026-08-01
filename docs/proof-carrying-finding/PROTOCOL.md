@@ -105,8 +105,14 @@ authorized and legal. Revocation = short TTL + a revocation-id list the executor
 ## 9. Relationship to what is built
 
 Implemented today: the controlled RemediationCertificate (Mode-R negative proof + §2 controls), its offline
-re-execution verifier, the signed hash-chain + anti-rollback (`SeriesHead` substrate), and the witnessed log
-primitive (`transparency.py`, not yet wired to findings). **Not yet built** (each its own reviewed slice):
-the Mode-L nonce/freshness driver (§5), the `IdentityAttestation` + Capability objects (§4, §7), wiring the
-witnessed checkpoint + observed-time (§3 Mode W / §8 time), and the adversarial **conformance corpus** that
-pins every MUST-REJECT in this document across both the VIGIL and the VIGIL-free verifier.
+re-execution verifier, the adversarial **conformance corpus** pinning every MUST-REJECT over that verifier
+(`integration/tests/test_remediation_conformance.py`), the signed hash-chain + anti-rollback (`SeriesHead`
+substrate), the witnessed log primitive (`transparency.py`, not yet wired to findings), and — new — the
+**`IdentityAttestation` + `Capability` objects** of §4/§7 as pure `vigil_core` signed data
+(`packages/core/vigil_core/vigil_core/capability.py`): owner-attested acceptable-identity policy
+(`identity_matches` = conjunctive over dimensions, any-of within), and an owner-minted, scoped, windowed,
+revocable, biscuit-style **narrow-only attenuable** re-verification capability, bound to an identity by digest,
+with the one-call `authorize_reverification` gate. **Not yet built** (each its own reviewed slice): the Mode-L
+nonce/freshness driver that carries a live `identity_sample` + V's nonce into the re-drive (§5), wiring the
+witnessed checkpoint + observed-time (§3 Mode W / §8 time), and extending the VIGIL-free verifier to re-derive
+the identity/capability chain offline.

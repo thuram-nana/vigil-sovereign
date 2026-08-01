@@ -16,6 +16,11 @@ while still sharing this core with the offensive side.
 from __future__ import annotations
 
 from .canonical import canonical_json, digest_payload, evidence_signing_bytes, sha256_hex
+from .capability import (
+    Attenuation, Capability, CapabilityError, EffectiveCapability, IdentityAttestation,
+    attenuate, authorize_reverification, identity_digest, identity_matches, sign_capability,
+    sign_identity_attestation, verify_capability, verify_identity_attestation,
+)
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from .crypto import IntegrityError, KeyPair, generate_keypair, sign, verify_one, verify_threshold
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
@@ -29,4 +34,7 @@ __all__ = [
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
     "Vault", "VaultLocked",
+    "IdentityAttestation", "Capability", "Attenuation", "EffectiveCapability", "CapabilityError",
+    "sign_identity_attestation", "verify_identity_attestation", "identity_digest", "identity_matches",
+    "sign_capability", "attenuate", "verify_capability", "authorize_reverification",
 ]
