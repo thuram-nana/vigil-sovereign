@@ -66,6 +66,10 @@ DOMAIN_TAGS: dict[str, bytes] = {
     "delegation": b"vigil-delegation-v1\x00",                  # S4 owner delegation
     "transparency": b"vigil-transparency-checkpoint-v1\x00",   # transparency checkpoint witness
     "destruction": b"vigil-destruction-authorization-v1\x00",  # m-of-n destruction authorization
+    "identity": b"vigil-identity-attestation-v1\x00",          # VF owner-attested target identity policy
+    "capability": b"vigil-capability-v1\x00",                  # VF re-verification capability (base)
+    "attenuation": b"vigil-capability-attenuation-v1\x00",     # VF biscuit-style narrow-only attenuation
+    "wielder-pop": b"vigil-capability-wielder-pop-v1\x00",     # VF wielder proof-of-possession over a challenge
 }
 
 

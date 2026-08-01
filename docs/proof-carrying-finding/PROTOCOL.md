@@ -86,6 +86,15 @@ non_destructive=true, not_before, not_after, rate_limit, revocation_id, audience
 traffic); Mode L **requires** one, so third-party re-verification (which re-runs an exploit) is itself
 authorized and legal. Revocation = short TTL + a revocation-id list the executor checks + the kill-switch.
 
+**Proof-of-possession (anti-theft).** `audience` is a *public* key sitting in the inert capability bytes, so a
+holder who merely *names* it authenticates nothing — a thief who steals the bytes would otherwise pass. The
+wielder therefore proves possession of the **effective (post-attenuation) audience private key** by signing a
+fresh, caller-supplied `challenge` bound to the capability digest (`WielderProof`); the gate verifies that
+signature against the effective audience key. A byte-holding thief without that private key cannot produce it.
+`challenge` freshness is the caller's responsibility (the §5 Mode-L nonce), exactly as `now` must come from a
+trusted clock. A **bearer** (`"*"`) audience has no key to prove — bearer means anyone holding the bytes may
+wield, by design.
+
 ## 8. Security considerations (assumptions + what breaks)
 
 - **Byte authenticity.** Mode R trusts P's capture. Mode L trusts O's identity attestation + the nonce-echo.
@@ -105,8 +114,16 @@ authorized and legal. Revocation = short TTL + a revocation-id list the executor
 ## 9. Relationship to what is built
 
 Implemented today: the controlled RemediationCertificate (Mode-R negative proof + §2 controls), its offline
-re-execution verifier, the signed hash-chain + anti-rollback (`SeriesHead` substrate), and the witnessed log
-primitive (`transparency.py`, not yet wired to findings). **Not yet built** (each its own reviewed slice):
-the Mode-L nonce/freshness driver (§5), the `IdentityAttestation` + Capability objects (§4, §7), wiring the
-witnessed checkpoint + observed-time (§3 Mode W / §8 time), and the adversarial **conformance corpus** that
-pins every MUST-REJECT in this document across both the VIGIL and the VIGIL-free verifier.
+re-execution verifier, the adversarial **conformance corpus** pinning every MUST-REJECT over that verifier
+(`integration/tests/test_remediation_conformance.py`), the signed hash-chain + anti-rollback (`SeriesHead`
+substrate), the witnessed log primitive (`transparency.py`, not yet wired to findings), and — new — the
+**`IdentityAttestation` + `Capability` objects** of §4/§7 as pure `vigil_core` signed data
+(`packages/core/vigil_core/vigil_core/capability.py`): owner-attested acceptable-identity policy
+(`identity_matches` = conjunctive over dimensions, any-of within), and an owner-minted, scoped, windowed,
+revocable, biscuit-style **narrow-only attenuable** re-verification capability, bound to an identity by digest,
+with the one-call `authorize_reverification` gate — which now requires a **`WielderProof`** (proof-of-possession
+of the effective audience key over a fresh challenge, §7), so a stolen-bytes thief cannot wield a pinned
+capability. **Not yet built** (each its own reviewed slice): the Mode-L driver that carries a live
+`identity_sample` + the target-echoed nonce into the re-drive (§5), wiring the witnessed checkpoint +
+observed-time (§3 Mode W / §8 time), and extending the VIGIL-free verifier to re-derive the identity/capability
+chain offline.
