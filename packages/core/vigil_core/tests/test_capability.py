@@ -10,6 +10,8 @@ Run: pytest packages/core/vigil_core/tests/test_capability.py -q
 """
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from vigil_core import generate_keypair
@@ -59,7 +61,8 @@ def test_full_authorization_holds():
     ident = _identity()
     cap = _cap(id_digest=identity_digest(ident))
     eff = authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
-                                   engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK)
+                                   engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
+                                   wielder_pubkey=AUDITOR.public_key_b64)
     assert eff.engagement == ENG and "error_based_sqli" in eff.class_allowlist
     # round-trips as inert JSON
     assert IdentityAttestation.model_validate_json(ident.model_dump_json()) == ident
@@ -119,7 +122,8 @@ def test_transplant_to_a_different_target_is_refused_end_to_end():
     with pytest.raises(CapabilityError, match="does not satisfy the attested policy"):
         authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
                                  engagement=ENG, bug_class="error_based_sqli",
-                                 identity_sample={"host": "evil.test", "tls_spki_sha256": "aa" * 32})
+                                 identity_sample={"host": "evil.test", "tls_spki_sha256": "aa" * 32},
+                                 wielder_pubkey=AUDITOR.public_key_b64)
 
 
 # --- capability core ---------------------------------------------------------------------------------
@@ -159,7 +163,8 @@ def test_class_not_in_allowlist_is_refused_end_to_end():
     cap = _cap(id_digest=identity_digest(ident), classes=["reflected_xss"])
     with pytest.raises(CapabilityError, match="not in the capability's allowlist"):
         authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
-                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK)
+                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
+                                 wielder_pubkey=AUDITOR.public_key_b64)
 
 
 def test_capability_bound_to_wrong_identity_is_refused():
@@ -168,7 +173,8 @@ def test_capability_bound_to_wrong_identity_is_refused():
     cap = _cap(id_digest=other_digest)   # capability points at a DIFFERENT identity than the one presented
     with pytest.raises(CapabilityError, match="not bound to this identity"):
         authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
-                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK)
+                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
+                                 wielder_pubkey=AUDITOR.public_key_b64)
 
 
 def test_tampered_capability_field_breaks_signature():
@@ -258,3 +264,58 @@ def test_forged_attenuation_signature_is_refused():
     with pytest.raises(CapabilityError, match="does not verify|widens"):
         verify_capability(cap, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW, engagement=ENG,
                           attenuations=[forged])
+
+
+# --- FINDING-1 regression: the authorization GATE must bind the wielder (was fail-open by default) ----
+def test_authorize_refuses_a_non_audience_wielder_through_the_gate():
+    # a capability PINNED to the auditor must not be usable by a thief through authorize_reverification —
+    # the documented "one call" gate. (Before the fix this returned success when wielder_pubkey defaulted.)
+    ident = _identity()
+    cap = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64)
+    with pytest.raises(CapabilityError, match="wielder is not the capability's audience"):
+        authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
+                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
+                                 wielder_pubkey=ATTACKER.public_key_b64)
+    # the legitimate auditor is admitted
+    eff = authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
+                                   engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
+                                   wielder_pubkey=AUDITOR.public_key_b64)
+    assert eff.audience == AUDITOR.public_key_b64
+
+
+def test_authorize_requires_a_wielder():
+    # the gate cannot be invoked without declaring who wields: missing -> TypeError (required kwarg),
+    # empty -> a typed CapabilityError. Neither may silently authorize.
+    ident = _identity()
+    cap = _cap(id_digest=identity_digest(ident), audience=AUDITOR.public_key_b64)
+    with pytest.raises(TypeError):
+        authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
+                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK)
+    with pytest.raises(CapabilityError, match="requires a non-empty wielder_pubkey"):
+        authorize_reverification(cap, ident, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW,
+                                 engagement=ENG, bug_class="error_based_sqli", identity_sample=SAMPLE_OK,
+                                 wielder_pubkey="")
+
+
+# --- LOW-2 regressions: weak-key rejection + cross-domain replay (verified sound; now pinned) ---------
+def test_low_order_attenuation_signer_is_rejected():
+    # a bearer capability skips the signer==audience check, so the ONLY thing rejecting a keyless-forgery
+    # signer is load_public_key's weak-key screen. Pin it: an identity-point (all-zero) signer is refused.
+    cap = _cap(audience="*")
+    zero_point = base64.b64encode(b"\x00" * 32).decode()
+    att = Attenuation(prev_digest=cap._digest(), signer_pubkey=zero_point, class_subset=["error_based_sqli"],
+                      sig=base64.b64encode(b"\x00" * 64).decode())
+    with pytest.raises(CapabilityError, match="malformed|does not verify"):
+        verify_capability(cap, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW, engagement=ENG,
+                          attenuations=[att])
+
+
+def test_cross_domain_signature_replay_is_rejected():
+    # present a capability-DOMAIN owner signature as if it were an ATTENUATION signature. Distinct domain
+    # tags mean it cannot verify under the attenuation purpose. (bearer cap so the signer check is skipped.)
+    cap = _cap(audience="*")
+    replay = Attenuation(prev_digest=cap._digest(), signer_pubkey=OWNER.public_key_b64,
+                         class_subset=["error_based_sqli"], sig=cap.sig)   # cap.sig is a capability-domain sig
+    with pytest.raises(CapabilityError, match="does not verify"):
+        verify_capability(cap, trusted_owner_pubkey=OWNER.public_key_b64, now=NOW, engagement=ENG,
+                          attenuations=[replay])

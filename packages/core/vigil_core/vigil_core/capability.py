@@ -317,7 +317,13 @@ def verify_capability(cap: Capability, *, trusted_owner_pubkey: str, now: int, e
     """Return the EffectiveCapability iff ``cap`` is owner-signed for ``engagement``, its attenuation chain is
     intact and NARROW-ONLY, it is within its (attenuated) window at ``now``, non-destructive, not revoked, and
     (if ``wielder_pubkey`` given) the final audience admits that wielder. Fail-closed: raises CapabilityError
-    on any failure."""
+    on any failure.
+
+    This is the low-level INSPECTION primitive: ``wielder_pubkey`` is optional so a caller may examine a
+    capability's effective grant without a wielder in mind (audit/display). **Omitting it does NOT bind the
+    wielder** — a pinned capability is usable by anyone if you never pass the wielder. Any executor / authorizer
+    that gates a real re-drive MUST bind the wielder; use :func:`authorize_reverification` (where it is
+    required), or pass ``wielder_pubkey`` here explicitly."""
     if not isinstance(cap, Capability):
         raise CapabilityError("not a capability")
     if int(cap.schema_version) != _SCHEMA:
@@ -417,13 +423,21 @@ def verify_capability(cap: Capability, *, trusted_owner_pubkey: str, now: int, e
 
 def authorize_reverification(cap: Capability, identity: IdentityAttestation, *, trusted_owner_pubkey: str,
                              now: int, engagement: str, bug_class: str, identity_sample: dict[str, str],
-                             attenuations: list[Attenuation] | None = None, wielder_pubkey: str | None = None,
+                             wielder_pubkey: str, attenuations: list[Attenuation] | None = None,
                              revoked_ids: frozenset[str] = frozenset()) -> EffectiveCapability:
     """The one call the executor / a third-party verifier makes before a Mode-L re-drive: prove the whole
     chain at once. Returns the EffectiveCapability iff (a) the OWNER attested this target's identity for the
     engagement, (b) the capability is owner-minted, chained narrow-only, in-window, non-destructive, and not
     revoked, (c) the capability is BOUND to exactly that identity attestation, (d) ``bug_class`` is in the
-    (attenuated) allowlist, and (e) the live ``identity_sample`` SATISFIES the attested policy. Fail-closed."""
+    (attenuated) allowlist, (e) the live ``identity_sample`` SATISFIES the attested policy, and (f) the
+    presenting ``wielder_pubkey`` is admitted by the (attenuated) audience. Fail-closed.
+
+    ``wielder_pubkey`` is REQUIRED (no default): the authorization gate can never be invoked without declaring
+    who is wielding, so a pinned capability can never be used by a non-audience holder through this path. For a
+    bearer ("*") capability any wielder is admitted, but the caller still declares its identity for the audit
+    trail."""
+    if not isinstance(wielder_pubkey, str) or not wielder_pubkey.strip():
+        raise CapabilityError("authorize_reverification requires a non-empty wielder_pubkey")
     id_digest = verify_identity_attestation(identity, trusted_owner_pubkey=trusted_owner_pubkey, now=now,
                                             engagement=engagement)
     eff = verify_capability(cap, trusted_owner_pubkey=trusted_owner_pubkey, now=now, engagement=engagement,
