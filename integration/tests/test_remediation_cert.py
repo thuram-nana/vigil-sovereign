@@ -1,7 +1,9 @@
-"""VF-1a — the portable RemediationCertificate: the negative proof-carrying artifact.
+"""VF-1a — the CONTROLLED RemediationCertificate (negative proof with negative-proof controls).
 
-Earned-by-silence (a still-firing patched build is refused), offline-verifiable by re-execution, and rejects
-every tamper. Needs framework (reverify + the oracle) → PYTHONPATH=integration:engine/crucible:gateway.
+A remediation is proven only when "silent" is distinguished from "didn't reach": the SAME oracle must still
+FIRE on a positive-control twin (the harness is capable of firing), the patched build must be SILENT, and the
+target must have ANSWERED (liveness). All controls are signed into the whole cert, so none can be stripped.
+Needs framework (reverify + the oracle) → PYTHONPATH=integration:engine/crucible:gateway.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ _BENIGN = b"HTTP/1.1 200\r\n\r\n{\"results\": []}"
 
 
 def _context(body: bytes) -> dict:
-    """Build an error_signature oracle_context from a captured response — the same translator the mint uses."""
+    """An error_signature oracle_context from a captured response — the translator the mint/verify use."""
     from framework.v2.evidence.poc import CapturedExchange
     from framework.v2.verify.poc_translate import context_from_exchanges
     ex = CapturedExchange(channel="error_signature", role="mutated", response_bytes_ref="resp")
@@ -31,49 +33,57 @@ def _context(body: bytes) -> dict:
     return ctx.model_dump(mode="json")
 
 
-def test_silent_patched_build_mints_a_verifiable_remediation_cert():
-    cert = mint_remediation_certificate(
+def _mint(patched: dict, control: dict) -> dict:
+    return mint_remediation_certificate(
         finding_ref="errsqli-1", bug_class="error_based_sqli",
-        patched_oracle_context=_context(_BENIGN), engagement_slug="acme", signers=SIGNERS,
+        patched_oracle_context=patched, positive_control_context=control,
+        engagement_slug="acme", signers=SIGNERS, surface="GET /search?q=",
         original_finding_cert_digest="sha256:deadbeef")
-    assert cert["schema"] == "vigil-remediation-cert-v1"
-    assert cert["verdict"] == "oracle-silent"
-    assert cert["original_finding_cert_digest"] == "sha256:deadbeef"  # pairs the positive proof
+
+
+def test_controlled_remediation_mints_and_verifies():
+    cert = _mint(patched=_context(_BENIGN), control=_context(_SQL_ERROR))
+    assert cert["schema"] == "vigil-remediation-cert-v2"
+    assert cert["controls"]["positive_control"] and cert["controls"]["liveness"]
+    assert "positive_control_context" in cert and "signature" in cert
     v = verify_remediation_certificate(cert, signer_pubkeys=PUBKEYS)
-    assert v.ok and v.silent and v.bound and v.authentic, v.reason
+    assert v.ok and v.silent and v.control_fires and v.live and v.bound and v.authentic, v.reason
 
 
 def test_still_vulnerable_build_cannot_be_certified():
-    # earned-by-silence: a patched build where the exploit STILL fires must be refused, never minted.
     with pytest.raises(ValueError, match="STILL fires"):
-        mint_remediation_certificate(
-            finding_ref="errsqli-1", bug_class="error_based_sqli",
-            patched_oracle_context=_context(_SQL_ERROR), engagement_slug="acme", signers=SIGNERS)
+        _mint(patched=_context(_SQL_ERROR), control=_context(_SQL_ERROR))
+
+
+def test_positive_control_that_does_not_fire_is_refused():
+    # the twin must FIRE — else "silent" on the patched build could just be a broken/blocked probe.
+    with pytest.raises(ValueError, match="positive control does NOT fire"):
+        _mint(patched=_context(_BENIGN), control=_context(_BENIGN))
+
+
+def test_unreachable_patched_build_is_indeterminate_not_fixed():
+    # a context with no captured response → silence is indistinguishable from "unreachable" → refused.
+    with pytest.raises(ValueError, match="no captured response"):
+        _mint(patched={"bug_class": "error_based_sqli"}, control=_context(_SQL_ERROR))
 
 
 def test_wrong_pinned_key_fails_authenticity():
-    cert = mint_remediation_certificate(
-        finding_ref="errsqli-1", bug_class="error_based_sqli",
-        patched_oracle_context=_context(_BENIGN), engagement_slug="acme", signers=SIGNERS)
+    cert = _mint(patched=_context(_BENIGN), control=_context(_SQL_ERROR))
     attacker = generate_keypair()
     v = verify_remediation_certificate(cert, signer_pubkeys={"root0": attacker.public_key_b64})
     assert not v.ok and not v.authentic
 
 
-def test_tampered_context_breaks_binding():
-    cert = mint_remediation_certificate(
-        finding_ref="errsqli-1", bug_class="error_based_sqli",
-        patched_oracle_context=_context(_BENIGN), engagement_slug="acme", signers=SIGNERS)
-    # flip a byte in the retained context AFTER minting → the recomputed digest no longer matches the signed one.
-    cert["patched_oracle_context"]["_tamper"] = "x"
+def test_tampered_context_breaks_binding_and_signature():
+    cert = _mint(patched=_context(_BENIGN), control=_context(_SQL_ERROR))
+    cert["patched_oracle_context"]["_tamper"] = "x"   # edit the retained context after signing
     v = verify_remediation_certificate(cert, signer_pubkeys=PUBKEYS)
-    assert not v.ok and not v.bound
+    assert not v.ok and (not v.bound or not v.authentic)
 
 
-def test_forged_signature_ref_is_rejected():
-    cert = mint_remediation_certificate(
-        finding_ref="errsqli-1", bug_class="error_based_sqli",
-        patched_oracle_context=_context(_BENIGN), engagement_slug="acme", signers=SIGNERS)
-    cert["signature_ref"] = "remediation:deadbeefdeadbeefdeadbeef:root0:" + "A" * 86
+def test_stripped_control_breaks_the_whole_cert_signature():
+    # flipping a control claim after signing must break authenticity (the controls are signed into the cert).
+    cert = _mint(patched=_context(_BENIGN), control=_context(_SQL_ERROR))
+    cert["controls"]["positive_control"] = False
     v = verify_remediation_certificate(cert, signer_pubkeys=PUBKEYS)
     assert not v.ok and not v.authentic
