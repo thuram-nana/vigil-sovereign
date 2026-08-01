@@ -116,29 +116,45 @@ class Freshness:
 class RepeatPolicy:
     bug_class: str
     min_valid_trials: int
-    certifiable_by_silence: bool          # can oracle SILENCE across N valid trials soundly prove remediation?
-    requires_significance: bool = False   # statistical family (timing/race) — needs an equivalence/power rule
+    certifiable_by_silence: bool          # is oracle SILENCE a SOUND negative for THIS oracle (deterministic
+                                          # per-observation)? — an oracle property, orthogonal to whether a
+                                          # given run also establishes LIVENESS (that is a separate runtime gate).
+    requires_significance: bool = False   # statistical/probabilistic family — silence needs an equivalence rule
     unique_token_per_trial: bool = False  # OOB families must not reuse a token across trials
     note: str = ""
 
 
-# Probabilistic classes whose oracle kind is NOT statistical-by-name (e.g. request_race uses ACHIEVED_STATE)
-# but where silence-across-N is still not a sound negative (the race/TOCTOU window may simply not have been
-# hit). Kept minimal + backed by a substring heuristic; genuinely-unknown races canonicalise to None → refused.
+# Probabilistic classes whose oracle kind is NOT one of the statistical KINDS below (e.g. request_race uses
+# ACHIEVED_STATE) but where silence-across-N is still not a sound negative (the race/TOCTOU window may simply
+# not have been hit). Kept minimal + a substring heuristic; genuinely-unknown races canonicalise to None → refused.
 _PROBABILISTIC_CLASSES = frozenset({"request_race", "race_condition", "toctou"})
+
+
+def _statistical_oracle_kinds():
+    """The oracle KINDS whose firing is a SIGNIFICANCE TEST OVER A SAMPLED CAMPAIGN, so oracle SILENCE is
+    absence-of-evidence, NOT evidence of absence — remediation cannot be certified by silence for them.
+    Deliberately NOT ``BOOLEAN_INFERENCE``: its per-round signal ``(true≠false) AND (false_a==false_b)`` is
+    DETERMINISTIC (SPRT only bounds the rounds-to-decision), so a still-present boolean injection re-fires with
+    certainty on a comparable honest re-drive → silence IS sound. ``TIMING`` (statistical delay) and
+    ``CREDENTIAL_STUFFING`` (SPRT over a sampled auth-success stream — a limiter that blocks a burst need not
+    block a slow drip) are the sampled-campaign kinds. Derived from the authoritative OracleKind enum."""
+    from framework.v2.verify.models import OracleKind                     # lazy — FATAL-2
+    return frozenset({OracleKind.TIMING, OracleKind.CREDENTIAL_STUFFING})
 
 
 def repeat_policy_for(bug_class: str) -> RepeatPolicy:
     """The repeat policy for the AUTHORIZED ``bug_class``, DERIVED from the authoritative verifier taxonomy
-    (never a private, divergent table). Fail-closed on certifiability:
+    (never a private, divergent table). ``certifiable_by_silence`` answers ONLY "is oracle silence a sound
+    negative for this oracle?" — LIVENESS (did the target answer) is a separate runtime gate in the mint.
+    Fail-closed:
       * an UNKNOWN class (``canonical_bug_class`` → None, incl. oracle-KIND names like ``differential_response``)
         cannot be certified — we cannot reason about its stopping rule;
-      * a STATISTICAL family (its oracle set contains ``OracleKind.TIMING``) or a PROBABILISTIC race/TOCTOU
-        class cannot be certified by silence (absence of evidence ≠ evidence of absence) — needs a
-        significance/equivalence rule (not implemented);
-      * only a KNOWN, deterministic class (no timing/statistical oracle kind, not a race) is certifiable.
-    Reasoning over the SAME taxonomy the oracle uses is what closes the divergence that let a timing exploit
-    mislabelled with an oracle-kind name reach REMEDIATED. Lazy framework import (FATAL-2)."""
+      * a class whose oracle set contains a SAMPLED-CAMPAIGN statistical kind (``_statistical_oracle_kinds`` —
+        TIMING / CREDENTIAL_STUFFING) or a PROBABILISTIC race/TOCTOU class cannot be certified by silence
+        (absence of evidence ≠ evidence of absence) — needs a significance/equivalence rule (not implemented);
+      * only a KNOWN class whose every oracle fires on a DETERMINISTIC per-observation signal is certifiable.
+    Reasoning over the SAME taxonomy the oracle uses is what closes the divergence that let a timing/credstuff
+    exploit reach REMEDIATED. Lazy framework import (FATAL-2)."""
     from framework.v2.verify.models import OracleKind                     # lazy — FATAL-2
     from framework.v2.verify.verifier import BUG_CLASS_ORACLES, canonical_bug_class
 
@@ -148,14 +164,15 @@ def repeat_policy_for(bug_class: str) -> RepeatPolicy:
         return RepeatPolicy(label, min_valid_trials=3, certifiable_by_silence=False,
                             note="UNKNOWN to the oracle vocabulary — fail-closed: cannot certify by silence")
     oracles = BUG_CLASS_ORACLES.get(canonical, ())
-    statistical = OracleKind.TIMING in oracles
+    statistical = bool(set(oracles) & _statistical_oracle_kinds())
     probabilistic = statistical or canonical in _PROBABILISTIC_CLASSES or "race" in canonical or "toctou" in canonical
     if probabilistic:
         return RepeatPolicy(canonical, min_valid_trials=8, certifiable_by_silence=False, requires_significance=True,
-                            note="statistical/probabilistic family — silence needs a significance/equivalence rule")
+                            note="sampled-campaign statistical / probabilistic family — silence needs a "
+                                 "significance/equivalence rule (not implemented)")
     return RepeatPolicy(canonical, min_valid_trials=3, certifiable_by_silence=True,
                         unique_token_per_trial=(OracleKind.OOB_CALLBACK in oracles),
-                        note="deterministic family — silence across N valid fresh trials is a sound negative")
+                        note="deterministic per-observation family — silence across N valid fresh trials is sound")
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -536,7 +553,13 @@ def prove_remediation(
             surface="", original_finding_cert_digest=original_certificate_digest,
             freshness_nonce=challenge, repeats=valid)
     except ValueError as e:
-        return inconclusive(Reason.INSUFFICIENT_REPETITIONS, f"controlled remediation mint refused: {e}",
+        # Surface an HONEST reason for WHY the negative claim was not earned rather than always blaming the
+        # trial count. A liveness refusal ("no captured response" / "unreachable") means the target's answer
+        # was not retained for this class — a response-channel/evidence issue, not too-few repetitions.
+        msg = str(e).lower()
+        reason = (Reason.RESPONSE_CHANNEL_DEGRADED if ("no captured response" in msg or "unreachable" in msg)
+                  else Reason.INSUFFICIENT_REPETITIONS)
+        return inconclusive(reason, f"controlled remediation mint refused: {e}",
                             attempted=attempted, valid=valid, freshness=achieved_freshness)
 
     cert = mk(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, freshness_challenge=challenge,

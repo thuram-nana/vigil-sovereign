@@ -153,16 +153,38 @@ def test_bearer_capability_allowed_only_when_pop_not_required():
 
 # ============================ BLOCK-1 regression: statistical / unknown families are non-certifiable ============
 def test_repeat_policy_classifies_from_the_authoritative_taxonomy():
-    # statistical (oracle set contains TIMING) + probabilistic race → non-certifiable
-    for bc in ("time_based_sqli", "time_based", "time_based_command_injection", "request_race"):
+    # sampled-campaign statistical (TIMING or CREDENTIAL_STUFFING in the oracle set) + probabilistic race →
+    # non-certifiable. credential_stuffing is the BLOCK-A regression: SPRT over a sampled campaign.
+    for bc in ("time_based_sqli", "time_based", "time_based_command_injection", "request_race",
+               "credential_stuffing", "account_takeover", "password_spraying"):
         assert repeat_policy_for(bc).certifiable_by_silence is False, bc
     # oracle-KIND names are NOT bug classes → canonical is None → non-certifiable (the BLOCK-1 hole)
     for bc in ("error_signature", "differential_response", "oob_callback"):
         assert repeat_policy_for(bc).certifiable_by_silence is False, bc
-    # genuinely deterministic, KNOWN classes → certifiable
-    for bc in ("error_based_sqli", "reflected_xss", "boolean_sqli", "ssrf"):
+    # genuinely deterministic, KNOWN classes → certifiable. boolean_sqli stays certifiable: SPRT bounds only
+    # the rounds-to-decision; its per-round signal is deterministic, so silence IS a sound negative.
+    for bc in ("error_based_sqli", "reflected_xss", "boolean_sqli", "sqli", "ssrf"):
         assert repeat_policy_for(bc).certifiable_by_silence is True, bc
     assert repeat_policy_for("some_brand_new_class").certifiable_by_silence is False   # fail-closed
+
+
+def test_refused_credential_stuffing_sampled_campaign():
+    # BLOCK-A regression: a SPRT-over-sampled-campaign class must not reach REMEDIATED by silence.
+    out = _run(FakeAdapter(bug_class="credential_stuffing"))
+    assert out.state == State.REFUSED and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED
+
+
+def test_liveness_keys_are_target_produced_only():
+    # MEDIUM-C / LOW-D: liveness must detect TARGET-produced fields (observed_state, observed_evidence,
+    # oob_hits, error_observed) and must NOT be asserted by PRODUCER-set fields alone (expected_state,
+    # predicate, marker) or an empty context.
+    from vigil_integration.remediation.remediation_cert import _has_live_response
+    assert _has_live_response({"observed_state": {"row": 1}})
+    assert _has_live_response({"observed_evidence": {"leak": "x"}})
+    assert _has_live_response({"oob_hits": ["cb"]})
+    assert _has_live_response({"error_observed": "SQL error"})
+    assert not _has_live_response({"expected_state": {"row": 1}, "predicate": {"p": 1}, "marker": "m"})
+    assert not _has_live_response({})
 
 
 def test_refused_statistical_timing_family():
