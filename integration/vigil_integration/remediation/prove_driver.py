@@ -49,6 +49,10 @@ from vigil_core import (
 )
 from vigil_core.crypto import load_public_key
 
+# The response-bearing (oracle-judged) fields — SAME set the liveness control uses (single source of truth).
+# remediation_cert's module scope is stdlib + vigil_core only, so this import is FATAL-2 safe (no framework).
+from .remediation_cert import _RESPONSE_KEYS
+
 PROTOCOL_VERSION = "vigil-remediation-prove-v1"
 _CERT_SCHEMA = "vigil-remediation-prove-cert-v1"
 _CERT_DOMAIN = b"vigil-remediation-prove-cert-v1\x00"
@@ -118,49 +122,40 @@ class RepeatPolicy:
     note: str = ""
 
 
-# Canonical statistical classes (+ their known aliases) — silence is absence-of-evidence, NOT evidence of
-# absence, at these sample sizes. Certifying remediation needs a significance/equivalence rule (not yet built).
-_STATISTICAL_CLASSES = frozenset({
-    "time_based_sqli", "time_based", "time_based_command_injection", "time_based_ci", "timing", "timing_sqli",
-    "blind_time", "request_race", "race_condition", "toctou", "race",
-})
-# Deterministic classes where silence across N valid, fresh trials IS a sound negative proof.
-_DETERMINISTIC_CLASSES: dict[str, dict] = {
-    "error_based_sqli": {"min": 3},
-    "error_signature": {"min": 3},
-    "boolean_sqli": {"min": 3},
-    "reflected_xss": {"min": 3},
-    "dom_xss": {"min": 3},
-    "differential_response": {"min": 3},
-    "open_redirect": {"min": 2},
-    "path_traversal": {"min": 2},
-    "os_command_injection": {"min": 2},
-    "ssti": {"min": 2},
-    "xxe": {"min": 2, "oob": True},
-    "ssrf": {"min": 3, "oob": True},
-    "oob_callback": {"min": 3, "oob": True},
-}
-
-
-def _normalize_class(bug_class: str) -> str:
-    return str(bug_class or "").strip().lower()
+# Probabilistic classes whose oracle kind is NOT statistical-by-name (e.g. request_race uses ACHIEVED_STATE)
+# but where silence-across-N is still not a sound negative (the race/TOCTOU window may simply not have been
+# hit). Kept minimal + backed by a substring heuristic; genuinely-unknown races canonicalise to None → refused.
+_PROBABILISTIC_CLASSES = frozenset({"request_race", "race_condition", "toctou"})
 
 
 def repeat_policy_for(bug_class: str) -> RepeatPolicy:
-    """The repeat policy for the AUTHORIZED ``bug_class`` (normalised). Fail-closed: a statistical family is
-    non-certifiable (needs a significance rule); an UNKNOWN class is non-certifiable too (we cannot reason
-    about its stopping rule, so we never certify remediation for it — extend the table to add one)."""
-    bc = _normalize_class(bug_class)
-    if bc in _STATISTICAL_CLASSES:
-        return RepeatPolicy(bc, min_valid_trials=8, certifiable_by_silence=False, requires_significance=True,
-                            note="statistical family — silence needs an equivalence/power rule (not implemented)")
-    spec = _DETERMINISTIC_CLASSES.get(bc)
-    if spec is not None:
-        return RepeatPolicy(bc, min_valid_trials=int(spec["min"]), certifiable_by_silence=True,
-                            unique_token_per_trial=bool(spec.get("oob", False)),
-                            note="deterministic family — silence across N valid fresh trials is a sound negative")
-    return RepeatPolicy(bc, min_valid_trials=3, certifiable_by_silence=False,
-                        note="UNCLASSIFIED oracle family — fail-closed: cannot certify remediation by silence")
+    """The repeat policy for the AUTHORIZED ``bug_class``, DERIVED from the authoritative verifier taxonomy
+    (never a private, divergent table). Fail-closed on certifiability:
+      * an UNKNOWN class (``canonical_bug_class`` → None, incl. oracle-KIND names like ``differential_response``)
+        cannot be certified — we cannot reason about its stopping rule;
+      * a STATISTICAL family (its oracle set contains ``OracleKind.TIMING``) or a PROBABILISTIC race/TOCTOU
+        class cannot be certified by silence (absence of evidence ≠ evidence of absence) — needs a
+        significance/equivalence rule (not implemented);
+      * only a KNOWN, deterministic class (no timing/statistical oracle kind, not a race) is certifiable.
+    Reasoning over the SAME taxonomy the oracle uses is what closes the divergence that let a timing exploit
+    mislabelled with an oracle-kind name reach REMEDIATED. Lazy framework import (FATAL-2)."""
+    from framework.v2.verify.models import OracleKind                     # lazy — FATAL-2
+    from framework.v2.verify.verifier import BUG_CLASS_ORACLES, canonical_bug_class
+
+    canonical = canonical_bug_class(bug_class)
+    if canonical is None:
+        label = str(bug_class or "").strip().lower()
+        return RepeatPolicy(label, min_valid_trials=3, certifiable_by_silence=False,
+                            note="UNKNOWN to the oracle vocabulary — fail-closed: cannot certify by silence")
+    oracles = BUG_CLASS_ORACLES.get(canonical, ())
+    statistical = OracleKind.TIMING in oracles
+    probabilistic = statistical or canonical in _PROBABILISTIC_CLASSES or "race" in canonical or "toctou" in canonical
+    if probabilistic:
+        return RepeatPolicy(canonical, min_valid_trials=8, certifiable_by_silence=False, requires_significance=True,
+                            note="statistical/probabilistic family — silence needs a significance/equivalence rule")
+    return RepeatPolicy(canonical, min_valid_trials=3, certifiable_by_silence=True,
+                        unique_token_per_trial=(OracleKind.OOB_CALLBACK in oracles),
+                        note="deterministic family — silence across N valid fresh trials is a sound negative")
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -195,13 +190,21 @@ def target_identity_digest_of(identity_sample: dict) -> str:
     return digest_payload({str(k): identity_sample[k] for k in sorted(identity_sample or {})})
 
 
-def _challenge_in_context(challenge: str, oracle_context: dict) -> bool:
-    """DETERMINISTIC freshness check: is the challenge string actually present in the retained evidence the
-    oracle judged? The grounding confirms standard HTTP oracle_contexts retain the response BODY verbatim, so
-    a body-echoed challenge is recoverable here — this is what lets the core VERIFY F2 rather than trust the
-    adapter's self-reported level."""
+def _challenge_in_judged_evidence(challenge: str, oracle_context: dict) -> bool:
+    """DETERMINISTIC freshness check, scoped to the oracle-JUDGED evidence: is the challenge string present in
+    the RESPONSE-BEARING fields (the target-produced bytes the oracle actually adjudicates), not merely
+    somewhere in the context dict? The grounding confirms standard HTTP oracle_contexts retain the response
+    BODY verbatim in these fields (``error_observed`` / ``mutated`` / ``baseline`` / ``reflection`` / …), so a
+    body-echoed challenge is recoverable here — and a challenge riding an unjudged/derived field (which does
+    NOT determine the silence verdict) does NOT count as F2. Uses the SAME response-key set as the liveness
+    control (single source of truth)."""
+    if not isinstance(oracle_context, dict):
+        return False
+    judged = {k: oracle_context.get(k) for k in _RESPONSE_KEYS if k in oracle_context}
+    if not judged:
+        return False
     try:
-        return str(challenge).encode("utf-8") in canonical_json(oracle_context)
+        return str(challenge).encode("utf-8") in canonical_json(judged)
     except Exception:  # noqa: BLE001
         return False
 
@@ -494,9 +497,9 @@ def prove_remediation(
                                 "the target did not echo the run challenge — cannot prove fresh (not replayed)",
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
         verified_level = int(trial.freshness_level)
-        if verified_level >= Freshness.F2_PATH_TRAVERSED and not _challenge_in_context(challenge,
-                                                                                       trial.oracle_context):
-            verified_level = Freshness.F1_TARGET_ECHOES   # adapter claimed F2+ but the challenge is not in the bytes
+        if verified_level >= Freshness.F2_PATH_TRAVERSED and not _challenge_in_judged_evidence(
+                challenge, trial.oracle_context):
+            verified_level = Freshness.F1_TARGET_ECHOES   # claimed F2+ but the challenge is not in the JUDGED bytes
         if verified_level < eff_min_freshness:
             return inconclusive(Reason.INSUFFICIENT_FRESHNESS,
                                 f"verified F{verified_level} < required floor F{eff_min_freshness}",

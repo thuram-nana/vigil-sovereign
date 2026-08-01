@@ -56,8 +56,8 @@ class FakeAdapter:
 
     def __init__(self, *, bug_class=BUG, destructive=False, identity=None, trial_fires=False, trial_valid=True,
                  trial_reachable=True, nonce_echoed=True, trial_freshness=Freshness.F2_PATH_TRAVERSED,
-                 embed_challenge=True, control_fires=True, control_reachable=True, drift_identity_after=None,
-                 raise_on_trial=False):
+                 embed_challenge=True, embed_in_unjudged_field=False, control_fires=True, control_reachable=True,
+                 drift_identity_after=None, raise_on_trial=False):
         self.bug_class = bug_class
         self.oracle_family = bug_class
         self.oracle_id = "oracle:" + bug_class
@@ -72,6 +72,7 @@ class FakeAdapter:
         self._nonce_echoed = nonce_echoed
         self._trial_freshness = trial_freshness
         self._embed = embed_challenge
+        self._embed_unjudged = embed_in_unjudged_field
         self._control_fires = control_fires
         self._control_reachable = control_reachable
         self._drift_after = drift_identity_after
@@ -95,9 +96,12 @@ class FakeAdapter:
             raise RuntimeError("collector boom")
         base = _SQL_ERROR if self._trial_fires else _BENIGN
         if self._embed and self._nonce_echoed and self._trial_freshness >= Freshness.F2_PATH_TRAVERSED:
-            base = base + b" echo=" + challenge.encode()   # the challenge is now IN the retained body
+            base = base + b" echo=" + challenge.encode()   # the challenge is now IN the retained body (judged)
+        ctx = _context(base)
+        if self._embed_unjudged:
+            ctx["discriminator"] = {"unjudged_note": challenge}   # present in the dict but NOT an oracle-judged field
         return TrialObservation(reachable=self._trial_reachable, valid=self._trial_valid,
-                                oracle_context=_context(base), freshness_level=self._trial_freshness,
+                                oracle_context=ctx, freshness_level=self._trial_freshness,
                                 nonce_echoed=self._nonce_echoed)
 
 
@@ -148,9 +152,14 @@ def test_bearer_capability_allowed_only_when_pop_not_required():
 
 
 # ============================ BLOCK-1 regression: statistical / unknown families are non-certifiable ============
-def test_repeat_policy_classifies_canonical_families():
-    for bc in ("time_based_sqli", "time_based", "time_based_command_injection", "request_race", "race_condition"):
+def test_repeat_policy_classifies_from_the_authoritative_taxonomy():
+    # statistical (oracle set contains TIMING) + probabilistic race → non-certifiable
+    for bc in ("time_based_sqli", "time_based", "time_based_command_injection", "request_race"):
         assert repeat_policy_for(bc).certifiable_by_silence is False, bc
+    # oracle-KIND names are NOT bug classes → canonical is None → non-certifiable (the BLOCK-1 hole)
+    for bc in ("error_signature", "differential_response", "oob_callback"):
+        assert repeat_policy_for(bc).certifiable_by_silence is False, bc
+    # genuinely deterministic, KNOWN classes → certifiable
     for bc in ("error_based_sqli", "reflected_xss", "boolean_sqli", "ssrf"):
         assert repeat_policy_for(bc).certifiable_by_silence is True, bc
     assert repeat_policy_for("some_brand_new_class").certifiable_by_silence is False   # fail-closed
@@ -158,6 +167,19 @@ def test_repeat_policy_classifies_canonical_families():
 
 def test_refused_statistical_timing_family():
     out = _run(FakeAdapter(bug_class="time_based_sqli"))
+    assert out.state == State.REFUSED and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED
+
+
+@pytest.mark.parametrize("kind_name", ["error_signature", "differential_response", "oob_callback"])
+def test_refused_oracle_kind_name_masquerading_as_bug_class(kind_name):
+    # BLOCK-1 regression: an oracle-KIND name is unknown to the vocabulary → cannot be certified (previously
+    # these fell into a private table and a timing exploit so-labelled reached REMEDIATED).
+    out = _run(FakeAdapter(bug_class=kind_name))
+    assert out.state == State.REFUSED and out.reason_code == Reason.UNPROVABLE_ORACLE_FAMILY
+
+
+def test_refused_request_race_probabilistic():
+    out = _run(FakeAdapter(bug_class="request_race"))
     assert out.state == State.REFUSED and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED
 
 
@@ -251,6 +273,15 @@ def test_inconclusive_adapter_lies_about_freshness_core_caps_it():
     # adapter CLAIMS F2 but does NOT embed the challenge → the core verifies from the bytes and caps to F1 →
     # under an F2 floor this is INSUFFICIENT (the adapter's self-report is not trusted).
     out = _run(FakeAdapter(trial_freshness=Freshness.F2_PATH_TRAVERSED, embed_challenge=False),
+               policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
+
+
+def test_inconclusive_challenge_in_unjudged_field_does_not_count_as_f2():
+    # LOW-3 regression: the challenge rides an UNJUDGED field (not the response the oracle adjudicates) → the
+    # core scopes the F2 check to the judged evidence → caps to F1 → INSUFFICIENT under an F2 floor.
+    out = _run(FakeAdapter(trial_freshness=Freshness.F2_PATH_TRAVERSED, embed_challenge=False,
+                           embed_in_unjudged_field=True),
                policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
 
