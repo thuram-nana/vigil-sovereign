@@ -119,6 +119,7 @@ jobs:
               --ignore=integration/tests/test_vf_end_to_end.py \
               --ignore=integration/tests/test_live_adapter.py \
               --ignore=integration/tests/test_live_adapter_tls.py \
+              --ignore=integration/tests/test_live_adapter_f2.py \
               --ignore=integration/tests/test_cli_remediate.py -q
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
@@ -148,6 +149,7 @@ jobs:
               integration/tests/test_vf_end_to_end.py \
               integration/tests/test_live_adapter.py \
               integration/tests/test_live_adapter_tls.py \
+              integration/tests/test_live_adapter_f2.py \
               integration/tests/test_cli_remediate.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"

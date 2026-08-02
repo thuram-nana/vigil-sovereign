@@ -100,8 +100,13 @@ class Reason:
 
 class Freshness:
     F0_NONCE_GENERATED = 0        # a fresh client challenge exists
-    F1_TARGET_ECHOES = 1         # the target returned the challenge (responsive)
-    F2_PATH_TRAVERSED = 2        # the challenge is present in the retained evidence the oracle judged
+    F1_TARGET_ECHOES = 1         # the target returned the challenge (responsive) — reflection, incl. into a
+                                 #   SILENT response, never exceeds this (an echoer/edge can produce it)
+    F2_PATH_TRAVERSED = 2        # the fresh challenge is reflected in the datastore-error LINE a FIRING trial
+                                 #   matched — it came back through the SAME error channel the signal did, as
+                                 #   attributable as the error_signature oracle's own firing (NOT byte-unforgeable;
+                                 #   that is the OOB Tier-2 / zkTLS frontier). Sound only for STILL_VULNERABLE; a
+                                 #   REMEDIATED (silent) verdict can NEVER reach F2 (fixed sink) — VF-1a.3.
     F3_BOUND_TO_EVIDENCE = 3     # the challenge is bound into the exploit/control evidence (structural)
     F4_INDEPENDENT_SIGNED = 4    # an independent collector / the target key signed the nonce-bound observation
 
@@ -223,23 +228,46 @@ def target_identity_digest_of(identity_sample: dict) -> str:
     return digest_payload({str(k): identity_sample[k] for k in sorted(identity_sample or {})})
 
 
-def _challenge_in_judged_evidence(challenge: str, oracle_context: dict) -> bool:
-    """DETERMINISTIC freshness check, scoped to the oracle-JUDGED evidence: is the challenge string present in
-    the RESPONSE-BEARING fields (the target-produced bytes the oracle actually adjudicates), not merely
-    somewhere in the context dict? The grounding confirms standard HTTP oracle_contexts retain the response
-    BODY verbatim in these fields (``error_observed`` / ``mutated`` / ``baseline`` / ``reflection`` / …), so a
-    body-echoed challenge is recoverable here — and a challenge riding an unjudged/derived field (which does
-    NOT determine the silence verdict) does NOT count as F2. Uses the SAME response-key set as the liveness
-    control (single source of truth)."""
+def _line_containing(text: str, idx: int) -> str:
+    """The physical line (between ``\\n`` boundaries) of ``text`` holding position ``idx``."""
+    start = text.rfind("\n", 0, idx) + 1        # 0 when there is no preceding newline
+    end = text.find("\n", idx)
+    return text[start:] if end < 0 else text[start:end]
+
+
+def _challenge_in_firing_signature(challenge: str, oracle_context: dict) -> bool:
+    """SOUND F2 for the error-signature channel (this driver's live adapter's sole channel): is the fresh
+    challenge reflected INSIDE the datastore error LINE the oracle matched — i.e. did it come back through the
+    SAME error channel the firing signal came from?
+
+    This is deliberately STRONGER than "the challenge is somewhere in the judged bytes": a target that emits a
+    STATIC error banner on one line and reflects the injected input on ANOTHER line (a non-executing echoer)
+    does NOT satisfy it → the run is capped to F1. It is NOT byte-unforgeable — a target that fabricates a
+    matching error EMBEDDING the nonce is indistinguishable on the response channel (that is the deferred
+    OOB/zkTLS frontier; the OOB Tier-2 is the unforgeable channel) — so F2 here is only ever "as attributable as
+    the error_signature oracle's own firing." It uses the oracle ITSELF (a lazy import, never a duplicated
+    signature list) to locate the match, so the check can never drift from the authority. FATAL-2 safe."""
     if not isinstance(oracle_context, dict):
         return False
-    judged = {k: oracle_context.get(k) for k in _RESPONSE_KEYS if k in oracle_context}
-    if not judged:
+    needle = str(challenge)
+    if not needle:
         return False
     try:
-        return str(challenge).encode("utf-8") in canonical_json(judged)
+        from framework.v2.verify.oracles import error_signature_oracle   # lazy — FATAL-2
     except Exception:  # noqa: BLE001
         return False
+    for k in _RESPONSE_KEYS:
+        text = oracle_context.get(k)
+        if not isinstance(text, str) or needle not in text:
+            continue
+        sig = error_signature_oracle(text)
+        if not getattr(sig, "fired", False):
+            continue
+        match = str((getattr(sig, "observed", None) or {}).get("match") or "")
+        idx = text.find(match) if match else -1
+        if idx >= 0 and needle in _line_containing(text, idx):
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -307,6 +335,12 @@ class ControlObservation:
     freshness_level: int = Freshness.F0_NONCE_GENERATED
     definition_digest: str = ""
     detail: str = ""
+    # VF-1a.3 — set True when a LIVE control probe saw a benign challenge-bearing marker (sent through the
+    # injectable param) reflected in the response. INFORMATIONAL ONLY: reflection could come from the app OR
+    # from an interposing edge/gateway that echoes the request, so it does NOT distinguish them and does NOT by
+    # itself rule out a param-stripping edge (that discriminator is the deferred frontier). Never gates a verdict
+    # and never promotes freshness (F2 stays exclusive to a firing trial's signature line).
+    injectable_param_live: bool = False
 
 
 @dataclass(frozen=True)
@@ -523,23 +557,36 @@ def prove_remediation(
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
         if not trial.valid or trial.oracle_context is None:
             continue   # recorded but not counted; the budget bounds an invalid streak
-        # FRESHNESS — the echo must be present AND (at F2+) the challenge must ACTUALLY appear in the retained
-        # evidence the oracle judged. The adapter's claimed level is CAPPED by what the core can verify.
         if not trial.nonce_echoed:
             return inconclusive(Reason.FRESHNESS_ECHO_MISSING,
                                 "the target did not echo the run challenge — cannot prove fresh (not replayed)",
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
+        # ORACLE AUTHORITY — re-fire the ORIGINAL oracle over this fresh evidence. Computed HERE (before the
+        # freshness credit) because F2 soundness depends on whether this trial FIRED (VF-1a.3).
+        fired = _fires(trial.oracle_context, adapter.bug_class, finding_id)
+        # FRESHNESS — the adapter's claimed level is CAPPED by what the core can verify. F2 is credited ONLY when
+        # the oracle FIRED and the fresh challenge is reflected IN the matched datastore-error LINE
+        # (``_challenge_in_firing_signature`` below) — the nonce came back through the SAME error channel the
+        # signal did, so F2 is "as attributable as the error_signature oracle's own firing" (NOT byte-unforgeable:
+        # a target that fabricates a matching error embedding the nonce is indistinguishable on the response
+        # channel — the deferred OOB/zkTLS frontier). A SILENT trial can NEVER earn F2: with no firing signature,
+        # a challenge in the response is mere reflection, which an app or interposing edge can fake — so silence
+        # caps at F1 (target-responsive). A genuine remediation is therefore reported at F1, and a verifier that
+        # demands F2 for a REMEDIATION correctly gets INCONCLUSIVE: once the sink is fixed its traversal is
+        # unprovable by reflection (a fundamental limit, not a downgrade; ruling out a payload-discriminating WAF
+        # or a request-echoing edge for the silent case needs a matched-decoy differential or the OOB Tier-2,
+        # both deferred). The F2 case that IS sound — a live, fresh, sink-reflected EXPLOIT — is earned by the
+        # STILL_VULNERABLE branch below.
         verified_level = int(trial.freshness_level)
-        if verified_level >= Freshness.F2_PATH_TRAVERSED and not _challenge_in_judged_evidence(
-                challenge, trial.oracle_context):
-            verified_level = Freshness.F1_TARGET_ECHOES   # claimed F2+ but the challenge is not in the JUDGED bytes
+        if verified_level >= Freshness.F2_PATH_TRAVERSED and not (
+                fired and _challenge_in_firing_signature(challenge, trial.oracle_context)):
+            verified_level = Freshness.F1_TARGET_ECHOES   # claimed F2+ but not reflected in the firing signature line
         if verified_level < eff_min_freshness:
             return inconclusive(Reason.INSUFFICIENT_FRESHNESS,
                                 f"verified F{verified_level} < required floor F{eff_min_freshness}",
                                 attempted=attempted, valid=valid, freshness=verified_level)
         achieved_freshness = max(achieved_freshness, verified_level)
-        # ORACLE AUTHORITY — re-fire the ORIGINAL oracle over this fresh evidence.
-        if _fires(trial.oracle_context, adapter.bug_class, finding_id):
+        if fired:
             cert = mk(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, freshness_challenge=challenge,
                       effective_authority_digest=auth.digest(), identity_samples=identity_samples,
                       trial_policy=_policy_dict(rp, eff_min_freshness),

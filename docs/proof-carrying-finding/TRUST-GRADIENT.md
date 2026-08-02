@@ -32,13 +32,24 @@ enforced by merged, adversarially-reviewed code:
 
 **Tier-1 honest limits (do not read past them):**
 
-- **Freshness is F1, not F2, for the current live adapter.** The freshness nonce rides a *separate* query
-  param, so an echo proves the target is *responsive* (F1), NOT that the *vulnerable code path* ran (F2). An
-  interposing edge / WAF block page / down-origin gateway that reflects the nonce can therefore yield
-  `REMEDIATED@F1`. A verifier that needs the exploit path exercised sets
-  `policy.minimum_freshness_level >= F2`, which the current adapter honestly cannot meet → `INCONCLUSIVE`
-  (never a falsely-strong `REMEDIATED`). Closing this (a LIVE positive control + nonce-through-the-exploit-path)
-  is the disclosed VF-1a.3 follow-up.
+- **Freshness is asymmetric between the two verdicts, and the asymmetry is FUNDAMENTAL (VF-1a.3).** For a
+  **STILL_VULNERABLE** finding the adapter reaches **F2**: with a `payload_template` the fresh challenge rides
+  the exploit payload and comes back reflected IN the datastore-error line the oracle matched — it traversed the
+  *same error channel the firing signal did*, so F2 is **as attributable as the error_signature oracle's own
+  firing** (`live_adapter.py` + the driver's `fired ∧ challenge-in-the-matched-error-line` gate, #202). It is
+  *not* byte-unforgeable — a target that fabricates a matching error embedding the nonce is indistinguishable on
+  the response channel; that (the OOB Tier-2 / zkTLS frontier) is where unforgeability lives. A target that
+  emits a static error banner and reflects the input on a *different* line does not earn F2 (capped to F1). For
+  a **REMEDIATED** finding F2 is *unattainable*: a fixed sink produces no signature, so a nonce in a silent
+  response got there by *reflection*, which an echoing app or an interposing edge can fake — the driver caps a
+  silent verdict at **F1**, and an F2-demanding verifier of a remediation gets `INCONCLUSIVE` (never a
+  falsely-strong `REMEDIATED@F2`). The remediation's control is now a **LIVE positive control** (a real gated
+  fetch this run, not just retained bytes), so it genuinely exercises the channel now.
+  **Residuals, disclosed:** an F1 remediation does not distinguish, from a real fix, (a) a *payload-discriminating
+  WAF* (blocks the exploit's metacharacters, passes a benign marker), nor (b) a *param-stripping edge fronting a
+  request-echoing gateway* (a reflected benign marker can come from the edge, not the app — so
+  `injectable_param_live` is informational, never a closure). Both need a matched-decoy differential or the OOB
+  Tier-2, deferred.
 - **Target-binding is TLS-SPKI-strong only for HTTPS; a plain-HTTP target binds host-only.** The strong,
   non-transplantable form of "bound to THE target" (the SPKI row above) requires an HTTPS handshake:
   `identity_sample` records `tls_spki_sha256` *only* when the scheme is `https`, and for an HTTP target (or a
@@ -94,8 +105,12 @@ These are honestly out of scope today; VIGIL does not claim them:
 - **A hard, external time anchor.** An RFC3161 TSA / OpenTimestamps proof over the checkpoint hash would give a
   single trusted "no-later-than T" independent of witness honesty. It is a designed, deferred hook
   (`WITNESS-TRUST.md` §5); until built, the time bound is the quorum-median described above.
-- **F2+ freshness in the live adapter** (nonce through the exploit path + a live positive control) — the
-  VF-1a.3 follow-up noted under Tier 1.
+- **Distinguishing an interposer from a real fix for the SILENT case.** VF-1a.3 delivered F2 for the firing
+  case and a genuinely-live positive control; what remains for a REMEDIATED verdict is telling a real fix apart
+  from (a) a payload-discriminating WAF that blocks the exploit's metacharacters while passing a benign marker,
+  and (b) a param-stripping edge fronting a request-echoing gateway. Both need a matched-decoy differential (a
+  metachar-identical-but-null control) or the OOB Tier-2 — deferred, and honestly reported as the F1-remediation
+  residuals under Tier 1 (never a falsely-strong verdict: an F2-demanding verifier gets `INCONCLUSIVE`).
 
 ---
 

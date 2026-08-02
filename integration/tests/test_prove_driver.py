@@ -128,22 +128,44 @@ def _run(adapter, *, policy=ProvePolicy(), revoked_ids=frozenset(), requested_mi
 
 
 # ============================ happy paths ============================
-def test_remediated_with_verified_f2_and_reexecuting_cert():
+def test_remediated_silent_caps_at_f1_reflection_is_not_sink_traversal():
+    # VF-1a.3 corrected semantics: the default FakeAdapter REFLECTS the fresh nonce into the SILENT response
+    # body (embed_challenge=True) — yet a remediation caps at F1, because reflection into a silent response is
+    # not sink-traversal (an echoing app / interposing edge can produce it). F2 is reserved for a FIRING trial.
     out = _run(FakeAdapter())
     assert out.state == State.REMEDIATED, out
     assert out.reason_code == Reason.ORACLE_SILENT_ACROSS_TRIALS
-    assert out.trials_valid == 3 and out.achieved_freshness == Freshness.F2_PATH_TRAVERSED
+    assert out.trials_valid == 3 and out.achieved_freshness == Freshness.F1_TARGET_ECHOES
     ok, reason = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
     assert ok, reason
     assert "cross-bound" in reason
     assert out.certificate["evidence"]["embedded_remediation_cert"] is not None
 
 
-def test_still_vulnerable_when_oracle_fires():
+def test_remediated_under_f2_floor_is_inconclusive_sink_traversal_unprovable():
+    # VF-1a.3: a verifier that DEMANDS F2 for a remediation gets INCONCLUSIVE — honestly, because sink-traversal
+    # is unprovable once the sink is fixed (the default FakeAdapter reflects the nonce into the silent body, but
+    # that only earns F1). This is the corrected behaviour: never a falsely-strong REMEDIATED@F2.
+    out = _run(FakeAdapter(), policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
+
+
+def test_still_vulnerable_reaches_genuine_f2_via_firing_sink():
+    # VF-1a.3: the F2 case that IS sound — a FIRING trial whose oracle-judged bytes embed the fresh nonce (it
+    # came back INSIDE the sink's firing signature) → genuine F2 (the vulnerable path ran this run).
     out = _run(FakeAdapter(trial_fires=True))
     assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED
+    assert out.achieved_freshness == Freshness.F2_PATH_TRAVERSED
     ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
     assert ok and out.certificate["verdict"]["oracle_fired"] is True
+
+
+def test_still_vulnerable_firing_without_nonce_in_judged_bytes_is_f1():
+    # A firing trial whose fresh nonce is NOT in the judged bytes (no payload_template echo) → STILL_VULNERABLE
+    # but only F1 (can't prove THIS nonce traversed the sink) — F2 needs the nonce inside the firing signature.
+    out = _run(FakeAdapter(trial_fires=True, embed_challenge=False))
+    assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED
+    assert out.achieved_freshness == Freshness.F1_TARGET_ECHOES
 
 
 def test_bearer_capability_allowed_only_when_pop_not_required():
@@ -307,8 +329,9 @@ def test_inconclusive_insufficient_freshness_level():
 
 
 def test_inconclusive_adapter_lies_about_freshness_core_caps_it():
-    # adapter CLAIMS F2 but does NOT embed the challenge → the core verifies from the bytes and caps to F1 →
-    # under an F2 floor this is INSUFFICIENT (the adapter's self-report is not trusted).
+    # adapter CLAIMS F2 but the run cannot earn it — the core caps from the bytes, never the self-report. Here
+    # the trial is silent AND the challenge is not embedded, so F2 fails on BOTH counts (silence can't be F2,
+    # and the nonce isn't in the judged bytes) → capped to F1 → INSUFFICIENT under an F2 floor.
     out = _run(FakeAdapter(trial_freshness=Freshness.F2_PATH_TRAVERSED, embed_challenge=False),
                policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
