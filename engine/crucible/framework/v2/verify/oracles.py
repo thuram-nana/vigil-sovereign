@@ -1453,8 +1453,9 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
     OUT-OF-BAND by the verifier (never read from the producer-controlled context) — to demand an F4 proof: a
     token-matched hit ALSO requires a collector signature that verifies against that pinned key. A fully-
     dishonest producer who fabricates the whole context cannot forge a receipt that verifies under a pinned key
-    it does not hold → not fired. When ``collector_pubkey`` is None the oracle stays at the VF-2a (token-only)
-    tier, whose honest limit is that it does NOT defeat a fully-dishonest producer."""
+    it does not hold → not fired. ``collector_pubkey=None`` intentionally stays at the VF-2a (token-only) tier,
+    whose honest limit is that it does NOT defeat a fully-dishonest producer; an EMPTY/blank ``collector_pubkey``
+    means F4 was requested with a bad key → fail-closed (NOT a silent drop to token-only)."""
     from .oob import verify_oob_receipt   # local import keeps the module import graph acyclic
 
     hit_list = list(hits or [])
@@ -1481,9 +1482,17 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
             observed={"hit_count": len(hit_list), "matched": 0, "token_verified": False})
 
     receipt_verified = False
-    if collector_pubkey:
-        # VF-2b F4: require an INDEPENDENT collector receipt over a token-matched hit, checked against the
-        # caller-PINNED collector key. Fail-closed: a token match without a verifying receipt does NOT fire.
+    if collector_pubkey is not None:
+        # VF-2b F4 requested (collector_pubkey passed, even if blank). An EMPTY/blank pin is a caller error, not
+        # "F4 not requested" — fail-closed (symmetric with verify_oob_receipt), never a silent drop to the
+        # token-only tier. Pass collector_pubkey=None to intentionally stay at the VF-2a token-only tier.
+        if not str(collector_pubkey).strip():
+            return OracleSignal(
+                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                evidence="F4 (collector receipt) requested but the pinned collector key is empty (fail-closed)",
+                observed={"hit_count": len(hit_list), "token_verified": True, "receipt_verified": False})
+        # require an INDEPENDENT collector receipt over a token-matched hit, checked against the caller-PINNED
+        # collector key. Fail-closed: a token match without a verifying receipt does NOT fire.
         matched = [h for h in matched if verify_oob_receipt(h, collector_pubkey=collector_pubkey)]
         if not matched:
             return OracleSignal(

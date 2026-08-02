@@ -160,3 +160,20 @@ def test_oracle_f4_requires_a_receipt_verifying_against_the_pinned_collector_key
     # VF-2a tier still available (no collector pin) — token-only fire, receipt not claimed
     tier = oob_callback_oracle(hits, token)
     assert tier.fired and tier.observed.get("receipt_verified") is False
+
+
+def test_oracle_empty_pinned_key_is_failclosed_not_token_only() -> None:
+    # LOW-1 regression: passing an EMPTY collector pin means F4 was REQUESTED with a bad key → fail-closed,
+    # NOT a silent drop to the token-only tier. (collector_pubkey=None is the intentional VF-2a tier.)
+    from vigil_core import generate_keypair
+
+    from ..oracles import oob_callback_oracle
+    kp = generate_keypair()
+    with OOBReceiver(collector_keypair=kp) as oob:
+        token, url = oob.register_token()
+        _get(url)
+        hits = [h.model_dump() for h in oob.poll(token)]
+    assert not oob_callback_oracle(hits, token, "").fired          # empty pin → fail-closed
+    assert not oob_callback_oracle(hits, token, "   ").fired        # blank pin → fail-closed
+    assert oob_callback_oracle(hits, token, None).fired             # None → intentional VF-2a token-only tier
+    assert oob_callback_oracle(hits, token, kp.public_key_b64).fired  # real pin → F4
