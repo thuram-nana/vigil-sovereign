@@ -564,17 +564,19 @@ def prove_remediation(
         # ORACLE AUTHORITY — re-fire the ORIGINAL oracle over this fresh evidence. Computed HERE (before the
         # freshness credit) because F2 soundness depends on whether this trial FIRED (VF-1a.3).
         fired = _fires(trial.oracle_context, adapter.bug_class, finding_id)
-        # FRESHNESS — the adapter's claimed level is CAPPED by what the core can verify. F2 (the challenge
-        # provably traversed the VULNERABLE code path) is credited ONLY when the oracle FIRED over judged bytes
-        # that contain the fresh challenge: a firing signature (e.g. a DB error wrapping the challenge) is
-        # unforgeable proof the sink processed it THIS run. A SILENT trial can NEVER earn F2 from reflection —
-        # an app or interposing edge that merely echoes the injected input back would otherwise fake
-        # sink-traversal — so silence caps at F1 (target-responsive). A genuine remediation is therefore
-        # reported at F1, and a verifier that demands F2 for a REMEDIATION correctly gets INCONCLUSIVE: once the
-        # sink is fixed its traversal is unprovable by reflection (a fundamental limit, not a downgrade; ruling
-        # out a payload-discriminating edge for the silent case needs a matched-decoy differential or the OOB
-        # Tier-2, both deferred). The F2 case that IS sound — a live, fresh, sink-traversed EXPLOIT — is earned
-        # by the STILL_VULNERABLE branch below.
+        # FRESHNESS — the adapter's claimed level is CAPPED by what the core can verify. F2 is credited ONLY when
+        # the oracle FIRED and the fresh challenge is reflected IN the matched datastore-error LINE
+        # (``_challenge_in_firing_signature`` below) — the nonce came back through the SAME error channel the
+        # signal did, so F2 is "as attributable as the error_signature oracle's own firing" (NOT byte-unforgeable:
+        # a target that fabricates a matching error embedding the nonce is indistinguishable on the response
+        # channel — the deferred OOB/zkTLS frontier). A SILENT trial can NEVER earn F2: with no firing signature,
+        # a challenge in the response is mere reflection, which an app or interposing edge can fake — so silence
+        # caps at F1 (target-responsive). A genuine remediation is therefore reported at F1, and a verifier that
+        # demands F2 for a REMEDIATION correctly gets INCONCLUSIVE: once the sink is fixed its traversal is
+        # unprovable by reflection (a fundamental limit, not a downgrade; ruling out a payload-discriminating WAF
+        # or a request-echoing edge for the silent case needs a matched-decoy differential or the OOB Tier-2,
+        # both deferred). The F2 case that IS sound — a live, fresh, sink-reflected EXPLOIT — is earned by the
+        # STILL_VULNERABLE branch below.
         verified_level = int(trial.freshness_level)
         if verified_level >= Freshness.F2_PATH_TRAVERSED and not (
                 fired and _challenge_in_firing_signature(challenge, trial.oracle_context)):
