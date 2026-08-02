@@ -277,7 +277,9 @@ class OOBCheck:
         while not hits and time.monotonic() < deadline:
             time.sleep(self.poll_interval)
             hits = oob.poll(token)
-        return FindingContext.from_oob(hits, bug_class=self.bug_class)
+        # VF-2a: retain the REGISTERED per-finding token so the oracle fires only for a callback that carried
+        # it (live AND on offline re-verify) — a fabricated/unrelated hit no longer confirms.
+        return FindingContext.from_oob(hits, bug_class=self.bug_class, expected_token=token)
 
 
 @runtime_checkable

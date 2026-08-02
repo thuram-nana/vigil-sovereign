@@ -38,7 +38,7 @@ observed)`.
 | `achieved_state_oracle(expected_state, observed_state)` | IDOR / BOLA / mass-assignment / privesc | a state the attacker should not reach became observable |
 | `side_effect_oracle(marker, observed_sink)` | XSS / SSTI / path-traversal / error-based | a unique canary reached a sink it should never touch |
 | `sanitizer_signal_oracle(process_output)` | memory-corruption / crash | ASAN/UBSAN/MSAN/TSAN, panic, abort, traceback markers |
-| `oob_callback_oracle(hits)` | SSRF / blind XXE / OOB SQLi / deserialization | an inbound interaction landed on a unique correlation token |
+| `oob_callback_oracle(hits, expected_token)` | SSRF / blind XXE / OOB SQLi / deserialization | an inbound interaction carried the finding's REGISTERED per-finding token (fail-closed without it) |
 
 Confidence inside an oracle combines corroborating dimensions with a
 noisy-OR and is clamped to 0.99 — a deterministic oracle never claims
@@ -57,7 +57,7 @@ from framework.v2.verify import OOBReceiver, oob_callback_oracle
 with OOBReceiver() as oob:
     token, url = oob.register_token()     # hand `url` to a probe
     # ... something blind fetches `url` ...
-    signal = oob_callback_oracle(oob.poll(token))
+    signal = oob_callback_oracle(oob.poll(token), token)   # the callback must carry the registered token
     assert signal.fired
 ```
 

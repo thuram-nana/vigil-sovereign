@@ -197,12 +197,14 @@ def test_sanitizer_strongest_match_wins() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_oob_callback_fires_on_hit() -> None:
-    hits = [{"method": "GET", "path": "/tok/x", "client_ip": "127.0.0.1"}]
-    sig = oob_callback_oracle(hits)
+def test_oob_callback_fires_only_on_token_verified_hit() -> None:
+    # VF-2a: a hit carrying the REGISTERED per-finding token fires; the token comparison is constant-time.
+    hits = [{"token": "sekret-tok", "method": "GET", "path": "/sekret-tok/x", "client_ip": "127.0.0.1"}]
+    sig = oob_callback_oracle(hits, expected_token="sekret-tok")
     assert sig.fired
     assert sig.kind is OracleKind.OOB_CALLBACK
     assert sig.confidence >= 0.9
+    assert sig.observed.get("token_verified") is True
 
 
 def test_oob_callback_no_fire_on_empty() -> None:
@@ -210,3 +212,20 @@ def test_oob_callback_no_fire_on_empty() -> None:
     assert not sig.fired
     assert sig.confidence == 0.0
     assert oob_callback_oracle(None).fired is False
+
+
+def test_oob_callback_fail_closed_without_expected_token() -> None:
+    # VF-2a: a callback we cannot tie to a registered per-finding token is NOT trusted (fail-closed) — this is
+    # the old "fires on ANY non-empty hits" weakness, now closed.
+    hits = [{"token": "whatever", "method": "GET", "path": "/whatever/x", "client_ip": "10.0.0.9"}]
+    assert oob_callback_oracle(hits).fired is False                       # no expected_token → fail-closed
+    assert oob_callback_oracle(hits, expected_token="").fired is False    # empty expected_token → fail-closed
+
+
+def test_oob_callback_no_fire_on_wrong_or_missing_hit_token() -> None:
+    # a forged/unrelated callback with the WRONG token, or no token at all, must NOT fire even when an
+    # expected_token is registered.
+    assert oob_callback_oracle(
+        [{"token": "attacker-tok", "method": "GET", "path": "/x"}], expected_token="real-tok").fired is False
+    assert oob_callback_oracle(
+        [{"method": "GET", "path": "/x", "client_ip": "1.2.3.4"}], expected_token="real-tok").fired is False

@@ -124,9 +124,20 @@ def test_confirm_ssrf_via_real_oob_callback() -> None:
         result = OracleVerifier().confirm({
             "bug_class": "ssrf",
             "oob_hits": oob.poll(token),
+            "oob_token": token,   # VF-2a: the context must carry the REGISTERED token for the oracle to fire
         })
     assert result.confirmed
     assert result.confirming_signals[0].kind is OracleKind.OOB_CALLBACK
+
+
+def test_confirm_ssrf_refused_without_registered_token() -> None:
+    # VF-2a: the SAME real callback WITHOUT the registered token on the context does NOT confirm (fail-closed)
+    # — the old "fires on any oob_hits" weakness is closed.
+    with OOBReceiver() as oob:
+        token, url = oob.register_token()
+        _get(url)
+        result = OracleVerifier().confirm({"bug_class": "ssrf", "oob_hits": oob.poll(token)})
+    assert not result.confirmed
 
 
 # ---------------------------------------------------------------------------
