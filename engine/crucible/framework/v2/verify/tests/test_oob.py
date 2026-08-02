@@ -93,3 +93,70 @@ def test_server_stops_cleanly() -> None:
     # After stop, accessing the port raises rather than silently listening.
     with pytest.raises(RuntimeError):
         oob.register_token()
+
+
+# ============================ VF-2b: the independent, receipt-signing collector ============================
+def test_collector_signs_receipts_that_verify_against_its_pinned_key() -> None:
+    from vigil_core import generate_keypair
+
+    from ..oob import verify_oob_receipt
+    kp, attacker = generate_keypair(), generate_keypair()
+    with OOBReceiver(collector_keypair=kp) as oob:
+        assert oob.collector_pubkey == kp.public_key_b64
+        token, url = oob.register_token()
+        _get(url)  # a real inbound loopback interaction the collector observes + signs
+        hits = [h.model_dump() for h in oob.poll(token)]
+        assert hits and hits[0]["collector_sig"]                       # the collector signed a receipt
+        assert verify_oob_receipt(hits[0], collector_pubkey=kp.public_key_b64)          # verifies vs its key
+        assert not verify_oob_receipt(hits[0], collector_pubkey=attacker.public_key_b64)  # not vs another key
+        assert not verify_oob_receipt(hits[0], collector_pubkey="")                     # empty pin → fail-closed
+
+
+def test_receiver_without_collector_key_emits_no_receipt() -> None:
+    from ..oob import verify_oob_receipt
+    with OOBReceiver() as oob:            # no collector key → VF-2a tier only
+        token, url = oob.register_token()
+        _get(url)
+        hits = [h.model_dump() for h in oob.poll(token)]
+        assert hits and hits[0]["collector_sig"] == ""
+        assert oob.collector_pubkey is None
+        assert not verify_oob_receipt(hits[0], collector_pubkey="anything")
+
+
+def test_tampered_receipt_core_fails_verification() -> None:
+    from vigil_core import generate_keypair
+
+    from ..oob import verify_oob_receipt
+    kp = generate_keypair()
+    with OOBReceiver(collector_keypair=kp) as oob:
+        token, url = oob.register_token()
+        _get(url)
+        hit = oob.poll(token)[0].model_dump()
+    assert verify_oob_receipt(hit, collector_pubkey=kp.public_key_b64)
+    hit["client_ip"] = "9.9.9.9"          # edit a signed receipt field after the fact
+    assert not verify_oob_receipt(hit, collector_pubkey=kp.public_key_b64)
+
+
+def test_oracle_f4_requires_a_receipt_verifying_against_the_pinned_collector_key() -> None:
+    # The end-to-end F4 guarantee: a fully-dishonest producer who fabricates the whole context cannot make the
+    # oracle fire against a collector key PINNED out-of-band that it does not hold.
+    from vigil_core import generate_keypair
+
+    from ..oracles import oob_callback_oracle
+    kp, attacker = generate_keypair(), generate_keypair()
+    with OOBReceiver(collector_keypair=kp) as oob:
+        token, url = oob.register_token()
+        _get(url)
+        hits = [h.model_dump() for h in oob.poll(token)]
+    # real receipt + real pinned key → F4 fired
+    sig = oob_callback_oracle(hits, token, kp.public_key_b64)
+    assert sig.fired and sig.observed.get("receipt_verified") is True
+    # real receipt but WRONG pinned key (producer substituted its own) → not fired
+    assert not oob_callback_oracle(hits, token, attacker.public_key_b64).fired
+    # fabricated hit (right token, made-up receipt, no collector key) vs the real pinned key → not fired
+    forged = [{"token": token, "method": "GET", "path": "/" + token, "client_ip": "1.2.3.4",
+               "received_at": 1.0, "collector_sig": "AAAA"}]
+    assert not oob_callback_oracle(forged, token, kp.public_key_b64).fired
+    # VF-2a tier still available (no collector pin) — token-only fire, receipt not claimed
+    tier = oob_callback_oracle(hits, token)
+    assert tier.fired and tier.observed.get("receipt_verified") is False

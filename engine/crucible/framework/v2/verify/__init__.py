@@ -29,7 +29,7 @@ from .models import (
     OracleSignal,
     VerificationResult,
 )
-from .oob import OOBHit, OOBReceiver
+from .oob import OOBHit, OOBReceiver, sign_oob_receipt, verify_oob_receipt
 from .cicd_posture import (
     cicd_posture_context,
     confirm_cicd_posture,
@@ -196,6 +196,8 @@ __all__ = [
     # oob
     "OOBReceiver",
     "OOBHit",
+    "sign_oob_receipt",
+    "verify_oob_receipt",
     # verifier
     "OracleVerifier",
     "HIGH_CONFIDENCE",
