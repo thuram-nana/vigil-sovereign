@@ -341,7 +341,10 @@ class LiveHttpAdapter:
         wallclock/rng)."""
         base = self.base_url.rstrip("/")
         path = "/" + self.endpoint_path.lstrip("/")
-        param_value = self.payload_template.format(challenge=challenge) if self.payload_template else self.payload
+        # str.replace, NOT str.format: a real exploit payload may contain literal braces (JSON, ${...}); format()
+        # would raise/misparse them. replace substitutes ONLY the {challenge} slot the __post_init__ check requires.
+        param_value = (self.payload_template.replace("{challenge}", challenge)
+                       if self.payload_template else self.payload)
         query = urlencode(sorted({self.param: param_value, self.nonce_param: challenge}.items()))
         return f"{base}{path}?{query}"
 
