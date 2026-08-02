@@ -39,15 +39,27 @@ The signal is the **boolean differential** already computed in `framework/v2/ver
   **SPRT** that terminates in one of THREE outcomes: `confirm`, `refute`, or `inconclusive` (no boundary
   reached). The second half of the per-round signal is a genuine per-round *dynamic-page control*.
 
-**Unforgeable against whom — precisely.** An interposer (WAF/CDN/cache/edge) that **does not execute the
-injection** cannot produce the differential **only if the discriminating clause is DATA-DEPENDENT** — i.e. its
-truth hinges on a predicate over the origin's own data that the interposer cannot evaluate without querying the
-origin. A *constant* tautology (`'c'='c'` vs `'c'='cx'`) is **forgeable**: any interposer that parses SQL — as
-most commercial WAFs do, to detect injection — can evaluate the trailing constant itself and fabricate a
-differential. Therefore §3 uses data-dependent clauses. Even so, the property is bounded: it is unforgeable by
-an interposer that does not *execute the injection against the origin's data*; it is **NOT** producer-unforgeable
-(a producer fabricating the origin's bytes is the OOB Tier-2 / zkTLS frontier, §7), and it does **not** defeat a
-*sanitizing* interposer (§1 a-sanitize), which lets the probe reach the origin but as inert data.
+**What an interposer can and cannot forge — precisely (and it is NOT "cannot forge the differential").** Over
+plaintext HTTP the three probes are always *lexically separable* — `true` and `false_a` must differ in bytes to
+carry opposite booleans, and `false_a`/`false_b` differ only in the inert marker. So a **non-executing lexical
+interposer can fabricate a firing** by partitioning the probes on surface form (return X for `true`, Y for both
+`false`s) with zero origin queries. Data-dependence does **not** prevent this (a *constant* tautology is merely
+even easier — a SQL-parsing WAF evaluates it directly). The boolean firing is therefore **not
+interposer-unforgeable**. What data-dependence and the oracle actually buy is bounded and *one-directional*:
+
+  * a **fabricated firing only ever OVER-REPORTS STILL_VULNERABLE** — the conservative "go investigate" verdict,
+    never a false all-clear. Suppressing the signal to force a false REMEDIATED is the separately-disclosed
+    sanitizing / cache case (§7), not something this forgery adds.
+  * a **genuine firing reflects the origin's own data** (the data-dependent predicate), so a *real* differential
+    is real evidence the sink executed. The channel simply cannot tell a genuine firing from a lexically-forged
+    one from the response bytes alone, and so must treat STILL_VULNERABLE as *"the origin executes the injection
+    OR an interposer is fabricating a differential — either way, not remediated,"* never as proof-of-vuln.
+
+The property is thus: **unforgeable in the REMEDIATED direction only up to the disclosed §7 residuals**, and in
+the STILL_VULNERABLE direction it is a safe over-approximation, not an unforgeable proof. It is emphatically
+**NOT** producer-unforgeable (a producer fabricating the origin's bytes is the OOB Tier-2 / zkTLS frontier, §7),
+and does **not** defeat a *sanitizing* interposer (§1 a-sanitize), which lets the probe reach the origin as inert
+data.
 
 ## 3. The matched-decoy triple (+ baseline), with DATA-DEPENDENT clauses
 
@@ -62,10 +74,11 @@ marker (never as the discriminating predicate):
 | `false_b` | `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c2>` (FALSE, different marker) | full exploit metachars | the dynamic-page control twin |
 
 `true`/`false_a`/`false_b` are **metacharacter-identical in class** (all carry `'`, `AND`, `SELECT`, `--`), so a
-content-inspecting WAF that blocks one blocks all — the matched decoy. They differ only in a **data-dependent
-predicate** the origin's DB must evaluate, so a non-executing interposer cannot craft the true/false split
-(HIGH-1). The exact predicate is per-DB-family and is an implementation concern; the design constraint is only
-that it be data-dependent and that `<c>` never be the thing that flips the boolean.
+content-inspecting WAF that blocks one blocks all — the matched decoy. They differ in a **data-dependent
+predicate** the origin's DB must evaluate, so a *genuine* firing reflects origin data. This does **not** stop a
+non-executing interposer from *lexically* fabricating a firing (§2) — but a fabricated firing only over-reports
+STILL_VULNERABLE, never REMEDIATED. The exact predicate is per-DB-family and is an implementation concern; the
+design constraint is only that it be data-dependent and that `<c>` never be the thing that flips the boolean.
 
 ## 4. The four-way attribution (the state machine)
 
@@ -73,8 +86,10 @@ Given the live responses, adjudicated by the **existing** oracles (never a new j
 scoped **per comparison**:
 
 1. **`boolean_inference_oracle` returns `decision == "confirm"` (FIRES)** → the sink executes the injection this
-   run → **STILL_VULNERABLE**. The boolean-signal comparison (`true` vs `false`) MUST use a **lexical-sensitive**
-   discriminator (a real injection may change only reflected *text*, invisible to `status`+`structural` alone).
+   run **OR** an interposer is lexically fabricating the differential (§2) → **STILL_VULNERABLE** (a safe
+   over-approximation — "not remediated, investigate", never a false all-clear). The boolean-signal comparison
+   (`true` vs `false`) MUST use a **lexical-sensitive** discriminator (a real injection may change only reflected
+   *text*, invisible to `status`+`structural` alone).
 
 2. **`decision == "refute"` (DECISIVELY indistinguishable) *and* the metachar probes REACHED THE ORIGIN** →
    **REMEDIATED**. "Reached the origin" is the WAF-closure test:
@@ -202,7 +217,9 @@ For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traver
 > A differential-channel REMEDIATED means: under the recorded authorization/identity/freshness, a
 > metacharacter-bearing **data-dependent** boolean pair drew a **decisively indistinguishable** (SPRT-refuted)
 > response and a baseline-shaped 200 came back (`origin_reached`) — so a **blocking** content-discriminating WAF
-> is ruled out and the interposer-forgeable-differential is ruled out, and the injection no longer executes at
-> the sink **as observed through this edge**. It does **not** rule out an in-flight **sanitizing** interposer, an
-> edge that **strips the parameter**, a structurally-matched 200 block page, or a producer that fabricates the
-> origin's bytes — all reported honestly, none presented as a clean code fix.
+> is ruled out, and the injection no longer executes at the sink **as observed through this edge**. It does
+> **not** rule out an in-flight **sanitizing** interposer, an edge that **strips the parameter**, a
+> structurally-matched 200 block page, or a producer that fabricates the origin's bytes — all reported honestly,
+> none presented as a clean code fix. (The *complementary* STILL_VULNERABLE verdict is a safe over-approximation,
+> not an unforgeable proof: a non-executing interposer can lexically fabricate a firing — §2 — but only ever
+> over-reports "not remediated," never a false all-clear.)
