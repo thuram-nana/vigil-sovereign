@@ -141,6 +141,14 @@ _CERTIFIABLE_ORACLE_KINDS = frozenset({
     "dom_execution", "evaluation", "achieved_state", "predicate", "oob_callback",
     "sql_injection_breakout", "command_injection_breakout", "nosql_injection_breakout",
 })
+# LOAD-BEARING INVARIANTS these entries rest on (verified by round-5 adversarial audit; preserve them):
+#  (1) differential_response is here only because NO certifiable class attaches a LATENCY discriminator — every
+#      certifiable producer uses content dims (status/length/lexical); the two latency-mode producers hard-code
+#      the guarded `request_smuggling` class. If a future producer attaches a latency discriminator to a
+#      certifiable class, silence becomes unsound — exclude latency-mode differential then.
+#  (2) boolean_inference & oob_callback silence is sound ONLY because the mandatory POSITIVE-CONTROL fire proves
+#      the round/callback budget is adequate before any silence is credited. Do NOT relax the positive-control
+#      gate for these families.
 
 # Non-deterministically-REPRODUCIBLE phenomena: the oracle is deterministic given the observation, but a present
 # vuln may not manifest on a given drive (connection-state desync / race window). Silence-across-N is unsound.
