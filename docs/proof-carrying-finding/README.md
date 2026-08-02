@@ -119,10 +119,13 @@ protocol is the textbook "don't roll your own," so external review is warranted.
   producer, OOB classes: token + independent signed collector receipt), the honest limits of each, and the
   deferred frontier (zkTLS / external time anchor / F2). The end-to-end demonstration is
   `integration/tests/test_vf_end_to_end.py`; the standalone verifier is `verify_vf.py`.
-- **`DIFFERENTIAL-REMEDIATION.md`** — **design-first (not yet built).** The plan to close the one remaining
-  disclosed silent-case residual — a *payload-discriminating WAF* — with a **matched-decoy differential**: a
-  metacharacter-identical boolean true/false pair a content-inspecting WAF cannot treat differently, judged by
-  the existing interposer-unforgeable `boolean_inference_oracle`, plus a mandatory baseline WAF-closure test. It
-  states the soundness argument, the three-way state machine (STILL_VULNERABLE / REMEDIATED+`origin_reached` /
-  INCONCLUSIVE), the adversarial test plan, and what it still does **not** close (a param-stripping edge =
-  mitigated-by-edge; producer byte-forgery = the OOB/zkTLS frontier).
+- **`DIFFERENTIAL-REMEDIATION.md`** — **design-first (not yet built; revised once after adversarial review).**
+  The plan to *narrow* the silent-case interposer residual with a **matched-decoy differential**: a
+  metacharacter-identical, **data-dependent** boolean true/false pair a content-inspecting WAF cannot treat
+  differently, judged by the existing `boolean_inference_oracle` (unforgeable by an interposer that does not
+  execute the injection), plus a mandatory baseline WAF-closure test and a **decisive-SPRT-refute** requirement.
+  It closes a *blocking* payload-discriminating WAF and states, honestly, what it does **not** close — an
+  in-flight **sanitizing** interposer (the red-pen's false-REMEDIATED BLOCK), a param-stripping edge, a
+  structurally-matched 200 block page, and producer byte-forgery (OOB/zkTLS frontier). Records the four-way
+  state machine (STILL_VULNERABLE / REMEDIATED+`origin_reached` / INTERPOSER_SUSPECTED / INSUFFICIENT_ROUNDS),
+  the freshness caveat (F2 needs a new verifier), and the full adversarial corpus.

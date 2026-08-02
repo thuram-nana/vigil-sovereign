@@ -1,176 +1,208 @@
-# Differential remediation — closing the payload-discriminating-WAF residual (design-first)
+# Differential remediation — narrowing the silent-case interposer residual (design-first)
 
-> **Status: design, not yet built.** This is the reviewed security-engineering design for the one remaining
-> disclosed residual of the SILENT (REMEDIATED) case in `TRUST-GRADIENT.md` — a *payload-discriminating WAF*
-> that blocks the exploit's metacharacters while a real fix and a WAF-block look identical at F1. It is written
-> to be reviewed and independently checked **before** the adapter is built, exactly as `REMEDIATION-SEMANTICS.md`
-> / `PROTOCOL.md` / `WITNESS-TRUST.md` preceded their drivers. It grounds every claim in primitives that already
-> exist — no new oracle is invented.
+> **Status: design, not yet built — and revised once already after adversarial review.** This is the reviewed
+> security-engineering design for part of the disclosed SILENT (REMEDIATED) residual in `TRUST-GRADIENT.md`. A
+> first draft over-claimed; a red-pen pass found a false-REMEDIATED counterexample (an in-flight *sanitizing*
+> interposer) and a forgeable clause construction. This revision states the **narrow** adversary it actually
+> defeats and discloses the ones it does not. It is written to be reviewed and independently checked **before**
+> the adapter is built, as `REMEDIATION-SEMANTICS.md` / `PROTOCOL.md` / `WITNESS-TRUST.md` preceded their
+> drivers. It invents no new oracle, but it DOES require one new freshness verifier (§5) — called out honestly.
 
-## 1. The residual, precisely
+## 1. The residual, precisely — and split into sub-cases
 
-VF-1a.3 (`#202`) made the error-signature remediation honest: a REMEDIATED verdict is reported at **F1**, and a
-verifier that demands F2 gets `INCONCLUSIVE`. But F1 does not distinguish, from a real fix:
+VF-1a.3 (`#202`) made the error-signature remediation honest: a REMEDIATED verdict is F1, and an F2-demanding
+verifier gets `INCONCLUSIVE`. But F1 cannot distinguish a real fix from an in-flight mitigation that neutralizes
+the exploit while leaving the origin vulnerable-if-reached-directly. That "in-flight mitigation" is **not one
+residual but three**, and this design closes only the first:
 
-- **(a) a payload-discriminating WAF** — it blocks the exploit's metacharacters (`'`, `--`, `UNION`, …) while
-  passing a benign request. The exploit is then silent because it was *blocked*, not *fixed*; the live positive
-  control's benign marker sails through, so the run reads `REMEDIATED@F1` over a still-vulnerable origin.
-- **(b) a param-stripping edge fronting a request-echoing gateway** — treated separately in §7.
+- **(a-block) a *blocking/diverting* payload-discriminating WAF** — blocks the exploit's metacharacters (403, a
+  block page, a redirect). **This design closes it.**
+- **(a-sanitize) a *sanitizing/virtual-patching* interposer** — does NOT block; it escapes/strips the
+  metacharacters in-flight (a common ModSecurity/gateway transform), so the origin receives inert data and
+  answers normally. **This design does NOT close it** (§7) — it is a false-REMEDIATED source and must be
+  disclosed as mitigated-by-edge, exactly like (b).
+- **(b) a param-stripping edge** — drops the injectable param entirely (§7).
 
-This document closes **(a)**. The mechanism is a **matched decoy**: a probe that is *indistinguishable to a
-content-inspecting WAF* from the exploit, so the WAF cannot let one through while blocking the other, combined
-with a signal that **only an executing sink can produce** and **no interposer can forge**.
+The mechanism for (a-block) is a **matched decoy**: a probe *indistinguishable to a content-inspecting WAF* from
+the exploit, so the WAF cannot pass one while blocking the other, combined with a signal that **only an
+executing sink produces** and **an interposer that does not execute the injection cannot forge**.
 
-## 2. The interposer-unforgeable signal (already built)
+## 2. The signal, and the precise adversary it is unforgeable against
 
-The signal is the **boolean differential** the framework already computes in
-`framework/v2/verify/oracles.py`:
+The signal is the **boolean differential** already computed in `framework/v2/verify/oracles.py`:
 
 - `differential_response_oracle(baseline, mutated, discriminator)` — quantifies whether two responses differ
-  (status / length / lexical / structural / marker), with an `expect: "differ" | "same"` mode.
+  (dimensions `status`/`length`/`lexical`/`structural`/`marker`; `expect: "differ" | "same"`). Note the default
+  dimension set does **not** include `structural`; a caller must request dimensions explicitly (see §4).
 - `boolean_inference_oracle(probe_rounds, …)` — per round, the Bernoulli signal is
+  **(TRUE clause differs from FALSE clause) AND (the two FALSE clauses agree)**, accumulated under a Wald
+  **SPRT** that terminates in one of THREE outcomes: `confirm`, `refute`, or `inconclusive` (no boundary
+  reached). The second half of the per-round signal is a genuine per-round *dynamic-page control*.
 
-  > **(TRUE clause differs from FALSE clause)  AND  (the two FALSE clauses agree)**
+**Unforgeable against whom — precisely.** An interposer (WAF/CDN/cache/edge) that **does not execute the
+injection** cannot produce the differential **only if the discriminating clause is DATA-DEPENDENT** — i.e. its
+truth hinges on a predicate over the origin's own data that the interposer cannot evaluate without querying the
+origin. A *constant* tautology (`'c'='c'` vs `'c'='cx'`) is **forgeable**: any interposer that parses SQL — as
+most commercial WAFs do, to detect injection — can evaluate the trailing constant itself and fabricate a
+differential. Therefore §3 uses data-dependent clauses. Even so, the property is bounded: it is unforgeable by
+an interposer that does not *execute the injection against the origin's data*; it is **NOT** producer-unforgeable
+(a producer fabricating the origin's bytes is the OOB Tier-2 / zkTLS frontier, §7), and it does **not** defeat a
+*sanitizing* interposer (§1 a-sanitize), which lets the probe reach the origin but as inert data.
 
-  accumulated under a Wald **SPRT** (robust to caching / per-request tokens / dynamic pages). The first half is
-  the boolean signal; the second is a *dynamic-page control* — a page that simply changes every request trips
-  the control and cannot masquerade as a bug.
+## 3. The matched-decoy triple (+ baseline), with DATA-DEPENDENT clauses
 
-**Why an interposer cannot forge it.** A WAF, CDN, cache, or request-echoing gateway does not hold the origin's
-data and cannot evaluate an injected boolean clause against it. It therefore cannot produce a response that
-differs for `… AND 1=1` but is stable for two `… AND 1=2` variants. The boolean differential is, like the
-error-signature firing, **as attributable as the oracle itself** — not byte-unforgeable against a producer that
-fabricates the origin's data (that remains the OOB Tier-2 / zkTLS frontier, §7), but unforgeable against an
-*interposer* that cannot execute the injection. That is exactly the adversary residual (a) is about.
+Per round, through the **same injectable parameter**, carrying the run `challenge` only as an inert freshness
+marker (never as the discriminating predicate):
 
-## 3. The matched-decoy triple (+ baseline)
-
-Per round the differential adapter sends, through the **same injectable parameter**, carrying the run
-`challenge` in a data position:
-
-| probe | payload shape | metachar profile | purpose |
+| probe | clause shape (illustrative) | metachar profile | purpose |
 |---|---|---|---|
-| `baseline` | a benign value, NO injection metacharacters | none | what an un-WAF'd, inert-handled request looks like |
-| `true`  | `… ' AND '<c>'='<c>' -- ` (tautology, true) | full exploit metachars | the TRUE clause |
-| `false_a` | `… ' AND '<c>'='<c>x' -- ` (contradiction) | full exploit metachars | a FALSE clause |
-| `false_b` | `… ' AND '<c2>'='<c2>y' -- ` (contradiction, different literal) | full exploit metachars | the dynamic-page control twin |
+| `baseline` | benign value, NO metacharacters, carries `<c>` | none | the inert-handled / un-WAF'd response shape |
+| `true`  | `… ' AND (SELECT SUBSTR(@@version,1,1))>'' -- <c>` (a predicate TRUE on the live DB) | full exploit metachars | the TRUE clause — **data-dependent** |
+| `false_a` | `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c>` (same predicate, FALSE) | full exploit metachars | a FALSE clause — **data-dependent** |
+| `false_b` | `… ' AND (SELECT SUBSTR(@@version,1,1))>'~~~' -- <c2>` (FALSE, different marker) | full exploit metachars | the dynamic-page control twin |
 
-`true` / `false_a` / `false_b` are **metacharacter-identical in class** — a content-inspecting WAF that blocks
-one blocks all three (they all carry `'`, `AND`, `--`). This is the *matched decoy*: the WAF cannot pass the
-inert probes while blocking the exploit, because they are the same kind of payload.
+`true`/`false_a`/`false_b` are **metacharacter-identical in class** (all carry `'`, `AND`, `SELECT`, `--`), so a
+content-inspecting WAF that blocks one blocks all — the matched decoy. They differ only in a **data-dependent
+predicate** the origin's DB must evaluate, so a non-executing interposer cannot craft the true/false split
+(HIGH-1). The exact predicate is per-DB-family and is an implementation concern; the design constraint is only
+that it be data-dependent and that `<c>` never be the thing that flips the boolean.
 
-## 4. The three-way attribution (the state machine)
+## 4. The four-way attribution (the state machine)
 
-Given the four live responses, adjudicated by the **existing** oracles (never a new judgement):
+Given the live responses, adjudicated by the **existing** oracles (never a new judgement), with the discriminator
+scoped **per comparison**:
 
-1. **`boolean_inference_oracle([{true, false_a, false_b}, …])` FIRES** → the sink executes the injection this
-   run → **STILL_VULNERABLE**. Freshness: the challenge rides the clauses, so a firing over probes carrying the
-   fresh nonce is **F2** (the boolean sink behaviour was exercised this run), on the same "as-attributable-as-
-   the-oracle" footing VF-1a.3 established for the error channel.
+1. **`boolean_inference_oracle` returns `decision == "confirm"` (FIRES)** → the sink executes the injection this
+   run → **STILL_VULNERABLE**. The boolean-signal comparison (`true` vs `false`) MUST use a **lexical-sensitive**
+   discriminator (a real injection may change only reflected *text*, invisible to `status`+`structural` alone).
 
-2. **boolean SILENT *and* the metachar probes REACHED THE ORIGIN** → **REMEDIATED**. "Reached the origin" is the
-   WAF-closure test: `differential_response_oracle(baseline, false_a, expect="same")` must hold — the
-   metacharacter-bearing probe is handled like the benign baseline (a normal "no results" page), i.e. it was
-   **not** turned into a block page. Because the decoy is metachar-identical to the exploit, a WAF that would
-   block the exploit would also block `false_a` → it would differ from `baseline` → this test fails → we do
-   **not** mint REMEDIATED. So a silent-because-blocked path can no longer be read as a fix.
+2. **`decision == "refute"` (DECISIVELY indistinguishable) *and* the metachar probes REACHED THE ORIGIN** →
+   **REMEDIATED**. "Reached the origin" is the WAF-closure test:
+   `differential_response_oracle(baseline, false_a, discriminator={dimensions:[status,structural], expect:"same"})`
+   must hold — the metachar-bearing probe is handled like the benign baseline (a normal page), i.e. NOT turned
+   into a block page. Responses MUST carry a `status` (else that dimension is silently dropped and the test
+   weakens). Because the decoy is metachar-identical to the exploit, a WAF that would block the exploit blocks
+   `false_a` → it differs from `baseline` → this test fails → no REMEDIATED. **The cert records
+   `origin_reached: true`, meaning ONLY "a baseline-shaped 200 came back for a metachar payload" — it does NOT
+   mean the metacharacters reached the sink intact** (a sanitizer defeats that, §7).
 
-3. **boolean SILENT *and* the metachar probes were BLOCKED / diverted** (`false_a` differs from `baseline` in a
-   block-page way) → **INCONCLUSIVE** (`Reason.INTERPOSER_SUSPECTED`, new) — a WAF/edge is interposing; silence
-   is not attributable to a fix. Never a false REMEDIATED.
+3. **`decision == "refute"` *and* the metachar probes were BLOCKED/diverted** (`false_a` differs from
+   `baseline`) → **INCONCLUSIVE** (`Reason.INTERPOSER_SUSPECTED`, new) — a blocking WAF/edge is interposing.
 
-The positive control is unchanged in spirit: the **retained** vulnerable probe-rounds must still fire
-`boolean_inference_oracle` (harness capability), and the live control is a real fetch this run (VF-1a.3).
+4. **`decision == "inconclusive"` (SPRT reached no boundary)** → **INCONCLUSIVE** (`Reason.INSUFFICIENT_ROUNDS`)
+   — *absence of evidence is not evidence of a fix.* REMEDIATED requires a **decisive refute**, never a
+   non-decision (HIGH-3). Likewise any probe that cannot be built, is not delivered, or yields a malformed round
+   → the whole run is INCONCLUSIVE: `boolean_inference_oracle` silently `continue`s past malformed rounds, so the
+   **adapter/driver** (not the oracle) MUST enforce this fail-closed obligation (HIGH-4).
 
-**Why REMEDIATED is sound even against a signature-specific WAF.** A false REMEDIATED would require the decoy
-pair to reach a *vulnerable* origin yet produce *no* differential — impossible for a correctly-constructed
-boolean pair (a true tautology and a false contradiction differ at a vulnerable sink). So the only routes to
-REMEDIATED are (i) the decoy reaches the origin and is handled inertly (genuinely fixed) or — if a WAF passes
-the decoy but blocked the exploit — the decoy, reaching a still-vulnerable origin, **fires** the boolean oracle
-→ STILL_VULNERABLE, not REMEDIATED. The design therefore does not depend on the WAF blocking the decoy; it
-depends only on a *working* boolean pair.
+The positive control: the **retained** vulnerable probe-rounds must still fire `boolean_inference_oracle`
+(harness capability); the live control is a real fetch this run (VF-1a.3) and, for this channel, MUST observe
+its fresh benign marker reflected (not mere reachability) so a query-stripping cache is caught (LOW-1).
 
-**Implementation caution (block-page vs baseline discriminator).** Step 2's `expect="same"` test must actually
-detect a WAF block page as *differing* from the benign baseline. A WAF that returns a `200` block page
-lexically close to the app's own "no results" page could slip past a loose discriminator and be read as
-"reached the origin." The baseline MUST be chosen to mirror the *inert-injection* response shape (a benign
-search that returns the same "no results" page a parameterized injection would), and the discriminator MUST
-include `status` + `structural` dimensions, not lexical length alone. This is a tuning obligation the
-implementation slice owns and the adversarial corpus (§8.3) must exercise with a 200-block-page WAF, not only a
-403.
+**Soundness of REMEDIATED — and its exact boundary.** A false REMEDIATED requires the decoy pair to reach the
+origin, be handled with no differential, yet the origin be vulnerable-if-reached-directly. With a *working
+data-dependent* pair this happens in exactly one way: an **in-flight sanitizer** (a-sanitize) neutralizes the
+metacharacters so the origin sees inert data. A *blocking* WAF cannot cause it (blocked → step 3 INCONCLUSIVE); a
+non-executing interposer cannot fake the *firing* direction either (data-dependent clause, §2). So the design is
+sound against a **blocking** content-discriminating WAF and against a non-executing interposer, and is **unsound
+against a sanitizing one** — which is therefore disclosed (§7), not claimed closed.
 
-## 5. Freshness in the differential channel
+## 5. Freshness in the differential channel — needs a NEW verifier
 
-The challenge is embedded in the clause literals (`'<c>'='<c>'`). For **STILL_VULNERABLE**, a firing boolean
-differential whose rounds carry the fresh challenge earns **F2** — the sink's boolean behaviour was exercised
-with this run's nonce (the differential channel's analogue of the error-line same-line check). For
-**REMEDIATED**, freshness stays **F1** (a fixed sink cannot be *traversed*, §1 of VF-1a.3 still holds), **but**
-the certificate additionally attests `origin_reached: true` — a distinct, honestly-scoped property meaning "the
-metacharacter payloads reached the origin and were handled inertly (WAF ruled out for class (a))." `origin_reached`
-is **not** a freshness bump and **not** an interposition-proof beyond (a); it is recorded so a consumer can tell
-a differential-channel REMEDIATED (WAF-closed) from an error-channel REMEDIATED (WAF-open).
+The challenge rides the probes as an inert marker. For **STILL_VULNERABLE**, a firing whose rounds carry the
+fresh challenge should earn **F2** (the sink's boolean behaviour exercised this run) — but this is **not
+delivered by existing code**: the merged F2 gate calls `_challenge_in_firing_signature`
+(`prove_driver.py`), which is hard-wired to the **error-signature** channel (it re-fires `error_signature_oracle`
+and checks the matched *error line*). A boolean firing has no error line, so the existing gate **caps a
+differential firing to F1**. Delivering F2 here requires a **new** verifier — "the fresh challenge marker is
+present in the judged clauses of the firing rounds" — which §9 lists as new work. Until it exists, the
+differential channel is honestly **F1 for both verdicts** (STILL_VULNERABLE@F1, REMEDIATED@F1+`origin_reached`).
+For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traversable, per VF-1a.3), and
+`origin_reached` is **not** a freshness level and **not** an interposition proof beyond (a-block).
 
 ## 6. Downgrade resistance & invariants
 
-- Only the **existing** `boolean_inference_oracle` / `differential_response_oracle` mint the judgement — oracle
-  authority is preserved; the adapter only *arranges* the probes and the driver *sequences* them.
-- The WAF-closure test (step 2) is **mandatory** for a differential-channel REMEDIATED — there is no flag to
-  skip it (contrast the removed `require_injectable_param_live`; this one is sound because the decoy is
-  metachar-identical, so a passing decoy genuinely rules out a content-discriminating WAF).
-- FATAL-2 (framework imports function-local), determinism (the driver supplies `now`/`run_id`/nonces; the two
-  false literals are derived from the challenge, not RNG), fail-closed (any probe that cannot be built or judged
-  → INCONCLUSIVE, never REMEDIATED), single signed causal-chain cert (as VF-1a).
+- Only the **existing** `boolean_inference_oracle` / `differential_response_oracle` mint the judgement (oracle
+  authority); the adapter arranges probes, the driver sequences them and owns the fail-closed obligation (§4.4).
+- REMEDIATED requires (decisive SPRT `refute`) **AND** (the WAF-closure baseline test passes) **AND** (every
+  round delivered and well-formed) — no flag skips any of these.
+- FATAL-2 (framework imports function-local), determinism (driver supplies `now`/`run_id`/nonces; the two false
+  markers derive from the challenge, not RNG; the data-dependent predicate is a fixed template, not RNG),
+  fail-closed (any unbuildable/undelivered/ambiguous probe → INCONCLUSIVE), one signed causal-chain cert.
 
-## 7. What this does NOT close (honest, deferred)
+## 7. What this does NOT close (honest, disclosed)
 
-- **(b) a param-stripping edge that drops the injectable param entirely.** Then `true`/`false_a`/`false_b` all
-  collapse to the same benign request → no differential AND they match the baseline → the run reads REMEDIATED.
-  This is "mitigated-by-edge, not fixed-in-code": from the client's vantage the param is not injectable through
-  that edge, but the origin may be vulnerable if reached directly. It is a **scope question** (is the WAF/edge
-  part of the system-under-test?), not a soundness bug — disclosed, and reported with `origin_reached: true`
-  only when a benign baseline genuinely round-trips the param (an all-stripping edge that does not echo the
-  param at all fails even the baseline round-trip and yields INCONCLUSIVE).
-- **Byte-forgery by a malicious producer** — a producer that fabricates the origin's data for all four probes.
-  This is the general zkTLS/TLSNotary frontier and the OOB Tier-2's domain; the differential channel is
-  interposer-unforgeable, not producer-unforgeable.
+- **(a-sanitize) an in-flight sanitizing / virtual-patching interposer.** It escapes or strips the
+  metacharacters, the origin answers inertly, the WAF-closure test passes, the boolean refutes → a REMEDIATED
+  **indistinguishable from a real code fix**, with `origin_reached: true`. This is the BLOCK the review caught. It
+  is **mitigated-by-edge, not fixed-in-code** — a scope question (is the sanitizer part of the system-under-test,
+  and permanent?). The cert MUST NOT present it as a clean fix beyond what `origin_reached` literally asserts;
+  distinguishing it needs an origin-side observation the response channel cannot provide (side-effect / OOB
+  Tier-2 / direct-to-origin re-drive bypassing the edge).
+- **(b) a param-stripping edge** that drops the injectable param → all probes collapse to baseline → looks
+  REMEDIATED. Same mitigated-by-edge scope bucket (an all-stripping non-echoing edge fails the live-marker
+  reflection control → INCONCLUSIVE).
+- **A structurally-matched 200 block page** (a WAF block page shaped like the baseline "no results") can pass the
+  WAF-closure test if the discriminator is out-tuned — REMEDIATED soundness against a block-page WAF is therefore
+  *heuristic* (raises the bar), not an invariant. Disclosed; the corpus (§8) must include a 200-block-page WAF.
+- **A cache/CDN keyed on less than the full URL** (query-stripping) serves one body for all probes → caught only
+  by the live-marker-reflection control (§4); stated as a dependency, tested in §8.
+- **Producer byte-forgery** of the origin's data for all probes — the OOB Tier-2 / zkTLS frontier.
 
 ## 8. Adversarial test plan (loopback servers, the VF-1a.3 harness)
 
-Each against a real `ThreadingHTTPServer`, driven through the gated `HttpExecutor`:
-
-1. **genuine fix** — parameterized origin: `true ≈ false`, both match baseline → **REMEDIATED**, `origin_reached=true`.
-2. **still vulnerable** — injectable origin: `true ≠ false`, `false_a ≈ false_b` → boolean FIRES → **STILL_VULNERABLE@F2**.
-3. **payload-discriminating WAF over a vulnerable origin** — blocks metachar probes (block page), passes
-   baseline: `false_a` differs from `baseline` → **INCONCLUSIVE** (`INTERPOSER_SUSPECTED`), *never* REMEDIATED.
-   This is the residual (a) closed — the acceptance test of the whole slice.
-4. **dynamic page** — every response differs: `false_a ≠ false_b` trips the within-same control → boolean does
-   not fire spuriously → not a false STILL_VULNERABLE.
-5. **param-stripping edge** — drops the param: all probes ≈ baseline → **REMEDIATED**, but the cert marks the
-   (b) residual honestly (documented, not hidden); an all-stripping non-echoing edge → INCONCLUSIVE.
-6. **freshness** — a firing round carrying the fresh nonce → F2; a firing round whose nonce is absent from the
-   judged clauses → capped to F1 (the challenge must ride the clauses).
-7. **determinism / FATAL-2** — no RNG in the two false literals; no module-scope framework import.
+1. **genuine fix** — parameterized origin: data-dependent `true ≈ false`, both match baseline, SPRT `refute` →
+   **REMEDIATED**, `origin_reached=true`.
+2. **still vulnerable, clean path** — injectable origin: `true ≠ false`, `false_a ≈ false_b`, SPRT `confirm` →
+   **STILL_VULNERABLE**.
+3. **blocking payload-discriminating WAF over a vulnerable origin** — 403/block-page for metachar probes,
+   baseline passes → `false_a` differs from baseline → **INCONCLUSIVE** (`INTERPOSER_SUSPECTED`). *The acceptance
+   test for the (a-block) closure.*
+4. **sanitizing WAF over a vulnerable origin** — escapes quotes in-flight → origin inert → refute + closure
+   passes → REMEDIATED. Assert the cert carries only `origin_reached` and the (a-sanitize) residual is surfaced
+   (NOT a clean-fix claim). *The BLOCK-1 disclosure, pinned as a test so the honesty cannot silently regress.*
+5. **SQL-parsing interposer, constant-clause variant** — assert that a constant-clause construction is forgeable
+   (a regression guarding the §3 requirement that clauses be data-dependent).
+6. **dynamic page** — every response differs → `false_a ≠ false_b` trips the per-round control → not a false
+   STILL_VULNERABLE.
+7. **SPRT-inconclusive** — too few/noisy rounds, no boundary → **INCONCLUSIVE** (`INSUFFICIENT_ROUNDS`), never
+   REMEDIATED.
+8. **200 block page ≈ baseline** — a structurally-close block page; assert the status/structural discriminator
+   still separates it, and document the residual if a chosen block page defeats it.
+9. **query-stripping cache** — identical body for all probes → the live-marker-reflection control fails →
+   **INCONCLUSIVE**.
+10. **malformed/undelivered round** — one probe fetch fails → whole run **INCONCLUSIVE** (fail-closed in the
+    adapter/driver, not silently dropped by the oracle).
+11. **text-only differential** — a vulnerable origin whose true/false differ only in reflected text → the
+    lexical-sensitive boolean discriminator still fires (guards HIGH-4.1).
+12. **determinism / FATAL-2** — no RNG in the markers or the predicate template; no module-scope framework import.
 
 ## 9. Implementation order (design-first → reviewed slices)
 
-1. **This spec** — reviewed first.
-2. `DifferentialHttpAdapter` (a second `LiveTargetAdapter`) — builds the baseline + true/false_a/false_b probes
-   from a `clause_template` carrying `{challenge}`, gated-fetches them, assembles the `probe_rounds` context the
-   `boolean_inference_oracle` re-fires over, and runs the step-2 WAF-closure `differential_response_oracle`
-   check. Positive control = retained firing rounds.
-3. Driver support — `prove_remediation` gains a channel abstraction so a "trial" may be a *round bundle*
-   (true/false_a/false_b) judged by `boolean_inference_oracle`, plus the mandatory WAF-closure gate and the
-   `INTERPOSER_SUSPECTED` state; the error-signature channel is unchanged.
-4. Adversarial red-pen (try to forge a differential without an executing sink; get REMEDIATED past a WAF; get
-   STILL_VULNERABLE from a dynamic page) → CI → merge.
-5. `TRUST-GRADIENT.md` updated: residual (a) moves from "deferred" to "closed by the differential channel";
-   (b) and byte-forgery remain the disclosed frontier.
+1. **This spec (revised)** — reviewed to convergence first.
+2. `DifferentialHttpAdapter` (a second `LiveTargetAdapter`) — builds baseline + data-dependent
+   true/false_a/false_b from a `clause_template` (data-dependent predicate + `{challenge}` inert marker),
+   gated-fetches them, assembles the `probe_rounds` context, runs the WAF-closure `differential_response_oracle`
+   check, and **fail-closes the whole run** on any undelivered/malformed probe. Positive control = retained
+   firing rounds; live control observes fresh-marker reflection.
+3. Driver support — `prove_remediation` gains a channel abstraction so a "trial" may be a round bundle judged by
+   `boolean_inference_oracle`; REMEDIATED requires SPRT `decision == "refute"` (not merely `fired == False`) +
+   the WAF-closure gate; new `INTERPOSER_SUSPECTED` / `INSUFFICIENT_ROUNDS` reasons. Error-signature channel
+   unchanged.
+4. **New differential-channel freshness verifier** (§5) — "the fresh marker is in the judged clauses of the
+   firing rounds" — to lift a genuine differential firing from F1 to F2. Separate, reviewed slice.
+5. Adversarial red-pen against the §8 corpus (esp. the sanitizing-WAF disclosure and the constant-clause
+   regression) → CI → merge.
+6. `TRUST-GRADIENT.md` updated: **(a-block) moves from deferred to closed**; **(a-sanitize), (b), block-page,
+   and producer byte-forgery remain the disclosed frontier** — the residual list gets *more* precise, not shorter
+   by sleight of hand.
 
 ## 10. One-line trust statement (for the tin, once built)
 
 > A differential-channel REMEDIATED means: under the recorded authorization/identity/freshness, a
-> metacharacter-bearing boolean-injection pair **reached the origin and was handled inertly** (a
-> content-discriminating WAF is ruled out), and the interposer-unforgeable boolean-differential oracle went
-> **silent** across the protocol-required rounds — so the original injection no longer executes at the sink.
-> It does not rule out an edge that strips the parameter (mitigated-by-edge, a scope question) or a producer
-> that fabricates the origin's bytes (the OOB/zkTLS frontier).
+> metacharacter-bearing **data-dependent** boolean pair drew a **decisively indistinguishable** (SPRT-refuted)
+> response and a baseline-shaped 200 came back (`origin_reached`) — so a **blocking** content-discriminating WAF
+> is ruled out and the interposer-forgeable-differential is ruled out, and the injection no longer executes at
+> the sink **as observed through this edge**. It does **not** rule out an in-flight **sanitizing** interposer, an
+> edge that **strips the parameter**, a structurally-matched 200 block page, or a producer that fabricates the
+> origin's bytes — all reported honestly, none presented as a clean code fix.
