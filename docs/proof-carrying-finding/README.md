@@ -112,4 +112,10 @@ protocol is the textbook "don't roll your own," so external review is warranted.
 - **`WITNESS-TRUST.md`** — the witness trust model (independence, collusion tolerance
   `≤ 2t − n − 1`, the strict-majority requirement), the honest clock model (a median quorum time that
   bounds *witnessing*, not *re-proof*), and the RFC3161/OpenTimestamps external-anchor fallback.
-  Primitives built: `integration/vigil_integration/transparency.py`, `scitt.py`.
+  Primitives built: `integration/vigil_integration/transparency.py`, `scitt.py`, `remediation/attestation_witness.py`.
+- **`TRUST-GRADIENT.md`** — the whole program stated on the tin: **exactly how much you can trust a
+  remediation proof and against whom** — Tier 1 (honest producer: re-derived, controlled, live, target-bound,
+  continuously re-proven, witnessed, third-party-re-derivable with ZERO vigil code), Tier 2 (dishonest
+  producer, OOB classes: token + independent signed collector receipt), the honest limits of each, and the
+  deferred frontier (zkTLS / external time anchor / F2). The end-to-end demonstration is
+  `integration/tests/test_vf_end_to_end.py`; the standalone verifier is `verify_vf.py`.
