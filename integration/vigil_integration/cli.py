@@ -238,6 +238,256 @@ def _cmd_patch(args: argparse.Namespace) -> int:
     return 1 if str(result.status).startswith("refused") else 0
 
 
+def _remediate_safe_ref(ref: str) -> str:
+    """A filesystem-safe slug of a finding ref for the certificate filename (never a path-traversal)."""
+    s = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(ref or "finding"))
+    s = s.strip("._") or "finding"
+    return s[:80]
+
+
+def _match_reverifiable_entry(entries: "list[dict]", ref: str, finding_ref: str) -> "Optional[dict]":
+    """Pick the retained re-verifiable entry that belongs to THIS finding. Prefer an explicit
+    ``--finding-ref`` / the finding ref matched against ``check_id``; fall back to the sole entry when the
+    run produced exactly one. Ambiguity (many entries, no match) → None (the caller refuses honestly)."""
+    if not entries:
+        return None
+    want = str(finding_ref or "").strip() or str(ref or "").strip()
+    for e in entries:
+        if isinstance(e, dict) and str(e.get("check_id") or "") == want:
+            return e
+    if len(entries) == 1 and isinstance(entries[0], dict):
+        return entries[0]
+    return None
+
+
+def _reconstruct_exploit_request(finding: Any, entry: dict) -> "tuple[Optional[dict], str]":
+    """Reconstruct the ORIGINAL exploit request ``(endpoint_path, param, payload)`` from the RETAINED,
+    provenance-grounded finding + its re-verifiable entry — never fabricated. Sources, in order:
+
+      * ``payload``      ← the entry's retained decoded request value (``oracle_context.request_payload``),
+                           the request-side field the FindingContext carries; without it the exploit value
+                           was not retained and we cannot honestly re-drive → an honest error.
+      * ``param``        ← ``oracle_context.payload_param`` (the named insertion point that rides on the
+                           certificate), else the entry's ``insertion_point`` when it is a bare token.
+      * ``endpoint_path``← an explicit retained path (``oracle_context.requested_path`` / ``endpoint``),
+                           else the ``insertion_point`` when it is path-like, else the finding target's path.
+
+    Returns ``(spec, "")`` on success or ``(None, why)`` when the retained data is insufficient (fail-closed:
+    we refuse rather than guess a payload/param/endpoint the finding never recorded)."""
+    from urllib.parse import urlsplit
+
+    octx = entry.get("oracle_context") if isinstance(entry.get("oracle_context"), dict) else {}
+    insertion = str(entry.get("insertion_point") or "").strip()
+    ftarget = str(getattr(finding, "target", "") or "").strip()
+
+    payload = str(octx.get("request_payload") or "").strip()
+
+    param = str(octx.get("payload_param") or "").strip()
+    if not param and insertion and not insertion.startswith("/") and "://" not in insertion:
+        param = insertion
+
+    endpoint = ""
+    for k in ("requested_path", "endpoint_path", "endpoint"):
+        v = octx.get(k)
+        if isinstance(v, str) and v.strip():
+            endpoint = v.strip()
+            break
+    if not endpoint:
+        if insertion.startswith("/"):
+            endpoint = insertion
+        elif "://" in insertion:
+            endpoint = urlsplit(insertion).path or ""
+    if not endpoint and ftarget:
+        endpoint = urlsplit(ftarget).path if "://" in ftarget else (ftarget if ftarget.startswith("/") else "")
+
+    missing = [name for name, val in
+               (("endpoint_path", endpoint), ("param", param), ("payload", payload)) if not val]
+    if missing:
+        return None, (
+            f"the retained finding data is insufficient to reconstruct the exploit request (missing: "
+            f"{', '.join(missing)}). The re-verifiable entry must carry the decoded request value "
+            f"(oracle_context.request_payload), the insertion point (payload_param / insertion_point), and a "
+            f"reconstructable endpoint — refusing to fabricate one (fail-closed).")
+    return {"endpoint_path": endpoint, "param": param, "payload": payload}, ""
+
+
+def _cmd_remediate(args: argparse.Namespace) -> int:
+    """VF-1a — ``vigil remediate --prove``: run the FOUR-STATE live remediation proof over a PROVENANCE-
+    GROUNDED confirmed finding and emit a signed prove-certificate.
+
+    The driving finding is NEVER built from raw JSON (mirrors ``vigil patch``): it comes from the engagement's
+    OWN signed spine (``--from-spine <slug>`` [+ ``--finding-ref``]) or a signed inert envelope
+    (``--finding-envelope`` — owner-delegated m-of-n governance). The retained ORIGINAL firing
+    ``oracle_context`` (the positive control) and the exploit's channel / insertion point come from the run's
+    re-verifiable proof material (``proofs/reverifiable.json``); the exploit request is RECONSTRUCTED from
+    that retained data, never fabricated.
+
+    The re-drive runs the ORIGINAL exploit against the LIVE ``--target-base-url`` (which MUST be authorized in
+    the engagement charter scope) through CRUCIBLE's gated ``HttpExecutor`` and classifies the FRESH result:
+
+        REMEDIATED · STILL_VULNERABLE · INCONCLUSIVE · REFUSED
+
+    Only ``--prove`` mode exists (downgrade resistance — no weaker/unsigned mode). Identity + capability +
+    proof-of-possession are composed from a provisioned governance authority exactly as the merged live
+    adapter does; the caller mints FRESH run_id / pop_challenge / freshness_nonce (inputs, not signed math).
+    Exit: 0 REMEDIATED · 1 STILL_VULNERABLE · 2 INCONCLUSIVE · 3 REFUSED · 2 for a pre-flight refusal. Never
+    prints "fixed" for anything but a REMEDIATED that ALSO independently re-verifies. FATAL-2: every
+    framework-touching import is function-local.
+    """
+    import secrets
+    import time as _time
+    from urllib.parse import urlsplit
+
+    # (0) DOWNGRADE RESISTANCE — only the signed, four-state prove mode exists. No silent weaker mode.
+    if not getattr(args, "prove", False):
+        print("vigil remediate: only --prove mode is supported (a signed, four-state LIVE remediation proof). "
+              "Re-run with --prove. There is deliberately no weaker/unsigned mode (downgrade resistance).",
+              file=sys.stderr)
+        return 2
+
+    # (1) EXACTLY ONE trusted finding source (mirrors `vigil patch`). A raw-JSON finding is never accepted.
+    from .live.trusted_finding import TrustedFindingError, finding_from_envelope, finding_from_spine
+    if bool(args.finding_envelope) == bool(args.from_spine):
+        print("vigil remediate: choose EXACTLY ONE trusted finding source — --finding-envelope <signed.json> "
+              "(owner-delegated m-of-n governance) OR --from-spine <slug> (the engagement's signed spine). "
+              "A raw-JSON finding is never accepted.", file=sys.stderr)
+        return 2
+    # The engagement slug is the charter the HttpExecutor scope gate keys off: --scope for the envelope path,
+    # the spine slug for the spine path (mirrors _cmd_patch).
+    slug = str((args.scope if args.finding_envelope else args.from_spine) or "").strip()
+    if not slug:
+        print("vigil remediate: an engagement slug is required — --scope <slug> (with --finding-envelope) or "
+              "--from-spine <slug>. It is the charter the live target must be authorized under.", file=sys.stderr)
+        return 2
+    try:
+        if args.finding_envelope:
+            finding = finding_from_envelope(
+                envelope_path=args.finding_envelope, owner_pubkey=args.owner_pubkey,
+                delegation_path=args.delegation, scope=args.scope, target_repo="")
+        else:
+            finding = finding_from_spine(
+                base_dir=args.base_dir, slug=args.from_spine, target_repo="", finding_ref=args.finding_ref)
+    except TrustedFindingError as exc:
+        print(f"vigil remediate: REFUSED (fail-closed): {exc}", file=sys.stderr)
+        return 2
+
+    # (2) The RETAINED re-verifiable proof material for THIS finding: the positive control (original firing
+    #     oracle_context) + the confirmed channel + the insertion point the exploit rode.
+    from .proof.run import read_reverifiable
+    run_dir = str(getattr(args, "run_dir", "") or "") or args.base_dir
+    entries = read_reverifiable(run_dir).get("active_findings", [])
+    entry = _match_reverifiable_entry(entries, finding.ref, args.finding_ref)
+    if entry is None:
+        print(f"vigil remediate: no retained re-verifiable proof material for finding {finding.ref!r} under "
+              f"{run_dir}/proofs/reverifiable.json (found {len(entries)} entr(y/ies)). The engagement persists "
+              f"the original firing oracle_context there — run it first; the positive control cannot be "
+              f"fabricated. Pass --finding-ref to disambiguate.", file=sys.stderr)
+        return 2
+
+    channel = str(entry.get("channel") or "")
+    if channel != "error_signature":
+        print(f"vigil remediate: finding {finding.ref!r} was confirmed on the {channel or '?'!r} channel; this "
+              f"prove-mode live re-drive currently supports ONLY the error_signature channel (error_based_sqli). "
+              f"Refusing rather than mis-driving a different oracle family (fail-closed).", file=sys.stderr)
+        return 2
+    bug_class = str(entry.get("bug_class") or "error_based_sqli")
+    original_firing_context = entry.get("oracle_context")
+    if not (isinstance(original_firing_context, dict) and original_firing_context):
+        print(f"vigil remediate: finding {finding.ref!r} has no retained firing oracle_context (the positive "
+              f"control) — silence on the patched build could not be distinguished from a broken probe. Refusing.",
+              file=sys.stderr)
+        return 2
+
+    # (3) Reconstruct the ORIGINAL exploit request from the retained finding + insertion point (never faked).
+    spec, why = _reconstruct_exploit_request(finding, entry)
+    if spec is None:
+        print(f"vigil remediate: {why}", file=sys.stderr)
+        return 2
+
+    target_base_url = str(args.target_base_url or "").strip()
+    host = urlsplit(target_base_url).hostname or ""
+    if not (target_base_url.startswith(("http://", "https://")) and host):
+        print("vigil remediate: --target-base-url must be an http(s) URL with a host, e.g. "
+              "http://127.0.0.1:8080 (and it MUST be authorized in the engagement charter scope).",
+              file=sys.stderr)
+        return 2
+
+    # (4) Build the gated executor + the live adapter (framework import is function-local — FATAL-2).
+    from vigil_core import (
+        generate_keypair, identity_digest, prove_wielder, sign_capability, sign_identity_attestation)
+    from vigil_core.vault import Vault
+    from framework.v2.agents import HttpExecutor
+
+    from .live.wiring import provision_authority
+    from .remediation.live_adapter import LiveHttpAdapter
+    from .remediation.prove_driver import ProvePolicy, State, prove_remediation, verify_prove_certificate
+
+    executor = HttpExecutor(engagement_slug=slug, base_url=target_base_url,
+                            prompt_callback=lambda *_a: False)
+    adapter = LiveHttpAdapter(
+        executor=executor, base_url=target_base_url, endpoint_path=spec["endpoint_path"],
+        param=spec["param"], payload=spec["payload"], nonce_param="rc",
+        original_firing_context=dict(original_firing_context), bug_class=bug_class)
+
+    # (5) Provision identity + capability + wielder proof — the SAME composition the merged live adapter uses.
+    #     The governance key is loaded-or-provisioned STABLE under --base-dir (sealed under its vault), so the
+    #     prove-certificate is signed by a reproducible key an external verifier can pin.
+    prov = provision_authority(slug=slug, scope=[host], base_dir=args.base_dir,
+                               vault=Vault(Path(args.base_dir) / "vault"))
+    owner = prov.keypair
+    wielder = generate_keypair()
+    now = int(_time.time())
+    not_after = now + 3600
+    ident = sign_identity_attestation(owner, engagement=slug, policy={"host": [host]}, not_after=not_after)
+    cap = sign_capability(owner, engagement=slug, identity_digest=identity_digest(ident),
+                          class_allowlist=[bug_class], not_before=0, not_after=not_after,
+                          rate_limit=16, revocation_id=f"rev-{finding.ref}",
+                          audience=wielder.public_key_b64)
+    # FRESH per-run values — the CALLER's responsibility. The signed math forbids Date.now()/rng, but MINTING
+    # these inputs with secrets/uuid is correct and expected (they are inputs, not the signed computation).
+    pop_challenge = secrets.token_hex(16)
+    freshness_nonce = secrets.token_hex(16)
+    run_id = "remediate-" + secrets.token_hex(8)
+    wproof = prove_wielder(wielder, challenge=pop_challenge, capability=cap)
+
+    out = prove_remediation(
+        adapter=adapter, identity=ident, capability=cap, wielder_proof=wproof,
+        trusted_owner_pubkey=owner.public_key_b64, engagement=slug, finding_id=finding.ref,
+        original_certificate_digest=str(finding.evidence_ref or ""), signers=prov.signers,
+        now=now, run_id=run_id, pop_challenge=pop_challenge, freshness_nonce=freshness_nonce,
+        policy=ProvePolicy())
+
+    # (6) Honest four-state summary — never "fixed" for anything but a re-verifying REMEDIATED.
+    provenance = ("signed envelope (m-of-n governance, owner-delegated)" if args.finding_envelope
+                  else "signed offense spine (verified + rebuilt)")
+    print(f"=== vigil remediate --prove — finding {finding.ref!r} [{bug_class}] ===")
+    print(f"provenance        : {provenance}")
+    print(f"target            : {target_base_url}   (endpoint={spec['endpoint_path']} param={spec['param']})")
+    print(f"STATE             : {out.state}")
+    print(f"reason_code       : {out.reason_code}")
+    print(f"trials            : attempted={out.trials_attempted} valid={out.trials_valid}")
+    print(f"achieved_freshness: F{out.achieved_freshness}")
+    print(f"detail            : {out.detail}")
+
+    # (7) Persist the signed prove-certificate + re-verify it INLINE (offline, fail-closed).
+    proofs_dir = Path(args.base_dir) / "proofs"
+    proofs_dir.mkdir(parents=True, exist_ok=True)
+    cert_path = proofs_dir / f"remediation-prove-{_remediate_safe_ref(finding.ref)}.json"
+    cert_path.write_text(json.dumps(out.certificate, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"certificate       : {cert_path}")
+    pubkeys = {prov.signers[0][0]: owner.public_key_b64}
+    ok, verify_why = verify_prove_certificate(out.certificate, signer_pubkeys=pubkeys)
+    print(f"re-verify         : {'OK' if ok else 'FAILED'} — {verify_why}")
+
+    if out.state == State.REMEDIATED and not ok:
+        # A REMEDIATED cert that does not independently re-verify is not honestly a fix (fail-closed).
+        print("vigil remediate: a REMEDIATED certificate did NOT independently re-verify — refusing to report "
+              "success (fail-closed).", file=sys.stderr)
+        return 3
+    return {State.REMEDIATED: 0, State.STILL_VULNERABLE: 1,
+            State.INCONCLUSIVE: 2, State.REFUSED: 3}.get(out.state, 4)
+
+
 def _cmd_provision_destruction(args: argparse.Namespace) -> int:
     """Mint the m-of-n destruction quorum keys for `vigil patch --open-pr`. Prints each signer's PRIVATE key
     ONCE (paste the owner key into Settings; distribute co-signer keys to their holders) and writes the PUBLIC
@@ -1078,6 +1328,44 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the durable single-use nonce ledger DIRECTORY (--open-pr; one authorization → one PR)")
     ppatch.add_argument("--pr-base", default="", help="the PR base branch (default: the repo's default branch)")
     ppatch.set_defaults(func=_cmd_patch)
+
+    prem = sub.add_parser(
+        "remediate",
+        help="run the FOUR-STATE live remediation proof over a PROVENANCE-GROUNDED finding (--prove): re-drive "
+             "the original exploit against the live target through the gated executor and print REMEDIATED / "
+             "STILL_VULNERABLE / INCONCLUSIVE / REFUSED + write a signed prove-certificate")
+    # only --prove mode exists (downgrade resistance): without it the verb refuses (no silent weaker mode)
+    prem.add_argument("--prove", action="store_true",
+                      help="run the signed, four-state LIVE remediation proof (REQUIRED — the only mode). There "
+                           "is deliberately NO weaker/unsigned mode.")
+    # finding source (EXACTLY one) — a raw-JSON finding is never accepted (mirrors `vigil patch`)
+    prem.add_argument("--from-spine", default="",
+                      help="an engagement slug: rebuild a confirmed fact from {slug}.spine under --base-dir "
+                           "after a fail-closed integrity audit. Use --finding-ref to disambiguate.")
+    prem.add_argument("--finding-envelope", default="",
+                      help="a signed inert finding envelope: its m-of-n governance signature is verified with "
+                           "vigil_core under an OWNER-signed delegation. Needs --owner-pubkey, --delegation, "
+                           "--scope.")
+    prem.add_argument("--owner-pubkey", default="",
+                      help="the pinned owner PUBLIC key (base64) — the delegation trust anchor (--finding-envelope)")
+    prem.add_argument("--delegation", default="",
+                      help="an owner-signed offense-governance DelegationCert JSON file (--finding-envelope)")
+    prem.add_argument("--scope", default="",
+                      help="the engagement slug the envelope + delegation must cover (--finding-envelope); it is "
+                           "also the charter the live target must be authorized under")
+    prem.add_argument("--finding-ref", default="",
+                      help="pick the fact by ref (--from-spine when the spine has >1 fact; also selects the "
+                           "matching re-verifiable entry)")
+    prem.add_argument("--base-dir", default=".vigil-live",
+                      help="engagement home: holds {slug}.spine + vault + the STABLE governance key, and where "
+                           "the prove-certificate is written (proofs/remediation-prove-<ref>.json)")
+    prem.add_argument("--run-dir", default="",
+                      help="the run dir holding proofs/reverifiable.json (the retained positive control); "
+                           "default = --base-dir")
+    prem.add_argument("--target-base-url", default="",
+                      help="the LIVE target scheme+host(:port) to re-drive against, e.g. http://127.0.0.1:8080 "
+                           "— MUST be authorized in the engagement charter scope (else REFUSED, fail-closed)")
+    prem.set_defaults(func=_cmd_remediate)
 
     pprov = sub.add_parser(
         "provision-destruction",
