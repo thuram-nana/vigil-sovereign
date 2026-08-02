@@ -1436,27 +1436,70 @@ def error_signature_oracle(observed_body: Any, control_body: Any = None) -> Orac
 # ---------------------------------------------------------------------------
 
 
-def oob_callback_oracle(hits: Any) -> OracleSignal:
-    """Fire when the out-of-band receiver logged >=1 inbound interaction
-    against a correlation token. An inbound hit on a per-finding unique token
-    is close to unforgeable evidence of blind execution (SSRF, OOB SQLi,
-    blind XXE, deserialization callbacks). `hits` is whatever `oob.poll()`
-    returned — a list of hit records/objects."""
+def oob_callback_oracle(hits: Any, expected_token: "str | None" = None) -> OracleSignal:
+    """Fire when the out-of-band receiver logged an inbound interaction that carried the finding's REGISTERED
+    per-finding secret token. The token — minted per finding (`oob.register_token`, `secrets.token_hex(16)`)
+    and embedded in the callback URL the target must actually execute to emit — is what makes a blind-execution
+    callback (SSRF, OOB SQLi, blind XXE, deserialization) close to unforgeable. `hits` is whatever `oob.poll()`
+    returned; `expected_token` is that registered secret (carried on the context as `oob_token`).
+
+    VF-2a hardening (was: fired on ANY non-empty `hits`): a callback that does NOT carry the registered token —
+    or a context with no registered token to compare against — is NOT trusted. Fail-closed:
+      * no `hits` → not fired (unchanged);
+      * `hits` but NO `expected_token` → NOT fired (a callback we cannot tie to a per-finding secret is
+        indistinguishable from a fabricated/unrelated hit — the live receiver bucket-filters by token, but that
+        filter is not reproduced offline, so re-verification must check the token itself);
+      * `hits` but none carry the token → NOT fired (forged/unrelated callback);
+      * ≥1 hit whose token == `expected_token` (constant-time) → fired.
+
+    HONEST LIMIT: this defeats a fabricated/unrelated callback and closes the offline re-verify gap. It does NOT
+    alone defeat a FULLY-dishonest producer who fabricates the whole context (setting `oob_token` == a planted
+    hit token) — that requires an INDEPENDENT, receipt-SIGNING collector (VF-2b), which binds a signature by a
+    party other than the producer over `{token, source_ip, time}`."""
     hit_list = list(hits or [])
     if not hit_list:
         return OracleSignal(
             kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
             evidence="no out-of-band interaction observed", observed={"hit_count": 0})
 
-    first = hit_list[0]
-    summary = _hit_summary(first)
+    want = str(expected_token or "")
+    if not want:
+        return OracleSignal(
+            kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+            evidence=(f"{len(hit_list)} out-of-band interaction(s) but NO registered per-finding token to "
+                      f"verify them — a callback cannot be distinguished from a fabricated/unrelated hit "
+                      f"(fail-closed)"),
+            observed={"hit_count": len(hit_list), "token_verified": False})
+
+    matched = [h for h in hit_list if _hit_token_matches(h, want)]
+    if not matched:
+        return OracleSignal(
+            kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+            evidence=(f"{len(hit_list)} out-of-band interaction(s) but NONE carried the registered per-finding "
+                      f"token — forged/unrelated callback (fail-closed)"),
+            observed={"hit_count": len(hit_list), "matched": 0, "token_verified": False})
+
+    summary = _hit_summary(matched[0])
     return OracleSignal(
         kind=OracleKind.OOB_CALLBACK,
         fired=True,
         confidence=0.95,
-        evidence=f"{len(hit_list)} out-of-band interaction(s); first: {summary}",
-        observed={"hit_count": len(hit_list), "first": summary},
+        evidence=f"{len(matched)} token-verified out-of-band interaction(s); first: {summary}",
+        observed={"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
+                  "first": summary},
     )
+
+
+def _hit_token(hit: Any) -> str:
+    if isinstance(hit, Mapping):
+        return str(hit.get("token") or "")
+    return str(getattr(hit, "token", "") or "")
+
+
+def _hit_token_matches(hit: Any, want: str) -> bool:
+    """Constant-time equality of a hit's self-reported token against the registered secret."""
+    tok = _hit_token(hit)
+    return bool(tok) and hmac.compare_digest(tok, want)
 
 
 def _hit_summary(hit: Any) -> str:

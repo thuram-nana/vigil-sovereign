@@ -674,7 +674,8 @@ class OracleVerifier:
             return None
         if kind is OracleKind.OOB_CALLBACK:
             if "oob_hits" in ctx:
-                return oracles.oob_callback_oracle(ctx["oob_hits"])
+                # VF-2a: pass the retained registered token so the oracle fires only for a token-verified hit.
+                return oracles.oob_callback_oracle(ctx["oob_hits"], ctx.get("oob_token"))
             return None
         if kind is OracleKind.SERVICE_REACHABILITY:
             if "handshake" in ctx:

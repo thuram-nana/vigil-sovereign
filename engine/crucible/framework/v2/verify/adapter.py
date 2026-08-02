@@ -140,6 +140,7 @@ def _hit_to_dict(hit: Any) -> dict[str, Any]:
     if isinstance(hit, Mapping):
         return dict(hit)
     return {
+        "token": getattr(hit, "token", ""),   # VF-2a: preserve the token so the oracle can verify it
         "method": getattr(hit, "method", "?"),
         "path": getattr(hit, "path", "?"),
         "client_ip": getattr(hit, "client_ip", "?"),
@@ -223,6 +224,7 @@ class FindingContext(BaseModel):
 
     # oob_callback_oracle
     oob_hits: list[Any] | None = None
+    oob_token: str | None = None   # VF-2a: the REGISTERED per-finding secret the callback must carry to fire
 
     # service_reachability_oracle (a real transport handshake reproduced a scanner's "open port")
     handshake: dict[str, Any] | None = None
@@ -406,14 +408,17 @@ class FindingContext(BaseModel):
 
     @classmethod
     def from_oob(
-        cls, hits: Any, *, bug_class: str = "ssrf"
+        cls, hits: Any, *, bug_class: str = "ssrf", expected_token: "str | None" = None
     ) -> "FindingContext":
         """A list of out-of-band interactions (whatever `OOBReceiver.poll`
         returned) for the oob-callback oracle. An empty list is a valid,
-        non-firing negative control."""
+        non-firing negative control. VF-2a: pass ``expected_token`` — the REGISTERED per-finding secret
+        (`oob.register_token`) — so the oracle (live AND on offline re-verify) fires only for a hit that
+        carried it. Omitting it yields a context the oracle refuses to confirm (fail-closed)."""
         return cls(
             bug_class=bug_class,
             oob_hits=[_hit_to_dict(h) for h in (hits or [])],
+            oob_token=expected_token,
         )
 
     @classmethod
@@ -1062,6 +1067,8 @@ class FindingContext(BaseModel):
             ctx["process_output"] = self.process_output
         if self.oob_hits is not None:
             ctx["oob_hits"] = self.oob_hits
+        if self.oob_token is not None:
+            ctx["oob_token"] = self.oob_token   # VF-2a: retained so offline re-verify can check the token
         if self.handshake is not None:
             ctx["handshake"] = self.handshake
         if self.anon_get is not None:
