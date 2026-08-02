@@ -32,20 +32,20 @@ def test_lookup_and_helpers():
     assert sd.signer_role("offense-spine") == OFFENSE_SPINE_ROLE
     assert sd.domain("offense-spine").trust_domain == sd.OFFENSE
     owner_rooted = set(sd.owner_rooted_segments())
-    # sovereign spine (owner key directly), the finding anchor-1 (from_delegation consumer), and — as of S5b —
-    # the offense SPINE (its verify_offense_spine consumer derives the trusted key from an owner-signed
-    # delegation) are owner-rooted. The usage ledger (operator key, not owner-delegated) and the CRUCIBLE
-    # blackboard chain (no owner-delegation consumer for its head) are honestly NOT owner-rooted (S7).
+    # sovereign spine (owner key directly), the finding anchor-1 (from_delegation consumer), the offense SPINE
+    # (S5b's verify_offense_spine consumer), and — as of T3 — the CRUCIBLE blackboard chain (its persisted
+    # head is rooted by verify_blackboard_chain -> verify_delegation(OFFENSE_GOVERNANCE_ROLE)) are owner-rooted.
+    # The usage ledger (operator key, not owner-delegated) is honestly NOT owner-rooted (S7).
     assert "sovereign-spine" in owner_rooted
     assert "offense-finding-anchor1" in owner_rooted
     assert "offense-spine" in owner_rooted
+    assert "crucible-blackboard-chain" in owner_rooted
     assert "offense-usage-ledger" not in owner_rooted
-    assert "crucible-blackboard-chain" not in owner_rooted
-    # but the offense spine IS file-backed (verifiable offline once a verifier + pinned pubkey exist)
+    # both the offense spine and — as of T3 — the persisted CRUCIBLE blackboard chain are file-backed
+    # (offline-verifiable from inert bytes by a public-key-only reader).
     file_backed = set(sd.offline_verifiable_segments())
     assert "offense-spine" in file_backed
-    # the CRUCIBLE blackboard chain is a DB-projection — NOT offline-byte-verifiable
-    assert "crucible-blackboard-chain" not in file_backed
+    assert "crucible-blackboard-chain" in file_backed
 
 
 def test_owner_rooted_iff_named_consumer():
@@ -57,9 +57,10 @@ def test_owner_rooted_iff_named_consumer():
 
 def test_registration_guard_catches_the_whole_class_not_just_one_instance():
     # Per-SEGMENT guard: ANY segment flipped to owner_rooted=True without naming a consumer is refused —
-    # including `crucible-blackboard-chain`, which SHARES OFFENSE_GOVERNANCE_ROLE with the genuinely
-    # owner-rooted `offense-finding-anchor1`. A role-granular guard would have let it ride in on the sibling's
-    # role (the exact S5a re-check MED); the segment-granular guard does not.
+    # including `continuous-attestation-log`, which SHARES OFFENSE_GOVERNANCE_ROLE with the genuinely
+    # owner-rooted `offense-finding-anchor1` and (as of T3) `crucible-blackboard-chain`. A role-granular guard
+    # would have let it ride in on a sibling's role (the exact S5a re-check MED); the segment-granular guard
+    # does not.
     import dataclasses
 
     import pytest
@@ -76,13 +77,15 @@ def test_registration_guard_catches_the_whole_class_not_just_one_instance():
             sd.DOMAINS = original                  # type: ignore[misc]
 
     # overclaim: owner_rooted=True with no consumer — for the consumer-LESS segments, crucially including
-    # `crucible-blackboard-chain`, which SHARES OFFENSE_GOVERNANCE_ROLE with the owner-rooted
-    # offense-finding-anchor1. A role-granular guard would let it ride in on the sibling's role; this one
-    # doesn't (it binds the claim to each segment's OWN named consumer).
-    for victim in ("crucible-blackboard-chain", "offense-usage-ledger"):
+    # `continuous-attestation-log`, which SHARES OFFENSE_GOVERNANCE_ROLE with the owner-rooted
+    # offense-finding-anchor1 (and T3's crucible-blackboard-chain). A role-granular guard would let it ride in
+    # on a sibling's role; this one doesn't (it binds the claim to each segment's OWN named consumer).
+    for victim in ("continuous-attestation-log", "offense-usage-ledger"):
         _patched_raises(victim, owner_rooted=True)
-    # under-claim: a real consumer named but owner_rooted=False is ALSO refused (would leave it unroutable)
+    # under-claim: a real consumer named but owner_rooted=False is ALSO refused (would leave it unroutable) —
+    # assert it for BOTH the offense spine and (T3) the now-consumer-bearing crucible-blackboard-chain.
     _patched_raises("offense-spine", owner_rooted=False)
+    _patched_raises("crucible-blackboard-chain", owner_rooted=False)
 
 
 def test_unknown_segment_is_fail_closed():

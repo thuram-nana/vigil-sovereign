@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
+import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -47,6 +50,8 @@ from .governance_identity import DEFAULT_GOVERNANCE_KEY_FILE, load_or_create_gov
 from .spine_identity import DEFAULT_SPINE_KEY_FILE, SPINE_KEY_ID, load_or_create_spine_keypair
 from .spine_vigilcore import VigilCoreSpine
 from .think_claude import think
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_KEY_ID = "root0"
 
@@ -562,11 +567,18 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             ]
             graph_writer.rebuild_from_spine(records, group_id=graph_partition)
 
+    # -- T3: persist the CRUCIBLE blackboard chain as inert, governance-signed bytes at end of run ---------
+    def persist_spine() -> None:
+        # Reuses the SAME governance signers the engine provisioned (prov.signers) — the anchor-1 m-of-n
+        # authority, owner-delegatable via OFFENSE_GOVERNANCE_ROLE — so an owner delegation over that key
+        # roots the persisted head. Best-effort + fail-closed (never raises into the engine's end-of-run).
+        _persist_blackboard_chain(config.base_dir, config.slug, prov.signers)
+
     seams = EngineSeams(
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
         checkpoint=checkpoint, detect=detect, approval=approval,
         operator_messages=operator_messages, deploy_fireteam=deploy_fireteam,
-        project=graph_project,
+        project=graph_project, persist_spine=persist_spine,
     )
     return VigilEngine(slug=config.slug, seams=seams,
                        require_attestation=config.require_attestation,
@@ -954,3 +966,88 @@ def _read(path: str) -> str:
         return Path(path).read_text(encoding="utf-8")
     except Exception:  # noqa: BLE001 — an unreadable log source is simply empty (no detections)
         return ""
+
+
+# ---------------------------------------------------------------------------------------------------
+# T3 — persist the CRUCIBLE blackboard chain as inert, offline-verifiable bytes (overclaim O9)
+# ---------------------------------------------------------------------------------------------------
+
+
+def _atomic_write_0600(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (tmp + os.replace) at 0600 — a crash never leaves a torn file
+    (a reader sees either the complete OLD or the complete NEW bytes). Mirrors attestation_log."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.tmp-{os.getpid()}"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # pragma: no cover — non-POSIX; content is signed/inert, mode is best-effort
+        pass
+
+
+def _persist_blackboard_chain(base_dir: str, slug: str, signers: list) -> None:
+    """T3 — SIGN + WRITE the CRUCIBLE blackboard chain for ``slug`` as inert bytes under ``base_dir``, so the
+    public-key-only offline reader ``spine_verify.verify_blackboard_chain`` can verify it (making overclaim O9
+    — "everything offline-verifiable, forever" — true for the one chain that was DB-only).
+
+    Two files are written: ``spine-chain.json`` (the ``ChainEntry`` digests, so the head re-binds WITHOUT the
+    DB) and ``spine-head.json`` (the governance-signed ``SignedChainHead``, which already binds
+    ``engagement_slug``). The head is signed over EXACTLY the persisted entries with the SAME governance
+    ``signers`` the engine provisioned (``prov.signers`` — owner-delegatable via OFFENSE_GOVERNANCE_ROLE).
+
+    Deterministic: no wallclock/rng enters the signed bytes (``event_digest`` excludes ``posted_at``;
+    ``sign_head`` signs the version-conditional head payload with deterministic Ed25519). The chain is written
+    FIRST and the head LAST, so a reader that finds a head always finds its matching chain.
+
+    FAIL-CLOSED + best-effort: no signers, an absent/empty engagement, or ANY build/sign/write error is
+    swallowed (logged) and NOTHING partial is left — a persist failure never crashes the run; but if the files
+    ARE written they are a valid, verifiable pair. FATAL-2: every ``framework``-touching import is
+    function-local (this offense-side path never co-loads the sovereign env)."""
+    if not signers:
+        return
+    try:
+        # Framework imports are function-local (FATAL-2): the sovereign env never co-loads them via this module.
+        from framework.v2.agents.blackboard import open_blackboard
+        from framework.v2.agents.spine_chain import build_spine_chain
+
+        # Build the chain + sign the head with vigil_core's OWN primitives (the SAME module the offline
+        # verifier uses), so sign/verify are byte-symmetric independent of any framework vendoring drift. We
+        # take ONLY the per-event digests from the framework (its blackboard read); the chain + head are then
+        # pure vigil_core over those digests.
+        from vigil_core.chain import build_chain as _vc_build_chain
+        from vigil_core.chain import sign_head as _vc_sign_head
+
+        bb = open_blackboard()
+        try:
+            # The FULL, in-id-order chain over the engagement's blackboard events. Raises (caught below) when
+            # the engagement was never posted to the blackboard — nothing to anchor → no artifacts (honest).
+            fw_entries = build_spine_chain(bb, slug)
+        finally:
+            try:
+                bb.close()
+            except Exception:  # noqa: BLE001 — a close error must not mask a successful build
+                pass
+        # Rebuild the hash-linked chain over the per-event digests with vigil_core, then sign the head over
+        # EXACTLY those persisted entries (not a second DB read), so head↔entries always bind for the offline
+        # reader. sign_head binds engagement_slug — no cross-engagement head replay.
+        entries = _vc_build_chain([e.cert_digest for e in fw_entries])
+        head = _vc_sign_head(entries, engagement_slug=slug, signers=list(signers))
+        chain_json = json.dumps([e.model_dump(mode="json") for e in entries],
+                                sort_keys=True, separators=(",", ":"))
+        head_json = head.model_dump_json()
+    except Exception as exc:  # noqa: BLE001 — build/sign failure ⇒ persist nothing (best-effort, fail-closed)
+        _log.warning("live.wiring.persist_blackboard_chain: build/sign failed for slug=%s: %s", slug, exc)
+        return
+    try:
+        base = Path(base_dir)
+        _atomic_write_0600(base / "spine-chain.json", chain_json)   # chain FIRST
+        _atomic_write_0600(base / "spine-head.json", head_json)     # head LAST (binds the chain above)
+    except Exception as exc:  # noqa: BLE001 — a write error is a best-effort miss, never fatal
+        _log.warning("live.wiring.persist_blackboard_chain: write failed for slug=%s: %s", slug, exc)
+        return

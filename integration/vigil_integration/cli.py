@@ -725,17 +725,23 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     import time
 
     from .live.spine_verify import FAILED, verify_offense_home
-    delegation = None
-    if args.delegation:
-        try:
-            from vigil_core.delegation import DelegationCert
-            delegation = DelegationCert.model_validate_json(
-                Path(args.delegation).read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001 — an unreadable/invalid cert → refuse (no forged owner tie)
-            print(f"delegation: could not load {args.delegation!r}: {exc}")
-            return 2
+
+    def _load_delegation(path: str):
+        from vigil_core.delegation import DelegationCert
+        return DelegationCert.model_validate_json(Path(path).read_text(encoding="utf-8"))
+
+    delegation = governance_delegation = None
+    try:
+        if args.delegation:
+            delegation = _load_delegation(args.delegation)
+        if getattr(args, "governance_delegation", ""):
+            governance_delegation = _load_delegation(args.governance_delegation)
+    except Exception as exc:  # noqa: BLE001 — an unreadable/invalid cert → refuse (no forged owner tie)
+        print(f"delegation: could not load a delegation cert: {exc}")
+        return 2
     verdicts = verify_offense_home(
         args.base_dir, owner_pubkey=(args.owner_pubkey or None), delegation=delegation,
+        governance_delegation=governance_delegation,
         now=int(time.time()), scope=args.scope, slug=(args.slug or None))
     print(f"=== vigil verify — offense segments under {args.base_dir} ===")
     print("(the sovereign spine is verified separately: `vigil sigil verify`)")
@@ -1285,6 +1291,10 @@ def build_parser() -> argparse.ArgumentParser:
     pver.add_argument("--delegation", default="",
                       help="a JSON file holding an owner-signed offense-spine DelegationCert (establishes the "
                            "owner tie; without it the spine is integrity-only, not owner-rooted)")
+    pver.add_argument("--governance-delegation", default="",
+                      help="a JSON file holding an owner-signed OFFENSE_GOVERNANCE_ROLE DelegationCert — roots "
+                           "the PERSISTED blackboard chain (spine-head.json/spine-chain.json); without it that "
+                           "chain is honestly UNVERIFIABLE, not owner-rooted")
     pver.add_argument("--scope", default="*", help="the engagement scope the delegation must cover")
     pver.set_defaults(func=_cmd_verify)
 

@@ -22,8 +22,17 @@ It is deliberately honest about the limits the S5 understand-phase found:
     (``finding_receiver.from_delegation`` → ``verify_delegation``) exists. Closing the spine/ledger ties is
     S6/S7's job; this module does not pretend the tie is enforced before it is.
   * ``file_backed`` states whether the segment is persisted as inert bytes a public-key-only reader can
-    verify offline. The CRUCIBLE blackboard chain is a DB-projection that is not file-backed and is not
-    wired into the live engine, so a byte-reader cannot verify it — it is documented, not claimed verifiable.
+    verify offline. As of T3 the CRUCIBLE blackboard chain HAS a real persist + offline-verify path: a live
+    engage run **that posted events to the blackboard** (e.g. a deployed fireteam wave) persists it as a
+    governance-signed ``spine-head.json`` + a ``spine-chain.json`` entry-digest chain under the run dir, and
+    ``spine_verify.verify_blackboard_chain`` verifies those inert bytes offline — DB-free and framework-free —
+    under an owner-signed ``OFFENSE_GOVERNANCE_ROLE`` delegation, so a byte-reader CAN verify it.
+    HONEST LIMIT: the live OODA loop does not itself post to the blackboard (only the fireteam coordination
+    path, reached after an approved escalation, does), so a typical OODA-only run persists NO artifacts and the
+    segment verdict is honestly ``UNVERIFIABLE`` (never a fake "verified"). Making every engage run populate +
+    persist the chain is the disclosed follow-up (T3b); this flag marks the segment's *nature* (it has a real
+    file-backed offline-verify path), consistent with the other ``file_backed`` segments that also persist only
+    when they hold content.
 """
 from __future__ import annotations
 
@@ -145,12 +154,24 @@ DOMAINS: tuple[SpineDomain, ...] = (
     ),
     SpineDomain(
         name="crucible-blackboard-chain",
-        trust_domain=OFFENSE, signer_role=OFFENSE_GOVERNANCE_ROLE, owner_rooted=False, file_backed=False,
-        location="engine/crucible/framework/v2/agents/spine_chain.py (DB-projection via build_chain)",
-        note="NOT file-backed and NOT wired into the live engine; verifiable only with the offense DB + "
-             "framework, so a public-key-only byte-reader CANNOT verify it. Its m-of-n governance head is not "
-             "derived from an owner delegation in any consumed path, so its trust is NOT owner-rooted today. "
-             "Documented, not claimed verifiable.",
+        trust_domain=OFFENSE, signer_role=OFFENSE_GOVERNANCE_ROLE, owner_rooted=True, file_backed=True,
+        location="persisted at end of a live engage run to <base_dir>/spine-head.json + spine-chain.json "
+                 "(live/wiring.py:_persist_blackboard_chain, over framework spine_chain.build_spine_chain); "
+                 "offline-verified by live/spine_verify.py:verify_blackboard_chain",
+        note="T3: a live engage run THAT POSTED EVENTS TO THE BLACKBOARD (e.g. a deployed fireteam wave) SIGNS "
+             "+ WRITES the blackboard chain as inert bytes — a governance-signed SignedChainHead "
+             "(spine-head.json, binding engagement_slug) + the ChainEntry digests (spine-chain.json), so the "
+             "head re-binds WITHOUT the offense DB. verify_blackboard_chain reads ONLY those bytes + PUBLIC keys "
+             "(vigil_core.chain.verify_head; no DB, no framework) and DERIVES the governance TrustRoot from an "
+             "owner-signed OFFENSE_GOVERNANCE_ROLE delegation — the live owner-tie consumer — so a public-key-"
+             "only reader CAN verify it and its trust IS owner-rooted. The head is m-of-n governance-signed with "
+             "the SAME key anchor-1 uses; one owner delegation (`vigil identity` -> `sigil delegate-offense`) "
+             "covers both. HONEST LIMIT: the live OODA loop does not itself post to the blackboard, so a typical "
+             "OODA-only run persists NO artifacts and the verdict is honestly UNVERIFIABLE (making every run "
+             "populate+persist is the disclosed T3b follow-up). Fail-closed: absent artifacts / no governance "
+             "delegation → honestly UNVERIFIABLE, never a fake verified.",
+        owner_tie_consumer="integration/.../live/spine_verify.py:verify_blackboard_chain -> "
+                           "verify_delegation(OFFENSE_GOVERNANCE_ROLE)",
     ),
 )
 
