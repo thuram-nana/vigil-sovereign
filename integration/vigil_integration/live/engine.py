@@ -38,11 +38,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
 from ..agent.react import apply_intake, authorize_edge, intake_result
 from ..agent.state import ActionType, AgentState, Finding, LLMDecision, Phase
+from ..agent.targets import extract_target
 
 # The governed LOCAL terminal tool name (mirrors executor._TERMINAL_TOOL — kept as a local literal so engine
 # imports nothing from executor). A terminal command inspects HOST state; its output is advisory, never
@@ -65,6 +67,8 @@ GateFn = Callable[[str, str, bool], Any]
 # offense tool (>= A2) — CRUCIBLE scope is still enforced by the executor's gate regardless.
 RunToolFn = Callable[..., Any]
 # oracle(raw_output, analysis) -> a signed evidence ref on confirmation, else None (the CRUCIBLE oracle).
+# The production seam also accepts a keyword-only ``redrive`` request-spec (T2 live re-drive); the engine
+# binds it in via ``_oracle_with_redrive`` and passes this 2-arg-shaped wrapper here, so react.py is unchanged.
 OracleFn = Callable[[str, Any], Optional[str]]
 # attest(action, target, phase, seq, prev_hash) -> an AttestationVerdict (.allowed/.reason/.attestation).
 AttestFn = Callable[..., Any]
@@ -276,10 +280,15 @@ class VigilEngine:
                      "facts": 0, "leads": 0, "advisory": "terminal"})
                 continue
 
-            # ORACLE INTAKE — the LLM's claims become LEADs; only the oracle re-firing over the RAW
-            # output mints a signed FACT. This is the load-bearing anti-hallucination seam.
+            # ORACLE INTAKE — the LLM's claims become LEADs; only the oracle re-firing over target-produced
+            # bytes mints a signed FACT. This is the load-bearing anti-hallucination seam. T2: for an
+            # error_based_sqli exploit claim the oracle ADDITIONALLY re-drives the proposed exploit through
+            # the gated executor and mints a FACT from the TARGET's FRESH response bytes — the LLM's claimed
+            # oracle_context is discarded for the fact (its proposed payload/param/endpoint is only "where to
+            # look"). The request-spec is bound in via `_oracle_with_redrive`; react.py stays unchanged.
             raw = getattr(exec_res, "stdout", "") or ""
-            intake = intake_result(raw, decision.output_analysis, oracle=self.seams.oracle,
+            oracle = self._oracle_with_redrive(decision, exec_res)
+            intake = intake_result(raw, decision.output_analysis, oracle=oracle,
                                    source=(decision.tool.tool_name if decision.tool else ""))
             apply_intake(state, intake)
             report.facts.extend(intake.facts)
@@ -351,6 +360,73 @@ class VigilEngine:
         except Exception as exc:  # noqa: BLE001 — an executor error is a DENY, never a crash
             return _DenyResult(getattr(tool, "tool_name", ""),
                                f"executor error (fail-closed): {type(exc).__name__}: {exc}")
+
+    def _oracle_with_redrive(self, decision: LLMDecision, exec_res: Any) -> Optional[OracleFn]:
+        """The oracle seam with the T2 live-re-drive request-spec bound in. For an ``error_based_sqli``
+        ``exploit_succeeded`` candidate carrying a COMPLETE request-spec (derived from the TOOL ARGS + the
+        LLM's analysis — its proposed "where to look"), wrap ``seams.oracle`` so it ALSO receives that spec
+        and can re-drive the target. Otherwise return the seam unchanged. Fail-closed: no seam ⇒ None; an
+        oracle that predates the ``redrive`` kwarg (a test fake / older seam) is called positionally, i.e.
+        no re-drive — exactly today's LEAD-only behaviour."""
+        oracle = self.seams.oracle
+        if oracle is None:
+            return None
+        spec = self._redrive_spec(decision, exec_res)
+        if spec is None:
+            return oracle
+
+        def _with_spec(raw_output: str, analysis: Any, _o: Any = oracle, _spec: dict = spec) -> Optional[str]:
+            try:
+                return _o(raw_output, analysis, redrive=_spec)
+            except TypeError:
+                # an oracle that does not accept the redrive kwarg ⇒ no re-drive (fail-closed, unchanged).
+                return _o(raw_output, analysis)
+
+        return _with_spec
+
+    @staticmethod
+    def _redrive_spec(decision: LLMDecision, exec_res: Any) -> Optional[dict]:
+        """Derive the T2 live-re-drive request-spec (``base_url`` / ``endpoint_path`` / ``param`` /
+        ``payload`` / ``nonce_param``) for an ``error_based_sqli`` ``exploit_succeeded`` candidate, from the
+        candidate's TOOL ARGS (the target the tool call named) + the LLM's ``output_analysis`` (its proposed
+        insertion point + payload — the "where to look", which the LLM is allowed to propose). Returns None
+        unless it is an error_based_sqli exploit claim with a COMPLETE, reconstructable spec (fail-closed →
+        the seam stays LEAD-only).
+
+        The LLM's claimed ``oracle_context`` (the response bytes) is NEVER read for the fact — only the
+        request-side "where to look" is sourced from the model here; the FACT is decided by the re-driven
+        wire bytes. The gated re-drive re-enforces charter scope, so an out-of-scope proposed target is
+        refused there (never a fact) — this derivation is proposal-triage only, not an authority."""
+        tool = getattr(decision, "tool", None)
+        analysis = getattr(decision, "output_analysis", None)
+        if tool is None or analysis is None:
+            return None
+        if getattr(analysis, "exploit_succeeded", None) is not True:
+            return None
+        info = getattr(analysis, "extracted_info", None)
+        if not isinstance(info, dict):
+            return None
+        octx = info.get("oracle_context") if isinstance(info.get("oracle_context"), dict) else {}
+        # CLASS GATE (cheap; the seam re-normalizes authoritatively): only error_based_sqli re-drives.
+        bug_class = str(info.get("bug_class") or octx.get("bug_class") or "")
+        if bug_class.strip().lower().replace("-", "_").replace(" ", "_") != "error_based_sqli":
+            return None
+        target = extract_target(getattr(tool, "tool_args", None))   # the ONE shared tool-args target reader
+        if not target:
+            return None
+        sp = urlsplit(target if "://" in target else "http://" + target)
+        if not sp.hostname:
+            return None
+        base_url = f"{(sp.scheme or 'http')}://{sp.netloc}"
+        endpoint_path = sp.path or "/"
+        param = str(info.get("insertion_point") or octx.get("payload_param") or "").strip()
+        payload = str(info.get("request_payload") or info.get("payload")
+                      or octx.get("request_payload") or "").strip()
+        nonce_param = str(info.get("nonce_param") or "rc").strip() or "rc"
+        if not (param and payload):
+            return None
+        return {"base_url": base_url, "endpoint_path": endpoint_path, "param": param,
+                "payload": payload, "nonce_param": nonce_param, "bug_class": "error_based_sqli"}
 
     def _approved(self, decision: LLMDecision, state: AgentState) -> bool:
         if self.seams.approval is None:

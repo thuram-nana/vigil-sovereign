@@ -285,3 +285,211 @@ def test_build_engine_persists_a_stable_governance_key_under_base_dir(hermetic_r
     persisted = json.loads(keyfile.read_text())["public_key_b64"]
     prov2 = provision_authority(slug="loopback", scope=["127.0.0.1"], base_dir=base)
     assert prov2.keypair.public_key_b64 == persisted                  # reuses the SAME anchor-1 signer
+
+
+# ===================================================================================================
+# T2 (TRUTHENOVATION) — the LIVE RE-DRIVE: the engage loop mints a signed FACT from a RE-DRIVEN oracle
+# over the TARGET's FRESH response bytes (overclaim O2). This fuses this file's build_engine harness with
+# a REAL loopback error_based_sqli target + a signed charter admitting 127.0.0.1 (the gated re-drive's
+# scope), and is the CONVERSE of test_live_llm_crafted_firing_context_stays_a_lead_not_a_fact above: an
+# LLM-crafted firing context is still a LEAD, but a RE-DRIVEN firing target is now a signed FACT.
+# ===================================================================================================
+
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+from urllib.parse import parse_qs, urlsplit  # noqa: E402
+
+# A real MySQL error-based-SQLi signature the error_signature oracle fires on (mirrors test_live_adapter).
+_ORIG_SQL_ERROR = b"HTTP/1.1 500\r\n\r\nYou have an error in your SQL syntax near '' at line 1"
+
+
+def _error_context(body: bytes) -> dict:
+    """Build the error_signature oracle_context the oracle re-fires over — the SAME translator the adapter
+    uses. Used to forge a genuinely-FIRING *LLM-claimed* context (which must STILL be demoted to a LEAD)."""
+    from framework.v2.evidence.poc import CapturedExchange
+    from framework.v2.verify.poc_translate import context_from_exchanges
+    ex = CapturedExchange(channel="error_signature", role="mutated", response_bytes_ref="resp")
+    ctx = context_from_exchanges([ex], bug_class="error_based_sqli", resolve=lambda _r: body)
+    assert ctx is not None
+    return ctx.model_dump(mode="json")
+
+
+class _SqliHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):  # keep test output quiet
+        pass
+
+    def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler contract
+        srv = self.server
+        q = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        exploit_present = any(v for v in q.get("q", []))
+        nonce = (q.get("rc") or [""])[0]
+        if (not srv.patched) and exploit_present:                          # type: ignore[attr-defined]
+            body = "HTTP 500 Internal Server Error\nYou have an error in your SQL syntax near '' at line 1\n"
+        else:
+            body = '{"results": [], "ok": true}\n'
+        if nonce:
+            body += f"\n<!-- vigil-echo:{nonce} -->\n"
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+class _SqliServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def _start_sqli(*, patched: bool) -> _SqliServer:
+    srv = _SqliServer(("127.0.0.1", 0), _SqliHandler)
+    srv.patched = patched            # type: ignore[attr-defined]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+_CHARTER = """\
+# Engagement charter — `{slug}`
+
+**Status:** Final
+
+## 1. Operator attestation
+
+Signed: `tester`     Date: `2026-05-04`
+
+## 2. In-scope systems
+
+| Host / Surface | Notes | Auth |
+|----------------|-------|------|
+| `{host}` | Loopback test app | Yes |
+
+## 3. Out of scope
+
+- Anything not listed above.
+
+## 7. Posture
+
+- [x] **TEST**
+"""
+
+
+def _setup_gated_root(tmp_path, monkeypatch, *, charter_host: str = "127.0.0.1") -> None:
+    """Fuse hermetic_root (the CRUCIBLE authority store) with test_live_adapter's gated_root (a signed
+    charter + the framework path helpers pointed at a tmp tree), so the T2 re-drive's gated HttpExecutor
+    scope gate resolves the CHARTER for the engine's own slug. ``charter_host`` sets which host the charter
+    admits — 127.0.0.1 for the reachable cases, a DIFFERENT host to force an out-of-scope gate refusal."""
+    from framework.v2.common import paths as _paths
+    monkeypatch.setenv("CRUCIBLE_ROOT", str(tmp_path / "crucible-root"))
+    targets = tmp_path / "targets"
+    (targets / "loopback").mkdir(parents=True)
+    (targets / "loopback" / "charter.md").write_text(
+        _CHARTER.format(slug="loopback", host=charter_host), encoding="utf-8")
+    authdir = tmp_path / "authority"
+    authdir.mkdir()
+    monkeypatch.setattr(_paths, "target_dir", lambda s: targets / s)
+    monkeypatch.setattr(_paths, "charter_path", lambda s: targets / s / "charter.md")
+    monkeypatch.setattr(_paths, "killswitch_path", lambda s: targets / s / ".halt")
+    monkeypatch.setattr(_paths, "authority_path", lambda s: authdir / f"{s}.authority.json")
+
+
+def _use_error_sqli_tool(base_url: str, *, tool: str = "httpx", llm_oracle_context=None) -> LLMDecision:
+    """An error_based_sqli ``exploit_succeeded`` proposal. The tool target names the LIVE server (the LLM's
+    proposed "where to look"); ``extracted_info`` carries the class + insertion point + proposed payload
+    (all legitimate model proposals). The fact must come from RE-DRIVING that spec — never from any claimed
+    ``oracle_context`` (``llm_oracle_context``, when set, is a FABRICATED firing context that must NOT
+    mint a fact)."""
+    target = base_url.rstrip("/") + "/search?q=1"
+    info = {"bug_class": "error_based_sqli", "check_id": "errsqli-live-001",
+            "insertion_point": "q", "request_payload": "x' OR '1'='1", "nonce_param": "rc"}
+    if llm_oracle_context is not None:
+        info["oracle_context"] = llm_oracle_context
+    return LLMDecision(
+        action=ActionType.USE_TOOL,
+        tool=ToolCall(tool_name=tool, tool_args={"target": target}),
+        output_analysis=OutputAnalysis(exploit_succeeded=True, extracted_info=info),
+    )
+
+
+def test_live_redrive_of_a_vulnerable_target_mints_a_fact_whose_cert_reverifies(tmp_path, monkeypatch):
+    # THE CONVERSE of the LLM-crafted-context test: a live engage run against a loopback target that returns
+    # a REAL error-based-SQLi signature MINTS A FACT via the live-redrive path, and the signed cert
+    # re-verifies OFFLINE against the FRESH re-driven context (not the LLM's claim).
+    from vigil_integration.live import wiring as W
+    from framework.v2.evidence.certify import verify_certificate
+
+    _setup_gated_root(tmp_path, monkeypatch, charter_host="127.0.0.1")
+
+    captured: list = []
+    real = W.confirm_and_certify
+
+    def _spy(finding, **kw):
+        res = real(finding, **kw)
+        if kw.get("provenance") == "live_redrive":
+            captured.append((res, finding.get("oracle_context")))
+        return res
+    monkeypatch.setattr(W, "confirm_and_certify", _spy)
+
+    srv = _start_sqli(patched=False)                              # a VULNERABLE target (oracle fires live)
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        engine, prov, _cfg = _engine(tmp_path, ReplayThinker([_use_error_sqli_tool(base), _complete()]))
+        report = engine.engage(base + "/search?q=1")
+    finally:
+        srv.shutdown(); srv.server_close()
+
+    assert any(t.outcome == "ran" for t in report.tool_calls)    # the in-scope tool ran (echo runner)
+    assert report.fact_count >= 1                                 # the LIVE RE-DRIVE minted a signed FACT
+    fact = report.facts[0]
+    assert fact.status == "fact" and fact.evidence_ref           # carries the signed cert ref
+    # the cert minted via the live-redrive path re-verifies OFFLINE against the run's trust root + the FRESH
+    # re-driven oracle_context (authentic + bound + REPRODUCED).
+    assert captured, "the live-redrive confirm path must have been exercised"
+    res, fresh_ctx = captured[0]
+    assert res.is_fact and res.signed is not None
+    ver = verify_certificate(res.signed, oracle_context=fresh_ctx, trust_root=prov.trust_root)
+    assert ver.ok is True, f"the live-redrive cert must re-verify offline, got: {ver}"
+
+
+def test_live_redrive_of_a_patched_target_stays_a_lead_even_if_llm_claims_success(tmp_path, monkeypatch):
+    # A target that does NOT reproduce the signature on re-drive stays a LEAD (fact_count == 0) EVEN when the
+    # LLM claims exploit_succeeded AND supplies a genuinely-FIRING (fabricated) oracle_context — a fabricated
+    # LLM oracle_context must never mint a fact; only the re-driven wire bytes decide.
+    _setup_gated_root(tmp_path, monkeypatch, charter_host="127.0.0.1")
+    forged = _error_context(_ORIG_SQL_ERROR)                     # a fabricated context that WOULD fire
+
+    srv = _start_sqli(patched=True)                              # a PATCHED target (answers cleanly)
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        engine, _prov, _cfg = _engine(
+            tmp_path, ReplayThinker([_use_error_sqli_tool(base, llm_oracle_context=forged), _complete()]))
+        report = engine.engage(base + "/search?q=1")
+    finally:
+        srv.shutdown(); srv.server_close()
+
+    assert any(t.outcome == "ran" for t in report.tool_calls)    # the tool ran; the re-drive was attempted
+    assert report.fact_count == 0                                # the target did NOT reproduce ⇒ NO fact
+    assert report.leads                                          # retained as a labelled lead
+
+
+def test_live_redrive_out_of_charter_scope_is_refused_never_a_fact(tmp_path, monkeypatch):
+    # A gate REFUSAL must never mint a fact. The signed authority admits 127.0.0.1 (so the ENGINE's tool call
+    # runs), but the CHARTER the re-drive's HttpExecutor enforces admits a DIFFERENT host — so the gated
+    # re-drive of 127.0.0.1 is REFUSED (out of scope). Even with a fabricated firing LLM context, no fact.
+    _setup_gated_root(tmp_path, monkeypatch, charter_host="10.10.10.10")     # charter EXCLUDES loopback
+    forged = _error_context(_ORIG_SQL_ERROR)
+
+    srv = _start_sqli(patched=False)                            # vulnerable, but the re-drive can't reach it
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        engine, _prov, _cfg = _engine(
+            tmp_path, ReplayThinker([_use_error_sqli_tool(base, llm_oracle_context=forged), _complete()]))
+        report = engine.engage(base + "/search?q=1")
+    finally:
+        srv.shutdown(); srv.server_close()
+
+    assert any(t.outcome == "ran" for t in report.tool_calls)    # the tool ran (authority admits 127.0.0.1)
+    assert report.fact_count == 0                                # the re-drive was REFUSED (out of charter scope)
+    assert report.leads                                          # a refusal degrades to a labelled lead

@@ -26,6 +26,7 @@ offense-side: it runs only in the no-owner-key worker.
 from __future__ import annotations
 
 import datetime
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -439,8 +440,16 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         except Exception:  # noqa: BLE001 — a spine outage is a recorded no-op, never fatal to the run
             return None
 
-    # -- oracle (F2): confirm_and_certify over the retained oracle_context ---------------------------
-    oracle = _build_oracle(prov)
+    # -- oracle (F2): confirm_and_certify over the retained oracle_context, PLUS the T2 live re-drive --
+    def _redrive_executor_factory(base_url: str) -> Any:
+        # A gated CRUCIBLE HttpExecutor bound to the SAME engagement slug the engine provisioned — its
+        # charter/scope/kill-switch/budget gate chain admits ONLY the chartered hosts, so the re-drive is
+        # NOT a new egress path (it rides the same signed-authority scope as the engine's own executor).
+        # Framework import is LAZY here (FATAL-2): this offense-side factory never co-loads the sovereign env.
+        from framework.v2.agents import HttpExecutor
+        return HttpExecutor(engagement_slug=prov.slug, base_url=base_url, prompt_callback=lambda *_a: False)
+
+    oracle = _build_oracle(prov, redrive_executor_factory=_redrive_executor_factory)
 
     # -- per-session knowledge graph (F3): the partition key is the SESSION id (falls back to the slug),
     # so each session owns a disjoint Neo4j partition + accumulates its own prior context. graph_writer is
@@ -744,24 +753,42 @@ def build_terminal_runtime(*, slug: str = "loopback", base_dir: str) -> Terminal
     )
 
 
-def _build_oracle(prov: Provisioned) -> Callable[[str, Any], Optional[str]]:
-    """The CRUCIBLE oracle seam. The deterministic oracle re-fires over an ``oracle_context`` and a signed
-    certificate's finding ref is returned ONLY on a real confirmation (else None ⇒ the claim stays a LEAD).
+def _build_oracle(
+    prov: Provisioned,
+    *,
+    redrive_executor_factory: Optional[Callable[[str], Any]] = None,
+) -> Callable[..., Optional[str]]:
+    """The CRUCIBLE oracle seam. Returns a signed certificate's finding ref ONLY on a real confirmation
+    (else None ⇒ the claim stays a LEAD).
 
-    AUDIT G4 — the sovereign anti-hallucination gate: the context here is the model's own
+    T2 — the LIVE RE-DRIVE (overclaim O2). For an ``error_based_sqli`` candidate the LLM marked
+    ``exploit_succeeded``, the seam RE-DRIVES the proposed exploit against the live target through the gated
+    ``redrive_executor_factory`` (a CRUCIBLE ``HttpExecutor`` bound to the engine's signed-authority slug) and
+    mints a signed FACT ONLY when the ORIGINAL deterministic oracle re-fires over the TARGET'S FRESH RESPONSE
+    bytes (``provenance="live_redrive"``). The LLM's proposed payload/param/endpoint is only the "where to
+    look"; the fact is decided by the wire bytes alone — the model's claimed ``oracle_context`` is DISCARDED
+    for the fact. A gate refusal / unreachable / silent target, an incomplete request-spec, or any other
+    class falls through to the LEAD path below (fail-closed: a refusal never mints a fact).
+
+    AUDIT G4 — the LEAD-only fallback (unchanged): the context here is the model's own
     ``analysis.extracted_info['oracle_context']`` — LLM-PROVENANCED — so it is passed with
     ``provenance="llm"`` and ``confirm_and_certify`` demotes it to a LEAD even when the oracle fires. A
-    crafted-but-firing context therefore CANNOT mint a signed FACT (the exact route this gate closes).
-    Minting a FACT from this seam requires REPRODUCING the finding from the ``raw_output`` argument (the
-    executor-captured, non-LLM tool output) via a class translator, or a scope-gated live re-drive of the
-    target — passed as ``provenance="reproduced"``/``"live_redrive"``. That reproduce-from-raw path is the
-    documented follow-up (see ``oracle_adapter`` module docstring); until it lands this seam yields LEADs,
-    which is the correct fail-closed disposition, not a regression of a sound FACT."""
+    crafted-but-firing context therefore CANNOT mint a signed FACT (the exact route this gate closes)."""
 
-    def oracle(raw_output: str, analysis: Any) -> Optional[str]:
+    def oracle(raw_output: str, analysis: Any, *, redrive: Optional[dict] = None) -> Optional[str]:
         info = getattr(analysis, "extracted_info", None) or {}
         if not isinstance(info, dict):
             return None
+
+        # T2 — LIVE RE-DRIVE (error_based_sqli only): a FACT from the TARGET's FRESH response bytes, NOT the
+        # LLM's claimed context. Any failure/refusal/silence returns None → the claim stays a LEAD below.
+        fact_ref = _live_redrive_fact(prov, redrive_executor_factory, info, redrive)
+        if fact_ref:
+            return fact_ref
+
+        # LEAD-ONLY fallback (AUDIT G4): a boolean/other-class candidate, or an error_based_sqli whose live
+        # re-drive did not reproduce, lands here. The deterministic oracle still runs so the LEAD is honestly
+        # labelled with what fired, but an LLM-provenanced context is never signed into a FACT.
         octx = info.get("oracle_context")
         if not isinstance(octx, dict):
             return None
@@ -772,8 +799,6 @@ def _build_oracle(prov: Provisioned) -> Callable[[str, Any], Optional[str]]:
             "oracle_context": octx,
         }
         try:
-            # provenance="llm": the deterministic oracle still runs (the LEAD is honestly labelled with
-            # what fired), but an LLM-emitted context is never signed into a FACT.
             res = confirm_and_certify(finding, engagement_slug=prov.slug, signers=prov.signers,
                                       provenance="llm")
         except Exception:  # noqa: BLE001 — an oracle/cert error confirms nothing (fail-closed)
@@ -781,6 +806,110 @@ def _build_oracle(prov: Provisioned) -> Callable[[str, Any], Optional[str]]:
         return res.finding_ref if getattr(res, "is_fact", False) else None
 
     return oracle
+
+
+def _redrive_challenge(*parts: str) -> str:
+    """A DETERMINISTIC freshness challenge for the live re-drive, derived from the request-spec (NO
+    wallclock / rng), so the same candidate always re-drives with the same nonce — the determinism
+    invariant. stdlib-only (FATAL-2 safe)."""
+    raw = "|".join(str(p) for p in parts)
+    return "vfrd" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _live_redrive_fact(
+    prov: Provisioned,
+    factory: Optional[Callable[[str], Any]],
+    info: dict,
+    redrive: Optional[dict],
+) -> Optional[str]:
+    """T2 — RE-DRIVE an ``error_based_sqli`` candidate against the live target through the gated
+    ``HttpExecutor`` and mint a signed FACT from the TARGET's FRESH response bytes.
+
+    Returns a signed certificate ref ONLY when EVERY condition holds: a factory is wired, a COMPLETE
+    request-spec is present, the class is ``error_based_sqli``, the gated re-drive REACHES the target, and
+    the ORIGINAL oracle re-fires over the freshly captured bytes. Every other path — no factory / no spec /
+    wrong class / a gate REFUSAL / unreachable / silent / a cert error — returns None, so the claim stays a
+    LEAD (fail-closed; a gate refusal MUST NOT mint a fact).
+
+    Soundness: the LLM's proposed ``payload``/``param``/``endpoint`` is the "where to look" (allowed), but
+    the FACT's ``oracle_context`` is the FRESH re-drive context (``TrialObservation.oracle_context``, built
+    from the wire bytes) — the model's claimed ``oracle_context`` is never read here. Scope is enforced by
+    the executor's own charter/scope/kill-switch chain inside ``gated_fetch`` — this opens no new egress.
+
+    HONEST LIMIT (payload-causation): this mint re-fires the ``error_signature`` oracle over a SINGLE
+    re-driven response (``control_body=None``), so it establishes "the in-charter target emitted a
+    datastore-error signature on the exploit request", NOT that the payload CAUSED the error — a target that
+    emits a static datastore-error banner independent of input would also mint. This is the documented limit
+    of the single-response ``error_signature`` channel (shared with the base oracle, not a T2-specific
+    overclaim; the fact is scoped to operator-authorized in-charter hosts). Threading a same-run benign
+    differential control (the adapter already owns ``_control_url``/``run_positive_control``) to establish
+    payload-causation is the disclosed hardening follow-up.
+
+    FATAL-2: every framework-touching import is function-local (this is the offense-side re-drive path)."""
+    if factory is None or not isinstance(redrive, dict):
+        return None
+    base_url = str(redrive.get("base_url") or "").strip()
+    endpoint_path = str(redrive.get("endpoint_path") or "").strip()
+    param = str(redrive.get("param") or "").strip()
+    payload = str(redrive.get("payload") or "").strip()
+    nonce_param = str(redrive.get("nonce_param") or "rc").strip() or "rc"
+    if not (base_url and endpoint_path and param and payload):
+        return None    # an incomplete request-spec cannot be honestly re-driven → LEAD (fail-closed)
+
+    # CLASS GATE — only the error_signature channel (error_based_sqli) is re-drivable in this slice; a
+    # boolean/other-class candidate stays a LEAD (unchanged). Normalize via the authoritative verifier.
+    try:
+        from framework.v2.verify.verifier import normalize_bug_class
+        bug_class = normalize_bug_class(str(redrive.get("bug_class") or info.get("bug_class") or ""))
+    except Exception:  # noqa: BLE001 — cannot normalize ⇒ cannot honestly re-drive → LEAD (fail-closed)
+        return None
+    if bug_class != "error_based_sqli":
+        return None
+
+    try:
+        executor = factory(base_url)
+    except Exception:  # noqa: BLE001 — cannot build the gated executor → LEAD (fail-closed)
+        return None
+    if executor is None:
+        return None
+    try:
+        from ..remediation.live_adapter import LiveHttpAdapter
+        from ..remediation.prove_driver import EffectiveAuthorization
+        adapter = LiveHttpAdapter(
+            executor=executor, base_url=base_url, endpoint_path=endpoint_path, param=param,
+            payload=payload, nonce_param=nonce_param,
+            original_firing_context={"bug_class": "error_based_sqli"}, bug_class="error_based_sqli")
+        # A minimal execution envelope — LiveHttpAdapter.run_exploit_trial does not consume ``auth`` (each
+        # gated_fetch is authorized by the HttpExecutor's own charter/scope chain); it is required only to
+        # satisfy the LiveTargetAdapter protocol signature.
+        auth = EffectiveAuthorization(
+            target_identity_digest="", allowed_bug_classes=("error_based_sqli",), maximum_requests=1,
+            not_before=0, expires_at=0, revocation_id="", capability_chain_digest="")
+        challenge = _redrive_challenge(prov.slug, base_url, endpoint_path, param, payload)
+        obs = adapter.run_exploit_trial(challenge=challenge, trial_index=0, auth=auth)
+    except Exception:  # noqa: BLE001 — any re-drive/transport error is an unconfirmed claim → LEAD
+        return None
+
+    if not (getattr(obs, "reachable", False) and getattr(obs, "valid", False)):
+        return None    # gate refusal / unreachable / uncapturable → LEAD (a REFUSAL never mints a fact)
+    fresh_ctx = getattr(obs, "oracle_context", None)
+    if not isinstance(fresh_ctx, dict) or not fresh_ctx:
+        return None
+
+    # MINT — confirm_and_certify re-fires the ORIGINAL oracle over the FRESH wire bytes; provenance=
+    # "live_redrive" is the non-LLM channel the sovereign anti-hallucination gate requires for a FACT.
+    finding = {
+        "check_id": str(info.get("check_id") or "finding"),
+        "bug_class": "error_based_sqli",
+        "insertion_point": param,
+        "oracle_context": fresh_ctx,     # the FRESH re-drive context — the LLM's claimed context is DISCARDED
+    }
+    try:
+        res = confirm_and_certify(finding, engagement_slug=prov.slug, signers=prov.signers,
+                                  provenance="live_redrive")
+    except Exception:  # noqa: BLE001 — a cert error confirms nothing (fail-closed)
+        return None
+    return res.finding_ref if getattr(res, "is_fact", False) else None
 
 
 # ---------------------------------------------------------------------------------------------------
