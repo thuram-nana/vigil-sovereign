@@ -32,13 +32,20 @@ enforced by merged, adversarially-reviewed code:
 
 **Tier-1 honest limits (do not read past them):**
 
-- **Freshness is F1, not F2, for the current live adapter.** The freshness nonce rides a *separate* query
-  param, so an echo proves the target is *responsive* (F1), NOT that the *vulnerable code path* ran (F2). An
-  interposing edge / WAF block page / down-origin gateway that reflects the nonce can therefore yield
-  `REMEDIATED@F1`. A verifier that needs the exploit path exercised sets
-  `policy.minimum_freshness_level >= F2`, which the current adapter honestly cannot meet → `INCONCLUSIVE`
-  (never a falsely-strong `REMEDIATED`). Closing this (a LIVE positive control + nonce-through-the-exploit-path)
-  is the disclosed VF-1a.3 follow-up.
+- **Freshness is asymmetric between the two verdicts, and the asymmetry is FUNDAMENTAL (VF-1a.3).** For a
+  **STILL_VULNERABLE** finding the adapter reaches **genuine F2**: with a `payload_template` the fresh challenge
+  rides the exploit payload and comes back INSIDE the sink's firing signature (e.g. a DB error wrapping the
+  nonce) — unforgeable proof the vulnerable path ran this run (`live_adapter.py` + the driver's
+  `fired ∧ challenge-in-judged-bytes` gate, #202). For a **REMEDIATED** finding F2 is *unattainable*: a fixed
+  sink produces no signature, so a nonce in a silent response got there by *reflection*, which an echoing app or
+  an interposing edge can fake — the driver therefore caps a silent verdict at **F1** and an F2-demanding
+  verifier of a remediation gets `INCONCLUSIVE` (never a falsely-strong `REMEDIATED@F2`). The remediation's
+  liveness is strengthened by a **LIVE positive control** (a real gated fetch this run, not just retained
+  bytes); with `policy.require_injectable_param_live` it also rules out a **param-stripping edge / down-origin
+  gateway** (the control sends a benign marker through the injectable param and requires the app to reflect it).
+  **Residual, disclosed:** the F1 remediation still does not distinguish a *payload-discriminating WAF* (blocks
+  the exploit's metacharacters, passes the benign marker) from a real fix — that needs a matched-decoy
+  differential or the OOB Tier-2, both deferred.
 - **Target-binding is TLS-SPKI-strong only for HTTPS; a plain-HTTP target binds host-only.** The strong,
   non-transplantable form of "bound to THE target" (the SPKI row above) requires an HTTPS handshake:
   `identity_sample` records `tls_spki_sha256` *only* when the scheme is `https`, and for an HTTP target (or a
@@ -94,8 +101,11 @@ These are honestly out of scope today; VIGIL does not claim them:
 - **A hard, external time anchor.** An RFC3161 TSA / OpenTimestamps proof over the checkpoint hash would give a
   single trusted "no-later-than T" independent of witness honesty. It is a designed, deferred hook
   (`WITNESS-TRUST.md` §5); until built, the time bound is the quorum-median described above.
-- **F2+ freshness in the live adapter** (nonce through the exploit path + a live positive control) — the
-  VF-1a.3 follow-up noted under Tier 1.
+- **Distinguishing a payload-discriminating WAF from a real fix for the SILENT case.** VF-1a.3 delivered
+  genuine F2 for the firing case, a live positive control, and (opt-in) the param-stripping/down-origin closure;
+  what remains is telling a WAF that blocks the exploit's metacharacters (while passing a benign marker) apart
+  from a genuine remediation. That needs a matched-decoy differential (a metachar-identical-but-null control) or
+  the OOB Tier-2 — deferred, and honestly reported as the F1-remediation residual under Tier 1.
 
 ---
 

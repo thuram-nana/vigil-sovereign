@@ -100,8 +100,12 @@ class Reason:
 
 class Freshness:
     F0_NONCE_GENERATED = 0        # a fresh client challenge exists
-    F1_TARGET_ECHOES = 1         # the target returned the challenge (responsive)
-    F2_PATH_TRAVERSED = 2        # the challenge is present in the retained evidence the oracle judged
+    F1_TARGET_ECHOES = 1         # the target returned the challenge (responsive) — reflection, incl. into a
+                                 #   SILENT response, never exceeds this (an echoer/edge can produce it)
+    F2_PATH_TRAVERSED = 2        # the challenge is in the oracle-JUDGED bytes of a FIRING trial — i.e. it came
+                                 #   back INSIDE the vulnerable sink's signature (unforgeable proof the path ran
+                                 #   this run). Sound only for STILL_VULNERABLE; a REMEDIATED (silent) verdict
+                                 #   can NEVER reach F2 (the fixed sink cannot be traversed) — VF-1a.3.
     F3_BOUND_TO_EVIDENCE = 3     # the challenge is bound into the exploit/control evidence (structural)
     F4_INDEPENDENT_SIGNED = 4    # an independent collector / the target key signed the nonce-bound observation
 
@@ -307,6 +311,11 @@ class ControlObservation:
     freshness_level: int = Freshness.F0_NONCE_GENERATED
     definition_digest: str = ""
     detail: str = ""
+    # VF-1a.3 — set True when a LIVE control probe confirmed the injectable parameter itself reached the app
+    # this run (the app reflected a benign challenge-bearing marker sent through it), ruling out a
+    # param-stripping edge / down-origin gateway for the control. Informational/honesty signal recorded on the
+    # cert; it is NEVER used to promote freshness (F2 sink-traversal stays exclusive to a FIRING trial).
+    injectable_param_live: bool = False
 
 
 @dataclass(frozen=True)
@@ -347,6 +356,14 @@ class ProvePolicy:
     require_fresh_revocation: bool = True
     minimum_freshness_level: int = Freshness.F1_TARGET_ECHOES
     single_instance_scope: bool = True
+    # VF-1a.3 — when True, a REMEDIATED claim additionally requires the live positive control to have confirmed
+    # the INJECTABLE PARAMETER reached the app this run (the app reflected a benign challenge-bearing marker sent
+    # through it). This closes the param-stripping-edge / down-origin case for the silent verdict: an edge that
+    # drops the injectable param cannot then yield REMEDIATED. Default False (backward-compatible: not every app
+    # reflects input, and an adapter with no live control leaves it False) — a verifier that wants the closure
+    # opts in. It does NOT close the payload-discriminating-WAF residual (a benign marker still passes) — that
+    # needs a matched-decoy differential or OOB Tier-2 (deferred).
+    require_injectable_param_live: bool = False
 
 
 @dataclass
@@ -494,6 +511,13 @@ def prove_remediation(
                                                 and _fires(control.oracle_context, adapter.bug_class, finding_id)):
         return inconclusive(Reason.CONTROL_FAILED,
                             "the positive control did NOT fire — silence would be an artefact, not a fix")
+    # VF-1a.3 — optional param-stripping / down-origin closure: demand the LIVE control confirmed the injectable
+    # parameter reached the app this run (a benign marker sent through it was reflected). Fail-closed under the
+    # policy: an edge that drops the injectable param cannot then be read as a fix.
+    if policy.require_injectable_param_live and not control.injectable_param_live:
+        return inconclusive(Reason.CONTROL_FAILED,
+                            "policy requires a live injectable-parameter control, but the app did not reflect "
+                            "the benign marker — a param-stripping edge / down-origin gateway is not ruled out")
 
     # ---- identity continuity #2 (before exploit trials). ----
     if not _same_identity(adapter, identity, policy, tid_digest, identity_samples):
@@ -523,23 +547,34 @@ def prove_remediation(
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
         if not trial.valid or trial.oracle_context is None:
             continue   # recorded but not counted; the budget bounds an invalid streak
-        # FRESHNESS — the echo must be present AND (at F2+) the challenge must ACTUALLY appear in the retained
-        # evidence the oracle judged. The adapter's claimed level is CAPPED by what the core can verify.
         if not trial.nonce_echoed:
             return inconclusive(Reason.FRESHNESS_ECHO_MISSING,
                                 "the target did not echo the run challenge — cannot prove fresh (not replayed)",
                                 attempted=attempted, valid=valid, freshness=achieved_freshness)
+        # ORACLE AUTHORITY — re-fire the ORIGINAL oracle over this fresh evidence. Computed HERE (before the
+        # freshness credit) because F2 soundness depends on whether this trial FIRED (VF-1a.3).
+        fired = _fires(trial.oracle_context, adapter.bug_class, finding_id)
+        # FRESHNESS — the adapter's claimed level is CAPPED by what the core can verify. F2 (the challenge
+        # provably traversed the VULNERABLE code path) is credited ONLY when the oracle FIRED over judged bytes
+        # that contain the fresh challenge: a firing signature (e.g. a DB error wrapping the challenge) is
+        # unforgeable proof the sink processed it THIS run. A SILENT trial can NEVER earn F2 from reflection —
+        # an app or interposing edge that merely echoes the injected input back would otherwise fake
+        # sink-traversal — so silence caps at F1 (target-responsive). A genuine remediation is therefore
+        # reported at F1, and a verifier that demands F2 for a REMEDIATION correctly gets INCONCLUSIVE: once the
+        # sink is fixed its traversal is unprovable by reflection (a fundamental limit, not a downgrade; ruling
+        # out a payload-discriminating edge for the silent case needs a matched-decoy differential or the OOB
+        # Tier-2, both deferred). The F2 case that IS sound — a live, fresh, sink-traversed EXPLOIT — is earned
+        # by the STILL_VULNERABLE branch below.
         verified_level = int(trial.freshness_level)
-        if verified_level >= Freshness.F2_PATH_TRAVERSED and not _challenge_in_judged_evidence(
-                challenge, trial.oracle_context):
-            verified_level = Freshness.F1_TARGET_ECHOES   # claimed F2+ but the challenge is not in the JUDGED bytes
+        if verified_level >= Freshness.F2_PATH_TRAVERSED and not (
+                fired and _challenge_in_judged_evidence(challenge, trial.oracle_context)):
+            verified_level = Freshness.F1_TARGET_ECHOES   # claimed F2+ but not a firing challenge-in-JUDGED-bytes
         if verified_level < eff_min_freshness:
             return inconclusive(Reason.INSUFFICIENT_FRESHNESS,
                                 f"verified F{verified_level} < required floor F{eff_min_freshness}",
                                 attempted=attempted, valid=valid, freshness=verified_level)
         achieved_freshness = max(achieved_freshness, verified_level)
-        # ORACLE AUTHORITY — re-fire the ORIGINAL oracle over this fresh evidence.
-        if _fires(trial.oracle_context, adapter.bug_class, finding_id):
+        if fired:
             cert = mk(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, freshness_challenge=challenge,
                       effective_authority_digest=auth.digest(), identity_samples=identity_samples,
                       trial_policy=_policy_dict(rp, eff_min_freshness),
