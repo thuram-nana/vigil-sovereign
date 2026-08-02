@@ -45,11 +45,17 @@ THE QUORUM + MEDIAN RULE (exactly)
   is unknown to the trust root, whose key is weak/malformed, or whose signature does not verify is
   IGNORED (never counted) — fail-closed.
 * NO-LATER-THAN ``T`` = the ``(n//2)``-th element of the SORTED distinct-verifying observed times, where
-  ``n`` is the count of distinct verifying witnesses. For odd ``n`` this is the exact median; for even
-  ``n`` it is the UPPER of the two central values (deterministic, integer, no averaging). The MEDIAN
-  (not min/max) is deliberate: under a strict-majority-HONEST quorum the ``(n//2)``-th value is always
-  sandwiched between two honest clocks, so a single dishonest witness reporting an extreme ``τ`` cannot
-  move it (WITNESS-TRUST §4).
+  ``n`` is the count of distinct verifying witnesses PRESENTED. For odd ``n`` this is the exact median; for
+  even ``n`` it is the UPPER of the two central values (deterministic, integer, no averaging). The MEDIAN is
+  sound ONLY under a strict-majority-HONEST **signing quorum** — and that is NOT a majority of the roster:
+  the verifier judges the sigs it is HANDED, and a fully-dishonest PRODUCER curates them (it can drop honest
+  sigs and present only its chosen quorum). So as few as ``floor(t/2)+1`` colluding signers — a roster
+  MINORITY for a large ``n`` — can shift ``T`` (back- or post-date), potentially below the non-equivocation
+  tolerance (``2t-n-1``). The code CANNOT check signer honesty. Mitigations: raise ``min_distinct_signers``
+  toward ``n`` (a strict verifier demands the full roster, so the producer cannot drop honest signers), and —
+  for a HARD time guarantee — the external RFC3161/OTS anchor over the checkpoint hash (WITNESS-TRUST §5),
+  which supersedes this median. The non-equivocation guarantee (below) is STRICTLY STRONGER than this clock
+  bound; do not conflate them.
 
 --------------------------------------------------------------------------------------------------------
 HONEST LIMIT (do NOT overclaim — WITNESS-TRUST §4)
@@ -153,6 +159,7 @@ def verify_timed_witnessed(
     timed_sigs: "list[TimedWitnessSignature]",
     *,
     witness_trust_root: TrustRoot,
+    min_distinct_signers: "Optional[int]" = None,
 ) -> "tuple[bool, Optional[int], str]":
     """Verify a strict-majority witness quorum TIMED-co-signed ``cp`` and return its no-later-than bound.
 
@@ -195,31 +202,55 @@ def verify_timed_witnessed(
             continue  # weak / non-canonical / malformed authorizer key — ignore, fail-closed
         if decoded_key in distinct_verified:
             continue  # already counted this witness (same decoded key) — never double-count
-        if verify_one(authorizer.public_key_b64, _timed_signing_bytes(cp, ts.observed_time), ts.signature_b64):
+        try:
+            verified = verify_one(
+                authorizer.public_key_b64, _timed_signing_bytes(cp, ts.observed_time), ts.signature_b64
+            )
+        except (IntegrityError, TypeError, ValueError):
+            # A MALFORMED / wrong-length / non-base64 signature must be IGNORED, never raised — a single bad
+            # sig (from a relay, a corrupt tick, or a hostile producer appending garbage) must not crash the
+            # offline verifier this layer exists to serve. Fail-closed: drop it, never count it.
+            continue
+        if verified:
             distinct_verified[decoded_key] = int(ts.observed_time)
 
-    # 3. quorum count.
-    if len(distinct_verified) < witness_trust_root.threshold:
-        return False, None, "quorum not met"
+    # 3. quorum count. Default requirement is the trust-root threshold; a strict verifier can raise it via
+    #    ``min_distinct_signers`` (e.g. to n, the full roster) to blunt the CURATION attack in the note below —
+    #    a dishonest producer choosing WHICH sigs the verifier sees cannot then drop honest signers.
+    required = witness_trust_root.threshold
+    if min_distinct_signers is not None:
+        required = max(required, int(min_distinct_signers))
+    if len(distinct_verified) < required:
+        return False, None, f"quorum not met (need {required} distinct verifying witnesses, got {len(distinct_verified)})"
 
     # 4. no-later-than T = the (n//2)-th of the sorted distinct-verifying observed times (upper-median for
-    #    even n; exact median for odd n) — robust: a single extreme value cannot dominate a majority-honest set.
+    #    even n; exact median for odd n). HONEST BOUND — this is sound ONLY if the PRESENTED signing quorum is
+    #    strict-majority HONEST. That is NOT the same as a majority of the roster: a fully-dishonest PRODUCER
+    #    curates which sigs the verifier sees (it can drop honest sigs and present only its chosen quorum), so
+    #    as few as floor(t/2)+1 colluding signers — a roster MINORITY for a large n — can shift T (back- or
+    #    post-date), possibly below the non-equivocation tolerance (2t-n-1). The code CANNOT check signer
+    #    honesty; for a HARD time guarantee use the external RFC3161/OTS anchor over the checkpoint hash
+    #    (WITNESS-TRUST §5), or raise ``min_distinct_signers`` toward n. See the module HONEST LIMIT.
     observed = sorted(distinct_verified.values())
     no_later_than_T = observed[len(observed) // 2]
     return (
         True,
         no_later_than_T,
-        f"witnessed by a strict-majority quorum; no-later-than T={no_later_than_T} (median of witness clocks)",
+        f"{len(distinct_verified)} distinct witness(es) co-signed; no-later-than T={no_later_than_T} = median of "
+        f"the PRESENTED signing quorum's clocks (sound only if that quorum is strict-majority honest — a hard "
+        f"time guarantee needs the external anchor)",
     )
 
 
 def verify_timed_witnessed_checkpoint(
-    twc: TimedWitnessedCheckpoint, *, witness_trust_root: TrustRoot
+    twc: TimedWitnessedCheckpoint, *, witness_trust_root: TrustRoot,
+    min_distinct_signers: "Optional[int]" = None,
 ) -> "tuple[bool, Optional[int], str]":
     """Convenience: verify a bundled :class:`TimedWitnessedCheckpoint` (reconstructs the typed checkpoint
     from its public dict, then delegates to :func:`verify_timed_witnessed`)."""
     return verify_timed_witnessed(
-        twc.as_checkpoint(), twc.witness_signatures, witness_trust_root=witness_trust_root
+        twc.as_checkpoint(), twc.witness_signatures, witness_trust_root=witness_trust_root,
+        min_distinct_signers=min_distinct_signers,
     )
 
 

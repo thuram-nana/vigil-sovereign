@@ -71,6 +71,14 @@ invariant and the existing dead-man's-switch pattern).
   two honest witnesses' clocks, so `|T_witness − (true time the checkpoint was witnessed)| ≤ δ`. The median (not
   min or max) is deliberate: a single dishonest witness reporting an extreme `τ` cannot move a
   strict-majority-honest median.
+- **CRUCIAL — "quorum" means the PRESENTED SIGNING quorum, not the roster.** The verifier judges the sigs it is
+  handed, and a fully-dishonest **producer** curates them: it can drop honest witnesses' sigs and present only a
+  quorum of its choosing. So the honest-majority assumption must hold over the **signing** set, which the
+  producer controls — not over the n-key roster. Consequently a roster **minority** of `floor(t/2)+1` colluding
+  signers can shift `T` (back- or post-date), *possibly below* the `2t−n−1` non-equivocation tolerance: **the
+  clock bound is STRICTLY WEAKER than non-equivocation** (do not present them as equally robust). The verifier
+  cannot check signer honesty; it can only (a) demand a larger presented quorum (`min_distinct_signers` toward
+  `n`, so honest sigs cannot be silently dropped) and (b) defer any HARD time claim to the external anchor (§5).
 - **What it bounds — and what it does NOT.** It bounds **when the checkpoint was WITNESSED**, i.e. when the
   attestation-series head existed and was presented to the quorum. It does **NOT** by itself prove *when the
   oracle re-fired*. A producer can present an OLD (un-re-verified) head to honest witnesses *today* and get a

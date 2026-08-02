@@ -278,3 +278,53 @@ def test_observed_time_tamper_invalidates_that_witness():
     others = [timed_cosign(cp, witness_keypair=W1, key_id="w1", observed_time=200)]
     ok, T, reason = verify_timed_witnessed(cp, [mutated] + others, witness_trust_root=QUORUM)
     assert not ok and "quorum not met" in reason      # only w1 verified → 1 < 2
+
+
+# ============================ VF-1c red-pen regressions ============================
+def test_malformed_signature_is_ignored_not_raised(tmp_path):
+    # BLOCK-1: a garbage / wrong-length signature from a real witness key_id must be IGNORED (never raised),
+    # so a single bad sig cannot crash the offline verifier — and a still-present valid quorum verifies.
+    cp = _cp()
+    from vigil_integration.remediation.attestation_witness import TimedWitnessSignature
+    sigs = [
+        timed_cosign(cp, witness_keypair=W0, key_id="w0", observed_time=100),
+        timed_cosign(cp, witness_keypair=W1, key_id="w1", observed_time=200),
+        # a third witness key_id present but with a non-base64 / wrong-length signature:
+        TimedWitnessSignature(key_id="w2", observed_time=300, signature_b64="!!!not-base64!!!"),
+    ]
+    ok, T, reason = verify_timed_witnessed(cp, sigs, witness_trust_root=QUORUM)   # must NOT raise
+    assert ok and T == 200, reason        # the 2 valid sigs form the quorum; the garbage one is dropped
+    # a lone malformed sig (no quorum) also must not crash — just fails closed.
+    ok2, T2, _ = verify_timed_witnessed(
+        cp, [TimedWitnessSignature(key_id="w0", observed_time=1, signature_b64="AAAA")],
+        witness_trust_root=QUORUM)
+    assert not ok2 and T2 is None
+
+
+def test_min_distinct_signers_blunts_producer_curation(tmp_path):
+    # HIGH-1: a dishonest PRODUCER curates the presented quorum — it drops honest sigs and presents only a
+    # minimum (threshold) quorum whose median it controls. A strict verifier demanding min_distinct_signers=n
+    # (the full roster) refuses that curated minimum, so the producer cannot silently drop honest signers.
+    cp = _cp()
+    # honest w0,w1 at real time; the producer presents ONLY w0 + a dishonest w2 backdating to 0 (threshold=2).
+    curated = [
+        timed_cosign(cp, witness_keypair=W0, key_id="w0", observed_time=1_700_000_000),
+        timed_cosign(cp, witness_keypair=W2, key_id="w2", observed_time=0),   # dishonest backdate
+    ]
+    ok, T, _ = verify_timed_witnessed(cp, curated, witness_trust_root=QUORUM)
+    assert ok and T in (0, 1_700_000_000)   # a curated 2-quorum verifies (default threshold) — the weak tier
+    # a strict verifier requires the FULL roster (min_distinct_signers=3) → the curated 2-sig set is refused.
+    ok2, T2, reason = verify_timed_witnessed(cp, curated, witness_trust_root=QUORUM, min_distinct_signers=3)
+    assert not ok2 and T2 is None and "need 3" in reason
+
+
+def test_single_dishonest_witness_cannot_move_a_full_quorum_median(tmp_path):
+    # With all 3 present, a single dishonest extreme time cannot move the median off the two honest clocks.
+    cp = _cp()
+    sigs = [
+        timed_cosign(cp, witness_keypair=W0, key_id="w0", observed_time=1_000),
+        timed_cosign(cp, witness_keypair=W1, key_id="w1", observed_time=1_002),
+        timed_cosign(cp, witness_keypair=W2, key_id="w2", observed_time=10**18),   # dishonest far-future
+    ]
+    ok, T, _ = verify_timed_witnessed(cp, sigs, witness_trust_root=QUORUM)
+    assert ok and T == 1_002   # median of the 3 is the honest middle value, not the extreme
