@@ -116,12 +116,14 @@ The positive control: the **retained** vulnerable probe-rounds must still fire `
 (harness capability); the live control is a real fetch this run (VF-1a.3) and, for this channel, MUST observe
 its fresh benign marker reflected (not mere reachability) so a query-stripping cache is caught (LOW-1).
 
-**Soundness of REMEDIATED — and its exact boundary.** A false REMEDIATED requires the decoy pair to reach the
-origin, be handled with no differential, yet the origin be vulnerable-if-reached-directly. With a *working
-data-dependent* pair this happens in exactly one way: an **in-flight sanitizer** (a-sanitize) neutralizes the
-metacharacters so the origin sees inert data. A *blocking* WAF cannot cause it (blocked → step 3 INCONCLUSIVE); a
-non-executing interposer cannot fake the *firing* direction either (data-dependent clause, §2). So the design is
-sound against a **blocking** content-discriminating WAF and against a non-executing interposer, and is **unsound
+**Soundness of REMEDIATED — and its exact boundary.** A false REMEDIATED requires a *refute* **plus** a
+WAF-closure *pass* while the origin is vulnerable-if-reached-directly. A non-executing interposer can fabricate a
+*firing* (§2) — but that yields STILL_VULNERABLE (the safe over-approximation), **not** the refute-plus-pass a
+false REMEDIATED needs; it cannot manufacture "the origin decisively did not discriminate." A *blocking* WAF
+cannot cause a false REMEDIATED either (blocked → step 3 INCONCLUSIVE). The refute-plus-pass over a vulnerable
+origin arises in exactly one way: an **in-flight sanitizer** (a-sanitize) neutralizes the metacharacters so the
+origin sees inert data. So the design is sound **in the REMEDIATED direction** against a blocking WAF and against
+a non-executing interposer (whose only forgery is the safe STILL_VULNERABLE over-report, §2), and is **unsound
 against a sanitizing one** — which is therefore disclosed (§7), not claimed closed.
 
 ## 5. Freshness in the differential channel — needs a NEW verifier
