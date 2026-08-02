@@ -224,6 +224,38 @@ def test_truncated_tick_log_is_rejected(tmp_path):
                        or "rolled back" in reason.lower()), reason
 
 
+def test_full_truncation_to_empty_is_rejected_by_the_floor(tmp_path):
+    # BLOCK-1 regression: an attacker empties ticks.jsonl AND removes head.json but CANNOT touch the durable
+    # floor (attacker-(i) / an OOB verifier holding the floor). verify_log must NOT report a clean empty log —
+    # the floor remembers entry_count>0, so this is a rollback (a full erasure of a signed attested series).
+    log = tmp_path / "attlog"
+    for i, k in enumerate([State.REMEDIATED, State.REMEDIATED, State.REMEDIATED]):
+        _append(log, _tick(k, i))
+    (log / al._TICKS_FILE).write_text("", encoding="utf-8")   # empty the tick log
+    (log / al._HEAD_FILE).unlink()                            # remove the signed head
+    # highwater.json is UNTOUCHED (entry_count=3)
+    ok, reason, series = _verify(log)
+    assert not ok and "rollback" in reason.lower() and series == [], reason
+
+
+def test_one_to_zero_truncation_is_rejected_by_entry_count(tmp_path):
+    # The entry_count-vs-last_seq degeneracy at the boundary: a 1-tick log has last_seq=0 (same as empty), so a
+    # 1->0 truncation is caught ONLY by the entry_count floor — and only if the floor is consulted before the
+    # empty short-circuit (the BLOCK-1 fix).
+    log = tmp_path / "attlog"
+    _append(log, _tick(State.REMEDIATED, 0))
+    (log / al._TICKS_FILE).write_text("", encoding="utf-8")
+    (log / al._HEAD_FILE).unlink()
+    ok, reason, series = _verify(log)
+    assert not ok and "rollback" in reason.lower(), reason
+
+
+def test_genuinely_empty_log_with_no_floor_still_verifies_empty(tmp_path):
+    # The fix must not over-reject: a never-appended log (no ticks, no head, NO floor) is genuinely empty.
+    ok, reason, series = _verify(tmp_path / "never-used")
+    assert ok and series == [] and "empty" in reason.lower()
+
+
 def test_tampered_tick_is_rejected_even_if_the_chain_is_re_signed(tmp_path):
     # A tampered tick changes its digest → the head no longer binds it. An attacker WITH the governance key
     # could re-chain + re-sign the head over the tampered set (verify_head then passes) — but the per-tick

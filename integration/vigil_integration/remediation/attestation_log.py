@@ -326,16 +326,25 @@ def verify_log(
     except AttestationError as e:
         return False, f"tick log unreadable: {e}", []
 
-    head = _load_head(log_dir)
-    if not ticks and head is None:
-        return True, "empty attestation log (no ticks)", []
-    if head is None:
-        return False, "tick log has entries but no signed head (truncated/removed head — fail closed)", []
-
+    # Load the durable floor FIRST — it is the ONLY component that can catch a FULL truncation, because an
+    # emptied tick log + removed head is validly "empty" to the in-band signature (nothing left to verify).
+    # (Previously the empty-log short-circuit returned True BEFORE this load, so an N->0 / 1->0 truncation was
+    # accepted as clean without ever consulting the floor — red-pen BLOCK-1.)
     try:
         hw = load_highwater(_highwater_path(log_dir))
     except Exception as e:  # noqa: BLE001 — a corrupt floor fails closed, never reads as absent
         return False, f"durable high-water unreadable: {e}", []
+
+    head = _load_head(log_dir)
+    if not ticks and head is None:
+        # An empty log is genuinely empty ONLY if the floor never recorded any tick. A floor remembering
+        # entry_count>0 means the series was TRUNCATED TO EMPTY → rollback (fail-closed).
+        if hw is not None and int(hw.get("entry_count", 0)) > 0:
+            return False, (f"ROLLBACK: empty tick log + no signed head, but the durable floor records "
+                           f"entry_count={hw['entry_count']} (the series was truncated to empty)"), []
+        return True, "empty attestation log (no ticks)", []
+    if head is None:
+        return False, "tick log has entries but no signed head (truncated/removed head — fail closed)", []
 
     # 1. bind the persisted head to the rebuilt-from-ticks chain + enforce the anti-rollback floor.
     digests = [digest_payload(t) for t in ticks]
