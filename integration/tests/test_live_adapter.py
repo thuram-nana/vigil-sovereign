@@ -199,11 +199,28 @@ def test_patched_server_is_remediated_and_cert_verifies(gated_root):
         srv.shutdown(); srv.server_close()
     assert out.state == State.REMEDIATED, out
     assert out.reason_code == Reason.ORACLE_SILENT_ACROSS_TRIALS
-    assert out.trials_valid == 3 and out.achieved_freshness == Freshness.F2_PATH_TRAVERSED
+    # HONEST: a separate-param nonce echo establishes F1 (target responsive THIS run), NOT F2 (exploit-path
+    # traversal). The adapter never claims more than it proves.
+    assert out.trials_valid == 3 and out.achieved_freshness == Freshness.F1_TARGET_ECHOES
     ok, reason = verify_prove_certificate(out.certificate, signer_pubkeys=pubkeys)
     assert ok, reason
     assert "cross-bound" in reason
     assert out.certificate["evidence"]["embedded_remediation_cert"] is not None
+    # the cert binds the ACTUALLY re-driven probe (N4): probe_digest is non-empty + derived from the re-drive.
+    assert out.certificate["original_finding"]["probe_digest"]
+
+
+def test_verifier_requiring_f2_gets_inconclusive_not_a_false_strong_remediated(gated_root):
+    # HONESTY GRADIENT: this adapter only proves F1 (responsive). A verifier that needs the exploit path
+    # exercised sets policy.minimum_freshness_level=F2 — and the run goes INCONCLUSIVE (insufficient freshness),
+    # NOT a falsely-strong REMEDIATED. This is the disclosed limit made enforceable, not hidden.
+    srv = _start(patched=True)
+    try:
+        out, _ = _drive(_adapter(srv),
+                        policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
+    finally:
+        srv.shutdown(); srv.server_close()
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
 
 
 def test_vulnerable_server_is_still_vulnerable_over_fresh_evidence(gated_root):

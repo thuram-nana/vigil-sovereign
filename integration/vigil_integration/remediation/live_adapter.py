@@ -10,16 +10,26 @@ STILL_VULNERABLE / INCONCLUSIVE / REFUSED verdict is earned over FRESH evidence,
 Scope of this slice: the response-side ``error_signature`` channel (``error_based_sqli``). A general
 multi-channel adapter (differential, boolean, evaluation, …) is a documented follow-up.
 
-The freshness split this adapter implements, stated plainly (it is the load-bearing soundness argument):
+The freshness split this adapter implements, stated plainly and HONESTLY (it is the load-bearing soundness
+argument, and its LIMIT is disclosed — never overclaimed):
 
   * the POSITIVE CONTROL re-uses the RETAINED original firing bytes — it proves ONLY that the SAME oracle is
-    still capable of FIRING (the harness is not broken), so a live silence is meaningful and not an artefact.
-    It is deliberately NOT a live fetch: liveness is proven elsewhere.
-  * LIVENESS + FRESHNESS are proven by the exploit TRIALS: each trial carries a fresh, unpredictable
-    ``challenge`` (the driver's freshness nonce, bound to the whole causal chain) in a query param the target
-    ECHOES into its response body; the driver verifies at F2 that the challenge is actually present in the
-    RESPONSE-BEARING bytes the oracle judged (``error_observed``). A silent-but-fresh trial therefore proves
-    "this target answered THIS run and the exploit did not reproduce", never "we could not reach it".
+    still capable of FIRING (the harness is not broken), so a live silence is not a harness artefact. It is
+    deliberately NOT a live fetch, so it does NOT prove the LIVE observation channel is intact right now — a
+    LIVE positive control (a benign probe demonstrating the exploit's parameter still reaches the app's
+    processing path) is the documented VF-1a.3 follow-up that would.
+  * The exploit TRIALS establish **F1 (the target answered THIS run)**: each trial carries a fresh,
+    unpredictable ``challenge`` (the driver's causal-chain nonce) in a query param the target ECHOES into its
+    response body, and the driver re-checks the echo is in the oracle-JUDGED bytes. So a silent-but-echoed
+    trial proves the exploit did not reproduce over a FRESH, live-answered response (not a replay of retained
+    bytes).
+  * **HONEST LIMIT (why this is F1, not F2):** the nonce rides a SEPARATE query param, not the exploit
+    payload, so an echo proves the target is *responsive*, NOT that the *vulnerable code path* was exercised.
+    An interposing edge / WAF block page / down-origin gateway that reflects the nonce is therefore NOT
+    distinguished at F1 — it can yield REMEDIATED@F1. Ruling that out is **F2+ (nonce through the exploit path)
+    + a LIVE positive control**, the disclosed follow-up. A verifier that needs it sets
+    ``policy.minimum_freshness_level >= F2`` — which this adapter honestly cannot meet, so it returns
+    INCONCLUSIVE rather than a falsely-strong REMEDIATED.
 
 Invariants honoured here (mirroring prove_driver / remediation_cert):
   * FATAL-2 — every ``framework.v2`` import is function-local; module scope is stdlib + vigil_core (via the
@@ -34,6 +44,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlencode, urlsplit
+
+from vigil_core import digest_payload   # stdlib+crypto only — FATAL-2 safe at module scope
 
 # prove_driver's module scope is stdlib + vigil_core (+ remediation_cert, also framework-free), so importing
 # these observation/enum/type shapes here is FATAL-2 safe — no framework is pulled at import time.
@@ -101,6 +113,15 @@ class LiveHttpAdapter:
         # authorized base_url (a config fact), NOT from a live probe — liveness is proven by the trials.
         # Designed so a stronger identity (a TLS SPKI pin) can slot in alongside ``host`` later.
         self._host = urlsplit(self.base_url).hostname or ""
+        # Bind the ACTUALLY re-driven probe into the cert (N4): if the caller did not supply a probe digest,
+        # derive one over the concrete re-drive spec (endpoint/param/payload/nonce_param/bug_class) so the
+        # signed "fixed" verdict attests WHICH exploit request was re-driven. Honest-producer tier: this binds
+        # the probe THIS adapter sends; cryptographically tying it back to the ORIGINAL finding's probe (vs a
+        # malicious producer swapping in a benign payload) stays the deferred frontier, stated in the docstring.
+        if not self.original_probe_recipe_digest:
+            self.original_probe_recipe_digest = digest_payload({
+                "endpoint_path": self.endpoint_path, "param": self.param, "payload": self.payload,
+                "nonce_param": self.nonce_param, "bug_class": self.bug_class, "method": "GET"})
 
     # ---- identity ----------------------------------------------------------------------------------
     def identity_sample(self) -> dict:
@@ -129,6 +150,11 @@ class LiveHttpAdapter:
         now). This is intentionally NOT a live send — liveness/freshness is the trials' job (see module
         docstring). ``reachable``/``channel_alive`` are True because the retained bytes are always present;
         the driver independently re-fires the oracle over ``oracle_context`` to credit the control.
+
+        HONEST LIMIT (do not overclaim): because it is not live, this control does NOT prove the LIVE
+        observation channel is intact right now — so it does NOT catch a WAF/edge that blocks the exploit while
+        still answering (the F1 limit in the module docstring). A LIVE positive control that demonstrates the
+        exploit's parameter still reaches the app's processing path is the VF-1a.3 follow-up that closes it.
         """
         return ControlObservation(
             reachable=True,
@@ -171,12 +197,15 @@ class LiveHttpAdapter:
                                     detail="could not build oracle_context from the captured body")
 
         echoed = challenge in body
-        # Claim F2 only when the challenge is echoed; the DRIVER independently caps this by re-checking that
-        # the challenge is actually in the oracle-JUDGED evidence, so an over-claim here cannot pass.
-        level = Freshness.F2_PATH_TRAVERSED if echoed else Freshness.F1_TARGET_ECHOES
+        # HONEST level: a nonce on a SEPARATE param that the target echoes establishes F1 (the target answered
+        # THIS run), NOT F2 (the operator's "nonce through the relevant/exploit path") — the exploit payload
+        # rides a different param, so an edge/WAF that merely reflects the nonce also satisfies an echo. This
+        # adapter therefore never claims F2; F2+ needs the nonce IN the exploit path + a live positive control
+        # (VF-1a.3). A verifier requiring F2 sets policy.minimum_freshness_level>=F2 → this run goes INCONCLUSIVE.
+        level = Freshness.F1_TARGET_ECHOES if echoed else Freshness.F0_NONCE_GENERATED
         return TrialObservation(reachable=True, valid=True, oracle_context=ctx,
                                 freshness_level=level, nonce_echoed=echoed,
-                                detail=f"live re-drive: status={status} echoed={echoed}")
+                                detail=f"live re-drive: status={status} echoed={echoed} (F1: responsive)")
 
     # ---- helpers ----------------------------------------------------------------------------------
     def _exploit_url(self, challenge: str) -> str:

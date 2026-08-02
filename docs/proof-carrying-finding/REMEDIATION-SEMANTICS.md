@@ -14,27 +14,38 @@ false negative. It complements `SPEC.md` (the positive proof-carrying finding).
 A positive proof is self-evidencing: the exploit fired, here are the bytes, re-fire the oracle. A **negative**
 proof — "the oracle went **silent**" — is not, because silence has many causes that are *not* "fixed":
 
-| Silence cause | Not a fix | Control that catches it |
-|---|---|---|
-| the target was down / unreachable | ✗ | **liveness** — the target must have answered |
-| a WAF/proxy blocked the probe | ✗ | **positive control** — the same probe must still fire on a twin |
-| the endpoint moved / was deleted | ✗ | **scope-equivalence** — same surface (method/param) |
-| a stale benign response was replayed | ✗ | **freshness** — a nonce echoed by the target |
-| the exploit is flaky (fires 1-in-N) | ✗ | **repetition** — N consistent silences |
-| the oracle body changed | ✗ | **oracle-version pin** (from the positive proof) |
+| Silence cause | Not a fix | Control that catches it | Live-tier status |
+|---|---|---|---|
+| the target was down / unreachable | ✗ | **liveness** — the target must have answered THIS run | caught (the trial's live answer, F1) |
+| a stale benign response was replayed | ✗ | **freshness** — a fresh nonce echoed by the target | caught at F1 (nonce echoed) |
+| the endpoint moved / was deleted | ✗ | **scope-equivalence** — same surface (method/param) | partial (surface rides on the cert) |
+| the exploit is flaky (fires 1-in-N) | ✗ | **repetition** — N consistent silences | caught (per-family repeat policy) |
+| the oracle body changed | ✗ | **oracle-version pin** (from the positive proof) | caught |
+| a **WAF/edge blocked the probe** while still answering / **an interposing edge reflects the nonce** | ✗ | **LIVE positive control** — a benign probe demonstrating the exploit's parameter still reaches the app's processing path | **NOT yet caught — the F1 limit** (see below) |
 
 Without these, "silent" means only "we did not observe it here, now" — the classic false negative. A sound
 RemediationCertificate therefore carries, and a verifier re-checks, **all** of the applicable controls.
+
+**HONEST F1 limit (the live tier, VF-1a.2).** The live adapter's positive control re-uses the RETAINED
+original firing bytes — it proves only that the oracle is still *capable of firing* (the harness is not
+broken), NOT that the *live observation channel* is intact right now. And the freshness nonce rides a
+**separate** query param, so an echo establishes only that the target is **responsive (F1)**, not that the
+**vulnerable code path** was exercised. Consequently a WAF/edge that blocks the exploit while still echoing the
+nonce — or a down origin behind a reflecting gateway — can yield **REMEDIATED@F1**. Distinguishing that
+requires **F2 (the nonce carried through the exploit path) + a LIVE positive control**, the disclosed VF-1a.3
+follow-up. A verifier that needs it sets `policy.minimum_freshness_level >= F2`; the current adapter cannot
+meet it and returns **INCONCLUSIVE** rather than a falsely-strong REMEDIATED. This is the trust gradient made
+enforceable — not hidden.
 
 ## 2. The controls (implemented vs driver-populated vs spec-only)
 
 | Control | Meaning | Status |
 |---|---|---|
 | **silence** | the oracle re-fires over the patched context and does NOT confirm | **implemented** (`_is_silent`, enforced at mint + re-checked at verify) |
-| **positive control (twin)** | the SAME oracle DOES re-fire over a known-vulnerable reference (the pre-fix build / a twin) — proving the harness is *capable of firing now*, so silence is meaningful | **implemented** (`_fires`, enforced at mint + re-checked at verify) |
-| **liveness** | the patched context carries a captured response (the target answered); no response ⇒ `INDETERMINATE`, not fixed | **implemented** (heuristic: a non-empty response-bearing field; the stronger nonce-echo form is driver-populated) |
-| **scope-equivalence** | the re-drive hit the SAME surface + oracle family as the original finding | **partial** — oracle-family is pinned (`fix_oracle` channel-pin); `surface` rides on the cert; per-request surface equality is enforced by the live driver |
-| **freshness** | silence observed against a FRESH request bound to a verifier nonce echoed by the target | **spec-only** — `controls.freshness_nonce` reserved; populated by the live driver (VF-1a driver) |
+| **positive control (twin)** | the SAME oracle DOES re-fire over a known-vulnerable reference (the pre-fix build / a twin) — proving the harness is *capable of firing now*, so silence is meaningful | **implemented** (`_fires`, enforced at mint + re-checked at verify). NOTE: the live tier's control is the RETAINED firing bytes (harness-capability only) — a **LIVE** positive control that proves the live channel/app-path is intact is the VF-1a.3 follow-up |
+| **liveness** | the target answered THIS run (not a replay of retained bytes) | **implemented live (F1)** — the exploit trial must return a real answer AND echo the run nonce (`live_adapter`); a down/refused trial ⇒ INCONCLUSIVE |
+| **scope-equivalence** | the re-drive hit the SAME surface + oracle family as the original finding | **partial** — oracle-family is pinned (`fix_oracle` channel-pin); `surface`/`probe_digest` ride on the cert; cryptographically tying the re-driven probe back to the ORIGINAL finding (vs a malicious producer) stays the deferred frontier |
+| **freshness** | silence observed against a FRESH request bound to a verifier nonce echoed by the target | **implemented at F1** (nonce echoed = target responsive); **F2** (nonce through the exploit path) / **F3** (bound to exploit evidence) / **F4** (independent collector) are the graded follow-ups — the cert records the achieved level and a verifier can require a floor |
 | **repetition** | N consistent silences (defeats a flaky exploit reading as silent once) | **spec-only** — `controls.repeats` reserved; populated by the live driver |
 
 Everything in the certificate — both contexts *and* the `controls` block — is covered by one whole-cert
