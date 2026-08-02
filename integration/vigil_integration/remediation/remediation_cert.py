@@ -33,13 +33,32 @@ _CERT_SCHEMA = "vigil-remediation-cert-v2"
 _SILENT_VERDICT = "oracle-silent"
 _CERT_DOMAIN = b"vigil-remediation-cert-v2\x00"    # domain tag for the whole-cert signature (binds the controls)
 
-# Response-bearing keys in a FindingContext — a NON-EMPTY value means the target produced observable output
-# (it ANSWERED the exploit). This is the liveness control's heuristic evidence: silence with NO response is
-# "unreachable" (INDETERMINATE), not "fixed". A stronger nonce-echo liveness is populated by the live driver.
+# TARGET-PRODUCED response-bearing keys in a FindingContext — a NON-EMPTY value means the target actually
+# ANSWERED the exploit (observable output it produced). This is the liveness control's evidence: silence with
+# NO such response is "unreachable" (INDETERMINATE), not "fixed". A stronger nonce-echo liveness is populated
+# by the live driver. CRITICAL: only fields the TARGET produces belong here — NOT producer/probe-set fields
+# (expected_state, predicate, marker, eval_raw/eval_expected, dom_canary, canary, honeypot_paths,
+# benign_sources, request_payload/payload_param, the timing_* / credstuff_* parameters, discriminator) — a
+# producer-set field is present even when the target never answered and would FALSELY assert liveness. The
+# names are the real ``FindingContext`` fields (framework/v2/verify/adapter.py); an out-of-model name is inert.
 _RESPONSE_KEYS = frozenset({
-    "error_observed", "mutated", "baseline", "eval_response", "reflection", "reflected_in",
-    "reflection_context", "probe_rounds", "oob_hits", "handshake", "achieved_state", "response",
-    "body", "observed", "treatment_latencies", "baseline_latencies",
+    "baseline", "mutated",                                   # differential_response (target responses)
+    "probe_rounds",                                          # boolean_inference (per-round target responses)
+    "baseline_latencies", "treatment_latencies",            # timing (target latencies)
+    "observed_state", "observed_evidence",                  # achieved_state / predicate (target-observed)
+    "observed_sink",                                        # side_effect (where the marker landed)
+    "eval_observed", "eval_control",                       # evaluation (target-produced output)
+    "error_observed", "error_control",                    # error_signature (target datastore/parser error)
+    "dom_binding_calls",                                   # dom_execution (JS the target executed)
+    "process_output",                                     # sanitizer_signal (target output)
+    "oob_hits",                                           # oob_callback (callbacks the target emitted)
+    "llm_output", "pi_treatment", "pi_control",          # AEGIS LLM output / prompt-injection behaviour obs
+    "auth_events",                                        # credential_stuffing observed auth outcomes
+    # NOTE: connection-style capture fields (handshake / tls / anon_get / crypto_artifact) are DELIBERATELY
+    # excluded — their helpers return a NON-EMPTY dict on FAILURE ({connected: False} / {status: None}, even on
+    # a kill-switch/scope refusal), so "dict non-empty" would falsely assert the target ANSWERED. Their classes
+    # are not certifiable-by-silence in prove mode anyway; a sound liveness for them would test `connected is
+    # True` / an integer status, not membership here.
 })
 
 

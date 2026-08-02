@@ -512,3 +512,14 @@ def _verify_wielder_proof(proof: WielderProof | None, *, expected_audience: str,
         raise CapabilityError(f"wielder proof signature is malformed: {e}") from e
     if not ok:
         raise CapabilityError("wielder proof does not verify against the capability's audience key")
+
+
+def verify_wielder_proof(proof: "WielderProof | None", *, expected_audience: str, challenge: str,
+                         capability: Capability) -> None:
+    """Public proof-of-possession check (returns None on success, raises CapabilityError on any failure). Lets
+    a caller verify the wielder holds ``expected_audience``'s private key BEFORE it touches the target — so a
+    PoP failure need not cost a live probe. ``expected_audience`` should be the EFFECTIVE (post-attenuation)
+    audience from :func:`verify_capability`; a bearer (``"*"``) audience has no key to prove and MUST be handled
+    by the caller's policy, not here."""
+    _verify_wielder_proof(proof, expected_audience=expected_audience, challenge=challenge,
+                          cap_digest=capability._digest())
