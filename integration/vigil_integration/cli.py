@@ -251,7 +251,8 @@ def _match_reverifiable_entry(entries: "list[dict]", ref: str, finding_ref: str)
     REQUIRED: no match ⇒ None (the caller refuses honestly) — the single-entry "sole entry" convenience must
     NEVER override a known ref, or a REMEDIATED for finding A could be minted from finding B's retained
     positive control + exploit (a false-negative on a live-vulnerable finding). The sole-entry fallback is
-    reachable ONLY when NO ref is known at all (which the CLI path never hits — the finding always has a ref)."""
+    reachable ONLY when NO ref is known at all; the CLI path never hits it because ``_cmd_remediate`` REFUSES an
+    empty finding ref before calling here (the invariant is ENFORCED, not assumed)."""
     if not entries:
         return None
     want = str(finding_ref or "").strip() or str(ref or "").strip()
@@ -386,6 +387,15 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
                 base_dir=args.base_dir, slug=args.from_spine, target_repo="", finding_ref=args.finding_ref)
     except TrustedFindingError as exc:
         print(f"vigil remediate: REFUSED (fail-closed): {exc}", file=sys.stderr)
+        return 2
+
+    # A confirmed fact MUST be addressable by a non-empty ref — else the reverifiable entry cannot be matched
+    # by check_id and the sole-entry fallback could substitute ANOTHER finding's positive control. Enforce it
+    # here so `_match_reverifiable_entry`'s known-ref path always applies (making its docstring invariant true).
+    if not str(getattr(finding, "ref", "") or "").strip():
+        print("vigil remediate: the trusted finding has no addressable ref — cannot match its retained "
+              "re-verifiable proof material by check_id (refusing rather than risk substituting another "
+              "finding's positive control; fail-closed).", file=sys.stderr)
         return 2
 
     # (2) The RETAINED re-verifiable proof material for THIS finding: the positive control (original firing

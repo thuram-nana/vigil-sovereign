@@ -283,6 +283,39 @@ def test_match_entry_refuses_a_mismatched_sole_entry():
     assert _match_reverifiable_entry(entries, "", "") == entries[0]             # no ref known → sole-entry ok
 
 
+def test_empty_ref_finding_is_refused(tmp_path, monkeypatch, capsys):
+    # A confirmed fact with an EMPTY ref is un-addressable: `want` would be empty and the sole-entry fallback
+    # could substitute another finding's control. The CLI must refuse before that (the enforced invariant that
+    # makes _match_reverifiable_entry's docstring true), minting nothing.
+    from vigil_core.vault import Vault
+    from vigil_integration.agent.state import AgentState, Finding
+    from vigil_integration.live.spine_identity import DEFAULT_SPINE_KEY_FILE, load_or_create_spine_keypair
+    from vigil_integration.live.spine_vigilcore import VigilCoreSpine
+    targets = tmp_path / "targets"; (targets / SLUG).mkdir(parents=True)
+    (targets / SLUG / "charter.md").write_text(_CHARTER.format(slug=SLUG), encoding="utf-8")
+    authdir = tmp_path / "authority"; authdir.mkdir()
+    monkeypatch.setattr(_paths, "target_dir", lambda s: targets / s)
+    monkeypatch.setattr(_paths, "charter_path", lambda s: targets / s / "charter.md")
+    monkeypatch.setattr(_paths, "killswitch_path", lambda s: targets / s / ".halt")
+    monkeypatch.setattr(_paths, "authority_path", lambda s: authdir / f"{s}.authority.json")
+    base = tmp_path / "home"; base.mkdir(parents=True)
+    kp = load_or_create_spine_keypair(path=str(base / DEFAULT_SPINE_KEY_FILE), vault=Vault(base / "vault"))
+    spine = VigilCoreSpine(kp, str(base / f"{SLUG}.spine"))
+    st = AgentState(engagement_slug=SLUG, iteration=1)
+    st.record_fact(Finding(ref="", bug_class=BUG, title="empty-ref fact", severity="high"),
+                   evidence_ref="cert:evi-x")   # a signed fact with NO addressable ref
+    spine.write_state(st, seq=1)
+    _write_reverifiable(base)
+    doc = json.loads((base / "proofs" / "reverifiable.json").read_text(encoding="utf-8"))
+    doc["active_findings"][0]["check_id"] = "f-A-DIFFERENT-FINDING"   # sole entry belongs to ANOTHER finding
+    (base / "proofs" / "reverifiable.json").write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+    rc, out, err = _remediate(
+        ["--prove", "--from-spine", SLUG, "--base-dir", str(base), "--target-base-url", "http://127.0.0.1:1/"],
+        capsys)
+    assert rc != 0, (rc, out, err)
+    assert "no addressable ref" in err and "REMEDIATED" not in out
+
+
 def test_cross_finding_control_is_refused_end_to_end(gated_home, capsys):
     # The spine's confirmed fact is FACT_REF, but the SOLE reverifiable entry belongs to a DIFFERENT finding.
     # The CLI must REFUSE (no retained material for THIS finding) and mint NOTHING — not a false REMEDIATED
