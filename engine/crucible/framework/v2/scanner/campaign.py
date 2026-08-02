@@ -950,11 +950,26 @@ class WebScanCampaign:
 def populate_worldmodel(report: ScanReport, world: WorldModel, *, seq: int) -> None:
     """Write a scan report into the world-model so the planner can reason over it.
 
-    Each distinct audited surface becomes an ENDPOINT node; each oracle-confirmed
-    active finding becomes a FINDING node with an EVIDENCES edge to its endpoint.
-    Deterministic: the caller supplies the monotonic ``seq`` (no wallclock), node
-    ids are derived from the surface/finding identity, and re-running upserts
-    rather than duplicates."""
+    Each distinct audited surface becomes an ENDPOINT node; each active finding becomes a
+    FINDING node with an EVIDENCES edge to its endpoint. Deterministic: the caller supplies
+    the monotonic ``seq`` (no wallclock), node ids are derived from the surface/finding
+    identity, and re-running upserts rather than duplicates.
+
+    UNIVERSAL veracity choke point (T1): a FINDING node carries an ``oracle:``-provenance —
+    the tier ``worldmodel.models.classify_provenance`` treats as a GROUNDED fact and the
+    firewall accepts as fact-strength — ONLY if the finding's retained ``oracle_context``
+    RE-FIRES NOW (graded through ``report.grounding.admit_for_report``, the shared veracity
+    authority). A finding recorded ``confirmed`` whose proof no longer reproduces is written
+    with a DOWNGRADED ``demoted:``-provenance (classified UNGROUNDED, so it can never be read
+    back as a proven fact) and an ``attrs["grounding"]="demoted"`` marker; its EVIDENCES edge
+    is downgraded the same way. So the world-model never carries an ``oracle:``-provenance
+    FACT node whose proof does not re-fire. Fail-closed: an ungradeable finding is treated as
+    non-fact (demoted). ENDPOINT nodes are untouched — recon surfaces are not oracle-proven
+    facts and are classified on their own ``scan:`` provenance as before."""
+    # Lazy import: campaign -> report.grounding -> veracity -> worldmodel would form an
+    # import cycle at module scope; importing here (offense-side only) keeps it FATAL-2-safe.
+    from ..report.grounding import admit_for_report
+
     endpoints: dict[str, str] = {}
     for f in report.active_findings:
         ep_id = f"endpoint:{f.param}"
@@ -967,18 +982,35 @@ def populate_worldmodel(report: ScanReport, world: WorldModel, *, seq: int) -> N
             ))
             endpoints[ep_id] = ep_id
 
+        # Re-execute the finding's retained proof; oracle:-provenance is reserved for a
+        # re-firing fact. Pure/deterministic (world=None inside admit_for_report → oracle
+        # re-fire only, no traffic). Fail-closed: any error → not a fact (demoted).
+        try:
+            admitted = admit_for_report(f)
+            is_fact = bool(admitted is not None and getattr(admitted, "is_fact", False))
+        except Exception:
+            is_fact = False
+        provenance = f"oracle:{f.confirmed_by}" if is_fact else f"demoted:{f.confirmed_by}"
+
+        attrs: dict[str, object] = {
+            "bug_class": f.bug_class, "confirmed_by": f.confirmed_by,
+            "confidence": f.confidence, "check": f.check_id,
+        }
+        if not is_fact:
+            # a queryable marker that this finding's proof did NOT re-fire (the top-level
+            # Node.grounding is re-derived from provenance by the graph and will read
+            # UNGROUNDED for a demoted: provenance).
+            attrs["grounding"] = "demoted"
+
         finding_id = f"finding:{f.bug_class}:{f.insertion_point}"
         world.add_node(Node(
             id=finding_id, kind=NodeKind.FINDING,
-            attrs={
-                "bug_class": f.bug_class, "confirmed_by": f.confirmed_by,
-                "confidence": f.confidence, "check": f.check_id,
-            },
-            provenance=f"oracle:{f.confirmed_by}", confidence=f.confidence,
+            attrs=attrs,
+            provenance=provenance, confidence=f.confidence,
             first_seen=seq, last_seen=seq,
         ))
         world.add_edge(Edge(
             src=finding_id, dst=ep_id, kind=EdgeKind.EVIDENCES, attrs={},
-            provenance=f"oracle:{f.confirmed_by}", confidence=f.confidence,
+            provenance=provenance, confidence=f.confidence,
             first_seen=seq, last_seen=seq,
         ))

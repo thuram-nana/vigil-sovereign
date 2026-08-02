@@ -158,7 +158,12 @@ class EdgeKind(str, enum.Enum):
 # as fact-grounded" is defined in exactly one place.
 _GROUNDED_PROV_PREFIXES = ("oracle:", "cert:", "finding:", "evidence:")
 _INTEL_PROV_PREFIXES = ("intel:", "intel-fused:", "derived:", "infer:", "scan:", "fingerprint:")
-_UNGROUNDED_PROV_MARKERS = ("llm", "assume", "guess", "hallucin", "unverified", "ungrounded", "advisory")
+# ``demoted:`` is the marker the veracity firewall writes (T1) when a recorded-confirmed finding's
+# retained proof did NOT re-fire at projection time: it is deliberately NON-fact so the graph can
+# never read a stale/tampered finding back as a grounded fact (and the strict-mode belief floor
+# applies to it).
+_UNGROUNDED_PROV_MARKERS = ("llm", "assume", "guess", "hallucin", "unverified", "ungrounded",
+                            "advisory", "demoted")
 
 GROUNDING_GROUNDED = "grounded"        # traces to a fired oracle / signed cert / promoted finding
 GROUNDING_INTEL = "intel"              # collected intelligence / derivation — real, but not oracle-proof
