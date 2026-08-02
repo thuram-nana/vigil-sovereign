@@ -78,7 +78,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 #    imports only stdlib + cryptography; this check lets a caller *demonstrate* the running interpreter
 #    has no VIGIL module reachable at all (used by the conformance test's clean subprocess).
 # ---------------------------------------------------------------------------
-_VIGIL_MODULES = ("framework", "vigil_core", "vigil_integration", "strix", "gateway")
+# Every importable VIGIL package name a standalone env must NOT be able to reach. NOTE the offense egress
+# gateway package is `vigil_gateway` (gateway/vigil_gateway) — checking only "gateway" would MISS it (the
+# whole point of --prove-standalone is that NO vigil code is importable); "gateway" is kept as a defensive
+# alias, and the crucible engine is reached as `framework`.
+_VIGIL_MODULES = ("framework", "vigil_core", "vigil_integration", "vigil_gateway", "gateway", "strix")
 
 
 def _assert_vigil_free() -> None:
@@ -95,8 +99,8 @@ def _assert_vigil_free() -> None:
             pass
     if reachable:
         raise SystemExit(f"[FAIL] VIGIL modules are importable here: {reachable} — not a standalone env")
-    print("  [standalone] confirmed VIGIL-free: framework / vigil_core / vigil_integration / strix / "
-          "gateway are neither imported nor importable in this interpreter")
+    print("  [standalone] confirmed VIGIL-free: framework / vigil_core / vigil_integration / vigil_gateway / "
+          "gateway / strix are neither imported nor importable in this interpreter")
 
 
 # ---------------------------------------------------------------------------
