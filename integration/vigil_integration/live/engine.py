@@ -91,6 +91,11 @@ OperatorMsgFn = Callable[[], list]
 # queued escalations. Reached ONLY after authorize_edge queued the deploy and a signed operator approval
 # satisfied it (approve-then-run). None-seam ⇒ an approved deploy is a recorded refusal (fail-closed).
 DeployFireteamFn = Callable[[LLMDecision, AgentState, int], Any]
+# persist_spine() -> None (T3): a best-effort, END-OF-RUN persist of the CRUCIBLE blackboard chain as inert,
+# governance-signed bytes (spine-head.json + spine-chain.json) so a public-key-only offline reader can verify
+# it. Emit-only / side-effecting; its return is ignored. None-seam ⇒ the chain is simply not persisted (the
+# segment then reports honestly UNVERIFIABLE — never a fake pass). A persist error NEVER affects the run.
+PersistSpineFn = Callable[[], None]
 
 _GENESIS = "0" * 64
 
@@ -112,6 +117,7 @@ class EngineSeams:
     approval: Optional[ApprovalFn] = None      # None ⇒ a phase escalation / fireteam stays QUEUED
     operator_messages: Optional[OperatorMsgFn] = None  # None ⇒ no mid-run operator instructions (A5)
     deploy_fireteam: Optional[DeployFireteamFn] = None  # None ⇒ an approved fireteam deploy is refused (A4c)
+    persist_spine: Optional[PersistSpineFn] = None  # None ⇒ the blackboard chain is not persisted (T3)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -309,6 +315,11 @@ class VigilEngine:
 
         # DETECTION MIRROR (WS-4) — prove each attack's signature over the target's own logs.
         self._run_detection(report)
+
+        # T3 — PERSIST the CRUCIBLE blackboard chain as inert, governance-signed bytes so a public-key-only
+        # offline reader can verify it (making overclaim O9 true for the last chain that wasn't file-backed).
+        # Best-effort + fail-closed: a persist error is swallowed and never affects the run's truth.
+        self._persist_spine()
         return report
 
     # -- seam adapters (each fail-closed / total) ---------------------------------------------------
@@ -542,6 +553,17 @@ class VigilEngine:
             return
         report.detection_facts = sum(1 for d in dets if getattr(d, "is_fact", False))
         report.detection_leads = sum(1 for d in dets if not getattr(d, "is_fact", False))
+
+    def _persist_spine(self) -> None:
+        """T3 — best-effort, END-OF-RUN persist of the blackboard chain (see :data:`PersistSpineFn`). Total:
+        no seam, or ANY seam error, is a silent no-op — a persistence failure is never fatal to a run whose
+        truth is already sealed in the signed spine + attestation ledger."""
+        if self.seams.persist_spine is None:
+            return
+        try:
+            self.seams.persist_spine()
+        except Exception:  # noqa: BLE001 — a persist error is a recorded no-op, never a crash
+            return
 
     @staticmethod
     def _tool_record(exec_res: Any) -> ToolCallRecord:

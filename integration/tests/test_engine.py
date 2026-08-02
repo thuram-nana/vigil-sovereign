@@ -469,3 +469,32 @@ def test_unapproved_deploy_stays_queued_and_never_fans_out():
                               gate=_allow_gate, deploy_fireteam=_seam))
     rep = eng.engage(TARGET)
     assert rep.paused == "awaiting_approval" and called["n"] == 0
+
+
+# --- T3: end-of-run blackboard-chain persist seam --------------------------------------------------
+
+
+def test_persist_spine_seam_is_called_once_at_end_of_run():
+    calls = []
+    seams = EngineSeams(attest=_attest_allow, think=lambda s: _complete(),
+                        persist_spine=lambda: calls.append(1))
+    report = _engine(seams).engage(TARGET)
+    assert not report.refused
+    assert calls == [1]                         # persisted exactly once, after the loop + detection mirror
+
+
+def test_persist_spine_error_never_crashes_the_run():
+    def _boom():
+        raise RuntimeError("blackboard persist backend down")
+    seams = EngineSeams(attest=_attest_allow, think=lambda s: _complete(), persist_spine=_boom)
+    report = _engine(seams).engage(TARGET)      # must not raise (best-effort, fail-closed)
+    assert report.done is True
+
+
+def test_persist_spine_not_called_on_a_refused_run():
+    # A refused engagement (no attestation) returns BEFORE the loop, so there is nothing to persist.
+    calls = []
+    seams = EngineSeams(attest=_attest_deny, think=lambda s: _complete(),
+                        persist_spine=lambda: calls.append(1))
+    report = _engine(seams).engage(TARGET)
+    assert report.refused and calls == []

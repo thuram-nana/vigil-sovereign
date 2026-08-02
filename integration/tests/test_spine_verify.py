@@ -5,18 +5,27 @@ role's first live consumer): a spine signed by an owner-DELEGATED key verifies a
 / expired / wrong-key delegation or a tampered spine fails; without a delegation the audit is integrity-only
 (NOT owner-rooted); and the verifier NEVER mutates the file it audits (read-only — no torn-tail repair).
 
-Run: PYTHONPATH=integration:gateway pytest integration/tests/test_spine_verify.py -q
+Also covers T3 — the PERSISTED CRUCIBLE blackboard chain: a live-engage-style persist writes it as inert
+governance-signed bytes and a PUBLIC-KEYS-ONLY offline verify (under an owner-signed OFFENSE_GOVERNANCE_ROLE
+delegation) is owner-rooted; a tampered entry/head, wrong owner, expired/wrong-role delegation, missing clock,
+or cross-engagement head each fails closed. (The blackboard round-trip builds a real blackboard, so this
+suite needs the framework on the path.)
+
+Run: PYTHONPATH=integration:engine/crucible:gateway pytest integration/tests/test_spine_verify.py -q
 """
 from __future__ import annotations
 
 from vigil_core import AuthorizerKey, generate_keypair
-from vigil_core.delegation import OFFENSE_SPINE_ROLE, sign_delegation
+from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE, OFFENSE_SPINE_ROLE, sign_delegation
 from vigil_integration.agent.state import AgentState, Finding, Phase
 from vigil_integration.live.spine_verify import (
     ABSENT,
+    BLACKBOARD_CHAIN_FILE,
+    BLACKBOARD_HEAD_FILE,
     FAILED,
     UNVERIFIABLE,
     VERIFIED,
+    verify_blackboard_chain,
     verify_offense_home,
     verify_offense_spine,
 )
@@ -28,6 +37,34 @@ SPINE_AUTH = AuthorizerKey(key_id="offense-spine-0", name="offense-spine-0",
                            public_key_b64=SPINE_KP.public_key_b64)
 NOW, NOT_AFTER = 1000, 2000
 SCOPE = "loopback"
+
+# --- T3: the persisted CRUCIBLE blackboard chain (governance-signed head + entry-digest chain) ------
+GOV_KP = generate_keypair()
+GOV_KEY_ID = "root0"   # the anchor-1 governance signer key_id (wiring.DEFAULT_KEY_ID) the head signs under
+GOV_AUTH = AuthorizerKey(key_id=GOV_KEY_ID, name=GOV_KEY_ID, public_key_b64=GOV_KP.public_key_b64)
+
+
+def _gov_delegation(*, owner=OWNER, authorizers=(GOV_AUTH,), scope=SCOPE, not_after=NOT_AFTER, threshold=1):
+    return sign_delegation(owner, role=OFFENSE_GOVERNANCE_ROLE, scope=scope,
+                           authorizers=list(authorizers), threshold=threshold, not_after=not_after)
+
+
+def _persist_blackboard(base_dir, monkeypatch, *, slug=SCOPE, n=3, signers=None):
+    """Seed an ISOLATED blackboard for ``slug`` with ``n`` events and persist its chain through the REAL
+    live.wiring._persist_blackboard_chain (monkeypatching open_blackboard onto a tmp DB). Returns
+    (head_path, chain_path)."""
+    from framework.v2.agents import blackboard as bb_mod
+    from vigil_integration.live.wiring import _persist_blackboard_chain
+    db = base_dir / "bb.sqlite"
+    seed = bb_mod.Blackboard(db_path=db)
+    seed.engagement_id(slug)
+    for i in range(n):
+        seed.post(engagement=slug, kind="observation", agent_name="a",
+                  payload={"source": "s", "surface": "p", "summary": f"e{i}"})
+    seed.close()
+    monkeypatch.setattr(bb_mod, "open_blackboard", lambda **_kw: bb_mod.Blackboard(db_path=db))
+    _persist_blackboard_chain(str(base_dir), slug, signers or [(GOV_KEY_ID, GOV_KP.private_key_b64)])
+    return str(base_dir / BLACKBOARD_HEAD_FILE), str(base_dir / BLACKBOARD_CHAIN_FILE)
 
 
 def _write_spine(path, kp=SPINE_KP, n=3):
@@ -163,5 +200,115 @@ def test_home_view_reports_every_segment(tmp_path):
         str(tmp_path), owner_pubkey=OWNER.public_key_b64, delegation=_delegation(), now=NOW, scope=SCOPE)}
     assert verdicts["offense-spine"].status == VERIFIED and verdicts["offense-spine"].owner_rooted
     assert verdicts["offense-usage-ledger"].status == ABSENT           # no ledger written in this test
-    # the DB-projection is honestly unverifiable by a byte-reader, never claimed verified
+    # T3: with NO persisted blackboard artifacts (this test writes only a spine), the segment is honestly
+    # UNVERIFIABLE — because there is nothing to read, NOT because it is forever DB-only.
     assert verdicts["crucible-blackboard-chain"].status == UNVERIFIABLE
+    assert verdicts["crucible-blackboard-chain"].owner_rooted is False
+
+
+# --- T3: persisted CRUCIBLE blackboard chain — round trip + fail-closed axes ------------------------
+
+
+def test_blackboard_chain_round_trips_to_owner_rooted(tmp_path, monkeypatch):
+    # A live-engage-style persist (via the REAL wiring._persist_blackboard_chain) writes the chain as inert
+    # bytes; a PUBLIC-KEYS-ONLY offline verify under an owner-signed OFFENSE_GOVERNANCE_ROLE delegation
+    # succeeds and is owner-rooted (no DB, no framework, only the owner PUBLIC key + the persisted files).
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    import os
+    assert os.path.exists(head_p) and os.path.exists(chain_p)
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=_gov_delegation(), now=NOW, scope=SCOPE, slug=SCOPE)
+    assert v.status == VERIFIED and v.owner_rooted is True
+    assert "owner-rooted via OFFENSE_GOVERNANCE_ROLE" in v.detail
+
+
+def test_blackboard_chain_absent_is_unverifiable(tmp_path):
+    # No persisted artifacts → honest UNVERIFIABLE (never a fake pass), even with a valid delegation + owner.
+    v = verify_blackboard_chain(
+        head_path=str(tmp_path / BLACKBOARD_HEAD_FILE), chain_path=str(tmp_path / BLACKBOARD_CHAIN_FILE),
+        owner_pubkey=OWNER.public_key_b64, delegation=_gov_delegation(), now=NOW, scope=SCOPE)
+    assert v.status == UNVERIFIABLE and v.owner_rooted is False
+
+
+def test_blackboard_chain_present_but_no_delegation_is_unverifiable(tmp_path, monkeypatch):
+    # Artifacts present but NO governance delegation → the owner tie cannot be established (the head names its
+    # signer only by key_id) → honest UNVERIFIABLE, never a fake integrity pass.
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=None, now=NOW, scope=SCOPE)
+    assert v.status == UNVERIFIABLE and v.owner_rooted is False
+
+
+def test_blackboard_chain_tampered_entry_fails(tmp_path, monkeypatch):
+    import json
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    entries = json.loads(open(chain_p, encoding="utf-8").read())
+    entries[0]["cert_digest"] = "de" * 32          # mutate a signed entry digest (raw-file edit)
+    open(chain_p, "w", encoding="utf-8").write(json.dumps(entries))
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=_gov_delegation(), now=NOW, scope=SCOPE)
+    assert v.status == FAILED and v.owner_rooted is False
+
+
+def test_blackboard_chain_tampered_head_fails(tmp_path, monkeypatch):
+    import json
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    head = json.loads(open(head_p, encoding="utf-8").read())
+    head["last_seq"] = int(head["last_seq"]) + 5    # rewrite the signed head so it no longer binds the chain
+    open(head_p, "w", encoding="utf-8").write(json.dumps(head))
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=_gov_delegation(), now=NOW, scope=SCOPE)
+    assert v.status == FAILED and v.owner_rooted is False
+
+
+def test_blackboard_chain_wrong_owner_fails(tmp_path, monkeypatch):
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p,
+                                owner_pubkey=generate_keypair().public_key_b64,
+                                delegation=_gov_delegation(), now=NOW, scope=SCOPE)
+    assert v.status == FAILED and v.owner_rooted is False and "delegation invalid" in v.detail
+
+
+def test_blackboard_chain_expired_delegation_fails(tmp_path, monkeypatch):
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=_gov_delegation(not_after=NOT_AFTER), now=NOT_AFTER + 1, scope=SCOPE)
+    assert v.status == FAILED and v.owner_rooted is False
+
+
+def test_blackboard_chain_wrong_role_delegation_fails(tmp_path, monkeypatch):
+    # A delegation for the OFFENSE_SPINE_ROLE must NOT root the governance-signed blackboard head.
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    spine_role_deleg = sign_delegation(OWNER, role=OFFENSE_SPINE_ROLE, scope=SCOPE, threshold=1,
+                                       not_after=NOT_AFTER, authorizers=[GOV_AUTH])
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=spine_role_deleg, now=NOW, scope=SCOPE)
+    assert v.status == FAILED and v.owner_rooted is False
+
+
+def test_blackboard_chain_missing_clock_fails_closed(tmp_path, monkeypatch):
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=_gov_delegation(), now=None, scope=SCOPE)
+    assert v.status == FAILED and v.owner_rooted is False and "trusted clock" in v.detail
+
+
+def test_blackboard_chain_cross_engagement_head_is_refused(tmp_path, monkeypatch):
+    # The head is anchored to SCOPE; asking to verify it as a DIFFERENT engagement slug is refused.
+    head_p, chain_p = _persist_blackboard(tmp_path, monkeypatch)
+    v = verify_blackboard_chain(head_path=head_p, chain_path=chain_p, owner_pubkey=OWNER.public_key_b64,
+                                delegation=_gov_delegation(scope="*"), now=NOW, scope="*", slug="other-engagement")
+    assert v.status == FAILED and v.owner_rooted is False and "cross-engagement" in v.detail
+
+
+def test_home_view_blackboard_owner_rooted_when_artifacts_present(tmp_path, monkeypatch):
+    # The integrated home view: with a persisted blackboard chain + BOTH delegations, the blackboard segment
+    # is now owner-rooted (item 3: the hard-coded UNVERIFIABLE verdict is replaced by a real verify).
+    _write_spine(tmp_path / "loopback.spine")
+    _persist_blackboard(tmp_path, monkeypatch)
+    verdicts = {v.segment: v for v in verify_offense_home(
+        str(tmp_path), owner_pubkey=OWNER.public_key_b64, delegation=_delegation(),
+        governance_delegation=_gov_delegation(), now=NOW, scope=SCOPE, slug=SCOPE)}
+    assert verdicts["offense-spine"].status == VERIFIED and verdicts["offense-spine"].owner_rooted
+    bb = verdicts["crucible-blackboard-chain"]
+    assert bb.status == VERIFIED and bb.owner_rooted is True
