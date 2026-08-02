@@ -60,6 +60,7 @@ The AI is only ever allowed to *propose*. A separate "oracle" must *prove*. A ga
 - [Architecture at a glance](#architecture-at-a-glance)
 - [The parts of the system](#the-parts-of-the-system)
 - [Feature highlights](#feature-highlights)
+- [Verifiable remediation — proving a fix, not just claiming one](#verifiable-remediation--proving-a-fix-not-just-claiming-one)
 - [How it works, end to end](#how-it-works-end-to-end)
 - [What's live vs. what's still deferred](#whats-live-vs-whats-still-deferred)
 - [Setup](#setup)
@@ -297,6 +298,12 @@ A vendored, Claude-migrated copy of the open-source Strix autonomous-hacker tool
 - Every finding is a signed, re-runnable certificate anyone can verify offline, forever.
 - Fresh per-run challenges make replayed or hallucinated "proofs" structurally impossible.
 
+**Verifiable remediation** (the 2026-08 Verifiable-Fact program — see the dedicated section below)
+- `vigil remediate --prove` re-drives the *original* exploit live against the patched target and emits a signed four-state verdict — **REMEDIATED · STILL_VULNERABLE · INCONCLUSIVE · REFUSED** — where a fix is *earned by oracle silence*, never asserted.
+- A **positive-control twin must still fire** and the target must have answered, so "silent" can never be mistaken for "unreachable"; a fail-closed allowlist refuses classes (timing/race) where silence isn't a sound negative.
+- A **standalone verifier** (`verify_vf.py`, stdlib + one crypto lib, **zero VIGIL code**) re-derives the whole lifecycle — vulnerable → proven-fixed → still-proven, witnessed, no-later-than-T — and rejects every tamper.
+- The **trust gradient is stated on the tin** ([`docs/proof-carrying-finding/TRUST-GRADIENT.md`](docs/proof-carrying-finding/TRUST-GRADIENT.md)): exactly how much you can trust a remediation proof, and against whom — never a claim beyond what the deterministic layer enforces.
+
 **Safety & governance**
 - Four independent authorities (oracle · conjunctive gate · egress gate · signed record) — none of them the AI.
 - WARDEN danger tiers A0–A3, fail-closed to the strictest tier on anything unknown; offense tools never auto-fire.
@@ -319,6 +326,93 @@ A vendored, Claude-migrated copy of the open-source Strix autonomous-hacker tool
 **Auditability & compliance**
 - An always-on, tamper-evident usage record: who used it, when, against what — tied to a never-decreasing counter (hardware-anchored when a secure chip is present) so it can't be back-dated.
 - A witnessed transparency log and offline-verifiable evidence — the append-only, tamper-evident logging that regimes such as the EU AI Act (Art. 12) call for.
+
+---
+
+## Verifiable remediation — proving a fix, not just claiming one
+
+> The **Verifiable-Fact program** (18 implementation PRs `#186–#202` + a design-first spec `#203`) extends the
+> one idea — *only a deterministic oracle mints a FACT* — from "this bug is real" to **"this bug is really
+> fixed."** A remediation stops being a status field you trust and becomes a **portable object whose truth a
+> third party re-derives by re-execution**: witnessed, time-anchored, continuously re-proven, and — for
+> out-of-band classes — self-authenticating. The whole gradient is stated honestly in
+> [`docs/proof-carrying-finding/TRUST-GRADIENT.md`](docs/proof-carrying-finding/TRUST-GRADIENT.md); the
+> companion protocol/semantics specs live beside it in [`docs/proof-carrying-finding/`](docs/proof-carrying-finding/).
+
+### The negative proof — a fix earned by oracle *silence*
+
+`vigil remediate --prove` (`integration/vigil_integration/cli.py`, driver `remediation/prove_driver.py`) loads a
+provenance-grounded finding (a signed spine/envelope, never raw JSON), re-drives the **original** retained
+exploit live against the patched target through the gated `HttpExecutor`, re-fires the **original** oracle over
+the fresh wire bytes, and emits one signed, cross-bound certificate in one of **four states**:
+
+| State | Meaning |
+|---|---|
+| **REMEDIATED** | the exploit provably no longer reproduces — earned by the oracle going **silent** across the protocol-required trials, with all controls satisfied |
+| **STILL_VULNERABLE** | the original oracle **fired** over fresh evidence — the bug reproduces right now |
+| **INCONCLUSIVE** | testing happened but the negative claim was **not earned** (a control failed, freshness fell short, the target was unreachable) |
+| **REFUSED** | testing **must not begin** (out of scope, an expired/insufficient capability, a non-certifiable oracle family) — distinct from INCONCLUSIVE, and signed so it can't be re-read as success |
+
+Silence only counts as a fix when it is *controlled*: a **positive-control twin must still fire** on the
+known-vulnerable bytes (the harness is alive), the target must have **answered** this run (liveness), and the
+oracle family must be one where silence-across-N is a *sound* negative — enforced by a **fail-closed allowlist**
+of deterministic-per-observation oracle kinds, so timing/race/credential-stuffing classes are `REFUSED`, never
+silently "remediated."
+
+### The freshness gradient F0–F4 — and what today's work made honest
+
+Every certificate records *how fresh* the evidence is, on a recorded gradient (`Freshness`, `prove_driver.py`):
+**F0** nonce generated · **F1** the target echoed the run challenge (responsive) · **F2** the fresh challenge
+came back *through the vulnerable sink's own channel* · **F3** structurally bound · **F4** an independent
+collector signed the nonce-bound observation. The asymmetry between the two verdicts is **fundamental and stated
+plainly**:
+
+- **STILL_VULNERABLE reaches genuine F2** — with a `payload_template` the run challenge rides the exploit
+  payload and comes back reflected *in the datastore-error line the oracle matched* (`live_adapter.py` +
+  the driver's `fired ∧ challenge-in-the-matched-error-line` gate). That is *as attributable as the
+  error-signature oracle's own firing* — **not** byte-unforgeable (a producer that fabricates the origin's bytes
+  is the OOB Tier-2 / zkTLS frontier).
+- **REMEDIATED is capped at F1** — a fixed sink emits no signature, so a nonce in a *silent* response got there
+  by reflection, which an echoing app or an interposing edge can fake. Sink-traversal is therefore *unprovable
+  once the sink is gone*: a verifier that demands F2 for a remediation gets `INCONCLUSIVE`, never a falsely-strong
+  `REMEDIATED@F2`.
+
+### Continuously re-proven, witnessed, and time-bounded
+
+Each re-proof "tick" is appended to a signed, hash-chained **Continuous Attestation Log**
+(`remediation/attestation_log.py`) guarded by a durable anti-rollback high-water floor
+(`vigil_core/highwater.py`), so a finding's status is *"as of the last re-proof"* — `present → proven-fixed →
+still-proven / regressed` — not "as of the report date," and a full truncation of the log is caught by the floor.
+A strict-majority **independent witness quorum** co-signs the series head with a **no-later-than-T** median time
+(`remediation/attestation_witness.py`), giving non-equivocation and a civil-time bound with no external service
+(the time bound is honestly *strictly weaker* than non-equivocation — it is over the presented signing quorum).
+
+### Self-authenticating for out-of-band classes (the dishonest-producer tier)
+
+For classes whose exploitation produces an **out-of-band callback** (SSRF, blind XXE, OOB-SQLi), the proof
+survives a producer who fabricates everything it can: the target emits a **per-finding secret token** it could
+only send by *actually executing* the payload, the oracle fires only on a **registered-token** match
+(constant-time), and the callback is witnessed by an **independent, receipt-signing collector** whose signature
+is checked against a key **pinned out-of-band** (`framework/v2/verify/oob.py`, `oracles.py`). A producer that
+does not hold the collector's key cannot forge a receipt that verifies.
+
+### Re-derivable with ZERO VIGIL code
+
+[`docs/proof-carrying-finding/verify_vf.py`](docs/proof-carrying-finding/verify_vf.py) is a **standalone**
+verifier — Python stdlib plus one Ed25519 library, and it asserts (via `--prove-standalone`) that no VIGIL
+module is even importable. It re-derives the whole lifecycle offline — the remediation certificate, the
+attestation series (chain + anti-rollback), and the witnessed no-later-than-T checkpoint — against
+out-of-band-pinned trust roots, and a single flipped byte anywhere flips it to NOT SOUND. It checks
+signatures/binding/structure/chain/quorum; it never re-fires the oracle (that one layer honestly needs VIGIL),
+and it says so.
+
+### What landed today (2026-08)
+
+| PR | What |
+|---|---|
+| **#201 — VF-3 capstone** | One end-to-end test (`integration/tests/test_vf_end_to_end.py`) walks the whole lifecycle against a real loopback target — vulnerable → `STILL_VULNERABLE`, patched → `REMEDIATED`, re-proved, a 2-of-3 witness quorum → no-later-than-T — then hands every artifact to the **standalone** verifier, which confirms it and **rejects every tamper** (flipped state / truncated tick / dropped witness sig). Plus [`TRUST-GRADIENT.md`](docs/proof-carrying-finding/TRUST-GRADIENT.md), the three-tier honesty statement. *An adversarial review caught and fixed a real overclaim in the trust-gradient doc itself* — a TLS-SPKI target-binding claim that the code only delivers for HTTPS (HTTP degrades to host-only), now stated exactly. |
+| **#202 — VF-1a.3** | **Genuine F2** (the fresh nonce reflected in the sink's own error line) + a **live positive control** (a real gated fetch this run, not just retained bytes). It also **fixed a real overclaim in #192**: crediting `F2_PATH_TRAVERSED` to a *silent* verdict from a merely-reflected nonce — reflection is not sink-traversal, so a silent verdict now caps at F1. *A dual/triple-pass adversarial review caught a BLOCK + HIGH + LOW here, all one root cause: positional facts (bytes present somewhere) dressed as causal proofs (the sink processed it) — each fixed to genuine channel-binding.* |
+| **#203 — differential-remediation spec** (design-first; **not yet built**) | The reviewed design to *narrow* the remaining silent-case residual — a payload-discriminating WAF — with a **matched-decoy differential** ([`docs/proof-carrying-finding/DIFFERENTIAL-REMEDIATION.md`](docs/proof-carrying-finding/DIFFERENTIAL-REMEDIATION.md)). Landed **spec-first** so the design could be adversarially reviewed *before* a line of code: the review found a false-`REMEDIATED` hole (an in-flight *sanitizing* WAF) and that a boolean differential is never interposer-*unforgeable* over plaintext HTTP — so the claims were narrowed to exactly what holds (it closes only a *blocking* WAF; its `STILL_VULNERABLE` is a safe over-approximation), and the sanitizing WAF, param-stripping edge, and byte-forgery are all disclosed residuals. **Implementation deferred** — the spec captures the design; the residual stays disclosed in `TRUST-GRADIENT.md`.
 
 ---
 
@@ -394,15 +488,17 @@ VIGIL is scrupulous about this (it would be ironic for an anti-hallucination sys
 |---|---|
 | ✅ **Built & merged (green on `main`)** | The signed core; the egress gate; the two-environment seam; the WARDEN gate; the conjunctive gate; the oracle-confirmation pipeline; challenge oracles; the transparency log; the threshold-destruction gate; the offline-verifiable certificates; the entire F0–F12 agent body; the unified web UI (cloud/K8s launch, an actionable gated Fixes screen, the deep-learn knowledge engine, one-click dossier download, and the **governed local Terminal + AI chatbot**); the embedded file-backed graph store; the **live telemetry-collector sidecar** (`vigil up --with-telemetry`); the **per-action cryptographic approval token** (single-use `O_EXCL` nonce, action-bound, owner-signed); the **bwrap-isolated `sandbox.exec` runner** (`--unshare-all` — the network unshare is the load-bearing one — with a minimal RO allowlist, never `--ro-bind / /`); the **live-key Claude think-step** (`think_claude.py`, key-gated with keyless-replay fallback); the **attestation auto-detect selector** (`open_attestation_provider` — auto-picks a TEE backend when the hardware *and* its backend are present, else the software/TPM fallback; runs on any Linux PC); the moonshot scaffolds. **WARDEN-gating of the vendored Strix `exec_command`/`write_stdin` shell is now ON BY DEFAULT** (a queued shell call routes to per-action owner approval; explicit opt-out `VIGIL_WARDEN_STRIX_GATE`), and **per-action owner-signed approval is now the DEFAULT offense authority** (the standing `--approve-offense` is demoted to an explicit lower-assurance mode). |
 | 🆕 **2026-07 hardening program (merged & CI-green; see [`docs/AS-BUILT.md`](docs/AS-BUILT.md) §"What's assured now")** | Every remaining software-completable pending/scaffolded item is now implemented and merged behind the 6 required CI checks: per-action approval as the default + the Strix shell gated by default (#178); per-finding **how-to-verify on every surface** + the per-session graph backend + `dossier --session` + Inbox/assurance/feed UI (#179); the **live-fire honesty reconciliation** (loopback FACT 3/3 offline; external testasp re-corroborated live with 4 spine-signed FACTs) (#180); the **proof-carrying-finding open standard + a VIGIL-free standalone verifier** and **attack-path/chokepoint triage** (#181); a **signed, independently-verifiable benchmark** + `make bench` (#182); a **confidence-calibration report** + **coverage-guided oracle-gated (non-evasive) discovery** (#183); and the **`engage --learn` cross-run auto-loop** (persistent calibrator + Thompson bandit, non-circular). Required status checks are enforced on protected `main`. |
+| 🆕 **2026-08 Verifiable-Fact program (merged & CI-green; see [the section above](#verifiable-remediation--proving-a-fix-not-just-claiming-one) + [`docs/proof-carrying-finding/`](docs/proof-carrying-finding/))** | A remediation is now itself a re-verifiable FACT. **Built & merged (18 impl PRs #186–#202):** the negative **RemediationCertificate** (fix earned by oracle silence) + its controls (positive-control twin must fire, liveness, freshness, repetition); `vigil remediate --prove` — the **four-state** driver (REMEDIATED/STILL_VULNERABLE/INCONCLUSIVE/REFUSED) with a fail-closed certifiable-family allowlist, an immutable `EffectiveAuthorization` + atomic budget, identity sampled 4× (owner-attested policy + `WielderProof` proof-of-possession), and the **F0–F4 freshness gradient**; the **live-HTTP re-drive adapter** with **genuine F2** (fresh nonce in the sink's matched error line) + a **live positive control** (#202); the observed-**TLS-SPKI** target binding (HTTPS-strong / HTTP host-only); the **Continuous Attestation Log** (signed hash-chain + durable anti-rollback floor); the **witnessed, no-later-than-T** checkpoint; the **OOB Tier-2** self-authenticating token + independent signed collector receipt; the **standalone VIGIL-free verifier** (`verify_vf.py`) + the byte-parity differential; and the **end-to-end lifecycle demo** + the explicit **`TRUST-GRADIENT.md`** (#201). Every crypto/composition slice was adversarially red-penned to convergence (it caught a real defect on nearly every one, including honesty overclaims in the docs themselves). **Deferred (design-first spec merged, #203):** the **differential-remediation** *implementation* — the spec closes only a *blocking* payload-discriminating WAF and honestly discloses the rest (sanitizing WAF, param-stripping edge, byte-forgery); the residual stays disclosed in `TRUST-GRADIENT.md`. |
 | ✅ **Live end-to-end (on loopback)** | The unified `vigil engage` engine; attestation-first blocking; the real gate (in-scope allowed, out-of-scope hard-denied); no-auto-fire of offensive tools; a real oracle-confirmed SQL-injection fact — including an `error_signature` (error-based SQLi) FACT minted over the loopback app and **re-verified 3/3 offline with no Caido and no Docker** (the first-party executor captured the datastore-error bytes); the Detection Mirror (7 detection facts); the usage record with its who/when replay; signed spine checkpoints. |
 | 🟡 **LEAD-only *by design*** (an honesty choice, not a gap) | Detection planes for which the logs don't exist (command-and-control, identity graph, cloud, session-phishing); any judgment made by another AI; the cognition governors (they re-rank, never decide truth). |
 | ⏳ **Deferred to further owner infrastructure** (the only things left are a live *external* service to stand up and confidential-computing hardware) | A running *external* graph database / telemetry collector — **both the embedded, file-backed graph store** (`framework/v2/graph/store.py`) **and the live telemetry-collector sidecar** (`integration/vigil_integration/telemetry.py`, run with `vigil up --with-telemetry`) **are now built**; only the live *external* Neo4j/OTLP service is deferred. The **external, network-egress run is now DONE**: the governed engine ran live against the vendor-published `testasp.vulnweb.com`, minted two oracle-confirmed FACTs (`boolean_sqli` + `open_redirect`), **re-verified them OFFLINE 2/2**, and **rejected a tampered byte** (`targets/testasp/charter.md` §7; `testphp.vulnweb.com` was offline at run time, so the FACTs came from the differential/achieved-state oracles rather than `error_signature`). The **live-API-key Claude step is now built** (`integration/vigil_integration/live/think_claude.py` — a real key-gated `claude-opus-5` call with adaptive thinking + streaming, falling back to keyless replay so tests stay hermetic; the model still only *proposes*, the oracle judges the bytes) and the **cryptographic per-action approval token is now built** (`integration/vigil_integration/live/approval_token.py` — single-use `O_EXCL` nonce, action-bound, owner-signed, expiry-checked; `--approve-offense` remains as an explicit *lower-assurance standing* mode). Genuinely still deferred: the live *external* Neo4j/OTLP service and confidential-computing hardware (hardware-gated). |
 | 🌙 **Moonshots — now SCAFFOLDED** (a built interface + a working software fallback/narrow path; the hardware/research frontier honestly stubbed) | The pluggable **agent-body** interface (`agent_body/interface.py`); the **attestation** provider (a software/TPM quote works; the SEV-SNP/TDX stubs raise — hardware-gated); the **binary/memory-safety** auto-patch tier (crash-confirm + fix-by-oracle-silence work; patch synthesis is research-gated). Each is a real, tested contract with a working narrow path — the binary CRS, a real TEE, and a next-generation body still need research/hardware. See [`docs/DEFERRED-INFRA.md`](docs/DEFERRED-INFRA.md). |
 
-> **Every feature, and how it works:** the exhaustive per-feature catalog — **247 features across 7 domains**, each with its
+> **Every feature, and how it works:** the exhaustive per-feature catalog — **260 features across 7 domains**, each with its
 > `file:line` and honest status — lives in **[`docs/FEATURES.md`](docs/FEATURES.md)** (the complete inventory; this table is
 > the status summary). It is code-grounded and adversarially honesty-checked: where a feature is opt-in, gated, scaffolded, or
-> stubbed, the catalog says so inline.
+> stubbed, the catalog says so inline. The 2026-08 Verifiable-Fact program adds `vigil remediate --prove` + the
+> verifiable-remediation cluster (§1, §4).
 
 > **Now merged (PR #157):** the governed **local Terminal** — `execute_terminal` (an allowlist that cannot egress
 > by construction, tiered A2 → queue → signed, redacted record), its natural-language **AI chatbot**
@@ -655,6 +751,7 @@ vigil/
 - **Now built (was deferred):** the live telemetry-collector sidecar (`vigil up --with-telemetry`), the live-key Claude think-step (`live/think_claude.py`, key-gated with keyless replay), and the per-action cryptographic approval token (`live/approval_token.py`, single-use nonce, action-bound, owner-signed). **Still deferred to owner infrastructure:** a running *external* Neo4j/OTLP graph-telemetry service, and confidential-computing hardware.
 - **Moonshots (now scaffolded):** a next-generation agent body, confidential-computing attestation, and the binary/memory-safety cyber-reasoning tier — each a built, tested interface with a working software fallback/narrow path; the hardware/research frontier stays honestly stubbed (see [`docs/DEFERRED-INFRA.md`](docs/DEFERRED-INFRA.md)).
 - **Merged this cycle (PR #157):** the governed local Terminal (`execute_terminal`) + its natural-language AI chatbot + the Terminal UI screen + the `vigil terminal` CLI verb, and opt-in WARDEN-gating of the Strix shell (`VIGIL_WARDEN_STRIX_GATE`). The session-omniscient **T2b** layer (session Q&A, cross-session fusion, ASK/DO modes, a signed replayable transcript in the dossier, teach-mode) is **roadmap** — see [`docs/VISION.md`](docs/VISION.md).
+- **Merged 2026-08 (the Verifiable-Fact program, PRs #186–#203):** `vigil remediate --prove` — a **four-state, oracle-silence-earned remediation proof** (REMEDIATED / STILL_VULNERABLE / INCONCLUSIVE / REFUSED) with an F0–F4 freshness gradient, a live re-drive adapter with **genuine F2** + a **live positive control** (#202), a continuous witnessed no-later-than-T attestation series, an OOB self-authenticating tier, a **standalone VIGIL-free verifier**, an end-to-end lifecycle demo, and the explicit **`TRUST-GRADIENT.md`** (#201). Every slice was adversarially red-penned to convergence — it caught real overclaims *in the docs themselves*. The **differential-remediation implementation is deferred**: its design-first spec is merged (#203) and honestly scoped (it closes only a *blocking* WAF; sanitizing/param-strip/byte-forgery are disclosed residuals). See [Verifiable remediation](#verifiable-remediation--proving-a-fix-not-just-claiming-one).
 
 See [`docs/AS-BUILT-LIVE.md`](docs/AS-BUILT-LIVE.md) for the honest, itemized status.
 
