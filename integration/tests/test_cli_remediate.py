@@ -269,3 +269,37 @@ def test_insufficient_retained_data_errors_honestly(gated_home, capsys):
          "--target-base-url", "http://127.0.0.1:1/"], capsys)
     assert rc != 0
     assert "insufficient to reconstruct the exploit request" in err
+
+
+# ============================ BLOCK regression: never substitute another finding's positive control ==========
+def test_match_entry_refuses_a_mismatched_sole_entry():
+    # the single-entry fallback must NEVER override a KNOWN finding ref (else finding A's REMEDIATED could be
+    # minted from finding B's retained control). A known ref + a sole entry with a different check_id → None.
+    from vigil_integration.cli import _match_reverifiable_entry
+    entries = [{"check_id": "f-OTHER", "oracle_context": {"error_observed": "x"}}]
+    assert _match_reverifiable_entry(entries, "f-errsqli", "") is None          # ref known via finding.ref
+    assert _match_reverifiable_entry(entries, "", "f-errsqli") is None          # ref known via --finding-ref
+    assert _match_reverifiable_entry(entries, "f-OTHER", "") == entries[0]      # an exact match is admitted
+    assert _match_reverifiable_entry(entries, "", "") == entries[0]             # no ref known → sole-entry ok
+
+
+def test_cross_finding_control_is_refused_end_to_end(gated_home, capsys):
+    # The spine's confirmed fact is FACT_REF, but the SOLE reverifiable entry belongs to a DIFFERENT finding.
+    # The CLI must REFUSE (no retained material for THIS finding) and mint NOTHING — not a false REMEDIATED
+    # from another finding's positive control + exploit.
+    rev = gated_home / "proofs" / "reverifiable.json"
+    doc = json.loads(rev.read_text(encoding="utf-8"))
+    doc["active_findings"][0]["check_id"] = "f-DIFFERENT-FINDING"
+    rev.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+    srv = _start(patched=True)
+    base_url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    try:
+        rc, out, err = _remediate(
+            ["--prove", "--from-spine", SLUG, "--finding-ref", FACT_REF, "--base-dir", str(gated_home),
+             "--target-base-url", base_url], capsys)
+    finally:
+        srv.shutdown(); srv.server_close()
+    assert rc != 0, (rc, out, err)
+    assert "no retained re-verifiable proof material" in err
+    assert "REMEDIATED" not in out
+    assert not (gated_home / "proofs" / f"remediation-prove-{FACT_REF}.json").is_file()

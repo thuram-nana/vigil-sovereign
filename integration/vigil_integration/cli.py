@@ -246,15 +246,20 @@ def _remediate_safe_ref(ref: str) -> str:
 
 
 def _match_reverifiable_entry(entries: "list[dict]", ref: str, finding_ref: str) -> "Optional[dict]":
-    """Pick the retained re-verifiable entry that belongs to THIS finding. Prefer an explicit
-    ``--finding-ref`` / the finding ref matched against ``check_id``; fall back to the sole entry when the
-    run produced exactly one. Ambiguity (many entries, no match) → None (the caller refuses honestly)."""
+    """Pick the retained re-verifiable entry that belongs to THIS finding, by ``check_id`` == the KNOWN finding
+    ref (explicit ``--finding-ref`` or the trusted finding's own ref). When a ref is known, an EXACT match is
+    REQUIRED: no match ⇒ None (the caller refuses honestly) — the single-entry "sole entry" convenience must
+    NEVER override a known ref, or a REMEDIATED for finding A could be minted from finding B's retained
+    positive control + exploit (a false-negative on a live-vulnerable finding). The sole-entry fallback is
+    reachable ONLY when NO ref is known at all (which the CLI path never hits — the finding always has a ref)."""
     if not entries:
         return None
     want = str(finding_ref or "").strip() or str(ref or "").strip()
-    for e in entries:
-        if isinstance(e, dict) and str(e.get("check_id") or "") == want:
-            return e
+    if want:
+        for e in entries:
+            if isinstance(e, dict) and str(e.get("check_id") or "") == want:
+                return e
+        return None   # a KNOWN ref that matches nothing → refuse; never substitute another finding's control
     if len(entries) == 1 and isinstance(entries[0], dict):
         return entries[0]
     return None
@@ -299,6 +304,11 @@ def _reconstruct_exploit_request(finding: Any, entry: dict) -> "tuple[Optional[d
             endpoint = urlsplit(insertion).path or ""
     if not endpoint and ftarget:
         endpoint = urlsplit(ftarget).path if "://" in ftarget else (ftarget if ftarget.startswith("/") else "")
+    # Hygiene (defense-in-depth): an absolute-URL endpoint is reduced to its PATH so it can never carry a host
+    # (the adapter's path-concat already neutralizes host, and the charter scope gate bounds it — this makes the
+    # intent explicit at the source rather than relying on a downstream accident).
+    if "://" in endpoint:
+        endpoint = urlsplit(endpoint).path or ""
 
     missing = [name for name, val in
                (("endpoint_path", endpoint), ("param", param), ("payload", payload)) if not val]
@@ -333,6 +343,13 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
     Exit: 0 REMEDIATED · 1 STILL_VULNERABLE · 2 INCONCLUSIVE · 3 REFUSED · 2 for a pre-flight refusal. Never
     prints "fixed" for anything but a REMEDIATED that ALSO independently re-verifies. FATAL-2: every
     framework-touching import is function-local.
+
+    TRUST NOTE (honest): the driving FINDING is provenance-grounded (signed spine / owner-delegated envelope),
+    but the retained re-verifiable material (``proofs/reverifiable.json`` — the original firing oracle_context
+    that serves as the positive control, plus the channel / insertion point) is trusted AS LOCAL, unsigned
+    material. In the owner-operated model that is the operator's own run output; do not point ``--run-dir`` at
+    another engagement's ``proofs/``. The entry is matched to the finding by ``check_id`` (exact, fail-closed —
+    a mismatch refuses; the positive control of a DIFFERENT finding is never substituted).
     """
     import secrets
     import time as _time
