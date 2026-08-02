@@ -119,3 +119,10 @@ protocol is the textbook "don't roll your own," so external review is warranted.
   producer, OOB classes: token + independent signed collector receipt), the honest limits of each, and the
   deferred frontier (zkTLS / external time anchor / F2). The end-to-end demonstration is
   `integration/tests/test_vf_end_to_end.py`; the standalone verifier is `verify_vf.py`.
+- **`DIFFERENTIAL-REMEDIATION.md`** — **design-first (not yet built).** The plan to close the one remaining
+  disclosed silent-case residual — a *payload-discriminating WAF* — with a **matched-decoy differential**: a
+  metacharacter-identical boolean true/false pair a content-inspecting WAF cannot treat differently, judged by
+  the existing interposer-unforgeable `boolean_inference_oracle`, plus a mandatory baseline WAF-closure test. It
+  states the soundness argument, the three-way state machine (STILL_VULNERABLE / REMEDIATED+`origin_reached` /
+  INCONCLUSIVE), the adversarial test plan, and what it still does **not** close (a param-stripping edge =
+  mitigated-by-edge; producer byte-forgery = the OOB/zkTLS frontier).
