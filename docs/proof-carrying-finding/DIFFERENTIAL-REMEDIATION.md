@@ -24,10 +24,12 @@ residual but three**, and this design closes only the first:
 - **(b) a param-stripping edge** — drops the injectable param entirely (§7).
 
 The mechanism for (a-block) is a **matched decoy**: a probe *indistinguishable to a content-inspecting WAF* from
-the exploit, so the WAF cannot pass one while blocking the other, combined with a signal that **only an
-executing sink produces** and **an interposer that does not execute the injection cannot forge**.
+the exploit, so the WAF cannot pass one while blocking the other, combined with a boolean signal whose
+**genuine** form reflects the origin's own data — so a *blocking* WAF is detected (it blocks the decoy too) and a
+real fix is separable from it. The signal is not interposer-*unforgeable* (§2), but its forgeries only ever
+over-report STILL_VULNERABLE, never a false REMEDIATED.
 
-## 2. The signal, and the precise adversary it is unforgeable against
+## 2. The signal, and the precise (bounded) adversary model
 
 The signal is the **boolean differential** already computed in `framework/v2/verify/oracles.py`:
 
