@@ -131,6 +131,19 @@ DOMAINS: tuple[SpineDomain, ...] = (
              "today (its own record_hash/prev_hash chain, not the vigil_core ChainEntry construction). S7.",
     ),
     SpineDomain(
+        name="continuous-attestation-log",
+        trust_domain=OFFENSE, signer_role=OFFENSE_GOVERNANCE_ROLE, owner_rooted=False, file_backed=True,
+        location="integration/.../remediation/attestation_log.py (ticks.jsonl + head.json + highwater.json)",
+        note="VF-1b Continuous Attestation Log: a monotonic series of signed four-state remediation re-proof "
+             "ticks (prove_driver certs), hash-chained via vigil_core.build_chain and anchored by a "
+             "governance m-of-n sign_head, with a durable vigil_core.highwater floor (entry_count PRIMARY + "
+             "last_seq) refusing a rolled-back/truncated series. File-backed + offline-verifiable via "
+             "verify_log, whose trust_root + signer_pubkeys are CALLER-PINNED out-of-band (like the proof "
+             "bundle) — there is no owner-delegation consumer that derives them, so it is honestly NOT "
+             "owner-rooted today. The durable floor is a LOCAL unsigned file: a same-host attacker rewriting "
+             "log+head+floor together defeats the LOCAL verify; the out-of-band witness (VF-1c) closes that.",
+    ),
+    SpineDomain(
         name="crucible-blackboard-chain",
         trust_domain=OFFENSE, signer_role=OFFENSE_GOVERNANCE_ROLE, owner_rooted=False, file_backed=False,
         location="engine/crucible/framework/v2/agents/spine_chain.py (DB-projection via build_chain)",

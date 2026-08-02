@@ -23,6 +23,9 @@ from .capability import (
 )
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
 from .crypto import IntegrityError, KeyPair, generate_keypair, sign, verify_one, verify_threshold
+from .highwater import (
+    HighWaterDowngrade, HighWaterError, advance_highwater, check_highwater, highwater_lock, load_highwater,
+)
 from .models import AuthorizerKey, ChainEntry, Signature, SignedChainHead, TrustRoot
 from .sealing import SealError, is_sealed, new_kek, seal, unseal
 from .vault import Vault, VaultLocked
@@ -30,6 +33,8 @@ from .vault import Vault, VaultLocked
 __all__ = [
     "canonical_json", "digest_payload", "evidence_signing_bytes", "sha256_hex",
     "append_entry", "build_chain", "sign_head", "verify_chain", "verify_head",
+    "load_highwater", "check_highwater", "advance_highwater", "highwater_lock",
+    "HighWaterError", "HighWaterDowngrade",
     "generate_keypair", "sign", "verify_one", "verify_threshold", "KeyPair", "IntegrityError",
     "AuthorizerKey", "ChainEntry", "Signature", "SignedChainHead", "TrustRoot",
     "seal", "unseal", "new_kek", "is_sealed", "SealError",
