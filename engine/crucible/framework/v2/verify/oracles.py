@@ -1436,26 +1436,28 @@ def error_signature_oracle(observed_body: Any, control_body: Any = None) -> Orac
 # ---------------------------------------------------------------------------
 
 
-def oob_callback_oracle(hits: Any, expected_token: "str | None" = None) -> OracleSignal:
+def oob_callback_oracle(hits: Any, expected_token: "str | None" = None,
+                        collector_pubkey: "str | None" = None) -> OracleSignal:
     """Fire when the out-of-band receiver logged an inbound interaction that carried the finding's REGISTERED
     per-finding secret token. The token — minted per finding (`oob.register_token`, `secrets.token_hex(16)`)
     and embedded in the callback URL the target must actually execute to emit — is what makes a blind-execution
     callback (SSRF, OOB SQLi, blind XXE, deserialization) close to unforgeable. `hits` is whatever `oob.poll()`
     returned; `expected_token` is that registered secret (carried on the context as `oob_token`).
 
-    VF-2a hardening (was: fired on ANY non-empty `hits`): a callback that does NOT carry the registered token —
-    or a context with no registered token to compare against — is NOT trusted. Fail-closed:
-      * no `hits` → not fired (unchanged);
-      * `hits` but NO `expected_token` → NOT fired (a callback we cannot tie to a per-finding secret is
-        indistinguishable from a fabricated/unrelated hit — the live receiver bucket-filters by token, but that
-        filter is not reproduced offline, so re-verification must check the token itself);
-      * `hits` but none carry the token → NOT fired (forged/unrelated callback);
+    VF-2a (token): a callback that does NOT carry the registered token — or a context with no registered token
+    to compare against — is NOT trusted. Fail-closed:
+      * no `hits` → not fired; `hits` but NO `expected_token` → not fired; none carry the token → not fired;
       * ≥1 hit whose token == `expected_token` (constant-time) → fired.
 
-    HONEST LIMIT: this defeats a fabricated/unrelated callback and closes the offline re-verify gap. It does NOT
-    alone defeat a FULLY-dishonest producer who fabricates the whole context (setting `oob_token` == a planted
-    hit token) — that requires an INDEPENDENT, receipt-SIGNING collector (VF-2b), which binds a signature by a
-    party other than the producer over `{token, source_ip, time}`."""
+    VF-2b (independent collector receipt): pass ``collector_pubkey`` — the collector's public key PINNED
+    OUT-OF-BAND by the verifier (never read from the producer-controlled context) — to demand an F4 proof: a
+    token-matched hit ALSO requires a collector signature that verifies against that pinned key. A fully-
+    dishonest producer who fabricates the whole context cannot forge a receipt that verifies under a pinned key
+    it does not hold → not fired. ``collector_pubkey=None`` intentionally stays at the VF-2a (token-only) tier,
+    whose honest limit is that it does NOT defeat a fully-dishonest producer; an EMPTY/blank ``collector_pubkey``
+    means F4 was requested with a bad key → fail-closed (NOT a silent drop to token-only)."""
+    from .oob import verify_oob_receipt   # local import keeps the module import graph acyclic
+
     hit_list = list(hits or [])
     if not hit_list:
         return OracleSignal(
@@ -1479,14 +1481,38 @@ def oob_callback_oracle(hits: Any, expected_token: "str | None" = None) -> Oracl
                       f"token — forged/unrelated callback (fail-closed)"),
             observed={"hit_count": len(hit_list), "matched": 0, "token_verified": False})
 
+    receipt_verified = False
+    if collector_pubkey is not None:
+        # VF-2b F4 requested (collector_pubkey passed, even if blank). An EMPTY/blank pin is a caller error, not
+        # "F4 not requested" — fail-closed (symmetric with verify_oob_receipt), never a silent drop to the
+        # token-only tier. Pass collector_pubkey=None to intentionally stay at the VF-2a token-only tier.
+        if not str(collector_pubkey).strip():
+            return OracleSignal(
+                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                evidence="F4 (collector receipt) requested but the pinned collector key is empty (fail-closed)",
+                observed={"hit_count": len(hit_list), "token_verified": True, "receipt_verified": False})
+        # require an INDEPENDENT collector receipt over a token-matched hit, checked against the caller-PINNED
+        # collector key. Fail-closed: a token match without a verifying receipt does NOT fire.
+        matched = [h for h in matched if verify_oob_receipt(h, collector_pubkey=collector_pubkey)]
+        if not matched:
+            return OracleSignal(
+                kind=OracleKind.OOB_CALLBACK, fired=False, confidence=0.0,
+                evidence=(f"token-matched out-of-band interaction(s) but NONE carried a collector receipt that "
+                          f"verifies against the pinned collector key — a fully-dishonest producer cannot forge "
+                          f"one (fail-closed)"),
+                observed={"hit_count": len(hit_list), "matched": 0, "token_verified": True,
+                          "receipt_verified": False})
+        receipt_verified = True
+
     summary = _hit_summary(matched[0])
+    tier = "F4 (token + independent collector receipt)" if receipt_verified else "token-verified"
     return OracleSignal(
         kind=OracleKind.OOB_CALLBACK,
         fired=True,
         confidence=0.95,
-        evidence=f"{len(matched)} token-verified out-of-band interaction(s); first: {summary}",
+        evidence=f"{len(matched)} {tier} out-of-band interaction(s); first: {summary}",
         observed={"hit_count": len(hit_list), "matched": len(matched), "token_verified": True,
-                  "first": summary},
+                  "receipt_verified": receipt_verified, "first": summary},
     )
 
 

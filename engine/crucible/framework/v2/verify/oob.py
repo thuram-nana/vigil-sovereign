@@ -37,9 +37,21 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
+from typing import Any
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# VF-2b: an INDEPENDENT, receipt-signing collector. The receiver (a party distinct from the producer) signs
+# each observed hit's {token, client_ip, received_at, method, path} with ITS OWN key; a verifier checks the
+# receipt against a caller-PINNED collector pubkey (out-of-band, like the PCF trust-root pin). A producer who
+# does not hold the collector private key cannot forge a receipt that verifies under the pinned key — so an OOB
+# proof survives even a FULLY-dishonest producer (VF-2a token-equality alone does not). vigil_core is the shared
+# offense-free integrity substrate (Ed25519 + canonical JSON); the offense venv installs it.
+from vigil_core import canonical_json, sign, verify_one
+from vigil_core.crypto import IntegrityError, load_public_key
+
+_OOB_RECEIPT_DOMAIN = b"vigil-oob-receipt-v1\x00"
 
 
 class OOBHit(BaseModel):
@@ -55,6 +67,48 @@ class OOBHit(BaseModel):
     user_agent: str = ""
     host_header: str = ""
     received_at: float = Field(description="epoch seconds when the hit landed")
+    # VF-2b: the INDEPENDENT collector's Ed25519 signature over the receipt core (empty when the receiver was
+    # not given a collector key). A verifier checks it against a caller-PINNED collector pubkey.
+    collector_sig: str = ""
+
+
+def _receipt_core(hit: Any) -> dict:
+    """The exact fields the collector signature covers, from an OOBHit or a plain dict (the retained,
+    serialized form). Only TARGET-observed facts — never the collector_sig itself."""
+    def g(k: str) -> Any:
+        return hit.get(k) if isinstance(hit, dict) else getattr(hit, k, None)
+    return {
+        "token": str(g("token") or ""),
+        "client_ip": str(g("client_ip") or ""),
+        "received_at": float(g("received_at") or 0.0),
+        "method": str(g("method") or ""),
+        "path": str(g("path") or ""),
+    }
+
+
+def _receipt_signing_bytes(core: dict) -> bytes:
+    m = canonical_json(core)
+    return _OOB_RECEIPT_DOMAIN + (m if isinstance(m, bytes) else m.encode("utf-8"))
+
+
+def sign_oob_receipt(collector_private_key_b64: str, hit: Any) -> str:
+    """The collector signs a hit's receipt core with its OWN key."""
+    return sign(collector_private_key_b64, _receipt_signing_bytes(_receipt_core(hit)))
+
+
+def verify_oob_receipt(hit: Any, *, collector_pubkey: str) -> bool:
+    """True iff the hit carries a collector signature that verifies against the PINNED collector pubkey over the
+    hit's own receipt core. Fail-closed: a missing/empty signature, an empty pinned key, or malformed key/sig
+    material → False. ``collector_pubkey`` MUST be pinned OUT-OF-BAND by the verifier — never trusted from the
+    producer-controlled context — or the guarantee is void (a producer would supply its own key)."""
+    sig = (hit.get("collector_sig") if isinstance(hit, dict) else getattr(hit, "collector_sig", "")) or ""
+    if not sig or not str(collector_pubkey or "").strip():
+        return False
+    try:
+        load_public_key(collector_pubkey)   # reject non-canonical / low-order keys before verifying
+        return bool(verify_one(collector_pubkey, _receipt_signing_bytes(_receipt_core(hit)), str(sig)))
+    except (IntegrityError, TypeError, ValueError):
+        return False
 
 
 def _token_of(path: str) -> str:
@@ -68,11 +122,12 @@ class _OOBHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, addr: tuple[str, int]) -> None:
+    def __init__(self, addr: tuple[str, int], signing_key: "str | None" = None) -> None:
         super().__init__(addr, _OOBRequestHandler)
         self._lock = threading.Lock()
         self._registered: set[str] = set()
         self._hits: dict[str, list[OOBHit]] = {}
+        self._signing_key = signing_key   # VF-2b: the collector's private key (b64), or None
 
     def _register(self, token: str) -> None:
         with self._lock:
@@ -80,6 +135,10 @@ class _OOBHTTPServer(ThreadingHTTPServer):
             self._hits.setdefault(token, [])
 
     def _record(self, hit: OOBHit) -> None:
+        # VF-2b: the collector signs the receipt AS IT OBSERVES the hit, so the signature is bound to what the
+        # independent collector actually saw (not to anything the producer supplies later).
+        if self._signing_key:
+            hit.collector_sig = sign_oob_receipt(self._signing_key, hit)
         with self._lock:
             self._hits.setdefault(hit.token, []).append(hit)
 
@@ -135,12 +194,19 @@ class OOBReceiver:
     poll for hits. All state is in-process; nothing is persisted and nothing
     leaves the machine."""
 
-    def __init__(self, host: str = "127.0.0.1", *, advertise_base_url: str | None = None) -> None:
+    def __init__(self, host: str = "127.0.0.1", *, advertise_base_url: str | None = None,
+                 collector_keypair: Any = None) -> None:
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError(
                 f"OOBReceiver refuses to bind to {host!r}; loopback only."
             )
         self._host = "127.0.0.1" if host == "localhost" else host
+        # VF-2b: an optional INDEPENDENT collector signing key (a vigil_core KeyPair). When set, every recorded
+        # hit is signed into a receipt a verifier checks against the PINNED collector pubkey — the mechanism
+        # that survives a fully-dishonest producer. Held by the collector (a party distinct from the producer);
+        # this class does not enforce that independence — it is a deployment assumption, like witness independence.
+        self._collector_priv = getattr(collector_keypair, "private_key_b64", None) if collector_keypair else None
+        self._collector_pub = getattr(collector_keypair, "public_key_b64", None) if collector_keypair else None
         # Opt-in operator-hosted relay (default off). The receiver STILL binds
         # loopback only — this URL is merely what probes embed as the callback.
         # The operator runs an allowlisted tunnel from that host back to this
@@ -169,7 +235,7 @@ class OOBReceiver:
     def start(self) -> "OOBReceiver":
         if self._server is not None:
             return self
-        self._server = _OOBHTTPServer((self._host, 0))
+        self._server = _OOBHTTPServer((self._host, 0), signing_key=self._collector_priv)
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="oob-receiver", daemon=True
         )
@@ -203,6 +269,12 @@ class OOBReceiver:
         if self._server is None:
             raise RuntimeError("OOBReceiver is not started")
         return self._server.server_address[1]
+
+    @property
+    def collector_pubkey(self) -> "str | None":
+        """The independent collector's public key (b64) when a signing key was given, else None. A verifier
+        PINS this out-of-band and checks each hit's receipt against it (VF-2b)."""
+        return self._collector_pub
 
     @property
     def base_url(self) -> str:
