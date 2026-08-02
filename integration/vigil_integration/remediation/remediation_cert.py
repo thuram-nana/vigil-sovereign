@@ -52,9 +52,13 @@ _RESPONSE_KEYS = frozenset({
     "dom_binding_calls",                                   # dom_execution (JS the target executed)
     "process_output",                                     # sanitizer_signal (target output)
     "oob_hits",                                           # oob_callback (callbacks the target emitted)
-    "handshake", "anon_get", "tls", "crypto_artifact",   # reachability / anon-GET / TLS / crypto artifact
     "llm_output", "pi_treatment", "pi_control",          # AEGIS LLM output / prompt-injection behaviour obs
     "auth_events",                                        # credential_stuffing observed auth outcomes
+    # NOTE: connection-style capture fields (handshake / tls / anon_get / crypto_artifact) are DELIBERATELY
+    # excluded — their helpers return a NON-EMPTY dict on FAILURE ({connected: False} / {status: None}, even on
+    # a kill-switch/scope refusal), so "dict non-empty" would falsely assert the target ANSWERED. Their classes
+    # are not certifiable-by-silence in prove mode anyway; a sound liveness for them would test `connected is
+    # True` / an integer status, not membership here.
 })
 
 

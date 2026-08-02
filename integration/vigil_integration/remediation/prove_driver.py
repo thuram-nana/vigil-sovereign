@@ -124,37 +124,42 @@ class RepeatPolicy:
     note: str = ""
 
 
-# Probabilistic classes whose oracle kind is NOT one of the statistical KINDS below (e.g. request_race uses
-# ACHIEVED_STATE) but where silence-across-N is still not a sound negative (the race/TOCTOU window may simply
-# not have been hit). Kept minimal + a substring heuristic; genuinely-unknown races canonicalise to None → refused.
-_PROBABILISTIC_CLASSES = frozenset({"request_race", "race_condition", "toctou"})
+# FAIL-CLOSED ALLOWLIST of oracle KINDS (by OracleKind.value) for which silence is a SOUND negative: a present
+# vuln CERTAINLY re-fires a comparable honest re-drive because the oracle fires on a DETERMINISTIC per-observation
+# signal over a RELIABLY-REPRODUCIBLE channel. A class is certifiable-by-silence ONLY if EVERY oracle in its set
+# is here — so an unaudited/new/sampled/stochastic kind defaults to NON-certifiable (a blocklist fails unsafe;
+# repeated red-pen rounds proved an allowlist is the only robust shape). Deliberately EXCLUDED and why:
+#   TIMING, CREDENTIAL_STUFFING            — significance test over a sampled campaign (silence = no evidence)
+#   PROMPT_INJECTION, SYSTEM_PROMPT_DISCLOSURE — deterministic GIVEN the obs, but the obs is a STOCHASTIC LLM output
+#   SANITIZER_SIGNAL                        — TSAN data-race sub-case is non-deterministic (unaudited → excluded)
+#   VERSION_RANGE, POLICY_PATH, *_POSTURE, SAML/SSO forgery, AUTOMATED_ACCESS — offline/posture, not a live
+#     exploit re-drive with a freshness nonce (out of prove-mode scope; reconciles the certifiability↔mint gap)
+#   SERVICE_REACHABILITY, ACTIVE_EXPOSURE, TLS_WEAKNESS — recon/handshake classes whose liveness is the
+#     connection-dict problem; excluded until a sound `connected is True` liveness lands.
+_CERTIFIABLE_ORACLE_KINDS = frozenset({
+    "error_signature", "side_effect", "differential_response", "boolean_inference", "reflection_context",
+    "dom_execution", "evaluation", "achieved_state", "predicate", "oob_callback",
+    "sql_injection_breakout", "command_injection_breakout", "nosql_injection_breakout",
+})
 
-
-def _statistical_oracle_kinds():
-    """The oracle KINDS whose firing is a SIGNIFICANCE TEST OVER A SAMPLED CAMPAIGN, so oracle SILENCE is
-    absence-of-evidence, NOT evidence of absence — remediation cannot be certified by silence for them.
-    Deliberately NOT ``BOOLEAN_INFERENCE``: its per-round signal ``(true≠false) AND (false_a==false_b)`` is
-    DETERMINISTIC (SPRT only bounds the rounds-to-decision), so a still-present boolean injection re-fires with
-    certainty on a comparable honest re-drive → silence IS sound. ``TIMING`` (statistical delay) and
-    ``CREDENTIAL_STUFFING`` (SPRT over a sampled auth-success stream — a limiter that blocks a burst need not
-    block a slow drip) are the sampled-campaign kinds. Derived from the authoritative OracleKind enum."""
-    from framework.v2.verify.models import OracleKind                     # lazy — FATAL-2
-    return frozenset({OracleKind.TIMING, OracleKind.CREDENTIAL_STUFFING})
+# Non-deterministically-REPRODUCIBLE phenomena: the oracle is deterministic given the observation, but a present
+# vuln may not manifest on a given drive (connection-state desync / race window). Silence-across-N is unsound.
+_PROBABILISTIC_CLASSES = frozenset({"request_race", "race_condition", "toctou", "request_smuggling",
+                                    "response_smuggling", "http_request_smuggling", "http_desync"})
+# Oracle kinds whose exclusion is a STATISTICAL/STOCHASTIC-rule gap (→ STATISTICAL_RULE_UNIMPLEMENTED reason),
+# vs a merely-unaudited/unsupported kind (→ UNPROVABLE_ORACLE_FAMILY).
+_STATISTICAL_KIND_NAMES = frozenset({"timing", "credential_stuffing", "prompt_injection",
+                                     "system_prompt_disclosure"})
 
 
 def repeat_policy_for(bug_class: str) -> RepeatPolicy:
-    """The repeat policy for the AUTHORIZED ``bug_class``, DERIVED from the authoritative verifier taxonomy
-    (never a private, divergent table). ``certifiable_by_silence`` answers ONLY "is oracle silence a sound
-    negative for this oracle?" — LIVENESS (did the target answer) is a separate runtime gate in the mint.
-    Fail-closed:
-      * an UNKNOWN class (``canonical_bug_class`` → None, incl. oracle-KIND names like ``differential_response``)
-        cannot be certified — we cannot reason about its stopping rule;
-      * a class whose oracle set contains a SAMPLED-CAMPAIGN statistical kind (``_statistical_oracle_kinds`` —
-        TIMING / CREDENTIAL_STUFFING) or a PROBABILISTIC race/TOCTOU class cannot be certified by silence
-        (absence of evidence ≠ evidence of absence) — needs a significance/equivalence rule (not implemented);
-      * only a KNOWN class whose every oracle fires on a DETERMINISTIC per-observation signal is certifiable.
-    Reasoning over the SAME taxonomy the oracle uses is what closes the divergence that let a timing/credstuff
-    exploit reach REMEDIATED. Lazy framework import (FATAL-2)."""
+    """The repeat policy for the AUTHORIZED ``bug_class``, DERIVED from the authoritative verifier taxonomy via a
+    FAIL-CLOSED oracle-kind ALLOWLIST. ``certifiable_by_silence`` answers ONLY "is oracle silence a SOUND negative
+    for this oracle?" (a present vuln CERTAINLY re-fires a comparable honest re-drive) — LIVENESS (did the target
+    answer) is a SEPARATE runtime gate in the mint. A class is certifiable iff its canonical name is known, it is
+    not a probabilistic-phenomenon (race/desync) class, AND EVERY oracle in its set is on the deterministic
+    allowlist. Everything else — unknown class, oracle-KIND name, sampled/stochastic kind, unaudited kind,
+    race/smuggling phenomenon — is NON-certifiable (fail-closed). Lazy framework import (FATAL-2)."""
     from framework.v2.verify.models import OracleKind                     # lazy — FATAL-2
     from framework.v2.verify.verifier import BUG_CLASS_ORACLES, canonical_bug_class
 
@@ -163,16 +168,19 @@ def repeat_policy_for(bug_class: str) -> RepeatPolicy:
         label = str(bug_class or "").strip().lower()
         return RepeatPolicy(label, min_valid_trials=3, certifiable_by_silence=False,
                             note="UNKNOWN to the oracle vocabulary — fail-closed: cannot certify by silence")
-    oracles = BUG_CLASS_ORACLES.get(canonical, ())
-    statistical = bool(set(oracles) & _statistical_oracle_kinds())
-    probabilistic = statistical or canonical in _PROBABILISTIC_CLASSES or "race" in canonical or "toctou" in canonical
-    if probabilistic:
-        return RepeatPolicy(canonical, min_valid_trials=8, certifiable_by_silence=False, requires_significance=True,
-                            note="sampled-campaign statistical / probabilistic family — silence needs a "
-                                 "significance/equivalence rule (not implemented)")
+    kinds = frozenset(o.value for o in BUG_CLASS_ORACLES.get(canonical, ()))
+    is_phenomenon = (canonical in _PROBABILISTIC_CLASSES
+                     or any(t in canonical for t in ("race", "toctou", "smuggl", "desync")))
+    all_deterministic = bool(kinds) and kinds.issubset(_CERTIFIABLE_ORACLE_KINDS)
+    if is_phenomenon or not all_deterministic:
+        requires_sig = is_phenomenon or bool(kinds & _STATISTICAL_KIND_NAMES)
+        return RepeatPolicy(canonical, min_valid_trials=8, certifiable_by_silence=False,
+                            requires_significance=requires_sig,
+                            note="non-deterministic / sampled / stochastic / race / unaudited oracle — silence is "
+                                 "not a sound negative (fail-closed)")
     return RepeatPolicy(canonical, min_valid_trials=3, certifiable_by_silence=True,
-                        unique_token_per_trial=(OracleKind.OOB_CALLBACK in oracles),
-                        note="deterministic per-observation family — silence across N valid fresh trials is sound")
+                        unique_token_per_trial=("oob_callback" in kinds),
+                        note="every oracle is deterministic per-observation over a reliable channel — silence sound")
 
 
 # --------------------------------------------------------------------------------------------------------

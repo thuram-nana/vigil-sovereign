@@ -152,32 +152,43 @@ def test_bearer_capability_allowed_only_when_pop_not_required():
 
 
 # ============================ BLOCK-1 regression: statistical / unknown families are non-certifiable ============
-def test_repeat_policy_classifies_from_the_authoritative_taxonomy():
-    # sampled-campaign statistical (TIMING or CREDENTIAL_STUFFING in the oracle set) + probabilistic race →
-    # non-certifiable. credential_stuffing is the BLOCK-A regression: SPRT over a sampled campaign.
+def test_repeat_policy_is_a_failclosed_deterministic_allowlist():
+    # NON-certifiable: sampled-campaign statistical (timing/credstuff), probabilistic phenomena (race +
+    # request_smuggling desync), stochastic LLM channels (prompt_injection / system_prompt_disclosure), and
+    # oracle-KIND names / unknown classes (canonical None).
     for bc in ("time_based_sqli", "time_based", "time_based_command_injection", "request_race",
-               "credential_stuffing", "account_takeover", "password_spraying"):
+               "credential_stuffing", "account_takeover", "password_spraying",
+               "request_smuggling", "prompt_injection", "system_prompt_disclosure",
+               "error_signature", "differential_response", "oob_callback", "some_brand_new_class"):
         assert repeat_policy_for(bc).certifiable_by_silence is False, bc
-    # oracle-KIND names are NOT bug classes → canonical is None → non-certifiable (the BLOCK-1 hole)
-    for bc in ("error_signature", "differential_response", "oob_callback"):
-        assert repeat_policy_for(bc).certifiable_by_silence is False, bc
-    # genuinely deterministic, KNOWN classes → certifiable. boolean_sqli stays certifiable: SPRT bounds only
-    # the rounds-to-decision; its per-round signal is deterministic, so silence IS a sound negative.
-    for bc in ("error_based_sqli", "reflected_xss", "boolean_sqli", "sqli", "ssrf"):
+    # CERTIFIABLE: every oracle deterministic-per-observation over a reliable channel. boolean_sqli stays
+    # certifiable (SPRT bounds only rounds; the per-round signal is deterministic).
+    for bc in ("error_based_sqli", "reflected_xss", "boolean_sqli", "sqli", "ldap_injection", "ssrf"):
         assert repeat_policy_for(bc).certifiable_by_silence is True, bc
-    assert repeat_policy_for("some_brand_new_class").certifiable_by_silence is False   # fail-closed
 
 
 def test_refused_credential_stuffing_sampled_campaign():
-    # BLOCK-A regression: a SPRT-over-sampled-campaign class must not reach REMEDIATED by silence.
     out = _run(FakeAdapter(bug_class="credential_stuffing"))
     assert out.state == State.REFUSED and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED
 
 
-def test_liveness_keys_are_target_produced_only():
-    # MEDIUM-C / LOW-D: liveness must detect TARGET-produced fields (observed_state, observed_evidence,
-    # oob_hits, error_observed) and must NOT be asserted by PRODUCER-set fields alone (expected_state,
-    # predicate, marker) or an empty context.
+def test_refused_request_smuggling_desync_phenomenon():
+    # BLOCK-2 regression: deterministic oracle over a non-deterministically-reproducible desync → non-certifiable.
+    out = _run(FakeAdapter(bug_class="request_smuggling"))
+    assert out.state == State.REFUSED and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED
+
+
+def test_refused_llm_stochastic_channel_classes():
+    # BLOCK-3 regression: prompt_injection / system_prompt_disclosure judge a STOCHASTIC LLM output → non-cert.
+    for bc in ("prompt_injection", "system_prompt_disclosure"):
+        out = _run(FakeAdapter(bug_class=bc))
+        assert out.state == State.REFUSED and out.reason_code == Reason.STATISTICAL_RULE_UNIMPLEMENTED, bc
+
+
+def test_liveness_is_target_answer_not_connection_failure_dict():
+    # MEDIUM-C / LOW-D + BLOCK-1: liveness detects TARGET-produced answers (observed_state / observed_evidence /
+    # oob_hits / error_observed) and must NOT be asserted by producer-set fields, an empty context, OR a
+    # connection-FAILURE dict ({connected: False} / {status: None}) — those keys are excluded from the set.
     from vigil_integration.remediation.remediation_cert import _has_live_response
     assert _has_live_response({"observed_state": {"row": 1}})
     assert _has_live_response({"observed_evidence": {"leak": "x"}})
@@ -185,6 +196,10 @@ def test_liveness_keys_are_target_produced_only():
     assert _has_live_response({"error_observed": "SQL error"})
     assert not _has_live_response({"expected_state": {"row": 1}, "predicate": {"p": 1}, "marker": "m"})
     assert not _has_live_response({})
+    # BLOCK-1: connection-style failure dicts must NOT read as "the target answered"
+    assert not _has_live_response({"tls": {"connected": False, "error": "refused"}})
+    assert not _has_live_response({"anon_get": {"status": None, "error": "gate refusal"}})
+    assert not _has_live_response({"handshake": {"connected": False}})
 
 
 def test_refused_statistical_timing_family():
