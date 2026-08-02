@@ -1,20 +1,23 @@
-"""VF-1a.3 — genuine F2 (nonce THROUGH the exploit path) + the LIVE positive control, end-to-end against a
-GENUINE loopback server, with the honest residual made explicit.
+"""VF-1a.3 — F2 (nonce reflected through the sink's error channel) + the LIVE positive control, end-to-end
+against a GENUINE loopback server, with every honest residual made explicit and tested.
 
 This extends test_live_adapter.py (the four states) with the VF-1a.3 soundness properties, each driven against
 a real stdlib ``ThreadingHTTPServer`` on 127.0.0.1 through the gated :class:`HttpExecutor`:
 
-  * GENUINE F2 for STILL_VULNERABLE — with a ``payload_template`` the run challenge rides the exploit payload;
-    a VULNERABLE build reflects the injected data (challenge included) INSIDE the firing SQL error, so the
-    fresh nonce comes back through the SINK → the driver credits F2 (unforgeable: an edge that cannot execute
-    the injection cannot fabricate a firing DB error wrapping a fresh, unpredictable nonce).
-  * REMEDIATED CAPS AT F1 even when the nonce is reflected — a PATCHED build that echoes the payload back into a
-    SILENT response does NOT reach F2: reflection is not sink-traversal (the reclassification, live).
-  * LIVE positive control closes PARAM-STRIPPING — with ``require_injectable_param_live`` an edge that drops the
-    injectable param cannot yield REMEDIATED (the benign marker is never reflected → CONTROL_FAILED).
-  * The SEMANTIC-WAF RESIDUAL is stated, not hidden — a payload-discriminating WAF (blocks the exploit's
-    metacharacters, passes the benign marker) over a still-vulnerable origin reads as REMEDIATED@F1; an
-    F2-demanding verifier gets INCONCLUSIVE (never a falsely-strong REMEDIATED@F2). This is the honest limit.
+  * F2 for STILL_VULNERABLE — with a ``payload_template`` the run challenge rides the exploit payload; a
+    VULNERABLE build reflects the injected data (challenge included) INSIDE the firing datastore-error LINE, so
+    the fresh nonce came back through the SAME error channel the signal did → the driver credits F2. This is
+    "as attributable as the error_signature oracle's own firing", NOT byte-unforgeable.
+  * A STATIC error banner + a SEPARATE-line reflection does NOT earn F2 — it is capped to F1. This is the
+    regression for the red-pen's "signature-anywhere + challenge-anywhere" attack: the challenge must be IN the
+    matched error line, not merely somewhere in the response.
+  * REMEDIATED CAPS AT F1 even when the nonce is reflected into the SILENT body — reflection is not
+    sink-traversal; F2 is unattainable once the sink is fixed.
+  * The LIVE positive control is a REAL fetch this run (not retained bytes). ``injectable_param_live`` is an
+    INFORMATIONAL observation only — a reflected benign marker can come from the app OR an echoing edge.
+  * The RESIDUALS are stated, not hidden — a param-stripping edge (b) and a payload-discriminating WAF (a),
+    both over/around a still-vulnerable origin, read as REMEDIATED@F1; an F2-demanding verifier gets
+    INCONCLUSIVE (never a falsely-strong REMEDIATED@F2). Closing them is deferred (matched-decoy / OOB Tier-2).
 
 Needs framework (reverify + the translator) → PYTHONPATH=integration:engine/crucible:gateway.
 """
@@ -45,12 +48,12 @@ NOW = 1_000
 BUG = "error_based_sqli"
 WIELDER = generate_keypair()
 
-# The RETAINED original firing bytes (the harness-capability positive control): a real error-based-SQLi sig.
 _ORIG_SQL_ERROR = b"HTTP/1.1 500\r\n\r\nYou have an error in your SQL syntax near '' at line 1"
-# An error-based-SQLi payload TEMPLATE weaving the run challenge into a data position the sink reflects (an
-# extractvalue marker); the vulnerable build echoes it back INSIDE the DB error → the fresh nonce traverses the
-# sink. Contains SQL metacharacters (' and -) so a payload-discriminating WAF blocks it (see the residual test).
+# An error-based-SQLi payload TEMPLATE weaving the run challenge into a data position the sink reflects; the
+# vulnerable build echoes it back INSIDE the DB error line → the fresh nonce traverses the sink. Contains SQL
+# metacharacters (' and -) so a payload-discriminating WAF blocks it (see the residual test).
 _F2_TEMPLATE = "' AND extractvalue(1,concat(0x7e,'{challenge}'))-- -"
+_METACHARS = "'\";-"
 
 
 def _error_context(body: bytes) -> dict:
@@ -63,11 +66,9 @@ def _error_context(body: bytes) -> dict:
 
 
 # --------------------------------------------------------------------------------------------------------
-# A richer loopback target: vulnerable/patched × reflects-input × payload-discriminating-WAF × param-stripping.
+# A richer loopback target: vulnerable/patched × reflects-input × static-error-banner × payload-WAF × strip.
+# Body is assembled LINE BY LINE so "reflected inside the error line" vs "on a separate line" is exact.
 # --------------------------------------------------------------------------------------------------------
-_METACHARS = "'\";-"
-
-
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -79,24 +80,26 @@ class _Handler(BaseHTTPRequestHandler):
         q = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         raw_val = (q.get(srv.exploit_param) or [""])[0]
         nonce = (q.get(srv.nonce_param) or [""])[0]
-        # A param-stripping edge drops the injectable param before it reaches the app logic.
-        val = "" if srv.strip_param else raw_val
+        val = "" if srv.strip_param else raw_val               # a param-stripping edge drops the injectable param
         has_metachar = any(c in val for c in _METACHARS)
-        # A payload-discriminating WAF blocks metacharacter-bearing values (the exploit) but passes benign ones.
-        blocked = srv.waf_block and has_metachar
-        fires = (not srv.patched) and bool(val) and not blocked
-        if fires:
-            # error-based SQLi: the DB error REFLECTS the injected data — so a challenge woven into the payload
-            # comes back INSIDE the firing signature (genuine F2).
-            body = f"HTTP 500 Internal Server Error\nYou have an error in your SQL syntax near '{val}' at line 1\n"
+        blocked = srv.waf_block and has_metachar               # a payload-discriminating WAF blocks the exploit
+        real_fire = (not srv.patched) and bool(val) and not blocked
+        lines = []
+        if real_fire:
+            # error-based SQLi: the DB error REFLECTS the injected data — the challenge comes back INSIDE the
+            # firing error line (genuine, sink-attributable F2).
+            lines.append(f"You have an error in your SQL syntax near '{val}' at line 1")
+        elif srv.static_banner:
+            # a non-executing target that ALWAYS shows a payload-independent SQL-error banner ("near ''"): the
+            # oracle fires, but the marker is NOT in this line.
+            lines.append("You have an error in your SQL syntax near '' at line 1")
         else:
-            body = '{"results": [], "ok": true}\n'
-            # a normal app reflects the (benign or patched) search term; a stripping edge / blocked payload does not.
-            if srv.reflect_param and val and not blocked:
-                body += f"\nYou searched for: {val}\n"
+            lines.append('{"results": [], "ok": true}')
+        if srv.reflect_param and val and not blocked:
+            lines.append(f"You searched for: {val}")           # a SEPARATE reflection line (not the error line)
         if srv.echo_nonce and nonce:
-            body += f"\n<!-- vigil-echo:{nonce} -->\n"
-        raw = body.encode("utf-8")
+            lines.append(f"<!-- vigil-echo:{nonce} -->")        # freshness: echo the run challenge (separate param)
+        raw = ("\n".join(lines) + "\n").encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
@@ -109,11 +112,13 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def _start(*, patched: bool, reflect_param: bool = False, waf_block: bool = False, strip_param: bool = False,
-           echo_nonce: bool = True, exploit_param: str = "q", nonce_param: str = "rc") -> _Server:
+def _start(*, patched: bool, reflect_param: bool = False, static_banner: bool = False, waf_block: bool = False,
+           strip_param: bool = False, echo_nonce: bool = True,
+           exploit_param: str = "q", nonce_param: str = "rc") -> _Server:
     srv = _Server(("127.0.0.1", 0), _Handler)
     srv.patched = patched                # type: ignore[attr-defined]
     srv.reflect_param = reflect_param    # type: ignore[attr-defined]
+    srv.static_banner = static_banner    # type: ignore[attr-defined]
     srv.waf_block = waf_block            # type: ignore[attr-defined]
     srv.strip_param = strip_param        # type: ignore[attr-defined]
     srv.echo_nonce = echo_nonce          # type: ignore[attr-defined]
@@ -192,10 +197,10 @@ def _drive(adapter, *, policy=ProvePolicy(), now=NOW, not_after=9_000):
     return out, {prov.signers[0][0]: owner.public_key_b64}
 
 
-# ============================ genuine F2 (nonce through the exploit path) ============================
+# ============================ F2 (nonce reflected through the sink's error channel) ============================
 def test_genuine_f2_vulnerable_reflects_nonce_inside_firing_error(gated_root):
-    # the challenge rides the exploit payload; the VULNERABLE sink reflects it INSIDE the firing DB error →
-    # the fresh nonce provably traversed the sink → STILL_VULNERABLE at genuine F2.
+    # the challenge rides the exploit payload; the VULNERABLE sink reflects it INSIDE the firing DB error LINE →
+    # the fresh nonce came back through the same error channel the signal did → STILL_VULNERABLE at F2.
     srv = _start(patched=False, reflect_param=True)
     try:
         out, pubkeys = _drive(_adapter(srv, payload_template=_F2_TEMPLATE))
@@ -207,9 +212,22 @@ def test_genuine_f2_vulnerable_reflects_nonce_inside_firing_error(gated_root):
     assert ok and out.certificate["verdict"]["oracle_fired"] is True
 
 
+def test_static_banner_plus_separate_line_reflection_is_f1_not_f2(gated_root):
+    # RED-PEN HIGH-1 regression: a non-executing target that ALWAYS shows a static SQL-error banner ("near ''")
+    # AND reflects the injected input on a SEPARATE line fires the oracle and has the challenge somewhere in the
+    # response — but the challenge is NOT in the matched error line, so it must NOT earn F2. STILL_VULNERABLE@F1.
+    srv = _start(patched=True, static_banner=True, reflect_param=True)
+    try:
+        out, _ = _drive(_adapter(srv, payload_template=_F2_TEMPLATE))
+    finally:
+        srv.shutdown(); srv.server_close()
+    assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED
+    assert out.achieved_freshness == Freshness.F1_TARGET_ECHOES, out
+
+
 def test_remediated_reflecting_patched_caps_at_f1_not_f2(gated_root):
     # a PATCHED build that echoes the payload (challenge included) into a SILENT response does NOT reach F2:
-    # reflection into a silent body is not sink-traversal. REMEDIATED, but honestly at F1.
+    # reflection into a silent body is not sink-traversal. REMEDIATED, honestly at F1.
     srv = _start(patched=True, reflect_param=True)
     try:
         out, _ = _drive(_adapter(srv, payload_template=_F2_TEMPLATE))
@@ -230,42 +248,49 @@ def test_remediated_reflecting_patched_under_f2_floor_is_inconclusive(gated_root
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
 
 
-# ============================ the LIVE positive control ============================
-def test_live_control_confirms_injectable_param_live_on_reflecting_patched(gated_root):
-    # require_injectable_param_live: a genuinely-patched build that reflects the benign marker → the control
-    # confirms the injectable param reaches the app this run → REMEDIATED (the closure does not over-reject).
+# ============================ the LIVE positive control (honest, informational) ============================
+def test_live_positive_control_runs_and_remediates_reflecting_patched(gated_root):
+    # the control is now a REAL fetch this run; a genuinely-patched build that answers it → REMEDIATED (the live
+    # control does not over-reject a well-behaved app). injectable_param_live is informational, never a gate.
     srv = _start(patched=True, reflect_param=True)
     try:
-        out, _ = _drive(_adapter(srv),
-                        policy=ProvePolicy(require_injectable_param_live=True))
+        out, _ = _drive(_adapter(srv))
     finally:
         srv.shutdown(); srv.server_close()
     assert out.state == State.REMEDIATED and out.reason_code == Reason.ORACLE_SILENT_ACROSS_TRIALS
 
 
-def test_live_control_param_stripping_edge_is_inconclusive(gated_root):
-    # a param-stripping edge drops the injectable param → the benign marker is never reflected →
-    # injectable_param_live is False → under the policy the run is INCONCLUSIVE, NOT a false REMEDIATED.
-    srv = _start(patched=True, reflect_param=True, strip_param=True)
+# ============================ the HONEST residuals (disclosed, never a false-strong F2) ============================
+def test_param_stripping_edge_reads_as_f1_remediation_honest_residual(gated_root):
+    # RED-PEN BLOCK-1 (post-fix): with the unsound require_injectable_param_live flag REMOVED, a param-stripping
+    # edge (drops the injectable param, still echoes the separate nonce) reads as REMEDIATED@F1 — the honest,
+    # pre-existing F1 residual (we cannot tell a stripped param from a fix at F1). It is NOT closed here, and it
+    # is NEVER a false-strong F2 (next test).
+    srv = _start(patched=False, strip_param=True, reflect_param=True)
     try:
-        out, _ = _drive(_adapter(srv),
-                        policy=ProvePolicy(require_injectable_param_live=True))
+        out, _ = _drive(_adapter(srv, payload_template=_F2_TEMPLATE))
     finally:
         srv.shutdown(); srv.server_close()
-    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.CONTROL_FAILED
+    assert out.state == State.REMEDIATED and out.achieved_freshness == Freshness.F1_TARGET_ECHOES, out
 
 
-# ============================ the HONEST residual (payload-discriminating WAF) ============================
-def test_semantic_waf_residual_reads_as_f1_never_false_strong_f2(gated_root):
-    # HONEST LIMIT: a payload-discriminating WAF blocks the exploit's metacharacters while passing the benign
-    # marker, over a still-vulnerable origin. The live control PASSES (marker reflected → param_live), the
-    # exploit is silent (blocked) → REMEDIATED@F1. This is the residual the docs disclose: F1 cannot tell a
-    # WAF-block from a fix. Crucially it is NEVER a falsely-strong REMEDIATED@F2 — an F2 verifier gets
-    # INCONCLUSIVE (below), so no over-claim escapes.
-    srv = _start(patched=False, reflect_param=True, waf_block=True)
+def test_param_stripping_edge_under_f2_floor_is_inconclusive(gated_root):
+    srv = _start(patched=False, strip_param=True, reflect_param=True)
     try:
         out, _ = _drive(_adapter(srv, payload_template=_F2_TEMPLATE),
-                        policy=ProvePolicy(require_injectable_param_live=True))
+                        policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
+    finally:
+        srv.shutdown(); srv.server_close()
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
+
+
+def test_semantic_waf_residual_reads_as_f1_never_false_strong_f2(gated_root):
+    # HONEST LIMIT: a payload-discriminating WAF blocks the exploit's metacharacters while passing the benign
+    # marker, over a still-vulnerable origin → the exploit is silent (blocked) → REMEDIATED@F1. F1 cannot tell a
+    # WAF-block from a fix; but it is NEVER a falsely-strong REMEDIATED@F2 (next test).
+    srv = _start(patched=False, reflect_param=True, waf_block=True)
+    try:
+        out, _ = _drive(_adapter(srv, payload_template=_F2_TEMPLATE))
     finally:
         srv.shutdown(); srv.server_close()
     assert out.state == State.REMEDIATED and out.achieved_freshness == Freshness.F1_TARGET_ECHOES, out
@@ -275,8 +300,7 @@ def test_semantic_waf_under_f2_floor_is_inconclusive_no_overclaim(gated_root):
     srv = _start(patched=False, reflect_param=True, waf_block=True)
     try:
         out, _ = _drive(_adapter(srv, payload_template=_F2_TEMPLATE),
-                        policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED,
-                                           require_injectable_param_live=True))
+                        policy=ProvePolicy(minimum_freshness_level=Freshness.F2_PATH_TRAVERSED))
     finally:
         srv.shutdown(); srv.server_close()
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS
