@@ -24,7 +24,7 @@ enforced by merged, adversarially-reviewed code:
 | **Controlled** | silence ≠ "didn't reach": the SAME oracle must still FIRE on a positive-control twin, the target must have ANSWERED (liveness), across a per-oracle-family repeat policy; only families where silence-across-N is a *sound* negative (deterministic per-observation) can be certified — timing/race/unknown are refused | negative-proof controls (#187); the fail-closed certifiability allowlist (#192) |
 | **Portable + tamper-evident** | the whole cert is one m-of-n-signed object; a single flipped byte flips verification | `_cert_signing_bytes` whole-cert Ed25519; the conformance corpus (#189) |
 | **Against a REAL target, freshly** | the exploit is re-driven LIVE through the gated executor, not re-judged offline | `LiveHttpAdapter` + gated `HttpExecutor` (#193); `vigil remediate --prove` (#194) |
-| **Bound to THE target** | the cert carries the target's OBSERVED TLS SPKI; a target presenting a different key is REFUSED — the cert is not transplantable | `verify/tls.py` `tls_spki_sha256` + `identity_matches` (#197) |
+| **Bound to THE target** (SPKI-strong for HTTPS; host-only for HTTP) | for an **HTTPS** target the cert carries the target's OBSERVED TLS SPKI, and a target presenting a different key is REFUSED — not transplantable. For a plain-**HTTP** target the binding honestly degrades to the observed host string (an SPKI is never fabricated), which is transplantable across any target answering at that host — see the limit below | `verify/tls.py` `tls_spki_sha256` + `identity_matches` (#197); `LiveHttpAdapter.identity_sample` (#193) |
 | **Authorized** | the re-verification itself is legal: an owner-minted, scoped, windowed, revocable, attenuable capability with wielder proof-of-possession | `vigil_core/capability.py` (#190) |
 | **Continuously re-proven** | a signed, hash-chained, anti-rollback series of re-proof ticks — `present → proven-fixed → still-proven / regressed` — so a finding is "as of the last re-proof," not "as of the report date" | `attestation_log.py` + `vigil_core/highwater.py` (#198) |
 | **Witnessed + time-bounded** | a strict-majority INDEPENDENT witness quorum co-signs the series head with a no-later-than-T median time (non-equivocation) | `attestation_witness.py` (#199) |
@@ -39,6 +39,16 @@ enforced by merged, adversarially-reviewed code:
   `policy.minimum_freshness_level >= F2`, which the current adapter honestly cannot meet → `INCONCLUSIVE`
   (never a falsely-strong `REMEDIATED`). Closing this (a LIVE positive control + nonce-through-the-exploit-path)
   is the disclosed VF-1a.3 follow-up.
+- **Target-binding is TLS-SPKI-strong only for HTTPS; a plain-HTTP target binds host-only.** The strong,
+  non-transplantable form of "bound to THE target" (the SPKI row above) requires an HTTPS handshake:
+  `identity_sample` records `tls_spki_sha256` *only* when the scheme is `https`, and for an HTTP target (or a
+  transport-layer handshake failure) it honestly degrades to `{"host": …}` — a producer-observed host string, no
+  SPKI ever fabricated (`live_adapter.py` `identity_sample`, #193). Against an HTTP target a `REMEDIATED` verdict
+  is therefore transplantable onto any target answering at the same host, because `identity_matches` has only the
+  host to check. **The end-to-end demo runs over HTTP loopback (`http://127.0.0.1`), so it exercises host-only
+  binding and never calls `tls_spki_sha256`.** For a non-transplantable cert, verify against an HTTPS target so
+  the SPKI is captured and pinned; full channel-binding of the judged bytes to the key holder is the deferred
+  stronger frontier noted below.
 - **The durable attestation floor is LOCAL.** A same-host attacker with the owner's UID who rewrites the tick
   log, the head, AND the floor together defeats the *local* `verify_log`. The sound guarantee holds against an
   attacker who cannot touch the floor, and against an out-of-band verifier that retained a newer floor — and

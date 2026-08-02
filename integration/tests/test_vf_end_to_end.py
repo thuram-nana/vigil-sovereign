@@ -305,7 +305,7 @@ def test_vf_end_to_end_lifecycle_and_standalone_verification(gated_root):
     # Demand the FULL roster (min_distinct_signers=3) — the strong tier that blunts producer curation.
     wok, T, wreason = verify_timed_witnessed_checkpoint(twc, witness_trust_root=quorum, min_distinct_signers=3)
     assert wok and T == 2000, wreason          # (n//2)-th of sorted [1000,2000,3000] = the exact median
-    print(f"  [4] WITNESSED    -> strict-majority 3-of-3 quorum; no-later-than T={T}")
+    print(f"  [4] WITNESSED    -> 2-of-3 strict-majority quorum, full roster demanded (min_distinct_signers=3); no-later-than T={T}")
 
     # ---- STAGE 5: hand ALL artifacts to the STANDALONE, VIGIL-free verifier, OOB-pinned trust roots -----
     ticks, head, floor = _load_log(log)
