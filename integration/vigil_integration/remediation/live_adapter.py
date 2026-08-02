@@ -105,14 +105,22 @@ class LiveHttpAdapter:
     original_probe_recipe_digest: str = ""
     execution_profile_digest: str = ""
     destructive: bool = False
+    # The engagement/charter slug the gated TLS handshake runs under (VF-2c). Optional: when unset it falls
+    # back to the executor's own ``engagement_slug`` (the adapter already holds the executor), so a normally
+    # constructed adapter needs no extra wiring — the handshake authorizes against the SAME charter as the
+    # HTTP re-drive.
+    engagement: str = ""
 
     _host: str = field(init=False, default="")
+    _slug: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
-        # The identity of the target for the policy match + the F0 target-identity digest. Derived from the
-        # authorized base_url (a config fact), NOT from a live probe — liveness is proven by the trials.
-        # Designed so a stronger identity (a TLS SPKI pin) can slot in alongside ``host`` later.
+        # The identity of the target for the policy match + the F0 target-identity digest. Host is derived from
+        # the authorized base_url (a config fact); for HTTPS, identity_sample STRENGTHENS this with the OBSERVED
+        # leaf-key SPKI (a real probe of the key the target presents) — see identity_sample's docstring.
         self._host = urlsplit(self.base_url).hostname or ""
+        # Slug for the gated TLS handshake: an explicit ``engagement`` wins; otherwise reuse the executor's.
+        self._slug = str(self.engagement or getattr(self.executor, "engagement_slug", "") or "")
         # Bind the ACTUALLY re-driven probe into the cert (N4): if the caller did not supply a probe digest,
         # derive one over the concrete re-drive spec (endpoint/param/payload/nonce_param/bug_class) so the
         # signed "fixed" verdict attests WHICH exploit request was re-driven. Honest-producer tier: this binds
@@ -125,12 +133,29 @@ class LiveHttpAdapter:
 
     # ---- identity ----------------------------------------------------------------------------------
     def identity_sample(self) -> dict:
-        """Return the target's stable identity ``{"host": <host>}``. Best-effort issues one gated base
-        request so an authorization/scope failure is surfaced early: a GATE REFUSAL (not authorized to even
-        probe this host) RAISES — the driver maps that to a REFUSED / TARGET_UNAVAILABLE disposition. A pure
-        transport failure (the app is simply DOWN) does NOT raise: identity ("who this host is") is a policy
-        fact, while liveness ("did it answer THIS run") is established by the exploit trials — so a down
-        target surfaces as an INCONCLUSIVE unreachable trial, not a refusal to test. Never fabricates.
+        """Return the target's OBSERVED identity. Best-effort issues one gated base request so an
+        authorization/scope failure is surfaced early: a GATE REFUSAL (not authorized to even probe this host)
+        RAISES — the driver maps that to a REFUSED / TARGET_UNAVAILABLE disposition. A pure transport failure
+        (the app is simply DOWN) does NOT raise: identity ("who this host is") is a policy fact, while liveness
+        ("did it answer THIS run") is established by the exploit trials — so a down target surfaces as an
+        INCONCLUSIVE unreachable trial, not a refusal to test. Never fabricates.
+
+        Identity strength (VF-2c). For an HTTPS target this binds to the target's OBSERVED TLS
+        SubjectPublicKeyInfo — the sha256 of the ACTUAL public key the endpoint presented on the wire —
+        returned ALONGSIDE ``host`` as ``tls_spki_sha256``. That is a PARTIAL anti-transplant property, stated
+        honestly with its limit:
+
+          * WHAT IT BUYS — the owner's ``IdentityAttestation`` policy pins the acceptable SPKI(s), so a
+            *different* target (one presenting a different leaf key) fails ``identity_matches`` and is REFUSED.
+            A REMEDIATED verdict earned against key K therefore cannot be transplanted onto a target presenting
+            key K' — the cert binds to the observed key, not a producer-asserted host string.
+          * WHAT IT IS NOT — it is not full byte-authenticity of the exchange. It proves which KEY answered the
+            handshake, NOT that the response bytes the oracle judged were produced/signed by the holder of that
+            key (a channel-binding / signed-transcript step is the deferred stronger frontier).
+
+        For an HTTP target, or when the gated handshake refuses/fails at the TRANSPORT layer, the sample is
+        host-only (``{"host": ...}``) — an honest weaker binding; an SPKI is NEVER fabricated. A GATE refusal
+        on the handshake (no slug, out of charter scope, ACTIVE_RECON not entitled, kill-switch) still RAISES.
         """
         try:
             resp = self.executor.gated_fetch(_HttpRequest(url=self.base_url, method="GET"))
@@ -141,7 +166,40 @@ class LiveHttpAdapter:
         # transport error is stamped with the exception type ("httpx.…"). Only the former is a "cannot test".
         if "REFUSED:" in note:
             raise RuntimeError(f"identity sample refused by gate: {note}")
-        return {"host": self._host}
+        sample = {"host": self._host}
+        # STRONGER binding for HTTPS: the sha256 of the OBSERVED leaf-key SPKI, from a gated TLS handshake.
+        split = urlsplit(self.base_url)
+        if (split.scheme or "").lower() == "https" and self._host:
+            spki = self._observed_tls_spki(split)   # may RAISE on a GATE refusal (unauthorized active probe)
+            if spki:
+                sample["tls_spki_sha256"] = spki
+        return sample
+
+    def _observed_tls_spki(self, split) -> str:
+        """Perform the SAME audited, bounded TLS handshake ``verify.reachability`` uses (kill-switch ->
+        single-host -> ACTIVE_RECON -> charter scope, engagement slug required) and return the sha256 of the
+        presented leaf-key SPKI, or "" on a pure transport failure (target DOWN / handshake reset → honest
+        host-only binding). A GATE refusal RAISES so an unauthorized target is REFUSED, not silently
+        downgraded to a host-only pin. Framework import is function-local (FATAL-2)."""
+        from framework.v2.verify.tls import capture_tls_handshake   # lazy — FATAL-2
+        port = split.port or 443
+        tls = capture_tls_handshake(self._host, int(port), slug=self._slug)
+        if tls.get("connected"):
+            return str(tls.get("spki_sha256") or "")
+        err = str(tls.get("error") or "")
+        if not self._looks_like_transport_failure(err):
+            raise RuntimeError(f"identity sample TLS handshake refused by gate: {err}")
+        return ""   # a genuine transport failure → the weaker host-only binding (honest, never fabricated)
+
+    @staticmethod
+    def _looks_like_transport_failure(err: str) -> bool:
+        """Classify a ``capture_tls_handshake`` refusal string WITHOUT importing the gate internals. A CONNECT
+        failure is formatted there as ``"<ExceptionType>: <msg>"`` — a single whitespace-free token before the
+        first ': '. Every GATE refusal from ``reachability._authorize`` is an English phrase (spaces before any
+        colon, or no colon at all). Fail-closed: anything not clearly transport-shaped is treated as a gate
+        refusal (so the caller RAISES rather than silently pinning host-only)."""
+        head = err.split(":", 1)[0].strip()
+        return bool(head) and " " not in head
 
     # ---- positive control (retained bytes; NOT a live fetch) --------------------------------------
     def run_positive_control(self, *, challenge: str, auth: EffectiveAuthorization) -> ControlObservation:

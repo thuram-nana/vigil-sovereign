@@ -17,6 +17,7 @@ endpoints (mirrors ``scanner.quantum_era.pqc_scan``). ``connect`` is injectable 
 from __future__ import annotations
 
 import base64
+import hashlib
 import socket
 import ssl
 from typing import Any, Callable
@@ -52,6 +53,21 @@ def _tls_connect(host: str, port: int, timeout: float) -> tuple[str, str, int | 
     return version, name, (int(bits) if isinstance(bits, int) else None), cert_der
 
 
+def tls_spki_sha256(cert_der: bytes) -> str:
+    """Return the sha256 hex of the leaf certificate's SubjectPublicKeyInfo (SPKI) DER — a stable
+    fingerprint of the PUBLIC KEY the endpoint actually presented on the wire. It survives certificate
+    reissuance that keeps the same key, and changes the moment the key changes, so it is a sound
+    *observed-key* identity for a target (stronger than a producer-asserted host string). Deterministic
+    and offense-free: it only parses the DER and hashes — no network, no rng, no wallclock. Raises on
+    malformed DER; ``capture_tls_handshake`` calls this behind a fail-closed try/except (omit on error)."""
+    from cryptography import x509                                   # local: keep tls.py import light
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    cert = x509.load_der_x509_certificate(bytes(cert_der))
+    spki = cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(spki).hexdigest()
+
+
 def capture_tls_handshake(
     host: str,
     port: int = 443,
@@ -83,6 +99,13 @@ def capture_tls_handshake(
     if cert_der:
         try:
             out["cert_der_b64"] = base64.b64encode(bytes(cert_der)).decode("ascii")
+        except Exception:
+            pass
+        # Bind the OBSERVED leaf-key: the sha256 of the presented cert's SubjectPublicKeyInfo. Fail-closed —
+        # a malformed/unparseable DER simply omits the field (a weaker host-only identity), never raises,
+        # never fabricates a fingerprint.
+        try:
+            out["spki_sha256"] = tls_spki_sha256(bytes(cert_der))
         except Exception:
             pass
     return out

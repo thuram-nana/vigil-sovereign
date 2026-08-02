@@ -25,6 +25,7 @@ from framework.v2.verify import (
 )
 from framework.v2.verify.adapter import FindingContext
 from framework.v2.verify.reverify import reverify_context
+from framework.v2.verify.tls import tls_spki_sha256
 
 
 # ---- the pure oracle -------------------------------------------------------
@@ -209,6 +210,104 @@ def test_capture_tls_requires_active_recon_entitlement(monkeypatch) -> None:
                         lambda cap: (_ for _ in ()).throw(RuntimeError("not entitled")))
     tls = capture_tls_handshake("10.0.0.5", 443, slug="alpha", connect=lambda *a: ("TLSv1.3", "x", 256))
     assert tls["connected"] is False and "not entitled" in tls["error"]
+
+
+# ---- VF-2c: observed-key SPKI fingerprint ----------------------------------
+
+
+def _reference_spki(cert) -> str:
+    """Compute the reference SPKI sha256 INDEPENDENTLY of the function under test (from the cert object)."""
+    import hashlib
+
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    spki_der = cert.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(spki_der).hexdigest()
+
+
+def _mint_cert():
+    """Mint a throwaway self-signed cert; return (cert_obj, cert_der) or None if cryptography is unavailable."""
+    try:
+        import datetime
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except Exception:
+        return None
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime(2026, 1, 1)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now).not_valid_after(datetime.datetime(2030, 1, 1))
+            .sign(key, hashes.SHA256()))
+    return cert, cert.public_bytes(serialization.Encoding.DER)
+
+
+def test_tls_spki_sha256_matches_independent_reference() -> None:
+    minted = _mint_cert()
+    if minted is None:
+        pytest.skip("cryptography not available to mint a cert")
+    cert, cert_der = minted
+    # the function under test agrees with an INDEPENDENT computation of sha256(SubjectPublicKeyInfo DER)
+    assert tls_spki_sha256(cert_der) == _reference_spki(cert)
+    assert len(tls_spki_sha256(cert_der)) == 64   # a hex sha256 digest
+
+
+def test_tls_spki_sha256_raises_on_malformed_der() -> None:
+    # fail-closed: garbage in raises (capture_tls_handshake wraps this and OMITS the field on error)
+    with pytest.raises(Exception):
+        tls_spki_sha256(b"not-a-certificate")
+
+
+def test_capture_tls_omits_spki_on_unparseable_cert(monkeypatch, tmp_path) -> None:
+    # an injected connector returns bytes that are NOT a valid cert; capture still base64s them but must
+    # omit spki_sha256 (fail-closed) — never raise, never fabricate a fingerprint.
+    _grant(monkeypatch)
+    _charter(tmp_path, "10.0.0.5")
+    tls = capture_tls_handshake("10.0.0.5", 443, slug="alpha",
+                                connect=lambda h, p, t: ("TLSv1.3", "TLS_AES_256_GCM_SHA384", 256, b"junk"))
+    assert tls["connected"] is True and "cert_der_b64" in tls
+    assert "spki_sha256" not in tls
+
+
+def test_capture_tls_over_real_loopback_returns_observed_spki(monkeypatch, tmp_path) -> None:
+    _grant(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    cert = _self_signed_cert(tmp_path)
+    if cert is None:
+        pytest.skip("cryptography not available to mint a self-signed cert")
+    # reference SPKI computed independently from the PEM the server serves
+    from cryptography import x509
+    pem = Path(cert).read_bytes()
+    ref = _reference_spki(x509.load_pem_x509_certificate(pem))
+
+    srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    srv_ctx.load_cert_chain(cert)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def _serve():
+        try:
+            conn, _ = srv.accept()
+            with srv_ctx.wrap_socket(conn, server_side=True):
+                pass
+        except OSError:
+            pass
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    try:
+        tls = capture_tls_handshake("127.0.0.1", port, slug="alpha", timeout=5.0)
+    finally:
+        srv.close()
+        t.join(timeout=2.0)
+    assert tls["connected"] is True
+    assert tls.get("spki_sha256") == ref   # the OBSERVED leaf-key SPKI, over a genuine handshake
 
 
 def _self_signed_cert(tmp_path: Path):
