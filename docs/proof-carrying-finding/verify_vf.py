@@ -111,7 +111,9 @@ def _assert_vigil_free() -> None:
 #        bytes. This is the same function verify_pcf.py re-implements.
 #      * canonical_json_ascii — ensure_ascii=True  (remediation_cert._canon): used ONLY for the embedded
 #        RemediationCertificate's context digests and whole-cert signing bytes. For ASCII content the two
-#        are byte-identical; they diverge only on non-ASCII, and the differential test pins both.
+#        are byte-identical; they diverge ONLY on non-ASCII — so both are pinned against the producers on a
+#        NON-ASCII payload in test_vf_differential.py::test_byte_parity_with_the_producers (an ASCII-only
+#        parity test would not catch a swap of the two; the non-ASCII row does).
 # ---------------------------------------------------------------------------
 GENESIS_PREV = "0" * 64
 _EVIDENCE_DOMAIN = b"crucible-evidence-v1\x00"

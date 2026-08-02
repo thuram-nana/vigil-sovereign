@@ -572,6 +572,16 @@ def test_byte_parity_with_the_producers():
     assert VF.canonical_json(sample) == canonical_json(sample), "canonical_json bytes differ"
     assert VF.digest_payload(sample) == digest_payload(sample), "digest_payload differs"
 
+    # NON-ASCII parity — this is the case the two canonicalizers actually differ on (the embedded rem-cert uses
+    # ensure_ascii=True, everything else ensure_ascii=False). Pinning BOTH against the real producers on a
+    # non-ASCII payload guards against a future refactor silently swapping them (which would reintroduce an
+    # accept/reject divergence between standalone and VIGIL). ASCII-only inputs would never catch that.
+    uni = {"slug": "café-ünïcode-日本語-☃", "emoji": "🔒", "nested": {"k": "naïve"}}
+    assert VF.canonical_json(uni) == canonical_json(uni), "canonical_json (ensure_ascii=False) diverges on non-ASCII"
+    assert VF.canonical_json_ascii(uni) == rc._canon(uni), "canonical_json_ascii (ensure_ascii=True) diverges on non-ASCII"
+    # and they MUST differ from each other on non-ASCII (else the two-canonicalizer design is vacuous)
+    assert VF.canonical_json(uni) != VF.canonical_json_ascii(uni), "the two canonicalizers must diverge on non-ASCII"
+
     cert = _mint(FakeAdapter())
     body = {k: v for k, v in cert.items() if k != "signer"}
     assert VF._prove_cert_signing_bytes(body) == vigil_prove_bytes(body), "prove-cert signing bytes differ"
