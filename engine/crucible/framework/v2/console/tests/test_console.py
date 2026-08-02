@@ -286,32 +286,52 @@ def test_benchmark_data_reads_committed_results() -> None:
     assert d["baseline"] is not None  # eval/baselines/benchmark-app.json
 
 
-def test_worldmodel_reconstructs_attack_paths(tmp_path, monkeypatch) -> None:
+def test_worldmodel_reexecutes_stored_findings_at_the_boundary(tmp_path, monkeypatch) -> None:
+    # TRUTHENOVATION T1: the console world-model handler re-projects a STORED report through
+    # chain_findings(verify=True), so it RE-EXECUTES each finding's retained proof. A finding that
+    # re-fires grants a grounded attacker capability; a recorded-confirmed finding whose retained
+    # proof no longer reproduces (here: never retained → oracle_context None) grants NONE — no
+    # grounded reach/topology/path — and is shown only as an UNGROUNDED demoted node.
     from framework.v2.console import actions
+    from framework.v2.verify.adapter import FindingContext
 
     monkeypatch.setattr(actions, "console_dir", lambda: tmp_path)
     rd = tmp_path / "runs" / "r1"
     rd.mkdir(parents=True)
-    # a ScanReport with chainable findings (IDOR fronts a datastore, deser on a host)
+    # a genuinely RE-FIRING finding: a divergent boolean/differential context reverify re-confirms.
+    refiring = FindingContext.from_http_responses(
+        {"status": 200, "body": "No results."},
+        {"status": 200, "body": "id=1 alice user\nid=2 bob admin\nid=3 carol user"},
+        bug_class="boolean_sqli", discriminator={"dimensions": ["status", "length", "lexical"]},
+    ).model_dump(mode="json")
     report = {
         "target": "http://t/",
         "active_findings": [
-            {"check_id": "idor", "bug_class": "idor", "insertion_point": "query:id", "param": "id",
+            {"check_id": "good", "bug_class": "boolean_sqli", "insertion_point": "query:q", "param": "q",
+             "endpoint": "http://t/?q=1", "confidence": 0.9, "confirmed_by": "differential_response",
+             "rationale": "divergent", "oracle_context": refiring},
+            # recorded confirmed but NO retained proof → never re-fires → grants no grounded capability
+            {"check_id": "stale", "bug_class": "idor", "insertion_point": "query:id", "param": "id",
              "endpoint": "http://t/account?id=1", "confidence": 0.9, "confirmed_by": "achieved_state",
              "rationale": "swap", "oracle_context": None},
-            {"check_id": "deser", "bug_class": "deserialization", "insertion_point": "body:data", "param": "data",
-             "endpoint": "http://t/import", "confidence": 0.9, "confirmed_by": "oob_callback",
-             "rationale": "gadget", "oracle_context": None},
         ],
     }
     (rd / "reverifiable.json").write_text(json.dumps(report), encoding="utf-8")
 
     wm = api.worldmodel("r1")
     assert wm["node_count"] > 0 and wm["edge_count"] > 0
-    assert len(wm["paths"]) >= 1  # attacker -> crown jewel chain
-    kinds = {n["kind"] for n in wm["nodes"]}
-    assert kinds & {"datastore", "host", "cloud_resource"}  # a crown-jewel node exists
-    # every path step is technique-annotated (the reasoning, surfaced)
+    # the re-firing finding DOES grant a grounded attacker capability (no over-skip)
+    grounded_edges = [e for e in wm["edges"]
+                      if e["provenance"].startswith("finding:") and e["grounding"] == "grounded"]
+    assert grounded_edges, "a re-firing stored finding must reconstruct a grounded capability"
+    # the non-re-firing IDOR grants NO grounded crown-jewel topology (BLOCK-1 regression)
+    grounded_topo = [n for n in wm["nodes"]
+                     if n["kind"] in ("datastore", "host") and n["grounding"] == "grounded"]
+    assert grounded_topo == [], "a non-re-firing finding must not spawn a grounded crown-jewel node"
+    # the demoted IDOR finding is still shown — but as an UNGROUNDED node, never a grounded fact
+    idor_nodes = [n for n in wm["nodes"] if n["id"].startswith("finding:idor")]
+    assert idor_nodes and all(n["grounding"] != "grounded" for n in idor_nodes)
+    # every path that IS reconstructed is technique-annotated (the reasoning, surfaced)
     assert all(s["technique"] for p in wm["paths"] for s in p["steps"])
 
 

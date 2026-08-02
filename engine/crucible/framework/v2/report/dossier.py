@@ -136,10 +136,68 @@ def _load_findings_source(run_dir: Path) -> Optional[list[dict]]:
     return None
 
 
+def _auditfinding_to_payload(f: dict) -> dict:
+    """Map an AuditFinding-shaped reverifiable finding onto the ``FindingPayload`` shape
+    ``report.grounding.grade_finding`` coerces. A ``reverifiable.json`` finding is a
+    serialized ``scanner.engine.AuditFinding`` (``check_id/bug_class/insertion_point/param/
+    endpoint/confidence/confirmed_by/oracle_context``) — it has none of ``FindingPayload``'s
+    required descriptive fields, so ``FindingPayload.model_validate`` rejects the raw dict.
+    Only the fields the grader reads matter — above all the retained ``oracle_context`` (what
+    RE-FIRES), plus ``bug_class`` and the oracle metadata; the descriptive fields are filled
+    from the finding's own identifiers so coercion succeeds. This never invents a proof: no
+    ``oracle_context`` in → no fact out. Deterministic; pure."""
+    return {
+        "finding_slug": str(f.get("check_id") or f.get("bug_class") or "finding"),
+        "title": str(f.get("bug_class") or f.get("check_id") or "finding"),
+        "severity": "Info",
+        "bug_class": str(f.get("bug_class") or ""),
+        "surface": str(f.get("insertion_point") or f.get("param") or f.get("endpoint") or ""),
+        "summary": "",
+        "oracle_context": f.get("oracle_context"),
+        # A reverifiable finding is oracle-RECORDED by construction (confirmed_by + retained
+        # context); mark it so a non-re-firing one grades DEMOTED (a lead), never LEAD-only.
+        "verified_by_oracle": bool(f.get("confirmed_by") or f.get("oracle_context")),
+        "confidence": f.get("confidence"),
+        "oracle_kind": f.get("confirmed_by"),
+    }
+
+
+def _reverifiable_finding_is_fact(f: dict) -> bool:
+    """RE-EXECUTE one reverifiable finding's retained proof NOW and return True IFF it grades
+    as a FACT. Reuses ``report.grounding.grade_finding`` — the SAME veracity authority the
+    reports and the console findings hub use — so a recorded-confirmed finding whose
+    ``oracle_context`` no longer re-fires (tampered/relabelled/dry-run) grades DEMOTED and is
+    NOT a fact. Import is lazy to avoid an import cycle. Fail-closed: any finding that cannot
+    be graded is excluded from the fact set (never labelled a fact). Pure + deterministic —
+    the oracle re-runs over retained evidence only, no traffic."""
+    try:
+        from .grounding import GRADE_FACT, grade_finding
+    except Exception:
+        return False
+    # First try the raw dict (handles a finding already in FindingPayload shape); on the
+    # coercion failure that an AuditFinding-shaped dict produces, retry via the field map.
+    try:
+        return grade_finding(f).grade == GRADE_FACT
+    except Exception:
+        pass
+    try:
+        return grade_finding(_auditfinding_to_payload(f)).grade == GRADE_FACT
+    except Exception:
+        return False
+
+
 def _read_reverifiable(run_dir: Path) -> list[dict]:
-    """The run's oracle-confirmed FACT set (``active_findings``). Handles BOTH conventions: the proof
-    studio's ``proofs/reverifiable.json`` and a scan/console run's top-level ``reverifiable.json``.
-    Total on a missing/unreadable file."""
+    """The run's oracle-confirmed FACT set (``active_findings``), GRADED BY RE-EXECUTION at
+    dossier-build time. Handles BOTH conventions: the proof studio's ``proofs/reverifiable.json``
+    and a scan/console run's top-level ``reverifiable.json``. Total on a missing/unreadable file.
+
+    UNIVERSAL veracity choke point (T1): a finding is returned here — and thus counted as one of
+    the dossier's "N oracle-confirmed FACT(s)" (banner, fact table, MANIFEST ``facts``) — ONLY if
+    its retained ``oracle_context`` RE-FIRES NOW via ``report.grounding.grade_finding``. A finding
+    recorded ``confirmed`` whose proof no longer reproduces is EXCLUDED (it is a lead), so a stale
+    or tampered certificate can never inflate the fact count. Fail-closed: an ungradeable finding
+    is excluded. Returns the RAW finding dicts (unchanged) that survive the re-execution grade, so
+    downstream display reads the original fields."""
     for rel in ("proofs/reverifiable.json", "reverifiable.json"):
         p = run_dir / rel
         if p.is_symlink() or not p.is_file():
@@ -150,7 +208,7 @@ def _read_reverifiable(run_dir: Path) -> list[dict]:
             continue
         fs = doc.get("active_findings") if isinstance(doc, dict) else None
         if isinstance(fs, list):
-            return [f for f in fs if isinstance(f, dict)]
+            return [f for f in fs if isinstance(f, dict) and _reverifiable_finding_is_fact(f)]
     return []
 
 

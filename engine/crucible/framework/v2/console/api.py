@@ -402,8 +402,11 @@ def remediate_plan(run_id: str) -> dict[str, Any]:
 
 
 def worldmodel(run_id: str) -> dict[str, Any]:
-    """Reconstruct the world-model attack graph for a saved run — a PURE re-run of
-    the chaining over the retained ScanReport (no traffic). Returns typed nodes,
+    """Reconstruct the world-model attack graph for a saved run — a re-run of the chaining
+    over the retained ScanReport (no traffic). RE-EXECUTES each finding's retained proof
+    (``chain_findings(verify=True)``, TRUTHENOVATION T1): a stored finding whose proof no
+    longer re-fires grants the attacker no grounded reach/topology/path (it is shown as an
+    UNGROUNDED demoted node, never a grounded capability). Returns typed nodes,
     belief-weighted edges, attacker→crown-jewel paths, and choke-points."""
     from . import actions
 
@@ -420,7 +423,7 @@ def worldmodel(run_id: str) -> dict[str, Any]:
         from ..worldmodel.impact import ImpactModel, rank_choke_points
 
         report = ScanReport.model_validate(doc)
-        auto = AutonomousCampaign(_no_send).chain_findings(report)
+        auto = AutonomousCampaign(_no_send).chain_findings(report, verify=True)
         world = auto.world
         # first_seen/last_seen drive the Timeline-replay screen (monotonic graph growth).
         nodes = [{

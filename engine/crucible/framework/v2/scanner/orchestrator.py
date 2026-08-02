@@ -154,7 +154,7 @@ class AutonomousCampaign:
 
     def chain_findings(
         self, report: ScanReport, *,
-        world: WorldModel | None = None, seq_base: int = 1,
+        world: WorldModel | None = None, seq_base: int = 1, verify: bool = False,
     ) -> AutonomousResult:
         """Turn a scan report into an attack graph, chain the operators over the
         confirmed facts, and extract the attacker→crown-jewel paths. Split out from
@@ -166,7 +166,21 @@ class AutonomousCampaign:
         are disjoint from intel-tier ids ``domain:*``/``host:*``, so they coexist).
         ``seq_base`` is where finding projection starts on the monotonic clock; a caller
         that already spent seqs ``0..N`` on recon passes ``N+1`` so the clock never
-        inverts. Defaults (``None``/``1``) reproduce the standalone behaviour exactly."""
+        inverts. Defaults (``None``/``1``) reproduce the standalone behaviour exactly.
+
+        ``verify`` (TRUTHENOVATION T1 — the veracity choke point for STORED projections).
+        This method is PURE reasoning over the findings it is given; by default it trusts
+        them (correct for a LIVE scan, whose findings just fired, and for unit tests that
+        feed synthetic facts). A caller that re-projects a STORED, possibly-stale report —
+        the console ``/api/worldmodel/<run_id>`` handler rebuilding from a saved
+        ``reverifiable.json`` — passes ``verify=True`` to RE-EXECUTE each finding's retained
+        proof and grant an attacker capability (the ``finding:``-provenance reach edge, the
+        topology nodes/edges, and the attack paths they feed) ONLY to a finding that
+        RE-FIRES NOW. A recorded-``confirmed`` finding whose proof no longer reproduces then
+        grants NOTHING — so the attack graph can never render a grounded reach/topology/path
+        built on an unproven finding (the demoted finding is still recorded, as an
+        UNGROUNDED node, by ``populate_worldmodel``). Verification is a boundary concern, so
+        it lives here as an opt-in rather than in the pure reasoning core."""
         world = world if world is not None else WorldModel()
         populate_worldmodel(report, world, seq=seq_base)
         seq = _Seq(seq_base + 1)
@@ -182,6 +196,17 @@ class AutonomousCampaign:
         for f in report.active_findings:
             ep_id = f"endpoint:{f.param}"
             if world.get_node(ep_id) is None:
+                continue
+            # T1 veracity choke point for STORED projections: when re-projecting a possibly-stale
+            # report (``verify=True``, set by the console /api/worldmodel handler), an attacker
+            # CAPABILITY grounded on a finding — the `finding:`-provenance reach edge, the topology
+            # nodes/edges, and the attack paths they feed — is minted ONLY if the finding's retained
+            # proof RE-FIRES NOW (the same admit() gate populate_worldmodel + the dossier use). A
+            # recorded-confirmed finding whose proof no longer reproduces grants the attacker NOTHING
+            # (its derivatives are skipped; the demoted finding is still recorded as an UNGROUNDED
+            # node by populate_worldmodel). Default ``verify=False`` = pure reasoning over given facts
+            # (a LIVE scan's findings just fired; unit tests feed synthetic facts).
+            if verify and not _finding_refires(f):
                 continue
             # the attacker has reached this confirmed-vulnerable surface
             attacker.reach(ep_id, seq=seq.next(), provenance=f"finding:{f.bug_class}", confidence=f.confidence)
@@ -293,6 +318,22 @@ class _Seq:
 
     def peek(self) -> int:
         return self._n
+
+
+def _finding_refires(f: object) -> bool:
+    """True IFF the active finding's retained ``oracle_context`` RE-FIRES NOW, graded through the
+    shared veracity authority (``report.grounding.admit_for_report`` → ``veracity.admit`` →
+    ``verify.reverify``) — the SAME gate ``populate_worldmodel`` and the dossier use (T1). A
+    recorded-``confirmed`` finding whose proof no longer reproduces (tampered / relabelled /
+    dry-run / absent) grades non-fact. Fail-closed: any error → False. Pure/read-only (oracle
+    re-run over retained evidence, no traffic; memoized). Lazy import keeps it offense-side only
+    (FATAL-2)."""
+    try:
+        from ..report.grounding import admit_for_report
+        admitted = admit_for_report(f)
+        return bool(admitted is not None and getattr(admitted, "is_fact", False))
+    except Exception:
+        return False
 
 
 def _set_attr(world: WorldModel, node_id: str, attrs: dict[str, object], prov: str, conf: float, seq: "_Seq") -> None:

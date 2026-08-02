@@ -102,7 +102,7 @@ CI-green → merge → update this scoreboard.
 ### PHASE T — truth-debt as CODE (make today's claims true)
 | Slice | Turns this… | …into this fact | State |
 |---|---|---|---|
-| T1 | O1 | firewall is a live choke point (world-model + reporting gates) — a fabricated claim is demoted in a live run | OVERCLAIM |
+| T1 | O1 | **VERIFIED FACT (#206).** Every fact-rendering boundary re-executes the proof: the report + console-findings paths already did; T1 added the dossier fact-set gate, the world-model finding-node gate (`demoted:` → UNGROUNDED when a proof doesn't re-fire), and the stored-projection attack-graph gate (`chain_findings(verify=True)` at `/api/worldmodel/`). A recorded-confirmed finding whose retained proof no longer re-fires (tampered / bug_class-flipped / absent) grants **zero** grounded fact, node, edge, or attack path — red-pen-verified across every stored-projection call site, no bypass. | ✅ VERIFIED FACT |
 | T2 | O2/live-seam | live `engage` mints a re-fired FACT over live bytes (live-redrive→FACT), offline-re-verified | OVERCLAIM |
 | T3 | O9 | the blackboard chain is owner-rooted + publicly verifiable by a no-VIGIL reader | OVERCLAIM |
 | T4 | narrow oracle surface | every applicable oracle kind is reachable in scan/engage/benchmark; k8s_rbac wired | CAPABILITY |
