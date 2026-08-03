@@ -12,8 +12,10 @@ byte-identical. Two things must never move without a deliberate, reviewed change
      (``test_gate_byte_identical.py`` asserts the same count via set arithmetic; this is the
      name-pinned twin that survives even if the enum or the arithmetic is refactored.)
 
-  2. The in-process benchmark tally is byte-identical: crucible tp=9, fp=0, fn=0, precision=recall=
-     f1=1.0, 853 requests, 9 findings reported — the exact row `make gate` prints and gates on.
+  2. The in-process benchmark tally is byte-identical: crucible tp=11, fp=0, fn=0, precision=recall=
+     f1=1.0, 1069 requests, 11 findings reported — the exact row `make gate` prints and gates on.
+     (TRUTHENOVATION-M1 #213 deliberately broadened the corpus 9->11 bugs — adding SSTI + host-header —
+     and re-baselined the gate; the frozen row moved 9/853/9 -> 11/1069/11 with it.)
 
 Colocated with ``test_gate_byte_identical.py`` under ``aegis/tests/`` so ``make test`` collects it.
 """
@@ -35,7 +37,7 @@ _FROZEN_15 = frozenset({
 })
 
 # The additive kinds (4 AEGIS telemetry + 3 request-side parse-proof [sqli/cmdi/nosql] + 1 WS-3
-# k8s-posture + 1 WS-B sso-assertion-forgery + 1 NW-1 saml-structural-forgery + 1 Wave-F1 cloud/CSPM
+# k8s-posture + 1 TRUTHENOVATION-T4 k8s-WORKLOAD-posture + 1 WS-B sso-assertion-forgery + 1 NW-1 saml-structural-forgery + 1 Wave-F1 cloud/CSPM
 # achieved-state posture + 1 Wave-G3 service-mesh posture + 1 Phase-2 CI/CD posture + 1 Phase-2 mobile
 # static-posture + 1 FORGE Domain 10 email-auth posture + 1 FORGE Domain 7 identity posture + 1 Slice-C3
 # active-exposure) that MUST stay OUT of the frozen fallback — reachable only via their explicit
@@ -43,6 +45,7 @@ _FROZEN_15 = frozenset({
 _ADDITIVE = frozenset({
     "PROMPT_INJECTION", "SYSTEM_PROMPT_DISCLOSURE", "AUTOMATED_ACCESS", "CREDENTIAL_STUFFING",
     "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "NOSQL_INJECTION_BREAKOUT", "K8S_POSTURE",
+    "K8S_WORKLOAD_POSTURE",
     "SSO_ASSERTION_FORGERY", "SAML_STRUCTURAL_FORGERY", "CLOUD_POSTURE", "MESH_POSTURE",
     "CICD_POSTURE", "MOBILE_POSTURE", "EMAIL_AUTH_POSTURE", "IDENTITY_POSTURE", "ACTIVE_EXPOSURE",
 })
@@ -64,9 +67,9 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 17 additive = 32; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 18 additive = 33; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
-    assert len(OracleKind) == 32
+    assert len(OracleKind) == 33
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 
@@ -103,13 +106,13 @@ def crucible_measured():
 
 def test_benchmark_tally_is_byte_identical(crucible_measured):
     sb = crucible_measured.scoreboard
-    assert (sb.true_positives, sb.false_positives, sb.false_negatives) == (9, 0, 0), (
+    assert (sb.true_positives, sb.false_positives, sb.false_negatives) == (11, 0, 0), (
         f"accuracy tally drifted: tp={sb.true_positives} fp={sb.false_positives} "
-        f"fn={sb.false_negatives} (gate requires 9/0/0)")
+        f"fn={sb.false_negatives} (gate requires 11/0/0)")
     assert sb.precision == 1.0 and sb.recall == 1.0 and sb.f1 == 1.0
 
 
 def test_benchmark_cost_row_is_byte_identical(crucible_measured):
     m = crucible_measured.metrics
-    assert m.requests_sent == 853, f"request budget drifted: {m.requests_sent} (gate requires 853)"
-    assert m.findings_reported == 9, f"findings reported drifted: {m.findings_reported} (gate requires 9)"
+    assert m.requests_sent == 1069, f"request budget drifted: {m.requests_sent} (gate requires 1069)"
+    assert m.findings_reported == 11, f"findings reported drifted: {m.findings_reported} (gate requires 11)"
