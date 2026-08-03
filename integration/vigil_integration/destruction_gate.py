@@ -32,13 +32,23 @@ Five properties, all fail-closed (first failure wins; any error or malformed inp
   4. **Dead-man's-switch (anti-dormancy)** — the validity window is bounded (``not_after`` and a
      policy-capped lifetime). A pre-signed, long-lived "sleeper" authorization is void; a quorum must
      re-authorize close in time to execution, bounding autonomy.
-  5. **Single-use** — an authorization carries one nonce. The gate CHECKS it against a caller-supplied
-     ``is_consumed`` (required; no permissive default) and returns the nonce for the caller to record
-     as consumed. Consumption itself is the caller's atomic commit against the append-only spine (the
-     spine append, with nonce uniqueness enforced there, is the serialization point) — the pure gate
-     offers the check, not the atomic check-and-consume, so a caller MUST record consumption
-     atomically at/after execution or a concurrent re-use of the SAME authorization could double-fire
-     that one action. Single-use survives restart because ``is_consumed`` is re-derived from the spine.
+  5. **Single-use** — an authorization carries one nonce, and there are TWO call surfaces:
+
+       * :func:`consume_authorization` is the ATOMIC check-AND-consume. It runs the full pure
+         :func:`authorize_destruction` decision, then BURNS the nonce via a
+         :class:`nonce_ledger.NonceLedger` whose ``O_EXCL`` marker create is the SINGLE serialization
+         point — so of N concurrent callers of the SAME authorization EXACTLY ONE wins and every other
+         loses the race and is DENIED as a replay. This is the surface a generic executor / the
+         conjunctive gate MUST use for a REAL destruction (it closes the check-only TOCTOU below).
+       * :func:`authorize_destruction` remains the PURE check: it CHECKS a caller-supplied
+         ``is_consumed`` (required; no permissive default) and RETURNS the nonce, but does NOT burn it.
+         It exists for callers that own their OWN atomic commit — the ``vigil patch --open-pr`` leg
+         (:func:`codefix_runner.build_destruction_quorum`) atomically reserves the returned nonce with
+         its own ``try_consume`` at the authorization point. A caller that consumes through this pure
+         surface without an atomic burn carries a TOCTOU: a concurrent re-use of the SAME authorization
+         could double-fire that one action, so such callers MUST record consumption atomically.
+
+     Single-use survives restart because the ledger marker (and the spine record) is re-derived from disk.
 
 Import-clean: ``vigil_core`` only (no ``framework.*``/``strix.*``) — the verification is sovereign-
 safe and runs in either environment; the offense worker consults it, it does not import the worker.
@@ -58,6 +68,11 @@ from vigil_core import (
     sign,
     verify_threshold,
 )
+
+# The durable, ATOMIC single-use ledger (stdlib-only; import-clean — no framework/strix). Its ``O_EXCL``
+# marker create is the serialization point that turns the pure single-use CHECK into an atomic
+# check-and-consume in :func:`consume_authorization`.
+from .live.nonce_ledger import NonceLedger
 
 # Fresh domain tag: a destruction authorization signature can NEVER be replayed as an evidence
 # certificate, a transparency checkpoint, an offense-gate open, or any other signed artifact.
@@ -279,17 +294,70 @@ def authorize_destruction(
     return DestructionDecision(True, "threshold-authorized", nonce=auth.nonce)
 
 
+def consume_authorization(
+    action: DestructiveAction,
+    signed: SignedDestructionAuthorization,
+    *,
+    authority: DestructionAuthority,
+    now: float,
+    ledger: NonceLedger,
+    policy: DestructionPolicy = DEFAULT_POLICY,
+) -> DestructionDecision:
+    """Atomic check-AND-burn: run the full pure :func:`authorize_destruction` decision, then ATOMICALLY
+    spend its nonce via ``ledger`` — the ``O_EXCL`` marker create is the SINGLE serialization point, so
+    of any number of concurrent callers of the SAME authorization EXACTLY ONE wins and every other loses
+    the race and is DENIED as a replay. This closes overclaim O5: the check-only single-use of
+    :func:`authorize_destruction` (a pure read that never marks consumed) has a TOCTOU — two concurrent
+    authorizations could both pass before either recorded the nonce; here the burn IS the check.
+
+    Fail-closed throughout: the burn happens ONLY after authority/threshold/window/action-binding/blank-
+    nonce all pass (so an invalid authorization can never grief-burn a victim's nonce); a ledger error
+    (I/O failure, or a blank nonce — the ledger raises) is a DENY, NEVER an authorization; a lost race
+    (``try_consume`` returns non-True) is a DENY (replay). NOTE: the burn is at the AUTHORIZATION point —
+    an authorization whose downstream action then fails is spent (re-authorize); that is the safe
+    direction for single-use (a crash after consume leaves the nonce spent, never re-fireable).
+
+    This is the sibling of :func:`live.approval_token.consume_token` (M2's 1-of-1 atomic burn) for the
+    m-of-n destruction gate. The mirror-pure :func:`authorize_destruction` stays available for callers
+    (like :func:`codefix_runner.build_destruction_quorum`) that own their own atomic ``try_consume``."""
+    if type(ledger) is not NonceLedger:
+        return DestructionDecision(False, "malformed nonce ledger")
+    decision = authorize_destruction(
+        action, signed, authority=authority, now=now, is_consumed=ledger.is_consumed, policy=policy
+    )
+    if not decision.authorized:
+        return decision
+    try:
+        won = ledger.try_consume(decision.nonce)
+    except Exception:  # noqa: BLE001 — a ledger I/O error / blank nonce is fail-closed (never authorize)
+        return DestructionDecision(False, "nonce burn errored — fail closed")
+    if won is not True:  # STRICT: lost the atomic race / already spent by a prior or concurrent caller
+        return DestructionDecision(False, "authorization already consumed (replay)")
+    return decision
+
+
 def require_destruction_authorization(
     action: DestructiveAction,
     signed: SignedDestructionAuthorization,
+    *,
+    ledger: NonceLedger | None = None,
     **kwargs,
 ) -> str:
     """Raise :class:`DestructionRefused` fail-closed unless ``action`` is threshold-authorized.
-    Returns the nonce to record as consumed. This is called by the PRIVILEGED EXECUTOR (the trusted
+    Returns the nonce that was consumed/returned. This is called by the PRIVILEGED EXECUTOR (the trusted
     host-side call site that holds the deployment ``authority``) immediately before an irreversible
     action — NOT by the injectable agent, which only proposes the action. It MUST NOT be wrapped in a
-    bare ``except``. ``authority`` must come from immutable deployment config, never from the request."""
-    decision = authorize_destruction(action, signed, **kwargs)
+    bare ``except``. ``authority`` must come from immutable deployment config, never from the request.
+
+    Pass a :class:`nonce_ledger.NonceLedger` ``ledger`` for the ATOMIC check-and-consume
+    (:func:`consume_authorization`) — the correct surface for an actual authorization, closing the
+    single-use TOCTOU. Omitting ``ledger`` and passing the pure ``is_consumed`` keeps the check-only
+    decision (:func:`authorize_destruction`); that leg is retained only for a caller that owns its own
+    atomic burn and MUST record consumption atomically at/after execution."""
+    if ledger is not None:
+        decision = consume_authorization(action, signed, ledger=ledger, **kwargs)
+    else:
+        decision = authorize_destruction(action, signed, **kwargs)
     if not decision.authorized:
         raise DestructionRefused(decision.reason)
     return decision.nonce

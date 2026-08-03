@@ -6,6 +6,8 @@ authorization is in-window, not a long-lived sleeper, and not already consumed. 
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from vigil_core import (
@@ -25,9 +27,11 @@ from vigil_integration.destruction_gate import (
     SignedDestructionAuthorization,
     authorization_signing_bytes,
     authorize_destruction,
+    consume_authorization,
     require_destruction_authorization,
     sign_authorization,
 )
+from vigil_integration.live.nonce_ledger import NonceLedger
 
 OWNER, WORKER, POLICY = generate_keypair(), generate_keypair(), generate_keypair()
 TRUST = TrustRoot(threshold=2, authorizers=[
@@ -265,6 +269,96 @@ def test_require_raises_on_refusal_and_returns_nonce_on_allow():
         require_destruction_authorization(
             _action(), _signed(signer_ids=("worker", "policy")),
             authority=AUTHORITY, now=NOW, is_consumed=_FRESH)
+
+
+# --- T6: the ATOMIC check-and-consume (overclaim O5 fix) --------------------------------------
+
+def test_consume_authorization_atomic_single_winner(tmp_path):
+    # THE O5 fix: of N concurrent consumers of ONE authorization over ONE ledger, EXACTLY ONE wins the
+    # atomic burn (the ledger's O_EXCL create is the serialization point); every other loses the race and
+    # is DENIED as a replay. Mirrors the 16-thread barrier harness in test_codefix_runner.py.
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    signed = _signed()                       # one owner+worker+policy authorization, nonce "nonce-abc-123"
+    results = []
+    barrier = threading.Barrier(16)
+    lock = threading.Lock()
+
+    def _race():
+        barrier.wait()
+        d = consume_authorization(_action(), signed, authority=AUTHORITY, now=NOW, ledger=ledger)
+        with lock:
+            results.append(d)
+    threads = [threading.Thread(target=_race) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    won = [d for d in results if d.authorized is True]
+    lost = [d for d in results if d.authorized is False]
+    assert len(won) == 1 and won[0].nonce == "nonce-abc-123"     # atomic single-use under concurrency
+    assert len(lost) == 15
+    assert all("consumed" in d.reason for d in lost)             # every loser is a replay DENY
+    assert ledger.is_consumed("nonce-abc-123") is True           # the one authorization is now spent
+
+
+def test_consume_authorization_sequential_replay_denied(tmp_path):
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    signed = _signed()
+    first = consume_authorization(_action(), signed, authority=AUTHORITY, now=NOW, ledger=ledger)
+    assert first.authorized is True and first.nonce == "nonce-abc-123"
+    second = consume_authorization(_action(), signed, authority=AUTHORITY, now=NOW, ledger=ledger)
+    assert second.authorized is False and "consumed" in second.reason
+
+
+def test_consume_authorization_ledger_error_fails_closed(tmp_path):
+    # a burn that errors (e.g. try_consume raises an I/O error) must FAIL CLOSED — DENY, never authorized,
+    # even though the pure authority/threshold/window checks all passed.
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+
+    def _boom(_n):
+        raise OSError("ledger unwritable")
+    ledger.try_consume = _boom               # instance shadow; type(ledger) is still NonceLedger
+    d = consume_authorization(_action(), _signed(), authority=AUTHORITY, now=NOW, ledger=ledger)
+    assert d.authorized is False and "fail closed" in d.reason
+
+
+def test_consume_authorization_rejects_a_non_ledger():
+    # a caller-supplied object that is not a real NonceLedger is a DENY (no duck-typed / behavior-overriding
+    # ledger can slip a non-atomic burn past the gate).
+    d = consume_authorization(_action(), _signed(), authority=AUTHORITY, now=NOW, ledger=object())
+    assert d.authorized is False and "malformed nonce ledger" in d.reason
+
+
+def test_consume_authorization_denies_unauthorized_without_burning(tmp_path):
+    # an invalid authorization (below the mandatory-owner requirement) is DENIED by the PURE check and its
+    # nonce is NEVER burned — an invalid authorization can't grief-burn a victim's single-use nonce.
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    signed = _signed(signer_ids=("worker", "policy"))            # meets threshold 2 but no mandatory owner
+    d = consume_authorization(_action(), signed, authority=AUTHORITY, now=NOW, ledger=ledger)
+    assert d.authorized is False and "mandatory" in d.reason
+    assert ledger.is_consumed("nonce-abc-123") is False          # nonce untouched
+
+
+def test_pure_authorize_destruction_never_burns(tmp_path):
+    # the PURE gate is unchanged: it CHECKS the ledger's is_consumed but does NOT burn — two pure calls both
+    # pass and the nonce stays unspent (only consume_authorization / the caller's own try_consume burns).
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    assert authorize_destruction(_action(), _signed(), authority=AUTHORITY, now=NOW,
+                                 is_consumed=ledger.is_consumed).authorized is True
+    assert authorize_destruction(_action(), _signed(), authority=AUTHORITY, now=NOW,
+                                 is_consumed=ledger.is_consumed).authorized is True
+    assert ledger.is_consumed("nonce-abc-123") is False          # pure check never spent it
+
+
+def test_require_destruction_authorization_atomic_ledger(tmp_path):
+    # the raising wrapper routed through a ledger does the ATOMIC burn: returns the nonce once, then a replay
+    # is refused fail-closed.
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    assert require_destruction_authorization(
+        _action(), _signed(), authority=AUTHORITY, now=NOW, ledger=ledger) == "nonce-abc-123"
+    with pytest.raises(DestructionRefused, match="consumed"):
+        require_destruction_authorization(
+            _action(), _signed(), authority=AUTHORITY, now=NOW, ledger=ledger)
 
 
 def test_import_clean_no_offense_modules():
