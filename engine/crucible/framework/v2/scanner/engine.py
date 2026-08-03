@@ -17,10 +17,12 @@ request budget bounds the sweep so an autonomous run cannot blow up.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..verify.confirmation import confirm_finding
+from ..verify.confirmation import adjudicate_finding, confirmed_from_result
+from ..verify.models import VerificationResult
 from ..verify.oob import OOBReceiver
 from ..verify.verifier import OracleVerifier
 from .checks import DEFAULT_CHECKS, Check, Send
@@ -71,6 +73,72 @@ class AuditFinding(BaseModel):
     oracle_context: dict | None = None
 
 
+class ProbeRecord(BaseModel):
+    """One EXERCISED (surface, insertion_point, check) probe and its adjudicated
+    verdict — the negative-and-positive coverage evidence the audit used to DROP.
+
+    Deterministic by construction: no wall-clock, no rng. ``verdict`` is the core
+    honesty distinction (see :func:`probe_verdict`):
+
+      * ``finding``      — an applicable oracle FIRED at/above threshold (a fact).
+      * ``clean``        — at least one applicable oracle CONCLUSIVELY adjudicated the
+                           negative: it proved it had an observable channel and rendered
+                           a decisive verdict (exercised-and-provably-clean), not merely
+                           a one-sided oracle that failed to fire with no channel.
+      * ``inconclusive`` — the payload was sent but NO oracle had a channel to adjudicate
+                           (no observable data / one-sided non-signal / oracle abstained).
+                           NEVER ``clean``.
+
+    ``oracle_kinds_run`` is the SORTED tuple of oracle kinds that CONCLUSIVELY adjudicated
+    over the observed data — the evidence backing a ``clean`` verdict (empty for
+    ``inconclusive``; see :func:`probe_verdict`)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    endpoint: str
+    insertion_point: str = Field(description="The point id (kind:locator) or request:<check> anchor.")
+    param: str = Field(description="Human name of the point (param/header/cookie/pointer) or (request).")
+    check_id: str
+    bug_class: str
+    oracle_kinds_run: tuple[str, ...] = Field(
+        default=(), description="SORTED oracle kinds that RAN over the observed data.")
+    verdict: Literal["finding", "clean", "inconclusive"]
+
+
+def probe_verdict(result: VerificationResult) -> tuple[str, tuple[str, ...]]:
+    """Decide a probe's coverage verdict from its oracle adjudication — THE honesty rule.
+
+    ``result.signals`` are the applicable oracle kinds that RAN over the observed data
+    (a kind whose inputs were absent is skipped, never a signal). But an oracle merely
+    RUNNING is not enough to certify ``clean``: a ONE-SIDED oracle (a single-shot
+    differential, a marker/error/callback simply absent) emits a non-firing signal
+    even when it had NO observable channel — a surface that ignores its input, or a
+    blind/second-order sink, looks identical to a safe one. Treating that non-signal as
+    ``clean`` is the coverage overclaim M2 must not make.
+
+    So a probe is ``clean`` only when at least one signal is CONCLUSIVE — the oracle
+    proved it had a channel and rendered a decisive verdict (``OracleSignal.conclusive``:
+    a positive fire, an SPRT refute, an adequate-sample timing test, a definite
+    predicate, or a payload OBSERVED reaching the sink but neutralised):
+
+      * confirmed                         -> ``finding``      (an oracle fired at/above threshold)
+      * a conclusive signal, none fired   -> ``clean``        (channel-confirmed negative)
+      * only non-conclusive non-signals   -> ``inconclusive`` (payload sent, no oracle
+                                             had a channel to adjudicate — NEVER clean)
+
+    ``oracle_kinds_run`` for a ``clean`` verdict names only the oracles that CONCLUSIVELY
+    adjudicated (the evidence backing the verdict); ``inconclusive`` carries none. This is
+    the line M2 exists to hold: a payload sent with no adjudicating channel is
+    inconclusive, never clean."""
+    if result.confirmed:
+        kinds = tuple(sorted({s.kind.value for s in result.signals}))
+        return "finding", kinds
+    conclusive = [s for s in result.signals if s.conclusive]
+    if conclusive:
+        return "clean", tuple(sorted({s.kind.value for s in conclusive}))
+    return "inconclusive", ()
+
+
 class BudgetExceeded(RuntimeError):
     """Raised internally when the request budget is hit; the audit returns what
     it has confirmed so far rather than sending more traffic."""
@@ -114,12 +182,33 @@ class AuditEngine:
         self.bandit = bandit
         self.bandit_context = bandit_context
         self.requests_sent = 0
+        # M2 coverage/completeness: every probe that actually adjudicated over
+        # observed data leaves a ProbeRecord here (both the positive and the
+        # otherwise-discarded negative branch), so a REACHED-and-oracle-cleared
+        # surface is provable, not merely untested. Accumulated across the whole
+        # campaign (one engine per campaign); audit()'s return type is unchanged
+        # and campaign reads this back after the loop (mirrors requests_sent).
+        self.exercised: list[ProbeRecord] = []
 
     def _counted_send(self, request: HttpRequest) -> dict:
         if self.max_requests and self.requests_sent >= self.max_requests:
             raise BudgetExceeded()
         self.requests_sent += 1
         return self._send(request)
+
+    def _record_probe(
+        self, *, endpoint: str, insertion_point: str, param: str,
+        check_id: str, bug_class: str, result: VerificationResult,
+    ) -> None:
+        """Retain one adjudicated probe. Called ONLY when an oracle layer actually
+        ran over observed data (a real VerificationResult), so the record honestly
+        reflects an EXERCISED surface — never a check that never engaged."""
+        verdict, kinds = probe_verdict(result)
+        self.exercised.append(ProbeRecord(
+            endpoint=endpoint, insertion_point=insertion_point, param=param,
+            check_id=check_id, bug_class=bug_class,
+            oracle_kinds_run=kinds, verdict=verdict,
+        ))
 
     def audit(
         self,
@@ -154,15 +243,20 @@ class AuditEngine:
                     continue
                 if ctx is None:
                     continue
-                confirmed = confirm_finding(
-                    finding={
-                        "bug_class": rcheck.bug_class,
-                        "title": f"{rcheck.bug_class} on the request",
-                        "severity": "High", "surface": f"request:{rcheck.id}",
-                        "summary": f"{rcheck.id} request-level probe fired an oracle",
-                    },
-                    context=ctx, verifier=self.verifier,
+                rfinding = {
+                    "bug_class": rcheck.bug_class,
+                    "title": f"{rcheck.bug_class} on the request",
+                    "severity": "High", "surface": f"request:{rcheck.id}",
+                    "summary": f"{rcheck.id} request-level probe fired an oracle",
+                }
+                rresult = adjudicate_finding(rfinding, ctx, self.verifier)
+                # Retain the coverage evidence (both branches) BEFORE the None-drop.
+                self._record_probe(
+                    endpoint=request.url, insertion_point=f"request:{rcheck.id}",
+                    param="(request)", check_id=rcheck.id, bug_class=rcheck.bug_class,
+                    result=rresult,
                 )
+                confirmed = confirmed_from_result(rresult, rfinding, self.verifier)
                 if confirmed is not None:
                     kind = confirmed.confirmed_by
                     findings.append(AuditFinding(
@@ -206,20 +300,24 @@ class AuditEngine:
                     if ctx is None and not adaptive:
                         continue
 
-                    def _confirm(c: FindingContext) -> object:
-                        return confirm_finding(
-                            finding={
-                                "bug_class": check.bug_class,
-                                "title": f"{check.bug_class} via {point.name}",
-                                "severity": "High",
-                                "surface": point.id,
-                                "summary": f"{check.id} probe fired an oracle at {point.name}",
-                            },
-                            context=c,
-                            verifier=self.verifier,
-                        )
+                    finding_payload = {
+                        "bug_class": check.bug_class,
+                        "title": f"{check.bug_class} via {point.name}",
+                        "severity": "High",
+                        "surface": point.id,
+                        "summary": f"{check.id} probe fired an oracle at {point.name}",
+                    }
 
-                    confirmed = _confirm(ctx) if ctx is not None else None
+                    def _adjudicate(c: FindingContext) -> VerificationResult:
+                        return adjudicate_finding(finding_payload, c, self.verifier)
+
+                    # One oracle pass; the VerificationResult carries BOTH the positive
+                    # (confirmed_from_result) and the retained negative (coverage) evidence.
+                    result = _adjudicate(ctx) if ctx is not None else None
+                    confirmed = (
+                        confirmed_from_result(result, finding_payload, self.verifier)
+                        if result is not None else None
+                    )
                     # WAF-adaptive fallback: the canonical payload did not fire (blocked
                     # or filtered). Synthesize a form that slips past AND fires the SAME
                     # oracle, then confirm that — precision is unchanged (a bypass that
@@ -232,13 +330,25 @@ class AuditEngine:
                         except Exception:
                             actx = None
                         if actx is not None:
-                            ac = _confirm(actx)
+                            ares = _adjudicate(actx)
+                            ac = confirmed_from_result(ares, finding_payload, self.verifier)
+                            # Record the adaptive adjudication as the probe's outcome
+                            # (it superseded the blocked canonical attempt).
+                            result, ctx = ares, actx
                             if ac is not None:
-                                confirmed, ctx = ac, actx
+                                confirmed = ac
                     # reward the bandit on every probe that actually ran: a fired
                     # oracle is a hit, an exhausted probe is a miss.
                     if self.bandit is not None:
                         self.bandit.update(self.bandit_context, check.bug_class, reward=confirmed is not None)
+                    # Retain the coverage evidence for every probe that actually
+                    # adjudicated over observed data (result is not None) — BEFORE the
+                    # None-drop below discards the negative branch as it always has.
+                    if result is not None:
+                        self._record_probe(
+                            endpoint=request.url, insertion_point=point.id, param=point.name,
+                            check_id=check.id, bug_class=check.bug_class, result=result,
+                        )
                     if confirmed is None:
                         continue
                     seen.add(key)

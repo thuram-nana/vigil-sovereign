@@ -1027,7 +1027,17 @@ def compliance_data(run_id: str) -> dict[str, Any]:
         return {"run_id": run_id, "pending": doc is None, "findings": [], "coverage": {},
                 "standards": standards.STANDARD_VERSIONS, "doctrine": _COMPLIANCE_DOCTRINE}
     mapped = _safe(lambda: [standards.map_finding(f) for f in findings][:200], default=[])
-    coverage = _safe(lambda: standards.coverage_matrix(findings), default={})
+    # M2: feed the EXERCISED-and-oracle-adjudicated classes (verdict clean/finding) into
+    # the coverage matrix so a probed-clean class grades `tested_clear` rather than
+    # `not_tested`. Absent (older reverifiable.json without exercised_probes) -> None ->
+    # unchanged behaviour. An `inconclusive` probe is excluded (no oracle adjudicated it).
+    from ..verify.coverage_oracle import tested_bug_classes as _tested_bug_classes
+    tested = _safe(
+        lambda: (_tested_bug_classes(doc.get("exercised_probes") or []) or None)
+        if isinstance(doc, dict) else None,
+        default=None,
+    )
+    coverage = _safe(lambda: standards.coverage_matrix(findings, tested_bug_classes=tested), default={})
     return {"run_id": run_id, "findings": mapped, "coverage": coverage,
             "standards": standards.STANDARD_VERSIONS, "doctrine": _COMPLIANCE_DOCTRINE}
 
