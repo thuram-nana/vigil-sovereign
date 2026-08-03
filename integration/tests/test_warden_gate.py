@@ -90,6 +90,40 @@ def test_hook_allows_an_auto_decision():
     assert hooks.decisions[-1].auto
 
 
+def test_hook_queue_with_owner_approval_runs():
+    # C8/T5: a QUEUE decision is APPROVE-THEN-RUN, not a hard-block. With an approver that yields a valid
+    # owner approval, the queued shell call RUNS (on_tool_start returns without raising), and the approver is
+    # invoked (off the event loop via run_in_executor) with the real (name, target, args).
+    seen: list = []
+
+    def _approver(name, target, args):
+        seen.append((name, target, args))
+        return True
+
+    hooks = WardenGateHooks(classify=_stub({"exec_command": "A3"}), approver=_approver)
+    asyncio.run(hooks.on_tool_start(None, None, _FakeTool("exec_command")))  # no raise -> it ran
+    assert not hooks.decisions[-1].auto             # it WAS a QUEUE decision...
+    assert seen and seen[0][0] == "exec_command"    # ...routed to the approver, which approved it
+
+
+def test_hook_queue_denied_by_approver_blocks():
+    # the negative leg: an approver that returns False (no valid owner token within the window) BLOCKS the
+    # queued call — a QUEUE that is not approved never runs.
+    hooks = WardenGateHooks(classify=_stub({"exec_command": "A3"}), approver=lambda *_a: False)
+    with pytest.raises(WardenDenied):
+        asyncio.run(hooks.on_tool_start(None, None, _FakeTool("exec_command")))
+
+
+def test_hook_queue_approver_error_is_fail_closed():
+    # an approver that RAISES is fail-closed (block), never run.
+    def _boom(*_a):
+        raise RuntimeError("broker unreachable")
+
+    hooks = WardenGateHooks(classify=_stub({"exec_command": "A3"}), approver=_boom)
+    with pytest.raises(WardenDenied):
+        asyncio.run(hooks.on_tool_start(None, None, _FakeTool("exec_command")))
+
+
 def test_hook_unnamed_tool_fails_closed():
     hooks = WardenGateHooks(classify=_stub({}))
     with pytest.raises(WardenDenied):

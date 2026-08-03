@@ -42,6 +42,7 @@ the sovereign environment.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -168,10 +169,17 @@ class WardenGateHooks:
     Not a subclass of the SDK ``RunHooks`` (the SDK isn't vendored on disk) — it exposes the same
     ``async on_tool_start(context, agent, tool)`` shape so it can be composed/attached once the SDK
     is available. Per the seam map, ``on_tool_start``'s return value is ignored and the ONLY way to
-    block a call is to RAISE, so this adapter is deliberately fail-safe: it raises ``WardenDenied``
-    for anything that is not an AUTO decision. A QUEUE decision therefore blocks (does not run)
-    until the graceful approval-queue wrapper is wired — a future slice upgrades QUEUE from
-    hard-block to approve-then-run. Every decision is recorded for audit/testing.
+    block a call is to RAISE, so this adapter applies its verdict by raising ``WardenDenied`` to block
+    and returning to allow.
+
+    A QUEUE decision is APPROVE-THEN-RUN (wired, not deferred): it is routed to the per-action,
+    single-use, owner-signed approval broker (``approver``) — the same broker/token/nonce-ledger the
+    offense engine uses. The broker publishes a public-safe pending request and (bounded) waits for a
+    matching owner-signed token; a valid, action-bound, single-use token authorizes THIS one call to
+    run, otherwise it raises. Fail-safe: with NO ``approver`` (no authority provisioned) a QUEUE
+    hard-blocks. The wait is offloaded off the asyncio event loop (``run_in_executor``) so a live
+    interactive approval window does not stall the async runner. Every decision is recorded for
+    audit/testing.
     """
 
     def __init__(
@@ -226,7 +234,13 @@ class WardenGateHooks:
         target = _strix_target(tool)
         args = _strix_args(getattr(context, "tool_arguments", None))
         try:
-            approved = bool(self._approver(name, target, args))
+            # The approver publishes the pending request then (bounded) waits for a matching owner-signed
+            # token — a synchronous, blocking poll. Offload it to a worker thread so the bounded wait does NOT
+            # stall the asyncio event loop the SDK runner drives (a live interactive approval window would
+            # otherwise block every other task on the loop). The approver's file I/O + atomic O_EXCL nonce
+            # burn are thread-safe.
+            approved = bool(await asyncio.get_running_loop().run_in_executor(
+                None, self._approver, name, target, args))
         except Exception as exc:  # noqa: BLE001 — an approver error is fail-closed (block)
             raise WardenDenied(
                 f"WARDEN gate blocked tool {name!r}: approval errored ({type(exc).__name__}) — fail-closed."
