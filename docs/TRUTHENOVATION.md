@@ -46,9 +46,14 @@ The tool **cannot lie about what it found; it makes no claim, and takes no measu
 Discovery rests on the Strix LLM (whose "coverage" is prompt exhortations — `vendor/strix/.../system_prompt.jinja:145,268,292`)
 plus a *bounded, opt-in* recon feed (frontier cap 64 `intel/frontier.py:32`; crawl 20 pages / depth 3
 `intel/expand.py:27-30`). There is **no coverage oracle** — `scanner/coverage.py` is a bandit *ranking* heuristic
-that deliberately *saturates* (`coverage.py:16-18,60-67`). Recall is measured only on 3 synthetic targets + 8
-files — the code's own words, *"a sanity check, not a capability claim"* (`V2-LIMITATIONS.md:879-906`); the
-front-end that would measure recall on a real surface is *"the open piece."* The same blind spot from the other
+that deliberately *saturates* (`coverage.py:16-18,60-67`). **M1 update (#213):** recall of the **deterministic
+scanner** is now MEASURED, signed, committed, and CI-gated — **11/11** on a broadened planted loopback corpus for
+the on-path oracle classes (xss, boolean/error SQLi, open-redirect, path-traversal, ssti, host-header, cors, three
+exposures), with a byte-reproducible, offline-verifiable accuracy-core baseline and an explicit recall-floor gate
+(`eval/recall_baseline.py`, `eval/baselines/recall-accuracy-core.json`, `eval/gate.py`); the old *"3 synthetic
+targets + 8 files … a sanity check"* framing (`V2-LIMITATIONS.md:879-906`) is **superseded for the deterministic
+scanner**. What stays unmeasured — and is stated as such — is recall of the **LLM-driven `engage`/planner** on
+diverse real targets (*"the open piece,"* H3) and a *coverage* oracle for provable absence (M2). The same blind spot from the other
 direction: a target can **poison the analyst's PLAN/coverage** (Q4) — the veracity firewall only ever *demotes*,
 so a claim the poisoned analyst never made is invisible (`veracity/firewall.py:14,178-180`); the kernel fencing is
 "a tripwire, not a sanitiser" and guards the *verdict*, not the *plan* (`kernel/binding.py:38-49`).
@@ -117,7 +122,7 @@ CI-green → merge → update this scoreboard.
 ### PHASE M — measure, then PROVE, completeness
 | Slice | Gap | Fact | State |
 |---|---|---|---|
-| M1 | recall unmeasured | a signed, reproducible measured recall/FN number on a real planted-bug corpus | UN-STARTED (harness) |
+| M1 | recall unmeasured | a signed, reproducible measured recall/FN number on a planted-bug corpus | ✅ **VERIFIED FACT (#213)** — deterministic-scanner recall **11/11** (precision 1.0, fp 0) on an 11-bug loopback corpus (on-path classes incl. new ssti + host-header); committed **byte-reproducible + offline-verifiable** signed accuracy-core (out-of-band-**pinned** trust root; a fresh-key re-sign of a tampered baseline is rejected) + an explicit **recall-floor** gate. Red-pen caught HIGH (unpinned trust root) + MEDIUM (CORS-on-safe-controls dishonesty) + LOW — all fixed & re-checked CLEAN. **Scope:** the *deterministic scanner* on a *planted* corpus — LLM-engage recall on real targets stays H3. |
 | M2 | no coverage oracle | a coverage certificate that a surface/param/sink was *exercised* — provable absence | UN-STARTED |
 | M3 | plan un-defended (Q4) | a signed plan-coverage attestation + a poison detector → a skipped surface is visible | UN-STARTED |
 
