@@ -119,10 +119,8 @@ def _get(url: str):
 def test_server_serves_spa_and_apis() -> None:
     with _running_server() as base:
         st, ct, body = _get(base + "/")
-        # The console now serves the UNIFIED VIGIL COMMAND bundle (vendored byte-identically from
-        # packages/vigil-ui/ by sync.sh), not the pre-unification "CRUCIBLE Ops Console" SPA.
-        assert st == 200 and ct == "text/html" and b"VIGIL COMMAND" in body
-        st, ct, body = _get(base + "/static/style.css")   # unified bundle emits style.css (was styles.css)
+        assert st == 200 and ct == "text/html" and b"CRUCIBLE" in body
+        st, ct, body = _get(base + "/static/styles.css")
         assert st == 200 and ct == "text/css"
         st, ct, body = _get(base + "/api/status")
         assert st == 200 and "backends" in json.loads(body)
