@@ -39,7 +39,7 @@ from .checks import CorsActiveCheck, DEFAULT_CHECKS, Check, HostHeaderCheck, Req
 from .crawler import Crawler, Scope
 from .discovery import DiscoveredPath, JsSecret
 from .domxss import DomXssCandidate, analyze_html
-from .engine import AuditEngine, AuditFinding
+from .engine import AuditEngine, AuditFinding, ProbeRecord
 from .fingerprint import Fingerprint, fingerprint
 from .access_control import AccessControlConfig, build_access_control_checks
 from .grammar import generate as grammar_generate, infer_grammar
@@ -117,6 +117,14 @@ class ScanReport(BaseModel):
     # alias overloading, batching) land in active_findings like any other; these are
     # the strictly-separated leads. Empty on every default (dos-off) run.
     graphql_leads: list[str] = Field(default_factory=list)
+    # M2 coverage/completeness: every (surface, insertion_point, check) the active
+    # audit actually adjudicated over observed data — with its verdict (finding /
+    # clean / inconclusive) and the oracle kinds that ran. This is the raw evidence
+    # a signed coverage certificate (verify.coverage_oracle) is built from: it makes
+    # an EXERCISED-and-oracle-cleared surface provable rather than merely untested.
+    # STRICTLY separate from active_findings (adding it changes no existing counter),
+    # so the M1 recall baseline still re-derives byte-identically from active_findings.
+    exercised_probes: list[ProbeRecord] = Field(default_factory=list)
 
     @property
     def total_findings(self) -> int:
@@ -849,6 +857,7 @@ class WebScanCampaign:
                                      pages=len(crawl.pages), discovered=len(crawl.requests))
 
             active: list[AuditFinding] = []
+            exercised_probes: list[ProbeRecord] = []
             audited = 0
             seen_hosts: set[str] = set()
             if self.enable_oob and self.oob_relay_url:
@@ -888,6 +897,13 @@ class WebScanCampaign:
                     if self.max_audit_requests and engine.requests_sent >= self.max_audit_requests:
                         break  # budget spent; stop auditing further endpoints
                 requests_sent = engine.requests_sent
+                # Read back the coverage evidence the engine accumulated (mirrors the
+                # requests_sent read-back). Stable-sorted for determinism so two scans
+                # of the same app produce byte-identical exercised_probes.
+                exercised_probes = sorted(
+                    engine.exercised,
+                    key=lambda p: (p.endpoint, p.insertion_point, p.check_id, p.bug_class),
+                )
 
             # Persist the learned posteriors so the next engagement warm-starts.
             if self.bandit_path is not None:
@@ -948,6 +964,7 @@ class WebScanCampaign:
             graphql_leads=graphql_leads,
             fingerprint=fp,
             library_checks_run=library_checks_run,
+            exercised_probes=exercised_probes,
         )
 
 

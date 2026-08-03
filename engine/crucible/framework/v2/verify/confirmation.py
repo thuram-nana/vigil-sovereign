@@ -43,7 +43,7 @@ from typing import Any, Iterator, Mapping
 from pydantic import BaseModel, ConfigDict, Field
 
 from .adapter import FindingContext
-from .models import OracleKind, OracleSignal
+from .models import OracleKind, OracleSignal, VerificationResult
 from .verifier import OracleVerifier
 
 
@@ -99,20 +99,12 @@ def _finding_to_dict(finding: Any) -> dict[str, Any]:
     }
 
 
-def confirm_finding(
-    finding: Any,
-    context: "FindingContext | Mapping[str, Any]",
-    verifier: OracleVerifier | None = None,
-) -> ConfirmedFinding | None:
-    """Promote `finding` to `ConfirmedFinding` iff the oracle layer fires.
-
-    `context` is a `FindingContext` (preferred) or a raw context mapping in the
-    shape `OracleVerifier.confirm` reads. The finding's `bug_class` fills in
-    when the context did not set one. Returns `None` when no oracle fired at or
-    above the verifier's high-confidence threshold — there is no assertion-only
-    path to a `ConfirmedFinding`."""
-    verifier = verifier or OracleVerifier()
-
+def _build_verifier_ctx(
+    finding: Any, context: "FindingContext | Mapping[str, Any]"
+) -> "tuple[dict[str, Any], dict[str, Any]]":
+    """Reduce a `finding` + `context` to the (verifier_ctx, finding_dict) pair the
+    oracle layer reads — shared by `confirm_finding` and `adjudicate_finding` so the
+    positive and the retained-negative paths adjudicate over byte-identical inputs."""
     if isinstance(context, FindingContext):
         ctx = context.to_verifier_context()
     elif isinstance(context, Mapping):
@@ -121,21 +113,49 @@ def confirm_finding(
         raise TypeError(
             f"context must be FindingContext or Mapping, got {type(context).__name__}"
         )
-
     fd = _finding_to_dict(finding)
     if not ctx.get("bug_class"):
         ctx["bug_class"] = str(fd.get("bug_class", ""))
+    return ctx, fd
 
-    result = verifier.confirm(ctx)
+
+def adjudicate_finding(
+    finding: Any,
+    context: "FindingContext | Mapping[str, Any]",
+    verifier: OracleVerifier | None = None,
+) -> VerificationResult:
+    """Run the oracle layer and return the FULL `VerificationResult` — BOTH branches.
+
+    Unlike `confirm_finding` (which returns `None` on the negative branch and so
+    discards the fact that an oracle actually RAN and rendered a clean verdict),
+    this retains that negative-adjudication evidence: `result.signals` are the
+    applicable oracle kinds that ran over the observed data, `result.confirmed` is
+    whether any fired at/above threshold. It promotes NOTHING — `confirm_finding`
+    remains the sole confirmation authority; this is the coverage/completeness lens
+    over the same single `verifier.confirm(ctx)` call."""
+    verifier = verifier or OracleVerifier()
+    ctx, _fd = _build_verifier_ctx(finding, context)
+    return verifier.confirm(ctx)
+
+
+def confirmed_from_result(
+    result: VerificationResult,
+    finding: Any,
+    verifier: OracleVerifier | None = None,
+) -> ConfirmedFinding | None:
+    """Build the `ConfirmedFinding` from an already-computed `VerificationResult`
+    (or `None` when it did not confirm). Factored out so a caller that already ran
+    `adjudicate_finding` derives the positive without a second oracle pass — the
+    ConfirmedFinding it returns is byte-identical to `confirm_finding`'s."""
+    verifier = verifier or OracleVerifier()
     if not result.confirmed:
         return None
-
+    fd = _finding_to_dict(finding)
     confirming = [
         s for s in result.signals
         if s.fired and s.confidence >= verifier.high_confidence
     ]
     top = max(confirming, key=lambda s: s.confidence)
-
     return ConfirmedFinding(
         bug_class=result.bug_class or str(fd.get("bug_class", "")),
         title=str(fd.get("title", "")),
@@ -148,6 +168,27 @@ def confirm_finding(
         rationale=result.rationale,
         finding=fd,
     )
+
+
+def confirm_finding(
+    finding: Any,
+    context: "FindingContext | Mapping[str, Any]",
+    verifier: OracleVerifier | None = None,
+) -> ConfirmedFinding | None:
+    """Promote `finding` to `ConfirmedFinding` iff the oracle layer fires.
+
+    `context` is a `FindingContext` (preferred) or a raw context mapping in the
+    shape `OracleVerifier.confirm` reads. The finding's `bug_class` fills in
+    when the context did not set one. Returns `None` when no oracle fired at or
+    above the verifier's high-confidence threshold — there is no assertion-only
+    path to a `ConfirmedFinding`.
+
+    (Return contract UNCHANGED — this now delegates to `adjudicate_finding` +
+    `confirmed_from_result`, which is exactly this function's old body split so the
+    negative branch's evidence can be retained by other callers.)"""
+    verifier = verifier or OracleVerifier()
+    result = adjudicate_finding(finding, context, verifier)
+    return confirmed_from_result(result, finding, verifier)
 
 
 # ---------------------------------------------------------------------------
