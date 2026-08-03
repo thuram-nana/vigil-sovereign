@@ -51,7 +51,23 @@ from .progress import ProgressSink
 from .sso import SSO_REQUEST_CHECKS
 from .library import LibraryEntry, load_library, select_entries, split_checks
 from .passive import PassiveFinding
+from .steer_detect import SteerSignal, scan_page_bodies_and_headers
 from .targeting import select_checks
+
+def _surface_key(req: HttpRequest) -> str:
+    """A port/scheme-INDEPENDENT surface key for a discovered request: ``METHOD path[?query]``.
+
+    Strips scheme + host + the volatile ephemeral port so two scans of the same app (which
+    bind a different port each run) yield identical discovered-surface bytes. The query is
+    KEPT (its param names are part of the surface a check would fuzz); method is kept because
+    a GET and a POST to one path are distinct surfaces. Mirrors the path+query normalisation
+    verify.coverage_oracle / verify.plan_integrity use for the exercised side of the diff."""
+    parts = urlsplit(req.url or "")
+    surface = parts.path or "/"
+    if parts.query:
+        surface = f"{surface}?{parts.query}"
+    return f"{(req.method or 'GET').upper()} {surface}"
+
 
 # The request-level arsenal: checks that operate on the WHOLE request/response
 # (adding a hostile header, POSTing a probe query) rather than fuzzing one
@@ -125,6 +141,28 @@ class ScanReport(BaseModel):
     # STRICTLY separate from active_findings (adding it changes no existing counter),
     # so the M1 recall baseline still re-derives byte-identically from active_findings.
     exercised_probes: list[ProbeRecord] = Field(default_factory=list)
+    # M3 plan-integrity: the DISCOVERED audit surface — every request the crawl (+SPA/
+    # grammar) put on the table, normalised to a port/scheme-independent surface key
+    # (method + path+query), STABLE-SORTED and de-duplicated. Retained because
+    # `all_requests`/`crawl.requests` are transient locals dropped at end of run(); without
+    # this list a reader sees only the requests_discovered COUNT, never WHICH surfaces — so
+    # the discovered-minus-exercised skip diff (verify.plan_integrity) could not be computed
+    # after the fact. Additive: changes no existing counter, so M1/M2 byte-identity holds
+    # (M1 recall re-derives from active_findings; M2 coverage from exercised_probes).
+    discovered_surfaces: list[str] = Field(default_factory=list)
+    # M3 plan-integrity: target CONTENT that matched a plan-steering pattern (scanner.
+    # steer_detect) — "deprecated / do not test / out of scope", X-Robots-Tag: noindex,
+    # <meta robots noindex>. A LISTED signal, never a blocker: the scan does not obey or
+    # reject it, it records it so a plan that skips a surface becomes AUDITABLE. Empty on a
+    # clean target. Deterministic, stable-sorted. Additive; no existing counter changes.
+    steer_signals: list[SteerSignal] = Field(default_factory=list)
+    # M3 plan-integrity: the CLASS axis of the committed plan — the sorted, distinct bug
+    # classes the active point-check roster committed to test at EACH discovered surface.
+    # The committed (surface x class) plan the scan signs is the cross product of
+    # discovered_surfaces x committed_check_classes (formed in verify.plan_integrity). Stored
+    # as the axis (not the materialised cross product) to keep the report lean + deterministic.
+    # Captured where active_checks is known (post library/access-control selection). Additive.
+    committed_check_classes: list[str] = Field(default_factory=list)
 
     @property
     def total_findings(self) -> int:
@@ -809,6 +847,11 @@ class WebScanCampaign:
         browser = self._maybe_start_browser()
         spa_endpoints: list[str] = []
         extra_requests: list[HttpRequest] = []
+        # M3 plan-integrity: initialised here so the ScanReport fields are always defined,
+        # even on an early failure path (they stay empty).
+        steer_signals: list[SteerSignal] = []
+        discovered_surfaces: list[str] = []
+        committed_check_classes: list[str] = []
         try:
             if browser is not None and self.enable_spa_crawl:
                 spa_endpoints, extra_requests = self._spa_discover(crawl, browser)
@@ -841,6 +884,11 @@ class WebScanCampaign:
                 if ac_checks:
                     active_checks = tuple(active_checks) + tuple(ac_checks)
 
+            # M3 plan-integrity: capture plan-steering CONTENT the crawl saw (bodies,
+            # <meta robots>, X-Robots-Tag) — a LISTED signal, never acted on. Deterministic,
+            # stable-sorted. Cheap (regex over already-fetched pages; no extra traffic).
+            steer_signals = scan_page_bodies_and_headers(crawl.pages)
+
             # SPA-discovered in-scope GET endpoints join the audit surface.
             all_requests = list(crawl.requests) + extra_requests
 
@@ -851,6 +899,18 @@ class WebScanCampaign:
             # staying well-formed enough to exercise real handlers.
             if self.grammar_fuzz > 0:
                 all_requests += self._grammar_requests(crawl.requests)
+
+            # M3 plan-integrity: retain the DISCOVERED audit surface as port/scheme-
+            # independent keys (method + path+query), stable-sorted + de-duplicated. This is
+            # the committed plan's surface axis and the left side of the discovered-minus-
+            # exercised skip diff. Captured HERE (not at report build) because all_requests is
+            # a transient local. No traffic, no rng.
+            discovered_surfaces = sorted({_surface_key(r) for r in all_requests})
+            # The CLASS axis of the committed plan: the distinct bug classes the active
+            # point-check roster committed to test at each surface (post library/access-
+            # control selection). The signed committed (surface x class) plan is the cross
+            # product of this with discovered_surfaces, formed in verify.plan_integrity.
+            committed_check_classes = sorted({c.bug_class for c in active_checks})
 
             if self._progress is not None:
                 self._progress.phase("audit", surface=len(all_requests),
@@ -965,6 +1025,9 @@ class WebScanCampaign:
             fingerprint=fp,
             library_checks_run=library_checks_run,
             exercised_probes=exercised_probes,
+            discovered_surfaces=discovered_surfaces,
+            steer_signals=steer_signals,
+            committed_check_classes=committed_check_classes,
         )
 
 
