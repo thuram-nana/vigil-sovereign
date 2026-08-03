@@ -10,9 +10,11 @@
 
 ### 📖 [Read the manifesto → *The Provable Adversary*](docs/MANIFESTO.md)
 
-### 📺 [Watch the full end-to-end demo →](https://youtu.be/iPIpk9QCKVw) · 🖼️ [Browse the UI screenshots →](docs/screenshots/)
+### 🖼️ [Browse the UI screenshots →](docs/screenshots/)
 
-*A complete walkthrough — every feature end-to-end, live oracle-proven findings, the interaction-driven UI, and the SIGIL sovereign voice.*
+*A visual walkthrough — every screen end-to-end, live oracle-proven findings, the interaction-driven UI, and the SIGIL sovereign voice.*
+
+<sub>offensive security · penetration testing · red team · bug bounty · ethical hacking · cybersecurity · infosec · security research · AI security · LLM security · agentic AI · autonomous security agent · AppSec · web security · API security · vulnerability scanner · DAST · provable security · verifiable security · oracle-confirmed findings · tamper-evident evidence · cryptographic attestation · Ed25519 · offline-verifiable proofs · zero-trust · defensive security · AEGIS · CRUCIBLE · SIGIL · sovereign AI · Claude · Anthropic</sub>
 
 </div>
 

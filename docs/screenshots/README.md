@@ -3,8 +3,6 @@
 A visual tour of every screen in the unified VIGIL interface (`vigil up`), captured live at 1600×900.
 Findings and proofs shown are from a real loopback engagement — every "CONFIRMED" is oracle-proven.
 
-> 📺 Prefer moving pictures? Watch the [full end-to-end demo video](https://youtu.be/iPIpk9QCKVw).
-
 ## DO — run and watch an assessment
 
 | Screen | Preview |
