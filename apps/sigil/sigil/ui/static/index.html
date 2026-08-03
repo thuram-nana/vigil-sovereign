@@ -1,30 +1,20 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SIGIL · cockpit</title>
-<link rel="stylesheet" href="/static/style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <title>VIGIL COMMAND</title>
+  <!-- self-contained, strict-CSP: only same-origin app.js/style.css; no CDN, no inline script -->
+  <link rel="stylesheet" href="style.css" />
 </head>
-<body data-token="__SIGIL_TOKEN__">
-<header>
-  <h1>◆ SIGIL</h1><span class="sub">glass cockpit · loopback · provenance-first</span>
-  <span id="kill" class="kill-off">…</span>
-</header>
-<main>
-  <section class="panel"><h2>Approval queue</h2><div id="queue" class="q"><span class="empty">loading…</span></div></section>
-  <section class="panel"><h2>Agent activity (recent)</h2><div id="activity" class="kv"></div>
-    <h2 class="mt">Budget today</h2><div id="budget" class="kv"></div>
-    <h2 class="mt">Ingest lag</h2><div id="lag" class="kv"></div></section>
-  <section class="panel"><h2>Capabilities · settings</h2>
-    <p class="hint">Disable gesture or voice control (owner-signed, tamper-evident). A disable takes effect
-      immediately and fail-safe; re-enabling is owner-signed.</p>
-    <div id="capabilities" class="caps"><span class="empty">loading…</span></div></section>
-  <section class="panel feed"><h2>Live event stream · click any atom to verify its provenance</h2>
-    <div id="feed"></div></section>
-</main>
-<div id="detail"><span id="detail-close" class="close">✕ close</span>
-  <div id="detail-body"></div></div>
-<script src="/static/app.js"></script>
+<!-- the server rewrites these placeholders per deployment (token + federated base paths).
+     Standalone (a single server): base paths are "" (its own /api). Behind `vigil up`'s
+     reverse proxy: data-sovereign="/sovereign" data-offense="/offense". -->
+<body data-token="__VIGIL_TOKEN__" data-sovereign="__VIGIL_SOVEREIGN__" data-offense="__VIGIL_OFFENSE__">
+  <noscript>VIGIL COMMAND requires JavaScript. It runs entirely on your machine (no external calls).</noscript>
+  <script src="ui.js"></script>
+  <script src="manual.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
