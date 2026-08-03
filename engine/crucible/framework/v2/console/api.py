@@ -1092,9 +1092,13 @@ def drift_data(arg: str) -> dict[str, Any]:
 
 _TRUST_DOCTRINE = (
     "Every certificate here re-verifies OFFLINE: a verifier re-derives the signed digest from the exact "
-    "bytes on disk, checks an m-of-n Ed25519 threshold of the NAMED authorizers, and confirms the trust-root "
-    "fingerprint matches an OUT-OF-BAND pin. A single flipped byte, or a fresh-key re-sign, fails. A green "
-    "badge means an ACTUAL re-verification passed — never that a signature field merely exists."
+    "bytes on disk and checks an m-of-n Ed25519 threshold of the NAMED authorizers. A single flipped byte "
+    "fails. A green badge means an ACTUAL re-verification passed — never that a signature field merely exists. "
+    "The trust ROOT (origin) is bound only where an OUT-OF-BAND pin exists: the recall baseline's is pinned in "
+    "SOURCE, so a fresh-key re-sign of it is rejected. A per-run cert has NO source pin — its own "
+    ".fingerprint.txt is written by the same signer and is NOT independent, so a fresh-key re-sign of a per-run "
+    "triple still re-verifies (its trust root is shown UNPINNED, not a green match) unless YOU supply the "
+    "operator-held out-of-band pin, which then rejects the forger."
 )
 
 # per-run signed certs the scanner/report pipeline may sign into a run dir (verify.coverage_oracle /
@@ -1143,6 +1147,9 @@ def _read_cert_triple(core_path, *, name: str, kind: str,
         "trust_root": {"threshold": None, "authorizers": []},
         "fingerprint": None,        # the cert's own committed fingerprint (.fingerprint.txt)
         "source_pin": source_pin,   # the OUT-OF-BAND pin held in SOURCE (recall baseline only), else None
+        # True only when an INDEPENDENT (source-held) pin binds the trust root. A per-run cert's own
+        # .fingerprint.txt is written by the same signer, so it is NOT an out-of-band pin → False here.
+        "trust_root_pinned": source_pin is not None,
         "summary": {},
     }
     present = _safe(lambda: core_path.is_file() and sig_path.is_file(), default=False)
@@ -1211,6 +1218,7 @@ def certs() -> dict[str, Any]:
         "doctrine": _TRUST_DOCTRINE,
         "source_pin_note": ("The recall baseline's trust root is pinned in SOURCE "
                             "(eval.recall_baseline.TRUST_ROOT_FINGERPRINT): rewriting it is a visible code "
-                            "change, not a silent data-file swap. Per-run certs pin against their committed "
-                            "fingerprint file — compare it to the operator's out-of-band value."),
+                            "change, not a silent data-file swap. A per-run cert has NO source pin — its own "
+                            ".fingerprint.txt is written by the same signer and is NOT independent, so its "
+                            "trust root shows UNPINNED unless you supply the operator-held out-of-band pin."),
     }

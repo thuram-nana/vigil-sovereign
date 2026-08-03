@@ -547,27 +547,47 @@
           return h("div", { style: { marginBottom: "3px" } },
             [V.pill(a.key_id || "?", null, null), " ", h("span.mono", null, trustShort(a.public_key_b64, 14, 6))]);
         }) : "—")]),
-      trustKv("Fingerprint pin (out-of-band)", h("span.mono", null, trustShort(c.fingerprint || c.source_pin, 26, 8))),
+      // A SOURCE-pinned cert (recall) shows its out-of-band pin; a per-run cert's .fingerprint.txt is
+      // written by the same signer and is NOT a pin — label it honestly so no "out-of-band" claim is implied.
+      c.source_pin
+        ? trustKv("Fingerprint pin (out-of-band)", h("span.mono", null, trustShort(c.source_pin, 26, 8)))
+        : trustKv("Fingerprint (self-asserted, in-bundle — NOT a pin)",
+                  h("span.mono", null, trustShort(c.fingerprint, 26, 8))),
       c.source_pin ? h("div.hint", null,
         "This trust root is pinned in SOURCE — a re-sign under a fresh key fails the pin.") : null,
+      c.source_pin ? null : h("div.hint", null,
+        "No source pin for a per-run cert: this fingerprint is written by the same signer, so it proves "
+        + "tamper-after-signing only. To bind the trust ROOT (reject a fresh-key re-sign), paste the "
+        + "operator-held out-of-band pin below."),
       trustSummary(c),
     ];
     var resultId = trustCssId(c.id);
+    var pinId = c.source_pin ? null : (resultId + "-pin");
+    if (pinId) {
+      body.push(h("div.kv", { style: { marginTop: "8px" } }, [
+        h("div.k", null, "Out-of-band pin (optional)"),
+        h("div.v", null, h("input.mono", { id: pinId, type: "text", spellcheck: "false",
+          placeholder: "sha256:… (the pin you hold independently)" })),
+      ]));
+    }
     body.push(h("div.row", { style: { marginTop: "10px", alignItems: "center" } }, [
-      h("button.btn.sm.primary", { onClick: function () { doVerifyCert(c, resultId); } },
+      h("button.btn.sm.primary", { onClick: function () { doVerifyCert(c, resultId, pinId); } },
         [V.icon("shield"), "Verify offline"]),
-      h("span.hint", { style: { marginLeft: "8px" } },
-        "Re-derives the digest + checks the signature + the OOB pin. Offline, read-only."),
+      h("span.hint", { style: { marginLeft: "8px" } }, c.source_pin
+        ? "Re-derives the digest + checks the signature + the SOURCE pin. Offline, read-only."
+        : "Re-derives the digest + checks the signature; binds the trust root only if you supply a pin. Offline, read-only."),
     ]));
     body.push(h("div", { id: resultId, style: { marginTop: "10px" } }));
     return h("div.card", null, [head, h("div", null, body)]);
   }
 
-  function doVerifyCert(c, resultId) {
+  function doVerifyCert(c, resultId, pinId) {
     var slot = V.$("#" + resultId);
     if (slot) V.mount(slot, h("div.row", { style: { alignItems: "center" } },
       [V.statusBadge("running"), h("span.hint", { style: { marginLeft: "8px" } }, "verifying offline…")]));
-    V.postJSON(OFF("/api/verify-cert"), { name: c.id, run_id: c.run_id || "" }).then(function (r) {
+    var pinEl = pinId ? V.$("#" + pinId) : null;
+    var oobPin = pinEl ? String(pinEl.value || "").trim() : "";
+    V.postJSON(OFF("/api/verify-cert"), { name: c.id, run_id: c.run_id || "", oob_pin: oobPin }).then(function (r) {
       renderVerifyResult(slot, r);
     }).catch(function () {
       if (slot) V.mount(slot, h("div.hint", null, "Verify failed — offense console unreachable."));
@@ -582,7 +602,22 @@
       return;
     }
     var ok = !!r.verified;
-    var fpOk = !!r.fingerprint_matches_pin;
+    // fingerprint_matches_pin is TRUE / FALSE only when a real out-of-band pin bound the trust root;
+    // NULL means the per-run trust root is UNPINNED (no independent pin) — that is NOT a green match.
+    var fp = r.fingerprint_matches_pin;
+    var fpRow;
+    if (fp === true) {
+      fpRow = h("span.row", { style: { alignItems: "center" } },
+        [V.statusBadge("confirmed"), h("span", { style: { marginLeft: "8px" } }, "matches the out-of-band pin")]);
+    } else if (fp === false) {
+      fpRow = h("span.row", { style: { alignItems: "center" } },
+        [V.statusBadge("refuted"), h("span", { style: { marginLeft: "8px" } }, "does NOT match the pin")]);
+    } else {
+      // unpinned trust root — neutral, never green. The origin/trust-root guarantee is not established.
+      fpRow = h("span.row", { style: { alignItems: "center" } },
+        [V.statusBadge("idle"), h("span", { style: { marginLeft: "8px" } },
+          "trust root UNPINNED — no out-of-band pin supplied (origin not bound)")]);
+    }
     V.mount(slot, [
       h("div.row", { style: { alignItems: "center" } }, [
         V.statusBadge(ok ? "confirmed" : "refuted"),
@@ -590,10 +625,8 @@
           ok ? "PASS — signature re-verified offline" : "FAIL — did not verify"),
       ]),
       h("div.kv", { style: { marginTop: "6px" } }, [
-        h("div.k", null, "Fingerprint vs out-of-band pin"),
-        h("div.v", null, h("span.row", { style: { alignItems: "center" } },
-          [V.statusBadge(fpOk ? "confirmed" : "refuted"),
-           h("span", { style: { marginLeft: "8px" } }, fpOk ? "matches the pin" : "does NOT match the pin")]))]),
+        h("div.k", null, "Trust root vs out-of-band pin"),
+        h("div.v", null, fpRow)]),
       (r.which_authorizers && r.which_authorizers.length)
         ? trustKv("Signed by", r.which_authorizers.join(", ")) : null,
       r.digest ? trustKv("Digest", h("span.mono", null, trustShort(r.digest))) : null,

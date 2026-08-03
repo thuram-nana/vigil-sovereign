@@ -426,10 +426,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/verify-cert":
                 # Trust Center: OFFLINE-verify ONE signed certificate from api.certs's own list. PURE /
-                # offline / read-only — re-derives the digest + checks the m-of-n signature + the OOB
-                # fingerprint pin. Takes NO scope/target, issues NO traffic, mints NOTHING. CSRF/rebind-
-                # gated above; an unsafe run id raises ValueError in run_dir → fail-closed refusal body.
-                self._json(actions.verify_cert(str(body.get("name", "")), str(body.get("run_id", ""))))
+                # offline / read-only — re-derives the digest + checks the m-of-n signature, and binds the
+                # trust ROOT to an out-of-band pin where one exists (source pin for recall; the OPTIONAL
+                # operator-supplied `oob_pin` for a per-run cert — its sibling .fingerprint.txt is NOT a pin).
+                # Takes NO scope/target, issues NO traffic, mints NOTHING. CSRF/rebind-gated above; an unsafe
+                # run id raises ValueError in run_dir → fail-closed refusal body.
+                self._json(actions.verify_cert(str(body.get("name", "")), str(body.get("run_id", "")),
+                                               str(body.get("oob_pin", ""))))
                 return
             if path == "/api/authority/ledger":
                 # replay the who/when/what usage-attestation ledger + verify its chain (read-only).
