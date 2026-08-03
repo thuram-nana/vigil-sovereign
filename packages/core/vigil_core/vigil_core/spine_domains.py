@@ -158,18 +158,20 @@ DOMAINS: tuple[SpineDomain, ...] = (
         location="persisted at end of a live engage run to <base_dir>/spine-head.json + spine-chain.json "
                  "(live/wiring.py:_persist_blackboard_chain, over framework spine_chain.build_spine_chain); "
                  "offline-verified by live/spine_verify.py:verify_blackboard_chain",
-        note="T3: a live engage run THAT POSTED EVENTS TO THE BLACKBOARD (e.g. a deployed fireteam wave) SIGNS "
-             "+ WRITES the blackboard chain as inert bytes — a governance-signed SignedChainHead "
-             "(spine-head.json, binding engagement_slug) + the ChainEntry digests (spine-chain.json), so the "
-             "head re-binds WITHOUT the offense DB. verify_blackboard_chain reads ONLY those bytes + PUBLIC keys "
-             "(vigil_core.chain.verify_head; no DB, no framework) and DERIVES the governance TrustRoot from an "
-             "owner-signed OFFENSE_GOVERNANCE_ROLE delegation — the live owner-tie consumer — so a public-key-"
-             "only reader CAN verify it and its trust IS owner-rooted. The head is m-of-n governance-signed with "
-             "the SAME key anchor-1 uses; one owner delegation (`vigil identity` -> `sigil delegate-offense`) "
-             "covers both. HONEST LIMIT: the live OODA loop does not itself post to the blackboard, so a typical "
-             "OODA-only run persists NO artifacts and the verdict is honestly UNVERIFIABLE (making every run "
-             "populate+persist is the disclosed T3b follow-up). Fail-closed: absent artifacts / no governance "
-             "delegation → honestly UNVERIFIABLE, never a fake verified.",
+        note="T3/T3b: EVERY live engage run SIGNS + WRITES the blackboard chain as inert bytes — a "
+             "governance-signed SignedChainHead (spine-head.json, binding engagement_slug) + the ChainEntry "
+             "digests (spine-chain.json), so the head re-binds WITHOUT the offense DB. T3b closed the last gap: "
+             "the live OODA loop now MIRRORS its own hook points (decision/hypothesis/observation/tool_call/"
+             "tool_result/finding/refusal) onto the blackboard via live/engine.py's spine_post seam "
+             "(live/wiring.py:_build_spine_poster, over agents.spine_sink.SpineSink) — the SAME open_blackboard() "
+             "DB + slug _persist_blackboard_chain reads — so a plain OODA-only run (no fireteam) populates + "
+             "persists a verifiable chain too; the segment is UNIVERSAL, not fireteam-only. "
+             "verify_blackboard_chain reads ONLY those bytes + PUBLIC keys (vigil_core.chain.verify_head; no DB, "
+             "no framework) and DERIVES the governance TrustRoot from an owner-signed OFFENSE_GOVERNANCE_ROLE "
+             "delegation — the live owner-tie consumer — so a public-key-only reader CAN verify it and its trust "
+             "IS owner-rooted. The head is m-of-n governance-signed with the SAME key anchor-1 uses; one owner "
+             "delegation (`vigil identity` -> `sigil delegate-offense`) covers both. Fail-closed: absent "
+             "artifacts / no governance delegation → honestly UNVERIFIABLE, never a fake verified.",
         owner_tie_consumer="integration/.../live/spine_verify.py:verify_blackboard_chain -> "
                            "verify_delegation(OFFENSE_GOVERNANCE_ROLE)",
     ),

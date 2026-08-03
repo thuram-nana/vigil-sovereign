@@ -45,6 +45,14 @@ class SpineSink:
         except Exception:
             return None   # never let a spine write perturb the scan/engagement
 
+    def post_event(self, kind: EventKind, payload: dict[str, Any], *,
+                   parent_id: int | None = None) -> int | None:
+        """Generic best-effort poster for any typed event kind (T3b) — a thin public passthrough over the
+        swallow-on-error :meth:`_post`, for callers (the live OODA loop's ``spine_post`` adapter) that build
+        their own schema-valid payloads for kinds without a bespoke helper above (e.g. ``hypothesis`` /
+        ``observation``). Returns the new event id, or None if the write was swallowed (never raises)."""
+        return self._post(kind, payload, parent_id=parent_id)
+
     # ---- ProgressSink Protocol (real-time, progress-level → observation events) ----
 
     def phase(self, name: str, **fields: object) -> None:

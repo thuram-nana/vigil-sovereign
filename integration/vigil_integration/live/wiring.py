@@ -567,6 +567,12 @@ def build_engine(config: EngineConfig) -> VigilEngine:
             ]
             graph_writer.rebuild_from_spine(records, group_id=graph_partition)
 
+    # -- T3b: mirror the OODA loop onto the blackboard event spine so persist_spine has real events to sign
+    # for EVERY engage run (O9 universal — not fireteam-only). SAME default open_blackboard() DB + SAME
+    # config.slug that _persist_blackboard_chain reads → that symmetry lets the end-of-run persist find these
+    # events. Fail-closed: no framework/blackboard ⇒ None ⇒ the seam is a NO-OP (persist writes nothing).
+    spine_post = _build_spine_poster(config.slug)
+
     # -- T3: persist the CRUCIBLE blackboard chain as inert, governance-signed bytes at end of run ---------
     def persist_spine() -> None:
         # Reuses the SAME governance signers the engine provisioned (prov.signers) — the anchor-1 m-of-n
@@ -578,7 +584,7 @@ def build_engine(config: EngineConfig) -> VigilEngine:
         think=think_seam, gate=gate, run_tool=run_tool, oracle=oracle, attest=attest,
         checkpoint=checkpoint, detect=detect, approval=approval,
         operator_messages=operator_messages, deploy_fireteam=deploy_fireteam,
-        project=graph_project, persist_spine=persist_spine,
+        project=graph_project, persist_spine=persist_spine, spine_post=spine_post,
     )
     return VigilEngine(slug=config.slug, seams=seams,
                        require_attestation=config.require_attestation,
@@ -991,6 +997,102 @@ def _atomic_write_0600(path: Path, text: str) -> None:
         pass
 
 
+# The engine's plain severity vocabulary → the framework FindingPayload's Literal severities. An unknown
+# value degrades to "Info" (never over-states severity), so a mirrored finding is always schema-valid.
+_SPINE_SEVERITY = {"critical": "Critical", "high": "High", "medium": "Medium", "med": "Medium",
+                   "moderate": "Medium", "low": "Low", "info": "Info", "informational": "Info"}
+
+
+def _spine_finding_payload(p: dict) -> dict:
+    """Reshape the engine's simple finding dict into a VALID framework ``FindingPayload`` mapping. Framework
+    schema knowledge lives HERE (wiring already imports the framework), so the engine stays framework-free.
+    ``critique_status`` is 'confirmed' ONLY for an oracle-minted fact (status == 'fact'), else 'pending' —
+    never over-stating the veracity the loop already sealed in the signed spine."""
+    is_fact = str(p.get("status", "")) == "fact"
+    sev = _SPINE_SEVERITY.get(str(p.get("severity", "")).strip().lower(), "Info")
+    return {
+        "finding_slug": str(p.get("finding_slug") or p.get("ref") or "000-lead"),
+        "title": str(p.get("title", "") or "(finding)"),
+        "severity": sev,
+        "bug_class": str(p.get("bug_class", "") or "unknown"),
+        "surface": str(p.get("surface", "") or p.get("source", "") or "(surface)"),
+        "summary": str(p.get("summary", "") or p.get("title", "") or "(finding)"),
+        "critique_status": "confirmed" if is_fact else "pending",
+        "verified_by_oracle": bool(p.get("verified_by_oracle", False)) and is_fact,
+    }
+
+
+def _build_spine_poster(slug: str) -> Optional[Callable[..., Optional[int]]]:
+    """T3b — build the OODA→blackboard spine poster for ``slug`` so EVERY engage run POPULATES the event spine
+    that :func:`_persist_blackboard_chain` signs at end-of-run (making O9 — an offline-verifiable spine —
+    UNIVERSAL, not only on the fireteam path).
+
+    CRITICAL SYMMETRY: this poster and ``_persist_blackboard_chain`` both use the DEFAULT ``open_blackboard()``
+    DB and the SAME ``slug`` — that is exactly what lets the end-of-run persist find (and sign) these events.
+    No new key is minted: persist reuses ``prov.signers``.
+
+    FATAL-2: every framework import is FUNCTION-LOCAL (this offense-side path never co-loads the sovereign
+    env). Fail-closed: if the framework/blackboard cannot be opened, returns None ⇒ the engine's ``spine_post``
+    seam is a NO-OP (no events ⇒ persist writes nothing ⇒ the segment stays honestly UNVERIFIABLE, never a
+    fake pass). Every post is best-effort (``SpineSink`` swallows write errors); the returned event id enables
+    provenance edges (tool_call→tool_result, finding←observation)."""
+    try:
+        # Framework imports are function-local (FATAL-2). SpineSink is the ready-made blackboard poster.
+        from framework.v2.agents.blackboard import open_blackboard
+        from framework.v2.agents.spine_sink import SpineSink
+
+        sink = SpineSink(open_blackboard(), slug, agent_name="ooda")
+    except Exception as exc:  # noqa: BLE001 — no framework/blackboard ⇒ no spine mirror (fail-closed NO-OP)
+        _log.info("live.wiring.build_spine_poster: no blackboard mirror for slug=%s (%s)", slug, exc)
+        return None
+
+    def spine_post(kind: str, payload: dict, *, parent_id: Optional[int] = None) -> Optional[int]:
+        # Translate the engine's plain (kind, payload) into a schema-valid blackboard event via SpineSink.
+        # SpineSink._post already swallows write errors; the outer guard is belt-and-braces so a mapping bug
+        # can never raise into the loop.
+        p = payload or {}
+        try:
+            if kind == "decision":
+                return sink.decision(str(p.get("question", "")), str(p.get("choice", "")),
+                                     str(p.get("rationale", "")))
+            if kind == "hypothesis":
+                return sink.post_event("hypothesis", {
+                    "handle": str(p.get("handle", "") or "H-?"),
+                    "surface": str(p.get("surface", "") or "(surface)"),
+                    "bug_class": str(p.get("bug_class", "")),
+                    "given": str(p.get("given", "") or "the chartered target"),
+                    "if_action": str(p.get("action", "") or "the proposed action"),
+                    "then_observation": str(p.get("rationale", "") or "the proposed observation"),
+                    "because_model": str(p.get("rationale", "") or "the reasoning core's model"),
+                    "refute_on": "the deterministic oracle does not fire over the target's own bytes",
+                    "cheap_test": str(p.get("action", "") or "run the proposed tool"),
+                    "status": "open"}, parent_id=parent_id)
+            if kind == "observation":
+                return sink.post_event("observation", {
+                    "source": str(p.get("source", "") or "ooda"),
+                    "surface": str(p.get("surface", "") or "(surface)"),
+                    "summary": str(p.get("summary", ""))}, parent_id=parent_id)
+            if kind == "tool_call":
+                return sink.tool_call(str(p.get("tool", "")), tier=str(p.get("tier", "")),
+                                      target=str(p.get("target", "")),
+                                      args_summary=str(p.get("args_summary", "")), parent_id=parent_id)
+            if kind == "tool_result":
+                return sink.tool_result(str(p.get("tool", "")), ok=bool(p.get("ok", False)),
+                                        refused=bool(p.get("refused", False)), gate=str(p.get("gate", "")),
+                                        summary=str(p.get("summary", "")), note=str(p.get("note", "")),
+                                        tool_call_id=parent_id)
+            if kind == "finding":
+                return sink.finding_event(_spine_finding_payload(p), parent_id=parent_id)
+            if kind == "refusal":
+                return sink.refusal(str(p.get("gate", "")), str(p.get("action_refused", "")),
+                                    reason=str(p.get("reason", "")), fatal=bool(p.get("fatal", False)))
+        except Exception:  # noqa: BLE001 — a spine write NEVER perturbs the run (SpineSink also swallows)
+            return None
+        return None
+
+    return spine_post
+
+
 def _persist_blackboard_chain(base_dir: str, slug: str, signers: list) -> None:
     """T3 — SIGN + WRITE the CRUCIBLE blackboard chain for ``slug`` as inert bytes under ``base_dir``, so the
     public-key-only offline reader ``spine_verify.verify_blackboard_chain`` can verify it (making overclaim O9
@@ -1033,6 +1135,13 @@ def _persist_blackboard_chain(base_dir: str, slug: str, signers: list) -> None:
                 bb.close()
             except Exception:  # noqa: BLE001 — a close error must not mask a successful build
                 pass
+        # T3b — an EMPTY chain is vacuous: it proves nothing and (with the spine_post seam left None, or a run
+        # that never posted an event) the engagement row may exist with zero events. Persist NOTHING rather
+        # than an empty pair — so the segment stays honestly UNVERIFIABLE (absent artifacts), never a
+        # zero-entry "verified". This preserves the pre-T3b "OODA-only run persists nothing" behaviour now that
+        # build_engine creates the SpineSink (and thus the engagement row) up front.
+        if not fw_entries:
+            return
         # Rebuild the hash-linked chain over the per-event digests with vigil_core, then sign the head over
         # EXACTLY those persisted entries (not a second DB read), so head↔entries always bind for the offline
         # reader. sign_head binds engagement_slug — no cross-engagement head replay.

@@ -39,6 +39,7 @@ from vigil_integration.attestation.ledger import read_ledger, verify_ledger  # n
 from vigil_integration.conjunctive_gate import build_offense_gate  # noqa: E402
 from vigil_integration.live.think_claude import ReplayThinker  # noqa: E402
 from vigil_integration.live.wiring import (  # noqa: E402
+    DEFAULT_KEY_ID,
     EngineConfig,
     build_engine,
     default_classify,
@@ -84,6 +85,19 @@ def hermetic_root(tmp_path, monkeypatch):
     """Point the CRUCIBLE authority store at a throwaway dir so provisioning is hermetic."""
     monkeypatch.setenv("CRUCIBLE_ROOT", str(tmp_path / "crucible-root"))
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_blackboard(tmp_path, monkeypatch):
+    """T3b — isolate the CRUCIBLE blackboard to a per-test tmp DB. build_engine now wires an OODA→spine
+    mirror (a SpineSink on the DEFAULT open_blackboard()) and the end-of-run persist reads that SAME DB, so
+    without isolation every engage would write to the shared repo store and leak events across tests. Both the
+    poster and _persist_blackboard_chain import open_blackboard at CALL time, so patching the module attribute
+    redirects both to one per-test file (mirrors test_spine_verify's blackboard isolation)."""
+    from framework.v2.agents import blackboard as _bb
+    db = tmp_path / "bb-isolated.sqlite"
+    monkeypatch.setattr(_bb, "open_blackboard", lambda **_kw: _bb.Blackboard(db_path=db))
+    yield
 
 
 def _engine(tmp_path, replay, *, owner_approves=True):
@@ -493,3 +507,103 @@ def test_live_redrive_out_of_charter_scope_is_refused_never_a_fact(tmp_path, mon
     assert any(t.outcome == "ran" for t in report.tool_calls)    # the tool ran (authority admits 127.0.0.1)
     assert report.fact_count == 0                                # the re-drive was REFUSED (out of charter scope)
     assert report.leads                                          # a refusal degrades to a labelled lead
+
+
+# ===================================================================================================
+# T3b (TRUTHENOVATION) — the UNIVERSAL offline-verifiable spine (overclaim O9). This is the assertion
+# the T3 unit test (test_spine_verify.py) could NOT make: a REAL loopback engage with NO fireteam — a
+# plain OODA run — now POPULATES the blackboard (via the engine's spine_post seam) and PERSISTS the
+# governance-signed spine-head.json + spine-chain.json, so verify_blackboard_chain returns VERIFIED +
+# owner-rooted; a tampered entry FAILS; and an engine built WITHOUT the spine_post seam persists nothing
+# (byte-identical to before T3b — the None-seam is fail-closed, never a fake pass).
+# ===================================================================================================
+
+from dataclasses import replace as _dc_replace  # noqa: E402
+
+from vigil_core import AuthorizerKey, generate_keypair  # noqa: E402
+from vigil_core.delegation import OFFENSE_GOVERNANCE_ROLE, sign_delegation  # noqa: E402
+from vigil_integration.live.spine_verify import (  # noqa: E402
+    BLACKBOARD_CHAIN_FILE,
+    BLACKBOARD_HEAD_FILE,
+    FAILED,
+    VERIFIED,
+    verify_blackboard_chain,
+)
+
+_T3B_NOW, _T3B_NOT_AFTER = 1000, 2000
+
+
+def _gov_delegation_for(prov, *, owner, scope="*", not_after=_T3B_NOT_AFTER):
+    """An owner-signed OFFENSE_GOVERNANCE_ROLE delegation over the engine's provisioned anchor-1 governance
+    key (prov.keypair, key_id=DEFAULT_KEY_ID) — the SAME key prov.signers signs the persisted head under, so
+    a public-key-only reader derives the trusted governance root from this delegation and verifies the head."""
+    auth = AuthorizerKey(key_id=DEFAULT_KEY_ID, name=DEFAULT_KEY_ID,
+                         public_key_b64=prov.keypair.public_key_b64)
+    return sign_delegation(owner, role=OFFENSE_GOVERNANCE_ROLE, scope=scope,
+                           authorizers=[auth], threshold=1, not_after=not_after)
+
+
+def test_ooda_only_engage_persists_a_universal_offline_verifiable_spine(hermetic_root, tmp_path):
+    # THE T3b POINT: a plain OODA engage (NO fireteam) now populates + persists the blackboard chain, and it
+    # verifies owner-rooted OFFLINE under an owner-signed governance delegation — O9 is now UNIVERSAL.
+    from pathlib import Path
+
+    engine, prov, cfg = _engine(
+        tmp_path, ReplayThinker([_use_tool(oracle_context=_NONFIRING_SQLI), _complete()]))
+    report = engine.engage(LOOPBACK, objective="t3b universal spine")
+    assert report.refused is False
+    assert engine.seams.spine_post is not None                    # the OODA→spine mirror IS wired
+
+    base = Path(cfg.base_dir)
+    head_p = base / BLACKBOARD_HEAD_FILE
+    chain_p = base / BLACKBOARD_CHAIN_FILE
+    assert head_p.exists() and chain_p.exists()                   # a fireteam-free run WROTE the artifacts
+
+    owner = generate_keypair()
+    deleg = _gov_delegation_for(prov, owner=owner)
+    v = verify_blackboard_chain(head_path=str(head_p), chain_path=str(chain_p),
+                                owner_pubkey=owner.public_key_b64, delegation=deleg,
+                                now=_T3B_NOW, scope="*", slug=cfg.slug)
+    assert v.status == VERIFIED and v.owner_rooted is True, f"expected owner-rooted VERIFIED, got {v}"
+
+
+def test_ooda_only_persisted_spine_tamper_fails_closed(hermetic_root, tmp_path):
+    # Mutate one persisted chain entry (a raw-file edit that bypasses the DB triggers) → the offline verify
+    # FAILS closed: the head no longer binds the tampered chain.
+    import json
+    from pathlib import Path
+
+    engine, prov, cfg = _engine(
+        tmp_path, ReplayThinker([_use_tool(oracle_context=_NONFIRING_SQLI), _complete()]))
+    engine.engage(LOOPBACK)
+    chain_p = Path(cfg.base_dir) / BLACKBOARD_CHAIN_FILE
+    head_p = Path(cfg.base_dir) / BLACKBOARD_HEAD_FILE
+    entries = json.loads(chain_p.read_text(encoding="utf-8"))
+    assert entries, "the OODA run must have produced at least one chain entry"
+    entries[0]["cert_digest"] = "de" * 32                         # tamper a signed entry digest
+    chain_p.write_text(json.dumps(entries), encoding="utf-8")
+
+    owner = generate_keypair()
+    deleg = _gov_delegation_for(prov, owner=owner)
+    v = verify_blackboard_chain(head_path=str(head_p), chain_path=str(chain_p),
+                                owner_pubkey=owner.public_key_b64, delegation=deleg,
+                                now=_T3B_NOW, scope="*", slug=cfg.slug)
+    assert v.status == FAILED and v.owner_rooted is False
+
+
+def test_none_spine_post_seam_persists_nothing_no_regression(hermetic_root, tmp_path):
+    # The fail-closed None-seam path: an engine whose spine_post seam is None runs identically but posts NO
+    # OODA events, so the end-of-run persist has nothing to anchor and writes NO artifacts (byte-identical to
+    # pre-T3b behaviour — never a fake pass). Uses its OWN fresh hermetic root/base so no other run's events
+    # leak into this slug's chain.
+    from pathlib import Path
+
+    engine, prov, cfg = _engine(
+        tmp_path, ReplayThinker([_use_tool(oracle_context=_NONFIRING_SQLI), _complete()]))
+    engine.seams = _dc_replace(engine.seams, spine_post=None)     # drop ONLY the OODA→spine mirror
+    report = engine.engage(LOOPBACK)
+    assert report.refused is False                                # the run itself is unaffected
+    assert any(t.outcome == "ran" for t in report.tool_calls)     # the tool still ran (no behavioural change)
+    base = Path(cfg.base_dir)
+    assert not (base / BLACKBOARD_HEAD_FILE).exists()             # nothing posted ⇒ nothing persisted
+    assert not (base / BLACKBOARD_CHAIN_FILE).exists()
