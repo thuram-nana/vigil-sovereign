@@ -22,17 +22,17 @@ It is deliberately honest about the limits the S5 understand-phase found:
     (``finding_receiver.from_delegation`` → ``verify_delegation``) exists. Closing the spine/ledger ties is
     S6/S7's job; this module does not pretend the tie is enforced before it is.
   * ``file_backed`` states whether the segment is persisted as inert bytes a public-key-only reader can
-    verify offline. As of T3 the CRUCIBLE blackboard chain HAS a real persist + offline-verify path: a live
-    engage run **that posted events to the blackboard** (e.g. a deployed fireteam wave) persists it as a
-    governance-signed ``spine-head.json`` + a ``spine-chain.json`` entry-digest chain under the run dir, and
-    ``spine_verify.verify_blackboard_chain`` verifies those inert bytes offline — DB-free and framework-free —
-    under an owner-signed ``OFFENSE_GOVERNANCE_ROLE`` delegation, so a byte-reader CAN verify it.
-    HONEST LIMIT: the live OODA loop does not itself post to the blackboard (only the fireteam coordination
-    path, reached after an approved escalation, does), so a typical OODA-only run persists NO artifacts and the
-    segment verdict is honestly ``UNVERIFIABLE`` (never a fake "verified"). Making every engage run populate +
-    persist the chain is the disclosed follow-up (T3b); this flag marks the segment's *nature* (it has a real
-    file-backed offline-verify path), consistent with the other ``file_backed`` segments that also persist only
-    when they hold content.
+    verify offline. As of T3b the CRUCIBLE blackboard chain has a real persist + offline-verify path on every
+    live engage run **that enters the OODA loop**: the loop mirrors its own hook points onto the blackboard, so
+    at run end the chain persists as a governance-signed ``spine-head.json`` + a ``spine-chain.json`` entry-
+    digest chain under the run dir, and ``spine_verify.verify_blackboard_chain`` verifies those inert bytes
+    offline — DB-free and framework-free — under an owner-signed ``OFFENSE_GOVERNANCE_ROLE`` delegation.
+    HONEST SCOPE: (a) a run refused at the attest-first gate (BEFORE the loop) posts nothing → the segment is
+    honestly ``UNVERIFIABLE`` (never a fake "verified"); (b) the chain proves the integrity, order, and
+    owner-root of the events the run POSTED (engine-authored summaries) — it is NOT a re-verification of a
+    finding's oracle proof (that is the separate proof re-execution, T1/T2) nor a guarantee the run recorded
+    everything it did; (c) it is the engagement's FULL append-only history for its slug, so it grows if a slug
+    is re-engaged (per-run byte-reproducibility holds for a fresh slug).
 """
 from __future__ import annotations
 
@@ -158,14 +158,19 @@ DOMAINS: tuple[SpineDomain, ...] = (
         location="persisted at end of a live engage run to <base_dir>/spine-head.json + spine-chain.json "
                  "(live/wiring.py:_persist_blackboard_chain, over framework spine_chain.build_spine_chain); "
                  "offline-verified by live/spine_verify.py:verify_blackboard_chain",
-        note="T3/T3b: EVERY live engage run SIGNS + WRITES the blackboard chain as inert bytes — a "
+        note="T3/T3b: every live engage run THAT ENTERS THE OODA LOOP signs + writes the blackboard chain as inert bytes — a "
              "governance-signed SignedChainHead (spine-head.json, binding engagement_slug) + the ChainEntry "
              "digests (spine-chain.json), so the head re-binds WITHOUT the offense DB. T3b closed the last gap: "
              "the live OODA loop now MIRRORS its own hook points (decision/hypothesis/observation/tool_call/"
              "tool_result/finding/refusal) onto the blackboard via live/engine.py's spine_post seam "
              "(live/wiring.py:_build_spine_poster, over agents.spine_sink.SpineSink) — the SAME open_blackboard() "
              "DB + slug _persist_blackboard_chain reads — so a plain OODA-only run (no fireteam) populates + "
-             "persists a verifiable chain too; the segment is UNIVERSAL, not fireteam-only. "
+             "persists a verifiable chain too; the segment is universal across OODA runs (no longer fireteam-only). "
+             "HONEST SCOPE: a run refused at the attest-first gate (before the loop) posts nothing → honestly "
+             "UNVERIFIABLE; the chain proves integrity/order/owner-root of the POSTED engine-authored SUMMARIES, "
+             "NOT a finding's oracle re-verification (that is the separate proof re-execution, T1/T2) nor a "
+             "complete record of everything the run did; it is the engagement's cumulative append-only history "
+             "(grows on re-engage of a slug). "
              "verify_blackboard_chain reads ONLY those bytes + PUBLIC keys (vigil_core.chain.verify_head; no DB, "
              "no framework) and DERIVES the governance TrustRoot from an owner-signed OFFENSE_GOVERNANCE_ROLE "
              "delegation — the live owner-tie consumer — so a public-key-only reader CAN verify it and its trust "
