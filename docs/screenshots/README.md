@@ -21,6 +21,7 @@ Findings and proofs shown are from a real loopback engagement — every "CONFIRM
 | **Report** — executive summary + one-click signed dossier | ![Report](12-report.png) |
 | **Fixes** — gated, oracle-earned remediation (proven by oracle silence) | ![Fixes](13-fixes.png) |
 | **Defense (AEGIS)** — watch your own app for AI attacks | ![Defense (AEGIS)](14-defense-aegis.png) |
+| **Replay the Proof** — paste an external report.json → re-fire its retained oracle proofs OFFLINE (no target, no traffic); a tampered proof shows CONTRADICTED, never a green reproduction | ![Replay the Proof](30-replay-proof.png) |
 
 ## MANAGE — govern the system
 
@@ -40,9 +41,11 @@ Findings and proofs shown are from a real loopback engagement — every "CONFIRM
 | **Settings** — model picker, effort, bring-your-own provider | ![Settings](26-settings.png) |
 | **Knowledge Engine** — vuln feeds, propose-to-learn, self-evolve | ![Knowledge Engine](27-knowledge-engine.png) |
 | **New Assessment › Cloud / K8s / infra posture** — CSPM / IAM / kube-bench import (posture analysis of a provided export — never a live cloud attack) | ![Cloud / K8s posture](28-cloud-account.png) |
+| **Governance & Gate Audit** — read-only posture: GOVERNED vs UNGOVERNED (entitlement enforced?), the sovereignty tier, the conjunctive safety-gate, and the m-of-n destruction quorum (the UI can never fire a destructive action) | ![Governance & Gate Audit](31-governance.png) |
 
 ## LEARN
 
 | Screen | Preview |
 |---|---|
+| **Trust Center** — VIGIL's signed recall / coverage / plan-integrity / evidence certificates rendered *as certificates* (trust root, out-of-band fingerprint pin) with a live offline PASS/FAIL verification | ![Trust Center](32-trust-center.png) |
 | **Manual** — the in-app documentation | ![Manual](29-manual.png) |
