@@ -96,6 +96,10 @@ class ProbeRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     endpoint: str
+    method: str = Field(default="GET", description=(
+        "HTTP method. With the surface it is the FULL probe identity — a GET and a POST to "
+        "one path+query are DISTINCT surfaces, so a method-aware skip diff (M3 plan-integrity) "
+        "does not hide an unprobed POST behind a probed GET."))
     insertion_point: str = Field(description="The point id (kind:locator) or request:<check> anchor.")
     param: str = Field(description="Human name of the point (param/header/cookie/pointer) or (request).")
     check_id: str
@@ -199,13 +203,14 @@ class AuditEngine:
     def _record_probe(
         self, *, endpoint: str, insertion_point: str, param: str,
         check_id: str, bug_class: str, result: VerificationResult,
+        method: str = "GET",
     ) -> None:
         """Retain one adjudicated probe. Called ONLY when an oracle layer actually
         ran over observed data (a real VerificationResult), so the record honestly
         reflects an EXERCISED surface — never a check that never engaged."""
         verdict, kinds = probe_verdict(result)
         self.exercised.append(ProbeRecord(
-            endpoint=endpoint, insertion_point=insertion_point, param=param,
+            endpoint=endpoint, method=method, insertion_point=insertion_point, param=param,
             check_id=check_id, bug_class=bug_class,
             oracle_kinds_run=kinds, verdict=verdict,
         ))
@@ -252,7 +257,7 @@ class AuditEngine:
                 rresult = adjudicate_finding(rfinding, ctx, self.verifier)
                 # Retain the coverage evidence (both branches) BEFORE the None-drop.
                 self._record_probe(
-                    endpoint=request.url, insertion_point=f"request:{rcheck.id}",
+                    endpoint=request.url, method=request.method, insertion_point=f"request:{rcheck.id}",
                     param="(request)", check_id=rcheck.id, bug_class=rcheck.bug_class,
                     result=rresult,
                 )
@@ -346,7 +351,7 @@ class AuditEngine:
                     # None-drop below discards the negative branch as it always has.
                     if result is not None:
                         self._record_probe(
-                            endpoint=request.url, insertion_point=point.id, param=point.name,
+                            endpoint=request.url, method=request.method, insertion_point=point.id, param=point.name,
                             check_id=check.id, bug_class=check.bug_class, result=result,
                         )
                     if confirmed is None:

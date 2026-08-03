@@ -345,3 +345,34 @@ def test_m2_coverage_certificate_still_builds():
         report, max_pages=25, max_depth=4, budget_exhausted=False)
     assert att["schema"] == pi.SCHEMA
     assert att["denominator"]["n_discovered"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# (i) Regression (red-pen MEDIUM): the skip diff is METHOD-AWARE — a probed GET
+#     must NOT hide an unprobed POST of the same path+query from `skipped`.
+# ---------------------------------------------------------------------------
+def test_skip_diff_is_method_aware_probed_get_does_not_hide_unprobed_post():
+    """A discovered POST that shares path+query with a PROBED GET is a DISTINCT surface and
+    must still surface in `skipped`. The skip diff keys on (METHOD, path+query) via
+    ProbeRecord.method, so an unprobed POST is never silently absent from the signed bytes —
+    the exact false-negative in the M3 visibility claim the red-pen reproduced."""
+    from types import SimpleNamespace
+
+    from framework.v2.scanner.engine import ProbeRecord
+
+    report = SimpleNamespace(
+        target="http://127.0.0.1:0/",
+        discovered_surfaces=["GET /submit?id=1", "POST /submit?id=1"],
+        committed_check_classes=["boolean_sqli"],
+        # only the GET was exercised (e.g. the audit budget broke before the POST)
+        exercised_probes=[ProbeRecord(
+            endpoint="http://127.0.0.1:0/submit?id=1", method="GET",
+            insertion_point="query:id", param="id", check_id="boolean-sqli",
+            bug_class="boolean_sqli", verdict="clean")],
+        steer_signals=[],
+    )
+    att = pi.build_plan_integrity_attestation(
+        report, max_pages=10, max_depth=3, budget_exhausted=True)
+    skipped = {r["surface"] for r in att["skipped"]}
+    assert "POST /submit?id=1" in skipped, "an unprobed POST was hidden behind a probed GET"
+    assert "GET /submit?id=1" not in skipped, "the probed GET must not read as a skip"

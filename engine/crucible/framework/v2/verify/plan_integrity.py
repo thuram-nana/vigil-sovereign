@@ -158,9 +158,12 @@ def build_plan_integrity_attestation(
     ]
     committed.sort(key=lambda r: (r["surface"], r["class"]))
 
-    # EXERCISED surface keys (path+query) — the M2 evidence of what a probe actually ran.
+    # EXERCISED surface keys (METHOD, path+query) — the M2 evidence of what a probe actually
+    # ran. Keyed on the method too: a discovered POST and a probed GET of the SAME path+query
+    # are DISTINCT surfaces, so a real unprobed POST is never hidden behind a probed GET (the
+    # method-blind bug a method-aware ProbeRecord.method closes).
     exercised_keys = {
-        _surface(getattr(p, "endpoint", ""))
+        (str(getattr(p, "method", "GET")).upper(), _surface(getattr(p, "endpoint", "")))
         for p in (getattr(report, "exercised_probes", []) or [])
     }
 
@@ -168,7 +171,7 @@ def build_plan_integrity_attestation(
     skipped: list[dict[str, str]] = []
     for entry in discovered_entries:
         method, surface = _split_discovered(entry)
-        if _surface(surface) in exercised_keys:
+        if (method.upper(), _surface(surface)) in exercised_keys:
             continue
         skipped.append({
             "surface": entry,

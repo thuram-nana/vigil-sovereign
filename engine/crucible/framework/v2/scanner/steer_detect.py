@@ -109,9 +109,18 @@ def scan_page_bodies_and_headers(pages: object) -> list[SteerSignal]:
     :class:`SteerSignal` (deterministic — no rng, no wall-clock).
 
     ``pages`` is an iterable of ``scanner.crawler.Page`` (``.url``, ``.body``, ``.headers``);
-    accepts anything with those attributes. It LISTS every hit — it does not de-duplicate
-    away repeats within a page, because a repeated directive is itself signal — but the
-    final list is sorted so the output is byte-stable across runs."""
+    accepts anything with those attributes. It LISTS every distinct hit, then collapses any
+    BYTE-IDENTICAL ``(where, pattern, excerpt)`` signals and sorts the result, so the output
+    is deterministic and byte-stable across runs. (Two matches that share a location, rule,
+    and normalised excerpt window are indistinguishable evidence, so they fold to one; two
+    at different offsets keep their distinct excerpts.)
+
+    NOTE — by design, this is NOISY on content-rich targets: the patterns are
+    case-insensitive substrings, so ordinary documentation prose ("deprecated", "out of
+    scope for this article", "skip it") will match. That is acceptable: every hit is a
+    LISTED signal with a bounded excerpt for a human to weigh, never a verdict or a block —
+    a benign match costs only a row in the attestation, and the caller/operator does the
+    legit-vs-suspicious classification."""
     from urllib.parse import urlsplit
 
     signals: list[SteerSignal] = []
