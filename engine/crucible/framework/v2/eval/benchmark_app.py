@@ -24,8 +24,15 @@ Design rules that make the numbers trustworthy:
     pure XSS sink), and the error page embeds its DB error inside a large static
     body so the boolean differential stays below threshold.
   * **The SAFE endpoints take input and handle it correctly** — a parameterised
-    profile lookup, a constant health endpoint, an allow-listed download — so a
-    tool that flags them is measurably wrong. They are the false-positive ruler.
+    profile lookup, a constant health endpoint, an allow-listed download, an
+    auto-escaping template, and an ordinary benign page — so a tool that flags them
+    is measurably wrong. They are the false-positive ruler for the param-level
+    checks. The two HOST-level classes (CORS, host-header) are anchored on the seed
+    ``/`` alone: those checks probe only the first request per host, so the
+    misconfiguration is planted there and every other route emits a clean
+    CORS/host response — **no safe endpoint carries either bug**, which is what
+    makes "anything reported on a safe endpoint is a false positive" honest for
+    every class, not just the param-level ones.
 
 The handler binds to loopback only and is served via :func:`serve`. It sends the
 ``Server: Jetty`` banner so the technology fingerprinter marks the stack ``java``
@@ -38,6 +45,7 @@ probe, an exploit, or anything aimed at a third party.
 from __future__ import annotations
 
 import contextlib
+import html
 import json
 import re
 import threading
@@ -124,6 +132,30 @@ _MYSQL_ERROR = (
     "your MySQL server version for the right syntax to use near ''' at line 1"
 )
 
+# ---------------------------------------------------------------------------
+# The server-side template-evaluation model (the SSTI planted bug). A naive
+# renderer EVALUATES an injected ``{{N*M}}`` / ``${N*M}`` expression and emits
+# only the computed RESULT — the raw template text is consumed, never reflected.
+# That is exactly what the evaluation oracle demands (result present, raw absent),
+# and it keeps the sink single-class: only a template-shaped arithmetic expression
+# is ever acted on, so an XSS marker, a SQL tautology, a traversal, or a quote all
+# fall through to a constant render and cannot co-fire.
+# ---------------------------------------------------------------------------
+
+_SSTI_BRACES = re.compile(r"\{\{\s*(\d+)\s*\*\s*(\d+)\s*\}\}")
+_SSTI_DOLLAR = re.compile(r"\$\{\s*(\d+)\s*\*\s*(\d+)\s*\}")
+
+
+def _eval_template(raw: str) -> str | None:
+    """The deliberately-flawed template evaluator: if ``raw`` is a bare ``{{N*M}}``
+    or ``${N*M}`` expression, COMPUTE it and return the product as a string (server-
+    side evaluation). Anything else returns None — the caller renders a constant, so
+    non-expression input is never reflected and the sink stays single-class SSTI."""
+    m = _SSTI_BRACES.fullmatch(raw) or _SSTI_DOLLAR.fullmatch(raw)
+    if m:
+        return str(int(m.group(1)) * int(m.group(2)))
+    return None
+
 
 def _page(title: str, body: str) -> bytes:
     return (
@@ -159,20 +191,28 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         *,
         ctype: str = "text/html; charset=utf-8",
         location: str | None = None,
+        cors_reflect: bool = False,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         if location is not None:
             self.send_header("Location", location)
-        # PLANTED BUG (CORS): reflect a hostile Origin AND allow credentials —
-        # the exact combination that lets any attacker page read authenticated
-        # responses. A properly-scoped policy would echo an allow-list, not the
-        # caller's Origin, and would not pair reflection with credentials.
-        origin = self.headers.get("Origin")
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Credentials", "true")
+        # PLANTED BUG (CORS) — scoped to the ONE anchor the check probes. CORS is a
+        # host-ANCHOR-level check: it sends a hostile Origin against the seed request
+        # (`/`) ONLY, so the misconfiguration is planted there and nowhere else. Only
+        # the index route passes ``cors_reflect=True``; every other route — in
+        # particular the SAFE controls — emits NO Access-Control-Allow-Origin at all,
+        # so a per-endpoint CORS report on a safe route would be flagging a bug that
+        # genuinely is not there, and "anything reported on a safe endpoint is a false
+        # positive by construction" holds for the CORS class too. When reflected, a
+        # hostile Origin is echoed AND credentials allowed — the exact combination
+        # that lets an attacker page read authenticated responses.
+        if cors_reflect:
+            origin = self.headers.get("Origin")
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Credentials", "true")
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -199,12 +239,35 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
                 ("/product?id=1", "Product"),
                 ("/redirect?url=/", "Continue"),
                 ("/file?name=manual.txt", "Docs"),
+                ("/render?name=guest", "Dashboard"),
                 ("/profile?name=guest", "Profile (safe)"),
                 ("/api/health?check=all", "Health (safe)"),
                 ("/download?file=manual.pdf", "Download (safe)"),
+                ("/greeting?name=guest", "Greeting (safe)"),
+                ("/support", "Support (safe)"),
             )
         )
-        self._respond(200, _page("Acme Store", f"<h1>Acme Store</h1><ul>{links}</ul>"))
+        # PLANTED BUG (host-header injection): the landing page derives its canonical
+        # Open-Graph URL from the incoming Host header with no allow-list, so a
+        # poisoned ``Host`` becomes an absolute ``//attacker`` URL — the primitive
+        # behind web-cache poisoning and password-reset-link hijacking. It is
+        # confirmed by HostHeaderCheck, which is a HOST-ANCHOR-level check (it runs
+        # once, against the first request seen for the host — the seed ``/``), which
+        # is exactly why the sink lives on the index. It reflects only the Host header
+        # (never a query value), so it cannot co-fire as XSS or open redirect, and the
+        # og:url meta is not a navigable link, so the crawler does not chase it.
+        host = self.headers.get("Host", "localhost")
+        page = (
+            "<!doctype html><html><head><title>Acme Store</title>"
+            f'<meta property="og:url" content="https://{host}/">'
+            "</head>"
+            f"<body><h1>Acme Store</h1><ul>{links}</ul></body></html>"
+        ).encode("utf-8")
+        # The seed `/` is the sole anchor for the two HOST-level checks: it carries
+        # both the host-header sink (og:url above) and the CORS misconfiguration
+        # (cors_reflect=True) — the only route that reflects a hostile Origin. Every
+        # other route leaves cors_reflect at its default False and is CORS-clean.
+        self._respond(200, page, cors_reflect=True)
 
     def _search(self) -> None:
         # PLANTED BUG (reflected XSS): a markup-shaped search term is reflected
@@ -251,6 +314,18 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         target = self._query("url") or "/"
         self._respond(302, b"", location=target)
 
+    def _render(self) -> None:
+        # PLANTED BUG (SSTI): a naive template renderer EVALUATES an injected
+        # expression server-side. ``{{N*M}}`` / ``${N*M}`` is computed and only the
+        # RESULT is rendered (the raw template text is consumed, not echoed), so the
+        # evaluation oracle confirms a real evaluation — result present, raw absent.
+        # Non-expression input renders a constant "guest", so nothing is reflected:
+        # the XSS marker / SQL tautology / traversal / quote probes all fall through
+        # to the same constant and cannot co-fire. Single-class SSTI by construction.
+        rendered = _eval_template(self._query("name")) or "guest"
+        body = f"<h1>Dashboard</h1><p>Welcome back, {rendered}.</p>"
+        self._respond(200, _page("Dashboard", body))
+
     # -- SAFE controls (must NEVER be flagged) -----------------------------
 
     def _profile(self) -> None:
@@ -282,6 +357,33 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             self._respond(200, body, ctype="application/pdf")
         else:
             self._respond(404, _page("Download", "<h2>Download</h2><p>File not found.</p>"))
+
+    def _greeting(self) -> None:
+        # SAFE (SSTI twin): an auto-escaping template — the user value is rendered
+        # as DATA, never evaluated. It echoes the input HTML-escaped inside a large
+        # static page, so ``{{7331*7331}}`` appears VERBATIM (the evaluation oracle's
+        # rule #2: raw present -> not evaluation) and its computed value 53743561
+        # never appears. The escaped echo cannot become an XSS sink (inert, encoded)
+        # and the constant filler keeps benign-vs-probe length/lexical deltas below
+        # the boolean-differential thresholds. The false-positive ruler for SSTI.
+        name = html.escape(self._query("name"))
+        body = f"<h1>Greeting</h1><p>Hello, {name}.</p><p>{_PRODUCT_FILLER}</p>"
+        self._respond(200, _page("Greeting", body))
+
+    def _support(self) -> None:
+        # SAFE (ordinary benign page): a static page whose single absolute link points
+        # at a FIXED, configured host. Its false-positive value is for the PARAM-LEVEL
+        # checks — a clean crawled route with an absolute URL that a tool must not flag
+        # as open-redirect, XSS, or injection. It is deliberately NOT called a
+        # host-header "twin": host-header (like CORS) is a host-ANCHOR check that
+        # probes ONLY the seed `/`, so it never re-probes this route and a per-endpoint
+        # safe twin for it would carry no measured signal. The correct fixed-host
+        # handling shown here is documentation of the safe pattern, not a discriminator.
+        body = (
+            "<h2>Support</h2>"
+            '<p>Contact us at <a href="https://acme.example/support">support</a>.</p>'
+        )
+        self._respond(200, _page("Support", body))
 
     def _file(self) -> None:
         # PLANTED BUG (path traversal): a traversal escapes the document directory
@@ -357,9 +459,12 @@ _ROUTES = {
     "/users": BenchmarkHandler._users,
     "/product": BenchmarkHandler._product,
     "/redirect": BenchmarkHandler._redirect,
+    "/render": BenchmarkHandler._render,
     "/profile": BenchmarkHandler._profile,
     "/api/health": BenchmarkHandler._health,
     "/download": BenchmarkHandler._download,
+    "/greeting": BenchmarkHandler._greeting,
+    "/support": BenchmarkHandler._support,
     "/file": BenchmarkHandler._file,
     "/.git/config": BenchmarkHandler._git_config,
     "/.env": BenchmarkHandler._env,
@@ -381,15 +486,17 @@ def benchmark_corpus(base_url: str) -> CorpusTarget:
     two host/endpoint-level classes (CORS, exposures) as the ``request:<check-id>``
     token CRUCIBLE emits for a request-level finding.
 
-    Eight planted bugs; the three SAFE endpoints (``/profile``, ``/api/health``,
-    ``/download``) are intentionally absent — anything a tool reports on them is a
-    false positive by construction."""
+    Eleven planted bugs; the five SAFE endpoints (``/profile``, ``/api/health``,
+    ``/download``, ``/greeting``, ``/support``) are intentionally absent — anything a
+    tool reports on them is a false positive by construction."""
     expected = [
         ExpectedFinding(bug_class="xss", location="/search?q"),
         ExpectedFinding(bug_class="boolean_sqli", location="/users?name"),
         ExpectedFinding(bug_class="error_based_sqli", location="/product?id"),
         ExpectedFinding(bug_class="open_redirect", location="/redirect?url"),
         ExpectedFinding(bug_class="path_traversal", location="/file?name"),
+        ExpectedFinding(bug_class="ssti", location="/render?name"),
+        ExpectedFinding(bug_class="host_header_injection", location="request:host-header"),
         ExpectedFinding(bug_class="cors", location="request:cors-active"),
         ExpectedFinding(bug_class="exposure", location="request:m5-fw-git-config"),
         ExpectedFinding(bug_class="exposure", location="request:m5-fw-env-dbpass"),
@@ -401,9 +508,11 @@ def benchmark_corpus(base_url: str) -> CorpusTarget:
         expected=expected,
         notes=(
             "Self-contained labelled benchmark: reflected XSS, boolean-blind SQLi, "
-            "error-based SQLi, open redirect, CORS-with-credentials, and three "
-            "exposures (.git/config, .env, Spring /actuator/env), plus three SAFE "
-            "controls (/profile, /api/health, /download) that must not be flagged."
+            "error-based SQLi, open redirect, path traversal, SSTI (server-side "
+            "template evaluation), host-header injection, CORS-with-credentials, and "
+            "three exposures (.git/config, .env, Spring /actuator/env), plus five SAFE "
+            "controls (/profile, /api/health, /download, /greeting, /support) that "
+            "must not be flagged."
         ),
     )
 

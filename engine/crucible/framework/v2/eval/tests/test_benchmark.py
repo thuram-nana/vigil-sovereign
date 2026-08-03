@@ -186,17 +186,21 @@ def test_crucible_precision_is_perfect_with_no_false_positives(crucible_boards):
 
 def test_crucible_recovers_the_response_visible_classes():
     """A direct adapter run confirms the mapped classes/locations are the planted
-    ones (xss, boolean_sqli, error_based_sqli, cors, and the exposures)."""
+    ones (xss, boolean_sqli, error_based_sqli, cors, ssti, host_header_injection,
+    and the exposures)."""
     with serve() as base_url:
         corpus = benchmark_corpus(base_url)
         produced = BenchmarkCrucibleAdapter().run(corpus)
 
     classes = {f.bug_class for f in produced}
-    assert {"xss", "boolean_sqli", "error_based_sqli", "cors", "exposure"} <= classes
+    assert {"xss", "boolean_sqli", "error_based_sqli", "cors", "exposure",
+            "ssti", "host_header_injection"} <= classes
     # every produced finding is oracle-confirmed
     assert all(f.confirmed for f in produced)
-    # and none of them land on a SAFE endpoint
-    safe_markers = ("profile", "health", "download")
+    # and none of them land on a SAFE endpoint (the SSTI twin /greeting and the
+    # ordinary benign page /support included — the host-level checks anchor on the
+    # seed / alone, so no safe route carries a CORS/host-header bug either)
+    safe_markers = ("profile", "health", "download", "greeting", "support")
     assert not any(any(m in f.location for m in safe_markers) for f in produced)
 
 

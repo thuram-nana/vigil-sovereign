@@ -146,11 +146,12 @@ def write_report(
     lines.append("# CRUCIBLE public benchmark scoreboard")
     lines.append("")
     lines.append(f"**Target corpus:** `{target}` — a single self-contained, labelled")
-    lines.append("vulnerable web app with a known ground truth of eight planted bugs")
+    lines.append("vulnerable web app with a known ground truth of eleven planted bugs")
     lines.append("(reflected XSS, boolean-blind SQLi, error-based SQLi, open redirect,")
-    lines.append("CORS-with-credentials, and three exposures: `.git/config`, `.env`, and")
-    lines.append("Spring `/actuator/env`) plus three SAFE endpoints (`/profile`,")
-    lines.append("`/api/health`, `/download`) that must never be flagged. Because the")
+    lines.append("path traversal, SSTI, host-header injection, CORS-with-credentials, and")
+    lines.append("three exposures: `.git/config`, `.env`, and Spring `/actuator/env`) plus")
+    lines.append("five SAFE endpoints (`/profile`, `/api/health`, `/download`, `/greeting`,")
+    lines.append("`/support`) that must never be flagged. Because the")
     lines.append("ground truth is complete, anything a tool reports off-manifest is a")
     lines.append("false positive **by construction** — that is what makes the FP column honest.")
     lines.append("")
@@ -252,7 +253,7 @@ def write_json_report(measured: list[MeasuredBoard], path: str | Path) -> Path:
     p = Path(path).expanduser()
     doc = {
         "tool": "CRUCIBLE",
-        "corpus": "in-process benchmark app (9 planted bugs, 3 safe controls)",
+        "corpus": "in-process benchmark app (11 planted bugs, 5 safe controls)",
         "matcher": "(normalized bug_class family, path+parameter); greedy 1-1; "
                    "off-manifest detections are false positives by construction",
         "incumbent_versions": _incumbent_versions(),
@@ -324,10 +325,29 @@ def sign_scorecard(scorecard_json_path: str | Path, *, signers: list[tuple[str, 
     return sig_env
 
 
-def verify_scorecard(scorecard_json_path: str | Path, sig_env: dict) -> bool:
+def verify_scorecard(
+    scorecard_json_path: str | Path,
+    sig_env: dict,
+    *,
+    trust_root_fingerprint: str | None = None,
+) -> bool:
     """Re-verify a signed scorecard offline: re-derive the canonical digest from the JSON on disk and check
     an m-of-n threshold of DISTINCT authorizers' Ed25519 signatures over those bytes. Fail-closed on any
-    mismatch (a flipped number → digest changes → every signature fails)."""
+    mismatch (a flipped number → digest changes → every signature fails).
+
+    TRUST ROOT PINNING (the property this call's tamper-evidence actually depends on).
+    The authorizer set lives INSIDE ``sig_env``. Without an out-of-band pin, verification proves only that
+    ``sig_env`` is INTERNALLY self-consistent — a repo-write / forked-bundle / malicious-PR adversary who
+    rewrites the baseline AND its ``.sig.json`` together simply re-signs the lie with a FRESH key, embeds
+    that key as the authorizer, and passes. The signature then binds to a root the attacker controls, so it
+    proves nothing about origin.
+
+    Pass ``trust_root_fingerprint`` (an ``sha256:...`` string the caller holds OUT OF BAND — pinned in
+    source, published on a separate channel) to close that hole: the authorizer set embedded in ``sig_env``
+    must hash (via :func:`_scorecard_fingerprint`) to EXACTLY that pin, else fail-closed. A forger's fresh
+    key hashes to a different fingerprint and is rejected before any signature is checked. When the pin is
+    ``None`` the check is skipped and only the weaker self-consistency guarantee holds — do not rely on that
+    mode for tamper-evidence against an adversary who can rewrite the signature file."""
     import hashlib
 
     from vigil_core import canonical_json, verify_one
@@ -337,7 +357,14 @@ def verify_scorecard(scorecard_json_path: str | Path, sig_env: dict) -> bool:
         if ("sha256:" + hashlib.sha256(body).hexdigest()) != sig_env.get("scorecard_digest"):
             return False
         tr = sig_env.get("trust_root", {})
-        pub = {a["key_id"]: a["public_key_b64"] for a in tr.get("authorizers", [])}
+        authorizers = tr.get("authorizers", [])
+        # Out-of-band pin enforcement: the embedded authorizer set must match the pin the caller holds
+        # independently. This is what makes the trust root NOT attacker-supplied — checked before any
+        # signature so a forged root is rejected outright.
+        if trust_root_fingerprint is not None:
+            if _scorecard_fingerprint(authorizers) != trust_root_fingerprint:
+                return False
+        pub = {a["key_id"]: a["public_key_b64"] for a in authorizers}
         good = set()
         for s in sig_env.get("signatures", []):
             kid = s.get("key_id")

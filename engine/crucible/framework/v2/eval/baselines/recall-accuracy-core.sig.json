@@ -1,0 +1,21 @@
+{
+  "schema": "vigil-benchmark-scorecard-sig/1",
+  "scorecard": "recall-accuracy-core.json",
+  "scorecard_digest": "sha256:01c1728ce982352594c9985da4387a73a16ac1d9ef867b64f6e653a726c85a96",
+  "signatures": [
+    {
+      "key_id": "recall-baseline-owner",
+      "signature_b64": "MXPXiX/WCIOHghDD5Ml/5UvIWKckW+liUDcGx5W1JXTayC93p6RBKxVUlPlsUYPqz+sa+yyb9qjv8dKH/oFxAg=="
+    }
+  ],
+  "threshold": 1,
+  "trust_root": {
+    "authorizers": [
+      {
+        "key_id": "recall-baseline-owner",
+        "public_key_b64": "tl1nuj0IpWGyA5bjr5G6m8A5pHH9S6r4QPVpZUglw+s="
+      }
+    ],
+    "threshold": 1
+  }
+}

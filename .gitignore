@@ -24,3 +24,7 @@ target/
 /img.avif
 /theme.png
 /AEGIS-Detection-Mirror-Complete(1).md
+
+# recall-baseline signing PRIVATE keys — the operator holds these out-of-band;
+# ONLY the public authorizer (in the .sig.json) + fingerprint are committed.
+*.privkey
