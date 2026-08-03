@@ -184,6 +184,28 @@
       ]
     },
     {
+      "description": "Read-only governance & gate audit — GOVERNED vs UNGOVERNED entitlement, the sovereignty tier, the conjunctive safety-gate, and the m-of-n destruction quorum read from disk. The UI cannot provision, authorize, or fire a governed action.",
+      "group": "MANAGE",
+      "id": "governance",
+      "label": "Governance",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "governance",
+        "gate audit",
+        "governance posture",
+        "sovereignty tier",
+        "entitlement",
+        "ungoverned",
+        "conjunctive gate",
+        "warden",
+        "destruction quorum",
+        "m-of-n",
+        "kill switch",
+        "read-only audit"
+      ]
+    },
+    {
       "description": "The command dashboard — system status, quick actions, and where to go next.",
       "group": "DO",
       "id": "home",
@@ -262,6 +284,26 @@
         "proof of pwn",
         "replay",
         "prove the bug"
+      ]
+    },
+    {
+      "description": "Import an external VIGIL report/finding JSON and re-fire its retained oracle proofs OFFLINE — pure re-computation, no target, no traffic; a tampered proof renders CONTRADICTED, never a green reproduction.",
+      "group": "DO",
+      "id": "replay",
+      "label": "Replay Proof",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "replay",
+        "replay proof",
+        "replay the proof",
+        "re-verify a report",
+        "reverify",
+        "import report",
+        "verify report.json",
+        "re-fire oracle",
+        "offline proof replay",
+        "proof replay"
       ]
     },
     {
@@ -380,5 +422,5 @@
       ]
     }
   ],
-  "source_sha": "1e7bf3a6e4c781d6560bdc93a85ea7547f9514fcec263a93793011c890b1a5e1"
+  "source_sha": "9baeff043d28749a9309f0d78e5021a239d0bde2d2a4bf64409dc735a44e62ab"
 }

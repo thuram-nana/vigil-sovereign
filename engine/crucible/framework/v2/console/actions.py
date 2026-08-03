@@ -663,6 +663,78 @@ def reverify_run(run_id: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+# Bound on an imported Replay document — a paste, not an engagement artifact. Big enough for a real
+# ScanReport, small enough that a hostile/oversized paste can never wedge the pure re-fire loop.
+_REPLAY_MAX_FINDINGS = 5000
+
+
+def replay_document(body: dict) -> dict:
+    """Replay-the-Proof — re-fire an EXTERNALLY-supplied report/finding document's RETAINED oracle
+    certificates offline. The body is ``{"doc": <parsed report or finding dict>}``. This is a PURE,
+    OFFLINE re-computation via ``verify.reverify.reverify_document``: it reconstructs each finding's
+    retained ``oracle_context`` and re-runs the pure oracle — NO target, NO network, NO scope, NO
+    re-drive. It mints nothing and touches no engagement tree; the input dict is the only evidence.
+
+    Returns a compact roll-up ``{total, reproduced, contradicted, ungrounded, results:[...]}``. Malformed
+    or oversized input fails CLOSED with an ``error`` marker — never a crash and never a partial re-fire."""
+    if not isinstance(body, dict):
+        return {"error": "malformed request: expected a JSON object with a `doc` field"}
+    doc = body.get("doc")
+    if not isinstance(doc, dict):
+        return {"error": "malformed document: expected a parsed report or finding OBJECT (a JSON dict)"}
+    findings = doc.get("active_findings")
+    if findings is not None and not isinstance(findings, list):
+        return {"error": "malformed document: `active_findings` must be a list of finding objects"}
+    if isinstance(findings, list) and len(findings) > _REPLAY_MAX_FINDINGS:
+        return {"error": f"document too large: {len(findings)} findings exceeds the "
+                         f"{_REPLAY_MAX_FINDINGS}-finding replay cap"}
+    # A single-finding document must at least be a finding-shaped object (has SOME recognised field), so a
+    # bare `{}` or an unrelated JSON blob is rejected up front rather than silently re-verifying to nothing.
+    if findings is None and not any(
+        k in doc for k in ("oracle_context", "bug_class", "confirmed_by", "confidence",
+                            "check_id", "finding_slug")):
+        return {"error": "malformed document: neither an `active_findings` report nor a finding object"}
+    try:
+        from ..verify import reverify
+
+        results = reverify.reverify_document(doc)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    def _bucket(r) -> str:
+        # matches_claim is False ONLY when a finding claimed a certificate that the retained evidence no
+        # longer reproduces (won't re-fire, or re-fires with a different oracle/confidence) — that is a
+        # TAMPERED/CONTRADICTED cert. Otherwise: reproduced=True is sound; the rest carried no re-runnable
+        # claim to reproduce (ungrounded).
+        if getattr(r, "matches_claim", None) is False:
+            return "contradicted"
+        if getattr(r, "reproduced", False):
+            return "reproduced"
+        return "ungrounded"
+
+    buckets = {"reproduced": 0, "contradicted": 0, "ungrounded": 0}
+    out = []
+    for r in results:
+        b = _bucket(r)
+        buckets[b] += 1
+        out.append({
+            "finding": getattr(r, "finding_ref", ""),
+            "reproduced": getattr(r, "reproduced", None),
+            "confirmed_by": getattr(r, "confirmed_by", None),
+            "confidence": getattr(r, "confidence", None),
+            "matches_claim": getattr(r, "matches_claim", None),
+            "bucket": b,
+            "note": getattr(r, "note", ""),
+        })
+    return {
+        "total": len(results),
+        "reproduced": buckets["reproduced"],
+        "contradicted": buckets["contradicted"],
+        "ungrounded": buckets["ungrounded"],
+        "results": out,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Trust Center — OFFLINE-verify one signed certificate from api.certs's own list.
 #

@@ -72,6 +72,7 @@ _EXACT_ROUTES = {
     "/api/telemetry": api.telemetry,            # G2: live assurance/metrics snapshot over the signed spine
     "/api/terminal/history": actions.terminal_history,   # T2: recent signed terminal.run records (read-only)
     "/api/certs": api.certs,                    # Trust Center: signed offline-verifiable certificates (metadata only)
+    "/api/governance": api.governance_data,     # Governance & Gate audit: READ-ONLY posture + m-of-n destruction quorum
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
@@ -394,6 +395,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     str(body.get("target", "")),
                     provider=str(body.get("provider", "")),
                 ))
+                return
+            if path == "/api/replay":
+                # Replay-the-Proof: re-fire an EXTERNALLY-supplied report/finding document's RETAINED oracle
+                # certificates OFFLINE (pure re-computation — NO target, NO scope, NO traffic). Registered
+                # BEFORE the `/api/reverify/` prefix branch so the exact path is not swallowed by it. Malformed
+                # input fails closed inside actions.replay_document. CSRF/rebind-gated above.
+                self._json(actions.replay_document(body))
                 return
             if path.startswith("/api/reverify/"):
                 self._json(actions.reverify_run(path[len("/api/reverify/"):].strip("/")))
