@@ -42,6 +42,7 @@
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
     ]},
     { group: "LEARN", items: [
+      { id: "trust", label: "Trust Center", icon: "shield", ready: true },
       { id: "manual", label: "Manual", icon: "book", ready: true },
       { id: "knowledge", label: "Knowledge Engine", icon: "brain", ready: true },
     ]},
@@ -448,6 +449,156 @@
       ]));
     });
     V.getJSON(OFF("/api/toolprofiles")).then(drawToolProfiles).catch(function () { /* panel just stays empty */ });
+  }
+
+  // ==========================================================================
+  // Trust Center — VIGIL's SIGNED, offline-verifiable certificates AS certificates.
+  // Renders each cert's trust root (m-of-n authorizers + threshold), its out-of-band
+  // fingerprint pin, the signed digest, and the accuracy numbers — plus a LIVE
+  // "Verify offline" button that runs the cert's real offline verifier and shows a
+  // PASS/FAIL badge + whether the fingerprint matches the OOB pin. READ/VERIFY-ONLY:
+  // no mint, no scope/target, no traffic — the verify POST is a pure re-computation.
+  // ==========================================================================
+
+  function trustKv(k, v) { return h("div.kv", null, [h("div.k", null, k), h("div.v", null, v)]); }
+  function trustShort(s, head, tail) {
+    s = String(s || ""); head = head || 22; tail = tail || 8;
+    return s.length > head + tail + 1 ? s.slice(0, head) + "…" + s.slice(-tail) : (s || "—");
+  }
+  function trustPct(x) { return x == null ? "—" : (Math.round(Number(x) * 1000) / 10) + "%"; }
+  function trustCssId(id) { return "trust-verify-" + String(id || "").replace(/[^A-Za-z0-9_-]+/g, "-"); }
+
+  function renderTrust(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Trust Center"),
+        h("span.sub", null, "VIGIL's signed, offline-verifiable certificates — rendered as certificates: "
+          + "trust root, out-of-band fingerprint pin, and a live offline PASS/FAIL verification.")]),
+      h("div#trust-doctrine", { style: { marginBottom: "14px" } }),
+      h("div#trust-body", null, h("div.empty", null, "Loading certificates…")),
+    ]);
+    V.getJSON(OFF("/api/certs")).then(renderTrustData).catch(function () {
+      V.mount(V.$("#trust-body"), h("div.empty", null, [
+        h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not reach the offense console to read certificates. "
+          + "Start it (vigil up / the console server) and reload."),
+      ]));
+    });
+  }
+
+  function renderTrustData(d) {
+    var doc = V.$("#trust-doctrine");
+    if (doc && d && d.doctrine) {
+      V.mount(doc, [h("div.hint", null, d.doctrine),
+        d.source_pin_note ? h("div.hint", { style: { marginTop: "6px" } }, d.source_pin_note) : null]);
+    }
+    var body = V.$("#trust-body"); if (!body) return;
+    var certs = (d && d.certs) || [];
+    if (!certs.length) { V.mount(body, h("div.empty", null, "No certificates found.")); return; }
+    V.mount(body, h("div.grid.cols-2", null, certs.map(trustCertCard)));
+  }
+
+  function trustSummary(c) {
+    var s = c.summary || {};
+    if (c.kind === "recall") {
+      var rows = (s.results || []).map(function (r) {
+        return trustKv(r.tool, "recall " + trustPct(r.recall) + " · precision " + trustPct(r.precision)
+          + " · F1 " + trustPct(r.f1) + " · tp " + r.tp + " / fp " + r.fp + " / fn " + r.fn);
+      });
+      return h("div", { style: { marginTop: "8px" } }, [
+        s.scope ? h("div.hint", null, s.scope) : null,
+        s.ground_truth_count != null ? trustKv("Ground truth",
+          s.ground_truth_count + " planted bugs across " + ((s.planted_classes || []).length) + " classes") : null,
+      ].concat(rows));
+    }
+    if (c.kind === "coverage" || c.kind === "plan-integrity") {
+      var sm = s.summary || {};
+      var keys = Object.keys(sm);
+      return h("div", { style: { marginTop: "8px" } }, [
+        s.scope ? h("div.hint", null, s.scope) : null,
+        s.target_host ? trustKv("Target host", s.target_host) : null,
+        keys.length ? trustKv("Summary", keys.map(function (k) { return k + " " + sm[k]; }).join(" · ")) : null,
+      ]);
+    }
+    return null;
+  }
+
+  function trustCertCard(c) {
+    var head = h("div.card-h", null, [
+      h("span.label", null, c.kind || "cert"),
+      h("h3", null, c.name || c.id),
+      c.run_id ? V.pill("run " + c.run_id, null, null) : null,
+    ]);
+    if (!c.present) {
+      return h("div.card", null, [head,
+        h("div.empty", { style: { marginTop: "8px" } }, [
+          V.statusBadge("idle"),
+          h("p", null, c.note || "not yet produced — run a scan / make bench to mint and sign this certificate."),
+        ]),
+      ]);
+    }
+    var tr = c.trust_root || {};
+    var authz = tr.authorizers || [];
+    var body = [
+      c.schema ? trustKv("Schema", h("span.mono", null, c.schema)) : null,
+      trustKv("Signed digest", h("span.mono", null, trustShort(c.scorecard_digest))),
+      trustKv("Trust root", "m-of-n threshold " + (tr.threshold != null ? tr.threshold : "?") + " of " + authz.length),
+      h("div.kv", null, [h("div.k", null, "Authorizers"), h("div.v", null,
+        authz.length ? authz.map(function (a) {
+          return h("div", { style: { marginBottom: "3px" } },
+            [V.pill(a.key_id || "?", null, null), " ", h("span.mono", null, trustShort(a.public_key_b64, 14, 6))]);
+        }) : "—")]),
+      trustKv("Fingerprint pin (out-of-band)", h("span.mono", null, trustShort(c.fingerprint || c.source_pin, 26, 8))),
+      c.source_pin ? h("div.hint", null,
+        "This trust root is pinned in SOURCE — a re-sign under a fresh key fails the pin.") : null,
+      trustSummary(c),
+    ];
+    var resultId = trustCssId(c.id);
+    body.push(h("div.row", { style: { marginTop: "10px", alignItems: "center" } }, [
+      h("button.btn.sm.primary", { onClick: function () { doVerifyCert(c, resultId); } },
+        [V.icon("shield"), "Verify offline"]),
+      h("span.hint", { style: { marginLeft: "8px" } },
+        "Re-derives the digest + checks the signature + the OOB pin. Offline, read-only."),
+    ]));
+    body.push(h("div", { id: resultId, style: { marginTop: "10px" } }));
+    return h("div.card", null, [head, h("div", null, body)]);
+  }
+
+  function doVerifyCert(c, resultId) {
+    var slot = V.$("#" + resultId);
+    if (slot) V.mount(slot, h("div.row", { style: { alignItems: "center" } },
+      [V.statusBadge("running"), h("span.hint", { style: { marginLeft: "8px" } }, "verifying offline…")]));
+    V.postJSON(OFF("/api/verify-cert"), { name: c.id, run_id: c.run_id || "" }).then(function (r) {
+      renderVerifyResult(slot, r);
+    }).catch(function () {
+      if (slot) V.mount(slot, h("div.hint", null, "Verify failed — offense console unreachable."));
+    });
+  }
+
+  function renderVerifyResult(slot, r) {
+    if (!slot) return;
+    if (!r || r.error) { V.mount(slot, h("div.hint", null, "Verify error: " + ((r && r.error) || "unknown"))); return; }
+    if (r.present === false) {
+      V.mount(slot, h("div.hint", null, r.note || "certificate not present — nothing to verify."));
+      return;
+    }
+    var ok = !!r.verified;
+    var fpOk = !!r.fingerprint_matches_pin;
+    V.mount(slot, [
+      h("div.row", { style: { alignItems: "center" } }, [
+        V.statusBadge(ok ? "confirmed" : "refuted"),
+        h("span", { style: { marginLeft: "8px", fontWeight: "700" } },
+          ok ? "PASS — signature re-verified offline" : "FAIL — did not verify"),
+      ]),
+      h("div.kv", { style: { marginTop: "6px" } }, [
+        h("div.k", null, "Fingerprint vs out-of-band pin"),
+        h("div.v", null, h("span.row", { style: { alignItems: "center" } },
+          [V.statusBadge(fpOk ? "confirmed" : "refuted"),
+           h("span", { style: { marginLeft: "8px" } }, fpOk ? "matches the pin" : "does NOT match the pin")]))]),
+      (r.which_authorizers && r.which_authorizers.length)
+        ? trustKv("Signed by", r.which_authorizers.join(", ")) : null,
+      r.digest ? trustKv("Digest", h("span.mono", null, trustShort(r.digest))) : null,
+      r.pin_source ? h("div.hint", null, "Pin source: " + r.pin_source) : null,
+    ]);
   }
 
   // ==========================================================================
@@ -4590,6 +4741,7 @@
     if (id === "manual") { renderManual(screen); return; }
     if (id === "knowledge") { renderKnowledge(screen); return; }
     if (id === "tools") { renderTools(screen); return; }
+    if (id === "trust") { renderTrust(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "chat") { renderChat(screen); return; }
     if (id === "terminal") { renderTerminal(screen); return; }
