@@ -451,6 +451,11 @@ def timing_oracle(
             why.append("dose-response failed")
         return OracleSignal(
             kind=OracleKind.TIMING, fired=False, confidence=0.0,
+            # Channel-confirmed negative: this branch is past the min-samples guard, so a
+            # real hypothesis test ran over adequate paired latencies and did not detect a
+            # shift — a decisive "no timing channel" clean (the insufficient-samples early
+            # return above stays non-conclusive → inconclusive, as it had no usable test).
+            conclusive=True,
             evidence="no timing signal: " + "; ".join(why),
             observed={"z": z, "p_value": p, "median_shift_ms": shift, "floor_ms": floor},
         )
@@ -569,8 +574,13 @@ def boolean_inference_oracle(
             observed=observed,
         )
     reason = "refuted (indistinguishable)" if decided == "refute" else "inconclusive (no boundary reached)"
+    # A REFUTE decision is a channel-confirmed negative: the SPRT accumulated enough
+    # evidence to accept the null (no boolean channel) at the controlled type-II rate,
+    # so it is a decisive "provably-tested-clean". Running out of rounds WITHOUT reaching
+    # a boundary is genuinely inconclusive (never a clean), so it is NOT conclusive.
     return OracleSignal(
         kind=OracleKind.BOOLEAN_INFERENCE, fired=False, confidence=0.0,
+        conclusive=(decided == "refute"),
         evidence=f"SPRT {reason} after {n_used} round(s): LLR={llr:.2f} in ({lower:.2f}, {upper:.2f})",
         observed=observed,
     )
@@ -673,6 +683,13 @@ def predicate_oracle(observed_evidence: Mapping[str, Any], predicate: Any) -> Or
         kind=OracleKind.ACHIEVED_STATE,
         fired=fired,
         confidence=0.9 if fired else 0.0,
+        # A predicate is a DEFINITE proposition evaluated over the raw observed values
+        # (a redirect Location, a reflected Origin, both identities' bodies): whether it
+        # holds or not is a decisive adjudication of an observable state — there is no
+        # blind variant it could be silently missing — so a non-firing predicate is a
+        # channel-confirmed clean, not an inconclusive non-detection. (The malformed-
+        # predicate branch above stays non-conclusive: no proposition was evaluated.)
+        conclusive=True,
         evidence=(f"dangerous condition holds over observed values: {evidence}"
                   if fired else f"condition not met: {evidence}"),
         observed={"predicate_eval": evidence, "values": observed},
@@ -710,6 +727,10 @@ def achieved_state_oracle(
         kind=OracleKind.ACHIEVED_STATE,
         fired=full,
         confidence=confidence,
+        # A concrete expectation was supplied (the empty-expectation branch returned
+        # above), so a full-match / no-match is a decisive adjudication of an observed
+        # state — a non-firing (unmatched) result is a channel-confirmed clean.
+        conclusive=True,
         evidence=evidence,
         observed={"matched": matched, "mismatched": mismatched},
     )
@@ -859,6 +880,11 @@ def reflection_context_oracle(marker: str, observed_sink: Any) -> OracleSignal:
 
     return OracleSignal(
         kind=OracleKind.REFLECTION_CONTEXT, fired=False, confidence=0.0,
+        # CHANNEL-CONFIRMED NEGATIVE: the marker WAS reflected (`ml in body` above),
+        # so the payload provably reached the response sink — and it landed only in an
+        # inert/encoded position. That is a decisive "reflected-but-neutralised" clean,
+        # unlike the "not reflected" branch above (no channel → non-conclusive/inconclusive).
+        conclusive=True,
         evidence="marker reflected but NOT in an executable context (encoded/inert)",
         observed={"marker": marker, "context": "inert"})
 
@@ -911,8 +937,12 @@ def evaluation_oracle(
 
     if raw and raw in body:
         # The literal template text survived — reflection, not evaluation.
+        # CHANNEL-CONFIRMED NEGATIVE: the raw expression provably reached the response
+        # sink and was rendered as inert text (not computed), so this is a decisive
+        # "reached-but-not-evaluated" clean — distinct from the "result absent" branch
+        # above (a blind/second-order sink where nothing was observed → inconclusive).
         return OracleSignal(
-            kind=OracleKind.EVALUATION, fired=False, confidence=0.0,
+            kind=OracleKind.EVALUATION, fired=False, confidence=0.0, conclusive=True,
             evidence=f"raw expression {raw!r} reflected verbatim — reflected, not evaluated",
             observed={"expected": expected, "raw_present": True})
 

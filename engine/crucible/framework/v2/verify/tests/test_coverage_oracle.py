@@ -97,11 +97,24 @@ def test_probe_verdict_decision_rule():
     fired = OracleSignal(kind=OracleKind.DIFFERENTIAL_RESPONSE, fired=True, confidence=0.95)
     assert probe_verdict(VerificationResult(
         confirmed=True, bug_class="boolean_sqli", signals=[fired]))[0] == "finding"
-    # ran, did not fire → clean (an applicable oracle adjudicated the observed data)
+    # ONE-SIDED oracle ran but did not fire with NO observable channel (a single-shot
+    # differential over indistinguishable responses) → INCONCLUSIVE, never clean: it
+    # cannot tell 'safe' from 'blind/inert'. This is the honesty line M2 must hold —
+    # a non-conclusive non-signal is not 'provably-tested-clean'.
     ran = OracleSignal(kind=OracleKind.DIFFERENTIAL_RESPONSE, fired=False, confidence=0.0)
+    assert ran.conclusive is False
     verdict, kinds = probe_verdict(VerificationResult(
         confirmed=False, bug_class="boolean_sqli", signals=[ran]))
-    assert verdict == "clean" and kinds == ("differential_response",)
+    assert verdict == "inconclusive" and kinds == ()
+    # a CHANNEL-CONFIRMED negative (conclusive=True — e.g. a definite predicate over the
+    # observed response, or a payload seen reaching an inert sink) → clean.
+    concl = OracleSignal(kind=OracleKind.ACHIEVED_STATE, fired=False, confidence=0.0,
+                         conclusive=True)
+    verdict, kinds = probe_verdict(VerificationResult(
+        confirmed=False, bug_class="open_redirect", signals=[concl]))
+    assert verdict == "clean" and kinds == ("achieved_state",)
+    # a fired signal is conclusive by construction (the validator enforces it).
+    assert fired.conclusive is True
     # payload sent but NO oracle adjudicated (no signals) → inconclusive, NEVER clean
     verdict, kinds = probe_verdict(VerificationResult(
         confirmed=False, bug_class="xss", signals=[]))

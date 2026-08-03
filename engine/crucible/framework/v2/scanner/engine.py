@@ -81,13 +81,17 @@ class ProbeRecord(BaseModel):
     honesty distinction (see :func:`probe_verdict`):
 
       * ``finding``      — an applicable oracle FIRED at/above threshold (a fact).
-      * ``clean``        — at least one APPLICABLE oracle actually RAN over the
-                           observed data and did NOT fire (exercised-and-clean).
-      * ``inconclusive`` — the payload was sent but NO applicable oracle adjudicated
-                           (no observable data / oracle abstained). NEVER ``clean``.
+      * ``clean``        — at least one applicable oracle CONCLUSIVELY adjudicated the
+                           negative: it proved it had an observable channel and rendered
+                           a decisive verdict (exercised-and-provably-clean), not merely
+                           a one-sided oracle that failed to fire with no channel.
+      * ``inconclusive`` — the payload was sent but NO oracle had a channel to adjudicate
+                           (no observable data / one-sided non-signal / oracle abstained).
+                           NEVER ``clean``.
 
-    ``oracle_kinds_run`` is the SORTED tuple of oracle kinds that genuinely ran over
-    the observed data — the evidence backing a ``clean`` verdict."""
+    ``oracle_kinds_run`` is the SORTED tuple of oracle kinds that CONCLUSIVELY adjudicated
+    over the observed data — the evidence backing a ``clean`` verdict (empty for
+    ``inconclusive``; see :func:`probe_verdict`)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -104,22 +108,35 @@ class ProbeRecord(BaseModel):
 def probe_verdict(result: VerificationResult) -> tuple[str, tuple[str, ...]]:
     """Decide a probe's coverage verdict from its oracle adjudication — THE honesty rule.
 
-    ``result.signals`` are exactly the applicable oracle kinds that RAN over the
-    observed data (a kind whose inputs were absent is skipped, never a signal). So:
+    ``result.signals`` are the applicable oracle kinds that RAN over the observed data
+    (a kind whose inputs were absent is skipped, never a signal). But an oracle merely
+    RUNNING is not enough to certify ``clean``: a ONE-SIDED oracle (a single-shot
+    differential, a marker/error/callback simply absent) emits a non-firing signal
+    even when it had NO observable channel — a surface that ignores its input, or a
+    blind/second-order sink, looks identical to a safe one. Treating that non-signal as
+    ``clean`` is the coverage overclaim M2 must not make.
 
-      * confirmed          -> ``finding``      (an oracle fired at/above threshold)
-      * ran, none fired    -> ``clean``        (applicable oracle(s) ran, said clean)
-      * nothing ran        -> ``inconclusive`` (payload sent, no oracle adjudicated)
+    So a probe is ``clean`` only when at least one signal is CONCLUSIVE — the oracle
+    proved it had a channel and rendered a decisive verdict (``OracleSignal.conclusive``:
+    a positive fire, an SPRT refute, an adequate-sample timing test, a definite
+    predicate, or a payload OBSERVED reaching the sink but neutralised):
 
-    A surface is ``clean`` ONLY when ``result.signals`` is non-empty — i.e. an
-    applicable oracle genuinely rendered a verdict. This is the line M2 exists to
-    hold: a payload sent with no adjudicating oracle is inconclusive, never clean."""
-    kinds = tuple(sorted({s.kind.value for s in result.signals}))
+      * confirmed                         -> ``finding``      (an oracle fired at/above threshold)
+      * a conclusive signal, none fired   -> ``clean``        (channel-confirmed negative)
+      * only non-conclusive non-signals   -> ``inconclusive`` (payload sent, no oracle
+                                             had a channel to adjudicate — NEVER clean)
+
+    ``oracle_kinds_run`` for a ``clean`` verdict names only the oracles that CONCLUSIVELY
+    adjudicated (the evidence backing the verdict); ``inconclusive`` carries none. This is
+    the line M2 exists to hold: a payload sent with no adjudicating channel is
+    inconclusive, never clean."""
     if result.confirmed:
+        kinds = tuple(sorted({s.kind.value for s in result.signals}))
         return "finding", kinds
-    if result.signals:
-        return "clean", kinds
-    return "inconclusive", kinds
+    conclusive = [s for s in result.signals if s.conclusive]
+    if conclusive:
+        return "clean", tuple(sorted({s.kind.value for s in conclusive}))
+    return "inconclusive", ()
 
 
 class BudgetExceeded(RuntimeError):

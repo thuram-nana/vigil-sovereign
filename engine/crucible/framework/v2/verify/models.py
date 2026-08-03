@@ -25,7 +25,7 @@ from __future__ import annotations
 import enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OracleKind(str, enum.Enum):
@@ -280,6 +280,35 @@ class OracleSignal(BaseModel):
         default_factory=dict,
         description="Structured detail of what was observed, for the audit trail.",
     )
+    conclusive: bool = Field(
+        default=False,
+        description=(
+            "Whether this signal is a DECISIVE adjudication of the surface for "
+            "coverage/completeness accounting (scanner.engine.probe_verdict). It is "
+            "True when the oracle had an OBSERVABLE CHANNEL and rendered a definite "
+            "verdict: a positive fire (always conclusive — see the validator below), "
+            "OR a channel-confirmed NEGATIVE — an SPRT that reached the refute "
+            "boundary, an adequate-sample timing test that found no shift, a definite "
+            "predicate/achieved-state proposition over observed values, or a payload "
+            "OBSERVED reaching the sink but neutralised (a marker reflected only into "
+            "an inert/encoded context, a template expression echoed raw-not-evaluated). "
+            "It is False for a ONE-SIDED oracle that merely did not fire with no "
+            "observable channel — a single-shot differential over indistinguishable "
+            "responses, a marker/error/callback simply absent (a blind, second-order, "
+            "or input-ignoring sink). Such a non-signal is 'inconclusive', NEVER "
+            "'clean': absence of a positive channel is not proof the surface is safe."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _fired_implies_conclusive(self) -> "OracleSignal":
+        """A FIRED signal is, by construction, a decisive positive adjudication (the
+        oracle observed a real channel and it carried the signal), so it is always
+        conclusive. Only a NON-firing signal must EARN ``conclusive`` by proving it
+        had a channel — the honesty line the coverage certificate rests on."""
+        if self.fired and not self.conclusive:
+            self.conclusive = True
+        return self
 
 
 class VerificationResult(BaseModel):
