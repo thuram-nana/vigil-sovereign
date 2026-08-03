@@ -357,7 +357,28 @@
         "toolkit",
         "install a tool"
       ]
+    },
+    {
+      "description": "VIGIL's signed, offline-verifiable certificates rendered as certificates — trust root, out-of-band fingerprint pin, and a live offline PASS/FAIL verification.",
+      "group": "LEARN",
+      "id": "trust",
+      "label": "Trust Center",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "trust center",
+        "certificates",
+        "certs",
+        "signed certificate",
+        "trust root",
+        "fingerprint pin",
+        "offline verify",
+        "verify certificate",
+        "provable",
+        "recall baseline",
+        "accuracy baseline"
+      ]
     }
   ],
-  "source_sha": "4d225a04620148bc40ed86e46dae66350766b7ea1f9c299852592bd17eb8df4c"
+  "source_sha": "1e7bf3a6e4c781d6560bdc93a85ea7547f9514fcec263a93793011c890b1a5e1"
 }

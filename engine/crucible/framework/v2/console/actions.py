@@ -663,6 +663,123 @@ def reverify_run(run_id: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+# ---------------------------------------------------------------------------
+# Trust Center — OFFLINE-verify one signed certificate from api.certs's own list.
+#
+# PURE / OFFLINE / READ-ONLY. Re-derives the signed digest from the bytes on disk, checks the m-of-n
+# Ed25519 threshold of the NAMED authorizers, and checks the trust-root fingerprint against the
+# OUT-OF-BAND pin. It takes NO scope/target, issues NO traffic, and mints NOTHING — it is a pure
+# re-computation over committed cert files, the read/verify dual of `reverify_run`. `name` is a cert id
+# from api.certs, validated against the KNOWN cert set (the recall baseline, or a per-run cert basename
+# under a validated run dir) — never an arbitrary path from the web.
+# ---------------------------------------------------------------------------
+
+# per-run signed certs the verify action recognises (basename -> kind). Kept in sync with
+# api._PER_RUN_CERT_KINDS. A basename outside this set is refused (fail-closed).
+_RUN_CERT_KINDS: dict[str, str] = {
+    "coverage-certificate.json": "coverage",
+    "plan-integrity.json": "plan-integrity",
+}
+
+
+def _verify_run_cert(basename: str, run_id: str, *, oob_pin: str = "") -> dict:
+    """Offline-verify a per-run coverage / plan-integrity cert.
+
+    TRUST-ROOT PINNING — the honest scope. Unlike the recall baseline (whose trust root is pinned in
+    SOURCE at :data:`rb.TRUST_ROOT_FINGERPRINT`), a per-run cert has NO source-held pin: it is produced
+    and signed inside a run directory. Its sibling ``.fingerprint.txt`` is written by the SAME signer that
+    produced the ``.sig.json`` — it is therefore NOT out-of-band and proves nothing about origin. Reading
+    it back as "the pin" is circular: an adversary who can write the run dir writes all three files under a
+    fresh key and every leg agrees. So we DO NOT treat that sibling file as the pin.
+
+    What we still prove unconditionally: the m-of-n Ed25519 signature re-verifies over the exact bytes and
+    the re-derived digest matches (tamper-AFTER-signing — a single flipped byte without a re-sign — fails).
+    The trust ROOT is bound only when the OPERATOR supplies a genuine out-of-band pin (``oob_pin``): then a
+    fresh-key re-sign is rejected before any signature check. Absent an operator pin the trust root is
+    reported UNPINNED (``fingerprint_matches_pin`` is ``None`` — neither a green match nor a red mismatch),
+    never a green "matches the pin"."""
+    from ..eval.benchmark_run import _scorecard_fingerprint
+    from ..verify.coverage_oracle import verify_coverage_certificate
+    from ..verify.plan_integrity import verify_plan_integrity_attestation
+
+    raw = str(basename or "")
+    if "/" in raw and not run_id:
+        run_id, _, raw = raw.partition("/")
+    bn = Path(raw).name                       # strip any path component (defence-in-depth)
+    kind = _RUN_CERT_KINDS.get(bn)
+    if kind is None:
+        return {"verified": False, "error": f"unknown certificate: {basename!r}"}
+    rd = run_dir(run_id)                       # validates run_id (raises ValueError on an unsafe id)
+    core = rd / bn
+    sig_path = core.with_suffix(".sig.json")
+    fp_path = core.with_suffix(".fingerprint.txt")
+    if not (core.is_file() and sig_path.is_file()):
+        return {"verified": False, "present": False, "kind": kind,
+                "note": "this run has not signed its certificate yet — nothing to verify."}
+    sig_env = json.loads(sig_path.read_text(encoding="utf-8"))
+    authz = (sig_env.get("trust_root", {}) or {}).get("authorizers", []) or []
+    computed_fp = _scorecard_fingerprint(authz)
+    committed_fp = fp_path.read_text(encoding="utf-8").strip() if fp_path.is_file() else None
+    # ONLY an operator-supplied pin is out-of-band. The cert's own .fingerprint.txt is NOT a pin.
+    pin = (oob_pin or "").strip() or None
+    verifier = verify_coverage_certificate if kind == "coverage" else verify_plan_integrity_attestation
+    verified = bool(verifier(core, sig_env, trust_root_fingerprint=pin))
+    if pin is not None:
+        fp_matches: bool | None = (computed_fp == pin)   # genuine: bound to an operator-held OOB pin
+        pin_source = "operator-supplied out-of-band pin"
+    else:
+        fp_matches = None                                 # no independent pin → trust root UNPINNED
+        pin_source = ("no out-of-band pin for a per-run cert — its .fingerprint.txt is written by the same "
+                      "signer and is NOT independent; supply the operator-held pin to bind the trust root")
+    return {"verified": verified, "present": True, "kind": kind,
+            "which_authorizers": [a.get("key_id") for a in authz],
+            "fingerprint_matches_pin": fp_matches, "trust_root_pinned": pin is not None,
+            "computed_fingerprint": computed_fp, "committed_fingerprint": committed_fp,
+            "pin": pin, "digest": sig_env.get("scorecard_digest"), "pin_source": pin_source}
+
+
+def verify_cert(name: str, run_id: str = "", oob_pin: str = "", *, _recall_base=None) -> dict:
+    """OFFLINE-verify ONE signed certificate — PURE, OFFLINE, READ-ONLY (no scope/target, no traffic,
+    no mint). Re-derives the digest + checks the m-of-n signature, and binds the trust ROOT to an
+    out-of-band pin where one exists.
+
+    ``name`` is a cert id from :func:`api.certs`: the recall baseline, or a per-run cert basename (with
+    ``run_id``). For the recall baseline the trust root is the SOURCE-pinned ``rb.TRUST_ROOT_FINGERPRINT``
+    (independent of the signed bytes — a fresh-key re-sign is rejected). A per-run cert has NO source pin;
+    the OPTIONAL ``oob_pin`` (an ``sha256:...`` value the operator holds independently) binds its trust root
+    when supplied — absent it, the per-run trust root is reported UNPINNED (see :func:`_verify_run_cert`).
+    ``_recall_base`` is a keyword-only TEST seam (a dir holding a recall triple) — the web do_POST branch
+    passes only ``name`` + ``run_id`` + ``oob_pin``, so the web can never set it."""
+    from ..eval import recall_baseline as rb
+    from ..eval.benchmark_run import _scorecard_fingerprint
+
+    n = str(name or "").strip()
+    try:
+        if n in ("recall", "recall-accuracy-core", "recall-accuracy-core.json"):
+            base = Path(_recall_base) if _recall_base else Path(rb.ACCURACY_CORE_PATH).parent
+            core = base / "recall-accuracy-core.json"
+            sig_path = core.with_suffix(".sig.json")
+            if not (core.is_file() and sig_path.is_file()):
+                return {"verified": False, "present": False, "kind": "recall",
+                        "note": "the committed recall baseline triple is not on disk."}
+            sig_env = json.loads(sig_path.read_text(encoding="utf-8"))
+            verified = bool(rb.verify_committed_recall_baseline(core, sig_env=sig_env))
+            authz = (sig_env.get("trust_root", {}) or {}).get("authorizers", []) or []
+            computed_fp = _scorecard_fingerprint(authz)
+            fp_matches = (computed_fp == rb.TRUST_ROOT_FINGERPRINT)
+            return {"verified": verified, "present": True, "kind": "recall",
+                    "which_authorizers": [a.get("key_id") for a in authz],
+                    "fingerprint_matches_pin": bool(fp_matches), "trust_root_pinned": True,
+                    "computed_fingerprint": computed_fp, "pin": rb.TRUST_ROOT_FINGERPRINT,
+                    "digest": sig_env.get("scorecard_digest"),
+                    "pin_source": "source-pinned (eval.recall_baseline.TRUST_ROOT_FINGERPRINT)"}
+        return _verify_run_cert(n, run_id, oob_pin=oob_pin)
+    except ValueError as e:                    # an unsafe run id → clean refusal (mirrors run_dir's guard)
+        return {"verified": False, "error": f"{type(e).__name__}: {e}"}
+    except Exception as e:                      # noqa: BLE001 — any error is fail-closed (not verified)
+        return {"verified": False, "error": f"{type(e).__name__}: {e}"}
+
+
 def trip_killswitch(slug: str, reason: str) -> dict:
     """Trip the kill-switch for an engagement — the emergency stop. Idempotent (the
     first reason is preserved). The console never CLEARS a kill-switch."""

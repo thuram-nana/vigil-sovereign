@@ -169,6 +169,14 @@ screens:
     description: System settings — the AI model, effort, providers, and other configuration.
     synonyms: [settings, config, configuration, preferences, options]
 
+  - id: trust
+    label: Trust Center
+    group: LEARN
+    owner: false
+    plane: unified
+    description: VIGIL's signed, offline-verifiable certificates rendered as certificates — trust root, out-of-band fingerprint pin, and a live offline PASS/FAIL verification.
+    synonyms: [trust center, certificates, certs, signed certificate, trust root, fingerprint pin, offline verify, verify certificate, provable, recall baseline, accuracy baseline]
+
   - id: manual
     label: Manual
     group: LEARN

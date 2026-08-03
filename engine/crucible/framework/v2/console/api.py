@@ -1077,3 +1077,148 @@ def drift_data(arg: str) -> dict[str, Any]:
             "fixed": list(diff.removed) if diff else [],         # disappeared FACT = fixed / no longer proven
             "stable": list(diff.unchanged) if diff else [],
             "has_drift": bool(diff and diff.has_drift), "doctrine": _DRIFT_DOCTRINE}
+
+
+# ---------------------------------------------------------------------------
+# Trust Center — the signed, offline-verifiable certificates AS certificates.
+#
+# READ-ONLY. This provider READS committed / produced signed-cert triples
+# (``<name>.json`` + ``<name>.sig.json`` + ``<name>.fingerprint.txt``) and returns, per
+# cert, its trust root (m-of-n Ed25519 authorizers + threshold), the out-of-band
+# fingerprint pin, the signed digest, and the summary numbers. It NEVER runs a verifier
+# here (the offline PASS/FAIL is a separate POST action, ``actions.verify_cert``) and it
+# NEVER fakes a ``present: true`` — a triple missing on disk is honestly ``present: false``.
+# ---------------------------------------------------------------------------
+
+_TRUST_DOCTRINE = (
+    "Every certificate here re-verifies OFFLINE: a verifier re-derives the signed digest from the exact "
+    "bytes on disk and checks an m-of-n Ed25519 threshold of the NAMED authorizers. A single flipped byte "
+    "fails. A green badge means an ACTUAL re-verification passed — never that a signature field merely exists. "
+    "The trust ROOT (origin) is bound only where an OUT-OF-BAND pin exists: the recall baseline's is pinned in "
+    "SOURCE, so a fresh-key re-sign of it is rejected. A per-run cert has NO source pin — its own "
+    ".fingerprint.txt is written by the same signer and is NOT independent, so a fresh-key re-sign of a per-run "
+    "triple still re-verifies (its trust root is shown UNPINNED, not a green match) unless YOU supply the "
+    "operator-held out-of-band pin, which then rejects the forger."
+)
+
+# per-run signed certs the scanner/report pipeline may sign into a run dir (verify.coverage_oracle /
+# verify.plan_integrity). The basename is the contract the verify action keys on — kept in sync with
+# actions._RUN_CERT_KINDS. A run that has not signed its cert yet is listed present:false (never faked).
+_PER_RUN_CERT_KINDS: tuple[tuple[str, str], ...] = (
+    ("coverage", "coverage-certificate.json"),
+    ("plan-integrity", "plan-integrity.json"),
+)
+
+
+def _cert_summary(kind: str, core: dict) -> dict[str, Any]:
+    """The human-facing numbers a Trust-Center card shows for a cert, per kind. Pure projection
+    of the (already-signed) document — no derivation, no verification."""
+    if kind == "recall":
+        res = core.get("results", []) or []
+        return {
+            "corpus": core.get("corpus"),
+            "scope": core.get("scope"),
+            "matcher": core.get("matcher"),
+            "ground_truth_count": core.get("ground_truth_count"),
+            "planted_classes": list(core.get("planted_classes", []) or []),
+            "results": [{"tool": r.get("tool"), "tp": r.get("tp"), "fp": r.get("fp"),
+                         "fn": r.get("fn"), "precision": r.get("precision"),
+                         "recall": r.get("recall"), "f1": r.get("f1")}
+                        for r in res if isinstance(r, dict)],
+        }
+    if kind in ("coverage", "plan-integrity"):
+        return {"scope": core.get("scope"), "target_host": core.get("target_host"),
+                "denominator": core.get("denominator", {}), "summary": core.get("summary", {})}
+    return {}
+
+
+def _read_cert_triple(core_path, *, name: str, kind: str,
+                      run_id: str | None = None, source_pin: str | None = None) -> dict[str, Any]:
+    """Read a signed-cert triple into the uniform Trust-Center shape. ``present`` is computed
+    from disk (core AND sig must exist) — never faked. A not-present cert returns the shape with
+    ``present: false`` and an honest note, and NONE of the trust-root / digest fields fabricated."""
+    core_path = Path(core_path)
+    sig_path = core_path.with_suffix(".sig.json")
+    fp_path = core_path.with_suffix(".fingerprint.txt")
+    cert_id = f"{run_id}/{core_path.name}" if run_id else name
+    shape: dict[str, Any] = {
+        "id": cert_id, "name": name, "kind": kind, "run_id": run_id,
+        "present": False, "schema": None, "scorecard_digest": None,
+        "trust_root": {"threshold": None, "authorizers": []},
+        "fingerprint": None,        # the cert's own committed fingerprint (.fingerprint.txt)
+        "source_pin": source_pin,   # the OUT-OF-BAND pin held in SOURCE (recall baseline only), else None
+        # True only when an INDEPENDENT (source-held) pin binds the trust root. A per-run cert's own
+        # .fingerprint.txt is written by the same signer, so it is NOT an out-of-band pin → False here.
+        "trust_root_pinned": source_pin is not None,
+        "summary": {},
+    }
+    present = _safe(lambda: core_path.is_file() and sig_path.is_file(), default=False)
+    if not present:
+        shape["note"] = "not yet produced — run a scan / make bench to mint and sign this certificate."
+        return shape
+    core = _safe(lambda: json.loads(core_path.read_text(encoding="utf-8")), default={}) or {}
+    sig = _safe(lambda: json.loads(sig_path.read_text(encoding="utf-8")), default={}) or {}
+    fp = _safe(lambda: fp_path.read_text(encoding="utf-8").strip(), default=None)
+    tr = sig.get("trust_root", {}) or {}
+    authz = [{"key_id": a.get("key_id"), "public_key_b64": a.get("public_key_b64")}
+             for a in (tr.get("authorizers", []) or []) if isinstance(a, dict)]
+    shape.update({
+        "present": True,
+        "schema": core.get("schema") or sig.get("schema"),
+        "scorecard_digest": sig.get("scorecard_digest"),
+        "trust_root": {"threshold": tr.get("threshold"), "authorizers": authz},
+        "fingerprint": fp,
+        "summary": _cert_summary(kind, core),
+    })
+    return shape
+
+
+def certs() -> dict[str, Any]:
+    """Trust Center: the signed, offline-verifiable certificates rendered AS certificates.
+
+    Read-only. Returns the flagship COMMITTED recall accuracy-core baseline (always shipped in the
+    package, trust root pinned in SOURCE) plus, for every known console run, its coverage / plan-integrity
+    cert — ``present`` read from disk so a run that has not signed its cert yet is honestly ``present: false``.
+    Verifies NOTHING here; ``actions.verify_cert`` is the separate offline PASS/FAIL action. ``_safe``
+    throughout — never 500s on a fresh tree."""
+    from ..eval import recall_baseline as rb
+    from . import actions
+
+    out: list[dict[str, Any]] = []
+    recall = _safe(lambda: _read_cert_triple(
+        rb.ACCURACY_CORE_PATH, name="recall-accuracy-core", kind="recall",
+        source_pin=rb.TRUST_ROOT_FINGERPRINT), default=None)
+    if recall is not None:
+        out.append(recall)
+
+    # runs are newest-first. A PRESENT (signed) per-run cert is always listed; NOT-present ones are
+    # capped (the newest few) so a long run history cannot flood the Trust Center with empty stubs while
+    # still giving the operator one honest "not yet produced" example to see.
+    _NOT_PRESENT_CAP = 4
+    not_present_shown = 0
+    run_ids = _safe(lambda: [r["run_id"] for r in list_runs().get("runs", []) if r.get("run_id")], default=[]) or []
+    for rid in run_ids:
+        rd = _safe(lambda r=rid: actions.run_dir(r), default=None)
+        if rd is None:
+            continue
+        for kind, basename in _PER_RUN_CERT_KINDS:
+            cert = _safe(
+                lambda rd=rd, kind=kind, basename=basename, rid=rid: _read_cert_triple(
+                    rd / basename, name=basename, kind=kind, run_id=rid),
+                default={"id": f"{rid}/{basename}", "name": basename, "kind": kind,
+                         "run_id": rid, "present": False,
+                         "note": "not yet produced — this run has not signed its certificate."})
+            if cert.get("present"):
+                out.append(cert)
+            elif not_present_shown < _NOT_PRESENT_CAP:
+                out.append(cert)
+                not_present_shown += 1
+    return {
+        "certs": out,
+        "doctrine": _TRUST_DOCTRINE,
+        "source_pin_note": ("The recall baseline's trust root is pinned in SOURCE "
+                            "(eval.recall_baseline.TRUST_ROOT_FINGERPRINT): rewriting it is a visible code "
+                            "change, not a silent data-file swap. A per-run cert has NO source pin — its own "
+                            ".fingerprint.txt is written by the same signer and is NOT independent, so its "
+                            "trust root shows UNPINNED unless you supply the operator-held out-of-band pin."),
+    }
