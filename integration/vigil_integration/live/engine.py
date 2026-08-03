@@ -96,6 +96,17 @@ DeployFireteamFn = Callable[[LLMDecision, AgentState, int], Any]
 # it. Emit-only / side-effecting; its return is ignored. None-seam ⇒ the chain is simply not persisted (the
 # segment then reports honestly UNVERIFIABLE — never a fake pass). A persist error NEVER affects the run.
 PersistSpineFn = Callable[[], None]
+# spine_post(kind, payload, *, parent_id=None) -> Optional[int] (T3b): mirror ONE OODA hook point onto the
+# CRUCIBLE blackboard event spine, so the END-OF-RUN persist_spine has real events to sign for EVERY engage
+# run — making the offline-verifiable spine (O9) universal, not fireteam-only. ``kind`` is a plain blackboard
+# event-kind string ("decision"/"hypothesis"/"observation"/"tool_call"/"tool_result"/"finding"/"refusal");
+# ``payload`` a plain dict in the engine's own vocabulary (the wiring adapter reshapes it to the framework's
+# validated schema — the engine imports NO framework). Returns the posted event id (for provenance
+# parent-linking of tool_call→tool_result / finding) or None. EMIT-ONLY + best-effort: its exceptions are
+# swallowed and NEVER affect the run's truth; a None return is fine. None-seam ⇒ NO-OP, byte-identical to
+# today (no events ⇒ persist_spine writes nothing ⇒ the segment stays honestly UNVERIFIABLE, never a fake
+# pass). engine.py stays FRAMEWORK-FREE: this is a plain callable and nothing here imports the framework.
+SpinePostFn = Callable[..., Optional[int]]
 
 _GENESIS = "0" * 64
 
@@ -118,6 +129,7 @@ class EngineSeams:
     operator_messages: Optional[OperatorMsgFn] = None  # None ⇒ no mid-run operator instructions (A5)
     deploy_fireteam: Optional[DeployFireteamFn] = None  # None ⇒ an approved fireteam deploy is refused (A4c)
     persist_spine: Optional[PersistSpineFn] = None  # None ⇒ the blackboard chain is not persisted (T3)
+    spine_post: Optional[SpinePostFn] = None  # None ⇒ OODA events are not mirrored to the blackboard spine (T3b)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -206,6 +218,26 @@ class VigilEngine:
             decision = self._think(state)
             report.decisions.append(str(decision.action.value))
 
+            # T3b — mirror the OODA ORIENT/DECIDE step onto the blackboard spine (best-effort NO-OP without a
+            # seam). The decision is the coordinator choice; a USE_TOOL proposal additionally posts the
+            # falsifiable HYPOTHESIS it is testing. All payloads are deterministic (no wallclock/rng), so two
+            # identical scripted engages produce identical spine digests.
+            self._spine_post("decision", {
+                "question": f"phase={state.phase.value} iteration={it}: what is the next action?",
+                "choice": str(decision.action.value),
+                "rationale": decision.reasoning or ""})
+            if decision.action == ActionType.USE_TOOL and decision.tool is not None:
+                _oa = decision.output_analysis
+                _info = getattr(_oa, "extracted_info", {}) if _oa is not None else {}
+                _tname = decision.tool.tool_name or ""
+                _ttarget = extract_target(getattr(decision.tool, "tool_args", None)) or ""
+                self._spine_post("hypothesis", {
+                    "handle": f"H-it{it}",
+                    "surface": _tname,
+                    "bug_class": str((_info or {}).get("bug_class", "")),
+                    "action": f"{_tname} vs {_ttarget}".strip(),
+                    "rationale": decision.reasoning or ""})
+
             # inert terminal / pause actions first.
             if decision.action == ActionType.COMPLETE:
                 state.done = True
@@ -250,17 +282,38 @@ class VigilEngine:
             elif verdict.outcome != "allow":
                 # denied / structurally invalid → record the refusal and PIVOT (never give up the run).
                 report.denied_edges.append(verdict.reason)
+                self._spine_post("refusal", {                # T3b — a gate refusal IS evidence on the spine
+                    "gate": "authorize_edge", "action_refused": str(decision.action.value),
+                    "reason": verdict.reason or "", "fatal": False})
                 state.execution_trace.append(
                     {"iteration": it, "action": str(decision.action.value), "outcome": "deny",
                      "reason": verdict.reason})
                 continue
 
             # ALLOW (A0/A1 auto) or APPROVED (owner-signed) — execute through the governed live executor.
+            # T3b — record the tool-run REQUEST on the spine BEFORE it runs (the intent is on the immutable
+            # stream even if the run refuses/errors); its id links the tool_result below.
+            _tc_id = self._spine_post("tool_call", {
+                "tool": decision.tool.tool_name if decision.tool else "",
+                "target": extract_target(getattr(decision.tool, "tool_args", None)) if decision.tool else "",
+                "tier": str(getattr(verdict, "tier", "") or ""),
+                "args_summary": "owner-approved" if approved else "auto"})
             exec_res = self._run_tool(decision.tool, state.phase, seq, approved=approved)
             seq += 1
             report.tool_calls.append(self._tool_record(exec_res))
+            # T3b — record the tool OUTCOME (a provenance-labelled observation, never a fact), linked to its
+            # tool_call. Covers BOTH the ran and the refused/errored branch below with one post point.
+            _ran = bool(getattr(exec_res, "ran", False))
+            self._spine_post("tool_result", {
+                "tool": (getattr(exec_res, "tool", "") or (decision.tool.tool_name if decision.tool else "")),
+                "ok": _ran, "refused": not _ran, "gate": "" if _ran else "executor",
+                "summary": str(getattr(exec_res, "outcome", "") or ""),
+                "note": "" if _ran else str(getattr(exec_res, "reason", "") or "")}, parent_id=_tc_id)
             if not getattr(exec_res, "ran", False):
                 report.denied_edges.append(getattr(exec_res, "reason", "tool call not run"))
+                self._spine_post("refusal", {                # T3b — the executor's fail-closed deny as evidence
+                    "gate": "executor", "action_refused": (getattr(exec_res, "tool", "") or "tool"),
+                    "reason": str(getattr(exec_res, "reason", "") or ""), "fatal": False})
                 state.execution_trace.append(
                     {"iteration": it, "action": "use_tool", "tool": getattr(exec_res, "tool", ""),
                      "outcome": "deny", "reason": getattr(exec_res, "reason", "")})
@@ -293,12 +346,33 @@ class VigilEngine:
             # oracle_context is discarded for the fact (its proposed payload/param/endpoint is only "where to
             # look"). The request-spec is bound in via `_oracle_with_redrive`; react.py stays unchanged.
             raw = getattr(exec_res, "stdout", "") or ""
+            # T3b — the recon/probe RAW output is a provenance-labelled observation on the spine (length only —
+            # deterministic and secret-safe; the raw bytes stay in the signed ExecRecord, not the digest).
+            _obs_id = self._spine_post("observation", {
+                "source": "tool:" + (decision.tool.tool_name if decision.tool else ""),
+                "surface": (extract_target(getattr(decision.tool, "tool_args", None)) if decision.tool else ""),
+                "summary": f"tool output captured: {len(raw)} byte(s)"}, parent_id=_tc_id)
             oracle = self._oracle_with_redrive(decision, exec_res)
             intake = intake_result(raw, decision.output_analysis, oracle=oracle,
                                    source=(decision.tool.tool_name if decision.tool else ""))
             apply_intake(state, intake)
             report.facts.extend(intake.facts)
             report.leads.extend(intake.leads)
+
+            # T3b — the ORACLE INTAKE result on the spine: each oracle-confirmed FACT as a finding event
+            # (linked to the raw observation), each LEAD as a labelled observation (never a finding — only a
+            # fired oracle mints a fact, mirrored honestly here).
+            for _f in intake.facts:
+                self._spine_post("finding", {
+                    "ref": getattr(_f, "ref", ""), "title": getattr(_f, "title", ""),
+                    "severity": getattr(_f, "severity", ""), "bug_class": getattr(_f, "bug_class", ""),
+                    "surface": getattr(_f, "source", ""), "summary": getattr(_f, "title", ""),
+                    "status": "fact", "verified_by_oracle": True}, parent_id=_obs_id)
+            for _ld in intake.leads:
+                self._spine_post("observation", {
+                    "source": "lead:" + (getattr(_ld, "source", "") or ""),
+                    "surface": getattr(_ld, "bug_class", "") or "(lead)",
+                    "summary": f"LEAD (unconfirmed): {getattr(_ld, 'title', '')}"}, parent_id=_obs_id)
 
             self._project(intake.facts)
             self._govern(state)
@@ -564,6 +638,25 @@ class VigilEngine:
             self.seams.persist_spine()
         except Exception:  # noqa: BLE001 — a persist error is a recorded no-op, never a crash
             return
+
+    def _spine_post(self, kind: str, payload: dict, *, parent_id: Optional[int] = None) -> Optional[int]:
+        """T3b — best-effort mirror of ONE OODA hook point onto the blackboard event spine (see
+        :data:`SpinePostFn`). Total + emit-only: no seam, any seam error, or a non-int return yields None and
+        NEVER raises into the loop, so mirroring can never perturb the run's truth. The returned id (when the
+        seam gives one) lets the caller thread provenance edges (tool_call→tool_result, finding←tool_result)."""
+        if self.seams.spine_post is None:
+            return None
+        try:
+            rid = self.seams.spine_post(kind, payload, parent_id=parent_id)
+        except TypeError:
+            # a seam that predates the parent_id kwarg (a test fake / older seam) — call it positionally.
+            try:
+                rid = self.seams.spine_post(kind, payload)
+            except Exception:  # noqa: BLE001 — a spine write is emit-only; never fatal to the run
+                return None
+        except Exception:  # noqa: BLE001 — a spine write is emit-only; never fatal to the run
+            return None
+        return rid if isinstance(rid, int) else None
 
     @staticmethod
     def _tool_record(exec_res: Any) -> ToolCallRecord:
