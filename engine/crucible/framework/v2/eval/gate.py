@@ -37,7 +37,13 @@ class GateError(EvalError):
 
 
 class ToolScore(BaseModel):
-    """One tool's confusion counts on one app — the baseline unit."""
+    """One tool's confusion counts on one app — the baseline unit.
+
+    ``recall`` and ``ground_truth_count`` are DERIVED from the confusion counts
+    (recall = tp/(tp+fn); ground truth = tp+fn = every planted bug), so the stored
+    unit stays a minimal tp/fp/fn triple and an older baseline file loads unchanged.
+    They are surfaced explicitly so a recall regression is a NAMED gate failure, not
+    only an implication of a tp drop."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -49,6 +55,15 @@ class ToolScore(BaseModel):
     def precision(self) -> float:
         d = self.tp + self.fp
         return round(self.tp / d, 6) if d else 0.0
+
+    @property
+    def recall(self) -> float:
+        d = self.tp + self.fn
+        return round(self.tp / d, 6) if d else 0.0
+
+    @property
+    def ground_truth_count(self) -> int:
+        return self.tp + self.fn
 
 
 class Baseline(BaseModel):
@@ -145,9 +160,18 @@ def gate(
             if c.precision < base.precision:
                 regressions.append(
                     f"{app}/{tool}: precision {base.precision:.3f} -> {c.precision:.3f} (DROP)")
-            if c.false_positives < base.fp or c.true_positives > base.tp:
+            # Named recall-floor check: candidate recall must not fall below the
+            # baseline's. Asymmetric — higher recall (more of the ground truth found)
+            # is an improvement, never a failure. A recall drop at an unchanged ground
+            # truth already implies a tp drop, but naming it makes a coverage
+            # regression an explicit, self-describing gate failure.
+            if c.recall < base.recall:
+                regressions.append(
+                    f"{app}/{tool}: recall {base.recall:.3f} -> {c.recall:.3f} (DROP)")
+            if c.false_positives < base.fp or c.true_positives > base.tp or c.recall > base.recall:
                 improvements.append(
-                    f"{app}/{tool}: tp {base.tp}->{c.true_positives}, fp {base.fp}->{c.false_positives}")
+                    f"{app}/{tool}: tp {base.tp}->{c.true_positives}, fp {base.fp}->{c.false_positives}, "
+                    f"recall {base.recall:.3f}->{c.recall:.3f}")
 
     return GateVerdict(
         passed=not regressions,

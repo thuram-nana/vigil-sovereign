@@ -146,11 +146,12 @@ def write_report(
     lines.append("# CRUCIBLE public benchmark scoreboard")
     lines.append("")
     lines.append(f"**Target corpus:** `{target}` — a single self-contained, labelled")
-    lines.append("vulnerable web app with a known ground truth of eight planted bugs")
+    lines.append("vulnerable web app with a known ground truth of eleven planted bugs")
     lines.append("(reflected XSS, boolean-blind SQLi, error-based SQLi, open redirect,")
-    lines.append("CORS-with-credentials, and three exposures: `.git/config`, `.env`, and")
-    lines.append("Spring `/actuator/env`) plus three SAFE endpoints (`/profile`,")
-    lines.append("`/api/health`, `/download`) that must never be flagged. Because the")
+    lines.append("path traversal, SSTI, host-header injection, CORS-with-credentials, and")
+    lines.append("three exposures: `.git/config`, `.env`, and Spring `/actuator/env`) plus")
+    lines.append("five SAFE endpoints (`/profile`, `/api/health`, `/download`, `/greeting`,")
+    lines.append("`/support`) that must never be flagged. Because the")
     lines.append("ground truth is complete, anything a tool reports off-manifest is a")
     lines.append("false positive **by construction** — that is what makes the FP column honest.")
     lines.append("")
@@ -252,7 +253,7 @@ def write_json_report(measured: list[MeasuredBoard], path: str | Path) -> Path:
     p = Path(path).expanduser()
     doc = {
         "tool": "CRUCIBLE",
-        "corpus": "in-process benchmark app (9 planted bugs, 3 safe controls)",
+        "corpus": "in-process benchmark app (11 planted bugs, 5 safe controls)",
         "matcher": "(normalized bug_class family, path+parameter); greedy 1-1; "
                    "off-manifest detections are false positives by construction",
         "incumbent_versions": _incumbent_versions(),
