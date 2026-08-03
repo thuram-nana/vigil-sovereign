@@ -25,9 +25,11 @@ from framework.v2.eval.benchmark_run import verify_scorecard
 from framework.v2.eval.recall_baseline import (
     ACCURACY_CORE_PATH,
     SCHEMA,
+    TRUST_ROOT_FINGERPRINT,
     build_accuracy_core,
     canonical_bytes,
     crucible_recall,
+    verify_committed_recall_baseline,
 )
 
 
@@ -71,8 +73,13 @@ def test_broadened_planted_classes_present() -> None:
 
 
 def test_committed_signature_verifies_offline() -> None:
-    """(c) The committed signature verifies offline against the committed JSON."""
-    assert verify_scorecard(ACCURACY_CORE_PATH, _committed_sig()) is True
+    """(c) The committed signature verifies offline against the committed JSON — through the
+    PINNED verify path (the trust root is checked against the source-held out-of-band pin,
+    not taken from the signature file)."""
+    assert verify_committed_recall_baseline() is True
+    # the committed fingerprint.txt equals the source-held pin (no in-band drift)
+    committed_fp = ACCURACY_CORE_PATH.with_suffix(".fingerprint.txt").read_text().strip()
+    assert committed_fp == TRUST_ROOT_FINGERPRINT
 
 
 def test_flipped_number_breaks_verification(tmp_path) -> None:
@@ -81,7 +88,42 @@ def test_flipped_number_breaks_verification(tmp_path) -> None:
     core["results"][0]["recall"] = 0.5  # a lie about coverage
     tampered = tmp_path / "recall-accuracy-core.json"
     tampered.write_bytes(canonical_bytes(core))
-    assert verify_scorecard(tampered, _committed_sig()) is False
+    assert verify_committed_recall_baseline(tampered, _committed_sig()) is False
+
+
+def test_forged_resign_with_fresh_key_is_rejected_by_the_pin(tmp_path) -> None:
+    """(d') The trust root is PINNED out of band. A repo-write adversary who flips a number,
+    mints a FRESH keypair, re-signs the tampered bytes, and embeds that fresh key as the
+    authorizer produces a sig that is internally self-consistent — verify WITHOUT the pin
+    would accept it — but the pinned verify path rejects it because the forged authorizer set
+    hashes to a different fingerprint than the source-held pin."""
+    import hashlib
+
+    from vigil_core import canonical_json, generate_keypair, sign
+
+    core = _committed_core()
+    core["results"][0]["recall"] = 0.42  # the lie
+    tampered = tmp_path / "recall-accuracy-core.json"
+    tampered.write_bytes(canonical_bytes(core))
+    body = canonical_bytes(core)
+
+    kp = generate_keypair()  # the forger's OWN key — never authorized out of band
+    forged_sig = {
+        "schema": "vigil-benchmark-scorecard-sig/1",
+        "scorecard": "recall-accuracy-core.json",
+        "scorecard_digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+        "threshold": 1,
+        "trust_root": {"threshold": 1, "authorizers": [
+            {"key_id": "recall-baseline-owner", "public_key_b64": kp.public_key_b64}]},
+        "signatures": [{"key_id": "recall-baseline-owner",
+                        "signature_b64": sign(kp.private_key_b64, body)}],
+    }
+    # Without a pin the forgery is self-consistent and would pass (the old, broken behaviour).
+    assert verify_scorecard(tampered, forged_sig) is True
+    # With the out-of-band pin enforced, the forged trust root is rejected outright.
+    assert verify_scorecard(tampered, forged_sig,
+                            trust_root_fingerprint=TRUST_ROOT_FINGERPRINT) is False
+    assert verify_committed_recall_baseline(tampered, forged_sig) is False
 
 
 def test_determinism_two_runs_identical() -> None:

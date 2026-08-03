@@ -39,11 +39,29 @@ from pathlib import Path
 from vigil_core import canonical_json
 
 from .benchmark_app import benchmark_corpus
-from .benchmark_run import BenchmarkCrucibleAdapter, run_benchmark_measured
+from .benchmark_run import BenchmarkCrucibleAdapter, run_benchmark_measured, verify_scorecard
 from .validation import MeasuredBoard
 
 # The committed accuracy-core baseline + its detached signature + trust-root pin.
 ACCURACY_CORE_PATH: Path = Path(__file__).resolve().parent / "baselines" / "recall-accuracy-core.json"
+
+# ---------------------------------------------------------------------------
+# The OUT-OF-BAND trust-root pin.
+#
+# This is the sha256 over the canonical authorizer set (key_id + public key) that is
+# authorized to sign this baseline — the SAME value committed to
+# ``recall-accuracy-core.fingerprint.txt``, but held HERE as a source-code constant so
+# verification does NOT derive the trust root from the (rewritable) ``.sig.json``.
+#
+# Why this matters: the Ed25519 signature only proves origin against whoever the trust
+# root names. If the verifier read that root straight out of the signature file, a
+# repo-write / forked-bundle / malicious-PR adversary would just re-sign a tampered
+# baseline with a FRESH key, embed that key as the authorizer, and pass. Pinning the
+# fingerprint in source turns rewriting the baseline into a SOURCE-CODE change to this
+# constant — visible in review — rather than a silent data-file swap. Honest residual: no
+# in-repo pin can stop an adversary who also rewrites THIS line; defeating that needs a pin
+# held off-repo. What this DOES close is the sig-file-only forgery (re-sign with a fresh key).
+TRUST_ROOT_FINGERPRINT: str = "sha256:6cd32e143135d03cd8bdad8037ebd7c63ca668f1531cc52d8de13415a0875747"
 
 # The stable schema tag the verifier and tests key on.
 SCHEMA = "vigil-recall-accuracy-core/1"
@@ -140,3 +158,23 @@ def crucible_recall(core: dict) -> float:
         if r.get("tool") == "crucible":
             return float(r.get("recall", 0.0))
     return 0.0
+
+
+def verify_committed_recall_baseline(
+    core_path: str | Path | None = None,
+    sig_env: dict | None = None,
+) -> bool:
+    """Offline-verify the committed recall baseline AGAINST THE PINNED trust root.
+
+    This is the verify path the M1 "signed and offline-verifiable" claim rests on: it
+    enforces :data:`TRUST_ROOT_FINGERPRINT` (a source-held pin), so a signature made under
+    any other authorizer set — e.g. a forger who re-signs a tampered baseline with a fresh
+    key and embeds it in the ``.sig.json`` — is rejected before its signature is even
+    checked. Defaults to the committed JSON + its committed ``.sig.json``.
+    """
+    import json as _json
+
+    p = Path(core_path) if core_path is not None else ACCURACY_CORE_PATH
+    if sig_env is None:
+        sig_env = _json.loads(p.with_suffix(".sig.json").read_bytes())
+    return verify_scorecard(p, sig_env, trust_root_fingerprint=TRUST_ROOT_FINGERPRINT)
