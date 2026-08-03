@@ -35,7 +35,12 @@ attestation modules (``attestation_log`` — whose framework re-execute is funct
 ``attestation_witness`` — ``vigil_core``-only). The OFFENSE re-drive path (``prove_remediation`` /
 ``LiveHttpAdapter`` / ``framework.v2`` executor) is reached ONLY through :func:`build_live_prove_target`,
 where every framework-touching import is FUNCTION-LOCAL (mirroring ``live/wiring.py:_build_spine_poster``),
-so importing this module never co-loads the offense engine.
+so importing this module never co-loads the offense ENGINE. The load-bearing invariant is exactly that: with
+``framework`` import forcibly blocked, importing this module still succeeds and ``sys.modules`` holds ZERO
+``framework`` modules. (Precise nuance: the pure-python ``prove_driver`` *module* may be pulled into
+``sys.modules`` transitively via ``attestation_log``'s re-execute path, but it co-loads NO ``framework``
+module — so no offense engine loads. ``framework.v2`` / ``LiveHttpAdapter`` are the offense-engine surfaces,
+and those are imported function-locally only.)
 
 Signing: :func:`run_reprove` reuses the caller's governance m-of-n signers (the anchor-1
 ``OFFENSE_GOVERNANCE_ROLE`` authority from ``live/wiring.py:provision_authority``) — it MINTS NO KEY.
