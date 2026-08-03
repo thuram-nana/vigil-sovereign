@@ -1,0 +1,60 @@
+# VIGIL continuous RE-PROOF — systemd USER service (oneshot)
+# =====================================================================
+# TRUTHENOVATION A2. Runs `vigil reprove --once`: ONE re-proof cycle that
+# re-fires the retained fact+remediation corpus against the live target
+# through the gated CRUCIBLE executor, appends a signed four-state tick to
+# the continuous attestation log, and has a witness co-sign the new head.
+# This is what makes "continuously re-proven" an OPERATING property instead
+# of a capability — the systemd timer (vigil-reprove.timer) fires this on a
+# cadence, so the attestation series grows and verifies end-to-end over time.
+#
+# The engagement-specific arguments (which finding, which target, base dir)
+# live in an EnvironmentFile so this unit is reusable across engagements:
+#
+#     ~/.config/vigil/reprove.env      (VIGIL_REPROVE_ARGS=…  — see the example)
+#
+# Manual run / logs:
+#     systemctl --user start vigil-reprove.service
+#     journalctl --user -u vigil-reprove -e
+#
+# INSTALL (paired with the timer):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-reprove.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-reprove.env.example      ~/.config/vigil/reprove.env
+#   $EDITOR ~/.config/vigil/reprove.env             # set VIGIL_REPROVE_ARGS + VIGIL_BASE_DIR
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-reprove.timer
+
+[Unit]
+Description=VIGIL continuous re-proof (one cadence cycle: re-fire corpus, append witnessed tick)
+Documentation=file:%h/vigil/docs/TRUTHENOVATION.md
+
+[Service]
+Type=oneshot
+
+# Engagement config: VIGIL_REPROVE_ARGS (the reprove flags — finding source + --target-base-url +
+# --base-dir) and VIGIL_BASE_DIR (the writable engagement home, used by ReadWritePaths below).
+EnvironmentFile=%h/.config/vigil/reprove.env
+Environment=PYTHONUNBUFFERED=1
+
+WorkingDirectory=%h/vigil
+# The offense venv's console script (vigil = vigil_integration.cli:main). Adjust the path if your checkout
+# or venv lives elsewhere. `--once` is fixed here (the timer owns the cadence); VIGIL_REPROVE_ARGS is
+# word-split by systemd (leave it UNQUOTED in the env file) into the finding/target/base-dir flags.
+ExecStart=%h/vigil/.venv-offense/bin/vigil reprove --once $VIGIL_REPROVE_ARGS
+
+# --- hardening (same posture as sigil-consolidate) -------------------------
+# It appends signed ticks + witnessed checkpoints under the engagement base dir, so it needs write access
+# to VIGIL_BASE_DIR and nothing else. NETWORK IS REQUIRED (the re-proof re-drives the live target), so
+# PrivateNetwork is deliberately NOT set.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=${VIGIL_BASE_DIR}
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set (would break it): ProtectHome (hides the checkout + base dir), PrivateNetwork (the re-drive needs
+# egress to the chartered target), MemoryDenyWriteExecute (native-lib safety).

@@ -1,0 +1,32 @@
+# VIGIL continuous re-proof timer — fires the oneshot on a cadence.
+# =====================================================================
+# THIS is the "continuous" in "continuously re-proven": it fires
+# vigil-reprove.service on a schedule, so the retained corpus is re-proved
+# and a fresh signed, witnessed tick is appended to the attestation log on
+# every cadence — the series then verifies end-to-end across time.
+#
+# Enable with:
+#   systemctl --user enable --now vigil-reprove.timer
+#   systemctl --user list-timers 'vigil-*'     # confirm next run
+#
+# HONEST RESIDUAL: freshness is only ever as current as the LAST fire of this
+# timer — "continuously re-proven" means "re-proven on this cadence", not
+# "provably true at this instant". Tighten OnCalendar for fresher assurance.
+
+[Unit]
+Description=Cadence trigger for VIGIL continuous re-proof
+Documentation=file:%h/vigil/docs/TRUTHENOVATION.md
+
+[Timer]
+# Every 6 hours, at a minute offset so it does not stampede with other jobs.
+# Tighten (e.g. hourly / */15) for fresher assurance; loosen to reduce load.
+OnCalendar=*-*-* 00/6:07:00
+# If the machine was asleep/off at the scheduled time, run once on the next
+# wake instead of skipping the window entirely.
+Persistent=true
+# Smear the start by up to 5 min so many hosts do not fire simultaneously.
+RandomizedDelaySec=300
+Unit=vigil-reprove.service
+
+[Install]
+WantedBy=timers.target
