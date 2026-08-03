@@ -24,8 +24,15 @@ Design rules that make the numbers trustworthy:
     pure XSS sink), and the error page embeds its DB error inside a large static
     body so the boolean differential stays below threshold.
   * **The SAFE endpoints take input and handle it correctly** — a parameterised
-    profile lookup, a constant health endpoint, an allow-listed download — so a
-    tool that flags them is measurably wrong. They are the false-positive ruler.
+    profile lookup, a constant health endpoint, an allow-listed download, an
+    auto-escaping template, and an ordinary benign page — so a tool that flags them
+    is measurably wrong. They are the false-positive ruler for the param-level
+    checks. The two HOST-level classes (CORS, host-header) are anchored on the seed
+    ``/`` alone: those checks probe only the first request per host, so the
+    misconfiguration is planted there and every other route emits a clean
+    CORS/host response — **no safe endpoint carries either bug**, which is what
+    makes "anything reported on a safe endpoint is a false positive" honest for
+    every class, not just the param-level ones.
 
 The handler binds to loopback only and is served via :func:`serve`. It sends the
 ``Server: Jetty`` banner so the technology fingerprinter marks the stack ``java``
@@ -184,20 +191,28 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         *,
         ctype: str = "text/html; charset=utf-8",
         location: str | None = None,
+        cors_reflect: bool = False,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         if location is not None:
             self.send_header("Location", location)
-        # PLANTED BUG (CORS): reflect a hostile Origin AND allow credentials —
-        # the exact combination that lets any attacker page read authenticated
-        # responses. A properly-scoped policy would echo an allow-list, not the
-        # caller's Origin, and would not pair reflection with credentials.
-        origin = self.headers.get("Origin")
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Credentials", "true")
+        # PLANTED BUG (CORS) — scoped to the ONE anchor the check probes. CORS is a
+        # host-ANCHOR-level check: it sends a hostile Origin against the seed request
+        # (`/`) ONLY, so the misconfiguration is planted there and nowhere else. Only
+        # the index route passes ``cors_reflect=True``; every other route — in
+        # particular the SAFE controls — emits NO Access-Control-Allow-Origin at all,
+        # so a per-endpoint CORS report on a safe route would be flagging a bug that
+        # genuinely is not there, and "anything reported on a safe endpoint is a false
+        # positive by construction" holds for the CORS class too. When reflected, a
+        # hostile Origin is echoed AND credentials allowed — the exact combination
+        # that lets an attacker page read authenticated responses.
+        if cors_reflect:
+            origin = self.headers.get("Origin")
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Credentials", "true")
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -248,7 +263,11 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
             "</head>"
             f"<body><h1>Acme Store</h1><ul>{links}</ul></body></html>"
         ).encode("utf-8")
-        self._respond(200, page)
+        # The seed `/` is the sole anchor for the two HOST-level checks: it carries
+        # both the host-header sink (og:url above) and the CORS misconfiguration
+        # (cors_reflect=True) — the only route that reflects a hostile Origin. Every
+        # other route leaves cors_reflect at its default False and is CORS-clean.
+        self._respond(200, page, cors_reflect=True)
 
     def _search(self) -> None:
         # PLANTED BUG (reflected XSS): a markup-shaped search term is reflected
@@ -352,13 +371,14 @@ class BenchmarkHandler(BaseHTTPRequestHandler):
         self._respond(200, _page("Greeting", body))
 
     def _support(self) -> None:
-        # SAFE (host-header twin): the absolute link is built from a FIXED, configured
-        # host — the incoming Host header is ignored — so a poisoned Host can never
-        # enter the URL. It is the correct-handling counterfactual to the index's
-        # planted sink. NOTE: HostHeaderCheck is a host-ANCHOR-level check (it probes
-        # only the first request seen for a host — the seed `/`), so this endpoint is
-        # not itself re-probed with a hostile Host; it stands as the documented safe
-        # pattern and an ordinary crawled page a param-level check must not flag.
+        # SAFE (ordinary benign page): a static page whose single absolute link points
+        # at a FIXED, configured host. Its false-positive value is for the PARAM-LEVEL
+        # checks — a clean crawled route with an absolute URL that a tool must not flag
+        # as open-redirect, XSS, or injection. It is deliberately NOT called a
+        # host-header "twin": host-header (like CORS) is a host-ANCHOR check that
+        # probes ONLY the seed `/`, so it never re-probes this route and a per-endpoint
+        # safe twin for it would carry no measured signal. The correct fixed-host
+        # handling shown here is documentation of the safe pattern, not a discriminator.
         body = (
             "<h2>Support</h2>"
             '<p>Contact us at <a href="https://acme.example/support">support</a>.</p>'

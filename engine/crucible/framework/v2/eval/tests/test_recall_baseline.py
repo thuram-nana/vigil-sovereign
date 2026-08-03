@@ -65,6 +65,52 @@ def test_committed_recall_and_precision() -> None:
     assert crucible_recall(build_accuracy_core()) == row["recall"]
 
 
+def test_safe_controls_carry_no_host_level_bug() -> None:
+    """(b') The SAFE controls are genuinely clean for the HOST-level classes too, so
+    "anything reported on a safe endpoint is a false positive by construction" is
+    honest for EVERY class — not just the param-level ones. The CORS-with-credentials
+    misconfiguration and the host-header sink are anchored on the seed ``/`` ALONE;
+    every other route must reflect NEITHER a hostile Origin (with credentials) NOR a
+    hostile Host. (Regression guard for the red-pen finding that _respond() used to
+    reflect a hostile Origin on every route, so the safe controls secretly carried a
+    real CORS bug and the precision=1.0 claim was dishonest for the CORS class.)"""
+    import http.client
+    from urllib.parse import urlsplit
+
+    from framework.v2.eval.benchmark_app import serve
+
+    evil_origin = "https://crucible-evil-origin.test"
+    evil_host = "crucible-evil-host.test"
+    safe_paths = ["/profile?name=guest", "/api/health?check=all",
+                  "/download?file=manual.pdf", "/greeting?name=guest", "/support"]
+
+    def probe(port: int, path: str) -> tuple[str, str, str, str]:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", path, headers={"Host": evil_host, "Origin": evil_origin})
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", "replace")
+        acao = resp.getheader("Access-Control-Allow-Origin") or ""
+        acac = resp.getheader("Access-Control-Allow-Credentials") or ""
+        loc = resp.getheader("Location") or ""
+        conn.close()
+        return acao, acac, body, loc
+
+    with serve() as base:
+        port = urlsplit(base).port
+        assert port is not None
+        for path in safe_paths:
+            acao, acac, body, loc = probe(port, path)
+            cors_bad = acao in (evil_origin, "*") and acac.lower() == "true"
+            host_bad = f"//{evil_host}" in body or evil_host in loc
+            assert not cors_bad, f"{path} reflects a hostile Origin with credentials (real CORS bug)"
+            assert not host_bad, f"{path} reflects a hostile Host as a URL authority (real host-header bug)"
+        # the seed IS the anchor: it must still reflect both, or the two host-level
+        # bugs would not fire and recall would drop.
+        acao, acac, body, _ = probe(port, "/")
+        assert acao == evil_origin and acac.lower() == "true", "the CORS anchor no longer fires on /"
+        assert f"//{evil_host}" in body, "the host-header anchor no longer fires on /"
+
+
 def test_broadened_planted_classes_present() -> None:
     """The broadened corpus carries the newly-added on-path classes."""
     core = _committed_core()
