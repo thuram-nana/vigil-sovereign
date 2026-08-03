@@ -80,6 +80,7 @@ def build_offense_gate(
     now: Any = None,
     destruction_authority: Any = None,
     is_consumed: Callable[[str], bool] | None = None,
+    destruction_ledger: Any = None,
 ) -> Callable[..., GateVerdict]:
     """Return ``gate(tool_name, target_url, destructive=False, *, destruction_action=None,
     destruction_signed=None) -> GateVerdict`` wired to the REAL gates — including the I4 threshold-
@@ -97,11 +98,20 @@ def build_offense_gate(
     argument, so the only path that sets it is the trusted caller here.
 
     Destructive actions are threshold-gated: pass a ``destruction_authority`` (immutable
-    :class:`destruction_gate.DestructionAuthority` from deployment config) and an ``is_consumed``
-    single-use check at build time, and per-call the ``destruction_action`` +
-    ``destruction_signed`` quorum authorization. A destructive call missing ANY of these engages no
-    threshold gate → ``conjunctive_decide`` DENIES it (fail-closed — an irreversible action never
-    slips through on the two base gates alone).
+    :class:`destruction_gate.DestructionAuthority` from deployment config) and, for the single-use leg,
+    EITHER a ``destruction_ledger`` (a :class:`nonce_ledger.NonceLedger`) OR a bare ``is_consumed``
+    check at build time, and per-call the ``destruction_action`` + ``destruction_signed`` quorum
+    authorization. A destructive call missing the authority, the action/signed pair, AND both single-use
+    inputs engages no threshold gate → ``conjunctive_decide`` DENIES it (fail-closed — an irreversible
+    action never slips through on the two base gates alone).
+
+    SINGLE-USE (O5 fix): a ``destruction_ledger`` routes the destruction conjunct through
+    :func:`destruction_gate.consume_authorization` — the ATOMIC check-AND-burn whose ``O_EXCL`` marker
+    create is the serialization point, so of N concurrent callers of ONE authorization exactly one wins
+    (this is the surface a caller wiring destruction for REAL execution MUST use). A bare ``is_consumed``
+    (no ledger) keeps the legacy PURE check (:func:`destruction_gate.authorize_destruction`), which
+    carries the documented TOCTOU and is retained ONLY for a caller that owns its own atomic burn;
+    prefer ``destruction_ledger``. If BOTH are given, the atomic ledger path wins.
     """
     if trust_root is None:
         raise ValueError(
@@ -135,11 +145,13 @@ def build_offense_gate(
             return decide_tool(tool_name, classify=classify, floor=floor, ceiling=ceiling)
 
         # Wire the real threshold-destruction thunk ONLY when the full context is present; otherwise
-        # a destructive action reaches conjunctive_decide with no gate → DENY (fail-closed).
+        # a destructive action reaches conjunctive_decide with no gate → DENY (fail-closed). The
+        # single-use leg needs EITHER an atomic ledger (preferred, real execution) OR a bare is_consumed.
         destruction_authorize = None
         if destructive and destruction_authority is not None and destruction_action is not None \
-                and destruction_signed is not None and is_consumed is not None:
-            from .destruction_gate import authorize_destruction
+                and destruction_signed is not None \
+                and (destruction_ledger is not None or is_consumed is not None):
+            from .destruction_gate import authorize_destruction, consume_authorization
 
             # Cross-bind the two halves: the quorum-authorized action MUST be the SAME target and
             # engagement the CRUCIBLE half is scoping (and the executor will act on). Without this a
@@ -155,7 +167,21 @@ def build_offense_gate(
                                 f"{getattr(destruction_action, 'target', None)!r}) does not match the "
                                 f"gate ({slug!r}/{target_url!r})"),
                     )
+            elif destruction_ledger is not None:
+                # REAL execution: ATOMIC check-AND-burn via the durable NonceLedger — the O_EXCL create
+                # is the serialization point, so concurrent callers of ONE authorization → exactly one
+                # wins and every replay is DENIED (closes the O5 check-only TOCTOU).
+                def destruction_authorize() -> Any:  # type: ignore[misc]
+                    return consume_authorization(
+                        destruction_action, destruction_signed,
+                        authority=destruction_authority,
+                        now=_as_epoch(now),      # destruction leg wants an epoch float
+                        ledger=destruction_ledger,
+                    )
             else:
+                # Back-compat: a caller supplying only a pure is_consumed (no ledger) keeps the
+                # check-only decision. This leg carries the documented TOCTOU — such a caller MUST own
+                # its own atomic burn at/after execution (as build_destruction_quorum does).
                 def destruction_authorize() -> Any:  # type: ignore[misc]
                     return authorize_destruction(
                         destruction_action, destruction_signed,

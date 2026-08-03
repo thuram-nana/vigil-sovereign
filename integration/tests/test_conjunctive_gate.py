@@ -307,3 +307,52 @@ def test_end_to_end_with_the_real_destruction_gate():
         return authorize_destruction(action, only_worker, authority=authority, now=50, is_consumed=lambda n: False)
     assert conjunctive_decide(crucible_authorize=_cru(True), warden_decide=_war("auto"),
                               destructive=True, destruction_authorize=bad_dz).outcome == "deny"
+
+
+def test_build_offense_gate_atomic_ledger_is_single_use(tmp_path, monkeypatch):
+    # T6 (O5 fix): wiring a `destruction_ledger` routes the destruction conjunct through the ATOMIC
+    # consume_authorization — so the SAME destructive action authorized once through build_offense_gate is
+    # single-use: a replay through the same gate + ledger is DENIED (the check-only TOCTOU is closed).
+    import sys
+    import types
+
+    for name in ("framework", "framework.v2", "framework.v2.authority"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    gate_mod = types.ModuleType("framework.v2.authority.gate")
+    gate_mod.load_authority_for_gate = lambda slug, trust_root: object()
+    gate_mod.authorize_action = lambda authority, req, **kw: types.SimpleNamespace(allowed=True, reason="in envelope")
+    models_mod = types.ModuleType("framework.v2.authority.models")
+    models_mod.ActionRequest = lambda **kw: types.SimpleNamespace(**kw)
+    monkeypatch.setitem(sys.modules, "framework.v2.authority.gate", gate_mod)
+    monkeypatch.setitem(sys.modules, "framework.v2.authority.models", models_mod)
+
+    from vigil_core import AuthorizerKey, TrustRoot, generate_keypair
+    from vigil_integration.destruction_gate import (
+        DestructionAuthority,
+        DestructionAuthorization,
+        DestructiveAction,
+        sign_authorization,
+    )
+    from vigil_integration.live.nonce_ledger import NonceLedger
+
+    owner, worker = generate_keypair(), generate_keypair()
+    tr = TrustRoot(threshold=2, authorizers=[
+        AuthorizerKey(key_id="owner", name="owner", public_key_b64=owner.public_key_b64),
+        AuthorizerKey(key_id="worker", name="worker", public_key_b64=worker.public_key_b64)])
+    authority = DestructionAuthority(trust_root=tr, mandatory_signer_ids={"owner"})
+    action = DestructiveAction(action_id="rm-1", engagement_slug="acme", target="db", blast_class="destructive")
+    auth = DestructionAuthorization(action_id="rm-1", engagement_slug="acme", target="db",
+                                    blast_class="destructive", not_before=0, not_after=100, nonce="n-ledger-1")
+    good = sign_authorization(auth, [("owner", owner.private_key_b64), ("worker", worker.private_key_b64)])
+
+    ledger = NonceLedger(str(tmp_path / "nonces"))
+    gate = build_offense_gate(slug="acme", trust_root=tr, classify=lambda n: "A0", floor="A0",
+                              ceiling="A3", now=50, destruction_authority=authority,
+                              destruction_ledger=ledger)
+    # first destructive authorization ALLOWs and atomically burns the nonce
+    assert gate("shell.exec", "db", destructive=True,
+                destruction_action=action, destruction_signed=good).outcome == "allow"
+    assert ledger.is_consumed("n-ledger-1") is True
+    # replay of the SAME authorization through the same gate + ledger is now DENIED (single-use)
+    v = gate("shell.exec", "db", destructive=True, destruction_action=action, destruction_signed=good)
+    assert v.outcome == "deny" and "consumed" in v.reason
