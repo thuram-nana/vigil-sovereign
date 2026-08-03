@@ -518,7 +518,8 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
 def _cmd_reprove(args: argparse.Namespace) -> int:
     """TRUTHENOVATION A2 — ``vigil reprove``: the CONTINUOUS RE-PROOF SERVICE.
 
-    Turns "continuously re-proven" from a capability into an operating property. It builds the SAME
+    Makes "continuously re-proven" an operating property *once its systemd timer is enabled on a host* —
+    until then this is the deployable re-proof loop (a capability), not a running deployment. It builds the SAME
     provenance-grounded re-proof target ``vigil remediate --prove`` builds (a signed spine / owner-delegated
     envelope finding, its retained firing ``oracle_context`` as the positive control, the original exploit
     reconstructed from the retained material), then LOOPS it on a cadence: each cycle re-fires the exploit
@@ -1602,8 +1603,8 @@ def build_parser() -> argparse.ArgumentParser:
         "reprove",
         help="TRUTHENOVATION A2 — the CONTINUOUS RE-PROOF SERVICE: loop the four-state live re-proof over a "
              "provenance-grounded finding on a cadence, appending signed, witnessed ticks to the continuous "
-             "attestation log so 'continuously re-proven' is an OPERATING property (a running daemon + a "
-             "systemd oneshot+timer), not just a capability")
+             "attestation log so 'continuously re-proven' becomes an OPERATING property once its systemd "
+             "timer is enabled on a host (until then: a deployable loop + oneshot/timer — a capability)")
     # cadence
     prr.add_argument("--once", action="store_true",
                      help="run ONE re-proof cycle and exit (the systemd oneshot the timer fires)")

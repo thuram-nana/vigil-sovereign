@@ -63,15 +63,20 @@ so a claim the poisoned analyst never made is invisible (`veracity/firewall.py:1
   witnesses are deployed** — the only callers are tests holding all keys in one process, and the code states
   independence is *"a deployment assumption the code cannot check"* (`attestation_witness.py:61-73`). At the
   trust-model-blessed `threshold==1`, equivocation is *detectable, not prevented* (`transparency.py:11-22`).
-- **Continuously re-proven:** ✅ **a running re-proof SERVICE now exists (A2, #TBD).** `vigil reprove` (a daemon
-  + a systemd oneshot `vigil-reprove.service`/`.timer`) loops the four-state live re-proof over the retained
+- **Continuously re-proven:** a re-proof SERVICE is now **BUILT + tested + shippable (A2, #TBD)** — a *deployable*
+  mechanism, **not a running deployment** (Rule 1/3/5). `vigil reprove` (a manual CLI) plus a *shippable but
+  un-installed* systemd oneshot `vigil-reprove.service`/`.timer` loops the four-state live re-proof over the retained
   fact+remediation corpus on a cadence: each cycle re-fires the retained `oracle_context` against the live target
   through the gated executor (`remediation/reprove.py:run_reprove`), `append_tick`s the fresh signed cert, and has a
-  witness time-co-sign the new head — so `append_tick`/`witness_attestation_head` run in production, not only from
-  tests, and the series verifies end-to-end. **HONEST RESIDUAL:** this is a running *cadence*, nothing more —
-  freshness is only as current as the **last cadence fire** ("re-proven on a cadence", never "true at this
-  instant"); it re-fires the **RETAINED** corpus (soundness bounded to what was retained); it needs the **targets
-  reachable**; and the default self-witness (threshold==1) is a time-stamp, not independence (that is A3/§4).
+  witness time-co-sign the new head. An OFFLINE deterministic test drives N cycles (injected clock + no-op sleep) and
+  asserts EXACTLY N witnessed ticks with `verify_log` green end-to-end, so `append_tick`/`witness_attestation_head`
+  are shown *runnable in the real path*, not only reachable — but the diff shows **code + an offline test**, not a
+  timer enabled on any host. **"Continuously re-proven" is therefore a CAPABILITY, not yet an operating property:** it
+  becomes one **only once an operator installs and enables the shipped timer on a host**, which this diff does not
+  demonstrate. **HONEST RESIDUAL (holds even once enabled):** it is a *cadence*, nothing more — freshness is only as
+  current as the **last cadence fire** ("re-proven on a cadence", never "true at this instant"); it re-fires the
+  **RETAINED** corpus (soundness bounded to what was retained); it needs the **targets reachable**; and the default
+  self-witness (threshold==1) is a time-stamp, not independence (that is A3/§4).
 - **Time-anchored:** quorum-median only; the RFC3161/OpenTimestamps anchor is *"a designed, deferred hook"*
   (`WITNESS-TRUST.md:104-108`, `transparency.py:29`).
 - Neo4j (`graph/store.py:266-297`), OTLP (`live/otel_export.py`), and SEV-SNP/TDX (`attestation/provider.py:136-179`)
@@ -137,7 +142,7 @@ CI-green → merge → update this scoreboard.
 | Slice | Gap | Fact | State |
 |---|---|---|---|
 | A1 | median-clock time | a checkpoint carries a verifiable RFC3161/OTS external timestamp | UN-STARTED |
-| A2 | no re-proof loop | a running re-proof service re-proves the corpus on a cadence + appends witnessed ticks | ✅ **VERIFIED FACT (#TBD)** — `remediation/reprove.py:run_reprove` LOOPS a cadence over the retained corpus: each cycle re-fires the retained `oracle_context` against the live target (a real `error_signature` re-drive, not a stub tick), `append_tick`s the fresh signed four-state cert, and `witness_attestation_head` time-co-signs the new head; persisted to `<base>/attestation-log/` (+ `witnessed.jsonl`). Shipped as `vigil reprove --once/--cycles/--interval` + the systemd `vigil-reprove.service`+`.timer` (oneshot on a cadence). The cadence `sleep` is INJECTABLE and nothing wallclock/rng enters the signed tick math — the offline test runs N cycles with a no-op sleep + injected clock and asserts EXACTLY N witnessed ticks, `verify_log` green end-to-end, and two identical runs → identical chain digests. Reuses the ONE governance authority (no new key); FATAL-2 (framework re-drive imports function-local). **Scope/residual:** freshness = last cadence fire; re-fires the RETAINED corpus; targets must be reachable; the default self-witness (threshold==1) is a time-stamp, not independence (→ A3/§4). |
+| A2 | no re-proof loop | a re-proof service (loop + CLI + shippable systemd unit/timer) re-proves the corpus on a cadence + appends witnessed ticks — an OPERATING property once its timer is enabled on a host | **CAPABILITY — BUILT + tested + shippable (#TBD)** — `remediation/reprove.py:run_reprove` LOOPS a cadence over the retained corpus: each cycle re-fires the retained `oracle_context` against the live target (a real `error_signature` re-drive, not a stub tick), `append_tick`s the fresh signed four-state cert, and `witness_attestation_head` time-co-signs the new head; persisted to `<base>/attestation-log/` (+ `witnessed.jsonl`). Shipped as `vigil reprove --once/--cycles/--interval` + the *shippable but un-installed* systemd `vigil-reprove.service`+`.timer` (oneshot on a cadence). The cadence `sleep` is INJECTABLE and nothing wallclock/rng enters the signed tick math — the offline test runs N cycles with a no-op sleep + injected clock and asserts EXACTLY N witnessed ticks, `verify_log` green end-to-end, and two identical runs → identical chain digests. Reuses the ONE governance authority (no new key); FATAL-2 (framework re-drive imports function-local). **Why CAPABILITY, not VERIFIED FACT (Rule 1/3):** the diff delivers code + an offline test (injected sleep, no real time) + un-installed units — the *running cadence* becomes a live operating property **only once an operator enables the shipped timer on a host**, which is not demonstrated here (cf. A3, kept at CAPABILITY for the same reason). **Scope/residual (even once enabled):** freshness = last cadence fire; re-fires the RETAINED corpus; targets must be reachable; the default self-witness (threshold==1) is a time-stamp, not independence (→ A3/§4). |
 | A3 | no witnesses deployed | N independent witness processes co-sign a real series; a third party can run one | CAPABILITY (+ irreducible independence → §4) |
 
 ### PHASE Z — the zero-trust endgame
