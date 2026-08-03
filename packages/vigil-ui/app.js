@@ -28,6 +28,7 @@
       { id: "report", label: "Report", icon: "book", ready: true },
       { id: "fixes", label: "Fixes", icon: "fixes", ready: true },
       { id: "defense", label: "Defense (AEGIS)", icon: "shield", ready: true },
+      { id: "replay", label: "Replay Proof", icon: "bolt", ready: true },
     ]},
     { group: "MANAGE", items: [
       { id: "sessions", label: "Sessions", icon: "book", ready: true },
@@ -40,6 +41,7 @@
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
+      { id: "governance", label: "Governance", icon: "shield", ready: true },
     ]},
     { group: "LEARN", items: [
       { id: "trust", label: "Trust Center", icon: "shield", ready: true },
@@ -632,6 +634,191 @@
       r.digest ? trustKv("Digest", h("span.mono", null, trustShort(r.digest))) : null,
       r.pin_source ? h("div.hint", null, "Pin source: " + r.pin_source) : null,
     ]);
+  }
+
+  // ==========================================================================
+  // Replay-the-Proof — import an external report/finding JSON and RE-FIRE its
+  // retained oracle certificates OFFLINE (pure re-computation via the console's
+  // /api/replay -> verify.reverify.reverify_document). No target, no traffic, no
+  // mint. A tampered finding renders CONTRADICTED, never a green "reproduced".
+  // ==========================================================================
+  function renderReplay(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Replay the Proof"),
+        h("span.sub", null, "Paste a VIGIL report or finding (report.json) and re-fire its retained oracle "
+          + "proofs OFFLINE — pure re-computation, no target, no traffic. A tampered proof shows as "
+          + "CONTRADICTED, never a green reproduction.")]),
+      h("div.card", null, [
+        h("div.kv", null, [h("div.k", null, "Report / finding JSON"),
+          h("div.v", null, h("textarea#replay-input", { rows: "10", spellcheck: "false",
+            placeholder: '{ "active_findings": [ … ] }  — or a single finding object' }))]),
+        h("div.row", { style: { marginTop: "10px", alignItems: "center" } }, [
+          h("button.btn.sm.primary", { onClick: doReplay }, [V.icon("bolt"), "Re-fire proofs offline"]),
+          h("span.hint", { style: { marginLeft: "8px" } },
+            "Re-runs each finding's retained oracle_context. Offline, read-only — nothing is sent to any target.")]),
+      ]),
+      h("div#replay-result", { style: { marginTop: "14px" } }),
+    ]);
+  }
+
+  function doReplay() {
+    var slot = V.$("#replay-result");
+    var el = V.$("#replay-input");
+    var raw = (el && el.value) || "";
+    var doc;
+    try { doc = JSON.parse(raw); }
+    catch (e) {
+      V.mount(slot, h("div.empty", null, [V.statusBadge("refuted"),
+        h("p", null, "That is not valid JSON. Paste a VIGIL report.json (with active_findings) or a single finding object.")]));
+      return;
+    }
+    V.mount(slot, h("div.row", { style: { alignItems: "center" } },
+      [V.statusBadge("running"), h("span.hint", { style: { marginLeft: "8px" } }, "re-firing proofs offline…")]));
+    V.postJSON(OFF("/api/replay"), { doc: doc }).then(function (r) { renderReplayResult(slot, r); })
+      .catch(function (e) {
+        V.mount(slot, h("div.empty", null, [V.statusBadge("refuted"),
+          h("p", null, "Replay failed: " + ((e && e.message) || "offense console unreachable."))]));
+      });
+  }
+
+  function replayBucketBadge(b) {
+    if (b === "reproduced") return V.statusBadge("confirmed");
+    if (b === "contradicted") return V.statusBadge("refuted");
+    return V.statusBadge("idle");
+  }
+
+  function renderReplayResult(slot, r) {
+    if (!slot) return;
+    if (!r || r.error) {
+      V.mount(slot, h("div.empty", null, [V.statusBadge("refuted"),
+        h("p", null, "Replay error: " + ((r && r.error) || "unknown"))]));
+      return;
+    }
+    var rows = (r.results || []).map(function (x) {
+      var label = x.bucket === "reproduced" ? "REPRODUCED"
+        : x.bucket === "contradicted" ? "CONTRADICTED (tampered / won't re-fire)" : "UNGROUNDED (no re-runnable claim)";
+      return h("div.card", { style: { marginBottom: "8px" } }, [
+        h("div.row", { style: { alignItems: "center" } }, [
+          replayBucketBadge(x.bucket),
+          h("span", { style: { marginLeft: "8px", fontWeight: "700" } }, label),
+          h("span.mono", { style: { marginLeft: "10px" } }, trustShort(x.finding, 40, 10)),
+        ]),
+        x.confirmed_by ? trustKv("Re-fired oracle",
+          x.confirmed_by + (x.confidence != null ? " · confidence " + trustPct(x.confidence) : "")) : null,
+        x.note ? h("div.hint", null, x.note) : null,
+      ]);
+    });
+    V.mount(slot, [
+      h("div.grid.cols-4", null, [
+        V.tile("Findings", String(r.total != null ? r.total : 0)),
+        V.tile("Reproduced", String(r.reproduced || 0), "oracle re-fired offline", "ok"),
+        V.tile("Contradicted", String(r.contradicted || 0), "tampered / won't re-fire", (r.contradicted ? "bad" : null)),
+        V.tile("Ungrounded", String(r.ungrounded || 0), "no re-runnable claim"),
+      ]),
+      rows.length ? h("div", { style: { marginTop: "12px" } }, rows)
+        : h("div.empty", { style: { marginTop: "12px" } }, "No findings in that document."),
+    ]);
+  }
+
+  // ==========================================================================
+  // Governance & Gate audit — a READ/AUDIT-ONLY view of the runtime governance
+  // posture: GOVERNED vs UNGOVERNED (entitlement enforced?), the sovereignty tier
+  // + seal, the safety-gate conjuncts every action must clear, and the m-of-n
+  // destruction quorum read from disk. The web CANNOT provision, authorize, or
+  // fire a destructive action — this screen reads state only.
+  // ==========================================================================
+  function renderGovernance(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Governance & Gate Audit"),
+        h("span.sub", null, "Read-only: whether exploitation runs GOVERNED (capability entitlement enforced) "
+          + "or UNGOVERNED, the sovereignty tier, the safety-gate conjuncts every action must clear, and the "
+          + "m-of-n destruction quorum. This screen cannot provision, authorize, or fire anything.")]),
+      h("div#gov-body", null, h("div.empty", null, "Reading governance posture…")),
+    ]);
+    V.getJSON(OFF("/api/governance")).then(renderGovernanceData).catch(function () {
+      V.mount(V.$("#gov-body"), h("div.empty", null, [
+        h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not reach the offense console to read the governance posture. "
+          + "Start it (vigil up / the console server) and reload.")]));
+    });
+  }
+
+  function renderGovernanceData(d) {
+    var body = V.$("#gov-body"); if (!body) return;
+    d = d || {};
+    var sov = d.sovereignty || null, ent = d.entitlement || null, gate = d.gate || {}, des = d.destruction || {};
+    var governed = !!d.governed;
+
+    var postureCard = h("div.card", null, [
+      h("div.card-h", null, [h("span.label", null, "posture"), h("h3", null, "Exploitation governance")]),
+      h("div.row", { style: { alignItems: "center", marginTop: "4px" } }, [
+        V.statusBadge(governed ? "confirmed" : "refuted"),
+        h("span", { style: { marginLeft: "8px", fontWeight: "700", fontSize: "15px" } },
+          governed ? "GOVERNED — capability entitlement is ENFORCED" : "UNGOVERNED — entitlement not enforced"),
+      ]),
+      ent ? trustKv("Entitlement", (ent.enforced ? "enforced" : "NOT enforced")
+        + (ent.granted_tier ? " · granted tier " + ent.granted_tier : "")) : null,
+      ent && ent.explain ? h("div.hint", null, ent.explain) : null,
+    ]);
+
+    var sovCard = h("div.card", null, [
+      h("div.card-h", null, [h("span.label", null, "sovereignty"), h("h3", null, "Sovereignty tier")]),
+      sov ? h("div.row", { style: { alignItems: "center", marginTop: "4px" } }, [
+        V.pill(sov.tier || "?", null, null),
+        h("span", { style: { marginLeft: "8px" } }, sov.sealed ? "SEALED (latched)" : "not sealed"),
+      ]) : h("div.hint", null, "sovereignty policy unavailable."),
+    ]);
+
+    var gateCard = h("div.card", null, [
+      h("div.card-h", null, [h("span.label", null, "safety gate"), h("h3", null, "Conjunctive gate")]),
+      h("div.hint", null, "Every target-touching action must clear ALL of these conjuncts (fail-closed):"),
+      h("div.row", { style: { flexWrap: "wrap", marginTop: "6px", gap: "6px" } },
+        (gate.conjuncts || []).map(function (c) { return V.pill(c, null, null); })),
+    ]);
+
+    V.mount(body, [
+      d.note ? h("div.hint", { style: { marginBottom: "10px" } }, d.note) : null,
+      h("div.grid.cols-2", null, [postureCard, sovCard]),
+      h("div", { style: { marginTop: "12px" } }, gateCard),
+      h("div", { style: { marginTop: "12px" } }, renderDestructionCard(des)),
+    ]);
+  }
+
+  function renderDestructionCard(des) {
+    var head = h("div.card-h", null, [h("span.label", null, "m-of-n quorum"),
+      h("h3", null, "Destruction authority (read-only audit)")]);
+    if (!des || des.present === false) {
+      return h("div.card", null, [head,
+        h("div.empty", { style: { marginTop: "8px" } }, [V.statusBadge("idle"),
+          h("p", null, (des && des.note) || "No destruction trust root provisioned — no m-of-n quorum exists on this host.")])]);
+    }
+    var tr = des.trust_root || {};
+    var pend = des.pending || [];
+    var pendRows = pend.map(function (p) {
+      return h("div.kv", { style: { marginTop: "4px" } }, [
+        h("div.k", null, trustShort(p.action_id || "?", 18, 6)),
+        h("div.v", null, [
+          p.blast_class ? V.pill(p.blast_class, null, null) : null, " ",
+          p.target ? h("span.mono", null, trustShort(p.target, 24, 8)) : null,
+          h("span.hint", { style: { marginLeft: "6px" } },
+            (p.signature_count || 0) + " of " + (tr.threshold != null ? tr.threshold : "?") + " signatures"),
+        ])]);
+    });
+    return h("div.card", null, [head,
+      h("div", null, [
+        trustKv("Threshold", "m-of-n: " + (tr.threshold != null ? tr.threshold : "?") + " of "
+          + (tr.authorizer_count != null ? tr.authorizer_count : (tr.authorizer_ids || []).length)),
+        h("div.kv", null, [h("div.k", null, "Authorizers"), h("div.v", null,
+          (tr.authorizer_ids || []).length
+            ? (tr.authorizer_ids || []).map(function (id) { return V.pill(id, null, null); }) : "—")]),
+        trustKv("Consumed nonces", String(des.consumed_nonce_count != null ? des.consumed_nonce_count : 0)
+          + " (spent single-use authorizations)"),
+        h("div.kv", { style: { marginTop: "6px" } }, [h("div.k", null, "Pending authorizations"),
+          h("div.v", null, pendRows.length ? pendRows : "none")]),
+        h("div.hint", { style: { marginTop: "8px" } },
+          "Read-only audit — the UI cannot provision, authorize, or fire a destructive action. Minting and "
+          + "consuming an authorization happen only via the gated CLI with m-of-n independent signatures."),
+      ])]);
   }
 
   // ==========================================================================
@@ -4775,6 +4962,8 @@
     if (id === "knowledge") { renderKnowledge(screen); return; }
     if (id === "tools") { renderTools(screen); return; }
     if (id === "trust") { renderTrust(screen); return; }
+    if (id === "replay") { renderReplay(screen); return; }
+    if (id === "governance") { renderGovernance(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "chat") { renderChat(screen); return; }
     if (id === "terminal") { renderTerminal(screen); return; }

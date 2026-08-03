@@ -177,6 +177,22 @@ screens:
     description: VIGIL's signed, offline-verifiable certificates rendered as certificates — trust root, out-of-band fingerprint pin, and a live offline PASS/FAIL verification.
     synonyms: [trust center, certificates, certs, signed certificate, trust root, fingerprint pin, offline verify, verify certificate, provable, recall baseline, accuracy baseline]
 
+  - id: replay
+    label: Replay Proof
+    group: DO
+    owner: false
+    plane: unified
+    description: Import an external VIGIL report/finding JSON and re-fire its retained oracle proofs OFFLINE — pure re-computation, no target, no traffic; a tampered proof renders CONTRADICTED, never a green reproduction.
+    synonyms: [replay, replay proof, replay the proof, re-verify a report, reverify, import report, verify report.json, re-fire oracle, offline proof replay, proof replay]
+
+  - id: governance
+    label: Governance
+    group: MANAGE
+    owner: false
+    plane: unified
+    description: Read-only governance & gate audit — GOVERNED vs UNGOVERNED entitlement, the sovereignty tier, the conjunctive safety-gate, and the m-of-n destruction quorum read from disk. The UI cannot provision, authorize, or fire a governed action.
+    synonyms: [governance, gate audit, governance posture, sovereignty tier, entitlement, ungoverned, conjunctive gate, warden, destruction quorum, m-of-n, kill switch, read-only audit]
+
   - id: manual
     label: Manual
     group: LEARN

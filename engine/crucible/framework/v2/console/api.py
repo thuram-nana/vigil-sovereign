@@ -662,6 +662,111 @@ def charter_status(slug: str) -> dict[str, Any]:
     }
 
 
+def _destruction_audit() -> dict[str, Any]:
+    """READ-ONLY audit of the m-of-n destruction-quorum state, from the PERSISTED files under the live
+    base dir — stdlib + ``vigil_core.TrustRoot`` ONLY (mirrors ``approvals``). It reads the public
+    trust-root JSON (threshold + authorizer ids), counts spent-nonce markers, and summarises any
+    pending signed authorization's PUBLIC signing-payload. It imports NONE of the destruction gate/mint
+    modules (FATAL-2) and exposes NO provision/authorize/consume path — it only reports what is on disk.
+    Not provisioned (no trust-root file) → ``{"present": False}`` honestly, never a fabricated quorum."""
+    import os
+    import re
+
+    base = os.environ.get("VIGIL_BASE_DIR") or ".vigil-live"
+    root = Path(base)
+    tr_path = root / "destruction-trust-root.json"
+    if not tr_path.is_file():
+        return {"present": False, "base_dir": base,
+                "note": "no destruction trust root provisioned — no m-of-n quorum exists on this host."}
+
+    def _trust_root() -> dict[str, Any]:
+        from vigil_core import TrustRoot
+        tr = TrustRoot.model_validate_json(tr_path.read_text(encoding="utf-8"))
+        return {"threshold": tr.threshold,
+                "authorizer_ids": [a.key_id for a in tr.authorizers],
+                "authorizer_count": len(tr.authorizers)}
+
+    def _consumed_nonces() -> int:
+        d = root / "destruction-nonces"
+        if not d.is_dir():
+            return 0
+        # each spent nonce is a marker file named sha256(nonce) = [0-9a-f]{64} (nonce_ledger); count them.
+        marker = re.compile(r"^[0-9a-f]{64}$")
+        return sum(1 for p in d.iterdir() if p.is_file() and marker.match(p.name))
+
+    def _pending() -> list[dict[str, Any]]:
+        p = root / "signed-authorization.json"
+        if not p.is_file():
+            return []
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        entries = doc if isinstance(doc, list) else [doc]
+        out: list[dict[str, Any]] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            # {"authorization": <signing_payload>, "signatures": [{key_id,...}]} — PUBLIC-safe fields only,
+            # NEVER a private key. This is a read of the payload the quorum SIGNED, not an authorization we hold.
+            auth = e.get("authorization") if isinstance(e.get("authorization"), dict) else e
+            sigs = e.get("signatures") if isinstance(e.get("signatures"), list) else []
+            out.append({
+                "action_id": auth.get("action_id"),
+                "engagement_slug": auth.get("engagement_slug"),
+                "target": auth.get("target"),
+                "blast_class": auth.get("blast_class"),
+                "not_before": auth.get("not_before"),
+                "not_after": auth.get("not_after"),
+                "signature_count": len(sigs),
+                "signer_ids": [str(s.get("key_id")) for s in sigs if isinstance(s, dict) and s.get("key_id")],
+            })
+        return out
+
+    return {
+        "present": True,
+        "base_dir": base,
+        "trust_root": _safe(_trust_root, default=None),
+        "consumed_nonce_count": _safe(_consumed_nonces, default=0),
+        "pending": _safe(_pending, default=[]) or [],
+    }
+
+
+def governance_data() -> dict[str, Any]:
+    """Governance & Gate audit — a READ/AUDIT-ONLY picture of the runtime governance posture: the
+    sovereignty tier + seal, whether capability entitlement is ENFORCED or the deployment runs
+    UNGOVERNED, the safety-gate conjuncts every action must clear, and the m-of-n destruction-quorum
+    state read from disk. It is PURE and READ-ONLY: it evaluates policy and reads persisted public files
+    only. It NEVER provisions, authorizes, signs, or fires a governed/destructive action, and it imports
+    no gate mint module (FATAL-2) — the destruction audit reads the persisted JSON/dir directly."""
+    def _sovereignty() -> dict[str, Any]:
+        from ..kernel import sovereignty
+        pol = sovereignty.current()
+        return {"tier": pol.tier.name, "sealed": bool(sovereignty.is_sealed())}
+
+    def _entitlement() -> dict[str, Any]:
+        from ..entitlement.policy import EntitlementPolicy
+        ent = EntitlementPolicy.from_provisioned()
+        gt = ent.granted_tier
+        return {"enforced": bool(ent.enforced),
+                "granted_tier": gt.name if gt is not None else None,
+                "explain": ent.explain()}
+
+    sovereignty = _safe(_sovereignty, default=None)
+    entitlement = _safe(_entitlement, default=None)
+    # GOVERNED iff entitlement is actually enforced; anything else (unenforced, or an unreadable policy) is
+    # UNGOVERNED — fail-honest, never assume governance we could not confirm.
+    governed = bool(entitlement and entitlement.get("enforced"))
+    return {
+        "governed": governed,
+        "sovereignty": sovereignty,
+        "entitlement": entitlement,
+        "gate": {"conjuncts": ["authority/kill-switch", "scope", "destructive-confirm",
+                               "budget", "rate-limit", "egress"]},
+        "destruction": _safe(_destruction_audit, default={"present": False}),
+        "read_only": True,
+        "note": ("Read-only audit — this screen cannot provision, authorize, or fire a destructive action; "
+                 "it reports the governance posture and the persisted m-of-n quorum state only."),
+    }
+
+
 def planner_data(slug: str) -> dict[str, Any]:
     """The goal-tree/plan state for an engagement, if a planner ran (planner-state.json)."""
     def _read() -> dict[str, Any]:
