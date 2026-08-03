@@ -131,6 +131,13 @@ def _verify(argv: list[str]) -> int:
     return reverify.main(argv)
 
 
+def _plan_integrity(argv: list[str]) -> int:
+    # TRUTHENOVATION M3: offline-verify a SIGNED plan-integrity attestation (committed /
+    # discovered / skipped / steer-signals). Pure, offline, deterministic — mirrors _verify.
+    from .verify import plan_integrity
+    return plan_integrity.main(argv)
+
+
 def _drift(argv: list[str]) -> int:
     # Continuous drift: diff the oracle-CONFIRMED fact set between two runs (re-firing each
     # run's retained certs). Pure, offline, deterministic — reuses verify.reverify.
@@ -244,6 +251,7 @@ _DISPATCH: dict[str, Callable[[list[str]], int]] = {
     "engage": _engage,
     "plan": _plan,
     "verify": _verify,
+    "plan-integrity": _plan_integrity,
     "drift": _drift,
     "capabilities": _capabilities,
     "aegis": _aegis,
