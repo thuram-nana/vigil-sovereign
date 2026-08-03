@@ -63,8 +63,15 @@ so a claim the poisoned analyst never made is invisible (`veracity/firewall.py:1
   witnesses are deployed** — the only callers are tests holding all keys in one process, and the code states
   independence is *"a deployment assumption the code cannot check"* (`attestation_witness.py:61-73`). At the
   trust-model-blessed `threshold==1`, equivocation is *detectable, not prevented* (`transparency.py:11-22`).
-- **Continuously re-proven:** **no scheduler exists**; `append_tick` is called *only from tests*; `drift --watch`
-  is a manual CLI defaulting to `--cycles 1` (`drift.py:383-384`). "As of the last time someone ran the command."
+- **Continuously re-proven:** ✅ **a running re-proof SERVICE now exists (A2, #TBD).** `vigil reprove` (a daemon
+  + a systemd oneshot `vigil-reprove.service`/`.timer`) loops the four-state live re-proof over the retained
+  fact+remediation corpus on a cadence: each cycle re-fires the retained `oracle_context` against the live target
+  through the gated executor (`remediation/reprove.py:run_reprove`), `append_tick`s the fresh signed cert, and has a
+  witness time-co-sign the new head — so `append_tick`/`witness_attestation_head` run in production, not only from
+  tests, and the series verifies end-to-end. **HONEST RESIDUAL:** this is a running *cadence*, nothing more —
+  freshness is only as current as the **last cadence fire** ("re-proven on a cadence", never "true at this
+  instant"); it re-fires the **RETAINED** corpus (soundness bounded to what was retained); it needs the **targets
+  reachable**; and the default self-witness (threshold==1) is a time-stamp, not independence (that is A3/§4).
 - **Time-anchored:** quorum-median only; the RFC3161/OpenTimestamps anchor is *"a designed, deferred hook"*
   (`WITNESS-TRUST.md:104-108`, `transparency.py:29`).
 - Neo4j (`graph/store.py:266-297`), OTLP (`live/otel_export.py`), and SEV-SNP/TDX (`attestation/provider.py:136-179`)
@@ -130,7 +137,7 @@ CI-green → merge → update this scoreboard.
 | Slice | Gap | Fact | State |
 |---|---|---|---|
 | A1 | median-clock time | a checkpoint carries a verifiable RFC3161/OTS external timestamp | UN-STARTED |
-| A2 | no re-proof loop | a running re-proof service re-proves the corpus on a cadence + appends witnessed ticks | CAPABILITY |
+| A2 | no re-proof loop | a running re-proof service re-proves the corpus on a cadence + appends witnessed ticks | ✅ **VERIFIED FACT (#TBD)** — `remediation/reprove.py:run_reprove` LOOPS a cadence over the retained corpus: each cycle re-fires the retained `oracle_context` against the live target (a real `error_signature` re-drive, not a stub tick), `append_tick`s the fresh signed four-state cert, and `witness_attestation_head` time-co-signs the new head; persisted to `<base>/attestation-log/` (+ `witnessed.jsonl`). Shipped as `vigil reprove --once/--cycles/--interval` + the systemd `vigil-reprove.service`+`.timer` (oneshot on a cadence). The cadence `sleep` is INJECTABLE and nothing wallclock/rng enters the signed tick math — the offline test runs N cycles with a no-op sleep + injected clock and asserts EXACTLY N witnessed ticks, `verify_log` green end-to-end, and two identical runs → identical chain digests. Reuses the ONE governance authority (no new key); FATAL-2 (framework re-drive imports function-local). **Scope/residual:** freshness = last cadence fire; re-fires the RETAINED corpus; targets must be reachable; the default self-witness (threshold==1) is a time-stamp, not independence (→ A3/§4). |
 | A3 | no witnesses deployed | N independent witness processes co-sign a real series; a third party can run one | CAPABILITY (+ irreducible independence → §4) |
 
 ### PHASE Z — the zero-trust endgame

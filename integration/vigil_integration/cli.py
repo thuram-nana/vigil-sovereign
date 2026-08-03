@@ -515,6 +515,200 @@ def _cmd_remediate(args: argparse.Namespace) -> int:
             State.INCONCLUSIVE: 2, State.REFUSED: 3}.get(out.state, 4)
 
 
+def _cmd_reprove(args: argparse.Namespace) -> int:
+    """TRUTHENOVATION A2 — ``vigil reprove``: the CONTINUOUS RE-PROOF SERVICE.
+
+    Turns "continuously re-proven" from a capability into an operating property. It builds the SAME
+    provenance-grounded re-proof target ``vigil remediate --prove`` builds (a signed spine / owner-delegated
+    envelope finding, its retained firing ``oracle_context`` as the positive control, the original exploit
+    reconstructed from the retained material), then LOOPS it on a cadence: each cycle re-fires the exploit
+    against the live ``--target-base-url`` through the gated CRUCIBLE executor, APPENDS a signed four-state
+    tick to the continuous attestation log, and has a witness time-co-sign the new head.
+
+      * ``--once``          — run ONE cycle and exit (the systemd oneshot the timer fires).
+      * ``--cycles N``      — run N cycles then exit.
+      * ``--interval SECS`` — the cadence between cycles for a long-running ``--cycles``/forever daemon.
+      * neither ``--once`` nor ``--cycles`` ⇒ run FOREVER on ``--interval`` (the ``--interval`` daemon).
+
+    Reuses the ONE provisioned governance authority for signing (no new key). Witnessing defaults to a
+    STABLE self-witness persisted under ``--base-dir`` (threshold==1) — an HONEST time-stamp, NOT an
+    independence proof (VF-1c: at threshold==1 equivocation is detectable, not prevented; deploy independent
+    witnesses for the stronger guarantee). Exit 0 iff every scheduled cycle appended a tick and the whole
+    series re-verifies. FATAL-2: every framework-touching import is function-local.
+
+    HONEST RESIDUAL (printed, never overclaimed): freshness is only as current as the last cadence fire; the
+    loop re-fires the RETAINED corpus (soundness bounded to what was retained); the target must be reachable.
+    """
+    import time as _time
+    from urllib.parse import urlsplit
+
+    # (1) EXACTLY ONE trusted finding source (mirrors `vigil remediate` / `vigil patch`).
+    from .live.trusted_finding import TrustedFindingError, finding_from_envelope, finding_from_spine
+    if bool(args.finding_envelope) == bool(args.from_spine):
+        print("vigil reprove: choose EXACTLY ONE trusted finding source — --finding-envelope <signed.json> "
+              "OR --from-spine <slug>. A raw-JSON finding is never accepted.", file=sys.stderr)
+        return 2
+    slug = str((args.scope if args.finding_envelope else args.from_spine) or "").strip()
+    if not slug:
+        print("vigil reprove: an engagement slug is required — --scope <slug> (with --finding-envelope) or "
+              "--from-spine <slug>. It is the charter the live target must be authorized under.", file=sys.stderr)
+        return 2
+    try:
+        if args.finding_envelope:
+            finding = finding_from_envelope(
+                envelope_path=args.finding_envelope, owner_pubkey=args.owner_pubkey,
+                delegation_path=args.delegation, scope=args.scope, target_repo="")
+        else:
+            finding = finding_from_spine(
+                base_dir=args.base_dir, slug=args.from_spine, target_repo="", finding_ref=args.finding_ref)
+    except TrustedFindingError as exc:
+        print(f"vigil reprove: REFUSED (fail-closed): {exc}", file=sys.stderr)
+        return 2
+    if not str(getattr(finding, "ref", "") or "").strip():
+        print("vigil reprove: the trusted finding has no addressable ref — cannot match its retained "
+              "re-verifiable proof material by check_id (fail-closed).", file=sys.stderr)
+        return 2
+
+    # (2) The RETAINED re-verifiable proof material (positive control + channel + insertion point).
+    from .proof.run import read_reverifiable
+    run_dir = str(getattr(args, "run_dir", "") or "") or args.base_dir
+    entries = read_reverifiable(run_dir).get("active_findings", [])
+    entry = _match_reverifiable_entry(entries, finding.ref, args.finding_ref)
+    if entry is None:
+        print(f"vigil reprove: no retained re-verifiable proof material for finding {finding.ref!r} under "
+              f"{run_dir}/proofs/reverifiable.json — run the engagement first (the positive control cannot be "
+              f"fabricated).", file=sys.stderr)
+        return 2
+    channel = str(entry.get("channel") or "")
+    if channel != "error_signature":
+        print(f"vigil reprove: finding {finding.ref!r} was confirmed on the {channel or '?'!r} channel; this "
+              f"re-proof loop currently supports ONLY the error_signature channel (error_based_sqli). "
+              f"Refusing (fail-closed).", file=sys.stderr)
+        return 2
+    bug_class = str(entry.get("bug_class") or "error_based_sqli")
+    original_firing_context = entry.get("oracle_context")
+    if not (isinstance(original_firing_context, dict) and original_firing_context):
+        print(f"vigil reprove: finding {finding.ref!r} has no retained firing oracle_context (the positive "
+              f"control). Refusing (fail-closed).", file=sys.stderr)
+        return 2
+
+    # (3) Reconstruct the ORIGINAL exploit request from the retained finding + insertion point (never faked).
+    spec, why = _reconstruct_exploit_request(finding, entry)
+    if spec is None:
+        print(f"vigil reprove: {why}", file=sys.stderr)
+        return 2
+    target_base_url = str(args.target_base_url or "").strip()
+    host = urlsplit(target_base_url).hostname or ""
+    if not (target_base_url.startswith(("http://", "https://")) and host):
+        print("vigil reprove: --target-base-url must be an http(s) URL with a host authorized in the "
+              "engagement charter scope.", file=sys.stderr)
+        return 2
+
+    # (4) Cadence: --once ⇒ 1; --cycles N ⇒ N; else forever. --interval bounds the between-cycle sleep.
+    cycles: Optional[int]
+    if args.once:
+        cycles = 1
+    elif args.cycles is not None:
+        cycles = int(args.cycles)
+        if cycles < 1:
+            print("vigil reprove: --cycles must be >= 1.", file=sys.stderr)
+            return 2
+    else:
+        cycles = None                       # the --interval daemon (runs forever)
+    interval = float(args.interval)
+
+    # (5) Provision the ONE governance authority (stable, sealed under --base-dir; NO new signing key) + a
+    #     stable self-witness key. FATAL-2: framework imports are function-local here.
+    from vigil_core import AuthorizerKey, TrustRoot
+    from vigil_core.keystore import load_or_create_sealed_keypair
+    from vigil_core.vault import Vault
+    from framework.v2.agents import HttpExecutor
+
+    from .live.wiring import provision_authority
+    from .remediation.attestation_log import verify_log
+    from .remediation.attestation_witness import verify_timed_witnessed_checkpoint
+    from .remediation.live_adapter import LiveHttpAdapter
+    from .remediation.reprove import (
+        ReproveConfig, ReproveTick, build_live_prove_target, load_witnessed, run_reprove,
+    )
+
+    vault = Vault(Path(args.base_dir) / "vault")
+    prov = provision_authority(slug=slug, scope=[host], base_dir=args.base_dir, vault=vault)
+    signer_pubkeys = {prov.signers[0][0]: prov.keypair.public_key_b64}
+    witness_kp = load_or_create_sealed_keypair(
+        path=str(Path(args.base_dir) / "reprove-witness.key"),
+        context=b"vigil-reprove-self-witness-v1\x00", vault=vault)
+    witness_key_id = "reprove-self"
+    witness_trust_root = TrustRoot(
+        threshold=1, authorizers=[AuthorizerKey(
+            key_id=witness_key_id, name="reprove self-witness", public_key_b64=witness_kp.public_key_b64)])
+
+    log_dir = str(args.log_dir or (Path(args.base_dir) / "attestation-log"))
+
+    def _adapter_factory():
+        # A FRESH gated adapter each cycle so each re-proof captures fresh wire bytes. The HttpExecutor's own
+        # charter/scope/kill-switch chain admits ONLY the chartered host — this opens no new egress path.
+        executor = HttpExecutor(engagement_slug=slug, base_url=target_base_url,
+                                prompt_callback=lambda *_a: False)
+        return LiveHttpAdapter(
+            executor=executor, base_url=target_base_url, endpoint_path=spec["endpoint_path"],
+            param=spec["param"], payload=spec["payload"], nonce_param="rc",
+            original_firing_context=dict(original_firing_context), bug_class=bug_class)
+
+    target = build_live_prove_target(
+        finding_id=finding.ref, engagement=slug, prov=prov, scope_host=host,
+        adapter_factory=_adapter_factory, bug_class=bug_class,
+        original_certificate_digest=str(finding.evidence_ref or ""))
+    cfg = ReproveConfig(
+        log_dir=log_dir, engagement_slug=slug, signers=prov.signers, trust_root=prov.trust_root,
+        signer_pubkeys=signer_pubkeys, corpus=[target], witnesses=[(witness_kp, witness_key_id)])
+
+    print(f"=== vigil reprove — continuous re-proof of finding {finding.ref!r} [{bug_class}] ===")
+    print(f"target            : {target_base_url}   (endpoint={spec['endpoint_path']} param={spec['param']})")
+    print(f"attestation log   : {log_dir}")
+    print(f"cadence           : " + ("--once (1 cycle)" if args.once else
+                                     f"{cycles} cycles" if cycles is not None else "forever")
+          + f" (interval={interval}s)")
+    print("witness           : STABLE self-witness (threshold==1) — an honest time-stamp, NOT independence")
+    print("HONEST RESIDUAL   : freshness = last cadence fire; re-fires the RETAINED corpus; target must be "
+          "reachable")
+
+    def _on_cycle(i: int, cticks: "list[ReproveTick]") -> None:
+        for t in cticks:
+            twhen = "witnessed" if t.witnessed is not None else "UN-witnessed"
+            print(f"  cycle {i}: tick seq={t.append.seq} state={t.append.state} "
+                  f"label={t.append.series[-1].label if t.append.series else '?'} ({twhen})", flush=True)
+
+    # (6) Run the loop. real clock + real sleep + UNPREDICTABLE (default secrets) freshness nonces.
+    try:
+        res = run_reprove(cfg, cycles=cycles, interval=interval, sleep=_time.sleep,
+                          clock=lambda: int(_time.time()), on_cycle=_on_cycle)
+    except KeyboardInterrupt:                # the daemon was asked to stop — a clean exit, not a failure
+        print("vigil reprove: interrupted — stopping the re-proof loop.", file=sys.stderr)
+        return 0
+    except Exception as exc:                 # noqa: BLE001 — a cycle could not honestly re-prove (unreachable/…)
+        print(f"vigil reprove: a re-proof cycle failed (fail-closed, nothing faked): {exc}", file=sys.stderr)
+        return 1
+
+    # (7) Bounded runs re-verify the whole series + every witnessed checkpoint before reporting success.
+    if cycles is not None:
+        ok, reason, series = verify_log(log_dir, trust_root=prov.trust_root, signer_pubkeys=signer_pubkeys)
+        print(f"verify_log        : {'OK' if ok else 'FAILED'} — {reason}")
+        if not ok:
+            return 1
+        persisted = load_witnessed(log_dir)
+        wall_ok = True
+        for twc in persisted:
+            wok, _T, _wr = verify_timed_witnessed_checkpoint(twc, witness_trust_root=witness_trust_root)
+            wall_ok = wall_ok and wok
+        print(f"witnessed heads   : {len(persisted)} persisted, "
+              f"{'all verify' if wall_ok else 'A CHECKPOINT FAILED'}")
+        print(f"appended this run : {len(res.ticks)} tick(s); series length now {len(series)}")
+        if not wall_ok:
+            return 1
+    return 0
+
+
 def _cmd_provision_destruction(args: argparse.Namespace) -> int:
     """Mint the m-of-n destruction quorum keys for `vigil patch --open-pr`. Prints each signer's PRIVATE key
     ONCE (paste the owner key into Settings; distribute co-signer keys to their holders) and writes the PUBLIC
@@ -1403,6 +1597,47 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the LIVE target scheme+host(:port) to re-drive against, e.g. http://127.0.0.1:8080 "
                            "— MUST be authorized in the engagement charter scope (else REFUSED, fail-closed)")
     prem.set_defaults(func=_cmd_remediate)
+
+    prr = sub.add_parser(
+        "reprove",
+        help="TRUTHENOVATION A2 — the CONTINUOUS RE-PROOF SERVICE: loop the four-state live re-proof over a "
+             "provenance-grounded finding on a cadence, appending signed, witnessed ticks to the continuous "
+             "attestation log so 'continuously re-proven' is an OPERATING property (a running daemon + a "
+             "systemd oneshot+timer), not just a capability")
+    # cadence
+    prr.add_argument("--once", action="store_true",
+                     help="run ONE re-proof cycle and exit (the systemd oneshot the timer fires)")
+    prr.add_argument("--cycles", type=int, default=None, metavar="N",
+                     help="run N re-proof cycles then exit (bounded run; re-verifies the whole series at the end)")
+    prr.add_argument("--interval", type=float, default=3600.0, metavar="SECS",
+                     help="cadence between cycles (default 3600s); with neither --once nor --cycles the loop "
+                          "runs FOREVER on this interval (the --interval daemon)")
+    prr.add_argument("--log-dir", default="",
+                     help="the continuous attestation log dir (default: <base-dir>/attestation-log)")
+    # trusted finding source (EXACTLY one) — identical to `vigil remediate` (a raw-JSON finding is never taken)
+    prr.add_argument("--from-spine", default="",
+                     help="an engagement slug: rebuild a confirmed fact from {slug}.spine under --base-dir")
+    prr.add_argument("--finding-envelope", default="",
+                     help="a signed inert finding envelope (needs --owner-pubkey, --delegation, --scope)")
+    prr.add_argument("--owner-pubkey", default="",
+                     help="the pinned owner PUBLIC key (base64) — the delegation trust anchor (--finding-envelope)")
+    prr.add_argument("--delegation", default="",
+                     help="an owner-signed offense-governance DelegationCert JSON file (--finding-envelope)")
+    prr.add_argument("--scope", default="",
+                     help="the engagement slug the envelope + delegation must cover, and the charter the live "
+                          "target must be authorized under (--finding-envelope)")
+    prr.add_argument("--finding-ref", default="",
+                     help="pick the fact by ref (--from-spine when the spine has >1 fact)")
+    prr.add_argument("--base-dir", default=".vigil-live",
+                     help="engagement home: holds {slug}.spine + vault + the STABLE governance key + the "
+                          "self-witness key, and (by default) the attestation-log/ directory")
+    prr.add_argument("--run-dir", default="",
+                     help="the run dir holding proofs/reverifiable.json (the retained positive control); "
+                          "default = --base-dir")
+    prr.add_argument("--target-base-url", default="",
+                     help="the LIVE target scheme+host(:port) to re-drive against each cycle — MUST be "
+                          "authorized in the engagement charter scope (else REFUSED, fail-closed)")
+    prr.set_defaults(func=_cmd_reprove)
 
     pprov = sub.add_parser(
         "provision-destruction",
