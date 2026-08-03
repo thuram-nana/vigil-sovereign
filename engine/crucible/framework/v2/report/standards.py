@@ -312,6 +312,10 @@ _STANDARDS: dict[str, ControlMapping] = {
                                 attack=("T1530", "T1078.004")),
     "k8s_misconfiguration": _m("A05:2021", ("CWE-1188", "CWE-16"), pci=_CLOUD_PCI, soc2=_CLOUD_SOC2, iso=_CLOUD_ISO,
                               attack=("T1610", "T1611")),
+    # T4: the RBAC-workload posture oracle (anonymous subject granted a dangerous built-in ClusterRole) —
+    # improper privilege management / access control on the cluster.
+    "k8s_workload_misconfiguration": _m("A01:2021", ("CWE-269", "CWE-284"), pci=_CLOUD_PCI, soc2=_CLOUD_SOC2,
+                                        iso=_CLOUD_ISO, attack=("T1078.004", "T1611")),
     "mesh_misconfiguration": _m("A05:2021", ("CWE-306", "CWE-16"), pci=_CLOUD_PCI, soc2=_CLOUD_SOC2, iso=_CLOUD_ISO,
                                attack=("T1557",)),
     "cicd_misconfiguration": _m("A08:2021", ("CWE-829", "CWE-16"), pci=_SUPPLY_PCI, soc2=_SUPPLY_SOC2, iso=_SUPPLY_ISO,

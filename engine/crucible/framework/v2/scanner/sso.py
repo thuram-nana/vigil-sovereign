@@ -619,6 +619,40 @@ class OidcIdTokenCheck:
             bug_class=self.bug_class)
 
 
+@dataclass(frozen=True)
+class SamlForgeryCheck:
+    """The OFFLINE, ZERO-TRAFFIC structural complement to the LIVE XSW/tampering checks: judge the
+    CAPTURED ``SAMLResponse`` XML *itself* for structural forgeability, sending NOTHING. A captured SAML
+    Response the request already carries is decoded and handed to the deterministic ``saml_forgery_oracle``
+    (via ``FindingContext.from_saml_structure``), which fires ONLY on a coarse, c14n-free STRUCTURAL
+    invariant a validly signed assertion cannot exhibit — an UNSIGNED consumed assertion, a
+    ds:Reference/@URI that does not cover the consumed element, or the signature-wrapping shape (the dual of
+    :func:`wrap_assertion_xsw`). A properly signed single assertion whose Reference covers it, a doc with no
+    consumed NameID, and malformed/XXE-refused XML do NOT fire (near-zero-FP).
+
+    This is the missing PRODUCER for ``verify.saml_forgery.confirm_saml_forgery`` — the plumbing existed but
+    no pipeline caller fed it a captured assertion. It re-uses the RAW SAMLResponse ALREADY in hand at this
+    site (``extract_form_field`` -> ``decode_saml``), so it needs no re-fetch and no LLM extraction: the
+    oracle judges the captured bytes ALONE, offline, fail-closed. Opt-in (SSO roster), so it never runs on
+    the default benchmark. Complementary to — never a replacement for — the LIVE acceptance checks: those
+    prove the SP ACCEPTED a forged assertion; this proves the captured assertion is itself FORGEABLE."""
+
+    id: str = "saml-structural-forgery"
+    bug_class: str = "saml_structural_forgery"
+    field_name: str = "SAMLResponse"
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        req = template.request
+        raw = extract_form_field(req, self.field_name)
+        if not raw:
+            return None
+        xml_text = decode_saml(raw)
+        if not xml_text:
+            return None
+        # No traffic: the oracle judges the CAPTURED XML alone (XXE-safe parse, fail-closed).
+        return FindingContext.from_saml_structure(xml_text, bug_class=self.bug_class)
+
+
 # The opt-in SSO arsenal. NOT part of DEFAULT_REQUEST_CHECKS — a caller enables it
 # explicitly (request_checks=... + SSO_REQUEST_CHECKS, or WebScanCampaign(enable_sso=True)),
 # so the default scan roster and the benchmark are byte-for-byte unchanged. Every
@@ -626,6 +660,7 @@ class OidcIdTokenCheck:
 SSO_REQUEST_CHECKS: tuple[object, ...] = (
     SamlSignatureWrappingCheck(),
     SamlAssertionTamperingCheck(),
+    SamlForgeryCheck(),
     OidcRedirectUriCheck(),
     OidcIdTokenCheck(),
 )

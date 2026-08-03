@@ -2173,7 +2173,7 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
     offline from the retained context. GROUNDING is procedural: the control MUST be the sensor's RETAINED
     binding evidence, never a re-run of a cluster call laundered as a fact."""
     if not isinstance(observed_control, Mapping):
-        return OracleSignal(kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+        return OracleSignal(kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=False, confidence=0.0,
                             evidence="no k8s RBAC control evidence")
     ctl = observed_control
     cid = _coerce_text(ctl.get("check_id") or ctl.get("name"))[:_K8S_WL_STR_CAP].strip()
@@ -2195,7 +2195,7 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
     if anon and dangerous:
         who = _coerce_text(anon[0])[:_K8S_WL_STR_CAP].strip()
         return OracleSignal(
-            kind=OracleKind.K8S_POSTURE, fired=True, confidence=0.9,
+            kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=True, confidence=0.9,
             evidence=(f"k8s RBAC fact: binding {label} grants the dangerous built-in ClusterRole {role!r} to "
                       f"an ANONYMOUS subject {who!r} — an unauthenticated caller has write/admin access "
                       f"(cluster-wide for a ClusterRoleBinding, namespace-scoped for a RoleBinding); re-derived "
@@ -2204,7 +2204,7 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
                       "reason": "anonymous_dangerous_rbac", "role": role, "subject": who})
 
     return OracleSignal(
-        kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
+        kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=False, confidence=0.0,
         evidence=(f"k8s RBAC control {label} does not bind a dangerous built-in ClusterRole to an anonymous "
                   f"subject (role {role or '?'!r}; anonymous subjects: {len(anon)}) — not provably critical "
                   f"(stays a lead)"),

@@ -45,7 +45,7 @@ from .access_control import AccessControlConfig, build_access_control_checks
 from .grammar import generate as grammar_generate, infer_grammar
 from .graphql import GRAPHQL_DOS_CHECKS, GraphQLIntrospectionCheck, GraphQLSuggestionsCheck
 from .insertion import HttpRequest, InsertionKind, RequestTemplate
-from .jwt import JwtNoneCheck
+from .jwt import JwtForgeryCheck, JwtNoneCheck
 from .learning import ContextualBandit
 from .progress import ProgressSink
 from .sso import SSO_REQUEST_CHECKS
@@ -62,6 +62,10 @@ DEFAULT_REQUEST_CHECKS: tuple[RequestCheck, ...] = (
     CorsActiveCheck(),
     HostHeaderCheck(),
     JwtNoneCheck(),
+    # T4b: the OFFLINE structural-forgery producer for a captured JWT (zero traffic; fires only on a
+    # genuinely forgeable token the request already carries — alg=none / recomputable-HS* / RS256->HS256).
+    # The benchmark carries no JWT, so this leaves `make gate` byte-identical.
+    JwtForgeryCheck(),
     GraphQLIntrospectionCheck(),
     GraphQLSuggestionsCheck(),
 )

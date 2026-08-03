@@ -175,6 +175,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # `make gate` byte-identical. (Cloud/CSPM public-exposure & over-broad-trust promotions reuse the
     # existing POLICY_PATH rows above; live reachability reuses `service_reachable` — no new rows.)
     "k8s_misconfiguration": (OracleKind.K8S_POSTURE,),
+    # C2·K8s (live-RBAC achieved-state promotion): a retained live RBAC-binding LEAD (sensors.k8s_live)
+    # becomes a FACT only when the k8s-workload-posture oracle re-derives a CONCRETE insecure ACHIEVED STATE
+    # over the RETAINED binding (an ANONYMOUS subject — system:anonymous / system:unauthenticated — bound to a
+    # dangerous built-in ClusterRole: cluster-admin / admin / edit). DISTINCT from `k8s_misconfiguration`
+    # (K8S_POSTURE, kube-bench control-plane CLI flags): the RBAC achieved-STATE membership lens over a single
+    # live binding record, no kube-bench. Like the k8s/cloud rows, this NEW OracleKind is reachable ONLY via
+    # this row — it is NOT in the frozen _ALL_ORACLES fallback — and fires only when the ctx carries
+    # `k8s_workload_control`, which no benchmark/scan/engage finding does. So appending it leaves the
+    # unknown-class fallback and `make gate` byte-identical.
+    "k8s_workload_misconfiguration": (OracleKind.K8S_WORKLOAD_POSTURE,),
     # Wave-F1 (cloud/CSPM achieved-state promotion): a retained cloud-posture LEAD (sensors.cloud)
     # becomes a FACT only when the cloud-posture oracle re-derives a CONCRETE insecure ACHIEVED STATE over
     # the RETAINED control (encryption-at-rest disabled on a sensitive datastore, an explicit
@@ -386,6 +396,15 @@ _ALIASES: dict[str, str] = {
     "wildcard_principal": "cloud_misconfiguration",
     "anonymous_grant": "cloud_misconfiguration",
     "k8s_insecure_setting": "k8s_misconfiguration",
+    # live-RBAC achieved-state posture spelling variants (an anonymous subject bound to a dangerous built-in
+    # ClusterRole, re-derived over the retained binding) fold onto the single canonical class. NOTE: the
+    # kube-bench control-plane class (`k8s_misconfiguration`, K8S_POSTURE) is deliberately NOT aliased here —
+    # RBAC achieved-STATE and kube-bench CLI-flag proofs are distinct and stay distinct classes.
+    "k8s_workload_posture": "k8s_workload_misconfiguration",
+    "k8s_rbac_misconfiguration": "k8s_workload_misconfiguration",
+    "anonymous_rbac_binding": "k8s_workload_misconfiguration",
+    "anonymous_cluster_admin": "k8s_workload_misconfiguration",
+    "rbac_anonymous_privileged_binding": "k8s_workload_misconfiguration",
     # service-mesh achieved-state posture spelling variants (a mesh-config control an oracle proves via a
     # concrete insecure achieved state) fold onto the single canonical class.
     "mesh_posture": "mesh_misconfiguration",
@@ -747,6 +766,12 @@ class OracleVerifier:
         if kind is OracleKind.K8S_POSTURE:
             if "k8s_control" in ctx:
                 return oracles.k8s_posture_oracle(ctx["k8s_control"])
+            return None
+        # -- C2·K8s live-RBAC posture — fire ONLY when the ctx carries `k8s_workload_control` (a retained live
+        #    RBAC binding); no benchmark/scan/engage finding does, so it is inert on the gate path.
+        if kind is OracleKind.K8S_WORKLOAD_POSTURE:
+            if "k8s_workload_control" in ctx:
+                return oracles.k8s_workload_posture_oracle(ctx["k8s_workload_control"])
             return None
         # -- Wave-F1 cloud/CSPM posture — fire ONLY when the ctx carries `cloud_control` (a retained cloud
         #    posture control); no benchmark/scan/engage finding does, so it is inert on the gate path.

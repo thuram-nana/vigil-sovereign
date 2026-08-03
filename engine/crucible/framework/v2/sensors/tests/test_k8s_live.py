@@ -100,7 +100,7 @@ def test_a_default_cluster_mints_and_promotes_nothing():
     world = WorldModel()
     res = SimpleNamespace(ok=True, result=SimpleNamespace(output={"controls": controls}))
     assert _reverify(world, FusionTask("k8s_live", {}), res, seq=1, slug="alpha") == 0
-    assert not any(n.id.startswith("finding:k8s_workload:") for n in world.all_nodes())
+    assert not any(n.id.startswith("finding:k8s_workload_posture:") for n in world.all_nodes())
 
 
 def test_controls_totality():
@@ -161,8 +161,9 @@ def test_anonymous_cluster_admin_promotes_through_reverify():
     world = WorldModel()
     promoted = _reverify(world, FusionTask("k8s_live", {}), res, seq=3, slug="alpha")
     assert promoted == 1                                                    # only the anonymous cluster-admin
-    fid = "finding:k8s_workload:k8s-workload:binding:/anon-admin"
+    # the FACT now carries the REAL oracle kind (K8S_WORKLOAD_POSTURE), routed through the confirm seam
+    fid = "finding:k8s_workload_posture:k8s-workload:binding:/anon-admin"
     node = world.get_node(fid)
     assert node is not None and node.grounding == GROUNDING_GROUNDED
     assert world.get_edge(fid, "control:k8s-workload:binding:/anon-admin", EdgeKind.EVIDENCES) is not None
-    assert world.get_node("finding:k8s_workload:k8s-workload:binding:/anon-view") is None   # the lead is not a fact
+    assert world.get_node("finding:k8s_workload_posture:k8s-workload:binding:/anon-view") is None   # the lead is not a fact

@@ -72,11 +72,14 @@ diverse real targets; no independent FP/FN rate (the "35–90% false positive" f
 VIGIL's *own* survey — `FRONTIER.md`). Refs: `README.md:485-494`, `AS-BUILT.md:93`, `AS-BUILT-LIVE.md:46-64`.
 
 ### Truth 4 — bounded "zero-trust"
-The standalone verifier checks signatures/binding/chain but **never re-fires the oracle** (needs VIGIL). Only ~15
-of 32 oracle kinds fire by default (`verifier.py:445-461`, `FEATURES.md:437,471`). The live-`engage` seam is
-LEAD-only (`provenance="llm"` → demoted even when the oracle fires; `wiring.py:687-723`, `oracle_adapter.py:139-147`).
-Producer byte-unforgeability (zkTLS) is un-started. So "re-derive without trusting VIGIL *or* the producer" holds
-today only for **OOB classes** (the Tier-2 token + independent signed collector receipt).
+The standalone verifier checks signatures/binding/chain but **never re-fires the oracle** (needs VIGIL). ~~The
+live-`engage` seam is LEAD-only~~ (**FIXED by T2, #207** — it now mints via a gated live re-drive). ~~Only ~15 of
+32 oracle kinds fire by default~~ (**CLARIFIED + FIXED by T4, #209**: the 15 was the unknown-class *fallback set*;
+each non-default kind fires on its own surface — AEGIS gateway or engage sensors — and T4 fixed the one real
+re-verifiability asymmetry (k8s RBAC) + wired the 2 forgery producers). Producer byte-unforgeability (zkTLS) is
+**still un-started (Phase Z)**. So "re-derive without trusting VIGIL *or* the producer" holds today only for
+**OOB classes** (the Tier-2 token + independent signed collector receipt) — the remaining live bound of this
+truth until Z1.
 
 ### Truth 5 — the anti-overclaim system overclaims (O1–O9)
 | # | The claim | The reality | Refs |
@@ -105,7 +108,7 @@ CI-green → merge → update this scoreboard.
 | T1 | O1 | **VERIFIED FACT (#206).** Every fact-rendering boundary re-executes the proof: the report + console-findings paths already did; T1 added the dossier fact-set gate, the world-model finding-node gate (`demoted:` → UNGROUNDED when a proof doesn't re-fire), and the stored-projection attack-graph gate (`chain_findings(verify=True)` at `/api/worldmodel/`). A recorded-confirmed finding whose retained proof no longer re-fires (tampered / bug_class-flipped / absent) grants **zero** grounded fact, node, edge, or attack path — red-pen-verified across every stored-projection call site, no bypass. | ✅ VERIFIED FACT |
 | T2 | O2/live-seam | **VERIFIED FACT (#207).** The live `engage` loop mints a signed FACT from a gated live RE-DRIVE (`provenance="live_redrive"`) whose `oracle_context` is the target's FRESH wire bytes — the LLM proposes the exploit, the oracle over fresh bytes decides. Fabricated LLM context, gate refusal, non-reproduction, and wrong-class all yield a LEAD (red-pen-verified, PASS). Honest limit stated: for `error_based_sqli` the single-response mint establishes the target emitted a datastore-error signature on the exploit request, not payload-causation (a same-run differential control is the disclosed hardening). | ✅ VERIFIED FACT |
 | T3 | O9 | **VERIFIED FACT — with a disclosed limit (#208).** The `crucible-blackboard-chain` now has a real owner-rooted, file-backed, offline-verify path: a run that posted blackboard events persists a governance-signed `spine-head.json` + `spine-chain.json`, and `verify_blackboard_chain` verifies them **public-key-only, DB-free, framework-free**, deriving the root from an owner-signed `OFFENSE_GOVERNANCE_ROLE` delegation. Red-pen forced 13/13 forge/tamper axes to fail closed. **HONEST LIMIT (red-pen-required disclosure):** the live OODA loop does not itself post to the blackboard (only the fireteam path, after an approved escalation, does), so a *typical OODA-only run persists nothing and the segment is honestly `UNVERIFIABLE`, never a fake "verified."* So O9 holds for the blackboard chain **for runs that produced blackboard events**; making every run populate+persist it is the disclosed **T3b** follow-up. | ✅ VERIFIED FACT (scoped) |
-| T4 | narrow oracle surface | every applicable oracle kind is reachable in scan/engage/benchmark; k8s_rbac wired | CAPABILITY |
+| T4 | "narrow oracle surface" (C3/C4) | **VERIFIED FACT (#209).** The audit's "15 of 32 fire by default" was about the *unknown-class fallback set* — each non-default kind DOES fire on its own surface (7 on the AEGIS gateway, 8 on engage sensors); there was **no** dropped-field gap for a web-scanned surface. T4 fixed the two REAL defects: (a) the k8s RBAC oracle fired via a direct call outside the `confirm`/`_run`/`oracle_version` substrate (bespoke non-enum strings) → now a first-class `OracleKind.K8S_WORKLOAD_POSTURE` that re-verifies through the registry like every sibling; (b) the JWT + SAML **forgery** oracles had full plumbing but no producer → now wired (`JwtForgeryCheck`/`SamlForgeryCheck`) over CAPTURED bytes, zero-traffic, minting re-verifiable facts that assert *proven* forgeability (alg=none / cracked weak HMAC / signature-strippable SAML — a strong/RS256/properly-signed artifact does NOT fire). Red-pen PASS; `_ALL_ORACLES`==15 frozen; `make gate` byte-identical. | ✅ VERIFIED FACT |
 | T5 | Strix hard-block | a non-AUTO shell call queues for approval and runs on approval | CAPABILITY |
 | T6 | O5 | destruction single-use is an atomic check-and-consume (O_EXCL ledger) | OVERCLAIM |
 | T3b | O9 (universal) | make EVERY engage run populate + persist the blackboard chain (the live OODA loop posts its events to the blackboard) so the verifiable chain is produced every run, not only on a fireteam wave | DISCLOSED FOLLOW-UP |

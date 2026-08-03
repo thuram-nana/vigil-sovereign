@@ -384,11 +384,13 @@ def _reverify_k8s_live(world: Any, res: Any, *, seq: int) -> int:
     whose retained raw subjects + role re-derive a concrete critical fact (an ANONYMOUS subject bound to a
     dangerous built-in role — cluster-admin/admin/edit) is promoted to an oracle-grounded FACT on its CONTROL
     node; anything else (the benign public-info-viewer default, an anonymous binding to a non-dangerous role)
-    is left an honest LEAD. NO cluster calls — a pure re-derivation over the retained control (mirrors
-    :func:`_reverify_k8s`; the oracle ``k8s_workload_posture_oracle`` is called directly like
-    :func:`_reverify_crypto`)."""
+    is left an honest LEAD. NO cluster calls — a pure re-derivation over the retained control. Routes through
+    the ``confirm_k8s_workload_posture`` seam (``confirm`` -> ``verifier._run`` -> the real
+    ``OracleKind.K8S_WORKLOAD_POSTURE``), exactly like :func:`_reverify_k8s` / :func:`_reverify_mesh` do for
+    their sensors, so the projected FACT carries the REAL oracle kind + bug_class and RE-VERIFIES through the
+    ``oracle_version`` reverify registry."""
     try:
-        from .verify.oracles import k8s_workload_posture_oracle
+        from .verify.k8s_workload_posture import confirm_k8s_workload_posture
     except Exception:
         return 0
     output = getattr(res.result, "output", None) or {}
@@ -403,17 +405,19 @@ def _reverify_k8s_live(world: Any, res: Any, *, seq: int) -> int:
         if not check_id:
             continue
         try:
-            sig = k8s_workload_posture_oracle(c)
+            result = confirm_k8s_workload_posture(c)
         except Exception:
             continue
-        if not getattr(sig, "fired", False):
+        if not result.confirmed:
             continue
+        rule = next((s.observed.get("rule") for s in result.confirming_signals
+                     if s.observed.get("rule")), None)
         subject = EntityRef(kind=NodeKind.CONTROL, key=f"k8s-workload:{check_id}".lower())
         _project_oracle_fact(
-            world, subject, oracle_kind="k8s_workload", bug_class="k8s_workload_misconfiguration",
+            world, subject, oracle_kind="k8s_workload_posture", bug_class="k8s_workload_misconfiguration",
             evidence=f"live k8s control {check_id} re-derives a concrete insecure achieved state",
             seq=seq, detail={"check_id": check_id, "resource_kind": str(c.get("resource_kind") or ""),
-                             "rule": (getattr(sig, "observed", None) or {}).get("rule")})
+                             "rule": rule})
         promoted += 1
     return promoted
 
