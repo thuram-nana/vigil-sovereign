@@ -120,14 +120,20 @@ oracle; timeout → REJECT).
   **live external** service is deferred: `Neo4jGraphStore` sits behind the same interface as a `[SCAFFOLD]`
   (every method raises) and the OTLP exporter (`live/otel_export.py`) still wants a running collector. The
   engine degrades these seams to no-op without affecting a run's truth.
-- **Live *external* tool execution / a running external red-team service**: the loopback live-fire **did**
-  execute real tools and mint + re-verify a real FACT — L1's `error_signature` FACT was minted over
-  executor-captured datastore-error bytes and re-verified 3/3 offline, **no Caido and no Docker** (§1). What
-  is outstanding is a live **external, network-egress** engagement: real subprocess Kali tools and
-  garak/PyRIT (F8) against an off-box target. `targets/testphp/charter.md` provisions the byte-identical
-  external run against `testphp.vulnweb.com`; it needs outbound egress the authoring sandbox lacked. (In CI
-  the deterministic echo runner validates the gate/oracle/spine wiring without the binaries — byte-identical
-  either way.)
+- **Live *external* network-egress engagement — DONE (2026-07-30).** *(Reconciled: this bullet previously said
+  the external run was "outstanding" — stale; the README/AS-BUILT record it as done. Corrected here in
+  TRUTHENOVATION T7.)* The governed engine ran live against the vendor-published `testasp.vulnweb.com` and minted
+  **two** oracle-confirmed FACTs (`boolean_sqli` + `open_redirect`), **re-verified OFFLINE 2/2**, with a tampered
+  byte rejected — the "the machine cannot lie about a finding" property demonstrated live AND external
+  (`targets/testasp/charter.md` §7). Honest nuances: `testphp.vulnweb.com` was **offline** at run time, so the
+  FACTs came from the **differential / achieved-state** oracles (not the loopback's `error_signature` class), and
+  the external re-verify was corroborated through the full gate + a rejected tamper (not the loopback's
+  self-contained 3/3). The loopback live-fire separately minted + re-verified an `error_signature` FACT 3/3
+  offline, no Caido/Docker (§1).
+  **Still outstanding (R4):** exercising the real subprocess **Kali** toolchain + **garak/PyRIT** (F8) against an
+  off-box target through the sandboxed topology — the testasp run used the first-party executor, not those
+  binaries. (In CI the deterministic echo runner validates the gate/oracle/spine wiring without the binaries —
+  byte-identical either way.)
 - **Live-API-key Claude think-step**: genuinely not exercised live — used in **replay** (keyless) mode here
   (no `ANTHROPIC_API_KEY`). The live path (`live/think_claude.think`) builds a real client when a key is
   present; the provable layer never depends on the model.
