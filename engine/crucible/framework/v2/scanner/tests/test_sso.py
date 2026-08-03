@@ -356,7 +356,9 @@ def test_sso_checks_are_not_in_the_default_roster() -> None:
     default_ids = {getattr(c, "id", None) for c in DEFAULT_REQUEST_CHECKS}
     sso_ids = {c.id for c in sso.SSO_REQUEST_CHECKS}
     assert sso_ids.isdisjoint(default_ids)
-    assert len(sso.SSO_REQUEST_CHECKS) == 4
+    # 4 live acceptance checks + the offline structural-forgery producer (T4b)
+    assert len(sso.SSO_REQUEST_CHECKS) == 5
+    assert "saml-structural-forgery" in sso_ids
 
 
 def test_campaign_enable_sso_wires_the_checks_only_when_on() -> None:

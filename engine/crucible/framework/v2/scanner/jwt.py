@@ -184,3 +184,34 @@ class JwtNoneCheck:
                 {"in": [{"var": "garbage_status"}, {"var": "unauthorized"}]},
             ]},
             bug_class=self.bug_class)
+
+
+@dataclass(frozen=True)
+class JwtForgeryCheck:
+    """The OFFLINE, ZERO-TRAFFIC structural complement to :class:`JwtNoneCheck`: judge the CAPTURED token
+    *itself* for structural forgeability, sending NOTHING. The JWT the request already carries is handed to
+    the deterministic ``jwt_forgery_oracle`` (via ``FindingContext.from_jwt_token``), which fires ONLY on a
+    proof re-runnable from the token alone: ``alg=none``/``None``, an HS* signature RECOMPUTABLE from a
+    weak/known secret, or an RS256->HS256 confusion. A normal RS256 token with an unknown key, and an HS*
+    token whose secret is not recoverable, do NOT fire (near-zero-FP) — so a hardened token is never flagged.
+
+    This is the missing PRODUCER for ``verify.jwt_forgery.confirm_jwt_forgery`` — the plumbing existed but no
+    pipeline caller fed it a captured token. It re-uses the RAW token ALREADY in hand at this site
+    (``extract_token``), so it needs no re-fetch and no LLM extraction: the oracle judges the captured bytes
+    ALONE, offline, fail-closed, sending ZERO forged traffic. Distinct from :class:`JwtNoneCheck` (which
+    proves the server ACCEPTS an unsigned token — a LIVE achieved-state fact): this proves the token is
+    itself FORGEABLE (an offline structural fact, the ``jwt_forgeable`` class). Because it sends nothing and
+    only fires over a token the request already carries — which the benchmark corpus does not contain — it
+    leaves the default scan roster's request budget and `make gate` byte-identical."""
+
+    id: str = "jwt-forgeable"
+    bug_class: str = "jwt_forgeable"
+    location: str = "authorization"
+
+    def probe(self, template: RequestTemplate, send: Send) -> FindingContext | None:
+        token = extract_token(template.request, self.location)
+        if token is None:
+            return None
+        # No traffic and no candidate keys beyond the oracle's own weak-secret baseline: the oracle judges
+        # the captured token ALONE (alg=none / recomputable-HS* / RS256->HS256), fail-closed.
+        return FindingContext.from_jwt_token(token, bug_class=self.bug_class)

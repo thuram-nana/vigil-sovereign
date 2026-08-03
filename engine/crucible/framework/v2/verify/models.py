@@ -87,6 +87,19 @@ class OracleKind(str, enum.Enum):
     # over the retained policy graph, and live service-reachability the EXISTING SERVICE_REACHABILITY
     # oracle over a gated handshake — so neither adds a new kind.)
     K8S_POSTURE = "k8s_posture"                       # a kube-bench CIS control FAILED with a concrete observed insecure setting (membership/parse-proof over the retained control)
+    # Kubernetes RBAC achieved-state posture — the LIVE-cluster (sensors.k8s_live) sibling of K8S_POSTURE and
+    # the RBAC twin of CLOUD_POSTURE. Distinct from K8S_POSTURE (which judges kube-bench control-plane CLI
+    # flags) so the two oracles carry DISTINCT versions and never collide in oracle_version / reverify. Like
+    # the AEGIS / K8S_POSTURE / CLOUD_POSTURE members above, this is an ADDITIVE append reachable ONLY via its
+    # explicit BUG_CLASS_ORACLES row (keyed on the `k8s_workload_control` ctx field NO benchmark/scan/engage
+    # finding carries), never via the frozen unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15).
+    # K8S_WORKLOAD_POSTURE promotes a retained live RBAC-binding control to a FACT — judged over the control's
+    # RETAINED raw subjects + role ALONE, offline, ZERO cluster calls — ONLY when an ANONYMOUS subject
+    # (system:anonymous / system:unauthenticated) is bound to a genuinely DANGEROUS built-in ClusterRole
+    # (cluster-admin / admin / edit): unauthenticated write/admin access no cluster ships by default. The
+    # benign built-in system:public-info-viewer binding, an anonymous binding to a non-dangerous/custom role,
+    # a binding with no anonymous subject, and malformed evidence do NOT fire (near-zero-FP).
+    K8S_WORKLOAD_POSTURE = "k8s_workload_posture"
     # Workstream-B SSO/JWT structural-forgery. Like the AEGIS / K8S_POSTURE members above, this is an
     # ADDITIVE append reachable ONLY via its explicit BUG_CLASS_ORACLES row (keyed on the `jwt_token`
     # ctx field no benchmark/scan/engage finding carries), never via the frozen unknown-class fallback

@@ -54,6 +54,10 @@ from .mobile_posture import (
     mobile_posture_context,
 )
 from .k8s_posture import confirm_k8s_posture, k8s_posture_context
+from .k8s_workload_posture import (
+    confirm_k8s_workload_posture,
+    k8s_workload_posture_context,
+)
 from .cloud_posture import confirm_cloud_posture, cloud_posture_context
 from .mesh_posture import (
     confirm_mesh_posture,
@@ -71,6 +75,7 @@ from .oracles import (
     jwt_forgery_oracle,
     cloud_posture_oracle,
     k8s_posture_oracle,
+    k8s_workload_posture_oracle,
     mesh_posture_oracle,
     mobile_posture_oracle,
     email_auth_posture_oracle,
@@ -139,6 +144,7 @@ __all__ = [
     "version_range_oracle",
     "policy_path_oracle",
     "k8s_posture_oracle",
+    "k8s_workload_posture_oracle",
     "cloud_posture_oracle",
     "mesh_posture_oracle",
     "mobile_posture_oracle",
@@ -175,6 +181,9 @@ __all__ = [
     # k8s posture (kube-bench CIS-control-failure promotion)
     "confirm_k8s_posture",
     "k8s_posture_context",
+    # k8s workload posture (live-cluster RBAC achieved-state promotion; C2·K8s)
+    "confirm_k8s_workload_posture",
+    "k8s_workload_posture_context",
     # cloud/CSPM posture (achieved-state promotion; Wave-F1)
     "confirm_cloud_posture",
     "cloud_posture_context",

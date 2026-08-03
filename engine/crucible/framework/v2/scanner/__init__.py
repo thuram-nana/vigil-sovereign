@@ -138,11 +138,12 @@ from .insertion import (
     InsertionPoint,
     RequestTemplate,
 )
-from .jwt import JwtNoneCheck
+from .jwt import JwtForgeryCheck, JwtNoneCheck
 from .sso import (
     OidcIdTokenCheck,
     OidcRedirectUriCheck,
     SamlAssertionTamperingCheck,
+    SamlForgeryCheck,
     SamlSignatureWrappingCheck,
     SsoLead,
     SSO_REQUEST_CHECKS,
@@ -170,6 +171,7 @@ __all__ = [
     "TimingCheck",
     "BooleanInferenceCheck",
     "JwtNoneCheck",
+    "JwtForgeryCheck",
     "jwt",
     "GraphQLIntrospectionCheck",
     "GraphQLSuggestionsCheck",
@@ -184,6 +186,7 @@ __all__ = [
     "sso",
     "SamlSignatureWrappingCheck",
     "SamlAssertionTamperingCheck",
+    "SamlForgeryCheck",
     "OidcRedirectUriCheck",
     "OidcIdTokenCheck",
     "SsoLead",

@@ -286,6 +286,12 @@ class FindingContext(BaseModel):
     # k8s_posture_oracle (a kube-bench CIS control FAILED with a concrete observed insecure setting) —
     # the RETAINED control evidence (sensors.k8s_runtime) the parse-proof judges
     k8s_control: dict[str, Any] | None = None
+    # k8s_workload_posture_oracle (a LIVE cluster RBAC binding — sensors.k8s_live — that provably grants a
+    # dangerous built-in ClusterRole to an anonymous subject) — the RETAINED binding evidence (raw subjects +
+    # role) the membership/parse-proof judges over its achieved-state ALONE, offline, ZERO cluster calls. The
+    # RBAC/achieved-state sibling of k8s_control; no benchmark/scan/engage finding carries k8s_workload_control,
+    # so appending this leaves the gate byte-identical.
+    k8s_workload_control: dict[str, Any] | None = None
     # cloud_posture_oracle (Wave-F1: a retained cloud/CSPM posture control whose ACHIEVED STATE literally
     # carries an insecure fact — encryption-at-rest disabled / public exposure / a wildcard principal) —
     # the RETAINED control evidence (sensors.cloud) the membership/parse-proof judges over its
@@ -545,6 +551,37 @@ class FindingContext(BaseModel):
         retained = {k: _coerce_text(src.get(k)) for k in (
             "check_id", "status", "actual_value", "description", "section", "benchmark") if src.get(k)}
         return cls(bug_class=bug_class, k8s_control=retained)
+
+    @classmethod
+    def from_k8s_workload_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "k8s_workload_misconfiguration"
+    ) -> "FindingContext":
+        """A RETAINED live-cluster RBAC-binding control (``sensors.k8s_live``), for the k8s-workload-posture
+        oracle — the RBAC achieved-state SIBLING of ``from_k8s_posture`` / ``from_cloud_control``. The
+        retained evidence that turns a live RBAC-binding LEAD into a FACT: the oracle re-derives the weakness
+        (an ANONYMOUS subject — system:anonymous / system:unauthenticated — bound to a dangerous built-in
+        ClusterRole: cluster-admin / admin / edit) over the binding's RETAINED raw ``subjects`` + ``role``
+        ALONE — offline, ZERO cluster calls — so a live RBAC read is confirmed a FACT only by the actual
+        anonymous-privileged binding, never the collector's say-so.
+
+        Only the structural fields the oracle judges are retained into a canonical shape — a caller-supplied
+        control that also carries verbose evidence is reduced to {check_id, resource_kind, name,
+        achieved_state:{subjects, role, role_kind, role_apigroup}}, so nothing else is laundered into the
+        certificate. JSON-safe + deterministic (re-verifies offline)."""
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        inner = src.get("achieved_state") if isinstance(src.get("achieved_state"), Mapping) else src
+        state: dict[str, Any] = {}
+        raw_subjects = inner.get("subjects")
+        if isinstance(raw_subjects, (list, tuple)):
+            state["subjects"] = [_coerce_text(s) for s in raw_subjects if s is not None]
+        for k in ("role", "role_kind", "role_apigroup"):
+            if inner.get(k) not in (None, ""):
+                state[k] = _coerce_text(inner.get(k))
+        retained: dict[str, Any] = {"achieved_state": state}
+        for k in ("check_id", "resource_kind", "name", "namespace"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))
+        return cls(bug_class=bug_class, k8s_workload_control=retained)
 
     @classmethod
     def from_cloud_control(
@@ -1083,6 +1120,8 @@ class FindingContext(BaseModel):
             ctx["policy"] = self.policy
         if self.k8s_control is not None:
             ctx["k8s_control"] = self.k8s_control
+        if self.k8s_workload_control is not None:
+            ctx["k8s_workload_control"] = self.k8s_workload_control
         if self.cloud_control is not None:
             ctx["cloud_control"] = self.cloud_control
         if self.mesh_control is not None:

@@ -57,6 +57,7 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.COMMAND_INJECTION_BREAKOUT: (oracles.command_injection_breakout_oracle,),
     OracleKind.NOSQL_INJECTION_BREAKOUT: (oracles.nosql_injection_breakout_oracle,),
     OracleKind.K8S_POSTURE: (oracles.k8s_posture_oracle,),
+    OracleKind.K8S_WORKLOAD_POSTURE: (oracles.k8s_workload_posture_oracle,),
     OracleKind.CLOUD_POSTURE: (oracles.cloud_posture_oracle,),
     OracleKind.MESH_POSTURE: (oracles.mesh_posture_oracle,),
     OracleKind.CICD_POSTURE: (oracles.cicd_posture_oracle,),
