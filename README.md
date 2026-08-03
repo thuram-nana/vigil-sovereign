@@ -2,13 +2,15 @@
 
 # 🛡️ VIGIL
 
-### A Claude-powered security system that never lets an AI's word become a fact.
+# The Provable Adversary
 
-**Sovereign · Provable · Autonomous — security testing and a personal AI assistant, on hardware you own.**
+### Provable Offensive Security — an autonomous adversary that doesn't ask you to trust it.
 
-### 📺 [Watch the full end-to-end demo →](https://youtu.be/iPIpk9QCKVw)
+**Proof, not findings.** Every finding is minted by a deterministic **oracle** over the target's *own bytes*, cryptographically **signed**, and **re-executable offline by anyone** — no VIGIL, no vendor, no trust required. It governs its own autonomy behind fail-closed cryptographic gates, and it **measures and signs its own completeness** — on hardware you own, with keys you hold.
 
-### 🖼️ [Browse the UI screenshots →](docs/screenshots/)
+### 📖 [Read the manifesto → *The Provable Adversary*](docs/MANIFESTO.md)
+
+### 📺 [Watch the full end-to-end demo →](https://youtu.be/iPIpk9QCKVw) · 🖼️ [Browse the UI screenshots →](docs/screenshots/)
 
 *A complete walkthrough — every feature end-to-end, live oracle-proven findings, the interaction-driven UI, and the SIGIL sovereign voice.*
 
@@ -16,16 +18,21 @@
 
 ---
 
-VIGIL is one system that does two very different jobs on machines **you** control:
+### "Autonomous pentesting" describes maybe a quarter of what this is.
 
-1. **An autonomous security tester** — an AI that hunts for real vulnerabilities in systems you're authorized to test.
-2. **A sovereign personal AI assistant** — one that remembers your whole working life and can act on your files, terminal, screen, and accounts, always with your permission.
+VIGIL is an AI that hunts real vulnerabilities in systems you're authorized to test — and also a sovereign personal AI assistant that can act on your files, terminal, screen, and accounts, always with your permission. But an AI that hands you findings you have to *believe* is the easy 25%. The other 75% is the part no one else has — and every bit of it is enforced by non-AI code you can read:
 
-What makes it *one* system, and what makes it different from every other "AI hacker," is a single rule that runs through everything:
+- **Provable** — a finding is a *fact* only when a non-AI **oracle** re-fires over data the real target produced; the AI only ever *proposes*. Every fact is signed and **replayable offline** by a third party (the anti-hallucination firewall in `engine/crucible/framework/v2/veracity/firewall.py` can *only demote*; `python3 -m framework.v2 verify` re-runs each proof — pure, offline, deterministic).
+- **Self-governing** — no target-touching or destructive action happens without a fail-closed **conjunctive gate**: signed charter + attestation + the **WARDEN** classifier + (for destructive actions) an **m-of-n threshold** of independent signers (`integration/vigil_integration/{conjunctive_gate,warden_gate,destruction_gate}.py`).
+- **Self-measuring** — it *signs how good it is*: a reproducible measured **recall** number, a **coverage** certificate that separates *provably-tested-clean* from *merely-untested*, and a **plan-integrity** attestation (landing) (`eval/recall_baseline.py`, `verify/coverage_oracle.py`).
+- **Sovereign & tamper-evident** — offense *and* defense over one control plane on your own metal; every action on a hash-chained, Ed25519-signed event spine that can't be secretly edited (`agents/spine_chain.py`).
 
-> **Nothing the AI says is treated as true, and no action the AI wants to take is allowed to happen, unless a separate, deterministic (non-AI) checker proves it — and every proof and every action is cryptographically signed and written to a record that can never be secretly edited.**
+Findings stop being *claims* and become *evidence* — a witness whose testimony anyone can re-run. **[Read the full manifesto →](docs/MANIFESTO.md)**
 
-The AI is only ever allowed to *propose*. A separate "oracle" must *prove*. A gate must *authorize*. Everything is *signed and logged*. You keep the keys. That's the whole idea — and this README explains all of it, in plain language, from top to bottom.
+> **The one rule that runs through everything:**
+> Nothing the AI says is treated as true, and no action the AI wants to take is allowed to happen, unless a separate, deterministic (non-AI) checker **proves** it — and every proof and every action is cryptographically **signed** and written to a record that can **never be secretly edited.**
+
+The AI is only ever allowed to *propose*. A separate **oracle** must *prove*. A **gate** must *authorize*. Everything is *signed and logged*. **You keep the keys.** That's the whole idea — and this README explains all of it, in plain language, from top to bottom.
 
 > ## ⚠️ CAUTION — read before you run anything
 >
