@@ -190,8 +190,16 @@ def write_report(
     lines.append("`SQL Injection` vs the manifest's `error_based_sqli`) or a different")
     lines.append("location granularity (a host-level message vs a `request:<check>` token)")
     lines.append("will score below what they *found* — the raw finding lists tell the fuller")
-    lines.append("story. The FP column, by contrast, is unambiguous: it counts detections on")
-    lines.append("surfaces the corpus proves are clean.")
+    lines.append("story. The FP column is NOT 'noise': it counts every finding that did not")
+    lines.append("match a planted bug under this STRICT matching, which conflates genuine")
+    lines.append("false alarms (on the clean-control surfaces) with real detections an")
+    lines.append("incumbent found but under a different label/location — so read it next to")
+    lines.append("the raw finding lists, not on its own. The one thing it states cleanly is")
+    lines.append("that CRUCIBLE (reporting only oracle-confirmed findings) flagged none of")
+    lines.append("the clean controls. This corpus uses CRUCIBLE's own class vocabulary and")
+    lines.append("location granularity, so a perfect CRUCIBLE score is partly a home-field")
+    lines.append("artifact — it is a soundness/FP demonstration, not a cross-tool")
+    lines.append("superiority claim.")
     lines.append("")
 
     if metrics:

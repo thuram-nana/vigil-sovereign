@@ -36,8 +36,16 @@ detect a bug under a different label vocabulary (e.g. generic
 `SQL Injection` vs the manifest's `error_based_sqli`) or a different
 location granularity (a host-level message vs a `request:<check>` token)
 will score below what they *found* — the raw finding lists tell the fuller
-story. The FP column, by contrast, is unambiguous: it counts detections on
-surfaces the corpus proves are clean.
+story. The FP column is NOT 'noise': it counts every finding that did not
+match a planted bug under this STRICT matching, which conflates genuine
+false alarms (on the clean-control surfaces) with real detections an
+incumbent found but under a different label/location — so read it next to
+the raw finding lists, not on its own. The one thing it states cleanly is
+that CRUCIBLE (reporting only oracle-confirmed findings) flagged none of
+the clean controls. This corpus uses CRUCIBLE's own class vocabulary and
+location granularity, so a perfect CRUCIBLE score is partly a home-field
+artifact — it is a soundness/FP demonstration, not a cross-tool
+superiority claim.
 
 ## Performance
 

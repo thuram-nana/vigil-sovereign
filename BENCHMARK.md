@@ -63,9 +63,24 @@ generation time):
 
 ### Reading the table — fairness caveats (do not skip)
 
-- **Read the FP column, not the tp column.** FP is the unambiguous one: it counts
-  detections on surfaces the corpus *proves* are clean. CRUCIBLE's **0** is the
-  differentiator; wapiti's 7 and nikto's 8 are noise a human must triage.
+- **The FP column is not a "noise" scoreboard.** It counts every finding that did
+  **not** match a planted bug under the strict matcher below — which conflates two very
+  different things: genuine false alarms (a detection on one of the five *clean-control*
+  surfaces) **and** real detections an incumbent actually made but under a different
+  label or a coarser location. Concretely, some of nikto's and wapiti's counted "FP"
+  are real hits on planted bugs (e.g. an `exposure` at `/.env` / `/actuator/env`, or a
+  generic `sql_injection` on the injectable route) that the strict `(class, path+param)`
+  key rejected. So do **not** read the incumbent FP counts as "noise a human must
+  triage" — read them beside the raw per-tool finding lists. The one thing the column
+  *does* state cleanly: CRUCIBLE, reporting only oracle-confirmed findings, flagged
+  **none** of the five clean controls.
+- **This is a soundness / FP demonstration, not a cross-tool superiority claim.** The
+  manifest uses CRUCIBLE's own class vocabulary and location granularity, so CRUCIBLE's
+  perfect 11/11 (P=R=F1=1.000) is partly a **home-field artifact** — the same strict
+  matching that gives CRUCIBLE a clean sweep penalizes incumbents in *both* the tp and
+  fp columns. The honest, portable claim is the narrow one this whole page stakes:
+  every finding CRUCIBLE reports is oracle-confirmed and offline-re-verifiable, so its
+  false-positive rate on the clean controls is zero.
 - **sqlmap is a SQLi-specific tool scored on a multi-class corpus.** Nine of the
   eleven planted bugs are outside its remit; a 0 here is not "sqlmap is broken", it is
   "a single-class tool on a multi-class board". It is included because practitioners
@@ -74,9 +89,8 @@ generation time):
   1-to-1. An incumbent that detects a bug under a **different label vocabulary**
   (generic `SQL Injection` vs the manifest's `error_based_sqli`) or a **coarser
   location** (a host-level banner vs a `request:<check>` token) scores **below what it
-  actually found**. The raw per-tool finding lists tell the fuller story; this is why
-  the fp column, which has no such excuse, carries the weight. This is **not** a
-  claim that "incumbents find nothing".
+  actually found**. The raw per-tool finding lists tell the fuller story. This is
+  **not** a claim that "incumbents find nothing".
 - **Performance is a cost axis, not accuracy.** `–` = the tool does not report that
   number; it is left blank, never faked to 0.
 
