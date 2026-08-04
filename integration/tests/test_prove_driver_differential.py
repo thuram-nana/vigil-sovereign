@@ -127,6 +127,11 @@ def _subthreshold_round() -> dict:
 
 SUBTHRESHOLD_ROUNDS = [_subthreshold_round(), _subthreshold_round(), _subthreshold_round()]
 
+# a 200-STATUS block page: same status as the baseline (so a status-ONLY closure "holds") but structurally
+# different (so the protocol-fixed {status,structural} closure catches it) — the re-check #2 weak-disc probe.
+BLOCK200 = R(200, "<html><body>Request blocked by WAF</body></html>")
+BLOCK200_ROUND = _round(BLOCK200, BLOCK200, BLOCK200, NORMAL)
+
 
 class FakeDifferentialAdapter:
     """A configurable differential ``LiveTargetAdapter``. ``rounds`` are emitted per trial (cyclically); the
@@ -291,6 +296,25 @@ def test_verifier_demotes_a_signed_across_true_remediated_cert():
         ok, reason = verify_prove_certificate(tampered, signer_pubkeys=PUBKEYS)
         assert not ok, f"verifier attested an across=True (still-open) cert: {reason}"
         assert "attribution re-check" in reason.lower()
+
+
+def test_verifier_ignores_a_weakened_cert_supplied_closure_discriminator():
+    # RED-PEN re-check #2 hardening — the verifier re-executes with PROTOCOL-FIXED discriminators, IGNORING any
+    # cert-supplied ones. A signed cert carrying real 200-block-page rounds (structurally != baseline) plus a
+    # WEAKENED closure_discriminator=["status"] (dropping structural, so a status-only closure would "hold") must
+    # NOT re-verify as REMEDIATED — the fixed {status,structural} closure catches the structural divergence.
+    out = _run(FakeDifferentialAdapter(rounds=[SILENT_ROUND, SILENT_ROUND, SILENT_ROUND]))
+    assert out.state == State.REMEDIATED
+    cert = out.certificate
+    tampered = {k: v for k, v in cert.items() if k != "signer"}
+    diff = {**tampered["evidence"]["differential"], "judged_rounds": [BLOCK200_ROUND, BLOCK200_ROUND, BLOCK200_ROUND],
+            "closure_discriminator": {"dimensions": ["status"], "expect": "same"}}   # weakened by the producer
+    tampered = {**tampered, "evidence": {**tampered["evidence"], "differential": diff}}
+    tampered["signer"] = {"key_id": "gov0",
+                          "signature": sign(OWNER.private_key_b64, _cert_signing_bytes(tampered))}
+    ok, reason = verify_prove_certificate(tampered, signer_pubkeys=PUBKEYS)
+    assert not ok, f"verifier trusted a weakened cert-supplied closure_discriminator: {reason}"
+    assert "waf-closure" in reason.lower()
 
 
 def test_freshness_floor_above_the_policy_is_enforced_not_ignored():

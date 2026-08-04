@@ -173,7 +173,11 @@ For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traver
   is **mitigated-by-edge, not fixed-in-code** — a scope question (is the sanitizer part of the system-under-test,
   and permanent?). The cert MUST NOT present it as a clean fix beyond what `origin_reached` literally asserts;
   distinguishing it needs an origin-side observation the response channel cannot provide (side-effect / OOB
-  Tier-2 / direct-to-origin re-drive bypassing the edge).
+  Tier-2 / direct-to-origin re-drive bypassing the edge). **Definitionally identical (same content-equalized
+  observation):** a boolean-blind sink "fixed" only by equalizing the *content* responses while the parameter
+  stays injectable via a **time-based blind or OOB** channel — the content differential measures `{status, body}`
+  only, so it reads REMEDIATED. Same disclosed bucket: REMEDIATED asserts closure of the *content* channel it
+  observed ("as observed through this edge"), never that a timing/OOB channel is also closed.
 - **(b) a param-stripping edge** that drops the injectable param → all probes collapse to baseline → looks
   REMEDIATED. Same mitigated-by-edge scope bucket (an all-stripping non-echoing edge fails the live-marker
   reflection control → INCONCLUSIVE).

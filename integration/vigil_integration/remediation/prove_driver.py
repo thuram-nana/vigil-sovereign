@@ -71,6 +71,14 @@ _BOOLEAN_INFERENCE = "boolean_inference"
 # minted and a re-verified cert are judged by the identical rule (mint gate + ``_verify_differential_remediated``).
 _ATTRIBUTION_DISC = {"dimensions": ["status", "length", "lexical"],
                      "length_threshold": 0.0, "lexical_threshold": 0.0}
+# The SPRT boolean discriminator and the WAF-closure discriminator are ALSO protocol constants — NEVER
+# cert-supplied at verify (red-pen re-check #2 hardening). The mint records them in the cert for audit, but
+# ``_verify_differential_remediated`` re-executes with THESE fixed rules, so a re-verified cert is judged by the
+# identical discriminators the mint used — a signed cert cannot carry a weakened ``closure_discriminator`` (e.g.
+# dropping ``structural``) to make a blocked/interposed origin re-verify as REMEDIATED. Consistent with the
+# re-execution-independence posture the attribution gate adopts.
+_BOOL_DISC = {"dimensions": ["status", "length", "lexical"]}
+_CLOSURE_DISC = {"dimensions": ["status", "structural"], "expect": "same"}
 
 
 class State:
@@ -708,8 +716,8 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
 
     # Lexical-sensitive boolean discriminator (§4.1: a real injection may change only reflected TEXT, invisible
     # to status/structural alone) and the WAF-closure discriminator (§4.2).
-    bool_disc = {"dimensions": ["status", "length", "lexical"]}
-    closure_disc = {"dimensions": ["status", "structural"], "expect": "same"}
+    bool_disc = _BOOL_DISC
+    closure_disc = _CLOSURE_DISC
 
     def dincon(reason: str, detail: str, *, attempted: int) -> ProveOutcome:
         # PR1: the differential channel is F1 (target-echoed) once a well-formed round is delivered.
@@ -1060,8 +1068,11 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
         )
     except Exception:  # noqa: BLE001
         return False, "differential oracles unavailable — fail closed"
-    bool_disc = ev.get("boolean_discriminator")
-    closure_disc = ev.get("closure_discriminator")
+    # Discriminators are PROTOCOL CONSTANTS at verify, NOT cert-supplied (re-check #2 hardening): a signed cert
+    # cannot weaken the SPRT/closure rule (e.g. drop ``structural`` from closure) to make an interposed origin
+    # re-verify. The cert's recorded ``*_discriminator`` fields are informational/audit only.
+    bool_disc = _BOOL_DISC
+    closure_disc = _CLOSURE_DISC
     sig = boolean_inference_oracle(rounds, discriminator=bool_disc)
     decision = str((sig.observed or {}).get("decision") or "")
     if not (decision == "refute" and sig.conclusive):
