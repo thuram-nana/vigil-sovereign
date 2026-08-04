@@ -103,10 +103,20 @@ reimplement crash detection) to:
   output. A crash that never reproduced before the fix returns `False` (nothing to earn); a crash still
   firing after returns `False`. **A fix is proven by silence, never asserted.**
 
-### [research-gated] gated: automated patch synthesis (a cyber-reasoning system)
-The generative step — localise the faulting instruction and emit a patch — is **not built**.
-`SanitizerSilenceTier.synthesize_patch` raises `NotImplementedError`, and `SymbolicCrashRepairTier` is a
-full stub behind the same interface.
+### [BUILT — narrow] a REAL ASan-grounded crash-confirm + pattern patch-synthesis + fix-by-silence (R3)
+`remediation_binary/asan_repair.py` (TRUTHENOVATION R3, #231) wires the end-to-end loop over the present
+toolchain (`gcc -fsanitize=address`): compile → run a crashing input → crash-confirm via the existing
+`sanitizer_signal_oracle` → **pattern-synthesise** a patch → recompile → accept ONLY on sanitizer SILENCE
+(`remediated_if_silent`) AND functional preservation. The synthesiser is real for ONE narrow class —
+unbounded `strcpy(dst, src)` into a fixed `char dst[N]` → bounded `strncpy(dst, src, N-1); dst[N-1]='\0'`.
+An unrecognised class returns `SYNTHESIS_UNAVAILABLE` — the crash is confirmed but **no patch is fabricated**.
+
+### [research-gated] gated: GENERAL automated patch synthesis (a cyber-reasoning system)
+The **general** generative step — localise an ARBITRARY faulting instruction by symbolic/concolic execution
+and emit a patch — is **not built** (the engine, e.g. angr, is **absent from this environment**).
+`SanitizerSilenceTier.synthesize_patch` raises `NotImplementedError` (its interface is output-based, distinct
+from the source-based narrow synthesiser above), and `SymbolicCrashRepairTier` is a full stub behind the same
+interface.
 
 **Activate when the CRS/symbolic engine lands:**
 1. Integrate a symbolic/concolic engine (e.g. angr) + a fuzzer harness for the target binary.
