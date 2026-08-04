@@ -128,12 +128,16 @@ class DifferentialHttpAdapter:
             if "{challenge}" not in tmpl:
                 raise ValueError(f"{name} must contain the literal '{{challenge}}' inert-marker slot "
                                  "(the run nonce rides the clause as a marker, never the predicate)")
-        # DATA-DEPENDENCE (spec §3 / §8.5 / red-pen BLOCK): the true/false clauses must differ in a
-        # DATA-DEPENDENT PREDICATE the origin's DB evaluates — NOT be identical (a degenerate round can never
-        # separate true from false, so the SPRT trivially refutes → a false REMEDIATED over a vulnerable origin),
-        # and NOT differ ONLY in the {challenge} marker (that would make the inert nonce FLIP the boolean, which
-        # §3/§6 forbid — the challenge is a freshness marker, never the discriminating predicate). Enforced at
-        # construction so a degenerate adapter can never be driven.
+        # SYNTACTIC non-degeneracy (spec §3 / §8.5): reject the two TRIVIAL degenerate forms — clauses that are
+        # IDENTICAL, or that differ ONLY in the {challenge} marker (which would make the inert nonce FLIP the
+        # boolean, forbidden by §3/§6). This is a STRING-level guard ONLY. It does NOT — and cannot — enforce
+        # genuine DATA-DEPENDENCE (that the two clauses hold OPPOSITE truth values the origin's DB evaluates):
+        # that is UNDECIDABLE from the template string (whitespace / case / different-constant / comment-padding
+        # pairs of equal truth value pass this guard). Genuine data-dependence is a CALLER OBLIGATION, ATTESTED at
+        # RUNTIME by the positive control — the retained ``original_firing_rounds`` must re-fire (SPRT confirm),
+        # i.e. they genuinely SEPARATED true from false on the known-vulnerable origin when the finding was
+        # confirmed. A caller that pairs degenerate live templates with non-degenerate retained rounds is the
+        # disclosed residual (DIFFERENTIAL-REMEDIATION §7), not caught here.
         if self.true_payload_template == self.false_payload_template:
             raise ValueError("true_payload_template and false_payload_template are IDENTICAL — the clauses must "
                              "differ in a data-dependent predicate (a degenerate round cannot separate true from "

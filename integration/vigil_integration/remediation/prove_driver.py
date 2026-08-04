@@ -61,6 +61,17 @@ _CHALLENGE_DOMAIN = b"vigil-remediation-freshness-challenge-v1\x00"
 # ``verify_prove_certificate`` to the differential re-execution path.
 _BOOLEAN_INFERENCE = "boolean_inference"
 
+# The ATTRIBUTION discriminator for the REMEDIATED channel-closure check (red-pen BLOCK-B) — ZERO tolerance:
+# ANY deterministic difference between ``true`` and ``false_a`` counts as the channel still OPEN. It is
+# DELIBERATELY distinct from the SPRT's fuzzy ``bool_disc``: the fuzzy thresholds (lexical 0.10 / length 0.05)
+# have a SAFE failure mode in the CONFIRM direction (a sub-threshold channel is a false-negative under-claim),
+# but reusing them to assert CLOSURE flips that into a false ALL-CLEAR — a 1-byte deterministic leak in a large
+# page (~99.85% similar) reads as "closed" while an attacker reads the DB bit-by-bit. To attribute a fix we
+# require true and false_a INDISTINGUISHABLE at zero tolerance. A PROTOCOL constant (never cert-supplied), so a
+# minted and a re-verified cert are judged by the identical rule (mint gate + ``_verify_differential_remediated``).
+_ATTRIBUTION_DISC = {"dimensions": ["status", "length", "lexical"],
+                     "length_threshold": 0.0, "lexical_threshold": 0.0}
+
 
 class State:
     REMEDIATED = "REMEDIATED"
@@ -808,14 +819,15 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
         return dincon(Reason.INSUFFICIENT_ROUNDS, "no judged rounds — cannot attribute a channel closure",
                       attempted=attempted)
     channel_closed = not any(
-        differential_response_oracle(r.get("false_a"), r.get("true"), bool_disc).fired for r in rounds
+        differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired for r in rounds
     )
     if not channel_closed:
         return dincon(Reason.CHANNEL_NOISE_UNATTRIBUTABLE,
-                      "SPRT refuted but true still SEPARATES from false on a judged round (across=True) — the "
-                      "refute was driven by the dynamic-page control (false_a != false_b noise: __VIEWSTATE / "
-                      "rotating token / reflected nonce), NOT genuine channel closure; over a noisy origin the "
-                      "injection may still fire, so this is NOT a sound REMEDIATED", attempted=attempted)
+                      "SPRT refuted but true still SEPARATES from false at zero tolerance on a judged round "
+                      "(across=True) — either dynamic-page noise (false_a != false_b: __VIEWSTATE / rotating "
+                      "token) OR a SUB-THRESHOLD leak the fuzzy SPRT missed (a 1-byte deterministic bit an "
+                      "attacker reads directly); NOT genuine channel closure, so NOT a sound REMEDIATED",
+                      attempted=attempted)
 
     # (3b) WAF-CLOSURE test on the JUDGED rounds (oracle authority — RECOMPUTED by differential_response_oracle,
     #     never trusted from the adapter): every metachar decoy (false_a) must come back baseline-shaped. A
@@ -1055,10 +1067,20 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
     if not (decision == "refute" and sig.conclusive):
         return False, "retained rounds do not re-execute to a DECISIVE SPRT refute"
     for r in rounds:
-        if not (isinstance(r, dict) and "baseline" in r and "false_a" in r):
-            return False, "a judged round is missing baseline/false_a for the WAF-closure re-check"
+        if not (isinstance(r, dict) and "baseline" in r and "false_a" in r and "true" in r):
+            return False, "a judged round is missing baseline/false_a/true for the differential re-check"
+        # ATTRIBUTION re-check (red-pen BLOCK-A — parity with the mint gate): the refute must be genuine channel
+        # CLOSURE, recomputed INDEPENDENT of the minter at ZERO tolerance (_ATTRIBUTION_DISC). If true still
+        # SEPARATES from false_a on any round the channel is still OPEN (a still-vulnerable noisy / sub-threshold
+        # origin) → DEMOTE. This is what lets the firewall demote a PRE-FIX false-REMEDIATED cert (across=True)
+        # that was validly signed before the mint gate existed — invariant 3 (re-execution can only demote).
+        if differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired:
+            return False, ("attribution re-check FAILED: true still separates from false_a at zero tolerance on "
+                           "a judged round (the boolean channel is still OPEN — dynamic-page noise or a "
+                           "sub-threshold leak) — NOT a genuine channel closure, so NOT a sound REMEDIATED")
         if not differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired:
             return False, "WAF-closure re-check failed (a metachar decoy diverged from baseline)"
-    return True, ("REMEDIATED (differential): signed + SPRT re-refutes decisively + WAF-closure re-holds — "
-                  "origin_reached ONLY (a blocking WAF is ruled out); the sanitizing-interposer residual "
-                  "(a-sanitize) is disclosed, NOT a clean-code-fix claim")
+    return True, ("REMEDIATED (differential): signed + SPRT re-refutes decisively + channel-closure attributed "
+                  "(across=False, zero tolerance) + WAF-closure re-holds — origin_reached ONLY (a blocking WAF "
+                  "is ruled out); the sanitizing-interposer residual (a-sanitize) is disclosed, NOT a "
+                  "clean-code-fix claim")

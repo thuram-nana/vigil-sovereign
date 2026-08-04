@@ -183,6 +183,20 @@ For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traver
 - **A cache/CDN keyed on less than the full URL** (query-stripping) serves one body for all probes → caught only
   by the live-marker-reflection control (§4); stated as a dependency, tested in §8.
 - **Producer byte-forgery** of the origin's data for all probes — the OOB Tier-2 / zkTLS frontier.
+- **A degenerate / non-data-dependent template pair (caller obligation).** The adapter rejects only the two
+  *trivial* syntactic degenerate forms (identical templates; templates differing only in the `{challenge}`
+  marker). Genuine data-dependence — that `true` and `false` hold *opposite* truth values the origin evaluates —
+  is **undecidable from the template string** (whitespace / case / different-constant / comment-padding pairs of
+  equal truth value pass the guard), so it is **not** statically enforced. It is a **caller obligation**, attested
+  at runtime by the positive control: the retained `original_firing_rounds` must re-fire (SPRT `confirm`), i.e.
+  they genuinely separated true from false on the known-vulnerable origin when the finding was confirmed. A caller
+  that pairs degenerate live templates with non-degenerate retained rounds is out of the guard's scope — disclosed.
+- **[red-pen — now CLOSED, recorded for provenance] a sub-threshold boolean channel.** A still-exploitable leak
+  smaller than the SPRT's *fuzzy* discriminator thresholds (a 1-byte deterministic bit in a large page) once read
+  as `across=False` → a false REMEDIATED. **Closed** by the **ATTRIBUTION gate** (§4.2a): channel-closure is
+  attributed with a **zero-tolerance** discriminator (`_ATTRIBUTION_DISC`, any deterministic true≠false_a
+  difference → channel OPEN), at **both mint and re-execution** — so a sub-threshold leak now yields INCONCLUSIVE,
+  and a signed cert whose retained rounds still separate is **demoted** by the offline verifier (invariant 3).
 
 ## 8. Adversarial test plan (loopback servers, the VF-1a.3 harness)
 

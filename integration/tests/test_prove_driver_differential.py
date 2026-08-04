@@ -34,10 +34,11 @@ import pytest
 from vigil_core import (
     generate_keypair, identity_digest, prove_wielder, sign_capability, sign_identity_attestation,
 )
+from vigil_core import sign
 from vigil_integration.remediation.differential_adapter import DifferentialHttpAdapter
 from vigil_integration.remediation.prove_driver import (
     ControlObservation, Freshness, ProvePolicy, Reason, State, TrialObservation,
-    prove_remediation, verify_prove_certificate,
+    _cert_signing_bytes, prove_remediation, verify_prove_certificate,
 )
 
 OWNER = generate_keypair()
@@ -106,6 +107,25 @@ def _noisy_vuln_round(n: int) -> dict:
 
 
 NOISY_VULN_ROUNDS = [_noisy_vuln_round(0), _noisy_vuln_round(1), _noisy_vuln_round(2)]
+
+
+_STABLE = "<html><body>" + ("<p>catalog item 0</p>" * 30)   # a large stable page the 1-bit leak hides in
+
+
+def _leakpage(bit: int) -> str:
+    return _STABLE + f"<span id=x>SECRET_BIT={bit}</span></body></html>"
+
+
+def _subthreshold_round() -> dict:
+    """A STILL-EXPLOITABLE 1-bit boolean channel: true/false differ by a single deterministic byte
+    (``SECRET_BIT=1`` vs ``=0``) in a large page → ~99.85% lexically similar, BELOW the fuzzy SPRT thresholds
+    (lexical 0.10 / length 0.05) → SPRT refutes, false pair stable, closure passes. An attacker reads the DB
+    bit-by-bit with exact comparison. Only a ZERO-tolerance attribution check catches it (red-pen BLOCK-B)."""
+    return _round(true=R(200, _leakpage(1)), false_a=R(200, _leakpage(0)),
+                  false_b=R(200, _leakpage(0)), baseline=R(200, _leakpage(0)))
+
+
+SUBTHRESHOLD_ROUNDS = [_subthreshold_round(), _subthreshold_round(), _subthreshold_round()]
 
 
 class FakeDifferentialAdapter:
@@ -238,6 +258,39 @@ def test_dynamic_page_noise_over_live_vuln_is_not_remediated():
     out = _run(FakeDifferentialAdapter(rounds=NOISY_VULN_ROUNDS))
     assert out.state != State.REMEDIATED, out
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.CHANNEL_NOISE_UNATTRIBUTABLE, out
+
+
+def test_subthreshold_boolean_channel_is_not_remediated():
+    # RED-PEN BLOCK-B — a still-EXPLOITABLE 1-bit boolean channel (true/false differ by a single deterministic
+    # byte in a large page, ~99.85% similar) is BELOW the fuzzy SPRT thresholds → SPRT refutes + closure passes.
+    # Pre-fix the fuzzy attribution recompute read across=False → REMEDIATED. The ZERO-tolerance attribution disc
+    # catches the 1-byte separation → across=True → INCONCLUSIVE, never REMEDIATED.
+    out = _run(FakeDifferentialAdapter(rounds=SUBTHRESHOLD_ROUNDS))
+    assert out.state != State.REMEDIATED, out
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.CHANNEL_NOISE_UNATTRIBUTABLE, out
+
+
+def test_verifier_demotes_a_signed_across_true_remediated_cert():
+    # RED-PEN BLOCK-A — the attribution gate must live at RE-EXECUTION too, or the veracity firewall cannot
+    # DEMOTE a false-REMEDIATED cert (invariant 3: re-execution can only demote). Model a cert the PRE-FIX minter
+    # (no attribution gate) would have signed: a genuine REMEDIATED cert whose judged_rounds are swapped for a
+    # still-vulnerable across=True set, then RE-SIGNED with the trusted governance key. verify_prove_certificate
+    # MUST now reject it via the attribution re-check — not attest a live-leaking origin as remediated.
+    out = _run(FakeDifferentialAdapter(rounds=[SILENT_ROUND, SILENT_ROUND, SILENT_ROUND]))
+    assert out.state == State.REMEDIATED
+    cert = out.certificate
+    ok_before, _ = verify_prove_certificate(cert, signer_pubkeys=PUBKEYS)
+    assert ok_before                                        # the genuine cert verifies
+    for across_true_rounds in (NOISY_VULN_ROUNDS, SUBTHRESHOLD_ROUNDS):
+        tampered = {k: v for k, v in cert.items() if k != "signer"}
+        tampered = {**tampered, "evidence": {**tampered["evidence"],
+                    "differential": {**tampered["evidence"]["differential"],
+                                     "judged_rounds": across_true_rounds}}}
+        tampered["signer"] = {"key_id": "gov0", "signature": sign(OWNER.private_key_b64,
+                                                                  _cert_signing_bytes(tampered))}
+        ok, reason = verify_prove_certificate(tampered, signer_pubkeys=PUBKEYS)
+        assert not ok, f"verifier attested an across=True (still-open) cert: {reason}"
+        assert "attribution re-check" in reason.lower()
 
 
 def test_freshness_floor_above_the_policy_is_enforced_not_ignored():
