@@ -202,14 +202,33 @@ def test_narrow_guard_on_a_gap_sized_buffer_is_structurally_rejected(monkeypatch
         assert "bounded" in out.reason.lower()
 
 
-def test_structural_check_flags_a_remaining_unbounded_strcpy():
-    # unit: the structural completeness check — an unbounded strcpy into a fixed char[N] remains → True (not a
-    # bounded fix), on any size incl. enlargement; a bounded strncpy rewrite → False; strcpy into a non-fixed
-    # (malloc'd) dst → False (out of the fixed-buffer class).
-    assert R._has_unbounded_strcpy_into_fixed_buffer("char b[16]; strcpy(b, s);") is True
-    assert R._has_unbounded_strcpy_into_fixed_buffer("char b[9999]; strcpy(b, s);") is True     # enlargement
-    assert R._has_unbounded_strcpy_into_fixed_buffer("char b[16]; strncpy(b, s, 16 - 1); b[15]=0;") is False
-    assert R._has_unbounded_strcpy_into_fixed_buffer("char *b = malloc(8); strcpy(b, s);") is False
+def test_structural_check_is_form_agnostic():
+    # unit: the structural completeness check flags an inherently-unbounded copy on ANY destination FORM (red-pen
+    # BLOCK: keying on `char <name>[<numeric>]` missed macro-sized / member / element / cast destinations the
+    # shipped synthesiser leaves behind). A bounded rewrite (strncpy) or a sized copy (snprintf) → False.
+    for remains in ("char b[16]; strcpy(b, s);", "char b[9999]; strcpy(b, s);", "char b[SZ]; strcpy(b, s);",
+                    "strcpy(s.mbuf, in);", "strcpy(bufs[0], in);", "strcpy((char*)buf, in);", "strcat(b, in);",
+                    "gets(buf);"):
+        assert R._has_remaining_unbounded_copy(remains) is True, remains
+    for bounded in ("char b[16]; strncpy(b, s, 16 - 1); b[15]=0;", "snprintf(b, 16, \"%s\", s);",
+                    "char *b = malloc(8); memcpy(b, s, 7);"):
+        assert R._has_remaining_unbounded_copy(bounded) is False, bounded
+
+
+def test_compound_source_with_a_macro_buffer_second_strcpy_is_not_remediated():
+    # RED-PEN BLOCK end-to-end (the shipped synthesiser, NO monkeypatch): the confirmed crash is on a numeric
+    # buffer (rewritten to strncpy), but a SECOND live strcpy into a MACRO-sized buffer (char b[CAP], guarded
+    # off-by-one) remains — overflowing at a fuzz-gap length. The form-agnostic structural check catches the
+    # remaining strcpy regardless of the macro size → NOT_REMEDIATED (no false all-clear over a live overflow).
+    compound = (
+        "#include <stdio.h>\n#include <string.h>\n#define CAP 100\n"
+        "int process(const char *in){ char a[16]; char b[CAP]; strcpy(a, in); "
+        "if (strlen(in) <= CAP) strcpy(b, in); return (int)strlen(a) + (int)strlen(b); }\n"
+        "int main(int argc, char**argv){ if(argc<2){printf(\"usage\\n\");return 2;} "
+        "printf(\"len=%d\\n\", process(argv[1])); return 0; }\n")
+    out = prove_asan_remediation(compound, crash_argv=["A" * 64], benign_argv=["hi"], expected_benign="len=")
+    assert out.state == BinRemState.NOT_REMEDIATED, out
+    assert "unbounded copy" in out.reason.lower()
 
 
 def test_synthesiser_never_fabricates_without_a_fixed_size_declaration():
