@@ -98,6 +98,7 @@ jobs:
             # (single source of truth for the always-denied ranges — a pure, offense-free module).
             PYTHONPATH=integration:gateway python -m pytest integration/tests \
               --ignore=integration/tests/test_oracle_adapter.py \
+              --ignore=integration/tests/test_external_tool_runner.py \
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_engine_terminal.py \
               --ignore=integration/tests/test_executor_scoped.py \
@@ -129,6 +130,7 @@ jobs:
             # `framework` into the sovereign-path process above and trip its import-clean assertions).
             PYTHONPATH=integration:engine/crucible:gateway python -m pytest \
               integration/tests/test_oracle_adapter.py \
+              integration/tests/test_external_tool_runner.py \
               integration/tests/test_engine_live.py \
               integration/tests/test_engine_terminal.py \
               integration/tests/test_executor_scoped.py \

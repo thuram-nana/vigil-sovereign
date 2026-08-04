@@ -150,3 +150,56 @@ contract; it already routes actions through the conjunctive gate.
 2. In `gate`, delegate to the **actual** gate-of-record (never decide authorization in the body).
 3. Keep `run_cycle` (or, if overriding, preserve gate-before-execute) so the invariant is inherited.
 4. Do not add any fact-minting / tier-granting to the body — the oracle remains sole authority.
+
+---
+
+## R4 — live external-tool runner through the gated offense topology
+
+**Module:** `integration/vigil_integration/live/external_tool.py`
+**Tests:** `integration/tests/test_external_tool_runner.py` (offense-process group in `ci.yml`)
+
+### [BUILT] now — the mechanism, exercised with a present tool (nmap)
+A **tool-agnostic runner** that turns "an external tool ran" into a signed FACT without reinventing scope,
+the egress floor, or adjudication — it composes the three existing layers:
+
+- **Scope gate BEFORE any traffic** — `ScopeGate` composes the gateway's L3/L4 conscience
+  (`vigil_gateway.denylist`, the **single source of truth** for egress: metadata/link-local denied
+  unconditionally, private denied unless charter-authorised, loopback only on the owner's opt-in) with the
+  charter scope (`vigil_gateway.scope_source` → CRUCIBLE `host_matches_scope`). An out-of-scope / IMDS /
+  un-authorised target is **refused and the tool is never launched** (a spy backend proves zero `run()`).
+- **Gated exec seam** — `DockerTopologyBackend` runs the tool INSIDE a container pinned to the internal
+  `vigil_sandbox` network (`infra/docker` topology via `docker.py`), whose only exit is the filtering
+  gateway behind the nftables egress gate (`--cap-drop ALL`, `no-new-privileges`). `LocalSubprocessBackend`
+  runs a present tool directly on the host (used for the loopback proof — the docker/bwrap isolation
+  backends unshare the net namespace and so cannot reach a HOST loopback service; the container backend is
+  for EXTERNAL scoped hosts).
+- **Oracle adjudication (the FACT gate)** — the tool's parsed "open" is a PROPOSAL, never a fact. The
+  runner reproduces each proposed service with an INDEPENDENT gated handshake
+  (`framework.v2.verify.capture_handshake`) and drives the existing `oracle_adapter.confirm_and_certify`
+  (`provenance="live_redrive"`), minting a signed proof-carrying certificate **only** on a fired
+  `service_reachability` oracle. Everything else stays a labelled lead. The retained JSON-safe context
+  re-verifies the certificate **offline** with no network (`verify_certificate`).
+
+**Live proof today:** a REAL `nmap -oG -` run against a stood-up loopback listener → exactly one oracle-
+confirmed, signed FACT that survives CRUCIBLE's own layered verifier; a closed / non-reproducing port →
+lead, never a fact.
+
+### [tooling-gated] gated: the LLM-red-team tools (garak / PyRIT / promptfoo)
+Those tools are **ABSENT from this environment** (no network to install them), so their live-fire is
+**DEFERRED** — this slice mints **NO garak/PyRIT/promptfoo FACT**. The runner is tool-agnostic: a new
+`ToolSpec` (argv builder + output parser → proposed signals) and, for a non-reachability signal, an oracle
+mapping, is all a new tool needs. The `DockerTopologyBackend` already builds the real pinned-network argv
+and reports availability honestly; only its live *container* run is gated on docker + the sandbox network +
+a tool image being present.
+
+**Activate when a tool + its image land:**
+1. Build/pull a container image carrying the tool onto the host (e.g. `vigil-garak:latest`); stand up the
+   gated topology with `SandboxNetworking().ensure_networks()`.
+2. Write a `ToolSpec`: `build_argv(target)` for the tool's CLI, and `propose(outcome, target)` parsing its
+   output into the proposed signals to adjudicate.
+3. For a **reachability/port** signal, reuse the built path unchanged (the `service_reachability` oracle).
+   For a NEW signal class (e.g. a prompt-injection finding from garak), map it to the appropriate existing
+   oracle via `oracle_adapter` — do **not** add a fact-minting path outside the oracle. If no deterministic
+   oracle covers the class, the result stays a **labelled lead** (the honesty invariant), never a FACT.
+4. Run `run_external_tool(spec, target, scope_gate=..., backend=DockerTopologyBackend(image=...), ...)`.
+   The scope gate + oracle authority + signing are inherited verbatim.
