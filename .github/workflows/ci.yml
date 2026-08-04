@@ -239,3 +239,22 @@ jobs:
           else
             echo "apps/sigil offense-gate tests not present on this ref (pre-merge) — nothing to test"
           fi
+
+  formal-verification:
+    name: formal (TLA+ core-invariant model check, F1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: TLC model-check the four core invariants + their mutants
+        run: |
+          if [ -f formal/check.sh ]; then
+            # check.sh fetches a PINNED, sha256-verified tla2tools.jar (GitHub runners have net),
+            # model-checks each faithful spec (must hold) AND each mutant (must be caught).
+            bash formal/check.sh
+          else
+            echo "formal/ not present on this ref (pre-merge) — nothing to check"
+          fi
