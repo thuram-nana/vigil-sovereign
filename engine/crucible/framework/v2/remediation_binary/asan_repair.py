@@ -129,6 +129,27 @@ def _run_capture(binary: Path, argv: "list[str]", *, stdin: str = "", timeout: i
         return report + "\n" + std, rc
 
 
+def _completeness_fuzz(crash_argv: "list[str]") -> "list[list[str]]":
+    """A length-sweep of the crash vector (the longest arg) — the CLASS-completeness check (red-pen BLOCK: a
+    single-input silence over-claims). A partial fix leaves inputs that still overflow: buffer ENLARGEMENT
+    (``char[16]``→``char[128]``) is defeated by a LONGER input; a NARROW length guard (``if strlen>20 return``
+    with the buffer still ``[16]``) is defeated by a SHORT-but-over-buffer input. A genuine BOUNDED copy (the
+    shipped synthesiser's ``strncpy``) survives EVERY length. Sweeping small→large catches both partial classes
+    without knowing the buffer size. NOT exhaustive over input SHAPE — see the REMEDIATED residual."""
+    if not crash_argv:
+        return []
+    idx = max(range(len(crash_argv)), key=lambda i: len(crash_argv[i]))
+    fill = (crash_argv[idx] or "A")[0]
+    lengths = (1, 4, 8, 12, 16, 17, 18, 20, 24, 31, 32, 48, 63, 64, 96, 127, 128, 192, 255, 256, 384, 512,
+               1024, 2048, 4096)
+    out = []
+    for length in lengths:
+        v = list(crash_argv)
+        v[idx] = fill * length
+        out.append(v)
+    return out
+
+
 def _died_by_fatal_signal(rc: "int | None") -> bool:
     """True if the process was killed by a fatal signal (subprocess reports a negative returncode). ASan with
     ``abort_on_error=1`` raises SIGABRT at the overflow; a SEGV from a smashed return address is also fatal. This
@@ -282,6 +303,21 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
                                 "still fires or the process still dies by a fatal signal) — not a fix",
                                 crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=True)
 
+        # COMPLETENESS (red-pen BLOCK — single-input silence over-claims): the confirmed input is silenced, but a
+        # PARTIAL fix (buffer enlargement / narrow length guard) leaves the CLASS exploitable. Fuzz a length-sweep
+        # of the crash vector; a bounded-copy fix survives every length, a partial fix crashes on one → the class
+        # is NOT remediated.
+        for fz in _completeness_fuzz(crash_argv):
+            fz_out, fz_rc = _run_capture(fixed, fz, timeout=timeout)
+            if _crashed(fz_out, fz_rc):
+                fz_len = len(fz[max(range(len(fz)), key=lambda i: len(fz[i]))])
+                return BinRemResult(
+                    BinRemState.NOT_REMEDIATED,
+                    "the patch stopped the confirmed crash input but a length-swept fuzz of the crash vector STILL "
+                    f"crashes (input length {fz_len}) — a partial fix (buffer enlargement / narrow guard), NOT a "
+                    "class-level remediation",
+                    crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=True)
+
         benign_out, benign_rc = _run_capture(fixed, benign_argv, timeout=timeout)
         functional = ((expected_benign in benign_out) and not _crashed(benign_out, benign_rc))
         if not functional:
@@ -293,10 +329,13 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
         return BinRemResult(
             BinRemState.REMEDIATED,
             "crash-confirmed by AddressSanitizer; a pattern-synthesised bounded-copy patch stopped the crash on "
-            "the same input (oracle SILENT + no fatal signal) AND preserved the benign functionality (fix earned "
-            "by silence, not asserted). RESIDUAL: pattern-based for the unbounded-strcpy class — general symbolic "
-            "synthesis (angr) is deferred; and the fix-by-silence gate assumes a GOOD-FAITH patch — it hardens "
-            "against report-diversion / fd-games / re-exec / signal-catching (denylist + out-of-band SIGABRT), "
-            "but a maximally-hostile patch-producer would require an out-of-band sandbox (ptrace/seccomp), which "
-            "the shipped strcpy synthesiser never needs (it emits none of those constructs).",
+            "the confirmed input AND across a LENGTH-SWEPT fuzz of the crash vector (oracle SILENT + no fatal "
+            "signal on every length — a partial fix like buffer enlargement or a narrow guard would crash on "
+            "one), AND preserved the benign functionality (fix earned by silence, not asserted). RESIDUAL: (1) "
+            "class-completeness is proven over the fuzzed LENGTH sweep, NOT exhaustively over input SHAPE — a bug "
+            "reachable only by a different input structure is out of scope; (2) pattern-based for the "
+            "unbounded-strcpy class — general symbolic synthesis (angr) is deferred; (3) the fix-by-silence gate "
+            "hardens against report-diversion / fd-games / re-exec / signal-catching (denylist + out-of-band "
+            "SIGABRT), but a maximally-hostile patch-producer would need an out-of-band sandbox (ptrace/seccomp), "
+            "which the shipped strcpy synthesiser never needs.",
             crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=False, functional_preserved=True)

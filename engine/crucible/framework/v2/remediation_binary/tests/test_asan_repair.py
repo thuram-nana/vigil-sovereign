@@ -158,6 +158,29 @@ def test_tamper_check_flags_only_patch_introduced_constructs():
     assert R._patch_introduces_sanitizer_tampering("strcpy(b,s);", "strncpy(b, s, 8 - 1); b[8 - 1] = '\\0';") == ""
 
 
+def test_buffer_enlargement_partial_fix_is_not_class_remediated(monkeypatch):
+    # RED-PEN BLOCK — a plausible good-faith PARTIAL fix (enlarge the buffer 16→128) silences the confirmed
+    # 64-byte input but a longer input still overflows the bigger buffer. The length-sweep completeness fuzz
+    # catches it → NOT_REMEDIATED (a partial fix is not a class-level remediation).
+    enlarge = STRCPY_VULN.replace("char buf[16];", "char buf[128];")
+    monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                        lambda _s: (enlarge, R.BinaryPatch(description="enlarge", diff="", provenance="test")))
+    out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
+    assert out.state == BinRemState.NOT_REMEDIATED, out
+    assert "length-swept" in out.reason.lower() and "partial fix" in out.reason.lower()
+
+
+def test_narrow_length_guard_partial_fix_is_not_class_remediated(monkeypatch):
+    # a narrow guard (reject inputs >20) with the buffer STILL [16] silences the confirmed 64-byte input but a
+    # 17–20 byte input passes the guard and overflows [16]. The short end of the length sweep catches it.
+    guard = STRCPY_VULN.replace("char buf[16]; strcpy", "char buf[16]; if(strlen(in) > 20) return -1; strcpy")
+    monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                        lambda _s: (guard, R.BinaryPatch(description="guard", diff="", provenance="test")))
+    out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
+    assert out.state == BinRemState.NOT_REMEDIATED, out
+    assert "partial fix" in out.reason.lower()
+
+
 def test_synthesiser_never_fabricates_without_a_fixed_size_declaration():
     # unit: the synthesiser returns (None, None) when there is no `char dst[N]` to bound — no fabricated patch.
     patched, patch = R.synthesize_bounded_copy_patch("char *p; strcpy(p, q);")
