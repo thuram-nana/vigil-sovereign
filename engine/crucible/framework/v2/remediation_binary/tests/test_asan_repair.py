@@ -162,12 +162,15 @@ def test_buffer_enlargement_partial_fix_is_not_class_remediated(monkeypatch):
     # RED-PEN BLOCK — a plausible good-faith PARTIAL fix (enlarge the buffer 16→128) silences the confirmed
     # 64-byte input but a longer input still overflows the bigger buffer. The length-sweep completeness fuzz
     # catches it → NOT_REMEDIATED (a partial fix is not a class-level remediation).
-    enlarge = STRCPY_VULN.replace("char buf[16];", "char buf[128];")
-    monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
-                        lambda _s: (enlarge, R.BinaryPatch(description="enlarge", diff="", provenance="test")))
-    out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
-    assert out.state == BinRemState.NOT_REMEDIATED, out
-    assert "length-swept" in out.reason.lower() and "partial fix" in out.reason.lower()
+    # both a small ([128]) and a LARGE ([8192], beyond the fixed part of the sweep) enlargement are caught — the
+    # sweep scales to the crash length + a 1 MiB upper probe, so any fixed buffer is exceeded by some fuzz length.
+    for size in (128, 8192):
+        enlarge = STRCPY_VULN.replace("char buf[16];", f"char buf[{size}];")
+        monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                            lambda _s, e=enlarge: (e, R.BinaryPatch(description="enlarge", diff="", provenance="test")))
+        out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
+        assert out.state == BinRemState.NOT_REMEDIATED, (size, out)
+        assert "length-swept" in out.reason.lower() and "partial fix" in out.reason.lower()
 
 
 def test_narrow_length_guard_partial_fix_is_not_class_remediated(monkeypatch):

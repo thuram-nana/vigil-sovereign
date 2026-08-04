@@ -140,10 +140,15 @@ def _completeness_fuzz(crash_argv: "list[str]") -> "list[list[str]]":
         return []
     idx = max(range(len(crash_argv)), key=lambda i: len(crash_argv[i]))
     fill = (crash_argv[idx] or "A")[0]
-    lengths = (1, 4, 8, 12, 16, 17, 18, 20, 24, 31, 32, 48, 63, 64, 96, 127, 128, 192, 255, 256, 384, 512,
-               1024, 2048, 4096)
+    cl = max(1, len(crash_argv[idx]))
+    # SMALL fixed lengths catch a narrow length-guard (a short-but-over-buffer input still overflows); lengths
+    # SCALED to the confirmed crash catch a buffer ENLARGEMENT (a buffer grown to N still overflows above N), up
+    # to a 1 MiB cap. A bounded copy survives ALL of these; a fixed enlargement fails at some multiple of cl.
+    lengths = {1, 4, 8, 12, 16, 17, 18, 20, 24, 31, 32, 48, 63, 64, 96, 127, 128, 192, 255, 256}
+    lengths.update(cl * k for k in (2, 4, 8, 16, 64, 256, 1024, 4096) if cl * k <= (1 << 20))
+    lengths.add(1 << 20)                       # a hard upper probe (1 MiB) beyond any plausible fixed buffer
     out = []
-    for length in lengths:
+    for length in sorted(lengths):
         v = list(crash_argv)
         v[idx] = fill * length
         out.append(v)
@@ -332,8 +337,11 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
             "the confirmed input AND across a LENGTH-SWEPT fuzz of the crash vector (oracle SILENT + no fatal "
             "signal on every length — a partial fix like buffer enlargement or a narrow guard would crash on "
             "one), AND preserved the benign functionality (fix earned by silence, not asserted). RESIDUAL: (1) "
-            "class-completeness is proven over the fuzzed LENGTH sweep, NOT exhaustively over input SHAPE — a bug "
-            "reachable only by a different input structure is out of scope; (2) pattern-based for the "
+            "the fuzz spans lengths to 1 MiB — a genuinely CLASS-complete fix is structurally a BOUNDED copy (what "
+            "the shipped synthesiser emits, which survives ANY length); the fuzz HEURISTICALLY rejects partial "
+            "fixes but is not exhaustive over input SHAPE nor length beyond the sweep — a bug reachable only by a "
+            "different structure, or a fixed buffer larger than the sweep, is out of the proven scope; (2) "
+            "pattern-based for the "
             "unbounded-strcpy class — general symbolic synthesis (angr) is deferred; (3) the fix-by-silence gate "
             "hardens against report-diversion / fd-games / re-exec / signal-catching (denylist + out-of-band "
             "SIGABRT), but a maximally-hostile patch-producer would need an out-of-band sandbox (ptrace/seccomp), "
