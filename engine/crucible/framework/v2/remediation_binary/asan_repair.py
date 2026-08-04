@@ -206,20 +206,29 @@ _SANITIZER_TAMPER = (
 # struct member, an array element, a cast). The STRUCTURAL completeness proof keys on the CALL, not the
 # destination form (red-pen BLOCK: keying on ``char <name>[<numeric>]`` missed macro-sized / member destinations
 # the shipped synthesiser leaves behind).
-_UNBOUNDED_COPY = re.compile(r"\b(?:strcpy|strcat|stpcpy|gets|sprintf|vsprintf|wcscpy|wcscat)\s*\(")
+_UNBOUNDED_COPY = re.compile(
+    r"\b(?:strcpy|strcat|stpcpy|wcpcpy|gets|sprintf|vsprintf|vswprintf|swprintf|wcscpy|wcscat)\s*\(")
+# formatted INPUT with an unbounded field: scanf/fscanf/sscanf with a naked ``%s`` or ``%[`` (no field width) —
+# the same unbounded-write hazard as ``gets``. A width (``%15s``) or suppression (``%*s``) is NOT matched.
+_UNBOUNDED_SCANF = re.compile(r"\b(?:scanf|fscanf|sscanf)\s*\([^;{}]*?%(?:s|\[)")
 
 
 def _has_remaining_unbounded_copy(source: str) -> bool:
-    """True if ``source`` STILL contains an inherently-unbounded (no-length-argument) copy/format call —
-    ``strcpy`` / ``strcat`` / ``stpcpy`` / ``gets`` / ``sprintf`` / ``vsprintf`` / ``wcscpy`` / ``wcscat``.
-    This is the STRUCTURAL completeness check for the class (the sound one; a length-sweep fuzz is only a sparse
-    heuristic with gaps): a genuine class-level fix REPLACES the unbounded copy with a BOUNDED one (``strncpy`` /
-    ``fgets`` / a length-checked copy), so no unbounded call remains — on ANY buffer whatever its DECLARATION FORM
-    (plain, macro-sized ``char b[SZ]``, struct member ``s.buf``, array element ``a[0]``, cast destination). A
-    buffer enlargement or a narrow guard KEEPS the unbounded call → caught. Conservative: a remaining unbounded
-    copy that happens to be safe (a provably-bounded input) is still demoted — the safe direction — and a fix in
-    a form that is bounded but not ``strncpy``/``fgets`` still passes (only the unbounded CALLS are flagged)."""
-    return bool(_UNBOUNDED_COPY.search(source))
+    """True if ``source`` STILL contains an inherently-unbounded (no-length-argument) copy/format/input call —
+    the ENUMERATED family: ``strcpy`` / ``strcat`` / ``stpcpy`` / ``wcpcpy`` / ``gets`` / ``sprintf`` /
+    ``vsprintf`` / ``swprintf`` / ``vswprintf`` / ``wcscpy`` / ``wcscat``, plus ``scanf``/``fscanf``/``sscanf``
+    with a naked ``%s`` / ``%[`` (no field width — the same hazard as ``gets``). A genuine class-level fix REPLACES
+    the unbounded call with a BOUNDED one (``strncpy`` / ``fgets`` / ``%15s`` / a length-checked copy), so none of
+    these remain — on ANY buffer whatever its DECLARATION FORM (plain, macro-sized ``char b[SZ]``, struct member
+    ``s.buf``, array element ``a[0]``, cast destination). A buffer enlargement or a narrow guard KEEPS the
+    unbounded call → caught, where the sparse length-sweep fuzz misses gap-sized buffers.
+
+    HONEST NATURE — this is an ENUMERATION of the common inherently-unbounded stdlib calls, NOT an exhaustive
+    semantic proof: an UN-enumerated function, a MACRO-aliased call (``#define COPY strcpy``), a size-argument copy
+    with an unsafe length (``memcpy(dst, src, strlen(src))``), or a hand-rolled loop is NOT flagged here — only the
+    runtime length-sweep fuzz (a heuristic) backstops those. Sound for what it enumerates; the residual names the
+    rest. Conservative: a remaining unbounded call that happens to be safe is still demoted (the safe direction)."""
+    return bool(_UNBOUNDED_COPY.search(source) or _UNBOUNDED_SCANF.search(source))
 
 
 def _patch_introduces_sanitizer_tampering(original: str, patched: str) -> str:
@@ -374,10 +383,12 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
             "(NO inherently-unbounded copy — strcpy/strcat/stpcpy/gets/sprintf/vsprintf — remains anywhere in the patch, whatever the "
             "destination's declaration form; the STRUCTURAL class-completeness proof) AND the patch stayed silent "
             "on the confirmed input + a length-swept fuzz (runtime confirmation) AND preserved the benign "
-            "functionality (fix earned by silence, not asserted). RESIDUAL: (1) class-completeness covers the "
-            "inherently-unbounded copy family (strcpy/strcat/stpcpy/gets/sprintf/vsprintf); a bug via a DIFFERENT mechanism (an unsized "
-            "sprintf, a memcpy with an attacker length, a custom copy) or a different input structure is out of "
-            "scope — the runtime fuzz is the only (heuristic) backstop there; (2) pattern-based for the "
+            "functionality (fix earned by silence, not asserted). RESIDUAL: (1) the structural check ENUMERATES "
+            "the common inherently-unbounded stdlib calls (strcpy/strcat/stpcpy/gets/sprintf/vsprintf/wcs*, and "
+            "scanf/fscanf/sscanf with a naked %s/%[) — NOT an exhaustive semantic proof: an UN-enumerated function, "
+            "a MACRO-aliased call, a size-argument copy with an unsafe length (memcpy(dst,src,strlen)), a "
+            "hand-rolled loop, or a bug reachable only by a DIFFERENT input structure is out of scope, with the "
+            "runtime length-sweep fuzz the only (heuristic) backstop there; (2) pattern-based for the "
             "unbounded-strcpy class — general symbolic synthesis (angr) is deferred; (3) the fix-by-silence gate "
             "hardens against report-diversion / fd-games / re-exec / signal-catching (denylist + out-of-band "
             "SIGABRT), but a maximally-hostile patch-producer would need an out-of-band sandbox (ptrace/seccomp), "

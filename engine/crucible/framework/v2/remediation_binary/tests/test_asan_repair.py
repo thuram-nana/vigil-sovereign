@@ -213,6 +213,25 @@ def test_structural_check_is_form_agnostic():
     for bounded in ("char b[16]; strncpy(b, s, 16 - 1); b[15]=0;", "snprintf(b, 16, \"%s\", s);",
                     "char *b = malloc(8); memcpy(b, s, 7);"):
         assert R._has_remaining_unbounded_copy(bounded) is False, bounded
+    # formatted INPUT: a naked scanf %s/%[ (same hazard as gets) is flagged; a WIDTH-limited %15s / suppressed
+    # %*s / fgets is not (red-pen: the scanf family was omitted from the enumeration).
+    for scan in ("scanf(\"%s\", buf);", "fscanf(fp, \"%s\", buf);", "sscanf(s, \"%[^\\n]\", buf);", "wcpcpy(d, s);"):
+        assert R._has_remaining_unbounded_copy(scan) is True, scan
+    for safe in ("scanf(\"%15s\", buf);", "scanf(\"%*s\");", "fgets(buf, 16, stdin);"):
+        assert R._has_remaining_unbounded_copy(safe) is False, safe
+
+
+def test_compound_source_with_a_second_scanf_overflow_is_not_remediated():
+    # RED-PEN BLOCK end-to-end (shipped synthesiser, NO monkeypatch): the confirmed crash is a strcpy (rewritten
+    # to strncpy) but a second LIVE unbounded stdin overflow via scanf("%s", ...) remains — the same hazard class
+    # as gets. The enumeration now covers the scanf family → NOT_REMEDIATED (no false all-clear over a live bug).
+    src = (
+        "#include <stdio.h>\n#include <string.h>\n"
+        "int main(int argc, char **argv){ char numbuf[16]={0}; char gapbuf[64]={0}; if(argc<2) return 1; "
+        "strcpy(numbuf, argv[1]); scanf(\"%s\", gapbuf); printf(\"ok:%s\\n\", numbuf); return 0; }\n")
+    out = prove_asan_remediation(src, crash_argv=["A" * 200], benign_argv=["hi"], expected_benign="ok:")
+    assert out.state == BinRemState.NOT_REMEDIATED, out
+    assert "unbounded copy" in out.reason.lower()
 
 
 def test_compound_source_with_a_macro_buffer_second_strcpy_is_not_remediated():
