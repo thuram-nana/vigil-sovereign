@@ -237,7 +237,10 @@ def test_case4_sanitizing_waf_remediated_carries_origin_reached_only_not_clean_f
     ev = out.certificate["evidence"]["differential"]
     assert ev["origin_reached"] is True
     assert "sanitiz" in ev["residual_disclosure"].lower()          # the (a-sanitize) residual is surfaced
-    assert "as observed through this edge" in out.detail.lower()   # not presented as a clean code fix
+    assert "as observed through this edge" in ev["residual_disclosure"].lower()   # not a clean code fix
+    # with NO origin re-drive configured (R2), the verdict is honestly EDGE-ONLY — a-sanitize residual OPEN.
+    assert ev["origin_confirmed"] is False and ev["origin_redrive"] == "not_attempted"
+    assert "edge-only" in out.detail.lower()
     # the cert asserts NOTHING stronger than origin_reached — no "clean_fix"/"code_fixed" claim field exists
     assert "clean_fix" not in ev and "code_fixed" not in ev
 
@@ -514,3 +517,86 @@ def test_real_adapter_vulnerable_origin_is_still_vulnerable(real_gated):
         assert out.state != State.REMEDIATED
     finally:
         srv.shutdown(); srv.server_close()
+
+
+# ============================ R2 — direct-to-origin re-drive (closes the a-sanitize residual) ================
+def _real_origin_adapter(edge_url: str, *, origin_ip: str, origin_port: int) -> DifferentialHttpAdapter:
+    """A real adapter whose EDGE is ``edge_url`` and whose direct-to-origin re-drive targets ``origin_ip:port``
+    with the Host pinned to the loopback (the origin server ignores Host; the scope gate matches the URL host)."""
+    from framework.v2.agents import HttpExecutor
+    executor = HttpExecutor(engagement_slug=_REAL_ENG, base_url=edge_url, prompt_callback=lambda *_a: False)
+    return DifferentialHttpAdapter(
+        executor=executor, base_url=edge_url, endpoint_path="/search", param="q", nonce_param="rc",
+        base_value="1", true_payload_template="1' AND 1=1 -- {challenge}",
+        false_payload_template="1' AND 1=2 -- {challenge}", original_firing_rounds=CONFIRM_ROUNDS,
+        engagement=_REAL_ENG, origin_ip=origin_ip, origin_port=origin_port, origin_host="127.0.0.1")
+
+
+def test_r2_sanitizing_edge_over_vulnerable_origin_is_demoted(real_gated):
+    # THE R2 HEADLINE: the EDGE sanitizes (all probes inert → the edge path refutes → REMEDIATED-at-edge), but
+    # the ORIGIN behind it is still vulnerable → the direct-to-origin re-drive (Host pinned, edge bypassed) FIRES
+    # → DEMOTE to STILL_VULNERABLE. R2 catches the sanitizer the edge-only path (a-sanitize residual) could not.
+    edge = _start_origin(vulnerable=False)          # a sanitizing edge: baseline for everything
+    origin = _start_origin(vulnerable=True)         # the still-vulnerable origin behind it
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.1",
+                                             origin_port=origin.server_address[1]))
+        assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED, out
+        assert out.state != State.REMEDIATED
+        assert out.certificate["evidence"]["differential"]["origin_redrive"] == "fired"
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_clean_origin_is_origin_confirmed_remediated(real_gated):
+    # both the edge and the origin are clean → the direct-to-origin re-drive stays silent + closed →
+    # origin_confirmed REMEDIATED (the a-sanitize residual is RULED OUT for this finding). The signed cert
+    # re-executes INCLUDING the origin rounds (the origin upgrade is mirrored at re-execution).
+    edge = _start_origin(vulnerable=False)
+    origin = _start_origin(vulnerable=False)
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.1",
+                                             origin_port=origin.server_address[1]))
+        assert out.state == State.REMEDIATED, out
+        ev = out.certificate["evidence"]["differential"]
+        assert ev["origin_confirmed"] is True and ev["origin_redrive"] == "confirmed", ev
+        assert isinstance(ev.get("origin_rounds"), list) and ev["origin_rounds"]
+        ok, reason = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
+        assert ok and "origin_confirmed" in reason.lower(), reason
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_origin_out_of_scope_stays_edge_only(real_gated):
+    # the origin IP is NOT in the charter scope → the scope gate REFUSES the origin re-drive → edge-only
+    # REMEDIATED with the a-sanitize residual STILL OPEN. R2 fail-closes; it NEVER bypasses the gate to reach a
+    # raw IP. (203.0.113.7 is TEST-NET-3 documentation space, not in scope — the gate refuses before any send.)
+    edge = _start_origin(vulnerable=False)
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="203.0.113.7", origin_port=80))
+        assert out.state == State.REMEDIATED, out
+        ev = out.certificate["evidence"]["differential"]
+        assert ev["origin_confirmed"] is False and ev["origin_redrive"] == "unavailable", ev
+        assert "sanitiz" in ev["residual_disclosure"].lower()      # residual still open
+    finally:
+        edge.shutdown(); edge.server_close()
+
+
+def test_verifier_demotes_a_false_origin_confirmed_cert():
+    # R2 + R1b lesson — a signed cert claiming origin_confirmed whose ORIGIN rounds actually FIRE (across=True)
+    # MUST be demoted by the offline verifier (the origin upgrade is re-executed, invariant 3: only demote).
+    out = _run(FakeDifferentialAdapter(rounds=[SILENT_ROUND, SILENT_ROUND, SILENT_ROUND]))
+    assert out.state == State.REMEDIATED
+    cert = out.certificate
+    tampered = {k: v for k, v in cert.items() if k != "signer"}
+    diff = {**tampered["evidence"]["differential"], "origin_confirmed": True, "origin_redrive": "confirmed",
+            "origin_rounds": NOISY_VULN_ROUNDS}                    # a still-firing origin (across=True)
+    tampered = {**tampered, "evidence": {**tampered["evidence"], "differential": diff}}
+    tampered["signer"] = {"key_id": "gov0",
+                          "signature": sign(OWNER.private_key_b64, _cert_signing_bytes(tampered))}
+    ok, reason = verify_prove_certificate(tampered, signer_pubkeys=PUBKEYS)
+    assert not ok, f"verifier trusted a false origin_confirmed over a firing origin: {reason}"
+    assert "origin" in reason.lower()
