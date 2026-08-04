@@ -108,6 +108,21 @@ def test_signal_catching_patch_is_rejected(monkeypatch):
     assert "sanitizer-tampering" in out.reason.lower()
 
 
+def test_fd_manipulation_patch_cannot_fake_silence(monkeypatch):
+    # RED-PEN re-check — a patch that MANIPULATES fd 2 (close(2) / dup2(...,2) / fclose(stderr)) to drop the ASan
+    # report off the child's stderr must NOT fake silence: the report is captured from a log FILE the driver owns
+    # (env log_path), which the child cannot suppress by closing/redirecting its own stderr → the oracle re-fires
+    # → NOT_REMEDIATED (the overflow still executed). The child controls its stderr; it does not control our file.
+    for construct in ("close(2);", "dup2(2, 2); close(2);", "fclose(stderr);"):
+        redirected = STRCPY_VULN.replace(
+            "#include <string.h>", "#include <string.h>\n#include <unistd.h>").replace(
+            "char buf[16];", f"{construct} char buf[16];")
+        monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                            lambda _s, p=redirected: (p, R.BinaryPatch(description="fd", diff="", provenance="test")))
+        out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
+        assert out.state == BinRemState.NOT_REMEDIATED, (construct, out)   # the report survives the fd game
+
+
 def test_tamper_check_flags_only_patch_introduced_constructs():
     # unit: a construct already in the ORIGINAL is not flagged (only what the PATCH adds); a genuine strncpy
     # patch introduces nothing on the denylist.

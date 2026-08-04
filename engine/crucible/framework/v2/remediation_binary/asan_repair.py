@@ -92,24 +92,39 @@ def _compile_asan(source: str, out_path: Path, workdir: Path) -> "tuple[bool, st
 
 
 def _run_capture(binary: Path, argv: "list[str]", *, stdin: str = "", timeout: int = 10) -> str:
-    """Run the binary and capture stdout+stderr (ASan reports go to stderr). ASAN_OPTIONS pins deterministic,
-    non-interactive behaviour. A timeout / crash still returns the captured output (the oracle reads it).
+    """Run the binary and capture the sanitizer report ROBUSTLY, then return it concatenated with stdout+stderr.
 
-    SECURITY (red-pen BLOCK): the env pin FORCES the report onto the captured stream — ``log_path=stderr`` +
-    ``log_to_stderr=1`` OVERRIDE a source-level ``__asan_default_options(){return "log_path=<file>";}`` that
-    would otherwise DIVERT the overflow report off stdout/stderr and fake "silence" while the bug still fires.
-    Env ASAN_OPTIONS takes precedence over the source default-options for the flags it sets, so pinning the
-    output flags closes the report-diversion silence-gaming vector."""
-    env = {"ASAN_OPTIONS": "log_path=stderr:log_to_stderr=1:detect_leaks=0:abort_on_error=0:exitcode=1",
-           "PATH": "/usr/bin:/bin"}
-    try:
-        r = subprocess.run([str(binary), *argv], input=stdin, capture_output=True, text=True,
-                           timeout=timeout, env=env)
-        return (r.stdout or "") + (r.stderr or "")
-    except subprocess.TimeoutExpired as e:
-        return (e.stdout or "") + (e.stderr or "") if isinstance(e.stdout, str) else "TIMEOUT"
-    except (OSError, subprocess.SubprocessError) as e:
-        return f"run failed: {e}"
+    SECURITY (red-pen BLOCK + re-check): the child controls its OWN stderr, so capturing the report from the
+    child's stderr is spoofable — a patch can DIVERT it (``__asan_default_options(log_path=…)``) OR MANIPULATE
+    the fd (``close(2)`` / ``dup2(…,2)`` / ``fclose(stderr)``) to fake "silence" while the overflow still fires.
+    So we do NOT trust the child's stderr for the verdict: we pin ``log_path`` to a FILE in a dir WE own (env
+    ASAN_OPTIONS overrides any source ``__asan_default_options``), and read the report from THAT file — which the
+    child cannot suppress by closing/redirecting its stderr (ASan opens the log fd itself at crash time). The
+    combined text (log file + stdout + stderr) is what the oracle reads; a still-firing overflow is captured in
+    the log file regardless of the child's fd games. The exit code is returned inline as a corroborating signal."""
+    with tempfile.TemporaryDirectory(prefix="asan-log-") as logdir:
+        log_base = Path(logdir) / "asan"
+        env = {"ASAN_OPTIONS": f"log_path={log_base}:log_exe_name=0:detect_leaks=0:abort_on_error=0:exitcode=1",
+               "PATH": "/usr/bin:/bin"}
+        rc = None
+        std = ""
+        try:
+            r = subprocess.run([str(binary), *argv], input=stdin, capture_output=True, text=True,
+                               timeout=timeout, env=env)
+            std, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
+        except subprocess.TimeoutExpired as e:
+            std = ((e.stdout or "") + (e.stderr or "")) if isinstance(e.stdout, str) else "TIMEOUT"
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"run failed: {e}"
+        # ASan appends .<pid> to log_path; read every report file the child could not touch.
+        report = ""
+        for f in sorted(Path(logdir).glob("asan*")):
+            try:
+                report += f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        exit_note = f"\n[exit_code={rc}]" if rc is not None else ""
+        return report + "\n" + std + exit_note
 
 
 def _summary_line(asan_output: str) -> str:
