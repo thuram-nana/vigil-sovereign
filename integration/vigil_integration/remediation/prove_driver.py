@@ -1228,7 +1228,9 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
     # the verifier MUST re-execute the origin rounds too (R1b lesson: a mint-side upgrade unmirrored at
     # re-execution means the firewall cannot demote a FALSE origin_confirmed). Same three checks as the edge
     # rounds, over the retained origin-re-drive bytes. A missing/failing origin claim is rejected, never ignored.
-    if ev.get("origin_confirmed") is True:
+    # Key on the CLAIM shape (truthy `origin_confirmed` OR `origin_redrive=="confirmed"`), so a tampered cert
+    # cannot dodge re-execution with a truthy non-bool flag (re-check #1 robustness note).
+    if bool(ev.get("origin_confirmed")) or ev.get("origin_redrive") == "confirmed":
         origin_rounds = ev.get("origin_rounds")
         if not isinstance(origin_rounds, list) or not origin_rounds:
             return False, "origin_confirmed asserted but no origin_rounds to re-execute"
