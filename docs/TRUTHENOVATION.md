@@ -188,13 +188,25 @@ CI-green → merge → update this scoreboard.
 For each: we ship the **deployable mechanism**; the **residual** stays true until a hardware/social/deployment fact
 outside the code is satisfied. Claiming these "done" in software would be the overclaim this whole program kills.
 
-| Item | Mechanism we ship | The irreducible residual |
-|---|---|---|
-| **H1 — hardware confidentiality** | TEE providers that activate when SEV-SNP/TDX is present | on commodity PCs it stays software-attested (integrity + origin only); confidentiality **needs silicon** |
-| **H2 — external graph/telemetry** | the Neo4j/OTLP client bodies + a validated run against a live service | "deployed" **needs a running external service** the operator stands up |
-| **H3 — field record** | the M1 harness + a runbook for diverse authorized targets | a genuine field record **accrues over real authorized engagements**; not manufacturable in a lab |
-| **H4 — third-party audit** | a reproducible external-audit package (bundle + verifier + scope) | the audit itself **needs an external team**; we prepare, we cannot *be* the third party |
-| **A3 residual — witness independence** | a deployable witness service any third party can run | *genuine* independence **needs third-party operators**; distinct keys ≠ distinct operators |
+| Item | Mechanism we ship | State | The irreducible residual |
+|---|---|---|---|
+| **H1 — hardware confidentiality** | `SoftwareAttestationProvider` (Ed25519) + auto-detect selector; SEV-SNP/TDX providers activate when a `/dev/{sev-guest,tdx_guest}` device is present (`attest/provider.py`) | **BUILT** (software attestation); TEE backends **hardware-gated stubs** | on commodity PCs it stays software-attested (**integrity + origin only**); confidentiality **needs silicon** — no SEV-SNP/TDX device here, the TEE bodies raise until provisioned |
+| **H2 — external graph/telemetry** | `Neo4jGraphStore` client body — idempotent MERGE / DETACH-DELETE Cypher over the same pure `project_events` core, per-partition label (`graph/store.py`); shape covered over a fake driver (`graph/tests/test_neo4j_client_body.py`) | **BUILT** (client body + mock-driver test); live test **loud-skipped** | "deployed" **needs a running external service** + `pip install neo4j` — both ABSENT here; the live parity test is gated behind a loud skip |
+| **H3 — field record** | the M1 recall harness (`eval/recall_baseline.py`, CI-gated) + the accrual runbook (`docs/H3-FIELD-RECORD-RUNBOOK.md`) | **BUILT** (harness + runbook); field record **not yet accrued** | a genuine field record **accrues over real authorized engagements**; **not manufacturable in a lab** — M1 measures the *deterministic scanner* on a *planted* corpus, LLM-`engage` on diverse real targets is the open piece |
+| **H4 — third-party audit** | the reproducible external-audit package generator (`evidence/audit_package.py`) — signed bundle + a standalone `verify_offline.py` (stdlib + cryptography, **no VIGIL import**) + scope/charter + runbook (`evidence/tests/test_audit_package.py`) | **BUILT** (generator + offline verifier + tamper tests) | the audit itself **needs an external team**; we **prepare**, we cannot *be* the third party — and the standalone verifier proves authenticity + binding + integrity + chain offline, while **reproduction** (re-firing each oracle) still needs the open-source VIGIL verifier |
+| **A3 residual — witness independence** | a deployable witness service any third party can run | BUILT (deployable) | *genuine* independence **needs third-party operators**; distinct keys ≠ distinct operators |
+
+**H-frontier mechanisms slice (2026-08).** The two most software-buildable H items are now BUILT + tested,
+and the two social/hardware ones are documented honestly: **H2** ships the real `Neo4jGraphStore` client
+body (idempotent MERGE Cypher over the same pure `project_events` core, per-partition label, `DETACH DELETE`
+on drop) with its shape covered over a fake driver — the `neo4j` lib and a live service are ABSENT, so the
+live parity test is loud-skipped (the *deploy* residual). **H4** ships a reproducible external-audit package
+generator: the signed evidence bundle + a self-contained `verify_offline.py` that re-verifies OFFLINE with
+**no VIGIL import** (a tampered bundle is rejected; reproduction stays the open-source VIGIL-verifier step).
+**H1** is honestly the software attestation that is already BUILT (integrity+origin; the SEV-SNP/TDX bodies
+stay hardware-gated stubs — no silicon here), and **H3** is the M1 harness plus the accrual runbook
+(`docs/H3-FIELD-RECORD-RUNBOOK.md`) — a genuine field record still accrues only over real authorized
+engagements. None of these mint a fact or grant a tier; the oracle remains the sole authority.
 
 ---
 

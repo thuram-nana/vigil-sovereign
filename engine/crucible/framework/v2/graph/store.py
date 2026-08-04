@@ -268,38 +268,154 @@ class EmbeddedGraphStore(_BaseGraphStore):
             pass
 
 
-class Neo4jGraphStore(_BaseGraphStore):
-    """[SCAFFOLD — infra-gated] A Neo4j-backed projection behind the SAME interface.
+# --- Neo4j transaction bodies (module-level, driver-agnostic) --------------------------------------
+# These take a neo4j managed-transaction handle ``tx`` (anything exposing ``.run(cypher, **params)``) and
+# a backtick-quoted per-partition ``label``. They are the ENTIRE storage-specific surface of the Neo4j
+# backend — pulled out of the class so they can be exercised over a fake tx (no live service) while the
+# graph they persist is the SAME pure ``project_events`` output the embedded store writes. Cypher labels
+# and relationship types cannot be parameterised, so the (already charset-restricted, backtick-quoted)
+# label is interpolated; every value the projection carries rides a bound ``$param``.
 
-    NOT required to run anything today — the embedded store is the working default. This class exists so
-    that, when a Neo4j (or other property-graph) service is provisioned, the swap is a one-line backend
-    change with no call-site edits. It reuses the pure ``project_events`` core verbatim; only the storage
-    (MERGE nodes/edges into the graph DB, scoped by a per-partition label) would differ.
+def _tx_rebuild(tx: Any, label: str, graph: dict[str, list[dict[str, Any]]]) -> None:
+    """Full, idempotent rebuild of one partition inside a single managed transaction.
 
-    ACTIVATION RUNBOOK (see docs/DEFERRED-INFRA.md → G1):
-      1. Provision Neo4j (or a bolt-compatible service); export ``NEO4J_URI`` / ``NEO4J_AUTH``.
-      2. ``pip install neo4j`` into the offense venv.
-      3. Implement the three ``NotImplementedError`` bodies below with idempotent MERGE Cypher, using a
-         partition label so ``drop_partition`` is ``MATCH (n:`part_<partition>`) DETACH DELETE n``.
-      4. The one-way invariant is UNCHANGED: this backend still only projects; it exposes no
-         tier/grant/authorize method, and dropping a partition never touches the spine.
-    """
-
-    def __init__(self, uri: str | None = None, auth: Any = None) -> None:  # pragma: no cover - stub
-        raise NotImplementedError(
-            "infra-gated: Neo4jGraphStore requires a running Neo4j service and the `neo4j` driver. "
-            "Use EmbeddedGraphStore (the working default) until the graph DB is provisioned — "
-            "see docs/DEFERRED-INFRA.md (G1)."
+    Mirrors the embedded store's semantics exactly: a partition is a FULL rebuild from the given events,
+    so we first ``DETACH DELETE`` the partition's existing nodes, then ``MERGE`` each node/edge. MERGE is
+    idempotent — re-running the same projection converges to the same graph (no duplicate nodes/edges),
+    and the leading clear makes a re-projection of a SHRUNKEN event list drop the stale surplus, matching
+    ``EmbeddedGraphStore``'s canonical-file overwrite."""
+    tx.run(f"MATCH (n:{label}) DETACH DELETE n")
+    for node in graph["nodes"]:
+        # node id is the MERGE key (one node per id); all other fields are set as properties.
+        tx.run(f"MERGE (n:{label} {{id: $id}}) SET n += $props", id=node["id"], props=dict(node))
+    for edge in graph["edges"]:
+        # relationship TYPE cannot be parameterised, so we use one type REL carrying a ``rel`` property
+        # ("posted"/"parent"/"supersedes"); the (rel, src, dst) triple is the MERGE key, so an edge is
+        # never duplicated. Endpoints are matched WITHIN this partition's label — never across partitions.
+        tx.run(
+            f"MATCH (s:{label} {{id: $src}}), (d:{label} {{id: $dst}}) "
+            f"MERGE (s)-[r:REL {{rel: $rel}}]->(d)",
+            src=edge["src"], dst=edge["dst"], rel=edge["rel"],
         )
 
-    def project_from_spine(self, events: Iterable[Any], *, partition: str = "default") -> None:  # pragma: no cover
-        raise NotImplementedError("infra-gated: see docs/DEFERRED-INFRA.md (G1)")
 
-    def nodes(self, partition: str = "default") -> list[dict[str, Any]]:  # pragma: no cover - stub
-        raise NotImplementedError("infra-gated: see docs/DEFERRED-INFRA.md (G1)")
+def _tx_nodes(tx: Any, label: str) -> list[dict[str, Any]]:
+    result = tx.run(f"MATCH (n:{label}) RETURN n ORDER BY n.id")
+    return [dict(rec["n"]) for rec in result]
 
-    def edges(self, partition: str = "default") -> list[dict[str, Any]]:  # pragma: no cover - stub
-        raise NotImplementedError("infra-gated: see docs/DEFERRED-INFRA.md (G1)")
+
+def _tx_edges(tx: Any, label: str) -> list[dict[str, Any]]:
+    result = tx.run(
+        f"MATCH (s:{label})-[r:REL]->(d:{label}) "
+        f"RETURN r.rel AS rel, s.id AS src, d.id AS dst ORDER BY rel, src, dst"
+    )
+    return [{"rel": rec["rel"], "src": rec["src"], "dst": rec["dst"]} for rec in result]
+
+
+class Neo4jGraphStore(_BaseGraphStore):
+    """[BUILT client body — infra-gated deploy] A Neo4j-backed projection behind the SAME interface.
+
+    The CLIENT BODY is real and reviewable: ``project_from_spine`` / ``nodes`` / ``edges`` /
+    ``drop_partition`` / ``partitions`` issue idempotent MERGE / DETACH-DELETE Cypher over the pure
+    ``project_events`` core the embedded store uses, scoped by a per-partition label. What is NOT present
+    HERE is the *deploy*: the ``neo4j`` driver package and a running Neo4j service are both ABSENT in this
+    environment (SCOUT). So:
+
+      * Constructing WITHOUT an injected driver imports ``neo4j`` lazily — which raises a clear,
+        actionable error until ``pip install neo4j`` + a live service exist (the ``deploy`` residual).
+      * The storage-specific Cypher lives in module-level ``_tx_*`` transaction bodies, so the client
+        body's SHAPE is exercised over a fake transaction (no live service) — the pure-projection core
+        stays covered by the embedded test, and a real integration test is gated behind a LOUD skip.
+
+    ONE-WAY INVARIANT (unchanged): this backend still only PROJECTS. It exposes no tier/grant/authorize
+    method; dropping a partition (``DETACH DELETE``) never touches the spine (the authority). The graph
+    is rebuildable, disposable state — a lens, never a source.
+
+    DEPLOY RUNBOOK (see docs/DEFERRED-INFRA.md → G1 / H2):
+      1. Provision Neo4j (or a bolt-compatible service); export ``NEO4J_URI`` / ``NEO4J_AUTH``.
+      2. ``pip install neo4j`` into the offense venv.
+      3. ``Neo4jGraphStore(os.environ["NEO4J_URI"], auth=(...))`` — no other call-site edits.
+    """
+
+    def __init__(
+        self,
+        uri: str | None = None,
+        auth: Any = None,
+        *,
+        driver: Any = None,
+        database: str | None = None,
+    ) -> None:
+        """Open (or adopt) a Neo4j driver. Pass a live ``uri``/``auth`` for production; pass an injected
+        ``driver`` (any object exposing ``session()`` → a context manager with ``execute_write`` /
+        ``execute_read``) to exercise the client body without a service. ``database`` selects a named DB.
+
+        With no injected driver and no ``neo4j`` package installed, construction raises a clear error —
+        the ``deploy`` residual — never a silent misbehaviour."""
+        self._database = database
+        if driver is not None:
+            self._driver = driver
+            return
+        try:
+            from neo4j import GraphDatabase  # type: ignore[import-not-found]
+        except ImportError as e:  # the `neo4j` package is ABSENT here — the honest deploy residual.
+            raise NotImplementedError(
+                "infra-gated (deploy): Neo4jGraphStore's client body is BUILT, but running it needs the "
+                "`neo4j` driver (`pip install neo4j`) and a live Neo4j service. Use EmbeddedGraphStore "
+                "(the working default) until the graph DB is provisioned — see docs/DEFERRED-INFRA.md (G1/H2)."
+            ) from e
+        if not uri:
+            raise ValueError("Neo4jGraphStore needs a bolt URI (e.g. NEO4J_URI) or an injected driver")
+        self._driver = GraphDatabase.driver(uri, auth=auth)
+
+    def _label(self, partition: str) -> str:
+        """The backtick-quoted, per-partition Cypher label. ``_safe_partition`` already restricts the key
+        to ``[A-Za-z0-9-_.]`` (no backticks, no separators), so backtick-quoting cannot be broken out of —
+        the label is injected into Cypher (labels are not parameterisable) but is not attacker-controllable."""
+        return f"`part_{self._safe_partition(partition)}`"
+
+    def _session(self) -> Any:
+        return (self._driver.session(database=self._database)
+                if self._database else self._driver.session())
+
+    def project_from_spine(self, events: Iterable[Any], *, partition: str = "default") -> None:
+        """One-way, deterministic rebuild of ``partition`` from the given append-only event list — the
+        SAME pure ``project_events`` output the embedded store persists, written into Neo4j via an
+        idempotent MERGE inside one managed (atomic) transaction."""
+        graph = project_events(events)
+        label = self._label(partition)
+        with self._session() as session:
+            session.execute_write(_tx_rebuild, label, graph)
+
+    def nodes(self, partition: str = "default") -> list[dict[str, Any]]:
+        label = self._label(partition)
+        with self._session() as session:
+            return session.execute_read(_tx_nodes, label)
+
+    def edges(self, partition: str = "default") -> list[dict[str, Any]]:
+        label = self._label(partition)
+        with self._session() as session:
+            return session.execute_read(_tx_edges, label)
+
+    def partitions(self) -> list[str]:
+        """List projected partitions by scanning labels with the ``part_`` prefix (stripping it)."""
+        with self._session() as session:
+            labels = session.execute_read(
+                lambda tx: [rec["label"] for rec in tx.run("CALL db.labels() YIELD label RETURN label")])
+        return sorted(lbl[len("part_"):] for lbl in labels if lbl.startswith("part_"))
+
+    def drop_partition(self, partition: str) -> None:
+        """Drop a rebuildable projection (``DETACH DELETE`` the partition's nodes). The spine (the
+        authority) is never touched."""
+        label = self._label(partition)
+        with self._session() as session:
+            session.execute_write(lambda tx: tx.run(f"MATCH (n:{label}) DETACH DELETE n"))
+
+    def close(self) -> None:
+        """Close the underlying driver (best-effort)."""
+        try:
+            self._driver.close()
+        except Exception:  # noqa: BLE001 — a close error must never mask the caller's own flow
+            pass
 
 
 def open_graph_store(base_dir: str | os.PathLike[str]) -> GraphStore:
