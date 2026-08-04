@@ -1,5 +1,6 @@
-# TLC-fetched checker (pinned + sha256-verified at runtime by check.sh) and its scratch
 .tla2tools.jar
 */states/
 *_TTrace_*.tla
+*_TTrace_*.bin
 *.st
+*.bin
