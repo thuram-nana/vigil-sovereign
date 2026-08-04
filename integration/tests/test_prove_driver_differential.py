@@ -133,6 +133,15 @@ BLOCK200 = R(200, "<html><body>Request blocked by WAF</body></html>")
 BLOCK200_ROUND = _round(BLOCK200, BLOCK200, BLOCK200, NORMAL)
 
 
+def _RT(body: str) -> dict:                     # a probe body captured at the truncation cap (a prefix only)
+    return {"status": 200, "body": body, "truncated": True}
+
+
+# a round whose observed prefixes are IDENTICAL (would be REMEDIATED in-window) but every body was TRUNCATED —
+# a boolean leak in the untruncated tail would be invisible, so closure cannot be attributed (red-pen R2 BLOCK).
+TRUNCATED_ROUND = _round(_RT("<baseline/>"), _RT("<baseline/>"), _RT("<baseline/>"), _RT("<baseline/>"))
+
+
 class FakeDifferentialAdapter:
     """A configurable differential ``LiveTargetAdapter``. ``rounds`` are emitted per trial (cyclically); the
     positive control returns RETAINED confirming rounds so the SAME boolean oracle still CONFIRMS. Knobs drive
@@ -276,6 +285,15 @@ def test_subthreshold_boolean_channel_is_not_remediated():
     out = _run(FakeDifferentialAdapter(rounds=SUBTHRESHOLD_ROUNDS))
     assert out.state != State.REMEDIATED, out
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.CHANNEL_NOISE_UNATTRIBUTABLE, out
+
+
+def test_truncated_observation_is_not_remediated():
+    # RED-PEN R2 BLOCK-1 — a >8 KB response captured at the truncation cap: even if the observed prefixes are
+    # identical (across=False IN-WINDOW), a boolean leak in the untruncated TAIL is invisible, so channel-closure
+    # cannot be attributed over a bounded window → INCONCLUSIVE / OBSERVATION_TRUNCATED, NEVER REMEDIATED.
+    out = _run(FakeDifferentialAdapter(rounds=[TRUNCATED_ROUND, TRUNCATED_ROUND, TRUNCATED_ROUND]))
+    assert out.state != State.REMEDIATED, out
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.OBSERVATION_TRUNCATED, out
 
 
 def test_verifier_demotes_a_signed_across_true_remediated_cert():
@@ -432,6 +450,7 @@ class _Origin(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):  # noqa: N802
+        self.server.hits += 1                        # count connections that actually landed (scope-gate proof)
         q = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         qv = (q.get("q") or [""])[0]
         rc = (q.get("rc") or [""])[0]
@@ -439,8 +458,14 @@ class _Origin(BaseHTTPRequestHandler):
         # (1=2) and the benign baseline do not. A FIXED origin ignores the injection entirely. The response
         # reflects ONLY the rc nonce (freshness) — NEVER the q payload — mirroring a real app's output channel.
         leaks = self.server.vulnerable and ("1=1" in qv) and ("1=2" not in qv)
-        rows = '[{"id": 1, "leak": "HASHLEAK"}]' if leaks else "[]"
-        raw = ('{"results": %s, "echo": "%s"}' % (rows, rc)).encode("utf-8")
+        if self.server.big_tail:
+            # a >8 KB response whose boolean leak lands in the TAIL (past the 8 KiB capture cap). The rc nonce is
+            # in the head (so freshness echoes); the leak marker `z` is past ~9 KB of padding → truncated away.
+            body = '{"echo":"%s","pad":"%s","z":"%s"}' % (rc, "A" * 9000, ("LEAK" if leaks else "____"))
+        else:
+            rows = '[{"id": 1, "leak": "HASHLEAK"}]' if leaks else "[]"
+            body = '{"results": %s, "echo": "%s"}' % (rows, rc)
+        raw = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
@@ -453,9 +478,11 @@ class _OriginServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def _start_origin(*, vulnerable: bool) -> _OriginServer:
-    srv = _OriginServer(("127.0.0.1", 0), _Origin)
+def _start_origin(*, vulnerable: bool, big_tail: bool = False, host: str = "127.0.0.1") -> _OriginServer:
+    srv = _OriginServer((host, 0), _Origin)
     srv.vulnerable = vulnerable  # type: ignore[attr-defined]
+    srv.big_tail = big_tail      # type: ignore[attr-defined]
+    srv.hits = 0                 # type: ignore[attr-defined]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -563,8 +590,50 @@ def test_r2_clean_origin_is_origin_confirmed_remediated(real_gated):
         ev = out.certificate["evidence"]["differential"]
         assert ev["origin_confirmed"] is True and ev["origin_redrive"] == "confirmed", ev
         assert isinstance(ev.get("origin_rounds"), list) and ev["origin_rounds"]
+        # BLOCK-2: origin_confirmed rules out a sanitizing EDGE but NOT the forgeable/bounded response channel —
+        # the byte-forgery + observation-window frontier must STILL be disclosed (not a clean bill of health).
+        rd = ev["residual_disclosure"].lower()
+        assert "byte-forgery" in rd and "observation" in rd, rd
         ok, reason = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
         assert ok and "origin_confirmed" in reason.lower(), reason
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_origin_leak_past_capture_cap_is_not_origin_confirmed(real_gated):
+    # RED-PEN R2 BLOCK-1 end-to-end — the ORIGIN returns a >8 KB body whose boolean leak is in the TAIL (past the
+    # 8 KiB capture cap). The executor flags the body truncated → the driver REFUSES origin_confirmed (edge-only),
+    # never a false "a-sanitize ruled out" over a still-leaking origin. Exercises the executor→adapter→driver flag.
+    edge = _start_origin(vulnerable=False)
+    origin = _start_origin(vulnerable=True, big_tail=True)      # leaks past the capture window
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.1",
+                                             origin_port=origin.server_address[1]))
+        # never origin_confirmed: either edge-only REMEDIATED (origin truncated → inconclusive) or, if the leak
+        # were visible in-window, STILL_VULNERABLE. In NO case a false a-sanitize-ruled-out.
+        if out.state == State.REMEDIATED:
+            assert out.certificate["evidence"]["differential"]["origin_confirmed"] is False, out
+        else:
+            assert out.state == State.STILL_VULNERABLE, out
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_reachable_out_of_scope_origin_is_refused_by_the_gate(real_gated):
+    # FINDING-3 — the true scope control: a REACHABLE origin on 127.0.0.2 that the charter does NOT scope (it
+    # lists only 127.0.0.1). The gate must REFUSE the origin re-drive (0 connections landed), not merely time out
+    # → edge-only REMEDIATED. Distinguishes a scope refusal from an unreachable-IP timeout.
+    edge = _start_origin(vulnerable=False)
+    origin = _start_origin(vulnerable=True, host="127.0.0.2")   # reachable, but OUT of charter scope
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.2",
+                                             origin_port=origin.server_address[1]))
+        assert out.state == State.REMEDIATED, out
+        ev = out.certificate["evidence"]["differential"]
+        assert ev["origin_confirmed"] is False and ev["origin_redrive"] == "unavailable", ev
+        assert origin.hits == 0, f"scope gate leaked {origin.hits} connections to an out-of-scope origin"
     finally:
         edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
 

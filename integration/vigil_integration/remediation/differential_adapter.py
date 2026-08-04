@@ -64,6 +64,11 @@ _BOOLEAN_INFERENCE_CHANNEL = "boolean_inference"
 _BOOLEAN_DISCRIMINATOR = {"dimensions": ["status", "length", "lexical"]}
 _CLOSURE_DISCRIMINATOR = {"dimensions": ["status", "structural"], "expect": "same"}
 
+# Fallback truncation proxy (chars) when the executor does not report ``truncated`` — mirrors the framework's
+# HttpExecutor._BODY_EXCERPT_BYTES (8 KiB). The AUTHORITATIVE signal is the executor's ``truncated`` flag; this
+# conservative proxy only over-triggers (→ INCONCLUSIVE, the safe direction), it never misses a flagged truncation.
+_BODY_EXCERPT_CAP = 8 * 1024
+
 
 @dataclass(frozen=True)
 class _HttpRequest:
@@ -298,7 +303,12 @@ class DifferentialHttpAdapter:
                                         invalid_reason=f"{via} {name} probe not answered: "
                                                        f"{str((resp or {}).get('refused') or status)}",
                                         detail=f"{via} {name} probe not answered")
-            responses[name] = {"status": int(status), "body": str((resp or {}).get("body") or "")}
+            body = str((resp or {}).get("body") or "")
+            # ``truncated`` (authoritative from the executor: the full body exceeded the capture cap) — a
+            # differential closure attribution over a truncated body is UNSOUND (a leak past the cap is invisible).
+            # Fall back to the excerpt-length proxy if the executor did not report it.
+            truncated = bool((resp or {}).get("truncated")) or len(body) >= _BODY_EXCERPT_CAP
+            responses[name] = {"status": int(status), "body": body, "truncated": truncated}
 
         round_ctx: dict[str, Any] = {
             "true": responses["true"], "false_a": responses["false_a"],

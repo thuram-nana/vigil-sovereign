@@ -178,9 +178,14 @@ For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traver
   `Host` pinned (edge bypassed), through the SAME gated executor. If the boolean channel FIRES direct-to-origin →
   **STILL_VULNERABLE** (the edge sanitized it — the residual is caught, not just disclosed); if it stays silent +
   closed → the cert upgrades to **`origin_confirmed`** (a-sanitize ruled out for this finding), and the offline
-  verifier RE-EXECUTES the origin rounds to keep that claim honest. **Still open (fail-closed to edge-only):** the
+  verifier RE-EXECUTES the origin rounds to keep that claim honest. **Still open (fail-closed to edge-only / never claimed):** the
   origin IP must be **in the charter scope and directly reachable** (R2 never bypasses the scope gate to reach a
-  raw IP), and PR1 is **plaintext-HTTP only** (an HTTPS origin needs IP-connect-with-hostname-SNI, a later slice). **Definitionally identical (same content-equalized
+  raw IP); PR1 is **plaintext-HTTP only** (an HTTPS origin needs IP-connect-with-hostname-SNI, a later slice);
+  the attribution is over the **captured response excerpt (8 KiB cap)** — a boolean leak in the untruncated tail
+  of a larger response is invisible, so a **truncated** observation yields INCONCLUSIVE (edge) / edge-only
+  (origin), never REMEDIATED (red-pen R2 BLOCK, gated at mint AND re-execution by the executor's `truncated`
+  flag); and `origin_confirmed` rules out a *sanitizing edge* but **not** producer byte-forgery of the origin's
+  own responses nor a blind time-based/OOB channel — it asserts closure of the observed **content** channel only. **Definitionally identical (same content-equalized
   observation):** a boolean-blind sink "fixed" only by equalizing the *content* responses while the parameter
   stays injectable via a **time-based blind or OOB** channel — the content differential measures `{status, body}`
   only, so it reads REMEDIATED. Same disclosed bucket: REMEDIATED asserts closure of the *content* channel it

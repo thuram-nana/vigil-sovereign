@@ -871,6 +871,10 @@ class HttpExecutor:
         return {
             "status": response.status_code,
             "body": body_excerpt,
+            # The body_excerpt is capped at _BODY_EXCERPT_BYTES; ``truncated`` tells a consumer the excerpt is a
+            # PREFIX (the full body was archived to evidence/). A differential remediation check must NOT attribute
+            # channel-closure over a truncated observation — a boolean leak past the cap would be invisible.
+            "truncated": len(body_bytes) > _BODY_EXCERPT_BYTES,
             "headers": [(k, v) for k, v in response.headers.items()],
             "latency_ms": elapsed_ms,
         }, None
