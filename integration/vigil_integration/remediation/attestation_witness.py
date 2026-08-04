@@ -80,6 +80,8 @@ read from the wall clock here.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 from pathlib import Path
 from typing import Optional, Union
 
@@ -96,6 +98,7 @@ from vigil_core import (
 from vigil_core.crypto import KeyPair, load_public_key
 
 from ..transparency import Checkpoint, checkpoint_of, is_split_view_resistant
+from ..time_anchor import anchor_checkpoint, verify_anchor
 
 # A DISTINCT domain tag from transparency's ``_WITNESS_DOMAIN`` so a timeless witness signature can NEVER
 # be replayed as a timed one (and vice-versa) — see the module docstring's DOMAIN SEPARATION section.
@@ -143,11 +146,23 @@ def timed_cosign(
 class TimedWitnessedCheckpoint(BaseModel):
     """A checkpoint over the attestation-series head plus the TIMED witness co-signatures gathered over
     it. ``checkpoint`` is the public :meth:`Checkpoint.to_dict` summary (offline-serialisable for the
-    VIGIL-free verifier); ``witness_signatures`` are the per-witness timed co-signatures."""
+    VIGIL-free verifier); ``witness_signatures`` are the per-witness timed co-signatures.
+
+    ``external_time_anchor`` (A1) is an OPTIONAL SIDECAR: base64 of a real RFC3161 TSA token
+    (:func:`time_anchor.anchor_checkpoint`) minted over :func:`transparency.checkpoint_hash` of THIS
+    checkpoint. It is a SIDECAR by construction — it is NOT inside ``checkpoint`` (so ``checkpoint_hash``
+    is unchanged by anchoring), NOT inside the timed-witness signed bytes (:func:`_timed_signing_bytes`),
+    and NOT inside the attestation-log tick-chain digest — so chain determinism is preserved (two runs
+    yield byte-identical chains though token bytes vary with genTime). When present AND verifiable against
+    a pinned TSA cert, its genTime SUPERSEDES the quorum-median no-later-than bound (see
+    :func:`verify_timed_witnessed`)."""
 
     model_config = ConfigDict(extra="forbid")
     checkpoint: dict
     witness_signatures: list[TimedWitnessSignature] = Field(default_factory=list)
+    external_time_anchor: Optional[str] = Field(
+        default=None, description="base64(DER RFC3161 TimeStampResp) over checkpoint_hash — SIDECAR (A1)."
+    )
 
     def as_checkpoint(self) -> Checkpoint:
         """Reconstruct the strongly-typed :class:`Checkpoint` from the stored public dict."""
@@ -160,6 +175,8 @@ def verify_timed_witnessed(
     *,
     witness_trust_root: TrustRoot,
     min_distinct_signers: "Optional[int]" = None,
+    external_time_anchor: "Optional[Union[bytes, str]]" = None,
+    tsa_cert_pin: "Optional[str]" = None,
 ) -> "tuple[bool, Optional[int], str]":
     """Verify a strict-majority witness quorum TIMED-co-signed ``cp`` and return its no-later-than bound.
 
@@ -176,14 +193,21 @@ def verify_timed_witnessed(
          weak-or-malformed key / non-verifying signature is IGNORED — never counted.
       3. **Quorum COUNT** — the number of distinct verifying witnesses must be ``>= threshold``, else
          ``(False, None, "quorum not met")``.
-      4. **Time bound** — ``T`` = the ``(n//2)``-th element of the sorted distinct-verifying observed
-         times (exact median for odd ``n``; upper-median for even ``n`` — deterministic, integer). A
-         single dishonest witness's extreme ``τ`` cannot move a strict-majority-honest median.
-         ``(True, T, "witnessed by a strict-majority quorum; no-later-than T=<T> (median of witness clocks)")``.
+      4. **Time bound** — the median ``T`` = the ``(n//2)``-th element of the sorted distinct-verifying
+         observed times (exact median for odd ``n``; upper-median for even ``n`` — deterministic, integer).
+         A single dishonest witness's extreme ``τ`` cannot move a strict-majority-honest median.
+      5. **External anchor (A1) — SUPERSEDES the median.** If ``external_time_anchor`` (a base64 or raw
+         DER RFC3161 token) AND ``tsa_cert_pin`` are supplied, the token is verified against the pinned
+         TSA cert over :func:`transparency.checkpoint_hash` of ``cp`` (:func:`time_anchor.verify_anchor`).
+         On success its genTime becomes the no-later-than ``T`` — a single externally-trusted timestamp
+         that does NOT depend on witness honesty/clocks. On FAILURE (tampered checkpoint → different hash;
+         wrong/unpinned TSA cert; malformed token) the whole verify FAILS CLOSED — a present-but-bad anchor
+         is never silently ignored. When no anchor is supplied, behaviour is unchanged: the median stands.
 
-    NOTE (WITNESS-TRUST §4, and the docstring HONEST LIMIT): ``T`` bounds when the head was WITNESSED,
-    not when the oracle re-fired, and independence of operators is a deployment assumption the code
-    cannot verify."""
+    NOTE (WITNESS-TRUST §4, and the docstring HONEST LIMIT): the median ``T`` bounds when the head was
+    WITNESSED, not when the oracle re-fired, and independence of operators is a deployment assumption the
+    code cannot verify; the external anchor's genTime is the stronger, witness-honesty-independent bound —
+    but a *local* self-signed TSA proves only the MECHANISM, not third-party independence (A1 residual)."""
     # 1. quorum shape — reuse the merged strict-majority / distinct-canonical-key gate exactly.
     if not is_split_view_resistant(witness_trust_root):
         return False, None, "not split-view resistant: sub-majority / duplicate / weak witness key"
@@ -232,11 +256,43 @@ def verify_timed_witnessed(
     #    honesty; for a HARD time guarantee use the external RFC3161/OTS anchor over the checkpoint hash
     #    (WITNESS-TRUST §5), or raise ``min_distinct_signers`` toward n. See the module HONEST LIMIT.
     observed = sorted(distinct_verified.values())
-    no_later_than_T = observed[len(observed) // 2]
+    median_T = observed[len(observed) // 2]
+
+    # 5. external RFC3161 anchor (A1) — SUPERSEDES the median when present + verifiable against the pin.
+    #    A present-but-unverifiable anchor is FATAL (fail-closed): a caller that attaches an anchor is
+    #    asserting the stronger bound, so a tampered checkpoint / wrong TSA cert must NOT fall back silently
+    #    to the weaker median. The token is a SIDECAR (not in any signed digest); genTime is read from the
+    #    SIGNED token, never the verifier wall clock.
+    if external_time_anchor is not None and tsa_cert_pin is not None:
+        try:
+            token = (
+                base64.b64decode(external_time_anchor, validate=True)
+                if isinstance(external_time_anchor, str)
+                else external_time_anchor
+            )
+        except (binascii.Error, ValueError):
+            return False, None, "external time anchor present but not valid base64 (fail-closed)"
+        anchor_ok, anchored_T = verify_anchor(cp, token, tsa_cert_pin=tsa_cert_pin)
+        if not anchor_ok or anchored_T is None:
+            return (
+                False,
+                None,
+                "external time anchor present but did NOT verify against the pinned TSA cert over "
+                "checkpoint_hash (tampered checkpoint / wrong TSA cert / malformed token) — fail-closed",
+            )
+        return (
+            True,
+            anchored_T,
+            f"{len(distinct_verified)} distinct witness(es) co-signed; no-later-than T={anchored_T} = "
+            f"RFC3161 external anchor genTime (SUPERSEDES the quorum-median {median_T}; witness-honesty-"
+            f"independent — a local self-signed TSA proves the MECHANISM only, third-party independence is "
+            f"the A1 residual)",
+        )
+
     return (
         True,
-        no_later_than_T,
-        f"{len(distinct_verified)} distinct witness(es) co-signed; no-later-than T={no_later_than_T} = median of "
+        median_T,
+        f"{len(distinct_verified)} distinct witness(es) co-signed; no-later-than T={median_T} = median of "
         f"the PRESENTED signing quorum's clocks (sound only if that quorum is strict-majority honest — a hard "
         f"time guarantee needs the external anchor)",
     )
@@ -245,12 +301,18 @@ def verify_timed_witnessed(
 def verify_timed_witnessed_checkpoint(
     twc: TimedWitnessedCheckpoint, *, witness_trust_root: TrustRoot,
     min_distinct_signers: "Optional[int]" = None,
+    tsa_cert_pin: "Optional[str]" = None,
 ) -> "tuple[bool, Optional[int], str]":
     """Convenience: verify a bundled :class:`TimedWitnessedCheckpoint` (reconstructs the typed checkpoint
-    from its public dict, then delegates to :func:`verify_timed_witnessed`)."""
+    from its public dict, then delegates to :func:`verify_timed_witnessed`). If the bundle carries a SIDECAR
+    ``external_time_anchor`` AND ``tsa_cert_pin`` is supplied out-of-band, the anchor's genTime supersedes
+    the median (A1) — and a present-but-unverifiable anchor then fails closed. If an anchor is present but
+    NO pin is supplied, the verifier opts out of the stronger check and the honest median bound is returned
+    (never the anchored T without verifying it) — no overclaim, just the weaker bound."""
     return verify_timed_witnessed(
         twc.as_checkpoint(), twc.witness_signatures, witness_trust_root=witness_trust_root,
         min_distinct_signers=min_distinct_signers,
+        external_time_anchor=twc.external_time_anchor, tsa_cert_pin=tsa_cert_pin,
     )
 
 
@@ -269,6 +331,7 @@ def witness_attestation_head(
     witnesses: "list[tuple[KeyPair, str]]",
     observed_times: "list[int]",
     head: Optional[SignedChainHead] = None,
+    tsa: "Optional[object]" = None,
 ) -> TimedWitnessedCheckpoint:
     """Emit a :class:`TimedWitnessedCheckpoint` over the Continuous Attestation Log head.
 
@@ -277,10 +340,15 @@ def witness_attestation_head(
     :func:`timed_cosign` it with its own ``observed_time``.
 
     ``witnesses`` is a list of ``(KeyPair, key_id)`` and ``observed_times`` is the PARALLEL list of each
-    witness's clock reading (caller inputs — no wall-clock read here). The result is NOT self-adjudicating:
-    the caller MUST pass it (with the witness ``TrustRoot`` pinned out-of-band) through
-    :func:`verify_timed_witnessed` / :func:`verify_timed_witnessed_checkpoint`, which enforce the
-    strict-majority quorum and compute the no-later-than bound."""
+    witness's clock reading (caller inputs — no wall-clock read here). If ``tsa`` (a
+    :class:`time_anchor.TSA` — e.g. a :class:`time_anchor.LocalTSA` for CI/mechanism, or a
+    :class:`time_anchor.RemoteTSA` for third-party independence) is supplied, a real RFC3161 token is minted
+    over ``checkpoint_hash(cp)`` and attached as the SIDECAR ``external_time_anchor`` (base64) — it does NOT
+    change the checkpoint, its signed bytes, or any chain digest. The result is NOT self-adjudicating: the
+    caller MUST pass it (with the witness ``TrustRoot`` — and, for the anchor, the TSA cert — pinned
+    out-of-band) through :func:`verify_timed_witnessed` / :func:`verify_timed_witnessed_checkpoint`, which
+    enforce the strict-majority quorum and compute the no-later-than bound (anchor genTime superseding the
+    median when a valid anchor + pin are present)."""
     if len(witnesses) != len(observed_times):
         raise ValueError(
             f"witnesses ({len(witnesses)}) and observed_times ({len(observed_times)}) must be parallel"
@@ -295,4 +363,11 @@ def witness_attestation_head(
         timed_cosign(cp, witness_keypair=kp, key_id=key_id, observed_time=int(t))
         for (kp, key_id), t in zip(witnesses, observed_times)
     ]
-    return TimedWitnessedCheckpoint(checkpoint=cp.to_dict(), witness_signatures=sigs)
+    anchor_b64: Optional[str] = None
+    if tsa is not None:
+        # openssl is invoked lazily by anchor_checkpoint (only when a TSA is supplied) — importing
+        # time_anchor itself needs no openssl, so the timed-witness core stays loadable without it.
+        anchor_b64 = base64.b64encode(anchor_checkpoint(cp, tsa=tsa)).decode("ascii")
+    return TimedWitnessedCheckpoint(
+        checkpoint=cp.to_dict(), witness_signatures=sigs, external_time_anchor=anchor_b64
+    )
