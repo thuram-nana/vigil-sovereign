@@ -3,10 +3,17 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-.PHONY: help setup up down services services-down logs smoke strix systemd envs clean-services bench
+.PHONY: help setup up down services services-down logs smoke strix systemd envs clean-services bench benchmark
 
 # extra flags for `make up`, e.g.  make up ARGS="--domain vigil.example.com --no-browser"
 ARGS ?=
+# Canonical committed benchmark artifacts live beside the engine, so `make bench` /
+# `make benchmark` regenerate exactly the files that ship. BENCH_KEY is a repo-local,
+# gitignored signing key that pins a STABLE, reproducible trust-root fingerprint; when it is
+# absent (a fresh clone) the CLI mints a fresh key per run and prints its fingerprint to pin
+# out-of-band — the committed .sig.json/.fingerprint.txt stay independently verifiable either way.
+BENCH_DOCS := engine/crucible/framework/v2/docs
+BENCH_KEY  := engine/crucible/framework/v2/eval/baselines/benchmark-scorecard.privkey
 # prefer the offense-venv launcher, fall back to `vigil` on PATH (installed by bootstrap.sh)
 VIGIL := $(shell if [ -x .venv-offense/bin/vigil ]; then echo .venv-offense/bin/vigil; \
                  elif command -v vigil >/dev/null 2>&1; then echo vigil; fi)
@@ -22,9 +29,15 @@ up: ## bring the WHOLE unified UI up at ONE origin (vigil up; ARGS=... for --dom
 	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }
 	$(VIGIL) up $(ARGS)
 
-bench: ## run the public benchmark → a SIGNED, tamper-evident, independently-verifiable scorecard
-	PYTHONPATH=engine/crucible .venv-offense/bin/python -m framework.v2 benchmark --no-incumbents \
-	  --report docs/benchmark-scoreboard.md --json docs/benchmark-results.json --sign
+bench: ## CRUCIBLE-only SIGNED accuracy scorecard (no external tools) → the canonical committed docs
+	@PYTHONPATH=engine/crucible .venv-offense/bin/python -m framework.v2 benchmark --no-incumbents \
+	  --report $(BENCH_DOCS)/benchmark-scoreboard.md --json $(BENCH_DOCS)/benchmark-results.json \
+	  --sign $$( [ -f $(BENCH_KEY) ] && printf -- '--signing-key %s --key-id benchmark-owner' "$$(cat $(BENCH_KEY))" )
+
+benchmark: ## comparative head-to-head vs installed incumbents (sqlmap/wapiti/nikto) → SIGNED comparative scorecard
+	@PYTHONPATH=engine/crucible .venv-offense/bin/python -m framework.v2 benchmark \
+	  --report $(BENCH_DOCS)/benchmark-comparative.md --json $(BENCH_DOCS)/benchmark-comparative.json \
+	  --sign $$( [ -f $(BENCH_KEY) ] && printf -- '--signing-key %s --key-id benchmark-owner' "$$(cat $(BENCH_KEY))" )
 
 down: ## stop a running `vigil up` (backends + reverse proxy)
 	@[ -n "$(VIGIL)" ] || { echo "vigil not found — run ./bootstrap.sh (or make setup) first" >&2; exit 127; }

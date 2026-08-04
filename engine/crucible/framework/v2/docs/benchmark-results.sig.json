@@ -1,0 +1,21 @@
+{
+  "schema": "vigil-benchmark-scorecard-sig/1",
+  "scorecard": "benchmark-results.json",
+  "scorecard_digest": "sha256:8ac0bc95ac03c59e532cbae7f42856eb7323b43f48fc23277a994e0ebaaa6fe1",
+  "signatures": [
+    {
+      "key_id": "benchmark-owner",
+      "signature_b64": "5wRKt4PJseDYCFsULm4fT+RHGR9XWUMvcMkuLQBMKz6yL0o+jdF/ecLhPUQpIW0Xladjn/hcxyQmtMsvQjBwAA=="
+    }
+  ],
+  "threshold": 1,
+  "trust_root": {
+    "authorizers": [
+      {
+        "key_id": "benchmark-owner",
+        "public_key_b64": "JjKmJF3eomYNB9EvQF6illGZKenIJLcdL2YPJ9yx1Ok="
+      }
+    ],
+    "threshold": 1
+  }
+}

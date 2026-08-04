@@ -23,10 +23,49 @@
       "precision": 1.0,
       "recall": 1.0,
       "f1": 1.0,
-      "elapsed_s": 11.068,
+      "elapsed_s": 11.146,
       "requests_sent": 1069,
-      "peak_rss_mb": 38.7,
+      "peak_rss_mb": 38.9,
       "findings_reported": 11
+    },
+    {
+      "tool": "sqlmap",
+      "tp": 0,
+      "fp": 0,
+      "fn": 11,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "elapsed_s": 1.103,
+      "requests_sent": null,
+      "peak_rss_mb": 100.4,
+      "findings_reported": 0
+    },
+    {
+      "tool": "wapiti",
+      "tp": 2,
+      "fp": 7,
+      "fn": 9,
+      "precision": 0.222222,
+      "recall": 0.181818,
+      "f1": 0.2,
+      "elapsed_s": 12.438,
+      "requests_sent": null,
+      "peak_rss_mb": 49.0,
+      "findings_reported": 10
+    },
+    {
+      "tool": "nikto",
+      "tp": 0,
+      "fp": 8,
+      "fn": 11,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "elapsed_s": 8.317,
+      "requests_sent": null,
+      "peak_rss_mb": null,
+      "findings_reported": 14
     }
   ]
 }
