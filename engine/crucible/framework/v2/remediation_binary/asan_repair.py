@@ -135,7 +135,7 @@ def _completeness_fuzz(crash_argv: "list[str]") -> "list[list[str]]":
     partial fixes (a buffer enlargement fails at a longer length; a narrow guard fails at a short-but-over-buffer
     length) but has GAPS between swept lengths — a narrow guard on a gap-sized buffer (e.g. ``char[100]`` guarded
     ``>100``) can slip it. The SOUND class-completeness check is STRUCTURAL
-    (:func:`_has_remaining_unbounded_copy`): REMEDIATED requires NO unbounded copy (strcpy/strcat/gets) to remain,
+    (:func:`_has_remaining_unbounded_copy`): REMEDIATED requires NO unbounded copy (strcpy/strcat/stpcpy/gets/sprintf/vsprintf) to remain,
     whatever the destination form; this fuzz is the belt-and-suspenders runtime check on top of it."""
     if not crash_argv:
         return []
@@ -206,11 +206,12 @@ _SANITIZER_TAMPER = (
 # struct member, an array element, a cast). The STRUCTURAL completeness proof keys on the CALL, not the
 # destination form (red-pen BLOCK: keying on ``char <name>[<numeric>]`` missed macro-sized / member destinations
 # the shipped synthesiser leaves behind).
-_UNBOUNDED_COPY = re.compile(r"\b(?:strcpy|strcat|gets)\s*\(")
+_UNBOUNDED_COPY = re.compile(r"\b(?:strcpy|strcat|stpcpy|gets|sprintf|vsprintf|wcscpy|wcscat)\s*\(")
 
 
 def _has_remaining_unbounded_copy(source: str) -> bool:
-    """True if ``source`` STILL contains an inherently-unbounded copy call (``strcpy`` / ``strcat`` / ``gets``).
+    """True if ``source`` STILL contains an inherently-unbounded (no-length-argument) copy/format call —
+    ``strcpy`` / ``strcat`` / ``stpcpy`` / ``gets`` / ``sprintf`` / ``vsprintf`` / ``wcscpy`` / ``wcscat``.
     This is the STRUCTURAL completeness check for the class (the sound one; a length-sweep fuzz is only a sparse
     heuristic with gaps): a genuine class-level fix REPLACES the unbounded copy with a BOUNDED one (``strncpy`` /
     ``fgets`` / a length-checked copy), so no unbounded call remains — on ANY buffer whatever its DECLARATION FORM
@@ -353,14 +354,14 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
                                 crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=False)
 
         # STRUCTURAL completeness (red-pen BLOCK — the fuzz is a sparse point-set with gaps): REMEDIATED requires
-        # NO inherently-unbounded copy (strcpy/strcat/gets) to REMAIN — such a call overflows ANY fixed
+        # NO inherently-unbounded copy (strcpy/strcat/stpcpy/gets/sprintf/vsprintf) to REMAIN — such a call overflows ANY fixed
         # destination for a long-enough input, whatever its declaration form (plain / macro-sized / struct member
         # / array element / cast), which is exactly where the length sweep AND a destination-form parse both miss.
         # A buffer enlargement or a narrow guard KEEPS the unbounded call; only a bounded rewrite removes it.
         if _has_remaining_unbounded_copy(patched_source):
             return BinRemResult(
                 BinRemState.NOT_REMEDIATED,
-                "the patch leaves an inherently-unbounded copy (strcpy/strcat/gets) — it overflows any fixed "
+                "the patch leaves an inherently-unbounded copy (strcpy/strcat/stpcpy/gets/sprintf/vsprintf) — it overflows any fixed "
                 "destination for a long-enough input (a buffer enlargement or a narrow length guard is not a "
                 "structural fix). A class-level remediation must replace it with a bounded copy "
                 "(strncpy / fgets / a length-checked copy).",
@@ -370,11 +371,11 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
         return BinRemResult(
             BinRemState.REMEDIATED,
             "crash-confirmed by AddressSanitizer; the vulnerable unbounded copy was replaced by a BOUNDED copy "
-            "(NO inherently-unbounded copy — strcpy/strcat/gets — remains anywhere in the patch, whatever the "
+            "(NO inherently-unbounded copy — strcpy/strcat/stpcpy/gets/sprintf/vsprintf — remains anywhere in the patch, whatever the "
             "destination's declaration form; the STRUCTURAL class-completeness proof) AND the patch stayed silent "
             "on the confirmed input + a length-swept fuzz (runtime confirmation) AND preserved the benign "
             "functionality (fix earned by silence, not asserted). RESIDUAL: (1) class-completeness covers the "
-            "inherently-unbounded copy family (strcpy/strcat/gets); a bug via a DIFFERENT mechanism (an unsized "
+            "inherently-unbounded copy family (strcpy/strcat/stpcpy/gets/sprintf/vsprintf); a bug via a DIFFERENT mechanism (an unsized "
             "sprintf, a memcpy with an attacker length, a custom copy) or a different input structure is out of "
             "scope — the runtime fuzz is the only (heuristic) backstop there; (2) pattern-based for the "
             "unbounded-strcpy class — general symbolic synthesis (angr) is deferred; (3) the fix-by-silence gate "
