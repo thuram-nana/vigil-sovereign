@@ -148,7 +148,7 @@ class FakeDifferentialAdapter:
     the malformed-round (fail-closed) and freshness-echo cases."""
 
     def __init__(self, *, rounds, confirm_rounds=None, nonce_echoed=True, malformed_at=None,
-                 identity=None, bug_class=BUG):
+                 identity=None, bug_class=BUG, reflect_challenge=False):
         self.bug_class = bug_class
         self.oracle_family = "boolean_inference"
         self.differential_channel = True
@@ -162,6 +162,7 @@ class FakeDifferentialAdapter:
         self._nonce_echoed = nonce_echoed
         self._malformed_at = malformed_at
         self._identity = identity or dict(SAMPLE)
+        self._reflect_challenge = reflect_challenge   # R1-PR2: echo the run challenge into the true response
         self.id_calls = 0
 
     def identity_sample(self):
@@ -181,7 +182,12 @@ class FakeDifferentialAdapter:
             return TrialObservation(reachable=True, valid=False, oracle_context=None,
                                     invalid_reason="one matched-decoy probe fetch failed (simulated)")
         spec = self._rounds[trial_index % len(self._rounds)]
-        return TrialObservation(reachable=True, valid=True, oracle_context=dict(spec),
+        ctx = {k: dict(v) if isinstance(v, dict) else v for k, v in spec.items()}
+        if self._reflect_challenge and isinstance(ctx.get("true"), dict):
+            # R1-PR2: reflect the fresh challenge in the SIGNAL-BEARING (true) response, as a live app would when
+            # the injected input is echoed — earns F2 (the sink was exercised this run, not a replay).
+            ctx["true"] = {**ctx["true"], "body": f'{ctx["true"].get("body", "")} <!--{challenge}-->'}
+        return TrialObservation(reachable=True, valid=True, oracle_context=ctx,
                                 freshness_level=Freshness.F1_TARGET_ECHOES, nonce_echoed=self._nonce_echoed)
 
 
@@ -226,6 +232,38 @@ def test_case2_still_vulnerable_clean_path_is_still_vulnerable():
     assert out.certificate["verdict"]["oracle_fired"] is True
     ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
     assert ok
+
+
+# ============================ R1-PR2 — differential F2 freshness (STILL_VULNERABLE only) ====================
+def test_r1pr2_firing_with_reflected_challenge_earns_f2():
+    # §5 — a differential FIRING whose signal-bearing (true) responses reflect the fresh challenge was exercised
+    # THIS run → STILL_VULNERABLE at F2 (not the F1 the error-signature-only gate used to cap a boolean firing to).
+    out = _run(FakeDifferentialAdapter(rounds=[SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND], reflect_challenge=True))
+    assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED, out
+    assert out.achieved_freshness == Freshness.F2_PATH_TRAVERSED, out
+
+
+def test_r1pr2_firing_without_reflected_challenge_stays_f1():
+    # a blind firing that does NOT reflect the fresh marker stays honestly F1 (the conservative floor).
+    out = _run(FakeDifferentialAdapter(rounds=[SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND], reflect_challenge=False))
+    assert out.state == State.STILL_VULNERABLE, out
+    assert out.achieved_freshness == Freshness.F1_TARGET_ECHOES, out
+
+
+def test_r1pr2_f2_demanded_reflected_firing_passes_the_floor():
+    # a caller REQUESTING F2 is satisfied by a reflected firing → STILL_VULNERABLE@F2, not INCONCLUSIVE.
+    out = _run(FakeDifferentialAdapter(rounds=[SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND], reflect_challenge=True),
+               requested_min_freshness=Freshness.F2_PATH_TRAVERSED)
+    assert out.state == State.STILL_VULNERABLE and out.achieved_freshness == Freshness.F2_PATH_TRAVERSED, out
+
+
+def test_r1pr2_f2_demanded_unreflected_firing_is_inconclusive():
+    # a caller REQUESTING F2 over a firing that only reaches F1 (no reflection) is enforced → INCONCLUSIVE, never
+    # a silently-downgraded STILL_VULNERABLE@F1 (downgrade resistance, parity with the error-signature floor).
+    out = _run(FakeDifferentialAdapter(rounds=[SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND], reflect_challenge=False),
+               requested_min_freshness=Freshness.F2_PATH_TRAVERSED)
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS, out
+    assert out.state != State.STILL_VULNERABLE
 
 
 def test_case3_blocking_waf_is_inconclusive_interposer_suspected():
