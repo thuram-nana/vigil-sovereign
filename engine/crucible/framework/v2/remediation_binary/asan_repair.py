@@ -93,8 +93,15 @@ def _compile_asan(source: str, out_path: Path, workdir: Path) -> "tuple[bool, st
 
 def _run_capture(binary: Path, argv: "list[str]", *, stdin: str = "", timeout: int = 10) -> str:
     """Run the binary and capture stdout+stderr (ASan reports go to stderr). ASAN_OPTIONS pins deterministic,
-    non-interactive behaviour. A timeout / crash still returns the captured output (the oracle reads it)."""
-    env = {"ASAN_OPTIONS": "detect_leaks=0:abort_on_error=0:exitcode=1", "PATH": "/usr/bin:/bin"}
+    non-interactive behaviour. A timeout / crash still returns the captured output (the oracle reads it).
+
+    SECURITY (red-pen BLOCK): the env pin FORCES the report onto the captured stream — ``log_path=stderr`` +
+    ``log_to_stderr=1`` OVERRIDE a source-level ``__asan_default_options(){return "log_path=<file>";}`` that
+    would otherwise DIVERT the overflow report off stdout/stderr and fake "silence" while the bug still fires.
+    Env ASAN_OPTIONS takes precedence over the source default-options for the flags it sets, so pinning the
+    output flags closes the report-diversion silence-gaming vector."""
+    env = {"ASAN_OPTIONS": "log_path=stderr:log_to_stderr=1:detect_leaks=0:abort_on_error=0:exitcode=1",
+           "PATH": "/usr/bin:/bin"}
     try:
         r = subprocess.run([str(binary), *argv], input=stdin, capture_output=True, text=True,
                            timeout=timeout, env=env)
@@ -115,6 +122,27 @@ def _summary_line(asan_output: str) -> str:
 # ---- pattern-based patch synthesis (narrow, REAL) --------------------------------------------------------
 _CHAR_DECL = re.compile(r"\bchar\s+(\w+)\s*\[\s*(\d+)\s*\]")
 _STRCPY = re.compile(r"\bstrcpy\s*\(\s*([A-Za-z_]\w*)\s*,\s*([^;)]+?)\s*\)")
+
+# Sanitizer-tampering constructs a patch must NEVER introduce — they DISABLE/DIVERT the very oracle whose
+# SILENCE the gate trusts (red-pen BLOCK: a report-diverting/suppressing patch fakes "silence" while the bug
+# still fires). A defense-in-depth denylist for the REUSABLE gate (the shipped strcpy synthesiser emits none of
+# these, but the gate is designed for reuse by the deferred symbolic tier). A fix that turns off the detector is
+# not a fix.
+_SANITIZER_TAMPER = (
+    "__asan_default_options", "__asan_on_error", "__lsan_default_options", "__ubsan_default_options",
+    "__msan_default_options", "__tsan_default_options", "__sanitizer_", "no_sanitize", "log_path",
+    "ASAN_OPTIONS", "halt_on_error", "detect_stack_use", "signal(", "sigaction(",
+)
+
+
+def _patch_introduces_sanitizer_tampering(original: str, patched: str) -> str:
+    """Return the first sanitizer-tampering token the PATCH introduced (present in ``patched``, absent from
+    ``original``), or "" if none. A patch that disables/diverts/handles the sanitizer or catches the crash
+    signal is rejected — silence over a disabled detector is not a remediation."""
+    for tok in _SANITIZER_TAMPER:
+        if tok in patched and tok not in original:
+            return tok
+    return ""
 
 
 def synthesize_bounded_copy_patch(source: str) -> "tuple[Optional[str], Optional[BinaryPatch]]":
@@ -184,6 +212,17 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
                 "no recognised safe rewrite for this crash class — general synthesis needs symbolic/concolic "
                 "execution (angr), which is not available; the crash is confirmed but no patch is fabricated",
                 crash_signature=crash_sig, before_fired=True)
+
+        # REJECT a patch that DISABLES/DIVERTS the sanitizer or catches the crash signal — silence over a
+        # disabled detector is not a fix (red-pen BLOCK: a report-diverting patch fakes silence). Defense in
+        # depth for the reusable gate, on top of the log_path=stderr env pin in _run_capture.
+        tamper = _patch_introduces_sanitizer_tampering(source, patched_source)
+        if tamper:
+            return BinRemResult(
+                BinRemState.NOT_REMEDIATED,
+                f"the synthesised patch introduces a sanitizer-tampering construct ({tamper!r}) — silence over a "
+                "disabled/diverted detector is NOT a fix; rejected",
+                crash_signature=crash_sig, patch=patch, before_fired=True)
 
         fixed = work / "fixed"
         ok, ferr = _compile_asan(patched_source, fixed, work)

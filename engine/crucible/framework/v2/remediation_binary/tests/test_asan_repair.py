@@ -83,6 +83,39 @@ def test_non_silencing_patch_is_not_remediated(monkeypatch):
     assert out.after_fired is True                                     # the sanitizer still fires post-"patch"
 
 
+def test_sanitizer_report_diverting_patch_is_rejected(monkeypatch):
+    # RED-PEN BLOCK — a patch that DIVERTS the ASan report off the captured stream via a source-level
+    # __asan_default_options(log_path=...) fakes "silence" while the overflow still fires. It must be REJECTED
+    # (the tamper denylist catches it; the log_path=stderr env pin is the second layer). NOT a false REMEDIATED.
+    divert = STRCPY_VULN.replace(
+        "#include <string.h>",
+        "#include <string.h>\nconst char* __asan_default_options(void){ return \"log_path=/tmp/asan_divert\"; }")
+    monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                        lambda _s: (divert, R.BinaryPatch(description="divert", diff="", provenance="test")))
+    out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
+    assert out.state == BinRemState.NOT_REMEDIATED, out
+    assert "sanitizer-tampering" in out.reason.lower()
+
+
+def test_signal_catching_patch_is_rejected(monkeypatch):
+    # a patch that installs a SIGSEGV/SIGABRT handler to swallow the crash is sanitizer-tampering → rejected.
+    catch = STRCPY_VULN.replace("#include <string.h>", "#include <string.h>\n#include <signal.h>").replace(
+        "char buf[16];", "signal(SIGSEGV, (void(*)(int))0); char buf[16];")
+    monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                        lambda _s: (catch, R.BinaryPatch(description="catch", diff="", provenance="test")))
+    out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
+    assert out.state == BinRemState.NOT_REMEDIATED, out
+    assert "sanitizer-tampering" in out.reason.lower()
+
+
+def test_tamper_check_flags_only_patch_introduced_constructs():
+    # unit: a construct already in the ORIGINAL is not flagged (only what the PATCH adds); a genuine strncpy
+    # patch introduces nothing on the denylist.
+    assert R._patch_introduces_sanitizer_tampering("no_sanitize x;", "no_sanitize x; y;") == ""   # pre-existing
+    assert R._patch_introduces_sanitizer_tampering("clean;", "clean; __asan_default_options") == "__asan_default_options"
+    assert R._patch_introduces_sanitizer_tampering("strcpy(b,s);", "strncpy(b, s, 8 - 1); b[8 - 1] = '\\0';") == ""
+
+
 def test_synthesiser_never_fabricates_without_a_fixed_size_declaration():
     # unit: the synthesiser returns (None, None) when there is no `char dst[N]` to bound — no fabricated patch.
     patched, patch = R.synthesize_bounded_copy_patch("char *p; strcpy(p, q);")
