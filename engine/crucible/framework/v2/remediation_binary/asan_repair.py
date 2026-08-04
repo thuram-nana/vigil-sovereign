@@ -130,12 +130,13 @@ def _run_capture(binary: Path, argv: "list[str]", *, stdin: str = "", timeout: i
 
 
 def _completeness_fuzz(crash_argv: "list[str]") -> "list[list[str]]":
-    """A length-sweep of the crash vector (the longest arg) — the CLASS-completeness check (red-pen BLOCK: a
-    single-input silence over-claims). A partial fix leaves inputs that still overflow: buffer ENLARGEMENT
-    (``char[16]``→``char[128]``) is defeated by a LONGER input; a NARROW length guard (``if strlen>20 return``
-    with the buffer still ``[16]``) is defeated by a SHORT-but-over-buffer input. A genuine BOUNDED copy (the
-    shipped synthesiser's ``strncpy``) survives EVERY length. Sweeping small→large catches both partial classes
-    without knowing the buffer size. NOT exhaustive over input SHAPE — see the REMEDIATED residual."""
+    """A length-sweep of the crash vector (the longest arg) — a RUNTIME confirmation, NOT the completeness proof.
+    It is a SPARSE point-set (fixed small lengths + crash-scaled multiples + a 1 MiB probe), so it catches MANY
+    partial fixes (a buffer enlargement fails at a longer length; a narrow guard fails at a short-but-over-buffer
+    length) but has GAPS between swept lengths — a narrow guard on a gap-sized buffer (e.g. ``char[100]`` guarded
+    ``>100``) can slip it. The SOUND class-completeness check is STRUCTURAL
+    (:func:`_has_unbounded_strcpy_into_fixed_buffer`): REMEDIATED requires the copy be BOUNDED to the buffer, on
+    any size; this fuzz is the belt-and-suspenders runtime check on top of it."""
     if not crash_argv:
         return []
     idx = max(range(len(crash_argv)), key=lambda i: len(crash_argv[i]))
@@ -198,6 +199,19 @@ _SANITIZER_TAMPER = (
     "setenv", "putenv", "clearenv", "unsetenv", "system(", "popen(", "posix_spawn",
     "syscall", "__asm", "asm ", "asm(", "asm\t", "asm\n",
 )
+
+
+def _has_unbounded_strcpy_into_fixed_buffer(source: str) -> bool:
+    """True if ``source`` STILL contains an unbounded ``strcpy(dst, src)`` where ``dst`` is a fixed ``char dst[N]``
+    — the copy is NOT bounded to the destination capacity. This is the STRUCTURAL completeness check for the
+    strcpy-overflow class (the sound one; a length-sweep fuzz is only a heuristic point-set with gaps): a genuine
+    class-level fix REPLACES the unbounded copy with a bounded one (``strncpy(dst, src, N-1)``), so no such call
+    remains. A buffer ENLARGEMENT (``char[16]``→``char[128]``) keeps ``strcpy`` into the bigger fixed buffer; a
+    NARROW length guard keeps the ``strcpy`` (only fencing some inputs) — both are caught here, on ANY buffer
+    size, where the sparse fuzz misses gap-sized buffers. Conservative: a bound in a form this does not recognise
+    (a guard that provably bounds to ≤ N-1, an exotic bounded copy) is demoted, the safe direction."""
+    sizes = {name for name, _ in _CHAR_DECL.findall(source)}
+    return any(m.group(1) in sizes for m in _STRCPY.finditer(source))
 
 
 def _patch_introduces_sanitizer_tampering(original: str, patched: str) -> str:
@@ -331,17 +345,28 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
                                 f"(expected {expected_benign!r} in the output) — a silence-gaming stub is rejected",
                                 crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=False)
 
+        # STRUCTURAL completeness (red-pen BLOCK — the fuzz is a sparse point-set with gaps): REMEDIATED requires
+        # the copy to be BOUNDED to the destination capacity. If an unbounded strcpy into a fixed char[N] REMAINS
+        # (buffer enlargement, or a narrow guard that only fences some inputs), the class is not remediated on ANY
+        # buffer size — including the gap sizes the length sweep misses. Only a real bounded rewrite removes it.
+        if _has_unbounded_strcpy_into_fixed_buffer(patched_source):
+            return BinRemResult(
+                BinRemState.NOT_REMEDIATED,
+                "the patch leaves an unbounded strcpy into a fixed char[N] buffer — the copy is not BOUNDED to the "
+                "destination capacity (a buffer enlargement or a narrow length guard is not a structural fix). A "
+                "class-level remediation must replace it with a bounded copy (strncpy(dst, src, N-1)).",
+                crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=False,
+                functional_preserved=True)
+
         return BinRemResult(
             BinRemState.REMEDIATED,
-            "crash-confirmed by AddressSanitizer; a pattern-synthesised bounded-copy patch stopped the crash on "
-            "the confirmed input AND across a LENGTH-SWEPT fuzz of the crash vector (oracle SILENT + no fatal "
-            "signal on every length — a partial fix like buffer enlargement or a narrow guard would crash on "
-            "one), AND preserved the benign functionality (fix earned by silence, not asserted). RESIDUAL: (1) "
-            "the fuzz spans lengths to 1 MiB — a genuinely CLASS-complete fix is structurally a BOUNDED copy (what "
-            "the shipped synthesiser emits, which survives ANY length); the fuzz HEURISTICALLY rejects partial "
-            "fixes but is not exhaustive over input SHAPE nor length beyond the sweep — a bug reachable only by a "
-            "different structure, or a fixed buffer larger than the sweep, is out of the proven scope; (2) "
-            "pattern-based for the "
+            "crash-confirmed by AddressSanitizer; the vulnerable unbounded copy was replaced by a BOUNDED copy "
+            "(no unbounded strcpy into a fixed char[N] remains — the STRUCTURAL class-completeness proof, sound on "
+            "any buffer size) AND the patch stayed silent on the confirmed input + a length-swept fuzz (runtime "
+            "confirmation) AND preserved the benign functionality (fix earned by silence, not asserted). "
+            "RESIDUAL: (1) class-completeness is proven for the strcpy-into-fixed-buffer STRUCTURE — a fix in a "
+            "bounded FORM this does not recognise is conservatively demoted (safe), and a bug reachable only by a "
+            "DIFFERENT input structure is out of scope; (2) pattern-based for the "
             "unbounded-strcpy class — general symbolic synthesis (angr) is deferred; (3) the fix-by-silence gate "
             "hardens against report-diversion / fd-games / re-exec / signal-catching (denylist + out-of-band "
             "SIGABRT), but a maximally-hostile patch-producer would need an out-of-band sandbox (ptrace/seccomp), "

@@ -184,6 +184,34 @@ def test_narrow_length_guard_partial_fix_is_not_class_remediated(monkeypatch):
     assert "partial fix" in out.reason.lower()
 
 
+def test_narrow_guard_on_a_gap_sized_buffer_is_structurally_rejected(monkeypatch):
+    # RED-PEN BLOCK — the length-sweep fuzz is a sparse point-set; a narrow guard on a GAP-sized buffer (e.g.
+    # char[100] guarded >100, whose overflow length 100 is not a swept value) slips the fuzz. The STRUCTURAL
+    # check (`_has_unbounded_strcpy_into_fixed_buffer`) catches it on ANY buffer size: an unbounded strcpy into a
+    # fixed char[N] REMAINS → not bounded to capacity → NOT_REMEDIATED.
+    for buf, guard in ((100, 100), (80, 90), (150, 150), (200, 200)):
+        vuln = ("#include <stdio.h>\n#include <string.h>\n"
+                f"int process(const char *in){{ char buf[{buf}]; strcpy(buf, in); return (int)strlen(buf); }}\n"
+                "int main(int argc, char**argv){ if(argc<2){printf(\"usage\\n\");return 2;} "
+                "printf(\"len=%d\\n\", process(argv[1])); return 0; }\n")
+        partial = vuln.replace(f"char buf[{buf}]; strcpy", f"char buf[{buf}]; if(strlen(in) > {guard}) return -1; strcpy")
+        monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                            lambda _s, p=partial: (p, R.BinaryPatch(description="guard", diff="", provenance="test")))
+        out = prove_asan_remediation(vuln, crash_argv=["A" * (buf * 3)], benign_argv=["hi"], expected_benign="len=2")
+        assert out.state == BinRemState.NOT_REMEDIATED, (buf, guard, out)
+        assert "bounded" in out.reason.lower()
+
+
+def test_structural_check_flags_a_remaining_unbounded_strcpy():
+    # unit: the structural completeness check — an unbounded strcpy into a fixed char[N] remains → True (not a
+    # bounded fix), on any size incl. enlargement; a bounded strncpy rewrite → False; strcpy into a non-fixed
+    # (malloc'd) dst → False (out of the fixed-buffer class).
+    assert R._has_unbounded_strcpy_into_fixed_buffer("char b[16]; strcpy(b, s);") is True
+    assert R._has_unbounded_strcpy_into_fixed_buffer("char b[9999]; strcpy(b, s);") is True     # enlargement
+    assert R._has_unbounded_strcpy_into_fixed_buffer("char b[16]; strncpy(b, s, 16 - 1); b[15]=0;") is False
+    assert R._has_unbounded_strcpy_into_fixed_buffer("char *b = malloc(8); strcpy(b, s);") is False
+
+
 def test_synthesiser_never_fabricates_without_a_fixed_size_declaration():
     # unit: the synthesiser returns (None, None) when there is no `char dst[N]` to bound — no fabricated patch.
     patched, patch = R.synthesize_bounded_copy_patch("char *p; strcpy(p, q);")
