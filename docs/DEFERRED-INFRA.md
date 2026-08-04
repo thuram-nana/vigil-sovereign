@@ -104,7 +104,7 @@ reimplement crash detection) to:
   firing after returns `False`. **A fix is proven by silence, never asserted.**
 
 ### [BUILT — narrow] a REAL ASan-grounded crash-confirm + pattern patch-synthesis + fix-by-silence (R3)
-`remediation_binary/asan_repair.py` (TRUTHENOVATION R3, #PRNUM) wires the end-to-end loop over the present
+`remediation_binary/asan_repair.py` (TRUTHENOVATION R3, #231) wires the end-to-end loop over the present
 toolchain (`gcc -fsanitize=address`): compile → run a crashing input → crash-confirm via the existing
 `sanitizer_signal_oracle` → **pattern-synthesise** a patch → recompile → accept ONLY on sanitizer SILENCE
 (`remediated_if_silent`) AND functional preservation. The synthesiser is real for ONE narrow class —
