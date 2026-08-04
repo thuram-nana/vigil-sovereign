@@ -57,6 +57,28 @@ PROTOCOL_VERSION = "vigil-remediation-prove-v1"
 _CERT_SCHEMA = "vigil-remediation-prove-cert-v1"
 _CERT_DOMAIN = b"vigil-remediation-prove-cert-v1\x00"
 _CHALLENGE_DOMAIN = b"vigil-remediation-freshness-challenge-v1\x00"
+# The differential-channel oracle family (TRUTHENOVATION R1) — used as the cert's channel marker and to route
+# ``verify_prove_certificate`` to the differential re-execution path.
+_BOOLEAN_INFERENCE = "boolean_inference"
+
+# The ATTRIBUTION discriminator for the REMEDIATED channel-closure check (red-pen BLOCK-B) — ZERO tolerance:
+# ANY deterministic difference between ``true`` and ``false_a`` counts as the channel still OPEN. It is
+# DELIBERATELY distinct from the SPRT's fuzzy ``bool_disc``: the fuzzy thresholds (lexical 0.10 / length 0.05)
+# have a SAFE failure mode in the CONFIRM direction (a sub-threshold channel is a false-negative under-claim),
+# but reusing them to assert CLOSURE flips that into a false ALL-CLEAR — a 1-byte deterministic leak in a large
+# page (~99.85% similar) reads as "closed" while an attacker reads the DB bit-by-bit. To attribute a fix we
+# require true and false_a INDISTINGUISHABLE at zero tolerance. A PROTOCOL constant (never cert-supplied), so a
+# minted and a re-verified cert are judged by the identical rule (mint gate + ``_verify_differential_remediated``).
+_ATTRIBUTION_DISC = {"dimensions": ["status", "length", "lexical"],
+                     "length_threshold": 0.0, "lexical_threshold": 0.0}
+# The SPRT boolean discriminator and the WAF-closure discriminator are ALSO protocol constants — NEVER
+# cert-supplied at verify (red-pen re-check #2 hardening). The mint records them in the cert for audit, but
+# ``_verify_differential_remediated`` re-executes with THESE fixed rules, so a re-verified cert is judged by the
+# identical discriminators the mint used — a signed cert cannot carry a weakened ``closure_discriminator`` (e.g.
+# dropping ``structural``) to make a blocked/interposed origin re-verify as REMEDIATED. Consistent with the
+# re-execution-independence posture the attribution gate adopts.
+_BOOL_DISC = {"dimensions": ["status", "length", "lexical"]}
+_CLOSURE_DISC = {"dimensions": ["status", "structural"], "expect": "same"}
 
 
 class State:
@@ -96,6 +118,16 @@ class Reason:
     RATE_LIMIT_INTERRUPTED = "rate_limit_interrupted"
     COLLECTOR_FAILED = "evidence_collector_failed"
     DEPLOYMENT_CHANGED = "deployment_changed_during_run"
+    # INCONCLUSIVE (differential channel, TRUTHENOVATION R1) — a decisive SPRT refute did not translate to a
+    # sound REMEDIATED because the metachar decoy was blocked/diverted (a blocking payload-discriminating WAF/
+    # edge is interposing, DIFFERENTIAL-REMEDIATION §4.3), or the SPRT reached no boundary at all (§4.4 / HIGH-3:
+    # absence of evidence is not evidence of a fix — REMEDIATED requires a DECISIVE refute, never a non-decision),
+    # or the refute was UNATTRIBUTABLE — driven by the dynamic-page control tripping (false_a != false_b noise:
+    # __VIEWSTATE / rotating banner / big reflected token) rather than genuine channel closure, so a still-firing
+    # injection can hide behind the noise (red-pen: a false REMEDIATED over a live-vulnerable noisy origin).
+    INTERPOSER_SUSPECTED = "interposer_suspected_waf_closure_failed"
+    INSUFFICIENT_ROUNDS = "sprt_inconclusive_insufficient_rounds"
+    CHANNEL_NOISE_UNATTRIBUTABLE = "sprt_refute_unattributable_dynamic_page_noise_not_channel_closure"
 
 
 class Freshness:
@@ -533,6 +565,18 @@ def prove_remediation(
     if not _same_identity(adapter, identity, policy, tid_digest, identity_samples):
         return inconclusive(Reason.IDENTITY_CHANGED, "identity changed before the exploit trials")
 
+    # ---- DIFFERENTIAL CHANNEL (boolean_inference SPRT) — an ADDITIVE branch (TRUTHENOVATION R1). Reached only
+    #      when the adapter declares the differential channel; the error-signature decision path BELOW is left
+    #      BYTE-UNCHANGED. It reuses the whole preamble already run above (capability / identity / authorization
+    #      / budget / positive-control / identity-continuity) via the injected auth/budget/control/mk/inconclusive
+    #      and adjudicates entirely in :func:`_prove_differential` — REMEDIATED ONLY on a decisive SPRT refute
+    #      AND WAF-closure; every other outcome is INCONCLUSIVE or STILL_VULNERABLE. ----
+    if getattr(adapter, "differential_channel", False) or adapter.oracle_family == "boolean_inference":
+        return _prove_differential(
+            adapter=adapter, identity=identity, policy=policy, finding_id=finding_id, challenge=challenge,
+            auth=auth, budget=budget, rp=rp, eff_min_freshness=eff_min_freshness, tid_digest=tid_digest,
+            identity_samples=identity_samples, control=control, mk=mk, inconclusive=inconclusive)
+
     # ---- re-drive the ORIGINAL exploit under the repeat policy; re-fire the ORIGINAL oracle. ----
     attempted = valid = 0
     achieved_freshness = Freshness.F0_NONCE_GENERATED
@@ -637,6 +681,206 @@ def prove_remediation(
 
 
 # --------------------------------------------------------------------------------------------------------
+# DIFFERENTIAL CHANNEL (boolean_inference SPRT) — TRUTHENOVATION R1, PR1. ADDITIVE to the error-signature
+# decision path above (which is byte-unchanged): a differential adapter is adjudicated ENTIRELY here.
+# --------------------------------------------------------------------------------------------------------
+def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttestation, policy: ProvePolicy,
+                        finding_id: str, challenge: str, auth: EffectiveAuthorization, budget: "AtomicBudget",
+                        rp: RepeatPolicy, eff_min_freshness: int, tid_digest: str, identity_samples: list,
+                        control: ControlObservation, mk, inconclusive) -> ProveOutcome:
+    """Adjudicate the boolean-blind DIFFERENTIAL channel over FRESH matched-decoy rounds. Reuses the caller's
+    already-run preamble via the injected ``auth`` / ``budget`` / ``control`` / ``mk`` / ``inconclusive`` — it
+    re-verifies NOTHING the preamble already proved. Oracle authority is preserved: the SPRT decision is the
+    EXISTING ``boolean_inference_oracle``'s, the WAF-closure is the EXISTING ``differential_response_oracle``'s;
+    this function only sequences the probes and owns the fail-closed obligation.
+
+    THE ONE INVARIANT — a false REMEDIATED is the exact overclaim this program KILLS:
+      * SPRT ``confirm``                             -> STILL_VULNERABLE (the sink executes the injection OR an
+                                                        interposer lexically fabricated the differential — either
+                                                        way NOT remediated; a safe over-approximation, §4.1)
+      * decisive SPRT ``refute`` AND WAF-closure     -> REMEDIATED (reported at F1 in PR1; the cert records
+                                                        ``origin_reached`` ONLY — NOT a clean-code-fix claim, §4.2)
+      * decisive ``refute`` AND WAF-closure FAILS    -> INCONCLUSIVE / INTERPOSER_SUSPECTED (a blocking
+                                                        payload-discriminating WAF/edge blocked the decoy, §4.3)
+      * SPRT ``inconclusive`` (no boundary)          -> INCONCLUSIVE / INSUFFICIENT_ROUNDS (absence of evidence
+                                                        is not a fix — REMEDIATED needs a DECISIVE refute, HIGH-3)
+      * any undelivered / malformed round            -> INCONCLUSIVE (FAIL-CLOSED; never silently skipped, §4.4)
+
+    FATAL-2: the two oracles are imported function-local. Determinism: no wallclock/rng (the driver supplied
+    ``challenge`` / nonces; the discriminators are fixed templates). PR1 freshness is honestly F1 for BOTH
+    verdicts (§5); the differential F2 freshness verifier is the separately-reviewed PR2.
+    """
+    from framework.v2.verify.oracles import (   # lazy — FATAL-2
+        boolean_inference_oracle, differential_response_oracle,
+    )
+
+    # Lexical-sensitive boolean discriminator (§4.1: a real injection may change only reflected TEXT, invisible
+    # to status/structural alone) and the WAF-closure discriminator (§4.2).
+    bool_disc = _BOOL_DISC
+    closure_disc = _CLOSURE_DISC
+
+    def dincon(reason: str, detail: str, *, attempted: int) -> ProveOutcome:
+        # PR1: the differential channel is F1 (target-echoed) once a well-formed round is delivered.
+        return inconclusive(reason, detail, freshness=Freshness.F1_TARGET_ECHOES, attempted=attempted, valid=0)
+
+    # ---- collect ``min_valid_trials`` well-formed matched-decoy rounds; FAIL-CLOSED on any malformed round. ----
+    rounds: list[dict] = []
+    attempted = 0
+    max_iterations = auth.maximum_requests   # belt-and-suspenders bound on top of the budget
+    while len(rounds) < rp.min_valid_trials:
+        if attempted >= max_iterations:
+            return dincon(Reason.RATE_LIMIT_INTERRUPTED, "differential trial iteration bound reached",
+                          attempted=attempted)
+        try:
+            budget.spend(1)   # consume-before-send; the orchestrator owns the bound, not the adapter
+            trial = adapter.run_exploit_trial(challenge=challenge, trial_index=attempted, auth=auth)
+        except BudgetExhausted as e:
+            return dincon(Reason.RATE_LIMIT_INTERRUPTED, f"budget interrupted the differential trials: {e}",
+                          attempted=attempted)
+        except Exception as e:  # noqa: BLE001
+            return dincon(Reason.COLLECTOR_FAILED, f"differential trial execution failed: {e}",
+                          attempted=attempted)
+        attempted += 1
+        if not trial.reachable:
+            return dincon(Reason.TARGET_UNAVAILABLE, "target became unreachable mid-run", attempted=attempted)
+        # FAIL-CLOSED (§4.4 / §8 case 10): unlike the error-signature loop (which ``continue``s past an invalid
+        # trial), the differential channel treats ANY undelivered/malformed round as FATAL — a matched decoy
+        # that could not be built or delivered leaves the whole differential uninterpretable, so
+        # ``boolean_inference_oracle`` must NOT be allowed to silently ``continue`` past it.
+        if not trial.valid or not isinstance(trial.oracle_context, dict):
+            return dincon(Reason.ORACLE_CONTEXT_UNREBUILDABLE,
+                          trial.invalid_reason or "undelivered/malformed differential round",
+                          attempted=attempted)
+        ctx = trial.oracle_context
+        if not all(k in ctx for k in ("true", "false_a", "false_b", "baseline")):
+            return dincon(Reason.ORACLE_CONTEXT_UNREBUILDABLE,
+                          "differential round missing baseline/true/false_a/false_b", attempted=attempted)
+        # Live-marker reflection control (§4 / LOW-1): the inert challenge marker MUST come back (a
+        # query-stripping cache / non-echoing edge serving one body for all probes fails this) — cannot prove
+        # the round is fresh this run otherwise.
+        if not trial.nonce_echoed:
+            return dincon(Reason.FRESHNESS_ECHO_MISSING,
+                          "the fresh challenge marker was not reflected — cannot prove the round is fresh",
+                          attempted=attempted)
+        rounds.append(ctx)
+
+    # ---- identity continuity after the trials (mirror the error-signature path). ----
+    if not _same_identity(adapter, identity, policy, tid_digest, identity_samples):
+        return dincon(Reason.IDENTITY_CHANGED, "identity changed during the differential trials",
+                      attempted=attempted)
+
+    # ---- ORACLE AUTHORITY: the SPRT decision is the EXISTING boolean_inference_oracle's, never ours. ----
+    sig = boolean_inference_oracle(rounds, discriminator=bool_disc)
+    decision = str((sig.observed or {}).get("decision") or "inconclusive")
+    achieved = Freshness.F1_TARGET_ECHOES   # PR1: F1 for BOTH verdicts (§5; the differential F2 verifier is PR2)
+    trial_policy = _policy_dict(rp, eff_min_freshness)
+    trial_results = {"attempted": attempted, "valid": len(rounds), "sprt_decision": decision,
+                     "signal_rounds": (sig.observed or {}).get("signal_rounds"),
+                     "rounds_used": (sig.observed or {}).get("rounds_used")}
+    fresh_ctx = {"bug_class": adapter.bug_class, "probe_rounds": rounds, "discriminator": bool_disc}
+
+    # ---- FRESHNESS FLOOR (parity with the error-signature path :601-608 + spec §5; red-pen: the differential
+    #      branch silently dropped this). A caller that REQUESTS a level ABOVE the policy floor is ENFORCED, not
+    #      ignored. The differential channel is honestly F1 for BOTH verdicts in PR1 (the differential F2 verifier
+    #      is PR2), so any request for F2+ yields INCONCLUSIVE — a verifier demanding F2 for a REMEDIATION
+    #      correctly gets INCONCLUSIVE, never a silently-downgraded REMEDIATED@F1. Gates BOTH verdicts, before the
+    #      confirm/refute split, exactly as the error-signature freshness gate precedes its ``if fired``.
+    if achieved < eff_min_freshness:
+        return dincon(Reason.INSUFFICIENT_FRESHNESS,
+                      f"differential channel proves F{achieved} < required floor F{eff_min_freshness} "
+                      "(PR1 is F1 for both verdicts; the differential F2 freshness verifier is PR2)",
+                      attempted=attempted)
+
+    # (1) CONFIRM → STILL_VULNERABLE (a safe over-approximation — never a false all-clear, §4.1).
+    if sig.fired and decision == "confirm":
+        cert = mk(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, freshness_challenge=challenge,
+                  effective_authority_digest=auth.digest(), identity_samples=identity_samples,
+                  trial_policy=trial_policy, trial_results=trial_results, achieved_freshness=achieved,
+                  fresh_oracle_context=fresh_ctx, channel=_BOOLEAN_INFERENCE)
+        return ProveOutcome(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, cert,
+                            "SPRT confirmed the boolean differential over fresh evidence (the sink executes the "
+                            "injection OR an interposer fabricated a differential — either way not remediated)",
+                            attempted, len(rounds), achieved)
+
+    # (2) SPRT INCONCLUSIVE (no decisive boundary) → INCONCLUSIVE / INSUFFICIENT_ROUNDS. REMEDIATED requires a
+    #     DECISIVE refute (``conclusive``), NEVER a non-decision (HIGH-3): absence of evidence is not a fix.
+    if not (decision == "refute" and sig.conclusive):
+        return dincon(Reason.INSUFFICIENT_ROUNDS,
+                      f"SPRT reached no boundary in {len(rounds)} round(s) — not a decisive refute "
+                      "(absence of evidence is not evidence of a fix)", attempted=attempted)
+
+    # decisive refute from here — but a refute is NOT automatically a channel CLOSURE.
+    # (3a) ATTRIBUTION (red-pen BLOCK — a reproduced false REMEDIATED over a live-vulnerable NOISY origin, e.g.
+    #      an ASP.NET __VIEWSTATE app like the authorized testasp target): boolean_inference's per-round signal is
+    #      (across AND within_same), across = (true != false_a) the boolean channel, within_same = (false_a ≈
+    #      false_b) the dynamic-page control. A refute (signal→p0) arises EITHER from across=False (GENUINE
+    #      closure — the predicate no longer changes the response = fixed) OR from within_same=False (the two
+    #      FALSE responses disagree because of structurally-invisible per-request noise: __VIEWSTATE / rotating
+    #      banner / big reflected token). The second is "too noisy to attribute," NOT a fix — over a still-
+    #      vulnerable noisy origin across=True (the injection still fires) yet the SPRT refutes, and the {status,
+    #      structural} WAF-closure below is deliberately blind to that lexical noise, so it cannot catch it. A
+    #      SOUND REMEDIATED therefore REQUIRES the refute be attributable to CLOSURE: true must be indistinguishable
+    #      from false_a (across=False) on EVERY judged round. If any round still SEPARATES true from false_a, the
+    #      boolean channel is still firing → INCONCLUSIVE, never REMEDIATED. Recomputed here (oracle authority) on
+    #      the SAME lexical-sensitive discriminator the SPRT used.
+    if not rounds:   # defense-in-depth: never mint REMEDIATED off zero evidence (all(...) is vacuously True on [])
+        return dincon(Reason.INSUFFICIENT_ROUNDS, "no judged rounds — cannot attribute a channel closure",
+                      attempted=attempted)
+    channel_closed = not any(
+        differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired for r in rounds
+    )
+    if not channel_closed:
+        return dincon(Reason.CHANNEL_NOISE_UNATTRIBUTABLE,
+                      "SPRT refuted but true still SEPARATES from false at zero tolerance on a judged round "
+                      "(across=True) — either dynamic-page noise (false_a != false_b: __VIEWSTATE / rotating "
+                      "token) OR a SUB-THRESHOLD leak the fuzzy SPRT missed (a 1-byte deterministic bit an "
+                      "attacker reads directly); NOT genuine channel closure, so NOT a sound REMEDIATED",
+                      attempted=attempted)
+
+    # (3b) WAF-CLOSURE test on the JUDGED rounds (oracle authority — RECOMPUTED by differential_response_oracle,
+    #     never trusted from the adapter): every metachar decoy (false_a) must come back baseline-shaped. A
+    #     blocking/diverting WAF blocks false_a → it differs from baseline → closure FAILS → NOT REMEDIATED.
+    closure_holds = all(
+        differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired for r in rounds
+    )
+    if not closure_holds:
+        return dincon(Reason.INTERPOSER_SUSPECTED,
+                      "SPRT decisively refuted but a metachar decoy was blocked/diverted (WAF-closure failed) "
+                      "— a blocking payload-discriminating interposer (WAF/edge) is suspected, so this is NOT a "
+                      "sound REMEDIATED", attempted=attempted)
+
+    # (4) REMEDIATED — decisive SPRT refute AND WAF-closure. Reported at F1 (PR1). ``origin_reached`` records
+    #     ONLY "a baseline-shaped response returned for a metacharacter-bearing probe" (a blocking WAF is ruled
+    #     out) — it is NOT a clean-code-fix claim: an in-flight SANITIZER (§7 a-sanitize) that strips/escapes the
+    #     metacharacters in-flight yields the SAME observation and is NOT ruled out; the residual is DISCLOSED.
+    differential_evidence = {
+        "channel": _BOOLEAN_INFERENCE, "sprt_decision": "refute", "sprt_conclusive": True,
+        "channel_closed": True,   # attribution: the refute is genuine closure (across=False on every judged
+                                  # round), NOT the dynamic-page control tripping (§4.2a / red-pen BLOCK)
+        "origin_reached": True, "waf_closure": "pass", "freshness_level": "F1",
+        "boolean_discriminator": bool_disc, "closure_discriminator": closure_disc, "judged_rounds": rounds,
+        "residual_disclosure": (
+            "origin_reached asserts ONLY that a baseline-shaped response returned for a metacharacter-bearing "
+            "probe (a blocking/diverting payload-discriminating WAF is ruled out). It is NOT a clean-code-fix "
+            "claim: an in-flight SANITIZING interposer (a-sanitize) that strips/escapes the metacharacters "
+            "in-flight, a param-stripping edge (b), a structurally-matched 200 block page, or producer "
+            "byte-forgery are NOT distinguished from a real fix and remain the disclosed frontier "
+            "(TRUST-GRADIENT §7). REMEDIATED here means: the injection no longer executes AS OBSERVED THROUGH "
+            "THIS EDGE."),
+    }
+    cert = mk(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, freshness_challenge=challenge,
+              effective_authority_digest=auth.digest(), identity_samples=identity_samples,
+              trial_policy=trial_policy, trial_results=trial_results, achieved_freshness=achieved,
+              fresh_oracle_context=fresh_ctx, channel=_BOOLEAN_INFERENCE,
+              differential_evidence=differential_evidence)
+    return ProveOutcome(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, cert,
+                        "the boolean differential DECISIVELY REFUTED (SPRT) and the metachar decoy reached the "
+                        "origin baseline-shaped (origin_reached) — a blocking WAF is ruled out and the "
+                        "injection no longer executes as observed through this edge; the sanitizing-interposer "
+                        "residual (a-sanitize) is disclosed, not claimed closed", attempted, len(rounds), achieved)
+
+
+# --------------------------------------------------------------------------------------------------------
 # Helpers.
 # --------------------------------------------------------------------------------------------------------
 def _fires(context: dict, bug_class: str, ref: str) -> bool:
@@ -680,7 +924,8 @@ def _mint_cert(state: str, reason: str, *, adapter: LiveTargetAdapter, identity:
                effective_authority_digest: str = "", identity_samples: "list[str] | None" = None,
                trial_policy: "dict | None" = None, trial_results: "dict | None" = None,
                achieved_freshness: int = Freshness.F0_NONCE_GENERATED, fresh_oracle_context: "dict | None" = None,
-               embedded_remediation_cert: "dict | None" = None, control_context: "dict | None" = None) -> dict:
+               embedded_remediation_cert: "dict | None" = None, control_context: "dict | None" = None,
+               channel: "str | None" = None, differential_evidence: "dict | None" = None) -> dict:
     cert: dict[str, Any] = {
         "schema": _CERT_SCHEMA,
         "protocol_version": PROTOCOL_VERSION,
@@ -729,6 +974,12 @@ def _mint_cert(state: str, reason: str, *, adapter: LiveTargetAdapter, identity:
             "reason_code": reason,
         },
     }
+    # DIFFERENTIAL CHANNEL (TRUTHENOVATION R1) — keys added ONLY for the differential channel, so an
+    # error-signature cert is byte-identical to before (no regression to the merged path or its signatures).
+    if channel:
+        cert["channel"] = str(channel)
+    if differential_evidence is not None:
+        cert["evidence"]["differential"] = differential_evidence
     key_id, priv = signers[0]
     cert["signer"] = {"key_id": str(key_id), "signature": sign(priv, _cert_signing_bytes(cert))}
     return cert
@@ -766,6 +1017,11 @@ def verify_prove_certificate(cert: dict, *, signer_pubkeys: "dict[str, str]") ->
     if bool(verdict.get("oracle_fired")) != (state == State.STILL_VULNERABLE):
         return False, "verdict.oracle_fired disagrees with the state"
 
+    # DIFFERENTIAL CHANNEL (TRUTHENOVATION R1) — a differential REMEDIATED re-executes its OWN evidence (the
+    # SPRT re-refutes AND the WAF-closure re-holds over the retained rounds), NOT an embedded RemediationCert.
+    if state == State.REMEDIATED and cert.get("channel") == _BOOLEAN_INFERENCE:
+        return _verify_differential_remediated(cert)
+
     if state == State.REMEDIATED:
         embedded = ((cert.get("evidence") or {}).get("embedded_remediation_cert"))
         if not isinstance(embedded, dict):
@@ -788,3 +1044,54 @@ def verify_prove_certificate(cert: dict, *, signer_pubkeys: "dict[str, str]") ->
             return False, f"embedded remediation cert does not re-execute: {v.reason}"
         return True, "REMEDIATED: signed + cross-bound + embedded remediation re-executes (silent, control fires, live)"
     return True, f"{state}: signed and internally consistent"
+
+
+def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
+    """Offline re-execution of a DIFFERENTIAL-channel REMEDIATED cert (TRUTHENOVATION R1). The signature is
+    already verified by the generic path; here the retained round evidence must itself RE-EXECUTE to the
+    decisive verdict — the EXISTING ``boolean_inference_oracle`` must re-refute (``decision == "refute"`` AND
+    ``conclusive``) over the judged rounds, AND the EXISTING ``differential_response_oracle`` WAF-closure must
+    re-hold (each ``baseline`` vs ``false_a`` indistinguishable on ``status``+``structural``). Fail-closed, and
+    honest — it re-checks ONLY what REMEDIATED claims (``origin_reached``), never a stronger clean-code-fix
+    property. FATAL-2: the oracle import is function-local."""
+    ev = ((cert.get("evidence") or {}).get("differential"))
+    if not isinstance(ev, dict):
+        return False, "differential REMEDIATED cert has no differential evidence block to re-execute"
+    if ev.get("origin_reached") is not True:
+        return False, "differential REMEDIATED must assert origin_reached"
+    rounds = ev.get("judged_rounds")
+    if not isinstance(rounds, list) or not rounds:
+        return False, "differential evidence carries no judged_rounds to re-execute"
+    try:
+        from framework.v2.verify.oracles import (   # lazy — FATAL-2
+            boolean_inference_oracle, differential_response_oracle,
+        )
+    except Exception:  # noqa: BLE001
+        return False, "differential oracles unavailable — fail closed"
+    # Discriminators are PROTOCOL CONSTANTS at verify, NOT cert-supplied (re-check #2 hardening): a signed cert
+    # cannot weaken the SPRT/closure rule (e.g. drop ``structural`` from closure) to make an interposed origin
+    # re-verify. The cert's recorded ``*_discriminator`` fields are informational/audit only.
+    bool_disc = _BOOL_DISC
+    closure_disc = _CLOSURE_DISC
+    sig = boolean_inference_oracle(rounds, discriminator=bool_disc)
+    decision = str((sig.observed or {}).get("decision") or "")
+    if not (decision == "refute" and sig.conclusive):
+        return False, "retained rounds do not re-execute to a DECISIVE SPRT refute"
+    for r in rounds:
+        if not (isinstance(r, dict) and "baseline" in r and "false_a" in r and "true" in r):
+            return False, "a judged round is missing baseline/false_a/true for the differential re-check"
+        # ATTRIBUTION re-check (red-pen BLOCK-A — parity with the mint gate): the refute must be genuine channel
+        # CLOSURE, recomputed INDEPENDENT of the minter at ZERO tolerance (_ATTRIBUTION_DISC). If true still
+        # SEPARATES from false_a on any round the channel is still OPEN (a still-vulnerable noisy / sub-threshold
+        # origin) → DEMOTE. This is what lets the firewall demote a PRE-FIX false-REMEDIATED cert (across=True)
+        # that was validly signed before the mint gate existed — invariant 3 (re-execution can only demote).
+        if differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired:
+            return False, ("attribution re-check FAILED: true still separates from false_a at zero tolerance on "
+                           "a judged round (the boolean channel is still OPEN — dynamic-page noise or a "
+                           "sub-threshold leak) — NOT a genuine channel closure, so NOT a sound REMEDIATED")
+        if not differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired:
+            return False, "WAF-closure re-check failed (a metachar decoy diverged from baseline)"
+    return True, ("REMEDIATED (differential): signed + SPRT re-refutes decisively + channel-closure attributed "
+                  "(across=False, zero tolerance) + WAF-closure re-holds — origin_reached ONLY (a blocking WAF "
+                  "is ruled out); the sanitizing-interposer residual (a-sanitize) is disclosed, NOT a "
+                  "clean-code-fix claim")

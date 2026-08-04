@@ -114,6 +114,7 @@ jobs:
               --ignore=integration/tests/test_remediation_cert.py \
               --ignore=integration/tests/test_remediation_conformance.py \
               --ignore=integration/tests/test_prove_driver.py \
+              --ignore=integration/tests/test_prove_driver_differential.py \
               --ignore=integration/tests/test_attestation_log.py \
               --ignore=integration/tests/test_vf_differential.py \
               --ignore=integration/tests/test_vf_end_to_end.py \
@@ -145,6 +146,7 @@ jobs:
               integration/tests/test_remediation_cert.py \
               integration/tests/test_remediation_conformance.py \
               integration/tests/test_prove_driver.py \
+              integration/tests/test_prove_driver_differential.py \
               integration/tests/test_attestation_log.py \
               integration/tests/test_vf_differential.py \
               integration/tests/test_vf_end_to_end.py \
