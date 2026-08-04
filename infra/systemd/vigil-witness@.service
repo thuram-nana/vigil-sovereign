@@ -1,0 +1,91 @@
+# VIGIL witness co-sign service — systemd USER service (TEMPLATE unit)
+# =====================================================================
+# TRUTHENOVATION A3. Runs `vigil witness serve`, ONE independently-keyed
+# witness process that co-signs an append-only checkpoint series over a
+# loopback/tunnel endpoint and REFUSES a fork (the anti-equivocation signal).
+# This lands the LIVE co-sign TRANSPORT that was deferred — N such processes,
+# each on its own box under its own key, are what make "witnessed by
+# independent parties" real. A THIRD PARTY runs one of these.
+#
+# The instance name (%i) IS the bind PORT, e.g.:
+#
+#     systemctl --user enable --now vigil-witness@8801
+#
+# ┌───────────────────────────────────────────────────────────────────┐
+# │  PIN THE BIND ADDRESS TO LOOPBACK OR A WIREGUARD/TAILSCALE IP —    │
+# │  NEVER 0.0.0.0 AND NEVER A PUBLIC ADDRESS.                         │
+# │                                                                    │
+# │  The server itself fails closed (`bind_ok`): it binds ONLY         │
+# │  loopback, an RFC1918 private address, the Tailscale CGNAT range,  │
+# │  or an IPv6 ULA/link-local address. A public / unspecified bind is │
+# │  refused (no signature is ever produced). The tunnel, not the      │
+# │  transport, is the network boundary — an operator MUST see every   │
+# │  checkpoint their witness is asked to co-sign.                     │
+# └───────────────────────────────────────────────────────────────────┘
+#
+# The bind host + this witness's persistent key file come from an env file so
+# the template is reusable across N witnesses on one host (distinct ports):
+#
+#     ~/.config/vigil/witness.env      (VIGIL_WITNESS_HOST=…  VIGIL_WITNESS_KEY=…)
+#
+# INSTALL (user-level, no root):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-witness@.service ~/.config/systemd/user/
+#   cp infra/systemd/vigil-witness.env.example ~/.config/vigil/witness.env
+#   $EDITOR ~/.config/vigil/witness.env          # set VIGIL_WITNESS_HOST + VIGIL_WITNESS_KEY
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-witness@8801
+#   # keep it running after logout (optional): loginctl enable-linger "$USER"
+#
+# Logs → the journal:  journalctl --user -u vigil-witness@8801 -f
+
+[Unit]
+Description=VIGIL witness co-sign service (port %i)
+Documentation=file:%h/vigil/docs/TRUTHENOVATION.md
+# The witness co-signs over a loopback/tunnel endpoint; if bound to a tunnel IP
+# it needs the tunnel up. Best-effort ordering hints, not hard requirements.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The port is the instance name (%i). VIGIL_WITNESS_HOST (loopback/tunnel bind) and VIGIL_WITNESS_KEY (this
+# witness's persistent key file, minted 0600 on first run) come from the env file. The leading '-' means a
+# missing file does not fail the unit; the defaults below then apply.
+EnvironmentFile=-%h/.config/vigil/witness.env
+Environment=PYTHONUNBUFFERED=1
+Environment=VIGIL_WITNESS_HOST=127.0.0.1
+Environment=VIGIL_WITNESS_KEY=%h/.config/vigil/witness-%i.key
+
+WorkingDirectory=%h/vigil
+# The offense venv's console script (vigil = vigil_integration.cli:main). Adjust the path if your checkout or
+# venv lives elsewhere; or use the module form if the console script is not installed:
+#   ExecStart=%h/vigil/.venv-offense/bin/python -m vigil_integration.witness_service serve …
+ExecStart=%h/vigil/.venv-offense/bin/vigil witness serve --host ${VIGIL_WITNESS_HOST} --port %i --key ${VIGIL_WITNESS_KEY}
+
+# --- lifecycle -------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+# The server installs SIGTERM/SIGINT handlers and stops serve_forever cleanly (run_witness_forever), so a
+# plain SIGTERM is a graceful stop, not an abrupt kill.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# --- hardening (mirrors sigil-bridge@ — verified NOT to break the daemon) ---
+# It only reads its key file + binds a loopback/tunnel socket; it writes nothing but its key on first run.
+NoNewPrivileges=yes
+ProtectSystem=strict
+# The one path it may write: its own key directory (the key is minted 0600 here on first run).
+ReadWritePaths=%h/.config/vigil
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set (would break it): PrivateNetwork (hides the tunnel interface → bind fails), ProtectHome (hides the
+# checkout + key file), MemoryDenyWriteExecute (native-lib safety).
+
+[Install]
+WantedBy=default.target
