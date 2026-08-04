@@ -305,6 +305,42 @@ def _challenge_in_firing_signature(challenge: str, oracle_context: dict) -> bool
     return False
 
 
+def _challenge_in_firing_differential(challenge: str, rounds: "list[dict]") -> bool:
+    """SOUND F2 for the boolean DIFFERENTIAL channel (STILL_VULNERABLE only — R1-PR2, §5). The analog of
+    :func:`_challenge_in_firing_signature` for the boolean channel, which has no error line: is the fresh
+    challenge marker reflected in the SIGNAL-BEARING (``true``) response of EVERY judged firing round — i.e. did
+    the fresh nonce come back through the SAME response channel the boolean signal was measured on THIS run?
+
+    A firing whose true-clause responses all carry the fresh marker was exercised this run (not a replay of stale
+    evidence). To bind the marker to the DISCRIMINATING signal (parity with the error-signature F2, which requires
+    the nonce in the *matched signature line*), it must be reflected in ``true`` and NOT in ``false_a`` on EVERY
+    judged round — i.e. the marker lives in exactly the bytes that make ``true`` differ from ``false_a`` (the
+    boolean signal), not in a static header echoed into every probe (an app that echoes the raw query into all
+    responses does not earn F2 — that reflection is not attributable to the sink's boolean behaviour). Deliberately
+    CONSERVATIVE: a single non-qualifying round caps the run to F1 (a blind boolean channel that never reflects the
+    payload stays F1 — the honest floor). Like the error-signature F2 it is NOT byte-unforgeable — a target that
+    fabricates a ``true`` response embedding the nonce is indistinguishable on the response channel (the deferred
+    OOB / zkTLS frontier) — so F2 here is only ever "as attributable as the boolean_inference oracle's own firing".
+    Sound ONLY for STILL_VULNERABLE (a firing over-report is the safe direction, §2); REMEDIATED never reaches it.
+    FATAL-2 safe: a pure string check, no framework import."""
+    needle = str(challenge)
+    if not needle or not rounds:
+        return False
+    for r in rounds:
+        if not isinstance(r, dict):
+            return False
+        true_resp, false_a_resp = r.get("true"), r.get("false_a")
+        true_body = true_resp.get("body") if isinstance(true_resp, dict) else None
+        false_a_body = false_a_resp.get("body") if isinstance(false_a_resp, dict) else ""
+        if not isinstance(true_body, str) or needle not in true_body:
+            return False
+        # the marker must be in the DISCRIMINATING bytes: present in true, absent from false_a (else it is a
+        # static echo not attributable to the firing) — the boolean analog of "in the matched signature line".
+        if isinstance(false_a_body, str) and needle in false_a_body:
+            return False
+    return True
+
+
 # --------------------------------------------------------------------------------------------------------
 # EffectiveAuthorization — an IMMUTABLE execution envelope + an ATOMIC, orchestrator-owned budget.
 # --------------------------------------------------------------------------------------------------------
@@ -775,7 +811,13 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
     # ---- ORACLE AUTHORITY: the SPRT decision is the EXISTING boolean_inference_oracle's, never ours. ----
     sig = boolean_inference_oracle(rounds, discriminator=bool_disc)
     decision = str((sig.observed or {}).get("decision") or "inconclusive")
-    achieved = Freshness.F1_TARGET_ECHOES   # PR1: F1 for BOTH verdicts (§5; the differential F2 verifier is PR2)
+    # FIRING FRESHNESS (R1-PR2, §5): a differential FIRING (SPRT confirm) earns F2 when the fresh challenge marker
+    # is reflected in the SIGNAL-BEARING (true) responses of the judged rounds — the sink's boolean behaviour was
+    # exercised THIS run, "as attributable as the boolean_inference oracle's own firing" (not byte-unforgeable).
+    # A REFUTE / silence stays F1: a fixed sink is not traversable, so F2 is unattainable for REMEDIATED (VF-1a.3).
+    achieved = (Freshness.F2_PATH_TRAVERSED
+                if (sig.fired and decision == "confirm" and _challenge_in_firing_differential(challenge, rounds))
+                else Freshness.F1_TARGET_ECHOES)
     trial_policy = _policy_dict(rp, eff_min_freshness)
     trial_results = {"attempted": attempted, "valid": len(rounds), "sprt_decision": decision,
                      "signal_rounds": (sig.observed or {}).get("signal_rounds"),

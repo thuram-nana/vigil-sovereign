@@ -145,15 +145,22 @@ STILL_VULNERABLE over-report, §2), and against a structurally-invisible dynamic
 ## 5. Freshness in the differential channel — needs a NEW verifier
 
 The challenge rides the probes as an inert marker. For **STILL_VULNERABLE**, a firing whose rounds carry the
-fresh challenge should earn **F2** (the sink's boolean behaviour exercised this run) — but this is **not
-delivered by existing code**: the merged F2 gate calls `_challenge_in_firing_signature`
-(`prove_driver.py`), which is hard-wired to the **error-signature** channel (it re-fires `error_signature_oracle`
-and checks the matched *error line*). A boolean firing has no error line, so the existing gate **caps a
-differential firing to F1**. Delivering F2 here requires a **new** verifier — "the fresh challenge marker is
-present in the judged clauses of the firing rounds" — which §9 lists as new work. Until it exists, the
-differential channel is honestly **F1 for both verdicts** (STILL_VULNERABLE@F1, REMEDIATED@F1+`origin_reached`).
-For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traversable, per VF-1a.3), and
-`origin_reached` is **not** a freshness level and **not** an interposition proof beyond (a-block).
+fresh challenge earns **F2** (the sink's boolean behaviour exercised this run). The merged error-signature F2 gate
+`_challenge_in_firing_signature` (`prove_driver.py`) is hard-wired to the **error-signature** channel (it re-fires
+`error_signature_oracle` and checks the matched *error line*); a boolean firing has no error line, so it capped a
+differential firing to F1. **[R1-PR2 — now DELIVERED]** the boolean analog `_challenge_in_firing_differential`
+credits **F2** to a differential firing iff, on **EVERY judged firing round**, the fresh challenge marker is
+reflected in the signal-bearing **`true`** response **and absent from `false_a`** — i.e. it lives in the
+*discriminating* bytes that make `true` differ from `false_a` (the boolean signal), the analog of the
+error-signature F2's "nonce in the matched signature line". A static header echoed into every probe does **not**
+qualify (that reflection is not attributable to the sink's boolean behaviour). It is deliberately **conservative** (a single non-reflecting round caps
+to F1 — a purely *blind* boolean channel that never reflects the payload stays honestly F1) and, like the
+error-signature F2, is **not byte-unforgeable** (a target that fabricates a `true` response embedding the nonce is
+indistinguishable on the response channel — the deferred OOB / zkTLS frontier), so it is only ever "as
+attributable as the `boolean_inference` oracle's own firing". A caller *requesting* F2 over an unreflected firing
+is enforced → INCONCLUSIVE, never a silently-downgraded STILL_VULNERABLE@F1 (downgrade resistance).
+For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traversable, per VF-1a.3; the credit is
+gated on `decision == "confirm"`), and `origin_reached`/`origin_confirmed` are **not** freshness levels.
 
 ## 6. Downgrade resistance & invariants
 
