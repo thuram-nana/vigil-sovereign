@@ -710,6 +710,24 @@ def _cmd_reprove(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_witness(args: argparse.Namespace) -> int:
+    """TRUTHENOVATION A3 — the DEPLOYABLE witness co-sign service. `serve` runs ONE witness process on
+    loopback (its own persistent key + tracked tip) that co-signs an append-only checkpoint series or
+    REFUSES a fork (ConsistencyError → 409); `submit` fans a checkpoint out to N witness endpoints, gathers
+    the timed co-signatures, and surfaces every refusal (the anti-equivocation signal, never swallowed). This
+    lands the co-sign TRANSPORT that was deferred (apps/sigil/spine/witness.py:37-39): N independently-keyed
+    witness PROCESSES co-sign a real series and a third party can run one. Sovereign-safe (vigil_core +
+    stdlib only — never co-loads the offense engine). HONEST: a CAPABILITY (built + shippable + local-deploy-
+    proven), NOT witnessed-by-independent-parties-in-production; genuine independence needs third-party
+    operators (distinct keys != distinct operators)."""
+    from .witness_service import build_parser as _witness_parser
+    # Delegate to the standalone witness parser so `vigil witness …` and `python -m
+    # vigil_integration.witness_service …` are the SAME surface (one arg contract, no drift).
+    sub_argv = list(getattr(args, "witness_argv", []) or [])
+    parsed = _witness_parser().parse_args(sub_argv)
+    return int(parsed.func(parsed))
+
+
 def _cmd_provision_destruction(args: argparse.Namespace) -> int:
     """Mint the m-of-n destruction quorum keys for `vigil patch --open-pr`. Prints each signer's PRIVATE key
     ONCE (paste the owner key into Settings; distribute co-signer keys to their holders) and writes the PUBLIC
@@ -1639,6 +1657,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="the LIVE target scheme+host(:port) to re-drive against each cycle — MUST be "
                           "authorized in the engagement charter scope (else REFUSED, fail-closed)")
     prr.set_defaults(func=_cmd_reprove)
+
+    pw = sub.add_parser(
+        "witness",
+        help="TRUTHENOVATION A3 — the deployable loopback witness co-sign service: `witness serve --port P "
+             "--key K` runs ONE independently-keyed witness process (co-signs an append-only checkpoint "
+             "series, REFUSES a fork); `witness submit --endpoints … --checkpoint C` fans a checkpoint out to "
+             "N witnesses + gathers the co-signatures (surfacing refusals). A third party can run a witness "
+             "standalone. Sovereign-safe; NOT witnessed-by-independent-parties (a capability, not production).")
+    pw.add_argument("witness_argv", nargs=argparse.REMAINDER,
+                    help="serve --host --port --key [--key-id] | submit --endpoints --checkpoint [--out]")
+    pw.set_defaults(func=_cmd_witness)
 
     pprov = sub.add_parser(
         "provision-destruction",
