@@ -171,7 +171,7 @@ CI-green → merge → update this scoreboard.
 ### PHASE F — formal assurance
 | Slice | Gap | Fact | State |
 |---|---|---|---|
-| F1 | invariants tested, not proven | a machine-checked TLA+/Alloy model of the 4 core invariants + a CI model-check | UN-STARTED |
+| F1 | invariants tested, not proven | a machine-checked TLA+/Alloy model of the 4 core invariants + a CI model-check | **BUILT + machine-checked (`formal/`, CI job `formal-verification`)** — TLC exhaustively model-checks all four core invariants over bounded models, and a MUTANT of each (the one load-bearing guard removed) is proven to be caught, so the check is non-vacuous: `gate/VigilGate.tla` (`GateSound`: allow ⇒ authority ∧ tier=auto ∧ (destructive⇒quorum) ∧ ¬error; 9,216 states), `oracle-mint/OracleMint.tla` (`OracleOnlyMints`: status=FACT ⇒ an oracle fired; firewall demote-only), `boundary/Boundary.tla` (`BoundaryHolds`+`InertSeam`: never co-load offense∧sovereign; offense never holds the owner key; the seam is inert DATA), `antirollback/MonotoneFloor.tla` (`MonotoneFloor`: the durable high-water never decreases; captures the 0-indexed last_seq degeneracy so entry_count is the sound guard). `check.sh` fails closed if any faithful spec regresses OR any mutant stops being caught; `CORRESPONDENCE.md` maps each model action/invariant to the enforcing `file:line`. **Honest scope (Rule 1):** this is model-level assurance that faithfully abstracts the enforcing code — NOT a code-extraction proof; the model↔code link is human-argued. We do not claim "the code is formally verified." |
 
 ### PHASE R — finish the disclosed residuals
 | Slice | Gap | Fact | State |
