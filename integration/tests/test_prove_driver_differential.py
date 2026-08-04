@@ -257,6 +257,16 @@ def test_r1pr2_f2_demanded_reflected_firing_passes_the_floor():
     assert out.state == State.STILL_VULNERABLE and out.achieved_freshness == Freshness.F2_PATH_TRAVERSED, out
 
 
+def test_r1pr2_static_echo_marker_does_not_earn_f2():
+    # red-pen parity note — the marker must be in the DISCRIMINATING bytes (present in `true`, ABSENT from
+    # `false_a`), the boolean analog of the error-signature "in the matched signature line". A static header
+    # echoed into EVERY probe (marker in both true and false_a) is NOT attributable to the firing → stays F1.
+    from vigil_integration.remediation.prove_driver import _challenge_in_firing_differential as _f
+    assert _f("CH", [{"true": {"body": "rows <!--CH-->"}, "false_a": {"body": "base"}}]) is True     # true-only
+    assert _f("CH", [{"true": {"body": "rows <!--CH-->"}, "false_a": {"body": "base <!--CH-->"}}]) is False  # echo
+    assert _f("CH", [{"true": {"body": "rows"}, "false_a": {"body": "base <!--CH-->"}}]) is False     # false-only
+
+
 def test_r1pr2_f2_demanded_unreflected_firing_is_inconclusive():
     # a caller REQUESTING F2 over a firing that only reaches F1 (no reflection) is enforced → INCONCLUSIVE, never
     # a silently-downgraded STILL_VULNERABLE@F1 (downgrade resistance, parity with the error-signature floor).

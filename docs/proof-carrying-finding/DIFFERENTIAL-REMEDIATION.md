@@ -149,9 +149,11 @@ fresh challenge earns **F2** (the sink's boolean behaviour exercised this run). 
 `_challenge_in_firing_signature` (`prove_driver.py`) is hard-wired to the **error-signature** channel (it re-fires
 `error_signature_oracle` and checks the matched *error line*); a boolean firing has no error line, so it capped a
 differential firing to F1. **[R1-PR2 — now DELIVERED]** the boolean analog `_challenge_in_firing_differential`
-credits **F2** to a differential firing iff the fresh challenge marker is reflected in the **signal-bearing
-(`true`) response of EVERY judged firing round** — the fresh nonce came back through the same response channel the
-boolean signal was measured on this run. It is deliberately **conservative** (a single non-reflecting round caps
+credits **F2** to a differential firing iff, on **EVERY judged firing round**, the fresh challenge marker is
+reflected in the signal-bearing **`true`** response **and absent from `false_a`** — i.e. it lives in the
+*discriminating* bytes that make `true` differ from `false_a` (the boolean signal), the analog of the
+error-signature F2's "nonce in the matched signature line". A static header echoed into every probe does **not**
+qualify (that reflection is not attributable to the sink's boolean behaviour). It is deliberately **conservative** (a single non-reflecting round caps
 to F1 — a purely *blind* boolean channel that never reflects the payload stays honestly F1) and, like the
 error-signature F2, is **not byte-unforgeable** (a target that fabricates a `true` response embedding the nonce is
 indistinguishable on the response channel — the deferred OOB / zkTLS frontier), so it is only ever "as

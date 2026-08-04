@@ -312,22 +312,31 @@ def _challenge_in_firing_differential(challenge: str, rounds: "list[dict]") -> b
     the fresh nonce come back through the SAME response channel the boolean signal was measured on THIS run?
 
     A firing whose true-clause responses all carry the fresh marker was exercised this run (not a replay of stale
-    evidence). Deliberately CONSERVATIVE: a single judged round whose ``true`` response does not reflect the fresh
-    marker caps the run to F1 (a blind boolean channel that never reflects the payload stays F1 — the honest
-    floor). Like the error-signature F2 it is NOT byte-unforgeable — a target that fabricates a ``true`` response
-    embedding the nonce is indistinguishable on the response channel (that is the deferred OOB / zkTLS frontier) —
-    so F2 here is only ever "as attributable as the boolean_inference oracle's own firing". Sound ONLY for
-    STILL_VULNERABLE (a firing over-report is the safe direction, §2); REMEDIATED never reaches it. FATAL-2 safe:
-    a pure string check, no framework import."""
+    evidence). To bind the marker to the DISCRIMINATING signal (parity with the error-signature F2, which requires
+    the nonce in the *matched signature line*), it must be reflected in ``true`` and NOT in ``false_a`` on EVERY
+    judged round — i.e. the marker lives in exactly the bytes that make ``true`` differ from ``false_a`` (the
+    boolean signal), not in a static header echoed into every probe (an app that echoes the raw query into all
+    responses does not earn F2 — that reflection is not attributable to the sink's boolean behaviour). Deliberately
+    CONSERVATIVE: a single non-qualifying round caps the run to F1 (a blind boolean channel that never reflects the
+    payload stays F1 — the honest floor). Like the error-signature F2 it is NOT byte-unforgeable — a target that
+    fabricates a ``true`` response embedding the nonce is indistinguishable on the response channel (the deferred
+    OOB / zkTLS frontier) — so F2 here is only ever "as attributable as the boolean_inference oracle's own firing".
+    Sound ONLY for STILL_VULNERABLE (a firing over-report is the safe direction, §2); REMEDIATED never reaches it.
+    FATAL-2 safe: a pure string check, no framework import."""
     needle = str(challenge)
     if not needle or not rounds:
         return False
     for r in rounds:
         if not isinstance(r, dict):
             return False
-        true_resp = r.get("true")
-        body = true_resp.get("body") if isinstance(true_resp, dict) else None
-        if not isinstance(body, str) or needle not in body:
+        true_resp, false_a_resp = r.get("true"), r.get("false_a")
+        true_body = true_resp.get("body") if isinstance(true_resp, dict) else None
+        false_a_body = false_a_resp.get("body") if isinstance(false_a_resp, dict) else ""
+        if not isinstance(true_body, str) or needle not in true_body:
+            return False
+        # the marker must be in the DISCRIMINATING bytes: present in true, absent from false_a (else it is a
+        # static echo not attributable to the firing) — the boolean analog of "in the matched signature line".
+        if isinstance(false_a_body, str) and needle in false_a_body:
             return False
     return True
 
