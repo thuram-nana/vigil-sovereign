@@ -10,7 +10,7 @@ five SAFE endpoints (`/profile`, `/api/health`, `/download`, `/greeting`,
 ground truth is complete, anything a tool reports off-manifest is a
 false positive **by construction** — that is what makes the FP column honest.
 
-**Tools scored on this host:** crucible. Incumbents that are not
+**Tools scored on this host:** crucible, sqlmap, wapiti, nikto. Incumbents that are not
 installed are skipped, not failed. CRUCIBLE runs in-process against the
 loopback target and reports only oracle-confirmed findings.
 
@@ -24,6 +24,9 @@ positives on the safe endpoints is the hard requirement).
 | tool | tp | fp | fn | precision | recall | f1 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | crucible | 11 | 0 | 0 | 1.000 | 1.000 | 1.000 |
+| sqlmap | 0 | 0 | 11 | 0.000 | 0.000 | 0.000 |
+| wapiti | 2 | 7 | 9 | 0.222 | 0.182 | 0.200 |
+| nikto | 0 | 8 | 11 | 0.000 | 0.000 | 0.000 |
 
 ### Reading the table
 
@@ -45,5 +48,8 @@ internal request count); it is left blank rather than faked to 0.
 
 | tool | time_s | requests_sent | peak_rss_mb | pages_found | findings_reported |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| crucible | 11.07 | 1069 | 38.7 | 12 | 11 |
+| crucible | 11.15 | 1069 | 38.9 | 12 | 11 |
+| sqlmap | 1.10 | - | 100.4 | - | 0 |
+| wapiti | 12.44 | - | 49.0 | - | 10 |
+| nikto | 8.32 | - | - | - | 14 |
 

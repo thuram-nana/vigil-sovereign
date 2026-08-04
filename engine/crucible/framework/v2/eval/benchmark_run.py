@@ -231,11 +231,16 @@ def _incumbent_versions() -> dict[str, str]:
     import re
 
     ver = re.compile(r"\d+\.\d+")
+    # Strip ANSI SGR/color escapes so a tool that colourises its version banner (e.g.
+    # nuclei) records a clean, diff-stable string rather than raw terminal control codes
+    # in the committed, signed scorecard.
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
     out: dict[str, str] = {}
     for tool, cmd in probes.items():
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)  # noqa: S603
-            lines = [ln.strip() for ln in (p.stdout or p.stderr or "").splitlines() if ln.strip()]
+            raw = ansi.sub("", (p.stdout or p.stderr or ""))
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
             # prefer the first line carrying a version-looking token (skip ASCII banners)
             pick = next((ln for ln in lines if ver.search(ln)), lines[0] if lines else "")
             out[tool] = pick or "installed (no version output)"

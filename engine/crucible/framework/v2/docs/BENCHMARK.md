@@ -121,28 +121,34 @@ generation time. On the host that produced the committed snapshot:
 
 | tool | version | invocation |
 |------|---------|------------|
-| sqlmap | 1.10.2#stable | `sqlmap -u <url> --batch` |
+| sqlmap | 1.10.6#stable | `sqlmap -u <url> --batch` |
 | wapiti | 3.2.10 | `wapiti -u <url> -f json -o <file>` |
 | nikto | 2.6.0 (LW 2.5) | `nikto -h <url> -Format json -output <file>` |
-| nuclei | absent here | `nuclei -u <url> -jsonl -silent` |
+| nuclei | v3.10.0 (installed; not one of the three scored incumbents) | `nuclei -u <url> -jsonl -silent` |
 | ZAP | absent here | `zap.sh -cmd -quickurl <url> -quickout <file>` |
+
+The three scored incumbents are sqlmap, Wapiti, and Nikto. Nuclei is installed on this
+host but is *not* one of the three the comparative runner drives (its version is probed
+into the JSON as reproducibility metadata only). Every version string above is captured
+into `benchmark-results.json` / `benchmark-comparative.json` at generation time.
 
 Adapters live in `eval/adapters.py` + `eval/adapters_ext.py`.
 
 ## Current public scoreboard (in-process labelled app)
 
-The self-contained labelled app has **9 planted bugs** (reflected XSS, boolean-blind
-SQLi, error-based SQLi, open redirect, path traversal, CORS-with-credentials, and
-three exposures: `.git/config`, `.env`, Spring `/actuator/env`) plus **3 safe
-controls** (`/profile`, `/api/health`, `/download`) that must never be flagged. From
-the committed `benchmark-results.json`:
+The self-contained labelled app has **11 planted bugs** (reflected XSS, boolean-blind
+SQLi, error-based SQLi, open redirect, path traversal, SSTI, host-header injection,
+CORS-with-credentials, and three exposures: `.git/config`, `.env`, Spring
+`/actuator/env`) plus **5 safe controls** (`/profile`, `/api/health`, `/download`,
+`/greeting`, `/support`) that must never be flagged. From the committed
+`benchmark-comparative.json` (this host — sqlmap 1.10.6, Wapiti 3.2.10, Nikto 2.6.0):
 
 | tool | tp | fp | fn | precision | recall | f1 | time_s | requests | rss_mb |
 |------|---:|---:|---:|----------:|-------:|---:|-------:|---------:|-------:|
-| **crucible** | 9 | **0** | 0 | **1.000** | 1.000 | 1.000 | ~10 | 796 | ~52 |
-| sqlmap | 0 | 0 | 9 | 0.000 | 0.000 | 0.000 | ~1 | n/r | ~103 |
-| wapiti | 2 | **7** | 7 | 0.222 | 0.222 | 0.222 | ~10–60 | n/r | ~40 |
-| nikto | 0 | **7** | 9 | 0.000 | 0.000 | 0.000 | ~14 | n/r | n/r |
+| **crucible** | 11 | **0** | 0 | **1.000** | 1.000 | 1.000 | ~11 | 1069 | ~40 |
+| sqlmap | 0 | 0 | 11 | 0.000 | 0.000 | 0.000 | ~1 | n/r | ~103 |
+| wapiti | 2 | **7** | 9 | 0.222 | 0.182 | 0.200 | ~12–16 | n/r | ~48 |
+| nikto | 0 | **8** | 11 | 0.000 | 0.000 | 0.000 | ~9 | n/r | n/r |
 
 Read the **fp column**, not the tp column: it is the unambiguous one. CRUCIBLE's 0
 is the differentiator. The recall/precision of incumbents is depressed partly by
