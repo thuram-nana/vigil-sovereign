@@ -311,13 +311,18 @@ class ScopeGate:
         if not self.scope.matches(h):
             return False, f"{h!r} is not in the charter scope"
         # 2. gateway L3/L4 egress conscience over every resolved IP (single source of truth).
+        #    The allow-set is ONLY the charter-authorized IPs (non-wildcard scope entries
+        #    resolved to concrete IPs) — we do NOT self-authorize the target's own resolved
+        #    IP. Self-adding it would lift the denylist's Tier-2 private-IP / DNS-rebinding
+        #    gate for a broad wildcard scope (``*.example.com`` resolving to 10.x via split-
+        #    horizon or attacker-controlled DNS), diverging from the gateway proxy this claims
+        #    to compose. A legitimate IP-literal or exact-hostname scope is already present in
+        #    resolved_allowed_ips, so dropping the self-add removes ONLY the wildcard→private
+        #    bypass and leaves every authorized path (including scoped loopback) unchanged.
         ips = self._resolve(h)
         if not ips:
             return False, f"{h!r} does not resolve to any IP (fail-closed)"
-        allowed_ips = set(self.scope.resolved_allowed_ips(resolver=self.resolver))
-        # a scoped IP literal authorises itself for the private/loopback lift.
-        for ip in ips:
-            allowed_ips.add(ip)
+        allowed_ips = frozenset(self.scope.resolved_allowed_ips(resolver=self.resolver))
         for ip in ips:
             denied, reason = denylist.is_egress_denied(
                 ip, allowed_ips, loopback_allowed_if_scoped=self.loopback_allowed_if_scoped)

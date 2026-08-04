@@ -187,6 +187,40 @@ def test_loopback_without_owner_opt_in_is_refused(tmp_path: Path) -> None:
     assert spy.runs == []
 
 
+def _fake_resolver(mapping: dict) -> "Callable":
+    """A getaddrinfo-shaped resolver over a fixed host→IP map; unknown hosts fail (authorise nothing)."""
+    def _r(host, *_a, **_k):
+        ip = mapping.get(host)
+        if ip is None:
+            raise socket.gaierror(f"no fake record for {host!r}")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))]
+    return _r
+
+
+def test_wildcard_scope_does_not_self_authorize_a_private_ip() -> None:
+    # REGRESSION (red-pen R4-MEDIUM): a broad *.example.com scope must NOT implicitly authorise
+    # reaching internal RFC1918 infra. The gate's allow-set is ONLY the charter-authorized IPs —
+    # it does not self-add the target's own resolved IP — so a wildcard subdomain that resolves
+    # (via split-horizon / attacker-controlled DNS) to 10.x is refused, matching the gateway proxy.
+    gate = ScopeGate(
+        scope=StaticScopeSource(["*.example.com"]), loopback_allowed_if_scoped=False,
+        resolver=_fake_resolver({"internal.example.com": "10.0.0.5"}))
+    allowed, reason = gate.authorize("internal.example.com")
+    assert allowed is False
+    assert "10.0.0.5" in reason and "egress denied" in reason
+
+
+def test_exact_hostname_scope_still_authorizes_its_resolved_public_ip() -> None:
+    # POSITIVE CONTROL: dropping the self-add must not break the legitimate exact-hostname path —
+    # the scope entry resolves into the charter-authorized allow-set, so its public IP is permitted.
+    gate = ScopeGate(
+        scope=StaticScopeSource(["host.example.com"]), loopback_allowed_if_scoped=False,
+        resolver=_fake_resolver({"host.example.com": "93.184.216.34"}))
+    allowed, reason = gate.authorize("host.example.com")
+    assert allowed is True
+    assert "93.184.216.34" in reason
+
+
 # ===================================================================================================
 # 3. THE TOOL-AGNOSTIC PARSE + ADJUDICATION over a MOCK backend (no nmap needed — shape-only CI).
 # ===================================================================================================
