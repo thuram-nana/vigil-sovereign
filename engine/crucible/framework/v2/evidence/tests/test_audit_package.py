@@ -114,6 +114,40 @@ def test_wrong_fingerprint_pin_rejected(tmp_path: Path) -> None:
     assert r.returncode != 0 and "NOT SOUND" in r.stdout
 
 
+def test_missing_out_of_band_pin_is_not_sound_failclosed(tmp_path: Path) -> None:
+    # REGRESSION (red-pen H-LOW): without --trust-root-fingerprint the shipped trust root is
+    # unauthenticated, so even a structurally-perfect package must be NOT SOUND / exit non-zero — a
+    # forgotten pin can NEVER surface as a clean SOUND / exit-0 (the whole point of the word 'SOUND').
+    pkg, _ = _make_package(tmp_path)
+    r = _run_verifier(pkg, fingerprint=None, cwd=tmp_path)
+    assert r.returncode != 0
+    assert "authenticity UNPROVEN" in r.stdout
+    # the ONLY 'SOUND' token in the output is the one inside 'NOT SOUND'
+    assert r.stdout.count("SOUND") == r.stdout.count("NOT SOUND")
+
+
+def test_forged_trust_root_is_rejected_even_though_internally_consistent(tmp_path: Path) -> None:
+    # The red-pen's full PoC: an attacker forges a fresh trust root and re-signs the WHOLE bundle with
+    # their own keys, yielding an INTERNALLY-CONSISTENT package. It is caught two ways.
+    _victim_pkg, victim_fp = _make_package(tmp_path / "victim")   # the genuine out-of-band fingerprint
+    atk_tr, atk_signers = _trust_root()                           # attacker-controlled root + keys
+    ev = tmp_path / "forge-ev"
+    (ev / "act-1").mkdir(parents=True)
+    (ev / "act-1" / "response.http").write_text("HTTP/1.1 200 OK\n\nadmin row leaked", "utf-8")
+    forged = tmp_path / "forged"
+    summary = build_audit_package(
+        forged, findings=[_finding("act-1")], signers=atk_signers, trust_root=atk_tr,
+        evidence_root=ev, scope="# Scope\n127.0.0.1 only", charter="# Charter\nauthorized",
+        engagement_slug="demo")
+    assert summary["ok"] and summary["fingerprint"] != victim_fp   # it really is a different root
+    # (a) no out-of-band pin -> fail-closed NOT SOUND (the fix), despite internal consistency.
+    r_nopin = _run_verifier(forged, fingerprint=None, cwd=tmp_path)
+    assert r_nopin.returncode != 0 and "authenticity UNPROVEN" in r_nopin.stdout
+    # (b) pinned to the VICTIM's genuine fingerprint -> the forged root's fingerprint differs -> mismatch.
+    r_pinned = _run_verifier(forged, fingerprint=victim_fp, cwd=tmp_path)
+    assert r_pinned.returncode != 0 and "NOT SOUND" in r_pinned.stdout
+
+
 def test_flipped_signature_rejected(tmp_path: Path) -> None:
     pkg, fingerprint = _make_package(tmp_path)
     bundle = json.loads((pkg / "evidence-bundle.json").read_text("utf-8"))

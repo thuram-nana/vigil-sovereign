@@ -17,9 +17,12 @@ It re-derives, from first principles, the CRYPTOGRAPHIC + INTEGRITY layers of th
   4. CHAIN / ANTI-SUPPRESSION — the hash chain links cleanly, the signed head anchors it, and the chain's
      digests equal EXACTLY the certificates' digests in order (nothing suppressed, injected, or reordered).
   5. TRUST-ROOT PIN — the shipped trust root's fingerprint must equal the value you pinned out-of-band;
-     the copy in the package is only a convenience. Without the pin, authenticity is unproven.
+     the copy in the package is only a convenience. Without the pin the shipped root is unauthenticated
+     (an attacker can forge a fresh root and re-sign the whole bundle), so the package is NOT SOUND and
+     the tool exits non-zero — FAIL-CLOSED. A forgotten pin can never surface as a clean SOUND / exit-0.
 
-Exit 0 iff ALL of the above hold for EVERY certificate. A single flipped byte anywhere → non-zero.
+Exit 0 iff ALL of the above hold for EVERY certificate — INCLUDING the out-of-band pin (item 5). A single
+flipped byte anywhere, OR a missing --trust-root-fingerprint, → non-zero.
 
 WHAT THIS DOES NOT DO — the honest residual, stated plainly:
   * REPRODUCTION. It does NOT re-fire the deterministic oracle over each oracle_context (that would
@@ -196,11 +199,15 @@ def verify_package(pkg: Path, pinned_fingerprint: str | None) -> tuple[bool, lis
     except (OSError, ValueError) as e:
         return False, [f"cannot load package files: {e}"]
 
-    # 5. trust-root pin (out-of-band). Required for an authenticity claim.
+    # 5. trust-root pin (out-of-band). REQUIRED for an authenticity claim: without it the shipped
+    #    trust root is unauthenticated (an attacker who forges a fresh root + re-signs every cert and
+    #    the head produces an internally-consistent bundle), so the package is NOT SOUND — fail-closed.
+    #    A forgotten pin must never surface as a clean SOUND / exit-0.
     fp = _fingerprint(trust_root)
+    authenticity_pinned = pinned_fingerprint is not None
     if pinned_fingerprint is None:
         notes.append(f"WARNING: no --trust-root-fingerprint pin given; loaded root fingerprint is {fp} "
-                     "(authenticity is UNPROVEN without an out-of-band pin)")
+                     "(authenticity is UNPROVEN — the shipped trust root is unauthenticated)")
     elif pinned_fingerprint.strip() != fp:
         return False, [f"trust-root fingerprint MISMATCH: pinned {pinned_fingerprint!r} != loaded {fp!r}"]
     else:
@@ -285,11 +292,15 @@ def verify_package(pkg: Path, pinned_fingerprint: str | None) -> tuple[bool, lis
         notes.append("WARNING: bundle has an UNSIGNED head — chain links but is not governance-anchored")
         all_ok = False
 
-    if all_ok:
+    if all_ok and authenticity_pinned:
         notes.append(f"SOUND: {len(certs)} certificate(s) authentic + bound + integral; chain anchored. "
                      "(Reproduction — re-firing each oracle — is the separate VIGIL-verifier step; see "
                      "RUNBOOK.md.)")
-    return all_ok, notes
+    elif all_ok and not authenticity_pinned:
+        notes.append(f"NOT SOUND (authenticity UNPROVEN): {len(certs)} certificate(s) are bound + integral "
+                     "and the chain is internally consistent, BUT the trust root is unauthenticated — "
+                     "re-run with --trust-root-fingerprint <the value published OUT-OF-BAND> to prove it.")
+    return (all_ok and authenticity_pinned), notes
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -301,7 +312,12 @@ def main(argv: list[str] | None = None) -> int:
     sound, notes = verify_package(Path(args.package), args.trust_root_fingerprint)
     for n in notes:
         print(("  - " + n))
-    print("RESULT:", "SOUND" if sound else "NOT SOUND")
+    if sound:
+        print("RESULT: SOUND")
+    elif args.trust_root_fingerprint is None:
+        print("RESULT: NOT SOUND (authenticity UNPROVEN — no out-of-band --trust-root-fingerprint pin)")
+    else:
+        print("RESULT: NOT SOUND")
     return 0 if sound else 1
 
 
