@@ -128,6 +128,21 @@ class DifferentialHttpAdapter:
             if "{challenge}" not in tmpl:
                 raise ValueError(f"{name} must contain the literal '{{challenge}}' inert-marker slot "
                                  "(the run nonce rides the clause as a marker, never the predicate)")
+        # DATA-DEPENDENCE (spec §3 / §8.5 / red-pen BLOCK): the true/false clauses must differ in a
+        # DATA-DEPENDENT PREDICATE the origin's DB evaluates — NOT be identical (a degenerate round can never
+        # separate true from false, so the SPRT trivially refutes → a false REMEDIATED over a vulnerable origin),
+        # and NOT differ ONLY in the {challenge} marker (that would make the inert nonce FLIP the boolean, which
+        # §3/§6 forbid — the challenge is a freshness marker, never the discriminating predicate). Enforced at
+        # construction so a degenerate adapter can never be driven.
+        if self.true_payload_template == self.false_payload_template:
+            raise ValueError("true_payload_template and false_payload_template are IDENTICAL — the clauses must "
+                             "differ in a data-dependent predicate (a degenerate round cannot separate true from "
+                             "false and would trivially refute → a false REMEDIATED, spec §3/§8.5)")
+        if (self.true_payload_template.replace("{challenge}", "")
+                == self.false_payload_template.replace("{challenge}", "")):
+            raise ValueError("true/false payload templates differ ONLY in the {challenge} marker — the inert "
+                             "freshness nonce must NOT be the discriminating predicate (spec §3/§6); the "
+                             "data-dependent predicate difference must be independent of the challenge")
         if not self.original_probe_recipe_digest:
             self.original_probe_recipe_digest = digest_payload({
                 "endpoint_path": self.endpoint_path, "param": self.param, "nonce_param": self.nonce_param,

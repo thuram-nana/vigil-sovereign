@@ -102,9 +102,13 @@ class Reason:
     # INCONCLUSIVE (differential channel, TRUTHENOVATION R1) — a decisive SPRT refute did not translate to a
     # sound REMEDIATED because the metachar decoy was blocked/diverted (a blocking payload-discriminating WAF/
     # edge is interposing, DIFFERENTIAL-REMEDIATION §4.3), or the SPRT reached no boundary at all (§4.4 / HIGH-3:
-    # absence of evidence is not evidence of a fix — REMEDIATED requires a DECISIVE refute, never a non-decision).
+    # absence of evidence is not evidence of a fix — REMEDIATED requires a DECISIVE refute, never a non-decision),
+    # or the refute was UNATTRIBUTABLE — driven by the dynamic-page control tripping (false_a != false_b noise:
+    # __VIEWSTATE / rotating banner / big reflected token) rather than genuine channel closure, so a still-firing
+    # injection can hide behind the noise (red-pen: a false REMEDIATED over a live-vulnerable noisy origin).
     INTERPOSER_SUSPECTED = "interposer_suspected_waf_closure_failed"
     INSUFFICIENT_ROUNDS = "sprt_inconclusive_insufficient_rounds"
+    CHANNEL_NOISE_UNATTRIBUTABLE = "sprt_refute_unattributable_dynamic_page_noise_not_channel_closure"
 
 
 class Freshness:
@@ -756,6 +760,18 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
                      "rounds_used": (sig.observed or {}).get("rounds_used")}
     fresh_ctx = {"bug_class": adapter.bug_class, "probe_rounds": rounds, "discriminator": bool_disc}
 
+    # ---- FRESHNESS FLOOR (parity with the error-signature path :601-608 + spec §5; red-pen: the differential
+    #      branch silently dropped this). A caller that REQUESTS a level ABOVE the policy floor is ENFORCED, not
+    #      ignored. The differential channel is honestly F1 for BOTH verdicts in PR1 (the differential F2 verifier
+    #      is PR2), so any request for F2+ yields INCONCLUSIVE — a verifier demanding F2 for a REMEDIATION
+    #      correctly gets INCONCLUSIVE, never a silently-downgraded REMEDIATED@F1. Gates BOTH verdicts, before the
+    #      confirm/refute split, exactly as the error-signature freshness gate precedes its ``if fired``.
+    if achieved < eff_min_freshness:
+        return dincon(Reason.INSUFFICIENT_FRESHNESS,
+                      f"differential channel proves F{achieved} < required floor F{eff_min_freshness} "
+                      "(PR1 is F1 for both verdicts; the differential F2 freshness verifier is PR2)",
+                      attempted=attempted)
+
     # (1) CONFIRM → STILL_VULNERABLE (a safe over-approximation — never a false all-clear, §4.1).
     if sig.fired and decision == "confirm":
         cert = mk(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, freshness_challenge=challenge,
@@ -774,8 +790,34 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
                       f"SPRT reached no boundary in {len(rounds)} round(s) — not a decisive refute "
                       "(absence of evidence is not evidence of a fix)", attempted=attempted)
 
-    # decisive refute from here — the boolean channel is decisively indistinguishable.
-    # (3) WAF-CLOSURE test on the JUDGED rounds (oracle authority — RECOMPUTED by differential_response_oracle,
+    # decisive refute from here — but a refute is NOT automatically a channel CLOSURE.
+    # (3a) ATTRIBUTION (red-pen BLOCK — a reproduced false REMEDIATED over a live-vulnerable NOISY origin, e.g.
+    #      an ASP.NET __VIEWSTATE app like the authorized testasp target): boolean_inference's per-round signal is
+    #      (across AND within_same), across = (true != false_a) the boolean channel, within_same = (false_a ≈
+    #      false_b) the dynamic-page control. A refute (signal→p0) arises EITHER from across=False (GENUINE
+    #      closure — the predicate no longer changes the response = fixed) OR from within_same=False (the two
+    #      FALSE responses disagree because of structurally-invisible per-request noise: __VIEWSTATE / rotating
+    #      banner / big reflected token). The second is "too noisy to attribute," NOT a fix — over a still-
+    #      vulnerable noisy origin across=True (the injection still fires) yet the SPRT refutes, and the {status,
+    #      structural} WAF-closure below is deliberately blind to that lexical noise, so it cannot catch it. A
+    #      SOUND REMEDIATED therefore REQUIRES the refute be attributable to CLOSURE: true must be indistinguishable
+    #      from false_a (across=False) on EVERY judged round. If any round still SEPARATES true from false_a, the
+    #      boolean channel is still firing → INCONCLUSIVE, never REMEDIATED. Recomputed here (oracle authority) on
+    #      the SAME lexical-sensitive discriminator the SPRT used.
+    if not rounds:   # defense-in-depth: never mint REMEDIATED off zero evidence (all(...) is vacuously True on [])
+        return dincon(Reason.INSUFFICIENT_ROUNDS, "no judged rounds — cannot attribute a channel closure",
+                      attempted=attempted)
+    channel_closed = not any(
+        differential_response_oracle(r.get("false_a"), r.get("true"), bool_disc).fired for r in rounds
+    )
+    if not channel_closed:
+        return dincon(Reason.CHANNEL_NOISE_UNATTRIBUTABLE,
+                      "SPRT refuted but true still SEPARATES from false on a judged round (across=True) — the "
+                      "refute was driven by the dynamic-page control (false_a != false_b noise: __VIEWSTATE / "
+                      "rotating token / reflected nonce), NOT genuine channel closure; over a noisy origin the "
+                      "injection may still fire, so this is NOT a sound REMEDIATED", attempted=attempted)
+
+    # (3b) WAF-CLOSURE test on the JUDGED rounds (oracle authority — RECOMPUTED by differential_response_oracle,
     #     never trusted from the adapter): every metachar decoy (false_a) must come back baseline-shaped. A
     #     blocking/diverting WAF blocks false_a → it differs from baseline → closure FAILS → NOT REMEDIATED.
     closure_holds = all(
@@ -793,6 +835,8 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
     #     metacharacters in-flight yields the SAME observation and is NOT ruled out; the residual is DISCLOSED.
     differential_evidence = {
         "channel": _BOOLEAN_INFERENCE, "sprt_decision": "refute", "sprt_conclusive": True,
+        "channel_closed": True,   # attribution: the refute is genuine closure (across=False on every judged
+                                  # round), NOT the dynamic-page control tripping (§4.2a / red-pen BLOCK)
         "origin_reached": True, "waf_closure": "pass", "freshness_level": "F1",
         "boolean_discriminator": bool_disc, "closure_discriminator": closure_disc, "judged_rounds": rounds,
         "residual_disclosure": (

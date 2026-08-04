@@ -120,11 +120,27 @@ its fresh benign marker reflected (not mere reachability) so a query-stripping c
 WAF-closure *pass* while the origin is vulnerable-if-reached-directly. A non-executing interposer can fabricate a
 *firing* (§2) — but that yields STILL_VULNERABLE (the safe over-approximation), **not** the refute-plus-pass a
 false REMEDIATED needs; it cannot manufacture "the origin decisively did not discriminate." A *blocking* WAF
-cannot cause a false REMEDIATED either (blocked → step 3 INCONCLUSIVE). The refute-plus-pass over a vulnerable
-origin arises in exactly one way: an **in-flight sanitizer** (a-sanitize) neutralizes the metacharacters so the
-origin sees inert data. So the design is sound **in the REMEDIATED direction** against a blocking WAF and against
-a non-executing interposer (whose only forgery is the safe STILL_VULNERABLE over-report, §2), and is **unsound
-against a sanitizing one** — which is therefore disclosed (§7), not claimed closed.
+cannot cause a false REMEDIATED either (blocked → step 3 INCONCLUSIVE).
+
+A refute-plus-pass over a vulnerable origin arises in **two** ways, and REMEDIATED must guard **both**:
+
+1. an **in-flight sanitizer** (a-sanitize) neutralizes the metacharacters so the origin sees inert data — the
+   *disclosed* residual (§7), not claimed closed; and
+2. **[red-pen BLOCK — corrected]** a **structurally-invisible dynamic page** (ASP.NET `__VIEWSTATE`, a rotating
+   banner, a large reflected token). `boolean_inference`'s per-round signal is `across ∧ within_same`; on a noisy
+   page `within_same` is *False* (the two FALSE responses disagree on the opaque token) so the SPRT **refutes even
+   though `across` is True — the injection is still firing** — and the `{status, structural}` closure is blind to
+   that lexical noise, so it *passes*. Over a live-leaking origin this minted a **false REMEDIATED** (reproduced).
+   This is **not** an interposer at all. **The fix (the ATTRIBUTION gate, §4.2a):** a REMEDIATED-eligible refute
+   must be attributable to genuine channel **closure** — `across` (true vs `false_a`, on the lexical-sensitive
+   boolean discriminator) must be **False on every judged round**. If any round still separates true from false,
+   the refute was driven by the dynamic-page control tripping, not a fix → **INCONCLUSIVE /
+   `CHANNEL_NOISE_UNATTRIBUTABLE`**, never REMEDIATED. A heavily lexically-dynamic page therefore yields
+   INCONCLUSIVE (honest: unattributable by this channel), never a false all-clear.
+
+So REMEDIATED is sound against a blocking WAF, against a non-executing interposer (whose only forgery is the safe
+STILL_VULNERABLE over-report, §2), and against a structurally-invisible dynamic page (the attribution gate); it is
+**unsound against an in-flight sanitizer** — disclosed (§7), not claimed closed.
 
 ## 5. Freshness in the differential channel — needs a NEW verifier
 

@@ -1,24 +1,40 @@
-"""TRUTHENOVATION R1 (PR1) — the DIFFERENTIAL (boolean-inference) remediation channel, offline against a fake.
+"""TRUTHENOVATION R1 (PR1) — the DIFFERENTIAL (boolean-inference) remediation channel.
 
-Exercises the differential branch of :func:`prove_remediation` (``_prove_differential``) over the §8 adversarial
-corpus of ``docs/proof-carrying-finding/DIFFERENTIAL-REMEDIATION.md``, WITHOUT a live target: the fake emits
-matched-decoy round bundles (``{true, false_a, false_b, baseline}``) and each corpus case drives one branch.
+Two harnesses, both re-firing the REAL framework oracles (SPRT + WAF-closure), so a REMEDIATED verdict is
+earned over the round bytes exactly as it would be over live bytes:
 
-THE ONE INVARIANT under test — a false REMEDIATED is the exact overclaim this program exists to KILL:
-REMEDIATED is minted ONLY on a decisive SPRT ``refute`` AND a passing WAF-closure test. A blocking
-payload-discriminating WAF (case 3) and an SPRT-inconclusive run (case 7) both yield INCONCLUSIVE, NEVER
-REMEDIATED. The oracle re-fire (boolean_inference SPRT + differential_response WAF-closure) is REAL (framework),
-so a REMEDIATED verdict is earned over the fake's round bytes exactly as it would be over live bytes.
+  * a FAKE-driven corpus that hands ``_prove_differential`` matched-decoy round bundles
+    (``{true, false_a, false_b, baseline}``) — covering the verdict-determining §8 cases 1,2,3,4,6,7,10
+    (`DIFFERENTIAL-REMEDIATION.md`), the freshness-echo/floor guards, and the dual-red-pen regressions below;
+  * a REAL ``DifferentialHttpAdapter`` driven end-to-end against a stdlib loopback origin through a genuine
+    gated ``HttpExecutor`` (:func:`test_real_adapter_*`) — exercising the actual probe path (URL build,
+    gated_fetch, fail-closed round assembly, nonce reflection) that the fake bypasses.
+
+THE ONE INVARIANT — a false REMEDIATED is the overclaim this program KILLS. REMEDIATED is minted ONLY on a
+decisive SPRT ``refute`` **attributable to genuine channel CLOSURE** (across=False on every judged round) AND a
+passing WAF-closure test. Each of these yields INCONCLUSIVE, NEVER REMEDIATED: a blocking WAF (case 3), an
+SPRT-inconclusive run (case 7), a malformed round (case 10), a caller demanding F2 (the freshness floor), and —
+the red-pen BLOCK — a still-vulnerable NOISY origin (ASP.NET ``__VIEWSTATE`` / rotating token) whose refute is
+driven by the dynamic-page control tripping, not closure (:func:`test_dynamic_page_noise_over_live_vuln_is_not_remediated`).
+
+NOT tested here (disclosed, not claimed closed — spec §7): the a-sanitize / param-strip / structurally-matched
+200 block-page / producer-forgery residuals, and §8 cases 8/9/11 (heuristic-boundary / cache / text-only
+lexical) which the PR1 discriminators disclose as residual rather than guarantee.
 
 Needs framework (the oracles + the retained-control reverify) → PYTHONPATH=integration:engine/crucible:gateway.
 """
 from __future__ import annotations
+
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from vigil_core import (
     generate_keypair, identity_digest, prove_wielder, sign_capability, sign_identity_attestation,
 )
+from vigil_integration.remediation.differential_adapter import DifferentialHttpAdapter
 from vigil_integration.remediation.prove_driver import (
     ControlObservation, Freshness, ProvePolicy, Reason, State, TrialObservation,
     prove_remediation, verify_prove_certificate,
@@ -64,6 +80,32 @@ BLOCKED_ROUND = _round(BLOCK, BLOCK, BLOCK, NORMAL)
 DYNAMIC_ROUND = _round(R(200, '{"i": [1, 2, 3]}'), R(200, '{"i": [1, 2]}'),
                        R(200, '{"i": [1, 2, 3, 4]}'), R(200, '{"i": [1]}'))
 CONFIRM_ROUNDS = [SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND]   # retained firing rounds for the positive control
+
+
+def _vs(seed: str) -> str:
+    """A long OPAQUE per-request token (ASP.NET ``__VIEWSTATE`` / rotating banner / big reflected nonce):
+    structurally invisible (the JSON shape is unchanged) but LEXICALLY loud (distinct seeds → dissimilar
+    bodies). Deterministic — no RNG."""
+    return (seed * 200)[:600]
+
+
+def _noisy(seed: str, rows: str) -> dict:
+    return R(200, '{"vs": "%s", "results": %s}' % (_vs(seed), rows))
+
+
+LEAK = '[{"id": 1, "leak": "admin@corp:HASHLEAK"}]'   # the TRUE-predicate leak an attacker reads bit-by-bit
+
+
+def _noisy_vuln_round(n: int) -> dict:
+    """A STILL-VULNERABLE origin (true leaks the extra row every round) on a page with structurally-invisible
+    per-request VIEWSTATE noise: false_a != false_b (within_same tripped → SPRT refutes) while true != false_a
+    (across=True → the injection STILL fires) and baseline ≈ false_a structurally (WAF-closure passes). The
+    red-pen's reproduced false-REMEDIATED shape — the attribution gate MUST catch it."""
+    return _round(true=_noisy(f"t{n}", LEAK), false_a=_noisy(f"a{n}", "[]"),
+                  false_b=_noisy(f"b{n}", "[]"), baseline=_noisy(f"c{n}", "[]"))
+
+
+NOISY_VULN_ROUNDS = [_noisy_vuln_round(0), _noisy_vuln_round(1), _noisy_vuln_round(2)]
 
 
 class FakeDifferentialAdapter:
@@ -113,7 +155,8 @@ def _identity_att(policy=None, not_after=9_000):
     return sign_identity_attestation(OWNER, engagement=ENG, policy=(policy or POLICY), not_after=not_after)
 
 
-def _run(adapter, *, policy=ProvePolicy(), rate_limit=10, pop_challenge="pop-1"):
+def _run(adapter, *, policy=ProvePolicy(), rate_limit=10, pop_challenge="pop-1",
+         requested_min_freshness=None):
     ident = _identity_att()
     cap = sign_capability(OWNER, engagement=ENG, identity_digest=identity_digest(ident),
                           class_allowlist=[adapter.bug_class], not_before=0, not_after=9_000,
@@ -123,7 +166,8 @@ def _run(adapter, *, policy=ProvePolicy(), rate_limit=10, pop_challenge="pop-1")
         adapter=adapter, identity=ident, capability=cap, wielder_proof=wp,
         trusted_owner_pubkey=OWNER.public_key_b64, engagement=ENG, finding_id="boolsqli-1",
         original_certificate_digest="sha256:orig", signers=SIGNERS, now=NOW, run_id="run-1",
-        pop_challenge=pop_challenge, freshness_nonce="fresh-nonce-xyz", policy=policy)
+        pop_challenge=pop_challenge, freshness_nonce="fresh-nonce-xyz", policy=policy,
+        requested_min_freshness=requested_min_freshness)
 
 
 # ============================ §8 corpus ============================
@@ -175,11 +219,59 @@ def test_case4_sanitizing_waf_remediated_carries_origin_reached_only_not_clean_f
 
 def test_case6_dynamic_page_is_not_a_false_still_vulnerable():
     # §8.6 — every probe differs in record COUNT. false_a ≠ false_b trips the per-round dynamic-page control →
-    # non-signal → SPRT refutes; but baseline ≠ false_a → WAF-closure fails → INCONCLUSIVE. NOT STILL_VULNERABLE
-    # (the control absorbed the noise) and NOT a false REMEDIATED (closure caught the structural drift).
+    # non-signal → SPRT refutes; but true still SEPARATES from false_a (across=True) → the attribution gate fires
+    # first → INCONCLUSIVE. NOT STILL_VULNERABLE (the control absorbed the noise) and — critically — NOT a false
+    # REMEDIATED (the refute is unattributable to a fix).
     out = _run(FakeDifferentialAdapter(rounds=[DYNAMIC_ROUND, DYNAMIC_ROUND, DYNAMIC_ROUND]))
     assert out.state != State.STILL_VULNERABLE
-    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INTERPOSER_SUSPECTED, out
+    assert out.state == State.INCONCLUSIVE and out.state != State.REMEDIATED, out
+    assert out.reason_code == Reason.CHANNEL_NOISE_UNATTRIBUTABLE, out
+
+
+def test_dynamic_page_noise_over_live_vuln_is_not_remediated():
+    # RED-PEN BLOCK regression — the reproduced false REMEDIATED. A STILL-VULNERABLE origin (true leaks a row
+    # every round) on a page with structurally-invisible per-request __VIEWSTATE noise makes false_a != false_b
+    # (within_same tripped) → SPRT REFUTES, and baseline ≈ false_a structurally → WAF-closure PASSES. Pre-fix this
+    # minted REMEDIATED over a live-leaking origin. The attribution gate (across must be False = genuine closure)
+    # catches that across=True (the injection still fires) → INCONCLUSIVE / CHANNEL_NOISE_UNATTRIBUTABLE, NEVER
+    # REMEDIATED. This is NOT the disclosed a-sanitize residual — there is no interposer; it is the raw vuln app.
+    out = _run(FakeDifferentialAdapter(rounds=NOISY_VULN_ROUNDS))
+    assert out.state != State.REMEDIATED, out
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.CHANNEL_NOISE_UNATTRIBUTABLE, out
+
+
+def test_freshness_floor_above_the_policy_is_enforced_not_ignored():
+    # ISOLATION-PARITY red-pen: the error-signature path enforces a requested freshness ABOVE the floor
+    # (prove_driver.py:601-608, spec §5). The differential channel is honestly F1 for BOTH verdicts in PR1, so a
+    # caller REQUESTING F2 must get INCONCLUSIVE / INSUFFICIENT_FRESHNESS — never a silently-downgraded
+    # REMEDIATED@F1. (Genuine-fix rounds that WOULD be REMEDIATED at the F1 floor.)
+    out = _run(FakeDifferentialAdapter(rounds=[SILENT_ROUND, SILENT_ROUND, SILENT_ROUND]),
+               requested_min_freshness=Freshness.F2_PATH_TRAVERSED)
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.INSUFFICIENT_FRESHNESS, out
+    assert out.state != State.REMEDIATED
+    # control: at the F1 floor the SAME rounds ARE remediated (so the guard, not the rounds, produced INCONCLUSIVE).
+    ctrl = _run(FakeDifferentialAdapter(rounds=[SILENT_ROUND, SILENT_ROUND, SILENT_ROUND]))
+    assert ctrl.state == State.REMEDIATED
+
+
+def test_degenerate_adapter_clauses_are_rejected_at_construction():
+    # §8.5 / red-pen: identical or challenge-only-differing clauses can never separate true from false (a
+    # trivial refute → a false REMEDIATED over a vulnerable origin). The adapter must REFUSE them at construction.
+    common = dict(executor=None, base_url="http://127.0.0.1/", endpoint_path="/", param="q", nonce_param="rc",
+                  base_value="1")
+    with pytest.raises(ValueError, match="IDENTICAL"):
+        DifferentialHttpAdapter(**common, true_payload_template="1' AND 1=1 -- {challenge}",
+                                false_payload_template="1' AND 1=1 -- {challenge}")
+    with pytest.raises(ValueError, match="ONLY in the .challenge. marker"):
+        # raw templates DIFFER (challenge inside the predicate vs in the comment) but are equal once the
+        # {challenge} marker is stripped → the ONLY difference is the inert nonce, which must not flip the boolean.
+        DifferentialHttpAdapter(**common, true_payload_template="1' AND SUBSTR(x,1,1)='{challenge}' -- z",
+                                false_payload_template="1' AND SUBSTR(x,1,1)='' -- z{challenge}")
+    # a genuinely data-dependent pair is ACCEPTED (the predicate difference is independent of the challenge).
+    ok = DifferentialHttpAdapter(**common,
+                                 true_payload_template="1' AND SUBSTR(@@version,1,1)>'' -- {challenge}",
+                                 false_payload_template="1' AND SUBSTR(@@version,1,1)>'~~~' -- {challenge}")
+    assert ok.bug_class == "boolean_sqli"
 
 
 def test_case7_sprt_inconclusive_is_inconclusive_never_remediated():
@@ -220,3 +312,128 @@ def test_tampered_differential_rounds_fail_remediated_verification():
     out.certificate["evidence"]["differential"]["judged_rounds"] = [SIGNAL_ROUND, SIGNAL_ROUND, SIGNAL_ROUND]
     ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
     assert not ok   # the signature is now broken AND the rounds would not re-refute
+
+
+# ============================ REAL DifferentialHttpAdapter over a stdlib loopback origin ============================
+# Exercises the ACTUAL probe path the fake bypasses: _probe_url build, gated_fetch through a real HttpExecutor
+# (charter/scope gate), fail-closed round assembly, nonce reflection. The origin reflects ONLY the rc nonce (never
+# the q payload), so a FIXED origin returns identical bodies for all four probes (across=False → REMEDIATED); a
+# VULNERABLE origin materialises a row for the TRUE predicate (1=1) only (across=True, false stable → CONFIRM).
+_REAL_ENG = "boolreal"
+_REAL_CHARTER = """\
+# Engagement charter — `{slug}`
+
+**Status:** Final
+
+## 1. Operator attestation
+
+Signed: `tester`     Date: `2026-05-04`
+
+## 2. In-scope systems
+
+| Host / Surface | Notes | Auth |
+|----------------|-------|------|
+| `127.0.0.1` | Loopback test app | Yes |
+
+## 3. Out of scope
+
+- Anything not listed above.
+
+## 7. Posture
+
+- [x] **TEST**
+"""
+
+
+class _Origin(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):  # keep the test output quiet
+        pass
+
+    def do_GET(self):  # noqa: N802
+        q = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        qv = (q.get("q") or [""])[0]
+        rc = (q.get("rc") or [""])[0]
+        # A still-vulnerable origin executes the TRUE predicate (1=1) → an extra row leaks; the FALSE predicate
+        # (1=2) and the benign baseline do not. A FIXED origin ignores the injection entirely. The response
+        # reflects ONLY the rc nonce (freshness) — NEVER the q payload — mirroring a real app's output channel.
+        leaks = self.server.vulnerable and ("1=1" in qv) and ("1=2" not in qv)
+        rows = '[{"id": 1, "leak": "HASHLEAK"}]' if leaks else "[]"
+        raw = ('{"results": %s, "echo": "%s"}' % (rows, rc)).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+class _OriginServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def _start_origin(*, vulnerable: bool) -> _OriginServer:
+    srv = _OriginServer(("127.0.0.1", 0), _Origin)
+    srv.vulnerable = vulnerable  # type: ignore[attr-defined]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+@pytest.fixture()
+def real_gated(tmp_path, monkeypatch):
+    """A throwaway CRUCIBLE tree so the executor's scope gate admits 127.0.0.1 (mirrors test_reprove)."""
+    from framework.v2.common import paths as _paths
+    targets = tmp_path / "targets"
+    (targets / _REAL_ENG).mkdir(parents=True)
+    (targets / _REAL_ENG / "charter.md").write_text(_REAL_CHARTER.format(slug=_REAL_ENG), encoding="utf-8")
+    monkeypatch.setattr(_paths, "target_dir", lambda s: targets / s)
+    monkeypatch.setattr(_paths, "charter_path", lambda s: targets / s / "charter.md")
+    monkeypatch.setattr(_paths, "killswitch_path", lambda s: targets / s / ".halt")
+    return tmp_path
+
+
+def _real_adapter(base_url: str) -> DifferentialHttpAdapter:
+    from framework.v2.agents import HttpExecutor
+    executor = HttpExecutor(engagement_slug=_REAL_ENG, base_url=base_url, prompt_callback=lambda *_a: False)
+    return DifferentialHttpAdapter(
+        executor=executor, base_url=base_url, endpoint_path="/search", param="q", nonce_param="rc",
+        base_value="1", true_payload_template="1' AND 1=1 -- {challenge}",
+        false_payload_template="1' AND 1=2 -- {challenge}", original_firing_rounds=CONFIRM_ROUNDS,
+        engagement=_REAL_ENG)
+
+
+def _run_real(adapter):
+    ident = sign_identity_attestation(OWNER, engagement=_REAL_ENG, policy={"host": ["127.0.0.1"]}, not_after=9_000)
+    cap = sign_capability(OWNER, engagement=_REAL_ENG, identity_digest=identity_digest(ident),
+                          class_allowlist=["boolean_sqli"], not_before=0, not_after=9_000, rate_limit=20,
+                          revocation_id="rev-r", audience=WIELDER.public_key_b64)
+    wp = prove_wielder(WIELDER, challenge="pop-r", capability=cap)
+    return prove_remediation(
+        adapter=adapter, identity=ident, capability=cap, wielder_proof=wp,
+        trusted_owner_pubkey=OWNER.public_key_b64, engagement=_REAL_ENG, finding_id="boolsqli-real",
+        original_certificate_digest="sha256:orig", signers=SIGNERS, now=NOW, run_id="run-r",
+        pop_challenge="pop-r", freshness_nonce="fresh-r", policy=ProvePolicy())
+
+
+def test_real_adapter_fixed_origin_is_remediated(real_gated):
+    srv = _start_origin(vulnerable=False)
+    try:
+        out = _run_real(_real_adapter(f"http://127.0.0.1:{srv.server_address[1]}/"))
+        assert out.state == State.REMEDIATED and out.reason_code == Reason.ORACLE_SILENT_ACROSS_TRIALS, out
+        ev = out.certificate["evidence"]["differential"]
+        assert ev["origin_reached"] is True and ev["channel_closed"] is True
+        ok, _ = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
+        assert ok
+    finally:
+        srv.shutdown(); srv.server_close()
+
+
+def test_real_adapter_vulnerable_origin_is_still_vulnerable(real_gated):
+    srv = _start_origin(vulnerable=True)
+    try:
+        out = _run_real(_real_adapter(f"http://127.0.0.1:{srv.server_address[1]}/"))
+        assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED, out
+        assert out.state != State.REMEDIATED
+    finally:
+        srv.shutdown(); srv.server_close()
