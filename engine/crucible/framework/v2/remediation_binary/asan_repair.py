@@ -91,22 +91,26 @@ def _compile_asan(source: str, out_path: Path, workdir: Path) -> "tuple[bool, st
     return (r.returncode == 0 and out_path.exists()), (r.stderr or r.stdout)
 
 
-def _run_capture(binary: Path, argv: "list[str]", *, stdin: str = "", timeout: int = 10) -> str:
-    """Run the binary and capture the sanitizer report ROBUSTLY, then return it concatenated with stdout+stderr.
+def _run_capture(binary: Path, argv: "list[str]", *, stdin: str = "", timeout: int = 10) -> "tuple[str, int | None]":
+    """Run the binary; return ``(captured_text, returncode)``. The verdict is derived from BOTH — the sanitizer
+    report AND whether the process died by a fatal signal (:func:`_died_by_fatal_signal`), an OUT-OF-BAND signal
+    the child cannot hide.
 
-    SECURITY (red-pen BLOCK + re-check): the child controls its OWN stderr, so capturing the report from the
-    child's stderr is spoofable — a patch can DIVERT it (``__asan_default_options(log_path=…)``) OR MANIPULATE
-    the fd (``close(2)`` / ``dup2(…,2)`` / ``fclose(stderr)``) to fake "silence" while the overflow still fires.
-    So we do NOT trust the child's stderr for the verdict: we pin ``log_path`` to a FILE in a dir WE own (env
-    ASAN_OPTIONS overrides any source ``__asan_default_options``), and read the report from THAT file — which the
-    child cannot suppress by closing/redirecting its stderr (ASan opens the log fd itself at crash time). The
-    combined text (log file + stdout + stderr) is what the oracle reads; a still-firing overflow is captured in
-    the log file regardless of the child's fd games. The exit code is returned inline as a corroborating signal."""
+    SECURITY (red-pen BLOCK + two re-checks): the child controls its OWN output streams, so capturing the report
+    from stderr is spoofable — a patch can DIVERT it (``__asan_default_options(log_path=…)``), MANIPULATE the fd
+    (``close(2)``/``dup2``/``fclose(stderr)``), or RE-EXEC itself with a child-chosen ``ASAN_OPTIONS`` to fake
+    "silence" while the overflow still fires. Two robust defenses beyond the denylist:
+      * ``log_path`` is pinned to a FILE in a dir WE own (env overrides a single-process source override); the
+        report is read from THAT file, which fd games cannot suppress.
+      * ``abort_on_error=1`` makes ASan ABORT (SIGABRT) at the faulting access — so a still-firing overflow KILLS
+        the process by a fatal signal, observed by the PARENT via the exit status, which the child cannot forge
+        or divert (short of catching the signal — denylisted — or re-execing to reconfigure — denylisted). The
+        report first, then the abort, so the log file is written even when the process dies."""
     with tempfile.TemporaryDirectory(prefix="asan-log-") as logdir:
         log_base = Path(logdir) / "asan"
-        env = {"ASAN_OPTIONS": f"log_path={log_base}:log_exe_name=0:detect_leaks=0:abort_on_error=0:exitcode=1",
+        env = {"ASAN_OPTIONS": f"log_path={log_base}:log_exe_name=0:detect_leaks=0:abort_on_error=1",
                "PATH": "/usr/bin:/bin"}
-        rc = None
+        rc: "int | None" = None
         std = ""
         try:
             r = subprocess.run([str(binary), *argv], input=stdin, capture_output=True, text=True,
@@ -115,16 +119,27 @@ def _run_capture(binary: Path, argv: "list[str]", *, stdin: str = "", timeout: i
         except subprocess.TimeoutExpired as e:
             std = ((e.stdout or "") + (e.stderr or "")) if isinstance(e.stdout, str) else "TIMEOUT"
         except (OSError, subprocess.SubprocessError) as e:
-            return f"run failed: {e}"
-        # ASan appends .<pid> to log_path; read every report file the child could not touch.
+            return f"run failed: {e}", None
         report = ""
         for f in sorted(Path(logdir).glob("asan*")):
             try:
                 report += f.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 pass
-        exit_note = f"\n[exit_code={rc}]" if rc is not None else ""
-        return report + "\n" + std + exit_note
+        return report + "\n" + std, rc
+
+
+def _died_by_fatal_signal(rc: "int | None") -> bool:
+    """True if the process was killed by a fatal signal (subprocess reports a negative returncode). ASan with
+    ``abort_on_error=1`` raises SIGABRT at the overflow; a SEGV from a smashed return address is also fatal. This
+    out-of-band signal is not forgeable by the child's own output streams."""
+    return rc is not None and rc < 0
+
+
+def _crashed(text: str, rc: "int | None") -> bool:
+    """A run 'crashed' if the sanitizer oracle fires on the captured report OR the process died by a fatal
+    signal. Either is sufficient; a patch that hides the report still cannot avoid the SIGABRT."""
+    return bool(sanitizer_signal_oracle(text).fired) or _died_by_fatal_signal(rc)
 
 
 def _summary_line(asan_output: str) -> str:
@@ -144,9 +159,18 @@ _STRCPY = re.compile(r"\bstrcpy\s*\(\s*([A-Za-z_]\w*)\s*,\s*([^;)]+?)\s*\)")
 # these, but the gate is designed for reuse by the deferred symbolic tier). A fix that turns off the detector is
 # not a fix.
 _SANITIZER_TAMPER = (
+    # sanitizer reconfiguration / suppression
     "__asan_default_options", "__asan_on_error", "__lsan_default_options", "__ubsan_default_options",
     "__msan_default_options", "__tsan_default_options", "__sanitizer_", "no_sanitize", "log_path",
-    "ASAN_OPTIONS", "halt_on_error", "detect_stack_use", "signal(", "sigaction(",
+    "ASAN_OPTIONS", "halt_on_error", "detect_stack_use",
+    # crash-signal handling (abort() still terminates, but a handler that _exit(0)s would dodge it)
+    "signal(", "sigaction(", "sigprocmask", "bsd_signal", "sysv_signal",
+    # RE-EXEC / env-mutation / raw syscall / inline asm — the family that lets a child RE-READ ASAN_OPTIONS with
+    # child-chosen values (re-check BLOCK). These are IDENTIFIERS — C cannot split them across string literals
+    # (unlike the split string ARGS the attack used), so a substring scan over the source catches them soundly.
+    "execve", "execv", "execvp", "execvpe", "execl", "execlp", "execle", "execveat", "fexecve",
+    "setenv", "putenv", "clearenv", "unsetenv", "system(", "popen(", "posix_spawn",
+    "syscall", "__asm", "asm ", "asm(", "asm\t", "asm\n",
 )
 
 
@@ -213,12 +237,13 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
         ok, cerr = _compile_asan(source, vuln, work)
         if not ok:
             return BinRemResult(BinRemState.INCONCLUSIVE, f"original source does not compile under ASan: {cerr[:200]}")
-        before_out = _run_capture(vuln, crash_argv, timeout=timeout)
-        before = tier.confirm_crash(CapturedCrash(output=before_out))
-        if not before.fired:
+        before_out, before_rc = _run_capture(vuln, crash_argv, timeout=timeout)
+        # confirm_crash keeps the oracle as the crash-signature authority; _crashed additionally counts a fatal
+        # signal (abort_on_error=1 → SIGABRT) as a crash, so the confirm is out-of-band-robust too.
+        if not _crashed(before_out, before_rc):
             return BinRemResult(BinRemState.INCONCLUSIVE,
                                 "no AddressSanitizer crash reproduced on the crashing input — nothing to remediate")
-        crash_sig = _summary_line(before_out)
+        crash_sig = _summary_line(before_out) or tier.confirm_crash(CapturedCrash(output=before_out)).evidence[:120]
 
         patched_source, patch = synthesize_bounded_copy_patch(source)
         if patched_source is None:
@@ -228,9 +253,10 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
                 "execution (angr), which is not available; the crash is confirmed but no patch is fabricated",
                 crash_signature=crash_sig, before_fired=True)
 
-        # REJECT a patch that DISABLES/DIVERTS the sanitizer or catches the crash signal — silence over a
-        # disabled detector is not a fix (red-pen BLOCK: a report-diverting patch fakes silence). Defense in
-        # depth for the reusable gate, on top of the log_path=stderr env pin in _run_capture.
+        # REJECT a patch that DISABLES/DIVERTS the sanitizer, catches the crash signal, or RE-EXECS to reconfigure
+        # it — silence over a defeated detector is not a fix (red-pen BLOCKs: report-diversion, fd games, and
+        # re-exec with a child-chosen ASAN_OPTIONS all fake silence). Defense in depth alongside the out-of-band
+        # abort_on_error=1 signal-death check + the driver-owned log file in _run_capture.
         tamper = _patch_introduces_sanitizer_tampering(source, patched_source)
         if tamper:
             return BinRemResult(
@@ -246,16 +272,18 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
                                 f"the synthesised patch did not compile: {ferr[:200]}",
                                 crash_signature=crash_sig, patch=patch, before_fired=True)
 
-        after_out = _run_capture(fixed, crash_argv, timeout=timeout)
-        after_fired = bool(sanitizer_signal_oracle(after_out).fired)
-        if not tier.remediated_if_silent(before_out, after_out):
+        after_out, after_rc = _run_capture(fixed, crash_argv, timeout=timeout)
+        after_crashed = _crashed(after_out, after_rc)
+        # REMEDIATED requires the SAME crashing input to no longer crash: the oracle SILENT on the captured report
+        # AND the process did NOT die by a fatal signal (a diverted/hidden report cannot escape the SIGABRT).
+        if after_crashed:
             return BinRemResult(BinRemState.NOT_REMEDIATED,
-                                "the synthesised patch did NOT silence the sanitizer on the crashing input "
-                                "(oracle still fires) — not a fix",
-                                crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=after_fired)
+                                "the synthesised patch did NOT stop the crash on the crashing input (the sanitizer "
+                                "still fires or the process still dies by a fatal signal) — not a fix",
+                                crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=True)
 
-        benign_out = _run_capture(fixed, benign_argv, timeout=timeout)
-        functional = (expected_benign in benign_out) and not bool(sanitizer_signal_oracle(benign_out).fired)
+        benign_out, benign_rc = _run_capture(fixed, benign_argv, timeout=timeout)
+        functional = ((expected_benign in benign_out) and not _crashed(benign_out, benign_rc))
         if not functional:
             return BinRemResult(BinRemState.NOT_REMEDIATED,
                                 "the patch silenced the crash but did NOT preserve the benign functionality "
@@ -264,8 +292,11 @@ def prove_asan_remediation(source: str, *, crash_argv: "list[str]", benign_argv:
 
         return BinRemResult(
             BinRemState.REMEDIATED,
-            "crash-confirmed by AddressSanitizer; a pattern-synthesised bounded-copy patch made the oracle go "
-            "SILENT on the same crashing input AND preserved the benign functionality (fix earned by silence, not "
-            "asserted). RESIDUAL: pattern-based for the unbounded-strcpy class — general symbolic synthesis (angr) "
-            "is deferred.",
+            "crash-confirmed by AddressSanitizer; a pattern-synthesised bounded-copy patch stopped the crash on "
+            "the same input (oracle SILENT + no fatal signal) AND preserved the benign functionality (fix earned "
+            "by silence, not asserted). RESIDUAL: pattern-based for the unbounded-strcpy class — general symbolic "
+            "synthesis (angr) is deferred; and the fix-by-silence gate assumes a GOOD-FAITH patch — it hardens "
+            "against report-diversion / fd-games / re-exec / signal-catching (denylist + out-of-band SIGABRT), "
+            "but a maximally-hostile patch-producer would require an out-of-band sandbox (ptrace/seccomp), which "
+            "the shipped strcpy synthesiser never needs (it emits none of those constructs).",
             crash_signature=crash_sig, patch=patch, before_fired=True, after_fired=False, functional_preserved=True)

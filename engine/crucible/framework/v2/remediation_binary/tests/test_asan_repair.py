@@ -123,6 +123,33 @@ def test_fd_manipulation_patch_cannot_fake_silence(monkeypatch):
         assert out.state == BinRemState.NOT_REMEDIATED, (construct, out)   # the report survives the fd game
 
 
+def test_reexec_reconfigure_patch_cannot_fake_silence(monkeypatch):
+    # RED-PEN re-check #2 BLOCK — a patch that RE-EXECS itself with a child-chosen ASAN_OPTIONS (setenv + execv),
+    # with the option names split across adjacent string literals to dodge a naive substring scan, would make the
+    # re-read'd ASan divert its report. It must NOT fake silence: `setenv`/`execv` are IDENTIFIERS (C cannot split
+    # them across string literals) → the denylist catches them; and `abort_on_error=1` means a live overflow kills
+    # the process by SIGABRT, an out-of-band signal the child cannot hide. → NOT_REMEDIATED.
+    reexec = STRCPY_VULN.replace(
+        "#include <string.h>", "#include <string.h>\n#include <stdlib.h>\n#include <unistd.h>").replace(
+        "int main(int argc, char**argv){",
+        "int main(int argc, char**argv){ if(!getenv(\"REEX\")){ setenv(\"REEX\",\"1\",1); "
+        "setenv(\"ASAN\" \"_OPTIONS\", \"log\" \"_path=/tmp/sink_rx\", 1); execv(argv[0], argv); }")
+    monkeypatch.setattr(R, "synthesize_bounded_copy_patch",
+                        lambda _s: (reexec, R.BinaryPatch(description="reexec", diff="", provenance="test")))
+    out = prove_asan_remediation(STRCPY_VULN, crash_argv=LONG, benign_argv=SHORT, expected_benign="len=5")
+    assert out.state == BinRemState.NOT_REMEDIATED, out
+    assert "sanitizer-tampering" in out.reason.lower()
+
+
+def test_out_of_band_signal_catches_report_suppression():
+    # unit: even if the captured report text is empty, a process that died by a fatal signal is 'crashed' — a
+    # report-suppressing patch cannot escape the SIGABRT (abort_on_error=1). The genuine-fix direction (silent +
+    # clean exit) stays not-crashed.
+    assert R._crashed("", -6) is True                          # SIGABRT with no captured report → crashed
+    assert R._crashed("some output", 0) is False               # clean exit, no report → not crashed
+    assert R._crashed("==1==ERROR: AddressSanitizer: heap-buffer-overflow", 1) is True   # report fires
+
+
 def test_tamper_check_flags_only_patch_introduced_constructs():
     # unit: a construct already in the ORIGINAL is not flagged (only what the PATCH adds); a genuine strncpy
     # patch introduces nothing on the denylist.
