@@ -184,8 +184,12 @@ For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traver
   the attribution is over the **captured response excerpt (8 KiB cap)** — a boolean leak in the untruncated tail
   of a larger response is invisible, so a **truncated** observation yields INCONCLUSIVE (edge) / edge-only
   (origin), never REMEDIATED (red-pen R2 BLOCK, gated at mint AND re-execution by the executor's `truncated`
-  flag); and `origin_confirmed` rules out a *sanitizing edge* but **not** producer byte-forgery of the origin's
-  own responses nor a blind time-based/OOB channel — it asserts closure of the observed **content** channel only. **Definitionally identical (same content-equalized
+  flag). **Capability cost of that gate:** a *genuine* clean fix on any response **larger than 8 KiB** is
+  therefore also INCONCLUSIVE/`OBSERVATION_TRUNCATED` — a sound safe over-approximation, not a false all-clear;
+  the long-term lift is capturing the **full body** for differential probes (this use) instead of the 8 KiB
+  excerpt, so a large genuine fix stays provable. And `origin_confirmed` rules out a *sanitizing edge* but
+  **not** producer byte-forgery of the origin's own responses, a blind time-based/OOB channel, or a leak carried
+  only in response **headers** — it asserts closure of the observed **body+status content** channel only. **Definitionally identical (same content-equalized
   observation):** a boolean-blind sink "fixed" only by equalizing the *content* responses while the parameter
   stays injectable via a **time-based blind or OOB** channel — the content differential measures `{status, body}`
   only, so it reads REMEDIATED. Same disclosed bucket: REMEDIATED asserts closure of the *content* channel it

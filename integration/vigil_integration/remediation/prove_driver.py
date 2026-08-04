@@ -921,10 +921,11 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
     # response channel over a BOUNDED window, so it cannot rule these out (red-pen R2 BLOCK-2: origin_confirmed
     # must NOT read as a clean bill of health):
     always_residual = (
-        " Not ruled out (the response channel is forgeable and bounded): producer byte-forgery of the origin's "
-        "own responses, a blind time-based/OOB channel that leaves content identical, and any leak beyond the "
-        "captured observation window. origin_reached/origin_confirmed assert closure of the observed CONTENT "
-        "channel only — never byte-unforgeability (freshness stays F1).")
+        " Not ruled out (the observation is over the response BODY + STATUS only, forgeable and bounded): "
+        "producer byte-forgery of the origin's own responses, a blind time-based/OOB channel or a leak carried "
+        "only in response HEADERS (neither is observed), and any leak beyond the captured observation window. "
+        "origin_reached/origin_confirmed assert closure of the observed content channel only — never "
+        "byte-unforgeability (freshness stays F1).")
     sanitizer_residual = (
         "" if origin_confirmed else
         " Also NOT distinguished from a real fix (edge-only): an in-flight SANITIZING interposer (a-sanitize), a "

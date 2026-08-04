@@ -306,8 +306,11 @@ class DifferentialHttpAdapter:
             body = str((resp or {}).get("body") or "")
             # ``truncated`` (authoritative from the executor: the full body exceeded the capture cap) — a
             # differential closure attribution over a truncated body is UNSOUND (a leak past the cap is invisible).
-            # Fall back to the excerpt-length proxy if the executor did not report it.
-            truncated = bool((resp or {}).get("truncated")) or len(body) >= _BODY_EXCERPT_CAP
+            # The executor flag is AUTHORITATIVE when present (a byte-length compare that catches multibyte bodies
+            # the char proxy would miss, and does NOT over-flag a full 8192-byte capture). Fall back to the
+            # conservative excerpt-length proxy ONLY when the executor did not report the flag at all.
+            flag = (resp or {}).get("truncated")
+            truncated = bool(flag) if flag is not None else (len(body) >= _BODY_EXCERPT_CAP)
             responses[name] = {"status": int(status), "body": body, "truncated": truncated}
 
         round_ctx: dict[str, Any] = {
