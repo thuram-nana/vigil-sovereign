@@ -28,7 +28,10 @@ WHAT IT PROVES (offline, no target, no network):
     last_seq secondary), every tick re-verifies, and the drift series
     (present → proven-fixed → still-proven → regressed) is derived;
   * witnessed time bound — a strict-majority witness quorum (2t > n over distinct, canonical, non-low-order
-    keys) TIMED-co-signed the attestation head, yielding a median no-later-than ``T``.
+    keys) TIMED-co-signed the attestation head, yielding a median no-later-than ``T``; and, when the bundle
+    carries an A1 external RFC3161 time anchor and a pinned TSA cert is supplied (``--tsa-cert-pin``), the
+    token is verified over ``checkpoint_hash`` with the system ``openssl ts`` (still VIGIL-free) and its
+    genTime SUPERSEDES the median — a witness-honesty-independent "existed no-later-than T".
 
 WHAT IT DOES NOT DO (the documented boundary — same as verify_pcf): it NEVER RE-FIRES THE ORACLE.
 Re-executing the deterministic oracle over a retained ``oracle_context`` — the check that turns "the bytes
@@ -64,9 +67,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import datetime
 import hashlib
 import json
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -120,6 +127,9 @@ _EVIDENCE_DOMAIN = b"crucible-evidence-v1\x00"
 _PROVE_CERT_DOMAIN = b"vigil-remediation-prove-cert-v1\x00"
 _REM_CERT_DOMAIN = b"vigil-remediation-cert-v2\x00"
 _WITNESS_TIME_DOMAIN = b"vigil-attestation-witness-time-v1\x00"
+# The timeless transparency checkpoint domain — used to recompute checkpoint_hash (what the RFC3161
+# external time anchor binds). Byte-identical to transparency._WITNESS_DOMAIN.
+_TRANSPARENCY_CHECKPOINT_DOMAIN = b"vigil-transparency-checkpoint-v1\x00"
 
 _PROVE_CERT_SCHEMA = "vigil-remediation-prove-cert-v1"
 _REM_CERT_SCHEMA = "vigil-remediation-cert-v2"
@@ -575,8 +585,89 @@ def _timed_signing_bytes(checkpoint: dict, observed_time: int) -> bytes:
         {"checkpoint": checkpoint, "observed_time": int(observed_time)})
 
 
+def checkpoint_hash(checkpoint: dict) -> str:
+    """sha256 of the domain-separated canonical checkpoint — the stable identity the RFC3161 external time
+    anchor binds (byte-identical to ``transparency.checkpoint_hash``)."""
+    return sha256_hex(_TRANSPARENCY_CHECKPOINT_DOMAIN + canonical_json(checkpoint))
+
+
+def openssl_ts_available() -> bool:
+    """True iff a usable ``openssl`` binary with the ``ts`` subcommand is reachable (needed to check the A1
+    anchor). openssl ts ships on ubuntu-latest CI runners; this stays VIGIL-free (external process)."""
+    if shutil.which("openssl") is None:
+        return False
+    try:
+        r = subprocess.run(["openssl", "ts", "-help"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    combined = r.stdout + r.stderr
+    return "ts [options]" in combined or "Query options" in combined
+
+
+def _anchor_gentime_epoch(token_path: Path) -> Optional[int]:
+    """Read genTime ONLY from the signature-covered TimeStampToken as an integer UNIX epoch (UTC); None on
+    parse failure (fail-closed). Reads the SIGNED token, NOT the verifier wall clock.
+
+    SECURITY: the ``TimeStampResp`` wraps the signed token in an UNSIGNED ``PKIStatusInfo`` that
+    ``ts -verify`` does not cover and that openssl prints BEFORE the signed section — so a producer can
+    inject a ``statusString`` free-text ``Time stamp:`` line to backdate the anchor while the signature
+    still verifies. We therefore extract the signed token alone with ``ts -token_out`` (dropping the status
+    wrapper) and parse genTime from THAT via ``-token_in``, so genTime comes only from TSA-signed bytes."""
+    with tempfile.TemporaryDirectory() as td:
+        tst = Path(td) / "tst.der"
+        r0 = subprocess.run(["openssl", "ts", "-reply", "-in", str(token_path), "-token_out", "-out",
+                             str(tst)], capture_output=True, text=True)
+        if r0.returncode != 0 or not tst.exists():
+            return None
+        r = subprocess.run(["openssl", "ts", "-reply", "-in", str(tst), "-token_in", "-text"],
+                           capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        s = line.strip()
+        if s.lower().startswith("time stamp:"):
+            value = s.split(":", 1)[1].strip()
+            try:
+                dt = datetime.datetime.strptime(value, "%b %d %H:%M:%S %Y %Z")
+            except ValueError:
+                return None
+            return int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+    return None
+
+
+def verify_external_time_anchor(checkpoint: dict, token_b64: str, *,
+                                tsa_cert_pin: str) -> tuple[bool, Optional[int]]:
+    """VIGIL-FREE offline check of the A1 RFC3161 external time anchor. Re-hash the checkpoint to
+    ``checkpoint_hash``, then ``openssl ts -verify`` the base64 token over that hash against the PINNED TSA
+    cert, and extract genTime — the "existed no-later-than T" bound. A TAMPERED checkpoint hashes
+    differently → imprint mismatch → FAIL; a token from a WRONG/unpinned TSA → chain failure → FAIL. Uses
+    only the system openssl binary via subprocess (no VIGIL import, no hand-parsed ASN.1). Fail-closed."""
+    if not tsa_cert_pin or not Path(tsa_cert_pin).exists():
+        return False, None
+    if not openssl_ts_available():
+        return False, None
+    try:
+        token = base64.b64decode(str(token_b64), validate=True)
+    except (binascii.Error, ValueError):
+        return False, None
+    digest_hex = checkpoint_hash(checkpoint)
+    with tempfile.TemporaryDirectory() as td:
+        tok = Path(td) / "token.tsr"
+        tok.write_bytes(token)
+        r = subprocess.run(["openssl", "ts", "-verify", "-digest", digest_hex, "-sha256", "-in", str(tok),
+                            "-CAfile", tsa_cert_pin], capture_output=True, text=True)
+        if r.returncode != 0 or "Verification: OK" not in (r.stdout + r.stderr):
+            return False, None
+        gen = _anchor_gentime_epoch(tok)
+        if gen is None:
+            return False, None
+        return True, gen
+
+
 def verify_timed_witnessed(checkpoint: dict, timed_sigs: list, *, witness_trust_root: dict,
-                           min_distinct_signers: Optional[int] = None) -> tuple[bool, Optional[int], str]:
+                           min_distinct_signers: Optional[int] = None,
+                           external_time_anchor: Optional[str] = None,
+                           tsa_cert_pin: Optional[str] = None) -> tuple[bool, Optional[int], str]:
     """Verify a strict-majority witness quorum TIMED-co-signed ``checkpoint`` and return its no-later-than
     bound (mirrors ``attestation_witness.verify_timed_witnessed``). Returns (ok, T, reason), FAIL-CLOSED:
 
@@ -586,13 +677,18 @@ def verify_timed_witnessed(checkpoint: dict, timed_sigs: list, *, witness_trust_
          unknown key_id / weak-or-malformed key / non-verifying-or-malformed signature is IGNORED (never
          counted, never raised);
       3. quorum COUNT — distinct verifying witnesses >= max(threshold, min_distinct_signers);
-      4. no-later-than T — the (n//2)-th of the sorted distinct-verifying observed times (exact median for
-         odd n; upper-median for even n — deterministic integer).
+      4. no-later-than median T — the (n//2)-th of the sorted distinct-verifying observed times (exact
+         median for odd n; upper-median for even n — deterministic integer);
+      5. external anchor (A1) — if ``external_time_anchor`` (base64 RFC3161 token) AND ``tsa_cert_pin`` are
+         supplied, verify the token over ``checkpoint_hash`` against the pinned cert (VIGIL-free openssl):
+         on success its genTime SUPERSEDES the median (witness-honesty-independent); a present-but-bad anchor
+         FAILS CLOSED. With no anchor supplied the median stands (unchanged behaviour).
 
-    HONEST LIMIT (does NOT overclaim, per WITNESS-TRUST §4): T bounds when the head was WITNESSED, not when
-    the oracle re-fired; independence of the distinct keyholders is a deployment assumption uncheckable by
-    code; and a fully-dishonest PRODUCER curates which sigs are presented (raise min_distinct_signers toward
-    n, or use an external RFC3161/OTS anchor, for a hard guarantee)."""
+    HONEST LIMIT (does NOT overclaim, per WITNESS-TRUST §4): the median T bounds when the head was WITNESSED,
+    not when the oracle re-fired; independence of the distinct keyholders is a deployment assumption
+    uncheckable by code; a fully-dishonest PRODUCER curates which sigs are presented (raise
+    min_distinct_signers toward n, or use the external anchor, for a hard guarantee) — and a *local*
+    self-signed TSA proves the anchor MECHANISM only, not third-party independence (the A1 residual)."""
     if not is_split_view_resistant(witness_trust_root):
         return False, None, "not split-view resistant: sub-majority / duplicate / weak witness key"
 
@@ -627,10 +723,27 @@ def verify_timed_witnessed(checkpoint: dict, timed_sigs: list, *, witness_trust_
                 f"quorum not met (need {required} distinct verifying witnesses, got {len(distinct_verified)})")
 
     observed_times = sorted(distinct_verified.values())
-    T = observed_times[len(observed_times) // 2]
-    return (True, T,
-            f"{len(distinct_verified)} distinct witness(es) co-signed; no-later-than T={T} = median of the "
-            f"PRESENTED signing quorum's clocks (sound only if that quorum is strict-majority honest — a "
+    median_T = observed_times[len(observed_times) // 2]
+
+    # 5. external RFC3161 anchor (A1) — SUPERSEDES the median when present + verifiable against the pin. A
+    #    present-but-unverifiable anchor FAILS CLOSED (a tampered checkpoint / wrong TSA cert must not fall
+    #    back silently to the weaker median). The token is a SIDECAR; genTime is read from the SIGNED token.
+    if external_time_anchor is not None and tsa_cert_pin is not None:
+        anchor_ok, anchored_T = verify_external_time_anchor(
+            checkpoint, external_time_anchor, tsa_cert_pin=tsa_cert_pin)
+        if not anchor_ok or anchored_T is None:
+            return (False, None,
+                    "external time anchor present but did NOT verify against the pinned TSA cert over "
+                    "checkpoint_hash (tampered checkpoint / wrong TSA cert / malformed token) — fail-closed")
+        return (True, anchored_T,
+                f"{len(distinct_verified)} distinct witness(es) co-signed; no-later-than T={anchored_T} = "
+                f"RFC3161 external anchor genTime (SUPERSEDES the quorum-median {median_T}; witness-honesty-"
+                f"independent — a local self-signed TSA proves the MECHANISM only, third-party independence "
+                f"is the A1 residual)")
+
+    return (True, median_T,
+            f"{len(distinct_verified)} distinct witness(es) co-signed; no-later-than T={median_T} = median of "
+            f"the PRESENTED signing quorum's clocks (sound only if that quorum is strict-majority honest — a "
             f"hard time guarantee needs the external anchor)")
 
 
@@ -640,7 +753,8 @@ def verify_timed_witnessed(checkpoint: dict, timed_sigs: list, *, witness_trust_
 def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
                   trust_root: Optional[dict] = None, witness_trust_root: Optional[dict] = None,
                   pin: str = "", witness_pin: str = "",
-                  min_distinct_signers: Optional[int] = None) -> tuple[bool, list]:
+                  min_distinct_signers: Optional[int] = None,
+                  tsa_cert_pin: Optional[str] = None) -> tuple[bool, list]:
     """Verify every component present in ``bundle`` against the out-of-band-pinned trust material. Returns
     (sound, log_lines). ``sound`` is True iff at least one component is present and EVERY present component
     is SOUND. A component whose required trust material is missing is a NOT-SOUND (fail-closed)."""
@@ -692,9 +806,14 @@ def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
             log.append("  [BAD] witnessed present but no --witness-trust-root supplied")
             results.append(False)
         else:
+            anchor = wt.get("external_time_anchor")
+            if anchor is not None and not tsa_cert_pin:
+                log.append("     (external_time_anchor present but no --tsa-cert-pin supplied — the "
+                           "stronger anchored bound is NOT checked; the median bound below stands)")
             ok, T, reason = verify_timed_witnessed(
                 wt.get("checkpoint") or {}, wt.get("witness_signatures") or [],
-                witness_trust_root=witness_trust_root, min_distinct_signers=min_distinct_signers)
+                witness_trust_root=witness_trust_root, min_distinct_signers=min_distinct_signers,
+                external_time_anchor=anchor if tsa_cert_pin else None, tsa_cert_pin=tsa_cert_pin)
             log.append(f"  [{'OK ' if ok else 'BAD'}] witnessed checkpoint "
                        f"(no-later-than T={T}): {reason}")
             results.append(ok)
@@ -727,7 +846,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     sound, log = verify_bundle(
         bundle, signer_pubkeys=signer_pubkeys, trust_root=trust_root,
         witness_trust_root=witness_trust_root, pin=args.fingerprint, witness_pin=args.witness_fingerprint,
-        min_distinct_signers=args.min_distinct_signers)
+        min_distinct_signers=args.min_distinct_signers, tsa_cert_pin=args.tsa_cert_pin)
     for line in log:
         print(line)
     return 0 if sound else 2
@@ -752,6 +871,10 @@ def main(argv: list) -> int:
                    help="out-of-band pin on --witness-trust-root (sha256:… or hex)")
     v.add_argument("--min-distinct-signers", type=int, default=None, dest="min_distinct_signers",
                    help="require at least N distinct verifying witnesses (blunts producer curation)")
+    v.add_argument("--tsa-cert-pin", default=None, dest="tsa_cert_pin",
+                   help="path to the PINNED TSA cert (PEM) for the A1 RFC3161 external time anchor over the "
+                        "witnessed checkpoint; when supplied and the bundle carries external_time_anchor, "
+                        "its genTime supersedes the quorum-median bound (openssl ts, VIGIL-free)")
     v.add_argument("--prove-standalone", action="store_true",
                    help="first assert no VIGIL module is imported or importable, else exit non-zero")
     v.set_defaults(fn=_cmd_verify)
