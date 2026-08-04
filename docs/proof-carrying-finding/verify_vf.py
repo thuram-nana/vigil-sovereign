@@ -130,6 +130,10 @@ _WITNESS_TIME_DOMAIN = b"vigil-attestation-witness-time-v1\x00"
 # The timeless transparency checkpoint domain — used to recompute checkpoint_hash (what the RFC3161
 # external time anchor binds). Byte-identical to transparency._WITNESS_DOMAIN.
 _TRANSPARENCY_CHECKPOINT_DOMAIN = b"vigil-transparency-checkpoint-v1\x00"
+# The Z1 channel-binding notary-cosign domain — byte-identical to channel_binding._CHANNEL_BINDING_DOMAIN.
+_CHANNEL_BINDING_DOMAIN = b"vigil-zktls-channel-binding-v1\x00"
+_CHANNEL_BINDING_SCHEMA = "vigil-zktls-channel-binding-v1"
+_CHANNEL_BINDING_KINDS = ("tls-exporter", "tls-transcript", "test-vector")
 
 _PROVE_CERT_SCHEMA = "vigil-remediation-prove-cert-v1"
 _REM_CERT_SCHEMA = "vigil-remediation-cert-v2"
@@ -748,13 +752,80 @@ def verify_timed_witnessed(checkpoint: dict, timed_sigs: list, *, witness_trust_
 
 
 # ---------------------------------------------------------------------------
+# 7b. Z1 — channel-binding (zkTLS) notary co-sign, VIGIL-free. Mirrors
+#     vigil_integration.channel_binding.verify_channel_binding_evidence byte-for-byte.
+# ---------------------------------------------------------------------------
+def channel_bound_signing_bytes(cbr: dict) -> bytes:
+    """Domain tag + canonical channel-bound response — the exact bytes a notary signs / a verifier checks
+    (byte-identical to ``channel_binding.channel_bound_signing_bytes``)."""
+    return _CHANNEL_BINDING_DOMAIN + canonical_json(cbr)
+
+
+def verify_channel_binding_evidence(evidence: dict, *,
+                                    notary_public_key_pin_b64: str) -> tuple[bool, str]:
+    """VIGIL-FREE offline check that a Z1 channel-binding envelope binds its carried response bytes to a TLS
+    session under a co-signature from the PINNED notary — WITHOUT trusting the producer. Byte-identical to
+    ``channel_binding.verify_channel_binding_evidence``. Checks: schema; the co-signing key equals the
+    out-of-band pinned notary key; the carried ``response_b64`` bytes hash to the bound ``response_sha256``;
+    the binding is a known non-empty TLS session binding; the notary Ed25519 co-signature verifies over the
+    domain-separated (session-binding, response-hash) tuple. Fail-closed.
+
+    HONEST LIMIT: passing proves the notary co-signed THIS (session, bytes) tuple and the bytes match — a
+    SOFTWARE notary can be handed a fabricated tuple, so this is the verifier SHAPE + mechanism, NOT genuine
+    producer-unforgeability (needs zkTLS/MPC-TLS + a third-party notary — the Z1 residual)."""
+    if not isinstance(evidence, dict):
+        return False, "evidence is not an object"
+    if evidence.get("schema") != _CHANNEL_BINDING_SCHEMA:
+        return False, f"wrong schema (expected {_CHANNEL_BINDING_SCHEMA!r})"
+    if not notary_public_key_pin_b64:
+        return False, "no notary public-key pin supplied (fail-closed: the pin is the only trust anchor)"
+
+    cosign = evidence.get("notary_cosign") or {}
+    sig_b64 = str(cosign.get("signature_b64", ""))
+    if not sig_b64:
+        return False, "no notary co-signature present (a producer-fabricated response is rejected)"
+    if str(cosign.get("notary_public_key_b64", "")) != notary_public_key_pin_b64:
+        return False, "co-signing key is not the pinned notary key (untrusted / producer-supplied signer)"
+
+    cbr = evidence.get("channel_bound_response") or {}
+    binding = cbr.get("binding") or {}
+    response_sha256 = str(cbr.get("response_sha256", ""))
+
+    try:
+        body = base64.b64decode(str(evidence.get("response_b64", "")), validate=True)
+    except (binascii.Error, ValueError):
+        return False, "response_b64 is not valid base64"
+    if sha256_hex(body) != response_sha256:
+        return False, "carried response bytes do not hash to the bound response_sha256"
+
+    if binding.get("kind") not in _CHANNEL_BINDING_KINDS:
+        return False, f"unknown session-binding kind {binding.get('kind')!r}"
+    if not str(binding.get("binding_hex", "")):
+        return False, "empty session binding (response is not tied to any TLS session)"
+
+    msg = channel_bound_signing_bytes(cbr)
+    try:
+        ok = verify_one(notary_public_key_pin_b64, msg, sig_b64)
+    except Exception:
+        return False, "malformed notary key/signature material"
+    if not ok:
+        return False, "notary co-signature does not verify over the (session-binding, response-hash) tuple"
+    kind = binding.get("kind")
+    return True, (
+        f"channel-bound response verified: {kind} binding to {binding.get('host')}:{binding.get('port')}, "
+        f"notary-cosigned by pinned key {cosign.get('notary_key_id')} (MECHANISM — a software notary is not "
+        f"producer-unforgeable; see Z1 residual)")
+
+
+# ---------------------------------------------------------------------------
 # 8. Bundle verification (compose everything) + CLI
 # ---------------------------------------------------------------------------
 def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
                   trust_root: Optional[dict] = None, witness_trust_root: Optional[dict] = None,
                   pin: str = "", witness_pin: str = "",
                   min_distinct_signers: Optional[int] = None,
-                  tsa_cert_pin: Optional[str] = None) -> tuple[bool, list]:
+                  tsa_cert_pin: Optional[str] = None,
+                  notary_pin: str = "") -> tuple[bool, list]:
     """Verify every component present in ``bundle`` against the out-of-band-pinned trust material. Returns
     (sound, log_lines). ``sound`` is True iff at least one component is present and EVERY present component
     is SOUND. A component whose required trust material is missing is a NOT-SOUND (fail-closed)."""
@@ -818,6 +889,17 @@ def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
                        f"(no-later-than T={T}): {reason}")
             results.append(ok)
 
+    # --- Z1 channel-binding (zkTLS notary co-sign) ---
+    if "channel_binding" in bundle:
+        if not notary_pin:
+            log.append("  [BAD] channel_binding present but no --notary-pin supplied")
+            results.append(False)
+        else:
+            ok, reason = verify_channel_binding_evidence(
+                bundle["channel_binding"] or {}, notary_public_key_pin_b64=notary_pin)
+            log.append(f"  [{'OK ' if ok else 'BAD'}] channel_binding: {reason}")
+            results.append(ok)
+
     sound = bool(results) and all(results)
     log.append(f"bundle {'SOUND' if sound else 'NOT SOUND'} "
                f"(standalone: signatures + binding + structure + chain + quorum; "
@@ -840,13 +922,16 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError) as e:
         print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr)
         return 3
-    if not isinstance(bundle, dict) or not ({"prove_cert", "attestation", "witnessed"} & set(bundle)):
-        print("[ERROR] bundle has none of prove_cert / attestation / witnessed", file=sys.stderr)
+    _known = {"prove_cert", "attestation", "witnessed", "channel_binding"}
+    if not isinstance(bundle, dict) or not (_known & set(bundle)):
+        print("[ERROR] bundle has none of prove_cert / attestation / witnessed / channel_binding",
+              file=sys.stderr)
         return 3
     sound, log = verify_bundle(
         bundle, signer_pubkeys=signer_pubkeys, trust_root=trust_root,
         witness_trust_root=witness_trust_root, pin=args.fingerprint, witness_pin=args.witness_fingerprint,
-        min_distinct_signers=args.min_distinct_signers, tsa_cert_pin=args.tsa_cert_pin)
+        min_distinct_signers=args.min_distinct_signers, tsa_cert_pin=args.tsa_cert_pin,
+        notary_pin=args.notary_pin)
     for line in log:
         print(line)
     return 0 if sound else 2
@@ -875,6 +960,10 @@ def main(argv: list) -> int:
                    help="path to the PINNED TSA cert (PEM) for the A1 RFC3161 external time anchor over the "
                         "witnessed checkpoint; when supplied and the bundle carries external_time_anchor, "
                         "its genTime supersedes the quorum-median bound (openssl ts, VIGIL-free)")
+    v.add_argument("--notary-pin", default="", dest="notary_pin",
+                   help="out-of-band PINNED notary Ed25519 public key (base64) for a Z1 channel_binding "
+                        "bundle; the co-signature is trusted ONLY when it is from this key (zkTLS mechanism — "
+                        "a software notary is not producer-unforgeable, see Z1 residual)")
     v.add_argument("--prove-standalone", action="store_true",
                    help="first assert no VIGIL module is imported or importable, else exit non-zero")
     v.set_defaults(fn=_cmd_verify)

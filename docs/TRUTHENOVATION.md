@@ -107,10 +107,14 @@ The standalone verifier checks signatures/binding/chain but **never re-fires the
 live-`engage` seam is LEAD-only~~ (**FIXED by T2, #207** — it now mints via a gated live re-drive). ~~Only ~15 of
 32 oracle kinds fire by default~~ (**CLARIFIED + FIXED by T4, #209**: the 15 was the unknown-class *fallback set*;
 each non-default kind fires on its own surface — AEGIS gateway or engage sensors — and T4 fixed the one real
-re-verifiability asymmetry (k8s RBAC) + wired the 2 forgery producers). Producer byte-unforgeability (zkTLS) is
-**still un-started (Phase Z)**. So "re-derive without trusting VIGIL *or* the producer" holds today only for
-**OOB classes** (the Tier-2 token + independent signed collector receipt) — the remaining live bound of this
-truth until Z1.
+re-verifiability asymmetry (k8s RBAC) + wired the 2 forgery producers). Producer byte-unforgeability (zkTLS)
+now has a **BUILT + tested CAPABILITY (Z1)** — a channel-binding evidence object + software-notary co-sign +
+standalone offline verifier (`integration/vigil_integration/channel_binding.py`) — but that proves the
+verifier SHAPE + mechanism, **NOT** a genuine guarantee: a software notary VIGIL runs can be handed a
+fabricated (session, bytes) tuple, so real unforgeability still needs an MPC-TLS/zkTLS toolchain (absent
+here) **and** a third-party notary. So "re-derive without trusting VIGIL *or* the producer" holds today only
+for **OOB classes** (the Tier-2 token + independent signed collector receipt) — the remaining live bound of
+this truth; Z1 is the deployable mechanism toward closing it, not the closure.
 
 ### Truth 5 — the anti-overclaim system overclaims (O1–O9)
 | # | The claim | The reality | Refs |
@@ -162,7 +166,7 @@ CI-green → merge → update this scoreboard.
 ### PHASE Z — the zero-trust endgame
 | Slice | Gap | Fact | State |
 |---|---|---|---|
-| Z1 | producer byte-forgery | a fact whose response bytes are producer-unforgeable (zkTLS/TLSNotary), checkable standalone | UN-STARTED |
+| Z1 | producer byte-forgery | a fact whose response bytes are producer-unforgeable (zkTLS/TLSNotary), checkable standalone | **CAPABILITY — BUILT + tested** — `integration/vigil_integration/channel_binding.py` binds a finding's response bytes to a TLS SESSION and has a NOTARY co-sign the tuple, so the standalone verifier confirms them offline WITHOUT trusting the producer. (1) **Channel-binding evidence object** — `ChannelBinding` carries the RFC 5705 exporter keying material (`tls-exporter`) or a handshake-transcript hash (`tls-transcript`) that ties the bytes to ONE specific TLS session; `ChannelBoundResponse` pairs it with `sha256(response_bytes)`; `capture_tls_channel_binding` pulls a live exporter via `openssl s_client -keymatexport` (network-gated; the exporter PARSER is unit-tested on canned output). (2) **Notary co-sign** — a NOTARY Ed25519 key (reusing `vigil_core`, no new dep) co-signs the domain-separated (`vigil-zktls-channel-binding-v1\x00`) canonical (session-binding, response-hash) tuple; `build_evidence` self-verifies before returning (fail-closed). (3) **Standalone OFFLINE verifier** — `verify_vf.py:verify_channel_binding_evidence` (+ a `channel_binding` bundle path with `--notary-pin`) checks, VIGIL-free and byte-identical, that the carried bytes hash to the bound hash, the co-signing key equals the out-of-band PINNED notary key (the ONLY trust anchor — a producer-asserted signer is rejected), the binding is a real non-empty TLS session value, and the notary Ed25519 co-signature verifies over the tuple. The offline test (`test_channel_binding.py`, 9 cases) asserts: a session-bound, notary-cosigned finding verifies (in-tree + standalone, byte-identical signing bytes); a producer-fabricated transcript with NO valid notary cosign is REJECTED (missing cosign; producer-signed cosign not the pin; pin-claimed-but-producer-signed → sig fails); a cosign over a DIFFERENT session or DIFFERENT bytes is REJECTED; tampered body / wrong-pin / empty-binding fail closed; and the `RemoteNotary` (third-party zkTLS) path is ABSENT + fails closed. FATAL-2 asserted (framework/sigil blocked → module still imports; imports only `vigil_core` + stdlib + `subprocess`). **Why CAPABILITY, not VERIFIED FACT (Rule 1/3/4):** the DEFAULT `LocalNotary` is SOFTWARE that VIGIL runs and hands the session binding to — VIGIL (the producer) can fabricate a (session, bytes) tuple and have "its" notary sign it, so this proves the verifier SHAPE + mechanism, NOT genuine producer-unforgeability. **Irreducible residual (→ §4):** genuine byte-unforgeability needs (a) a real **zkTLS / MPC-TLS / TLSNotary** toolchain in which the notary PARTICIPATES in the TLS handshake (co-deriving the session secrets) so the producer cannot forge the transcript — `tlsn`/`py-ecc`/`petlib`/`zksk` are ABSENT here (no network to install) and cannot be built with `openssl` alone; AND (b) a **THIRD-PARTY notary operator** independent of VIGIL (`RemoteNotary` marks the seam; its independence cannot be exercised offline). A software notary proves the MECHANISM only — mirrors A1's local-TSA-vs-third-party residual. |
 
 ### PHASE F — formal assurance
 | Slice | Gap | Fact | State |
