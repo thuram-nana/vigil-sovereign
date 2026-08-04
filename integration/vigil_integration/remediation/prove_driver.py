@@ -128,6 +128,9 @@ class Reason:
     INTERPOSER_SUSPECTED = "interposer_suspected_waf_closure_failed"
     INSUFFICIENT_ROUNDS = "sprt_inconclusive_insufficient_rounds"
     CHANNEL_NOISE_UNATTRIBUTABLE = "sprt_refute_unattributable_dynamic_page_noise_not_channel_closure"
+    # a probe body was captured at the truncation cap → closure CANNOT be attributed (a boolean leak past the
+    # observation window would be invisible; red-pen R2 BLOCK — a >8 KB response with the leak in its tail).
+    OBSERVATION_TRUNCATED = "closure_unattributable_response_body_truncated"
 
 
 class Freshness:
@@ -849,25 +852,104 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
                       "— a blocking payload-discriminating interposer (WAF/edge) is suspected, so this is NOT a "
                       "sound REMEDIATED", attempted=attempted)
 
+    # (3c) TRUNCATION (red-pen R2 BLOCK): the SPRT + attribution + closure were computed over the CAPTURED body
+    #      EXCERPT. If any judged probe body was captured at the truncation cap, a boolean leak in the tail is
+    #      INVISIBLE (identical prefixes → across=False), so channel-closure CANNOT be soundly attributed over a
+    #      bounded observation window → INCONCLUSIVE. Real responses (HTML / JSON lists) routinely exceed the cap.
+    if _rounds_truncated(rounds):
+        return dincon(Reason.OBSERVATION_TRUNCATED,
+                      "a judged response body was captured at the truncation cap — a boolean leak past the "
+                      "observation window would be invisible, so channel-closure cannot be attributed; NOT a "
+                      "sound REMEDIATED (the full body exceeded the capture excerpt)", attempted=attempted)
+
+    # ---- R2: DIRECT-TO-ORIGIN re-drive — narrow the (a-sanitize) residual. The EDGE-observed path reached
+    #      REMEDIATED; if the adapter can re-drive the SAME matched-decoy round DIRECTLY at the origin IP (Host
+    #      pinned, bypassing a sanitizing / virtual-patching edge), let the ORIGIN truth decide. Every origin
+    #      probe is STILL a gated_fetch admitted ONLY if the charter scopes the origin IP — this never bypasses
+    #      scope. Three outcomes:
+    #        * origin FIRES (SPRT confirm OR attribution across=True) → DEMOTE to STILL_VULNERABLE (edge-only fix)
+    #        * origin SILENT (decisive refute + closure + across=False) → UPGRADE (origin_confirmed)
+    #        * origin UNREACHABLE / IP out of scope / inconclusive → edge-only REMEDIATED, residual STILL OPEN
+    origin_redrive = "not_attempted"      # not_attempted | unavailable | confirmed | inconclusive
+    origin_rounds: list = []
+    if getattr(adapter, "origin_redrive_available", False):
+        origin_rounds = _collect_origin_rounds(
+            adapter, challenge=challenge, auth=auth, budget=budget, need=rp.min_valid_trials)
+        if origin_rounds is None:
+            origin_redrive, origin_rounds = "unavailable", []     # cannot soundly re-drive → edge-only
+        else:
+            osig = boolean_inference_oracle(origin_rounds, discriminator=bool_disc)
+            odecision = str((osig.observed or {}).get("decision") or "inconclusive")
+            origin_open = any(
+                differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired
+                for r in origin_rounds)
+            origin_closed = all(
+                differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired
+                for r in origin_rounds)
+            if (osig.fired and odecision == "confirm") or origin_open:
+                # the injection FIRES when re-driven DIRECTLY at the origin → the edge sanitized / virtual-
+                # patched it → NOT a code fix. Demote (mirrors the safe over-approximation direction, §4.1).
+                cert = mk(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, freshness_challenge=challenge,
+                          effective_authority_digest=auth.digest(), identity_samples=identity_samples,
+                          trial_policy=trial_policy, trial_results=trial_results, achieved_freshness=achieved,
+                          fresh_oracle_context=fresh_ctx, channel=_BOOLEAN_INFERENCE,
+                          differential_evidence={
+                              "channel": _BOOLEAN_INFERENCE, "origin_redrive": "fired",
+                              "edge_verdict": "refuted_at_edge_only", "judged_rounds": rounds,
+                              "origin_rounds": origin_rounds,
+                              "note": ("the boolean differential refuted AT THE EDGE but the SAME exploit FIRES "
+                                       "when re-driven DIRECTLY at the origin IP (Host pinned) — the fix is at the "
+                                       "edge (a-sanitize / virtual patch), the ORIGIN is still vulnerable")})
+                return ProveOutcome(State.STILL_VULNERABLE, Reason.ORACLE_FIRED, cert,
+                                    "REMEDIATED at the edge but the exploit FIRES direct-to-origin (Host pinned, "
+                                    "edge bypassed) — the sanitizer is edge-only; the origin is still vulnerable",
+                                    attempted, len(rounds), achieved)
+            # a truncated origin observation cannot attribute origin closure (same tail-leak blind spot) → the
+            # origin re-drive is inconclusive (edge-only), never origin_confirmed. A FIRING origin still demotes
+            # above (a visible leak within the window is sound).
+            origin_redrive = ("confirmed" if (odecision == "refute" and osig.conclusive and origin_closed
+                                              and not origin_open and not _rounds_truncated(origin_rounds))
+                              else "inconclusive")
+
     # (4) REMEDIATED — decisive SPRT refute AND WAF-closure. Reported at F1 (PR1). ``origin_reached`` records
     #     ONLY "a baseline-shaped response returned for a metacharacter-bearing probe" (a blocking WAF is ruled
-    #     out) — it is NOT a clean-code-fix claim: an in-flight SANITIZER (§7 a-sanitize) that strips/escapes the
-    #     metacharacters in-flight yields the SAME observation and is NOT ruled out; the residual is DISCLOSED.
+    #     out). ``origin_confirmed`` (R2) upgrades that: the SAME exploit re-driven DIRECTLY at the origin (Host
+    #     pinned, edge bypassed) ALSO stayed silent — so an in-flight SANITIZER is ruled out too. When the origin
+    #     re-drive was not possible (unavailable / inconclusive) the (a-sanitize) residual stays OPEN (edge-only).
+    origin_confirmed = origin_redrive == "confirmed"
+    # Residuals that stay OPEN even under origin_confirmed — the re-drive still observes only the FORGEABLE
+    # response channel over a BOUNDED window, so it cannot rule these out (red-pen R2 BLOCK-2: origin_confirmed
+    # must NOT read as a clean bill of health):
+    always_residual = (
+        " Not ruled out (the observation is over the response BODY + STATUS only, forgeable and bounded): "
+        "producer byte-forgery of the origin's own responses, a blind time-based/OOB channel or a leak carried "
+        "only in response HEADERS (neither is observed), and any leak beyond the captured observation window. "
+        "origin_reached/origin_confirmed assert closure of the observed content channel only — never "
+        "byte-unforgeability (freshness stays F1).")
+    sanitizer_residual = (
+        "" if origin_confirmed else
+        " Also NOT distinguished from a real fix (edge-only): an in-flight SANITIZING interposer (a-sanitize), a "
+        "param-stripping edge (b), or a structurally-matched 200 block page — the disclosed frontier (TRUST-"
+        "GRADIENT §7). REMEDIATED here means the injection no longer executes AS OBSERVED THROUGH THIS EDGE.")
+    origin_note = (
+        " The SAME exploit re-driven DIRECTLY at the origin IP (Host pinned, edge bypassed) ALSO stayed silent "
+        "and closed — a sanitizing/virtual-patching EDGE is ruled out (origin_confirmed)." if origin_confirmed else
+        f" A direct-to-origin re-drive was {origin_redrive or 'not_attempted'} (origin IP unknown / out of "
+        "charter scope / unreachable / inconclusive), so the a-sanitize residual stays OPEN — edge-only.")
     differential_evidence = {
         "channel": _BOOLEAN_INFERENCE, "sprt_decision": "refute", "sprt_conclusive": True,
         "channel_closed": True,   # attribution: the refute is genuine closure (across=False on every judged
                                   # round), NOT the dynamic-page control tripping (§4.2a / red-pen BLOCK)
         "origin_reached": True, "waf_closure": "pass", "freshness_level": "F1",
+        "origin_redrive": origin_redrive, "origin_confirmed": origin_confirmed,
         "boolean_discriminator": bool_disc, "closure_discriminator": closure_disc, "judged_rounds": rounds,
         "residual_disclosure": (
-            "origin_reached asserts ONLY that a baseline-shaped response returned for a metacharacter-bearing "
-            "probe (a blocking/diverting payload-discriminating WAF is ruled out). It is NOT a clean-code-fix "
-            "claim: an in-flight SANITIZING interposer (a-sanitize) that strips/escapes the metacharacters "
-            "in-flight, a param-stripping edge (b), a structurally-matched 200 block page, or producer "
-            "byte-forgery are NOT distinguished from a real fix and remain the disclosed frontier "
-            "(TRUST-GRADIENT §7). REMEDIATED here means: the injection no longer executes AS OBSERVED THROUGH "
-            "THIS EDGE."),
+            "origin_reached asserts a baseline-shaped response returned for a metacharacter-bearing probe (a "
+            "blocking/diverting payload-discriminating WAF is ruled out)." + sanitizer_residual + origin_note
+            + always_residual),
     }
+    if origin_confirmed:
+        differential_evidence["origin_rounds"] = origin_rounds
     cert = mk(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, freshness_challenge=challenge,
               effective_authority_digest=auth.digest(), identity_samples=identity_samples,
               trial_policy=trial_policy, trial_results=trial_results, achieved_freshness=achieved,
@@ -875,9 +957,11 @@ def _prove_differential(*, adapter: LiveTargetAdapter, identity: IdentityAttesta
               differential_evidence=differential_evidence)
     return ProveOutcome(State.REMEDIATED, Reason.ORACLE_SILENT_ACROSS_TRIALS, cert,
                         "the boolean differential DECISIVELY REFUTED (SPRT) and the metachar decoy reached the "
-                        "origin baseline-shaped (origin_reached) — a blocking WAF is ruled out and the "
-                        "injection no longer executes as observed through this edge; the sanitizing-interposer "
-                        "residual (a-sanitize) is disclosed, not claimed closed", attempted, len(rounds), achieved)
+                        "origin baseline-shaped" + (
+                            " AND a direct-to-origin re-drive (Host pinned) confirmed the origin is silent — a "
+                            "sanitizing edge is ruled out (origin_confirmed)" if origin_confirmed else
+                            "; the sanitizing-interposer residual (a-sanitize) is disclosed, not claimed closed "
+                            "(edge-only)"), attempted, len(rounds), achieved)
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -889,6 +973,51 @@ def _fires(context: dict, bug_class: str, ref: str) -> bool:
         return bool(reverify_context(context, bug_class=bug_class, ref=ref).reproduced)
     except Exception:  # noqa: BLE001
         return False
+
+
+def _rounds_truncated(rounds: "list[dict]") -> bool:
+    """True if ANY probe body in ANY round was captured at the truncation cap (the executor's ``truncated`` flag
+    on any of ``true``/``false_a``/``false_b``/``baseline``). Closure-attribution over a truncated body is
+    unsound — a boolean leak in the untruncated tail is invisible (red-pen R2 BLOCK)."""
+    for r in rounds or []:
+        if not isinstance(r, dict):
+            continue
+        for k in ("true", "false_a", "false_b", "baseline"):
+            probe = r.get(k)
+            if isinstance(probe, dict) and probe.get("truncated"):
+                return True
+    return False
+
+
+def _collect_origin_rounds(adapter, *, challenge: str, auth: EffectiveAuthorization, budget,
+                           need: int) -> "list[dict] | None":
+    """R2 — collect ``need`` well-formed DIRECT-TO-ORIGIN matched-decoy rounds via ``adapter.run_origin_trial``
+    (a Host-pinned re-drive at the origin IP). Returns None the moment the origin re-drive cannot be SOUNDLY
+    performed — the adapter lacks the method, the IP is out of charter scope / unreachable, a probe is malformed,
+    or the shared budget is exhausted — so the caller keeps the edge-only verdict (a-sanitize residual OPEN) and
+    NEVER fabricates an origin round. Best-effort on the shared budget (the required_sends floor covers only the
+    control + edge trials; the origin re-drive is extra)."""
+    run = getattr(adapter, "run_origin_trial", None)
+    if run is None:
+        return None
+    rounds: list[dict] = []
+    for i in range(need):
+        try:
+            budget.spend(1)
+            t = run(challenge=challenge, trial_index=i, auth=auth)
+        except BudgetExhausted:
+            return None
+        except Exception:  # noqa: BLE001 — any origin-probe crash → unavailable, not a fabricated silence
+            return None
+        if not getattr(t, "valid", False) or not isinstance(getattr(t, "oracle_context", None), dict):
+            return None
+        ctx = t.oracle_context
+        if not all(k in ctx for k in ("true", "false_a", "false_b", "baseline")):
+            return None
+        if not getattr(t, "nonce_echoed", False):
+            return None
+        rounds.append(ctx)
+    return rounds
 
 
 def _same_identity(adapter: LiveTargetAdapter, identity: IdentityAttestation, policy: ProvePolicy,
@@ -1091,7 +1220,39 @@ def _verify_differential_remediated(cert: dict) -> tuple[bool, str]:
                            "sub-threshold leak) — NOT a genuine channel closure, so NOT a sound REMEDIATED")
         if not differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired:
             return False, "WAF-closure re-check failed (a metachar decoy diverged from baseline)"
+    # TRUNCATION re-check (red-pen R2 BLOCK, mirrors the mint gate): closure cannot be attributed over a body
+    # captured at the truncation cap — demote a REMEDIATED cert whose judged rounds are truncated.
+    if _rounds_truncated(rounds):
+        return False, ("a judged response body was truncated at the capture cap — channel-closure cannot be "
+                       "attributed over a bounded observation window (a leak in the tail would be invisible)")
+    # R2 — if the cert claims ORIGIN_CONFIRMED (the a-sanitize residual closed by a direct-to-origin re-drive),
+    # the verifier MUST re-execute the origin rounds too (R1b lesson: a mint-side upgrade unmirrored at
+    # re-execution means the firewall cannot demote a FALSE origin_confirmed). Same three checks as the edge
+    # rounds, over the retained origin-re-drive bytes. A missing/failing origin claim is rejected, never ignored.
+    # Key on the CLAIM shape (truthy `origin_confirmed` OR `origin_redrive=="confirmed"`), so a tampered cert
+    # cannot dodge re-execution with a truthy non-bool flag (re-check #1 robustness note).
+    if bool(ev.get("origin_confirmed")) or ev.get("origin_redrive") == "confirmed":
+        origin_rounds = ev.get("origin_rounds")
+        if not isinstance(origin_rounds, list) or not origin_rounds:
+            return False, "origin_confirmed asserted but no origin_rounds to re-execute"
+        osig = boolean_inference_oracle(origin_rounds, discriminator=bool_disc)
+        if not (str((osig.observed or {}).get("decision") or "") == "refute" and osig.conclusive):
+            return False, "origin_confirmed but the origin rounds do not re-execute to a decisive SPRT refute"
+        for r in origin_rounds:
+            if not (isinstance(r, dict) and "baseline" in r and "false_a" in r and "true" in r):
+                return False, "an origin round is missing baseline/false_a/true for the origin re-check"
+            if differential_response_oracle(r.get("false_a"), r.get("true"), _ATTRIBUTION_DISC).fired:
+                return False, ("origin_confirmed but the ORIGIN channel is still OPEN (true separates from "
+                               "false_a at zero tolerance, direct-to-origin) — the origin is still vulnerable")
+            if not differential_response_oracle(r.get("baseline"), r.get("false_a"), closure_disc).fired:
+                return False, "origin_confirmed but the origin WAF-closure re-check failed"
+        if _rounds_truncated(origin_rounds):
+            return False, ("origin_confirmed but an origin response body was truncated at the capture cap — the "
+                           "origin closure cannot be attributed over a bounded observation window")
+        return True, ("REMEDIATED (differential, ORIGIN_CONFIRMED): edge AND direct-to-origin re-drive both "
+                      "re-refute decisively with channel-closure attributed — a sanitizing/virtual-patching edge "
+                      "is ruled out for this finding")
     return True, ("REMEDIATED (differential): signed + SPRT re-refutes decisively + channel-closure attributed "
                   "(across=False, zero tolerance) + WAF-closure re-holds — origin_reached ONLY (a blocking WAF "
                   "is ruled out); the sanitizing-interposer residual (a-sanitize) is disclosed, NOT a "
-                  "clean-code-fix claim")
+                  "clean-code-fix claim (edge-only)")

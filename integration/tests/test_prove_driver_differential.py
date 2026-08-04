@@ -133,6 +133,15 @@ BLOCK200 = R(200, "<html><body>Request blocked by WAF</body></html>")
 BLOCK200_ROUND = _round(BLOCK200, BLOCK200, BLOCK200, NORMAL)
 
 
+def _RT(body: str) -> dict:                     # a probe body captured at the truncation cap (a prefix only)
+    return {"status": 200, "body": body, "truncated": True}
+
+
+# a round whose observed prefixes are IDENTICAL (would be REMEDIATED in-window) but every body was TRUNCATED —
+# a boolean leak in the untruncated tail would be invisible, so closure cannot be attributed (red-pen R2 BLOCK).
+TRUNCATED_ROUND = _round(_RT("<baseline/>"), _RT("<baseline/>"), _RT("<baseline/>"), _RT("<baseline/>"))
+
+
 class FakeDifferentialAdapter:
     """A configurable differential ``LiveTargetAdapter``. ``rounds`` are emitted per trial (cyclically); the
     positive control returns RETAINED confirming rounds so the SAME boolean oracle still CONFIRMS. Knobs drive
@@ -237,7 +246,10 @@ def test_case4_sanitizing_waf_remediated_carries_origin_reached_only_not_clean_f
     ev = out.certificate["evidence"]["differential"]
     assert ev["origin_reached"] is True
     assert "sanitiz" in ev["residual_disclosure"].lower()          # the (a-sanitize) residual is surfaced
-    assert "as observed through this edge" in out.detail.lower()   # not presented as a clean code fix
+    assert "as observed through this edge" in ev["residual_disclosure"].lower()   # not a clean code fix
+    # with NO origin re-drive configured (R2), the verdict is honestly EDGE-ONLY — a-sanitize residual OPEN.
+    assert ev["origin_confirmed"] is False and ev["origin_redrive"] == "not_attempted"
+    assert "edge-only" in out.detail.lower()
     # the cert asserts NOTHING stronger than origin_reached — no "clean_fix"/"code_fixed" claim field exists
     assert "clean_fix" not in ev and "code_fixed" not in ev
 
@@ -273,6 +285,15 @@ def test_subthreshold_boolean_channel_is_not_remediated():
     out = _run(FakeDifferentialAdapter(rounds=SUBTHRESHOLD_ROUNDS))
     assert out.state != State.REMEDIATED, out
     assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.CHANNEL_NOISE_UNATTRIBUTABLE, out
+
+
+def test_truncated_observation_is_not_remediated():
+    # RED-PEN R2 BLOCK-1 — a >8 KB response captured at the truncation cap: even if the observed prefixes are
+    # identical (across=False IN-WINDOW), a boolean leak in the untruncated TAIL is invisible, so channel-closure
+    # cannot be attributed over a bounded window → INCONCLUSIVE / OBSERVATION_TRUNCATED, NEVER REMEDIATED.
+    out = _run(FakeDifferentialAdapter(rounds=[TRUNCATED_ROUND, TRUNCATED_ROUND, TRUNCATED_ROUND]))
+    assert out.state != State.REMEDIATED, out
+    assert out.state == State.INCONCLUSIVE and out.reason_code == Reason.OBSERVATION_TRUNCATED, out
 
 
 def test_verifier_demotes_a_signed_across_true_remediated_cert():
@@ -429,6 +450,7 @@ class _Origin(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):  # noqa: N802
+        self.server.hits += 1                        # count connections that actually landed (scope-gate proof)
         q = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         qv = (q.get("q") or [""])[0]
         rc = (q.get("rc") or [""])[0]
@@ -436,8 +458,14 @@ class _Origin(BaseHTTPRequestHandler):
         # (1=2) and the benign baseline do not. A FIXED origin ignores the injection entirely. The response
         # reflects ONLY the rc nonce (freshness) — NEVER the q payload — mirroring a real app's output channel.
         leaks = self.server.vulnerable and ("1=1" in qv) and ("1=2" not in qv)
-        rows = '[{"id": 1, "leak": "HASHLEAK"}]' if leaks else "[]"
-        raw = ('{"results": %s, "echo": "%s"}' % (rows, rc)).encode("utf-8")
+        if self.server.big_tail:
+            # a >8 KB response whose boolean leak lands in the TAIL (past the 8 KiB capture cap). The rc nonce is
+            # in the head (so freshness echoes); the leak marker `z` is past ~9 KB of padding → truncated away.
+            body = '{"echo":"%s","pad":"%s","z":"%s"}' % (rc, "A" * 9000, ("LEAK" if leaks else "____"))
+        else:
+            rows = '[{"id": 1, "leak": "HASHLEAK"}]' if leaks else "[]"
+            body = '{"results": %s, "echo": "%s"}' % (rows, rc)
+        raw = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
@@ -450,9 +478,11 @@ class _OriginServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def _start_origin(*, vulnerable: bool) -> _OriginServer:
-    srv = _OriginServer(("127.0.0.1", 0), _Origin)
+def _start_origin(*, vulnerable: bool, big_tail: bool = False, host: str = "127.0.0.1") -> _OriginServer:
+    srv = _OriginServer((host, 0), _Origin)
     srv.vulnerable = vulnerable  # type: ignore[attr-defined]
+    srv.big_tail = big_tail      # type: ignore[attr-defined]
+    srv.hits = 0                 # type: ignore[attr-defined]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -514,3 +544,128 @@ def test_real_adapter_vulnerable_origin_is_still_vulnerable(real_gated):
         assert out.state != State.REMEDIATED
     finally:
         srv.shutdown(); srv.server_close()
+
+
+# ============================ R2 — direct-to-origin re-drive (closes the a-sanitize residual) ================
+def _real_origin_adapter(edge_url: str, *, origin_ip: str, origin_port: int) -> DifferentialHttpAdapter:
+    """A real adapter whose EDGE is ``edge_url`` and whose direct-to-origin re-drive targets ``origin_ip:port``
+    with the Host pinned to the loopback (the origin server ignores Host; the scope gate matches the URL host)."""
+    from framework.v2.agents import HttpExecutor
+    executor = HttpExecutor(engagement_slug=_REAL_ENG, base_url=edge_url, prompt_callback=lambda *_a: False)
+    return DifferentialHttpAdapter(
+        executor=executor, base_url=edge_url, endpoint_path="/search", param="q", nonce_param="rc",
+        base_value="1", true_payload_template="1' AND 1=1 -- {challenge}",
+        false_payload_template="1' AND 1=2 -- {challenge}", original_firing_rounds=CONFIRM_ROUNDS,
+        engagement=_REAL_ENG, origin_ip=origin_ip, origin_port=origin_port, origin_host="127.0.0.1")
+
+
+def test_r2_sanitizing_edge_over_vulnerable_origin_is_demoted(real_gated):
+    # THE R2 HEADLINE: the EDGE sanitizes (all probes inert → the edge path refutes → REMEDIATED-at-edge), but
+    # the ORIGIN behind it is still vulnerable → the direct-to-origin re-drive (Host pinned, edge bypassed) FIRES
+    # → DEMOTE to STILL_VULNERABLE. R2 catches the sanitizer the edge-only path (a-sanitize residual) could not.
+    edge = _start_origin(vulnerable=False)          # a sanitizing edge: baseline for everything
+    origin = _start_origin(vulnerable=True)         # the still-vulnerable origin behind it
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.1",
+                                             origin_port=origin.server_address[1]))
+        assert out.state == State.STILL_VULNERABLE and out.reason_code == Reason.ORACLE_FIRED, out
+        assert out.state != State.REMEDIATED
+        assert out.certificate["evidence"]["differential"]["origin_redrive"] == "fired"
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_clean_origin_is_origin_confirmed_remediated(real_gated):
+    # both the edge and the origin are clean → the direct-to-origin re-drive stays silent + closed →
+    # origin_confirmed REMEDIATED (the a-sanitize residual is RULED OUT for this finding). The signed cert
+    # re-executes INCLUDING the origin rounds (the origin upgrade is mirrored at re-execution).
+    edge = _start_origin(vulnerable=False)
+    origin = _start_origin(vulnerable=False)
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.1",
+                                             origin_port=origin.server_address[1]))
+        assert out.state == State.REMEDIATED, out
+        ev = out.certificate["evidence"]["differential"]
+        assert ev["origin_confirmed"] is True and ev["origin_redrive"] == "confirmed", ev
+        assert isinstance(ev.get("origin_rounds"), list) and ev["origin_rounds"]
+        # BLOCK-2: origin_confirmed rules out a sanitizing EDGE but NOT the forgeable/bounded response channel —
+        # the byte-forgery + observation-window frontier must STILL be disclosed (not a clean bill of health).
+        rd = ev["residual_disclosure"].lower()
+        assert "byte-forgery" in rd and "observation" in rd, rd
+        ok, reason = verify_prove_certificate(out.certificate, signer_pubkeys=PUBKEYS)
+        assert ok and "origin_confirmed" in reason.lower(), reason
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_origin_leak_past_capture_cap_is_not_origin_confirmed(real_gated):
+    # RED-PEN R2 BLOCK-1 end-to-end — the ORIGIN returns a >8 KB body whose boolean leak is in the TAIL (past the
+    # 8 KiB capture cap). The executor flags the body truncated → the driver REFUSES origin_confirmed (edge-only),
+    # never a false "a-sanitize ruled out" over a still-leaking origin. Exercises the executor→adapter→driver flag.
+    edge = _start_origin(vulnerable=False)
+    origin = _start_origin(vulnerable=True, big_tail=True)      # leaks past the capture window
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.1",
+                                             origin_port=origin.server_address[1]))
+        # never origin_confirmed: either edge-only REMEDIATED (origin truncated → inconclusive) or, if the leak
+        # were visible in-window, STILL_VULNERABLE. In NO case a false a-sanitize-ruled-out.
+        if out.state == State.REMEDIATED:
+            assert out.certificate["evidence"]["differential"]["origin_confirmed"] is False, out
+        else:
+            assert out.state == State.STILL_VULNERABLE, out
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_reachable_out_of_scope_origin_is_refused_by_the_gate(real_gated):
+    # FINDING-3 — the true scope control: a REACHABLE origin on 127.0.0.2 that the charter does NOT scope (it
+    # lists only 127.0.0.1). The gate must REFUSE the origin re-drive (0 connections landed), not merely time out
+    # → edge-only REMEDIATED. Distinguishes a scope refusal from an unreachable-IP timeout.
+    edge = _start_origin(vulnerable=False)
+    origin = _start_origin(vulnerable=True, host="127.0.0.2")   # reachable, but OUT of charter scope
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="127.0.0.2",
+                                             origin_port=origin.server_address[1]))
+        assert out.state == State.REMEDIATED, out
+        ev = out.certificate["evidence"]["differential"]
+        assert ev["origin_confirmed"] is False and ev["origin_redrive"] == "unavailable", ev
+        assert origin.hits == 0, f"scope gate leaked {origin.hits} connections to an out-of-scope origin"
+    finally:
+        edge.shutdown(); edge.server_close(); origin.shutdown(); origin.server_close()
+
+
+def test_r2_origin_out_of_scope_stays_edge_only(real_gated):
+    # the origin IP is NOT in the charter scope → the scope gate REFUSES the origin re-drive → edge-only
+    # REMEDIATED with the a-sanitize residual STILL OPEN. R2 fail-closes; it NEVER bypasses the gate to reach a
+    # raw IP. (203.0.113.7 is TEST-NET-3 documentation space, not in scope — the gate refuses before any send.)
+    edge = _start_origin(vulnerable=False)
+    try:
+        edge_url = f"http://127.0.0.1:{edge.server_address[1]}/"
+        out = _run_real(_real_origin_adapter(edge_url, origin_ip="203.0.113.7", origin_port=80))
+        assert out.state == State.REMEDIATED, out
+        ev = out.certificate["evidence"]["differential"]
+        assert ev["origin_confirmed"] is False and ev["origin_redrive"] == "unavailable", ev
+        assert "sanitiz" in ev["residual_disclosure"].lower()      # residual still open
+    finally:
+        edge.shutdown(); edge.server_close()
+
+
+def test_verifier_demotes_a_false_origin_confirmed_cert():
+    # R2 + R1b lesson — a signed cert claiming origin_confirmed whose ORIGIN rounds actually FIRE (across=True)
+    # MUST be demoted by the offline verifier (the origin upgrade is re-executed, invariant 3: only demote).
+    out = _run(FakeDifferentialAdapter(rounds=[SILENT_ROUND, SILENT_ROUND, SILENT_ROUND]))
+    assert out.state == State.REMEDIATED
+    cert = out.certificate
+    tampered = {k: v for k, v in cert.items() if k != "signer"}
+    diff = {**tampered["evidence"]["differential"], "origin_confirmed": True, "origin_redrive": "confirmed",
+            "origin_rounds": NOISY_VULN_ROUNDS}                    # a still-firing origin (across=True)
+    tampered = {**tampered, "evidence": {**tampered["evidence"], "differential": diff}}
+    tampered["signer"] = {"key_id": "gov0",
+                          "signature": sign(OWNER.private_key_b64, _cert_signing_bytes(tampered))}
+    ok, reason = verify_prove_certificate(tampered, signer_pubkeys=PUBKEYS)
+    assert not ok, f"verifier trusted a false origin_confirmed over a firing origin: {reason}"
+    assert "origin" in reason.lower()

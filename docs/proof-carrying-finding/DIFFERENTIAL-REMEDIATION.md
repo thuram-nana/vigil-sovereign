@@ -173,7 +173,23 @@ For **REMEDIATED**, F2 stays unattainable regardless (a fixed sink is not traver
   is **mitigated-by-edge, not fixed-in-code** — a scope question (is the sanitizer part of the system-under-test,
   and permanent?). The cert MUST NOT present it as a clean fix beyond what `origin_reached` literally asserts;
   distinguishing it needs an origin-side observation the response channel cannot provide (side-effect / OOB
-  Tier-2 / direct-to-origin re-drive bypassing the edge). **Definitionally identical (same content-equalized
+  Tier-2 / direct-to-origin re-drive bypassing the edge). **[R2 — now NARROWED, not merely disclosed]** the
+  **direct-to-origin re-drive** is BUILT: the SAME matched-decoy round is re-driven at the origin IP with the
+  `Host` pinned (edge bypassed), through the SAME gated executor. If the boolean channel FIRES direct-to-origin →
+  **STILL_VULNERABLE** (the edge sanitized it — the residual is caught, not just disclosed); if it stays silent +
+  closed → the cert upgrades to **`origin_confirmed`** (a-sanitize ruled out for this finding), and the offline
+  verifier RE-EXECUTES the origin rounds to keep that claim honest. **Still open (fail-closed to edge-only / never claimed):** the
+  origin IP must be **in the charter scope and directly reachable** (R2 never bypasses the scope gate to reach a
+  raw IP); PR1 is **plaintext-HTTP only** (an HTTPS origin needs IP-connect-with-hostname-SNI, a later slice);
+  the attribution is over the **captured response excerpt (8 KiB cap)** — a boolean leak in the untruncated tail
+  of a larger response is invisible, so a **truncated** observation yields INCONCLUSIVE (edge) / edge-only
+  (origin), never REMEDIATED (red-pen R2 BLOCK, gated at mint AND re-execution by the executor's `truncated`
+  flag). **Capability cost of that gate:** a *genuine* clean fix on any response **larger than 8 KiB** is
+  therefore also INCONCLUSIVE/`OBSERVATION_TRUNCATED` — a sound safe over-approximation, not a false all-clear;
+  the long-term lift is capturing the **full body** for differential probes (this use) instead of the 8 KiB
+  excerpt, so a large genuine fix stays provable. And `origin_confirmed` rules out a *sanitizing edge* but
+  **not** producer byte-forgery of the origin's own responses, a blind time-based/OOB channel, or a leak carried
+  only in response **headers** — it asserts closure of the observed **body+status content** channel only. **Definitionally identical (same content-equalized
   observation):** a boolean-blind sink "fixed" only by equalizing the *content* responses while the parameter
   stays injectable via a **time-based blind or OOB** channel — the content differential measures `{status, body}`
   only, so it reads REMEDIATED. Same disclosed bucket: REMEDIATED asserts closure of the *content* channel it

@@ -64,6 +64,11 @@ _BOOLEAN_INFERENCE_CHANNEL = "boolean_inference"
 _BOOLEAN_DISCRIMINATOR = {"dimensions": ["status", "length", "lexical"]}
 _CLOSURE_DISCRIMINATOR = {"dimensions": ["status", "structural"], "expect": "same"}
 
+# Fallback truncation proxy (chars) when the executor does not report ``truncated`` — mirrors the framework's
+# HttpExecutor._BODY_EXCERPT_BYTES (8 KiB). The AUTHORITATIVE signal is the executor's ``truncated`` flag; this
+# conservative proxy only over-triggers (→ INCONCLUSIVE, the safe direction), it never misses a flagged truncation.
+_BODY_EXCERPT_CAP = 8 * 1024
+
 
 @dataclass(frozen=True)
 class _HttpRequest:
@@ -114,6 +119,17 @@ class DifferentialHttpAdapter:
     # ``oracle_family == "boolean_inference"``).
     differential_channel: bool = True
     engagement: str = ""
+
+    # --- R2 direct-to-origin re-drive (closes the a-sanitize residual) -------------------------------------
+    # When ``origin_ip`` is set the adapter can ALSO re-drive the SAME matched-decoy round DIRECTLY at the
+    # origin — connecting to the origin IP with the ``Host`` header PINNED to the target hostname — to bypass a
+    # sanitizing/virtual-patching EDGE. PLAINTEXT HTTP only in PR1 (HTTPS origin-SNI is a later slice). The
+    # re-drive is STILL a ``gated_fetch``: it passes ONLY if the charter scopes the origin IP (the scope gate
+    # matches an IP literal against an IP scope entry) — otherwise it fails closed to edge-only, NEVER bypassing
+    # the gate to reach a raw IP.
+    origin_ip: str = ""
+    origin_host: str = ""          # the Host header to pin; defaults to the target hostname (``_host``)
+    origin_port: int = 0           # 0 → 80 (plaintext); the origin's HTTP port
 
     _host: str = field(init=False, default="")
     _slug: str = field(init=False, default="")
@@ -232,13 +248,35 @@ class DifferentialHttpAdapter:
         return {"bug_class": self.bug_class, "probe_rounds": [dict(r) for r in self.original_firing_rounds],
                 "discriminator": dict(_BOOLEAN_DISCRIMINATOR)}
 
+    @property
+    def origin_redrive_available(self) -> bool:
+        """True iff a direct-to-origin re-drive is CONFIGURED (an origin IP is set). The driver only ATTEMPTS
+        the R2 leg when this holds; whether it SUCCEEDS still depends on the scope gate admitting that IP."""
+        return bool(self.origin_ip)
+
     # ---- exploit trial: build + gated-fetch the matched-decoy round --------------------------------
     def run_exploit_trial(self, *, challenge: str, trial_index: int,
                           auth: EffectiveAuthorization) -> TrialObservation:
-        """Build the four matched-decoy probes from the ``clause_template``, gated-fetch each through the
-        injectable ``param``, and assemble the ``boolean_inference_oracle`` round. FAIL-CLOSED: any probe that
-        is undelivered (gate refusal / transport failure / empty status) makes the WHOLE round ``valid=False``
-        so the driver fails the run closed (never a silently-dropped probe)."""
+        """The EDGE-observed matched-decoy round (through the target hostname / any interposing edge)."""
+        return self._drive_round(challenge=challenge, trial_index=trial_index, origin=False)
+
+    def run_origin_trial(self, *, challenge: str, trial_index: int,
+                         auth: EffectiveAuthorization) -> TrialObservation:
+        """R2 — the SAME matched-decoy round re-driven DIRECTLY at the origin IP (``Host`` pinned), bypassing a
+        sanitizing edge. Same fail-closed contract as the edge trial; when no origin is configured, or the scope
+        gate refuses the IP, or the origin is unreachable, the round comes back ``valid=False`` — which the
+        driver reads as "origin re-drive UNAVAILABLE" (→ edge-only REMEDIATED, residual open), NEVER as a
+        fabricated origin silence."""
+        if not self.origin_redrive_available:
+            return TrialObservation(reachable=False, valid=False, oracle_context=None,
+                                    invalid_reason="no origin_ip configured — direct-to-origin re-drive unavailable")
+        return self._drive_round(challenge=challenge, trial_index=trial_index, origin=True)
+
+    def _drive_round(self, *, challenge: str, trial_index: int, origin: bool) -> TrialObservation:
+        """Build the four matched-decoy probes and gated-fetch each — through the edge, or DIRECT-to-origin when
+        ``origin`` — assembling the ``boolean_inference_oracle`` round. FAIL-CLOSED: any probe that is
+        undelivered (gate refusal / transport failure / empty status) makes the WHOLE round ``valid=False`` so
+        the driver fails the run closed (never a silently-dropped probe)."""
         marker_b = self._marker_b(challenge)
         probes = {
             "baseline": self._baseline_value(challenge),
@@ -246,24 +284,34 @@ class DifferentialHttpAdapter:
             "false_a": self.false_payload_template.replace("{challenge}", challenge),
             "false_b": self.false_payload_template.replace("{challenge}", marker_b),
         }
+        via = "origin" if origin else "edge"
         responses: dict[str, dict] = {}
         for name, value in probes.items():
-            req = _HttpRequest(url=self._probe_url(value, challenge), method="GET")
+            req = self._probe_request(value, challenge, origin=origin)
             try:
                 resp = self.executor.gated_fetch(req)
             except Exception as exc:  # noqa: BLE001 — a transport/executor crash → the round is invalid
                 return TrialObservation(reachable=False, valid=False, oracle_context=None,
-                                        invalid_reason=f"{name} probe send crashed: {exc}",
-                                        detail=f"{name} probe send crashed")
+                                        invalid_reason=f"{via} {name} probe send crashed: {exc}",
+                                        detail=f"{via} {name} probe send crashed")
             status = (resp or {}).get("status")
             if status in (0, None):
                 # A gate refusal or transport failure on ANY of the four probes makes the matched decoy
-                # uninterpretable — fail the whole round closed (§4.4), never partial.
+                # uninterpretable — fail the whole round closed (§4.4), never partial. For the ORIGIN leg this
+                # is exactly the "origin unreachable / IP out of charter scope" case → edge-only, residual open.
                 return TrialObservation(reachable=False, valid=False, oracle_context=None,
-                                        invalid_reason=f"{name} probe not answered: "
+                                        invalid_reason=f"{via} {name} probe not answered: "
                                                        f"{str((resp or {}).get('refused') or status)}",
-                                        detail=f"{name} probe not answered")
-            responses[name] = {"status": int(status), "body": str((resp or {}).get("body") or "")}
+                                        detail=f"{via} {name} probe not answered")
+            body = str((resp or {}).get("body") or "")
+            # ``truncated`` (authoritative from the executor: the full body exceeded the capture cap) — a
+            # differential closure attribution over a truncated body is UNSOUND (a leak past the cap is invisible).
+            # The executor flag is AUTHORITATIVE when present (a byte-length compare that catches multibyte bodies
+            # the char proxy would miss, and does NOT over-flag a full 8192-byte capture). Fall back to the
+            # conservative excerpt-length proxy ONLY when the executor did not report the flag at all.
+            flag = (resp or {}).get("truncated")
+            truncated = bool(flag) if flag is not None else (len(body) >= _BODY_EXCERPT_CAP)
+            responses[name] = {"status": int(status), "body": body, "truncated": truncated}
 
         round_ctx: dict[str, Any] = {
             "true": responses["true"], "false_a": responses["false_a"],
@@ -278,7 +326,22 @@ class DifferentialHttpAdapter:
         echoed = challenge in responses["baseline"]["body"] or challenge in responses["false_a"]["body"]
         return TrialObservation(reachable=True, valid=True, oracle_context=round_ctx,
                                 freshness_level=Freshness.F1_TARGET_ECHOES, nonce_echoed=echoed,
-                                detail=f"differential round {trial_index}: 4/4 matched-decoy probes delivered")
+                                detail=f"{via} differential round {trial_index}: 4/4 matched-decoy probes delivered")
+
+    def _probe_request(self, value: str, challenge: str, *, origin: bool) -> _HttpRequest:
+        """The gated request for one probe. EDGE: the target hostname URL, no extra headers. ORIGIN (R2): the
+        origin-IP URL over plaintext HTTP with the ``Host`` header PINNED to the target hostname, so the send
+        reaches the origin directly while the app still routes on Host. The scope gate validates the URL host,
+        so the origin re-drive is admitted ONLY when the charter scopes the origin IP (else gated_fetch refuses
+        → the round is invalid → edge-only). The Host header is passed through untouched by gated_fetch."""
+        if not origin:
+            return _HttpRequest(url=self._probe_url(value, challenge), method="GET")
+        path = "/" + self.endpoint_path.lstrip("/")
+        query = urlencode(sorted({self.param: value, self.nonce_param: challenge}.items()))
+        port = self.origin_port or 80
+        netloc = f"{self.origin_ip}:{port}" if port != 80 else self.origin_ip
+        host = self.origin_host or self._host
+        return _HttpRequest(url=f"http://{netloc}{path}?{query}", method="GET", headers=(("Host", host),))
 
     # ---- helpers -----------------------------------------------------------------------------------
     @staticmethod
