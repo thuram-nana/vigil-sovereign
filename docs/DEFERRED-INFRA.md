@@ -42,18 +42,27 @@ nodes/edges via `project_from_spine(events, partition=...)`:
 
 Use it today via `open_graph_store(base_dir)`.
 
-### [SCAFFOLD] gated: a running property-graph database (Neo4j)
-`Neo4jGraphStore` exists behind the **same interface** but every method raises `NotImplementedError`.
+### [BUILT client body — deploy-gated] a running property-graph database (Neo4j) — H2
+`Neo4jGraphStore` is now a **real, reviewable client body** behind the **same interface** (TRUTHENOVATION
+H2). `project_from_spine` / `nodes` / `edges` / `drop_partition` / `partitions` issue idempotent
+`MERGE` / `DETACH DELETE` Cypher over the SAME pure `project_events` core the embedded store uses, scoped by
+a per-partition label (module-level `_tx_rebuild` / `_tx_nodes` / `_tx_edges` transaction bodies). Its
+SHAPE is covered over a fake driver in `framework/v2/graph/tests/test_neo4j_client_body.py`; the pure
+projection stays covered by the embedded test.
 
-**Activate when a Neo4j (or bolt-compatible) service is provisioned:**
+**What is still gated (the honest *deploy* residual):** the `neo4j` driver package and a running Neo4j
+service are **both ABSENT** in this environment. Constructing a LIVE store (no injected driver) imports
+`neo4j` lazily and raises a clear `NotImplementedError` until installed; the live parity test
+(`test_live_neo4j_round_trip`) is behind a **LOUD skip**.
+
+**Activate (deploy) when a Neo4j — or bolt-compatible — service is provisioned:**
 1. Provision Neo4j; export `NEO4J_URI` / `NEO4J_AUTH`.
 2. `pip install neo4j` into the offense venv.
-3. Implement the three stub bodies with idempotent `MERGE` Cypher, reusing the pure `project_events`
-   core verbatim. Scope each partition with a label so `drop_partition` is
-   `MATCH (n:`part_<partition>`) DETACH DELETE n`.
-4. Swap the call-site factory from `EmbeddedGraphStore` to `Neo4jGraphStore` — no other call-site edits.
-5. The one-way invariant is unchanged: still projection-only, still no authority surface, still never
-   touches the spine.
+3. `open_graph_store` stays the default (embedded); switch a call site to
+   `Neo4jGraphStore(os.environ["NEO4J_URI"], auth=(...))` — no other call-site edits. Set `NEO4J_URI` and
+   run the loud-skipped `test_live_neo4j_round_trip` to confirm on-service parity.
+4. The one-way invariant is unchanged: still projection-only, still no authority surface, still never
+   touches the spine (`drop_partition` is `MATCH (n:`part_<partition>`) DETACH DELETE n`).
 
 ---
 
@@ -150,3 +159,58 @@ contract; it already routes actions through the conjunctive gate.
 2. In `gate`, delegate to the **actual** gate-of-record (never decide authorization in the body).
 3. Keep `run_cycle` (or, if overriding, preserve gate-before-execute) so the invariant is inherited.
 4. Do not add any fact-minting / tier-granting to the body — the oracle remains sole authority.
+
+---
+
+## H3 — field record (recall on diverse real targets)
+
+**Runbook:** `docs/H3-FIELD-RECORD-RUNBOOK.md`
+**Harness:** `engine/crucible/framework/v2/eval/recall_baseline.py` (+ `eval/gate.py`, CI-gated)
+
+### [BUILT] now — the mechanism, NOT the record
+The M1 recall harness measures the **deterministic scanner's** recall/precision/FN on a **planted loopback
+corpus** — a signed, byte-reproducible, offline-verifiable accuracy-core baseline with a recall-floor gate.
+The accrual runbook defines the exact bar an engagement must clear to count as a field-record entry
+(authorized + in-scope, real external target, oracle-confirmed, independently re-verifiable via an H4
+package, misses counted, PII-minimized).
+
+### [social-gated] the field record itself
+A genuine field record — VIGIL finding real bugs on **diverse authorized real targets** — **accrues only
+over real authorized engagements**. It is **not manufacturable in a lab**, and this repo does **not** claim
+one exists. Until entries accrue, the honest state is: deterministic-scanner recall is MEASURED (M1) on a
+*planted* corpus; LLM-`engage` recall on diverse real targets is the **open piece**. Accrue entries per the
+runbook; state the field record and the planted-corpus number **separately** (they measure different
+things); never word an accruing record as completeness.
+
+---
+
+## H4 — reproducible external-audit package
+
+**Module:** `engine/crucible/framework/v2/evidence/audit_package.py`
+(standalone verifier: `evidence/audit_offline_verifier.py`, shipped as `verify_offline.py`)
+**Tests:** `framework/v2/evidence/tests/test_audit_package.py`
+
+### [BUILT] now
+`build_audit_package` / `write_package` assemble a **self-contained** external-audit package from
+oracle-confirmed findings, reusing the evidence layer verbatim (`build_certificate` / `sign_certificate` /
+`build_chain` / `sign_head`) — no new crypto. The package bundles the signed evidence
+(`evidence-bundle.json` + `contexts.json` + `trust-root.json` + `TRUST-ROOT-FINGERPRINT.txt` +
+`reverifiable.json`), the raw executor-captured `evidence/` tree, the scope/charter, a runbook
+(`RUNBOOK.md`), and a **standalone `verify_offline.py`** that imports **nothing from `framework`/`vigil`**
+(stdlib + `cryptography` only). An external team re-verifies OFFLINE:
+
+    python3 verify_offline.py --package . --trust-root-fingerprint <fingerprint pinned OUT-OF-BAND>
+
+Exit 0 iff every certificate is authentic (m-of-n Ed25519), bound (oracle_context ↔ digest), its raw
+artifacts re-hash, and the chain anchors the exact certificate set. A single flipped byte anywhere → NOT
+SOUND (the tests exercise flipped signature, altered oracle_context, mutated artifact, deleted chain entry,
+wrong fingerprint pin).
+
+### the honest residual
+1. **Reproduction is deploy-external, not standalone.** `verify_offline.py` proves authenticity + binding +
+   integrity + chain with **no VIGIL runtime**; it does NOT re-fire the oracle to re-derive each verdict
+   (that needs the oracle's code — the open-source VIGIL verifier `python3 -m framework.v2 evidence verify`,
+   documented as Step 2 in the package runbook). So after Step 1 you still trust the signer's honesty about
+   each verdict; Step 2 removes that.
+2. **The audit itself needs an external team.** We **prepare** a reproducible package; VIGIL cannot **be**
+   the independent third party. That conclusion is the auditor's to write.

@@ -42,8 +42,10 @@ from .certify import (
     verify_certificate,
 )
 from .chain import append_entry, build_chain, sign_head, verify_chain, verify_head
+from .audit_package import build_audit_package, write_package
 
 __all__ = [
+    "build_audit_package", "write_package",
     "canonical_json", "digest_payload", "evidence_signing_bytes", "sha256_hex",
     "ArtifactRef", "EvidenceCertificate", "SignedEvidence", "ChainEntry", "SignedChainHead",
     "PathCertificate", "PathStep",
