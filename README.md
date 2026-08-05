@@ -183,13 +183,20 @@ flowchart TB
       EGRESS{{"Egress gate<br/>deny-by-default, pinned to the target only"}}
       EXEC["Governed tool executor<br/>nmap · httpx · sqlmap · …"]
       TARGET[/"Authorized target<br/>e.g. 127.0.0.1 loopback"/]
-      ORACLE[["Deterministic oracle<br/>re-proves over the REAL output<br/>the ONLY thing that mints a FACT"]]
+      ORACLE[["Deterministic oracle (~33 kinds)<br/>re-proves over the REAL output<br/>the ONLY thing that mints a FACT"]]
       DET["Detection Mirror<br/>proves the attack from the target's own logs"]
-      SPINE[("Signed, append-only spine / record<br/>Ed25519 hash-chain")]
+      SPINE[("Signed, append-only spine / record<br/>Ed25519 hash-chain + anti-rollback")]
+    end
+
+    subgraph PROOF["PROOF · REMEDIATION · ASSURANCE — every fact carried the rest of the way"]
+      direction TB
+      EVID["Offline-verifiable evidence cert<br/>transparency log + SCITT / OpenVEX"]
+      REMED["Remediation + continuous re-proof<br/>prove-driver: REMEDIATED / STILL-VULN<br/>re-fires the SAME oracle over fresh bytes"]
+      ASSURE["Witnessed + externally time-anchored<br/>quorum co-sign · RFC 3161 · channel-binding"]
+      AUDIT["Portable audit package<br/>a third party re-verifies OFFLINE, no VIGIL"]
     end
 
     SIGIL[["SIGIL personal core<br/>offense-free · on your machine · under your key"]]
-    EVID["Offline-verifiable evidence<br/>transparency log + SCITT-style / OpenVEX certificates"]
 
     OP --> ATTEST --> THINK --> GATE
     GATE -- "allow / owner-approved" --> EGRESS --> EXEC --> TARGET
@@ -199,7 +206,10 @@ flowchart TB
     ORACLE -- "unconfirmed ⇒ honest LEAD" --> SPINE
     TARGET -- "access / auth logs" --> DET --> SPINE
     SPINE -. "loop: next proposal" .-> THINK
-    SPINE --> EVID
+    SPINE --> EVID --> AUDIT
+    SPINE --> REMED
+    REMED -. "re-fire over fresh bytes" .-> ORACLE
+    SPINE --> ASSURE
     SPINE == "inert, signed data only" ==> SIGIL
 ```
 
@@ -213,6 +223,11 @@ flowchart TB
 - **The oracle** re-examines that raw output and independently proves (or fails to prove) the finding. A pass becomes a **signed FACT**; anything else stays a **LEAD**.
 - **The Detection Mirror** reads the target's *own* logs and proves, defensively, what the attack looked like — pairing an **edge-plane** offensive fact (recon/injection/credential — the planes whose logs exist) with a matching detection fact; planes whose logs don't exist (C2/identity/cloud/session-phishing) are honest LEADs, not FACTs.
 - **The signed spine** records all of it, append-only. From there, evidence becomes an **offline-verifiable certificate**, and confirmed findings cross the **two-environment boundary** into your personal core as inert signed data only.
+- **Remediation & continuous re-proof** takes a confirmed FACT and, when you patch, re-fires *the same oracle* over fresh bytes to decide **REMEDIATED vs still-vulnerable** — never a "trust me, it's fixed"; the verdict is signed and can be re-proven on a cadence.
+- **Assurance** wraps the record so its soundness is externally checkable: a **witness quorum** co-signs it, an **RFC 3161** external timestamp bounds *when* it existed, and **channel-binding** ties response bytes to the real TLS session.
+- **The portable audit package** lets a third party re-verify everything **offline, with no VIGIL installed** — signatures, binding, chain, and time all re-derive from stdlib + one crypto library (re-firing the oracle is the one step that still needs VIGIL, and it says so).
+
+> Every box after the spine is deliberately explicit about what is **built and measured** versus what is a **capability** whose last mile is a hardware, service, or third-party fact — see the [deep architecture reference](docs/architecture/vigil-architecture.html) (11 layers) for the honest state of each.
 
 > 📊 **Want the deep version?** A highly-detailed, dark-theme architecture reference (11 layers plus an end-to-end overview, 158 components, every major subsystem mapped — including the full TRUTHENOVATION proof lifecycle, the operationalized-assurance/zero-trust layer, the evidence & audit substrate, and the offense/two-env control plane) lives as an interactive page at [`docs/architecture/vigil-architecture.html`](docs/architecture/vigil-architecture.html) (open in any browser) and as a print-ready [**PDF**](docs/architecture/vigil-architecture.pdf) — each diagram on its own full page.
 
