@@ -820,12 +820,173 @@ def verify_channel_binding_evidence(evidence: dict, *,
 # ---------------------------------------------------------------------------
 # 8. Bundle verification (compose everything) + CLI
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 8. PostureCertificate (the Certificate of Non-Exploitability) — standalone, VIGIL-free.
+#    Re-checks: the m-of-n governance signature over the canonical bytes + the out-of-band AUTHORIZER
+#    fingerprint pin (byte-identical to eval.benchmark_run._scorecard_fingerprint, the idiom the
+#    posture/coverage/M1 certs sign under); that posture_claims re-project byte-identically from the
+#    embedded coverage cert (a forged claim, detached from its evidence, is refused; a CLOSED with no
+#    conclusive oracle is refused); and the owner-signed target IdentityAttestation binds the certificate
+#    to the scanned target (closes target-swap).
+#    BOUNDARY (the honest residual, same as every component here): it does NOT re-fire the oracle — a
+#    CLOSED claim's "binding" tier means the signed coverage verdict is re-checked, not re-derived from
+#    raw bytes; re-firing needs VIGIL (a coverage re-run / `framework.v2 evidence verify`).
+# ---------------------------------------------------------------------------
+_IDENTITY_ATT_DOMAIN = b"vigil-identity-attestation-v1\x00"  # == vigil_core.spine_domains DOMAIN_TAGS["identity"]
+
+
+def _authorizer_fingerprint(authorizers: list) -> str:
+    """sha256 over the canonical authorizer set — byte-identical to eval.benchmark_run._scorecard_fingerprint
+    (the pin the posture/coverage/benchmark certs publish out-of-band)."""
+    return "sha256:" + sha256_hex(canonical_json(sorted(authorizers, key=lambda a: a.get("key_id", ""))))
+
+
+def _identity_core(att: dict) -> dict:
+    """Rebuild the signed core of an IdentityAttestation from its dict — byte-identical to
+    vigil_core.capability.IdentityAttestation._core()."""
+    return {
+        "schema_version": att.get("schema_version"),
+        "owner_pubkey": att.get("owner_pubkey"),
+        "engagement": att.get("engagement"),
+        "policy": {k: sorted(v) for k, v in sorted((att.get("policy") or {}).items())},
+        "not_after": att.get("not_after"),
+    }
+
+
+def _policy_wellformed(policy: Any) -> bool:
+    if not isinstance(policy, dict) or not policy:
+        return False
+    for dim, allowed in policy.items():
+        if not isinstance(dim, str) or not dim.strip():
+            return False
+        if not isinstance(allowed, list) or not allowed:
+            return False
+        if any((not isinstance(v, str)) or (not v.strip()) for v in allowed):
+            return False
+    return True
+
+
+def _verify_identity_attestation(att: dict, owner_pubkey: str, engagement: str, now: int) -> tuple[bool, str]:
+    """VIGIL-free mirror of vigil_core.capability.verify_identity_attestation (fail-closed)."""
+    if not isinstance(att, dict):
+        return False, "identity attestation missing"
+    if int(att.get("schema_version", -1)) != 1:
+        return False, f"unsupported identity schema_version {att.get('schema_version')!r}"
+    if not owner_pubkey or att.get("owner_pubkey") != owner_pubkey:
+        return False, "identity attestation is not by the pinned owner key"
+    if att.get("engagement") != engagement:
+        return False, f"identity engagement {att.get('engagement')!r} != required {engagement!r}"
+    if not _policy_wellformed(att.get("policy")):
+        return False, "identity attestation carries a malformed policy"
+    sig = att.get("sig")
+    if not sig or not isinstance(sig, str):
+        return False, "identity attestation is unsigned"
+    if not verify_one(str(owner_pubkey), _IDENTITY_ATT_DOMAIN + canonical_json(_identity_core(att)), str(sig)):
+        return False, "identity signature does not verify against the owner key"
+    if int(now) > int(att.get("not_after", 0)):
+        return False, f"identity attestation expired (now {int(now)} > not_after {att.get('not_after')})"
+    return True, "identity OK"
+
+
+def _identity_matches(policy: dict, sample: Any) -> bool:
+    """VIGIL-free mirror of vigil_core.capability.identity_matches."""
+    if not _policy_wellformed(policy) or not isinstance(sample, dict):
+        return False
+    for dim, allowed in policy.items():
+        observed = sample.get(dim)
+        if not isinstance(observed, str) or observed not in set(allowed):
+            return False
+    return True
+
+
+def _project_posture_claims(coverage_cert: dict) -> list:
+    """VIGIL-free mirror of posture.certificate.project_posture_claims (fail-closed on a false-CLOSED
+    source: a 'clean' probe with no conclusive oracle)."""
+    probes = coverage_cert.get("probes")
+    if not isinstance(probes, list):
+        raise ValueError("coverage certificate has no probes list")
+    groups: dict = {}
+    for p in probes:
+        if not isinstance(p, dict):
+            raise ValueError("malformed probe row")
+        verdict = p.get("verdict")
+        kinds = p.get("oracle_kinds_run") or []
+        if verdict == "clean" and not kinds:
+            raise ValueError("a 'clean' probe carries no oracle_kinds_run — invalid coverage certificate")
+        key = (str(p.get("surface", "")), str(p.get("param", "")), str(p.get("class", "")))
+        g = groups.setdefault(key, {"finding": 0, "clean": 0, "inconclusive": 0, "kinds": set(), "n": 0})
+        g["n"] += 1
+        if verdict in ("finding", "clean", "inconclusive"):
+            g[verdict] += 1
+        if verdict == "clean":
+            g["kinds"].update(str(k) for k in kinds)
+    claims = []
+    for (surface, param, cls), g in groups.items():
+        if g["finding"] > 0:
+            status, kinds = "OPEN", []
+        elif g["clean"] > 0:
+            status, kinds = "CLOSED", sorted(g["kinds"])
+        else:
+            status, kinds = "UNPROVEN", []
+        claims.append({"surface": surface, "param": param, "class": cls, "status": status,
+                       "verification": "binding", "evidence_oracle_kinds": kinds, "n_probes": g["n"]})
+    claims.sort(key=lambda c: (c["surface"], c["param"], c["class"]))
+    return claims
+
+
+def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: str, now: int) -> tuple[bool, str]:
+    """Standalone-verify a PostureCertificate. ``posture`` = {"certificate": {...}, "signature": {...}}.
+    Fail-closed: authenticity + pin, then coverage-projection binding, then owner target-binding."""
+    cert = posture.get("certificate") or {}
+    sig_env = posture.get("signature") or {}
+    tr = sig_env.get("trust_root") or {}
+    authz = tr.get("authorizers") or []
+    # 1. out-of-band pin over the authorizer set (REQUIRED — fail-closed, the H4 lesson)
+    fp = _authorizer_fingerprint(authz)
+    pin_s = (pin or "").strip()
+    if not pin_s:
+        return False, f"UNPINNED — supply the out-of-band posture fingerprint ({fp})"
+    want = pin_s if pin_s.startswith("sha256:") else ("sha256:" + pin_s)
+    if want.lower() != fp.lower():
+        return False, f"posture trust-root pin MISMATCH — expected {want}, got {fp}"
+    # 2. m-of-n signature over the canonical certificate bytes (+ digest-field integrity)
+    msg = canonical_json(cert)
+    want_digest = "sha256:" + sha256_hex(msg)
+    if sig_env.get("scorecard_digest") is not None and sig_env.get("scorecard_digest") != want_digest:
+        return False, "posture certificate digest field does not match the canonical bytes"
+    ok, valid, reason = verify_threshold(msg, sig_env.get("signatures") or [], tr)
+    if not ok:
+        return False, f"posture signature: {reason}"
+    # 3. coverage-projection binding (claims cannot drift from their evidence; no false CLOSED)
+    try:
+        rederived = _project_posture_claims(cert.get("coverage") or {})
+    except ValueError as e:
+        return False, f"posture coverage invalid: {e}"
+    if rederived != cert.get("posture_claims"):
+        return False, "posture_claims do not match the projection of the embedded coverage certificate"
+    for c in rederived:
+        if c["status"] == "CLOSED" and not c.get("evidence_oracle_kinds"):
+            return False, "a CLOSED claim names no conclusive oracle"
+    # 4. target binding (closes target-swap)
+    iok, ireason = _verify_identity_attestation(cert.get("target_identity") or {}, owner_pubkey, engagement, now)
+    if not iok:
+        return False, f"posture target-binding: {ireason}"
+    if not _identity_matches((cert.get("target_identity") or {}).get("policy") or {}, cert.get("target_sample") or {}):
+        return False, "posture target_sample does not satisfy the owner's identity policy"
+    s = cert.get("summary") or {}
+    return True, (f"SOUND: {s.get('n_closed', '?')} CLOSED / {s.get('n_open', '?')} OPEN / "
+                  f"{s.get('n_unproven', '?')} UNPROVEN over {cert.get('target_sample')} "
+                  f"(re-firing the oracle needs VIGIL — binding tier)")
+
+
 def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
                   trust_root: Optional[dict] = None, witness_trust_root: Optional[dict] = None,
                   pin: str = "", witness_pin: str = "",
                   min_distinct_signers: Optional[int] = None,
                   tsa_cert_pin: Optional[str] = None,
-                  notary_pin: str = "") -> tuple[bool, list]:
+                  notary_pin: str = "",
+                  posture_pin: str = "", posture_owner_pubkey: str = "",
+                  posture_engagement: str = "", posture_now: Optional[int] = None) -> tuple[bool, list]:
     """Verify every component present in ``bundle`` against the out-of-band-pinned trust material. Returns
     (sound, log_lines). ``sound`` is True iff at least one component is present and EVERY present component
     is SOUND. A component whose required trust material is missing is a NOT-SOUND (fail-closed)."""
@@ -900,6 +1061,22 @@ def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
             log.append(f"  [{'OK ' if ok else 'BAD'}] channel_binding: {reason}")
             results.append(ok)
 
+    # --- PostureCertificate (Certificate of Non-Exploitability) ---
+    if "posture" in bundle:
+        if not posture_pin:
+            log.append("  [BAD] posture present but no --posture-fingerprint (out-of-band) — fail-closed")
+            results.append(False)
+        elif not posture_owner_pubkey or not posture_engagement or posture_now is None:
+            log.append("  [BAD] posture present but --posture-owner-pubkey / --posture-engagement / "
+                       "--posture-now missing (needed to bind the certificate to its target)")
+            results.append(False)
+        else:
+            ok, reason = verify_posture(bundle["posture"] or {}, pin=posture_pin,
+                                        owner_pubkey=posture_owner_pubkey, engagement=posture_engagement,
+                                        now=int(posture_now))
+            log.append(f"  [{'OK ' if ok else 'BAD'}] posture: {reason}")
+            results.append(ok)
+
     sound = bool(results) and all(results)
     log.append(f"bundle {'SOUND' if sound else 'NOT SOUND'} "
                f"(standalone: signatures + binding + structure + chain + quorum; "
@@ -922,16 +1099,20 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError) as e:
         print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr)
         return 3
-    _known = {"prove_cert", "attestation", "witnessed", "channel_binding"}
+    _known = {"prove_cert", "attestation", "witnessed", "channel_binding", "posture"}
     if not isinstance(bundle, dict) or not (_known & set(bundle)):
-        print("[ERROR] bundle has none of prove_cert / attestation / witnessed / channel_binding",
+        print("[ERROR] bundle has none of prove_cert / attestation / witnessed / channel_binding / posture",
               file=sys.stderr)
         return 3
     sound, log = verify_bundle(
         bundle, signer_pubkeys=signer_pubkeys, trust_root=trust_root,
         witness_trust_root=witness_trust_root, pin=args.fingerprint, witness_pin=args.witness_fingerprint,
         min_distinct_signers=args.min_distinct_signers, tsa_cert_pin=args.tsa_cert_pin,
-        notary_pin=args.notary_pin)
+        notary_pin=args.notary_pin,
+        posture_pin=getattr(args, "posture_fingerprint", "") or "",
+        posture_owner_pubkey=getattr(args, "posture_owner_pubkey", "") or "",
+        posture_engagement=getattr(args, "posture_engagement", "") or "",
+        posture_now=getattr(args, "posture_now", None))
     for line in log:
         print(line)
     return 0 if sound else 2
@@ -966,6 +1147,17 @@ def main(argv: list) -> int:
                         "a software notary is not producer-unforgeable, see Z1 residual)")
     v.add_argument("--prove-standalone", action="store_true",
                    help="first assert no VIGIL module is imported or importable, else exit non-zero")
+    # --- PostureCertificate (Certificate of Non-Exploitability) ---
+    v.add_argument("--posture-fingerprint", default="", dest="posture_fingerprint",
+                   help="REQUIRED for a `posture` bundle: the out-of-band pin on the posture certificate's "
+                        "authorizer set (sha256:… ) — fail-closed without it")
+    v.add_argument("--posture-owner-pubkey", default="", dest="posture_owner_pubkey",
+                   help="the target-owner's Ed25519 public key (base64) that signed the certificate's "
+                        "IdentityAttestation — binds the posture proof to its target")
+    v.add_argument("--posture-engagement", default="", dest="posture_engagement",
+                   help="the engagement the IdentityAttestation must be for")
+    v.add_argument("--posture-now", type=int, default=None, dest="posture_now",
+                   help="the epoch time to check the IdentityAttestation's not_after against")
     v.set_defaults(fn=_cmd_verify)
 
     args = p.parse_args(argv)
