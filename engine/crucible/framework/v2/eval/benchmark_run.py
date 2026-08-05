@@ -520,6 +520,10 @@ def main(argv: list[str]) -> int:
             sig = sign_scorecard(json_path, signers=[(args.key_id, priv)],
                                  authorizers=authorizers, threshold=1)
             print(f"signed scorecard: {Path(json_path).with_suffix('.sig.json')}")
-            print(f"trust-root fingerprint (PIN OUT-OF-BAND): {sig['scorecard_digest']}")
+            # The OUT-OF-BAND pin is the AUTHORIZER (trust-root) fingerprint — a stable function of the
+            # signing key set (same key -> same pin every run). Do NOT pin scorecard_digest: that is the
+            # CONTENT hash, which includes non-deterministic wall-clock / RSS and changes every run.
+            print(f"scorecard content digest (per-run, NOT the pin): {sig['scorecard_digest']}")
+            print(f"trust-root fingerprint (PIN OUT-OF-BAND): {_scorecard_fingerprint(authorizers)}")
             print(f"                                          {Path(json_path).with_suffix('.fingerprint.txt')}")
     return 0
