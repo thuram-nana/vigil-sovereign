@@ -404,6 +404,10 @@
         <a href="#detection-mirror" class="navlink" data-target="detection-mirror">05 &middot; Detection Mirror</a>
         <a href="#auto-patch" class="navlink" data-target="auto-patch">06 &middot; Auto-Patch</a>
         <a href="#veracity-trust" class="navlink" data-target="veracity-trust">07 &middot; Veracity & Trust</a>
+        <a href="#proof-lifecycle" class="navlink" data-target="proof-lifecycle">08 &middot; Proof Lifecycle</a>
+        <a href="#assurance" class="navlink" data-target="assurance">09 &middot; Assurance &amp; Zero-Trust</a>
+        <a href="#evidence-substrate" class="navlink" data-target="evidence-substrate">10 &middot; Evidence &amp; Audit</a>
+        <a href="#offense-plane" class="navlink" data-target="offense-plane">11 &middot; Offense Plane &amp; Control</a>
     </nav>
     <main class="content">
       
@@ -427,6 +431,20 @@
           Mirror proving the same attacks from telemetry), L6 is the auto-patch loop that may act only on a FACT,
           and L7 names the veracity firewall and trust boundaries that hold across all six.
         </p>
+        <p class="lead">
+          The remaining layers carry a confirmed FACT the rest of the way &mdash; and are explicit about where a
+          property is <strong>BUILT and measured</strong> versus a <strong>CAPABILITY</strong> whose last mile is a
+          hardware, service, or third-party fact. <strong>L8</strong> is the proof lifecycle: a FACT becomes a signed,
+          re-executable <em>remediation</em> certificate and a continuously re-proven, anti-rollback attestation series
+          (differential / direct-to-origin / error-signature / ASan-binary remediation channels). <strong>L9</strong>
+          operationalizes assurance and closes the zero-trust gap as far as software can: an external RFC&nbsp;3161 time
+          anchor, a deployable witness quorum, TLS channel-binding, and two <em>VIGIL-free</em> standalone verifiers.
+          <strong>L10</strong> is the evidence substrate &mdash; certificates, the signed spine, the external audit
+          package, and the read-only graph projection &mdash; that authenticates and transports facts but never mints
+          them. <strong>L11</strong> is the offense plane and two-env control plane underneath it all: the oracle
+          family (~33 sole-minters), the intel/sensor inflow, the egress gateway, and the <code>dispatch</code> /
+          keyless-worker boundary that keeps offense and sovereign code from ever sharing a process.
+        </p>
         <div class="legend" role="list">
         <span class="chip" role="listitem"><span class="dot dot-fact"></span>FACT &mdash; oracle-confirmed + signed</span>
         <span class="chip" role="listitem"><span class="dot dot-lead"></span>LEAD &mdash; proposal, unconfirmed</span>
@@ -439,51 +457,80 @@
         <div class="diagram-scroll">
           <pre class="mermaid">%%{init: {"theme":"base","themeVariables":{"background":"#111720","primaryColor":"#18202b","primaryTextColor":"#e6edf3","primaryBorderColor":"#35d6c4","lineColor":"#66788a","secondaryColor":"#18202b","tertiaryColor":"#0a0e13","edgeLabelBackground":"#0b1119","fontSize":"48px","clusterBkg":"#0f151d","clusterBorder":"#232e3b"}, "flowchart":{"htmlLabels":true,"curve":"basis"}}}%%
 flowchart LR
-  OP(["Operator<br/>owner Ed25519 key"])
+  OP(["Operator &mdash; owner Ed25519 key"])
 
-  subgraph OFFENSE["env-offense &middot; keyless worker"]
+  subgraph OFFENSE["env-offense &middot; keyless worker (framework)"]
     direction TB
-    BODY["Agent Body<br/>F0-F12 + F2b<br/>ReAct &middot; tools &middot; fireteam &middot; gauntlet &middot; kb"]
+    INTEL["Intel &amp; recon + sensors<br/>intel/ &middot; sensors/"]
+    AGENTS["Agent swarm + critics / reflection<br/>agents/ &middot; OODA loop"]
+    ORACLE(("Oracle family (~33)<br/>verify/oracles.py &middot; oob.py<br/>SOLE fact-minter"))
+    VFW["Veracity firewall admit()<br/>veracity/firewall.py &middot; demote-only"]
+    INTEL -->|"leads"| AGENTS
+    AGENTS -.->|"propose (LEAD)"| VFW
+    AGENTS -->|"exploit claim + bytes"| ORACLE
+    ORACLE -->|"fire -&gt; FACT"| VFW
   end
 
-  subgraph SOV["env-sovereign &middot; owner key"]
+  BOUND{"Two-env boundary (FATAL-2)<br/>dispatch.py &middot; finding_spool -&gt; inert_finding"}
+  VFW -->|"signed FACT as inert DATA"| BOUND
+
+  subgraph SOV["env-sovereign &middot; owner key (vigil_core / sigil)"]
     direction TB
-    ATT["Attestation Ledger<br/>WHO / WHEN / WHAT"]
-    GATE{"Conjunctive Gate<br/>authority AND tier AND m-of-n"}
-    EGRESS{"Egress Gate<br/>loopback-pinned"}
-    ORACLE(("CRUCIBLE Oracle<br/>re-execute, not trust"))
-    SPINE[("Signed Spine<br/>Ed25519 hash-chain")]
-    TRANSP["Transparency + SCITT<br/>witnessed &middot; offline-verifiable"]
-
-    subgraph LIVE["Live Layer &mdash; loopback substrate"]
-      direction TB
-      EXEC["executor -&gt; Kali tools"]
-      GRAPH["graph -&gt; Neo4j"]
-      OTEL["otel -&gt; collector"]
-      THINK["think -&gt; Claude"]
-      SFILE["spine -&gt; file"]
-    end
-
-    MIRROR["Detection Mirror<br/>signed PCF certificates"]
+    ATT["Usage-attestation ledger<br/>WHO / WHEN / WHAT"]
+    GATE{"Gate of record<br/>vigil_core/gate.py<br/>authority AND tier AND m-of-n"}
+    CERT["Evidence certificate<br/>evidence/ &middot; m-of-n signed"]
+    SPINE[("Signed spine<br/>hash-chain + anti-rollback floor")]
+    ATT -->|"attested, else DENY"| GATE
+    CERT -->|"append"| SPINE
   end
-
+  BOUND -->|"re-verify m-of-n"| CERT
   OP -->|"attest"| ATT
-  OP -.->|"propose (non-authoritative)"| BODY
-  BODY -->|"propose action-edge"| GATE
-  ATT -->|"attested, else DENY"| GATE
-  GATE -->|"gate: allow"| EGRESS
-  GATE -.->|"deny / queue"| BODY
-  EGRESS -->|"egress (loopback only)"| EXEC
-  EXEC -->|"raw output"| ORACLE
-  BODY -->|"exploit_succeeded claim"| ORACLE
-  ORACLE -->|"oracle-confirm, sign -&gt; spine"| SPINE
-  SPINE --> TRANSP
+  OP -.->|"propose (non-authoritative)"| AGENTS
+
+  subgraph EGRESS["Egress gateway &mdash; physical boundary"]
+    NFT{"nftables L3/L4 deny-default<br/>+ L7 filtering proxy &middot; charter scope"}
+  end
+  GATE -->|"allow"| NFT
+  NFT -->|"loopback / charter IPs only"| EXEC["Live executor &middot; R4 external tool"]
+  EXEC -->|"raw bytes"| ORACLE
+
+  subgraph PROOF["L8 &mdash; Proof lifecycle"]
+    direction TB
+    TRIAGE["triage (confirmed-only)"]
+    PROVE{"prove_driver &mdash; 4-state<br/>diff &middot; origin &middot; error-sig &middot; ASan (R3)"}
+    RCERT["RemediationCertificate v2<br/>negative proof"]
+    SERIES[("Attestation series<br/>anti-rollback ticks + reprove")]
+    TRIAGE -->|"gated codefix"| PROVE
+    PROVE -->|"REMEDIATED (1 path)"| RCERT
+    PROVE -->|"signed prove-cert"| SERIES
+  end
+  SPINE -->|"confirmed FACT"| TRIAGE
+  PROVE -->|"re-fire FRESH bytes"| ORACLE
+
+  subgraph ASSURE["L9 &mdash; Assurance &amp; zero-trust"]
+    direction TB
+    WIT["Witness quorum (A3)"]
+    TSA["RFC3161 time anchor (A1)"]
+    CHAN["Channel-binding notary (Z1)"]
+  end
+  SERIES -->|"co-sign head"| WIT
+  WIT -->|"no-later-than T"| TSA
+  CERT -.->|"bind bytes to TLS session"| CHAN
+
+  subgraph AUDIT["L10 &mdash; Evidence &amp; audit"]
+    direction TB
+    BUNDLE["H4 audit package<br/>proof/bundle.py"]
+    VERIFY["Standalone verifiers<br/>verify_pcf / verify_vf (VIGIL-free)"]
+    GRAPH["Graph projector -&gt; Neo4j (H2)"]
+    BUNDLE -->|"offline, no VIGIL import"| VERIFY
+  end
+  SPINE -->|"export"| BUNDLE
   SPINE -->|"project (read-only)"| GRAPH
-  BODY -.->|"think proposal"| THINK
-  SPINE -.->|"checkpoint"| SFILE
-  EXEC -->|"telemetry (access.log / auth.log)"| MIRROR
-  MIRROR -->|"re-verified PCF cert -&gt; spine"| SPINE
-  OTEL -.->|"emit-only span"| SPINE
+  VERIFY -.->|"residual: never re-fires oracle"| ORACLE
+
+  MIRROR["Detection Mirror (L5)<br/>AEGIS firewall + PCF certs"]
+  EXEC -->|"telemetry"| MIRROR
+  MIRROR -->|"re-verified PCF -&gt; spine"| SPINE
 </pre>
         </div>
       </div>
@@ -3152,6 +3199,437 @@ flowchart TB
             <div class="invariant-label">INVARIANT</div>
             <p>Fail-closed on durability: no attestation can be minted (no signer / unbound operator / malformed input / write failure) ⇒ the engine gets a DENY and cannot proceed — a gated action never runs on an attestation that wasn't durably recorded. The signer's key_id must equal the bound operator fingerprint (identity↔signature binding). Chain order is (seq, prev_hash) alone — 'at'/monotonic are signed DATA, never ordering keys (no wallclock/RNG touches the chain). Tamper-evident: reordered/interior-deleted/forged entries fail.</p>
           </div>
+        </article>
+        </div>
+      </section>
+
+      <section id="proof-lifecycle" class="section">
+        <p class="eyebrow">L8 — THE PROOF LIFECYCLE</p>
+        <h2>VIGIL L8 — Proof Lifecycle: FACT → remediation certificate → continuously re-proven attestation series</h2>
+        <p class="lead">An oracle-confirmed FACT crosses the FATAL-2 seam (<code>inert_finding.py</code>) as inert signed DATA, then becomes a remediation claim strictly by <strong>re-execution</strong>. Deterministic, confirmed-only triage may spawn a gated codefix; <code>prove_driver.py</code> re-drives the original exploit against a live authorized target and lets the <em>original oracle</em> — never the orchestrator, which only sequences — mint exactly one of four signed states. REMEDIATED is reachable through a single narrow path that embeds a re-executable <code>RemediationCertificate</code> (negative proof) or, on the differential channel, its own re-refutable round evidence. <code>verify_prove_certificate</code> re-runs that math offline and is <strong>demote-only</strong>: a pre-fix false-REMEDIATED is demoted at re-execution (invariant&nbsp;3), never promoted. Signed ticks chain into an anti-rollback attestation series, witnessed and optionally RFC&nbsp;3161-anchored, and re-proven on a cadence by the reprove loop. The certs, firewall, and orchestration are BUILT and offline-verifiable; &ldquo;continuously re-proven against a live target&rdquo; is a CAPABILITY gated on a reachable chartered target — with silent-case freshness honestly F1, a local durable floor, and local-TSA/operator-independence residuals named.</p>
+        <div class="diagram">
+        <div class="diagram-scroll">
+          <pre class="mermaid">%%{init: {"theme":"base","themeVariables":{"background":"#111720","primaryColor":"#18202b","primaryTextColor":"#e6edf3","primaryBorderColor":"#35d6c4","lineColor":"#66788a","secondaryColor":"#18202b","tertiaryColor":"#0a0e13","edgeLabelBackground":"#0b1119","fontSize":"48px","clusterBkg":"#0f151d","clusterBorder":"#232e3b"}, "flowchart":{"htmlLabels":true,"curve":"basis"}}}%%
+flowchart TD
+  INERT{"Inert FACT seam (offense-&gt;sovereign)<br/>inert_finding.py"}
+  TRIAGE["Confirmed-only triage<br/>remediation/triage.py"]
+  CODEFIX["Gated destructive codefix<br/>remediation/codefix.py"]
+  FIXORACLE(("Fix-oracle re-fire<br/>remediation/fix_oracle.py"))
+  ORACLE(("Original oracle &mdash; SOLE minter<br/>verify/oracles.py"))
+  LIVE["error_signature re-drive<br/>remediation/live_adapter.py"]
+  DIFF["boolean matched-decoy + origin re-drive<br/>remediation/differential_adapter.py"]
+  ASAN["ASan crash-confirm + patch-synth (R3)<br/>remediation_binary/asan_repair.py"]
+  PROVE{"prove_driver &mdash; 4-state orchestrator"}
+  RCERT["RemediationCertificate v2 (negative proof)<br/>remediation/remediation_cert.py"]
+  PCERT["Signed 4-state prove-cert"]
+  FIREWALL["Demote-only veracity firewall<br/>verify_prove_certificate"]
+  LOG[("Anti-rollback attestation series<br/>remediation/attestation_log.py")]
+  WIT["Timed witnessed checkpoint<br/>remediation/attestation_witness.py"]
+  REPROVE["Continuous re-proof loop (A2)<br/>remediation/reprove.py"]
+  TSA["External RFC3161 anchor (A1)<br/>time_anchor.py"]
+
+  INERT -->|"inert signed FACT-as-DATA (m-of-n verified)"| TRIAGE
+  TRIAGE -->|"confirmed FACT may spawn; LEAD refused twice"| CODEFIX
+  CODEFIX -->|"verify_fix on patched build"| FIXORACLE
+  FIXORACLE -->|"re-fires SAME oracle; silence=fixed"| ORACLE
+  LIVE -->|"injected adapter"| PROVE
+  DIFF -->|"injected channel + Host-pinned origin"| PROVE
+  ASAN -->|"fix-by-silence + structural + fuzz"| PROVE
+  PROVE -->|"re-fire original oracle over FRESH bytes"| ORACLE
+  PROVE -->|"REMEDIATED (1 narrow path)"| RCERT
+  RCERT -->|"embedded + cross-bound"| PCERT
+  PROVE -->|"signs 4 states"| PCERT
+  PCERT -->|"offline re-execution, demote-only"| FIREWALL
+  FIREWALL -->|"re-executes embedded / SPRT+attribution+closure"| ORACLE
+  PCERT -->|"append_tick admits + chains"| LOG
+  LOG -->|"m-of-n head -&gt; quorum co-sign"| WIT
+  WIT -.->|"optional sidecar supersedes median T"| TSA
+  REPROVE -->|"each cycle re-runs prove_remediation"| PROVE
+  REPROVE -->|"one witnessed tick per cycle"| LOG
+</pre>
+        </div>
+      </div>
+        <div class="grid">
+        <article class="card">
+          <h3>prove_driver — four-state orchestrator</h3>
+          <div class="path">integration/vigil_integration/remediation/prove_driver.py</div>
+          <p class="behavior">Turns &ldquo;we patched it&rdquo; into a signed REMEDIATED / STILL_VULNERABLE / INCONCLUSIVE / REFUSED statement. Gates downgrade/auth/PoP/identity/budget/positive-control, re-fires the ORIGINAL oracle over fresh bytes, and reaches REMEDIATED by ONE narrow path; <code>verify_prove_certificate</code> re-executes the whole judgement offline.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>The orchestrator only sequences — the oracle over fresh bytes decides. Re-execution is demote-only: a pre-fix false-REMEDIATED is demoted, never promoted (invariant&nbsp;3). Live re-drive is a CAPABILITY behind an injected LiveTargetAdapter.</p></div>
+        </article>
+        <article class="card">
+          <h3>RemediationCertificate v2 — negative proof</h3>
+          <div class="path">integration/vigil_integration/remediation/remediation_cert.py</div>
+          <p class="behavior">Domain <code>vigil-remediation-cert-v2</code>: silent==fixed only with positive-control fires + patched-silent + liveness + bound digests + a whole-cert Ed25519 signature. Offline re-verifiable by re-execution; every control is fail-closed at mint AND re-checked at verify.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A stripped control breaks authenticity — you cannot forge a &ldquo;fixed&rdquo; by dropping a check. Cross-bound to the outer prove-cert (finding / class / freshness nonce / evidence digest) so a foreign cert cannot be spliced in.</p></div>
+        </article>
+        <article class="card">
+          <h3>differential_adapter — matched-decoy + direct-to-origin (R1/R2)</h3>
+          <div class="path">integration/vigil_integration/remediation/differential_adapter.py</div>
+          <p class="behavior">Drives baseline / true / false_a / false_b matched-decoy rounds (metacharacter-identical) judged by the existing boolean-inference (SPRT) + WAF-closure oracles, plus an R2 Host-pinned <em>direct-to-origin</em> re-drive that bypasses a sanitizing edge. Every send is a scope-gated fetch.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A REMEDIATED refute must be genuine CLOSURE (zero-tolerance attribution: no deterministic true≠false_a diff on any judged round), enforced at BOTH mint and re-execution. Origin re-drive can only DEMOTE an edge-only fix; a truncated observation gates to INCONCLUSIVE. Freshness is honestly F1.</p></div>
+        </article>
+        <article class="card">
+          <h3>live_adapter — error_signature re-drive</h3>
+          <div class="path">integration/vigil_integration/remediation/live_adapter.py</div>
+          <p class="behavior">Re-drives the original exploit through CRUCIBLE's gated HttpExecutor; a FIRING trial earns genuine F2 (the fresh challenge nonce lands in the matched error line), a silent trial is F1. Single response-side channel.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>&ldquo;Against the target now&rdquo; is a CAPABILITY gated on a chartered, reachable target + the gated executor; other channels are deferred, not silently assumed.</p></div>
+        </article>
+        <article class="card">
+          <h3>fix_oracle — oracle-backed fix verification</h3>
+          <div class="path">integration/vigil_integration/remediation/fix_oracle.py</div>
+          <p class="behavior"><code>build_fix_oracle</code> / <code>build_fix_signer</code> earn &ldquo;remediated&rdquo; ONLY by re-firing the SAME oracle over the patched build's re-captured bytes and signing on genuine silence; every unsound path (no re-drive, request-side channel, unbuildable context, unsigned) RAISES to unverified.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>No re-execution, no remediation. The re-drive capability is injected by the live pipeline; the pure verifier never fabricates a silence.</p></div>
+        </article>
+        <article class="card">
+          <h3>attestation_log — anti-rollback re-proof series</h3>
+          <div class="path">integration/vigil_integration/remediation/attestation_log.py</div>
+          <p class="behavior">A hash-chained, monotonic series of re-proof ticks. <code>append_tick</code> admits via <code>verify_prove_certificate</code> → build_chain → governance m-of-n sign_head → verify_head + check_highwater → advance the floor upward-only.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A rolled-back / truncated series is refused (entry_count primary, last_seq secondary). Honest limit: the durable high-water floor is a LOCAL, unsigned <code>0600</code> file — off-box anti-rollback is a deploy residual.</p></div>
+        </article>
+        <article class="card">
+          <h3>reprove — continuous re-proof service (A2)</h3>
+          <div class="path">integration/vigil_integration/remediation/reprove.py</div>
+          <p class="behavior"><code>run_reprove</code> loops a cadence over the retained corpus; each cycle re-runs a REAL <code>prove_remediation</code> over live bytes (not a hollow tick) and appends a witnessed tick. Cadence / clock / nonce are injectable; nothing wallclock/RNG enters the signed math. Ships as <code>vigil reprove</code> + a systemd timer.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A running cadence is an operating property only once an operator ENABLES the timer on a host — BUILT + shippable, not DEPLOYED. Freshness is only as current as the last fire, bounded to the retained corpus.</p></div>
+        </article>
+        <article class="card">
+          <h3>attestation_witness — timed witnessed quorum</h3>
+          <div class="path">integration/vigil_integration/remediation/attestation_witness.py</div>
+          <p class="behavior">A strict-majority (split-view-resistant) quorum time-co-signs the attestation head, yielding a median no-later-than <code>T</code>; a present RFC&nbsp;3161 anchor supersedes it. Domain-separated signatures, non-equivocation enforced.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>CAPABILITY for independence: distinct keys ≠ distinct operators; the median is sound only if the presented quorum is a strict majority of honest, independent parties — a deployment/social fact, marked.</p></div>
+        </article>
+        <article class="card">
+          <h3>inert_finding — the FATAL-2 two-env seam</h3>
+          <div class="path">integration/vigil_integration/inert_finding.py</div>
+          <p class="behavior">The sovereign-side receiver: a confirmed FACT crosses as INERT signed DATA — <code>json.loads</code>-only (never pickle/eval), 256&nbsp;KiB-bounded, strictly shaped, m-of-n governance signature re-verified with <code>vigil_core.verify_threshold</code> over the exact signed bytes.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Inertness is structural — no code path executes what a compromised offense worker sends. Depends on <code>vigil_core</code> alone (never framework/strix), which is what keeps the sovereign core offense-free by construction.</p></div>
+        </article>
+        <article class="card">
+          <h3>triage — deterministic confirmed-only</h3>
+          <div class="path">integration/vigil_integration/remediation/triage.py</div>
+          <p class="behavior">Nine fixed queries over the signed-spine read-model at zero LLM cost; a TriageFinding may spawn a remediation ONLY as an oracle-confirmed FACT with a signed <code>evidence_ref</code> — a LEAD is refused at the type level AND at the spawn boundary.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Deterministic and total on malformed input. The live Neo4j read backend is the deferred slice (H2); the embedded read-model is the default.</p></div>
+        </article>
+        <article class="card">
+          <h3>codefix — gated destructive pipeline</h3>
+          <div class="path">integration/vigil_integration/remediation/codefix.py</div>
+          <p class="behavior">Stages map to WARDEN tiers (clone A1 / edit A2 / build A3 / open-PR A3 + m-of-n); the per-block approval TIMEOUT auto-REJECTS (inverts redamon's auto-accept), never <code>git add -A</code>, and &ldquo;remediated&rdquo; is signed ONLY after the original oracle goes silent.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>CAPABILITY: the pure injected pipeline is BUILT and gated; the live git / sandbox / Claude executors are a later, off-by-default slice (see L11).</p></div>
+        </article>
+        <article class="card">
+          <h3>asan_repair — ASan binary remediation (R3)</h3>
+          <div class="path">engine/crucible/framework/v2/remediation_binary/asan_repair.py</div>
+          <p class="behavior">Compiles C under <code>gcc -fsanitize=address</code>, crash-confirms via the <code>sanitizer_signal_oracle</code>, rewrites an unbounded <code>strcpy→strncpy</code>, and accepts ONLY on oracle silence + an out-of-band SIGABRT-absence + a length-sweep fuzz + a STRUCTURAL no-unbounded-copy enumeration + preserved benign functionality.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>The oracle stays the sole crash authority; the child cannot forge silence (out-of-band SIGABRT + tamper denylist). Residual: pattern-only synthesis; the structural check ENUMERATES stdlib calls (strcpy/strcat/gets/sprintf/scanf&nbsp;%s/…), it is not an exhaustive semantic proof; symbolic synthesis (angr/z3) is research-gated → SYNTHESIS_UNAVAILABLE, never a fabricated patch.</p></div>
+        </article>
+        </div>
+      </section>
+
+      <section id="assurance" class="section">
+        <p class="eyebrow">L9 — OPERATIONALIZED ASSURANCE &amp; THE ZERO-TRUST ENDGAME</p>
+        <h2>VIGIL L9 — Assurance &amp; Zero-Trust: external time anchor · witness quorum · channel-binding · standalone verifiers</h2>
+        <p class="lead">This layer turns a signed bundle's soundness from a CAPABILITY into an <em>externally re-checkable</em> property: an RFC&nbsp;3161 external time bound (A1), a deployable witness quorum (A3), and a TLS channel-binding / notary producer-binding (Z1), attached alongside the transparency checkpoint and re-verified by two verifiers that import <strong>zero VIGIL code</strong> (stdlib + one Ed25519 library). Every module here is FATAL-2-clean, so it runs in the sovereign env. The load-bearing honesty: all three mechanisms are BUILT + tested but default to same-host / software authorities, so each is a CAPABILITY with a named independence residual — and the one thing NEITHER verifier does is re-fire the oracle. The oracle over real target bytes stays the sole minter; a standalone PASS is authenticity + binding + structure + chain + quorum + time, not a re-minted fact.</p>
+        <div class="diagram">
+        <div class="diagram-scroll">
+          <pre class="mermaid">%%{init: {"theme":"base","themeVariables":{"background":"#111720","primaryColor":"#18202b","primaryTextColor":"#e6edf3","primaryBorderColor":"#35d6c4","lineColor":"#66788a","secondaryColor":"#18202b","tertiaryColor":"#0a0e13","edgeLabelBackground":"#0b1119","fontSize":"48px","clusterBkg":"#0f151d","clusterBorder":"#232e3b"}, "flowchart":{"htmlLabels":true,"curve":"basis"}}}%%
+flowchart TD
+  ORACLE(("Oracle over target bytes<br/>sole fact-minter (upstream)"))
+  CP[("Transparency checkpoint<br/>transparency.py")]
+  TSAL["LocalTSA (self-signed, mechanism-only)<br/>time_anchor.py:LocalTSA"]
+  TSAR>"RemoteTSA &mdash; 3rd-party RFC3161 seam"]
+  ANCHOR["A1 external time anchor<br/>anchor_checkpoint"]
+  PIN{"Producer-pin gate<br/>witness_service.py"}
+  WITSVC["A3 witness co-signer<br/>witness_service.py"]
+  NOTL["LocalNotary (software, mechanism-only)<br/>channel_binding.py"]
+  NOTR>"RemoteNotary &mdash; zkTLS / MPC-TLS seam"]
+  CHAN["Z1 channel-binding evidence<br/>build_evidence"]
+  VPCF["Standalone verify_pcf.py<br/>(VIGIL-free)"]
+  VVF["Standalone verify_vf.py<br/>(VIGIL-free)"]
+  REFIRE>"Oracle re-fire &mdash; NOT done standalone"]
+
+  ORACLE -->|"signed facts -&gt; chain -&gt; checkpoint"| CP
+  CP -->|"checkpoint_hash anchored (RFC3161)"| ANCHOR
+  TSAL -->|"mints token (default)"| ANCHOR
+  TSAR -.->|"independence path (offline-unexercisable)"| ANCHOR
+  CP -->|"fan out for timed co-sign"| PIN
+  PIN -->|"pinned-producer sig -&gt; tip may advance"| WITSVC
+  WITSVC -.->|"timed co-sig / 409 anti-equivocation"| PIN
+  NOTL -->|"co-signs (session, bytes)"| CHAN
+  NOTR -.->|"3rd-party zkTLS notary"| CHAN
+  ANCHOR -->|"genTime supersedes median"| VVF
+  PIN -->|"witnessed checkpoint + timed sigs"| VVF
+  CHAN -->|"pinned-notary envelope"| VVF
+  CP -->|"cert set + chain + head + artifacts"| VPCF
+  VPCF -.->|"verifies everything EXCEPT"| REFIRE
+  VVF -.->|"verifies everything EXCEPT"| REFIRE
+  REFIRE -->|"re-fire needs the oracle bodies"| ORACLE
+</pre>
+        </div>
+      </div>
+        <div class="grid">
+        <article class="card">
+          <h3>A1 — RFC 3161 external time anchor</h3>
+          <div class="path">integration/vigil_integration/time_anchor.py</div>
+          <p class="behavior">Mints a real RFC&nbsp;3161 token over <code>checkpoint_hash</code> via the system <code>openssl ts</code>; genTime is read ONLY from the signature-covered token (<code>ts -token_out</code> defeats the unsigned-status backdate); self-verifies on mint; the token is a sidecar that keeps the chain byte-identical.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A present-but-unverifiable anchor FAILS CLOSED (never a silent downgrade to the median). Residual: the default <code>LocalTSA</code> is self-signed on the same host — proves the MECHANISM only; real no-later-than-T independence needs a third-party <code>RemoteTSA</code> / OpenTimestamps, unexercisable offline.</p></div>
+        </article>
+        <article class="card">
+          <h3>A3 — deployable witness co-signer</h3>
+          <div class="path">integration/vigil_integration/witness_service.py</div>
+          <p class="behavior">A loopback/tunnel-bound co-sign transport (<code>bind_ok</code> refuses public/unspecified binds); N independently-keyed processes co-sign; anti-equivocation is delegated to <code>Witness.cosign</code> (append-only or 409). Fail-closed body-cap + anti-CSRF/rebind guard + a producer-pin so a bogus first checkpoint cannot poison the tip. Ships as <code>vigil witness serve|submit</code>.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>CAPABILITY: N-witness LOCAL deploy is proven and a third party CAN run one — but distinct keys ≠ distinct operators; genuine independence needs THIRD-PARTY operators, and at threshold==1 equivocation is DETECTABLE, not prevented.</p></div>
+        </article>
+        <article class="card">
+          <h3>Z1 — channel-binding (zkTLS) evidence</h3>
+          <div class="path">integration/vigil_integration/channel_binding.py</div>
+          <p class="behavior">An RFC&nbsp;5705 exporter binding ties response bytes to ONE TLS session; a notary co-signs the domain-separated (session, response-hash) tuple; a producer-free offline verifier rejects a swapped body / wrong session / unpinned notary. Live capture via <code>openssl s_client</code> is network-gated (the parser is unit-tested).</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>The pinned notary key is the sole trust anchor. Residual: the default SOFTWARE <code>LocalNotary</code> that VIGIL runs can be handed a fabricated (session, bytes) tuple — this proves the verifier SHAPE + mechanism, NOT producer-unforgeability, which needs MPC-TLS/TLSNotary (toolchain absent) + a third-party notary (<code>RemoteNotary</code> seam).</p></div>
+        </article>
+        <article class="card">
+          <h3>Standalone verifier — verify_pcf.py</h3>
+          <div class="path">docs/proof-carrying-finding/verify_pcf.py</div>
+          <p class="behavior">Imports NO VIGIL code (stdlib + <code>cryptography</code>). Checks the out-of-band fingerprint pin, m-of-n Ed25519 authenticity, oracle_context binding, path-confined artifact re-hash, and the hash-chain + signed head + anti-rollback high-water; <code>--prove-standalone</code> asserts no VIGIL module is even importable.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Residual: it does NOT re-fire the oracle — reproduction (silence/fire) needs <code>python -m framework.v2 evidence verify</code>. A standalone PASS is authenticity + integrity, not a re-minted fact.</p></div>
+        </article>
+        <article class="card">
+          <h3>Standalone verifier — verify_vf.py</h3>
+          <div class="path">docs/proof-carrying-finding/verify_vf.py</div>
+          <p class="behavior">A VIGIL-free re-derivation of the whole remediation lifecycle — prove-cert authenticity, REMEDIATED cross-binding, the attestation chain/head/anti-rollback floor, the strict-majority witness-quorum median <code>T</code>, the A1 anchor genTime SUPERSEDING the median (via <code>openssl ts</code>, still VIGIL-free), and the Z1 channel-binding. Byte-parity with the in-tree producers is proven by a differential test.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A single flipped byte anywhere flips the verdict to NOT SOUND. The one residual it shares with verify_pcf: it NEVER re-fires the oracle — that is the sole fact-minting authority, and the firewall stays demote-only.</p></div>
+        </article>
+        </div>
+      </section>
+
+      <section id="evidence-substrate" class="section">
+        <p class="eyebrow">L10 — EVIDENCE, SPINE, EXTERNAL GRAPH &amp; AUDIT PACKAGE</p>
+        <h2>VIGIL L10 — Evidence &amp; Audit: the substrate that authenticates and transports facts (it never mints them)</h2>
+        <p class="lead">The deterministic oracle over real target bytes (re-executed by <code>verify/reverify.py</code>) is the sole fact-minter; every layer here binds, signs, chains, projects, or re-verifies what the oracle already proved, and the veracity firewall only ever demotes. The flagship is the H4 external audit package (<code>proof/bundle.py</code>): a self-contained directory a third party re-verifies OFFLINE with the VIGIL-free <code>verify_pcf.py</code> + <code>verify_vf.py</code>. Honest limits hold throughout — the trust-root-fingerprint pin FAILS CLOSED on a mismatch (an absent pin is reported UNPINNED / not-anchored, the other layers still run); the offline verifier never re-fires the oracle; the live Neo4j binder needs a provisioned service; and hardware attestation is a stub on commodity silicon.</p>
+        <div class="diagram">
+        <div class="diagram-scroll">
+          <pre class="mermaid">%%{init: {"theme":"base","themeVariables":{"background":"#111720","primaryColor":"#18202b","primaryTextColor":"#e6edf3","primaryBorderColor":"#35d6c4","lineColor":"#66788a","secondaryColor":"#18202b","tertiaryColor":"#0a0e13","edgeLabelBackground":"#0b1119","fontSize":"48px","clusterBkg":"#0f151d","clusterBorder":"#232e3b"}, "flowchart":{"htmlLabels":true,"curve":"basis"}}}%%
+flowchart TD
+  ORACLE(("Deterministic oracle &mdash; sole minter<br/>verify/reverify.py"))
+  CMODEL["Evidence certificate model<br/>evidence/models.py"]
+  ENGINE["Fact-verify engine<br/>evidence/certify.py"]
+  CLI["Offline verifier CLI + trust-root pin<br/>evidence/cli.py"]
+  BUNDLE["H4 external audit package<br/>proof/bundle.py"]
+  STAND["VIGIL-free standalone verifiers<br/>verify_pcf.py · verify_vf.py"]
+  DOSSIER["Whole-run dossier zip<br/>report/dossier.py"]
+  VCORE[("vigil_core signed spine<br/>crypto/chain/canonical/highwater")]
+  DOMAINS[("Spine-domain trust registry<br/>vigil_core/spine_domains.py")]
+  PROJ["Pure spine-&gt;graph projector (one writer)<br/>graph/projector.py"]
+  NEO4J["H2 live Neo4j binder<br/>live/graph_neo4j.py"]
+  SCITT["SCITT/OpenVEX + RFC-6962 Merkle<br/>scitt.py"]
+  TRANSP["Split-view-resistant transparency log<br/>transparency.py"]
+  ATTEST["Attestation quotes + witness time-bound<br/>attest/provider.py"]
+
+  ORACLE -->|"mints FACT; cert binds oracle_context digest"| CMODEL
+  ENGINE -->|"build + m-of-n sign (provisioning-only)"| CMODEL
+  ENGINE -->|"re-fires (reproduction layer)"| ORACLE
+  ENGINE -->|"chain + head + anti-rollback"| VCORE
+  CLI -->|"verify_bundle, exit 0 iff SOUND"| ENGINE
+  BUNDLE -->|"packages signed certs + PUBLIC root"| CMODEL
+  BUNDLE -->|"ships chain + signed head"| VCORE
+  DOSSIER -->|"embeds H4 bundle + MANIFEST.sig"| BUNDLE
+  STAND -->|"re-verifies OFFLINE, no VIGIL import"| BUNDLE
+  PROJ -->|"one-way pure projection"| VCORE
+  NEO4J -->|"reuses graph.project; idempotent MERGE"| PROJ
+  SCITT -->|"DSSE + OpenVEX wraps the cert"| CMODEL
+  SCITT -->|"Merkle inclusion receipt"| TRANSP
+  TRANSP -->|"quorum time-co-signs head -&gt; T"| ATTEST
+  DOMAINS -->|"routes each segment's trust root"| VCORE
+</pre>
+        </div>
+      </div>
+        <div class="grid">
+        <article class="card">
+          <h3>Evidence certificate model + fact-verify engine</h3>
+          <div class="path">engine/crucible/framework/v2/evidence/models.py · certify.py</div>
+          <p class="behavior">The deterministic (no-wallclock, seq-ordered) typed cert binding a finding's <code>oracle_context</code> digest + a per-file sha256 artifact manifest. <code>verify_bundle</code> runs five fail-closed layers — m-of-n authenticity · oracle_context binding · artifact re-hash · oracle REPRODUCTION · claim re-grounding — plus cert-set↔chain binding and the anti-rollback high-water.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Signing is provisioning-only; the runtime only verifies (demote-only). Additive fields drop from the canonical bytes when empty, so every prior signature stays byte-identical.</p></div>
+        </article>
+        <article class="card">
+          <h3>Offline verifier CLI + trust-root pin</h3>
+          <div class="path">engine/crucible/framework/v2/evidence/cli.py</div>
+          <p class="behavior"><code>python3 -m framework.v2 evidence verify/certify/keygen/pcf-*</code>. <code>--trust-root-fingerprint</code> REFUSES on a MISMATCH (exit&nbsp;2); an ABSENT pin prints <code>[WARN] UNPINNED</code> and still exercises the other layers.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>An honest correction to the H4 spec framing: the pin is authenticity-anchoring — without it authenticity is NOT anchored, but the structural/binding/chain layers still run. (The <em>external-audit-package</em> verifier, by contrast, fails closed with no pin — see the H4 card.)</p></div>
+        </article>
+        <article class="card">
+          <h3>H4 external audit package + standalone verifiers</h3>
+          <div class="path">integration/vigil_integration/proof/bundle.py · docs/proof-carrying-finding/verify_pcf.py · verify_vf.py</div>
+          <p class="behavior"><code>export_bundle</code> assembles a self-contained directory (evidence-bundle · trust-root · reverifiable · <code>evidence/</code> tree · README · HOW-TO-VERIFY · TRUST-ROOT-FINGERPRINT.txt) that a third party re-verifies with stdlib + one Ed25519 library; <code>--prove-standalone</code> asserts framework/vigil_core/strix are unimportable, and a differential test proves byte-parity with the in-tree verifiers.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>FATAL-2: every framework import is function-local; symlinks pruned; action_id path-confined; only PUBLIC keys written. Residual: the standalone verifier NEVER re-fires the oracle — reproduction needs the open-source VIGIL verifier as a separate step.</p></div>
+        </article>
+        <article class="card">
+          <h3>Whole-run dossier package</h3>
+          <div class="path">engine/crucible/framework/v2/report/dossier.py</div>
+          <p class="behavior"><code>build_dossier</code> emits one deterministic zip: reports + the H4 proof bundle + secret-scrubbed logs + the spine chain + drift + <code>MANIFEST.json</code> + an m-of-n <code>MANIFEST.sig.json</code> + the trust-root fingerprint. Sorted entries, fixed epoch, path-confined, symlinks never followed.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Deterministic and reproducible: the same run produces a byte-identical dossier; the manifest signature makes any post-hoc edit detectable.</p></div>
+        </article>
+        <article class="card">
+          <h3>vigil_core signed spine + domain registry</h3>
+          <div class="path">packages/core/vigil_core/vigil_core/ (crypto · chain · canonical · models · highwater · spine_domains)</div>
+          <p class="behavior">The one signed-spine substrate: Ed25519 + m-of-n threshold, canonical JSON, <code>ChainEntry</code>/<code>SignedChainHead</code> with a monotonic anti-rollback high-water, <code>TrustRoot</code>; <code>spine_domains.py</code> maps each signed segment (sovereign head/floor/witness, offense finding-anchor, engagement spine, usage ledger, blackboard) to who signs it, its owner-rooted flag, and its domain tag.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Namespace-pure — imports NO framework/strix/sigil, so the FATAL-2 boundary is structural and v1 heads verify byte-identically. Honest: only the offense-finding-anchor is <code>owner_rooted</code> today; the spine/ledger owner-tie is a later slice (S6/S7).</p></div>
+        </article>
+        <article class="card">
+          <h3>H2 live Neo4j binder + pure projector</h3>
+          <div class="path">integration/vigil_integration/live/graph_neo4j.py · graph/projector.py</div>
+          <p class="behavior">The projector is the ONE deterministic, projection-only writer (confirmed/lead split, spine-hash provenance, bi-temporal) — a projection authorizes nothing. <code>Neo4jGraphWriter.rebuild_from_spine</code> reuses it: a scoped DETACH-DELETE clear + an idempotent engagement-scoped MERGE, parameterized Cypher, a Confirmed label only from oracle-grounded <code>is_confirmed</code>, F3-redacted and fail-closed.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>BUILT + residual: the neo4j driver is INJECTED, not imported — it needs a provisioned Neo4j + a wired session factory or a rebuild is a no-write (tested against a faithful fake session). The legacy <code>graph/store.py</code> Neo4j store remains a gated stub; the embedded store is the default.</p></div>
+        </article>
+        <article class="card">
+          <h3>SCITT / OpenVEX / Merkle + transparency + attestation</h3>
+          <div class="path">integration/vigil_integration/scitt.py · transparency.py · engine/crucible/framework/v2/attest/provider.py</div>
+          <p class="behavior"><code>scitt</code> emits a DSSE signed statement + OpenVEX (confirmed=affected, lead=under_investigation) + a real RFC-6962 Merkle inclusion receipt; <code>transparency</code> is a witnessed append-only log; the <code>SoftwareAttestationProvider</code> signs integrity+origin quotes and a strict-majority quorum time-co-signs the head.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Residual: split-view PREVENTION is CONDITIONAL on a strict majority (2t&gt;n) — at threshold=1 only per-witness non-equivocation + after-the-fact detection hold; and a software quote is integrity+origin, NOT hardware confidentiality (SEV-SNP/TDX are stubs, H1).</p></div>
+        </article>
+        </div>
+      </section>
+
+      <section id="offense-plane" class="section">
+        <p class="eyebrow">L11 — THE OFFENSE PLANE &amp; THE TWO-ENV CONTROL PLANE</p>
+        <h2>VIGIL L11 — The Offense Plane &amp; Control: the oracle family, the intel/sensor inflow, the egress gateway, and the boundary that keeps offense and sovereign apart</h2>
+        <p class="lead">Everything above rests on an offense engine that only ever PROPOSES and a control plane that keeps it structurally separated from the owner's authority. The Master map collapses the whole oracle family into one node; here it expands: ~33 deterministic sole-minters (<code>verify/oracles.py</code>) plus the out-of-band receiver (<code>verify/oob.py</code>) for blind classes, fed by universal sensors and the intelligence engine, filtered by the general veracity firewall, and driven by a blackboard-coordinated agent swarm with critics and reflection. Underneath sits the two-env control plane: the <code>dispatch</code> super-CLI that routes offense verbs into the offense venv and never the sovereign one, the filesystem-only inert-finding spool that is the only thing crossing the boundary, the nftables + filtering-proxy egress gateway, and the owner-root trust chain (delegation, capability, vault, warden tiers). This is the substrate the seven upper layers assume.</p>
+        <div class="diagram">
+        <div class="diagram-scroll">
+          <pre class="mermaid">%%{init: {"theme":"base","themeVariables":{"background":"#111720","primaryColor":"#18202b","primaryTextColor":"#e6edf3","primaryBorderColor":"#35d6c4","lineColor":"#66788a","secondaryColor":"#18202b","tertiaryColor":"#0a0e13","edgeLabelBackground":"#0b1119","fontSize":"48px","clusterBkg":"#0f151d","clusterBorder":"#232e3b"}, "flowchart":{"htmlLabels":true,"curve":"basis"}}}%%
+flowchart TD
+  subgraph SENSE["Sense &amp; reason (propose only)"]
+    INTEL["Intelligence &amp; recon engine<br/>intel/"]
+    SENSORS["Universal sensors<br/>sensors/ (nmap/tls/tshark/cloud/k8s/sbom…)"]
+    MEM[("Offense event-spine / memory<br/>memory/")]
+    AGENTS["Agent swarm + critics + reflection<br/>agents/"]
+  end
+  subgraph MINT["Confirm (sole authority)"]
+    ORACLES(("Oracle family (~33)<br/>verify/oracles.py"))
+    OOB(("Out-of-band receiver<br/>verify/oob.py (blind classes)"))
+    VFW["Veracity firewall admit()<br/>veracity/firewall.py (demote-only)"]
+  end
+  subgraph CTRL["Two-env control plane"]
+    DISPATCH{"vigil dispatch &mdash; verb-&gt;venv router<br/>dispatch.py (FATAL-2)"}
+    SPOOL["Inert-finding spool<br/>finding_spool.py -&gt; inert_finding.py"]
+    GATEWAY{"Egress gateway<br/>gateway/ nftables + L7 proxy + scope"}
+    GATE{"Gate of record<br/>vigil_core/gate.py + warden_tiers.py"}
+  end
+  subgraph ROOT["Owner-root trust + keys"]
+    DELEG["DelegationCert (owner-root)<br/>vigil_core/delegation.py"]
+    CAP["Target IdentityAttestation<br/>vigil_core/capability.py"]
+    VAULT["Keys-at-rest (TPM-sealed KEK)<br/>vigil_core/vault.py"]
+  end
+
+  INTEL --> AGENTS
+  SENSORS --> ORACLES
+  MEM --> AGENTS
+  AGENTS -.->|"propose (LEAD)"| VFW
+  AGENTS -->|"claim + bytes"| ORACLES
+  OOB --> ORACLES
+  ORACLES -->|"fire -&gt; FACT"| VFW
+  VFW -->|"signed FACT"| SPOOL
+  DISPATCH -->|"offense verbs -&gt; offense venv only"| AGENTS
+  GATE -->|"allow"| GATEWAY
+  DELEG -->|"roots the governance TrustRoot"| GATE
+  CAP -.->|"binds a FACT to target S"| VFW
+  VAULT -.->|"seals signing keys (CAPABILITY)"| GATE
+</pre>
+        </div>
+      </div>
+        <div class="grid">
+        <article class="card">
+          <h3>The oracle family — ~33 sole-minters</h3>
+          <div class="path">engine/crucible/framework/v2/verify/oracles.py · verify/oob.py</div>
+          <p class="behavior">The full set the Master map collapses into one node: differential / timing / boolean / predicate / achieved_state / side_effect / reflection / system_prompt / prompt_injection / honeypot / cred-stuffing / sanitizer / DOM / error_signature / oob_callback / service_reachability / tls_weakness / weak_crypto / version_range / policy_path / cloud / mesh / cicd / mobile / email / identity-posture / SQL-cmd-NoSQL-breakout / JWT + SAML forgery. <code>oob.py</code> is the 127.0.0.1 ephemeral receiver — the only sound minter for blind classes (SSRF, OOB-SQLi, blind XXE, deserialization).</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A claim is a FACT only when one of these fires over real target bytes; nothing else promotes. Each is a pure, deterministic, re-executable program with a mandatory passing negative control.</p></div>
+        </article>
+        <article class="card">
+          <h3>Veracity firewall — the general anti-hallucination choke</h3>
+          <div class="path">engine/crucible/framework/v2/veracity/firewall.py</div>
+          <p class="behavior"><code>admit()</code> passes every Claim through one choke that RE-EXECUTES each cited ground and labels it CONTRADICTED / UNSUPPORTED / etc. (with <code>claims.py</code> / <code>consistency.py</code> / <code>tokens.py</code>). Distinct from the remediation-side <code>prove_driver</code> firewall of L8 — this is the general one backing the L7 discussion.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Demote-only: it can strip a claim of grounding but never promote one. A non-re-firing finding grants zero grounded fact / node / edge / path.</p></div>
+        </article>
+        <article class="card">
+          <h3>Intelligence &amp; reconnaissance engine</h3>
+          <div class="path">engine/crucible/framework/v2/intel/</div>
+          <p class="behavior">The reason-over-intel layer: a one-substrate Observation model, entity resolution, gated live collectors (crt.sh / DoH / RDAP), a VOI ReconPlanner, and a world-model Beta-belief projection where <code>promote.py</code> mints url-bearing endpoints for discovery.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Collectors are egress-gated; intel produces LEADs, never facts — discovery stays inert until an oracle confirms.</p></div>
+        </article>
+        <article class="card">
+          <h3>Universal sensors — the sensing inflow</h3>
+          <div class="path">engine/crucible/framework/v2/sensors/base.py</div>
+          <p class="behavior">The producers that FEED the oracles: nmap, tls_cert, tshark, web_scanner, cloud_live / gcp / azure, k8s_live / runtime, sbom, android_manifest, mesh, email_auth, fuzz. Each normalizes into the one Observation model as a provenance-tagged lead.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A sensor emits leads, never facts; live cloud/k8s sensors are gated. The oracle over the sensor's captured bytes is what confirms.</p></div>
+        </article>
+        <article class="card">
+          <h3>Agent swarm + critics + reflection</h3>
+          <div class="path">engine/crucible/framework/v2/agents/ (critics.py · reflection.py · cognitive_refusal.py · scope_gate.py · egress_guard.py)</div>
+          <p class="behavior">The blackboard-coordinated bodies behind the OODA loop — recon / hypothesis / exploit / reporter agents — with multi-critic scoring, reflection, cognitive refusal, and per-agent scope/egress guards, all writing to one append-only, provenance-linked event spine.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Critics / reflection may only advise, re-rank, defer, or abstain — never promote a finding or override the oracle. Coverage is never silently gated out.</p></div>
+        </article>
+        <article class="card">
+          <h3>Offense event-spine / memory</h3>
+          <div class="path">engine/crucible/framework/v2/memory/ (store · recall · recorder · priors · postmortem · fleet)</div>
+          <p class="behavior">The append-only offense-side substrate the telemetry projection and the graph projector read from — recall, priors, postmortems, fleet coordination. Distinct from the <code>vigil_core</code> sovereign signed spine.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Append-only and deterministic in the learning/reward math (no wallclock/global-RNG); learning re-ranks and defers, it never mints or auto-labels a silent oracle a false positive.</p></div>
+        </article>
+        <article class="card">
+          <h3>Proof Studio — reproduce-from-raw PCF minting</h3>
+          <div class="path">integration/vigil_integration/proof/engine.py · content_gate.py</div>
+          <p class="behavior">The FRONT of the proof lifecycle: a Strix PoC plus executor-captured NON-LLM bytes are re-driven so the oracle confirms them into a signed, replayable proof-carrying finding (else an honest LEAD). A fail-closed content gate refuses to store/replay/mint evasion / persistence / wipe / worm / cred-exfil PoC classes before minting.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>The oracle judges the bytes; the model only points. Provenance is <code>reproduced</code> (executor bytes), never the LLM's word.</p></div>
+        </article>
+        <article class="card">
+          <h3>VIGIL-LIVE unified OODA engine</h3>
+          <div class="path">integration/vigil_integration/live/engine.py</div>
+          <p class="behavior">The WS-2 attestation-first loop spine: attest → think (F2) → conjunctive gate → governed execute → oracle re-fire → FACT/LEAD → graph → cognition → observability → spine checkpoint. Loopback-proven; framework-free itself (framework imports are function-local in the wiring).</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Every target-touching edge crosses the gate before execute; every run that enters the loop persists an owner-rooted, offline-verifiable spine segment.</p></div>
+        </article>
+        <article class="card">
+          <h3>R4 live external-tool runner</h3>
+          <div class="path">integration/vigil_integration/live/external_tool.py</div>
+          <p class="behavior">Runs a REAL external tool through a <code>ScopeGate</code> (gateway denylist ∧ charter scope) and the docker + nftables egress topology, then lets the oracle adjudicate the tool's output into a FACT via an independent gated handshake. A present tool (nmap) proves the path against a loopback listener.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>The allow-set is ONLY the charter-authorized IPs — the runner does not self-authorize the target's own resolved IP (no wildcard→private bypass); the IMDS/link-local floor is unliftable. CAPABILITY: garak/PyRIT live-fire is tooling-gated, no such FACT minted.</p></div>
+        </article>
+        <article class="card">
+          <h3>Authorization gates — approval broker + nonce ledger</h3>
+          <div class="path">integration/vigil_integration/live/approval_broker.py · approval_token.py · nonce_ledger.py</div>
+          <p class="behavior">A file-backed pending-approval queue plus an owner-signed single-use token inbox satisfies the WARDEN human leg (queue → allow for exactly one action); a durable ATOMIC (<code>O_CREAT|O_EXCL</code>) nonce ledger is the serialization point for destruction authorizations — exactly one winner under concurrency.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>A non-AUTO action queues rather than proceeds; a single-use token / nonce cannot be double-spent even under a concurrent race.</p></div>
+        </article>
+        <article class="card">
+          <h3>Destructive-leg quorum + live codefix executors</h3>
+          <div class="path">integration/vigil_integration/live/destruction_provision.py · codefix_runner.py</div>
+          <p class="behavior"><code>destruction_provision</code> generates + signs the m-of-n <code>DestructionAuthority</code> quorum for <code>vigil patch --open-pr</code>; <code>codefix_runner</code> is the first live caller of the pure autopatch library — real Claude diff, git clone, git apply on the clone.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>CAPABILITY: real separation-of-duties needs co-signer keys off-box (solo default = a single owner key, still single-use / window / action-bound). The live PROPOSE/CLONE/APPLY legs are BUILT non-destructive; the OPEN-PR leg is gated OFF by default.</p></div>
+        </article>
+        <article class="card">
+          <h3>The two-env control plane — dispatch · proxy · verify</h3>
+          <div class="path">integration/vigil_integration/dispatch.py · uiproxy.py · live/spine_verify.py · governance_identity.py</div>
+          <p class="behavior"><code>dispatch</code> is the pure-stdlib, exec-only static verb→venv router — the FATAL-2 boundary rendered in code (offense verbs never resolve into the sovereign venv). <code>uiproxy</code> (<code>vigil up</code>) federates the sovereign cockpit + offense api + console at one origin behind a never-public bind. <code>vigil verify</code> is a public-key-only, inert-bytes-only offense-spine segment verifier over an owner-signed delegation.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Offense and sovereign code never share a process; the proxy reaches no target; <code>vigil verify</code> reports <code>owner_rooted</code> honestly and cannot verify the CRUCIBLE DB-projection chain.</p></div>
+        </article>
+        <article class="card">
+          <h3>Egress gateway — the physical two-env boundary</h3>
+          <div class="path">gateway/vigil_gateway/ (nftables.py · proxy.py · docker.py · scope_source.py · denylist.py)</div>
+          <p class="behavior">Two layers: an nftables L3/L4 deny-default ruleset + a host-side L7 filtering forward proxy + docker sandbox network pinning + charter scope resolution. The denylist is the single source of truth for always-denied ranges (metadata/link-local/loopback/private).</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>CAPABILITY: enforcement is real only when the docker + nftables topology is provisioned; the metadata/link-local floor is never liftable by scope. It is the physical layer beneath the WARDEN/authority logical gates.</p></div>
+        </article>
+        <article class="card">
+          <h3>Owner-root trust chain — delegation · capability · vault · WARDEN tiers · gate-of-record</h3>
+          <div class="path">packages/core/vigil_core/vigil_core/ (delegation.py · capability.py · vault.py · warden_tiers.py · gate.py)</div>
+          <p class="behavior">The owner-root <code>DelegationCert</code> ties the free-floating CRUCIBLE governance TrustRoot to the OWNER (role/scope/expiry-bounded); <code>capability</code> is an owner-signed target IdentityAttestation (SPKI/acceptable-identity pin) that closes proof transplant/target-swap; <code>vault</code> seals keys at rest under a TPM-sealed KEK; <code>warden_tiers</code> is the one A0–A3 classifier-of-record (a byte-faithful port of the Rust kernel, pinned to golden vectors); and <code>gate.py</code> is the one conjunctive gate-of-record shared byte-identically by both processes.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Since S6 (2026-07-25) <code>conjunctive_decide</code> lives in <code>vigil_core/gate.py</code> as the sole gate-of-record; the integration-side <code>conjunctive_gate.py</code> now only re-exports it. Vault is a CAPABILITY — DISABLED until <code>Vault.provision</code> seals a KEK to this machine's TPM (plaintext-0600 until then).</p></div>
+        </article>
+        <article class="card">
+          <h3>Read planes &amp; one-way projections — console · telemetry · learn-drain · knowledge-sync</h3>
+          <div class="path">engine/crucible/framework/v2/console/ · integration/vigil_integration/ (telemetry.py · learn_drain.py · knowledge_sync.py)</div>
+          <p class="behavior">The loopback-only read+SSE Ops Console the proxy federates at <code>/offense/*</code>; a one-way metrics projection over the signed spine (FACTs vs LEADs, refusals, by-kind); the offense-side consumer of the owner-signed learn-grant seam (re-derives a lead from the offense's OWN intel, mints no fact, bumps no priors); and the operator-gated knowledge→GitHub sync.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>All read-only / widen-nothing: the console mints nothing, telemetry projects only, learn-drain is non-circular (fail-closed Ed25519 verify), and committing knowledge makes nothing a FACT.</p></div>
+        </article>
+        <article class="card">
+          <h3>AEGIS runtime-defense engine (the mirror's engine)</h3>
+          <div class="path">engine/crucible/framework/v2/aegis/ (gateway · guard · middleware · boundary · oob_correlator · rampart · response_policy · actor_graph)</div>
+          <p class="behavior">The offense-side embeddable provable-firewall itself — distinct from the L5 detection-mirror <em>adapters</em>. It re-uses the same oracle-then-sign discipline to turn runtime telemetry into signed detection facts on their own chain.</p>
+          <div class="invariant"><div class="invariant-label">INVARIANT</div><p>Defensive-only by construction (adds no offense capability); a detection is a FACT only when its defensive oracle fires over data a real system produced.</p></div>
         </article>
         </div>
       </section>

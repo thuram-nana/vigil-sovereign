@@ -214,7 +214,7 @@ flowchart TB
 - **The Detection Mirror** reads the target's *own* logs and proves, defensively, what the attack looked like — pairing an **edge-plane** offensive fact (recon/injection/credential — the planes whose logs exist) with a matching detection fact; planes whose logs don't exist (C2/identity/cloud/session-phishing) are honest LEADs, not FACTs.
 - **The signed spine** records all of it, append-only. From there, evidence becomes an **offline-verifiable certificate**, and confirmed findings cross the **two-environment boundary** into your personal core as inert signed data only.
 
-> 📊 **Want the deep version?** A highly-detailed, dark-theme architecture reference (7 layers plus an overview, 118 components, every major subsystem mapped) lives as an interactive page at [`docs/architecture/vigil-architecture.html`](docs/architecture/vigil-architecture.html) (open in any browser) and as a print-ready [**PDF**](docs/architecture/vigil-architecture.pdf) — each diagram on its own full page.
+> 📊 **Want the deep version?** A highly-detailed, dark-theme architecture reference (11 layers plus an end-to-end overview, 158 components, every major subsystem mapped — including the full TRUTHENOVATION proof lifecycle, the operationalized-assurance/zero-trust layer, the evidence & audit substrate, and the offense/two-env control plane) lives as an interactive page at [`docs/architecture/vigil-architecture.html`](docs/architecture/vigil-architecture.html) (open in any browser) and as a print-ready [**PDF**](docs/architecture/vigil-architecture.pdf) — each diagram on its own full page.
 
 ---
 
