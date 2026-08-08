@@ -31,7 +31,9 @@ def test_observe_normalizes_and_digests_raw_output():
     assert obs.tool == "nmap" and obs.target == "127.0.0.1" and obs.outcome_class == "ran"
     assert obs.tool_version == "nmap 7.99" and obs.truncated is True and obs.backend == "local"
     assert obs.proposals == (("127.0.0.1", 80, "tcp"),)
-    want = "sha256:" + hashlib.sha256(b"80/open/tcp\x00warn").hexdigest()
+    # LENGTH-PREFIXED framing (injective): len(stdout)\n stdout \n stderr
+    so, se = b"80/open/tcp", b"warn"
+    want = "sha256:" + hashlib.sha256(f"{len(so)}\n".encode("ascii") + so + b"\n" + se).hexdigest()
     assert obs.raw_output_sha256 == want
     d = obs.to_dict()
     assert d["schema"] == "vigil-observation/1" and d["proposals"] == [["127.0.0.1", 80, "tcp"]]
@@ -41,6 +43,14 @@ def test_a_tampered_tool_row_changes_the_digest():
     a = observe(_Spec(), "t", _Outcome(stdout="80/open/tcp"), [])
     b = observe(_Spec(), "t", _Outcome(stdout="80/open/tcp EVIL"), [])
     assert a.raw_output_sha256 != b.raw_output_sha256   # the tool's say-so is bound, tamper-evident
+
+
+def test_digest_framing_is_injective_no_null_boundary_collision():
+    """Red-pen LOW-1 fix: the length-prefixed framing has no \\x00-boundary collision. The two inputs that
+    collided under a plain-\\x00 delimiter now yield DIFFERENT digests."""
+    a = observe(_Spec(), "t", _Outcome(stdout="a\x00", stderr="b"), [])
+    b = observe(_Spec(), "t", _Outcome(stdout="a", stderr="\x00b"), [])
+    assert a.raw_output_sha256 != b.raw_output_sha256
 
 
 def test_refused_observation_records_no_run():

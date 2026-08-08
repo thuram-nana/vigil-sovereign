@@ -8,13 +8,13 @@ adding a new tool means emitting THIS record, not a bespoke dict per oracle.
 
 Load-bearing honesty: the Observation is an OBSERVATION, never a fact. The tool output (and its digest) is a
 PROPOSAL of where to look; a FACT is still minted only by the runner's own oracle re-drive over its own
-gated capture (the ``raw_output_sha256`` binds the tool's SAY-SO, not a verdict). vigil_core + stdlib only.
+gated capture (the ``raw_output_sha256`` binds the tool's SAY-SO, not a verdict). stdlib only.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -44,16 +44,23 @@ class Observation:
 
 def _raw_output_sha256(outcome: Any) -> str:
     """sha256 over the tool's raw stdout+stderr — a stable digest of exactly what the tool emitted (its
-    proposal material). Binds the tool's say-so for the audit trail; NEVER a verdict."""
-    raw = ((getattr(outcome, "stdout", "") or "") + "\x00" + (getattr(outcome, "stderr", "") or "")).encode(
-        "utf-8", "replace")
+    proposal material). Binds the tool's say-so for the audit trail; NEVER a verdict.
+
+    The two streams are LENGTH-PREFIXED (``len(stdout)\\n stdout \\n stderr``) so the framing is INJECTIVE:
+    a plain ``\\x00`` delimiter is not, because ``\\x00`` can occur in the data (stdout='a\\x00',stderr='b'
+    would collide with stdout='a',stderr='\\x00b'). With the byte-length prefix, two distinct (stdout,stderr)
+    pairs can never share a digest — so the bind is genuinely tamper-evident (over the audit trail)."""
+    so = ((getattr(outcome, "stdout", "") or "")).encode("utf-8", "replace")
+    se = ((getattr(outcome, "stderr", "") or "")).encode("utf-8", "replace")
+    raw = f"{len(so)}\n".encode("ascii") + so + b"\n" + se
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def observe(spec: Any, target: str, outcome: Any, proposals: Any, *, tool_version: str = "",
             outcome_class: str = "ran") -> Observation:
-    """Build the canonical Observation from a completed tool run (the runner calls this). Total — never
-    raises; a missing field degrades to its default."""
+    """Build the canonical Observation from a completed tool run (the runner calls this). A missing/None
+    field degrades to its default (the runner always supplies well-typed inputs — spec.propose returns a
+    list, ToolOutcome.stdout/stderr are str); wrong-typed fields are the caller's contract, not handled."""
     props = tuple(
         (getattr(p, "host", ""), getattr(p, "port", 0), getattr(p, "protocol", "tcp"))
         for p in (proposals or [])
