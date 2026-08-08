@@ -267,3 +267,7 @@ a tool image being present.
    oracle covers the class, the result stays a **labelled lead** (the honesty invariant), never a FACT.
 4. Run `run_external_tool(spec, target, scope_gate=..., backend=DockerTopologyBackend(image=...), ...)`.
    The scope gate + oracle authority + signing are inherited verbatim.
+
+## Phase 0.2 evidence-verification — tracked LOW follow-ups (red-pen, non-blocking)
+- **single_engagement discards `""`** (`evidence/certify.py`): a cert with an empty `engagement_slug` can ride a named-engagement bundle without tripping the cross-engagement guard. Defense-in-depth only — it still requires a governance-signed head over the mixed chain. Fix (a producer-consistency + verifier tightening) deferred so uniform legacy `""` bundles under a named head keep verifying.
+- **refs_unique vs mint side** (`evidence/certify.py` vs `integration/vigil_integration/proof/bundle.py`): the verifier refuses a bundle with duplicate `finding_ref`s (closes the context-lookup collision), but the PRODUCER does not yet guarantee unique refs (it can fall back to `bug_class`). A legitimately-minted bundle with two same-class findings would be refused (fail-closed). Follow-up: make the producer key/emit unique refs (or key contexts by `cert_digest`) — Phase 0.6 conformance work.

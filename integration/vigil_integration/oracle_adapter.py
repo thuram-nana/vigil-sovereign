@@ -114,6 +114,8 @@ def confirm_and_certify(
     seq: int = 0,
     verifier: Any = None,
     provenance: str = "llm",
+    tool_version: str = "",
+    freshness_ttl_seconds: int = 0,
 ) -> AdapterResult:
     """Drive CRUCIBLE's oracle over ``finding['oracle_context']`` and, on a confirmed + oracle-mapped +
     REPRODUCED finding, mint + sign a proof-carrying certificate. ``signers`` = [(key_id, priv_b64)]
@@ -193,6 +195,10 @@ def confirm_and_certify(
         "confirmed_by": _kind_str(confirmed.confirmed_by),
         "confidence": float(confirmed.confidence),
         "oracle_context": oracle_context,
+        # criterion-9 provenance/freshness metadata, SIGNED into the cert (dropped when empty). A caller
+        # may also set these directly on `finding`; the explicit params win when non-empty.
+        "tool_version": tool_version or str(finding.get("tool_version", "") or ""),
+        "freshness_ttl_seconds": int(freshness_ttl_seconds or finding.get("freshness_ttl_seconds", 0) or 0),
     }
     cert = build_certificate(enriched, engagement_slug=engagement_slug, seq=seq)
     signed = sign_certificate(cert, signers)

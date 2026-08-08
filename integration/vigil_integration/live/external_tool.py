@@ -257,6 +257,10 @@ class ToolSpec:
     # nmap and every existing caller are byte-for-byte unchanged. A spec that mints a non-reachability FACT
     # (e.g. TLS) carries its re-drives HERE — never body-supplied provenance (the HIGH-3 guard).
     redrives: "tuple[Redrive, ...]" = ()
+    # OPTIONAL argv that prints the tool's VERSION (e.g. ["nmap","--version"]). The runner runs it once
+    # through the SAME gated backend (no target traffic) and stamps the parsed version into every FACT this
+    # run mints (criterion 9 tool_version). None ⇒ no version stamped (byte-identical certificate).
+    version_argv: "Callable[[], list[str]] | None" = None
 
 
 _NMAP_GREPABLE_OPEN = re.compile(r"\b(\d{1,5})/open/(tcp|udp)\b")
@@ -316,7 +320,8 @@ def tls_scan(*, port: int = 443, extra_args: Sequence[str] = ()) -> ToolSpec:
         reached = any(m in text for m in ("Connected to", "Testing SSL server", "Accepted", "Preferred"))
         return [ProposedService(host=target, port=port, protocol="tcp")] if reached else []
 
-    return ToolSpec("tls_scan", build, propose, redrives=_TLS_REDRIVES)
+    return ToolSpec("tls_scan", build, propose, redrives=_TLS_REDRIVES,
+                    version_argv=lambda: ["sslscan", "--version"])
 
 
 def nmap_service_scan(*, ports: str = "1-1024", extra_args: Sequence[str] = ()) -> ToolSpec:
@@ -337,7 +342,7 @@ def nmap_service_scan(*, ports: str = "1-1024", extra_args: Sequence[str] = ()) 
                 out.append(ProposedService(host=target, port=port, protocol=proto))
         return out
 
-    return ToolSpec("nmap", build, propose)
+    return ToolSpec("nmap", build, propose, version_argv=lambda: ["nmap", "--version"])
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +442,29 @@ def _default_capture(host: str, port: int, *, slug: str, protocol: str) -> dict:
     return capture_handshake(host, port, slug=slug, protocol=protocol)
 
 
+def _capture_tool_version(spec: "ToolSpec", backend: "ExecBackend", timeout: float) -> str:
+    """Best-effort tool version via ``spec.version_argv`` through the SAME gated backend (no target). The
+    parsed value is the producer's ASSERTED version (stamped + signed into the cert; NOT a proof of which
+    binary ran — see EvidenceCertificate.tool_version). Never fatal: any failure yields "" (dropped from the
+    cert → byte-identical). Returns the first non-empty stdout/stderr line, capped, single-line."""
+    va = getattr(spec, "version_argv", None)
+    if va is None:
+        return ""
+    try:
+        argv = list(va())
+        if not argv:
+            return ""
+        out = backend.run(argv, timeout=min(timeout, 20.0))
+        text = (out.stdout or "") + "\n" + (out.stderr or "")
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                return line[:120]
+    except Exception:  # noqa: BLE001 — version capture is advisory; never break a run over it
+        return ""
+    return ""
+
+
 def _reachable_context(handshake: dict) -> dict:
     from framework.v2.verify import reachable_context  # offense-side only
     return reachable_context(handshake)
@@ -452,6 +480,7 @@ def run_external_tool(
     signers: "list[tuple[str, str]]",
     capture: Callable[..., dict] = _default_capture,
     timeout: float = _DEFAULT_TIMEOUT,
+    freshness_ttl_seconds: int = 0,
 ) -> RunnerResult:
     """Run ``spec`` against ``target`` through ``backend`` and mint a signed FACT for every proposed
     service the deterministic oracle CONFIRMS.
@@ -493,6 +522,10 @@ def run_external_tool(
     # (built from the injectable `capture` param), so nmap + every existing caller are byte-for-byte
     # unchanged. A TLS/etc. spec carries its OWN runner-owned re-drives on the spec.
     redrives = spec.redrives or (Redrive("service_reachable", capture, _reachable_context),)
+    # Best-effort tool VERSION (criterion 9): run the spec's version_argv ONCE through the SAME gated backend
+    # (no target traffic) and stamp the parsed version into every FACT this run mints. Never fatal — an
+    # absent/failing version_argv just leaves the version "" (dropped from the cert → byte-identical).
+    tool_version = _capture_tool_version(spec, backend, timeout)
     facts: list = []
     leads: list = []
     contexts: dict = {}
@@ -521,7 +554,8 @@ def run_external_tool(
                 "oracle_context": oracle_context,
             }
             res = confirm_and_certify(
-                finding, engagement_slug=engagement_slug, signers=signers, provenance="live_redrive")
+                finding, engagement_slug=engagement_slug, signers=signers, provenance="live_redrive",
+                tool_version=tool_version, freshness_ttl_seconds=freshness_ttl_seconds)
             # retain the exact context keyed by the result's finding_ref so a caller can re-verify the
             # signed certificate OFFLINE (verify_certificate needs the context; the cert stores its digest).
             contexts[res.finding_ref] = oracle_context

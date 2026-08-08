@@ -43,11 +43,11 @@ def _ctx(mutated: dict) -> FindingContext:
         discriminator={"dimensions": ["status", "length", "lexical"]})
 
 
-def _finding(mutated: dict) -> dict:
+def _finding(mutated: dict, *, ref: str = "boolean-sqli") -> dict:
     ctx = _ctx(mutated)
     confirmed = confirm_finding(finding={"bug_class": "boolean_sqli"}, context=ctx)
     return {
-        "check_id": "boolean-sqli", "bug_class": "boolean_sqli",
+        "check_id": ref, "bug_class": "boolean_sqli",
         "confirmed_by": confirmed.confirmed_by.value if confirmed else "differential_response",
         "confidence": confirmed.confidence if confirmed else 0.9,
         "oracle_context": ctx.model_dump(mode="json"),
@@ -221,12 +221,14 @@ def test_claimed_artifacts_fail_closed_without_evidence_root(tmp_path: Path) -> 
 
 def test_verify_bundle_detects_a_suppressed_certificate() -> None:
     tr, signers = _trust_root(2, 3)
-    fs = [_finding(_DIVERGENT), _finding(_DIVERGENT)]
+    # DISTINCT finding_refs — a bundle must not reuse a ref (the per-ref context lookup would collide; the
+    # verifier now refuses a duplicate-ref bundle). Two distinct refs each get their own context entry.
+    fs = [_finding(_DIVERGENT, ref="boolean-sqli-a"), _finding(_DIVERGENT, ref="boolean-sqli-b")]
     certs = [sign_certificate(build_certificate(fs[0], seq=0), signers[:2]),
              sign_certificate(build_certificate(fs[1], seq=1), signers[:2])]
     chain = build_chain([c.certificate.cert_digest for c in certs])
     head = sign_head(chain, engagement_slug="acme", signers=signers[:2])
-    contexts = {"boolean-sqli": fs[0]["oracle_context"]}   # same ref for both
+    contexts = {"boolean-sqli-a": fs[0]["oracle_context"], "boolean-sqli-b": fs[1]["oracle_context"]}
 
     full = verify_bundle(certs, chain, head, contexts=contexts, trust_root=tr)
     assert full.ok and full.cert_set_bound
