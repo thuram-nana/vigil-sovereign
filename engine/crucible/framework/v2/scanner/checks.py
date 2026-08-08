@@ -24,6 +24,7 @@ tokens), not weaponized exploits.
 from __future__ import annotations
 
 import math
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
@@ -297,10 +298,13 @@ class RequestCheck(Protocol):
 @dataclass(frozen=True)
 class CorsActiveCheck:
     """Active CORS misconfiguration: send a hostile ``Origin`` and check whether
-    the server reflects it (or wildcards) with credentials — the combination that
-    lets an attacker page read authenticated responses. Confirmed via
-    achieved-state only on the dangerous reflection, so a properly-scoped CORS
-    policy does not fire."""
+    the server REFLECTS it back with credentials — the exact combination that lets
+    an attacker page read authenticated responses. Confirmed via achieved-state
+    only on the dangerous reflection, so a properly-scoped CORS policy does not
+    fire. Note: ``Access-Control-Allow-Origin: *`` WITH credentials is deliberately
+    NOT confirmed here — browsers refuse ``*``+credentials, so it is not
+    credential-readable and would be an over-claim as an exploitable FACT (a passive
+    check may still surface it as a lower-severity misconfiguration lead)."""
 
     id: str = "cors-active"
     bug_class: str = "cors"
@@ -316,14 +320,14 @@ class CorsActiveCheck:
         rh = resp.get("headers", []) or []
         acao = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-origin"), "")
         acac = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-credentials"), "")
-        # The ORACLE decides the dangerous condition over the raw header values:
-        # (ACAO reflects the hostile origin OR is a wildcard) AND credentials are
-        # allowed. A properly-scoped policy fails the predicate and does not fire.
+        # The ORACLE decides the exploitable condition over the raw header values:
+        # ACAO REFLECTS the hostile origin AND credentials are allowed. A wildcard
+        # (`*`) is excluded — browsers do not honour `*`+credentials, so it cannot
+        # read authenticated responses. A properly-scoped policy fails the predicate.
         return FindingContext.from_predicate(
             {"acao": acao, "acac": acac, "evil_origin": self.evil_origin},
             {"all": [
-                {"any": [{"eq": [{"var": "acao"}, {"var": "evil_origin"}]},
-                         {"eq": [{"var": "acao"}, "*"]}]},
+                {"eq": [{"var": "acao"}, {"var": "evil_origin"}]},
                 {"ieq": [{"var": "acac"}, "true"]},
             ]},
             bug_class=self.bug_class)
@@ -390,12 +394,15 @@ class OpenRedirectCheck:
         body = str(resp.get("body", ""))
 
         # The oracle decides redirection to the canary host over the raw status,
-        # Location, and body: a 30x Location to the canary host, OR a meta/JS
-        # redirect in the body that resolves to it. Reflection on the app's own
-        # host fails the predicate (no false positive on echoed-but-safe params).
+        # Location, and the body's ACTUAL navigation targets: a 30x Location to the
+        # canary host, OR a meta-refresh / JS-location sink whose target host IS the
+        # canary host. Reflection on the app's own host — or the canary merely echoed
+        # somewhere in the body next to an unrelated <meta http-equiv=...> — fails the
+        # predicate (no false positive on echoed-but-safe params).
         return FindingContext.from_predicate(
             {"status": status, "location_host": _host(location),
-             "canary_host": _host(self.canary), "body": body},
+             "canary_host": _host(self.canary), "body": body,
+             "markup_redirect_hosts": _markup_redirect_hosts(body)},
             {"any": [
                 {"all": [
                     {"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
@@ -403,12 +410,7 @@ class OpenRedirectCheck:
                 ]},
                 {"all": [
                     {"min_len": [{"var": "canary_host"}, 1]},
-                    {"contains": [{"var": "body"}, {"var": "canary_host"}]},
-                    {"any": [
-                        {"icontains": [{"var": "body"}, "http-equiv"]},
-                        {"icontains": [{"var": "body"}, "location.href"]},
-                        {"icontains": [{"var": "body"}, "location.replace"]},
-                    ]},
+                    {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
                 ]},
             ]},
             bug_class=self.bug_class)
@@ -603,6 +605,36 @@ def _slugify(s: str) -> str:
 def _host(url: str) -> str:
     """The netloc of a URL, lowercased, or '' if it has none (relative URL)."""
     return urlsplit(url).netloc.lower()
+
+
+_META_TAG = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_HTTP_EQUIV_REFRESH = re.compile(r"http-equiv\s*=\s*[\"']?\s*refresh", re.IGNORECASE)
+_META_CONTENT = re.compile(r"content\s*=\s*[\"']([^\"']*)[\"']", re.IGNORECASE)
+_META_CONTENT_URL = re.compile(r"\burl\s*=\s*(.+?)\s*$", re.IGNORECASE)
+# JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
+_JS_REDIRECT = re.compile(
+    r"(?:(?:window|document)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*[\"']([^\"']+)[\"']",
+    re.IGNORECASE)
+
+
+def _markup_redirect_hosts(body: str) -> list[str]:
+    """The hosts a browser would actually NAVIGATE to from the response markup — the target of a
+    meta-refresh (``<meta http-equiv=refresh content='...;url=<URL>'>``) or a JS location sink
+    (``location.href/.assign/.replace``, ``window/document.location``). Returns lowercased netlocs; a
+    relative / same-origin target contributes nothing (dropped). This is the co-location test that makes
+    open-redirect confirmation sound: the canary host must be an ACTUAL navigation target, not merely a
+    substring reflected somewhere in the body next to an unrelated ``<meta http-equiv=Content-Type>``."""
+    hosts: list[str] = []
+    for tag in _META_TAG.findall(body or ""):
+        if _HTTP_EQUIV_REFRESH.search(tag):
+            m = _META_CONTENT.search(tag)
+            if m:
+                u = _META_CONTENT_URL.search(m.group(1))
+                if u:
+                    hosts.append(_host(u.group(1).strip().strip("'\"")))
+    for u in _JS_REDIRECT.findall(body or ""):
+        hosts.append(_host(u.strip()))
+    return [h for h in hosts if h]   # only real authorities — a relative target is not an open redirect
 
 
 # ---------------------------------------------------------------------------

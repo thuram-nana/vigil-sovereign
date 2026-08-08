@@ -2,8 +2,9 @@
 
 A web tool (httpx / katana / nuclei) PROPOSES a URL; this re-drives it — the RUNNER (never the tool) crafts
 the probe, sends it through a GATED HTTP client, and the existing deterministic ``predicate_oracle`` judges
-the captured response. It mints a signed, offline-re-verifiable FACT for the near-zero-FP web classes whose
-predicate is a DEFINITE proposition over observed values:
+the captured response. It mints a signed, offline-re-verifiable FACT for the web classes whose predicate is
+a DEFINITE, EXPLOITABLE proposition over observed values (scoped to the co-located condition, not a loose
+substring match — a benign reflecting page does not false-FACT):
 
   * open_redirect   — a 30x whose Location host == the injected canary host (or a meta/JS redirect to it);
   * cors            — Access-Control-Allow-Origin reflects the evil origin (or ``*``) AND ...-Credentials=true;
@@ -22,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# the near-zero-FP web classes this wave mints as FACTs (each has a definite ACHIEVED_STATE predicate).
+# the web classes this wave mints as FACTs (each has a definite, exploitable-condition ACHIEVED_STATE predicate).
 WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection")
 
 
@@ -30,7 +31,8 @@ WEB_FACT_CLASSES = ("open_redirect", "cors", "host_header_injection")
 class WebRedriveResult:
     url: str
     facts: list = field(default_factory=list)     # AdapterResult (status=="fact"), signed
-    leads: list = field(default_factory=list)     # AdapterResult (status=="lead")
+    leads: list = field(default_factory=list)     # AdapterResult (status=="lead") — CHANNEL-CONFIRMED
+    inconclusive: list = field(default_factory=list)  # (bug_class, item) — a probe with NO channel; never CLEAN
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
     refused: bool = False
     notes: list = field(default_factory=list)
@@ -41,11 +43,19 @@ class WebRedriveResult:
 
 
 def _gated_web_send(slug: str, *, timeout: float = 8.0):
-    """A ``scanner.checks.Send`` — ``send(HttpRequest) -> {status, body, headers, latency_ms}`` — that
-    AUTHORIZES each request's URL through the URL-shaped active-recon gate (kill-switch → single-host →
-    ACTIVE_RECON → charter scope → http(s), no embedded creds) BEFORE issuing it, follows NO redirects (so
-    the raw Location is captured), and is bounded. A refusal (or transport error) returns a status-0 empty
-    response, so the check sees nothing and mints no FACT — never an un-gated send."""
+    """Return ``(send, state)``. ``send`` is a ``scanner.checks.Send`` —
+    ``send(HttpRequest) -> {status, body, headers, latency_ms}`` — that AUTHORIZES each request's URL
+    through the URL-shaped active-recon gate (kill-switch → single-host → ACTIVE_RECON → charter scope →
+    http(s), no embedded creds) BEFORE issuing it, follows NO redirects (so the raw Location is captured),
+    and is bounded.
+
+    ``state`` is a mutable ``{"channels": int, "no_channel": int}`` counter the runner uses to tell a
+    GENUINE observation from a NON-observation. A refusal (per-request gate deny / kill-switch tripped
+    mid-run) or any transport error (connection refused, timeout, DNS failure) increments ``no_channel``
+    and returns a status-0 empty response — the check sees nothing and mints no FACT (never an un-gated
+    send). The runner MUST NOT treat a no-channel probe as a "channel-confirmed CLEAN": no channel means
+    INCONCLUSIVE, not clean (the "found nothing != CLEAN" invariant). Only a real HTTP response — any
+    status, including 4xx/5xx — increments ``channels``."""
     import time
     import urllib.error
     import urllib.request
@@ -57,10 +67,12 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
             return None
 
     _EMPTY = {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
+    state = {"channels": 0, "no_channel": 0}
 
     def send(req: Any) -> dict:
         if _authorize(req.url, slug) is not None:
-            return dict(_EMPTY)   # refused pre-traffic — the check gets nothing
+            state["no_channel"] += 1
+            return dict(_EMPTY)   # refused (gate deny / kill-switch mid-run) — NO channel, not a CLEAN
         data = req.body.encode("utf-8") if getattr(req, "body", None) else None
         r = urllib.request.Request(req.url, data=data, method=getattr(req, "method", "GET"))
         for k, v in getattr(req, "headers", []) or []:
@@ -70,20 +82,24 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         try:
             with opener.open(r, timeout=timeout) as resp:
                 status, raw, headers = resp.status, resp.read(), list(resp.headers.items())
-        except urllib.error.HTTPError as e:      # a 4xx/5xx is a real, useful response
+        except urllib.error.HTTPError as e:      # a 4xx/5xx is a real, useful response — a genuine channel
             status, raw, headers = e.code, e.read(), list(e.headers.items())
-        except Exception:                        # noqa: BLE001 — any transport error → empty (no FACT)
+        except Exception:                        # noqa: BLE001 — transport error (no channel) → INCONCLUSIVE
+            state["no_channel"] += 1
             return dict(_EMPTY)
+        state["channels"] += 1
         return {"status": status, "body": raw.decode("utf-8", "replace"),
                 "headers": [(str(k), str(v)) for k, v in headers], "latency_ms": (time.monotonic() - t0) * 1000.0}
 
-    return send
+    return send, state
 
 
 def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                 timeout: float = 8.0) -> WebRedriveResult:
-    """Re-drive ``url`` through the shipped near-zero-FP web checks via a gated send and mint a signed FACT
-    for every ACHIEVED_STATE predicate the oracle confirms. Returns a :class:`WebRedriveResult`."""
+    """Re-drive ``url`` through the shipped web checks via a gated send and mint a signed FACT for every
+    ACHIEVED_STATE predicate the oracle confirms over VIGIL's OWN live capture. The predicates are scoped to
+    the exploitable, co-located condition (a real navigation target / reflected-origin+creds), and a probe
+    that established no channel is INCONCLUSIVE (never CLEAN). Returns a :class:`WebRedriveResult`."""
     from framework.v2.scanner.checks import CorsActiveCheck, HostHeaderCheck, OpenRedirectCheck  # noqa: PLC0415
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
@@ -101,10 +117,20 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         res.notes.append(f"refused before any traffic: {refusal}")
         return res
 
-    send = _gated_web_send(slug, timeout=timeout)
+    send, state = _gated_web_send(slug, timeout=timeout)
     template = RequestTemplate(HttpRequest(method="GET", url=url))
 
-    def _adjudicate(ctx: Any, bug_class: str, item: str) -> None:
+    def _run(probe_fn, bug_class: str, item: str) -> None:
+        """Run one check, but adjudicate ONLY if the probe established a real channel. A probe whose every
+        send was gate-refused (kill-switch tripped mid-run) or errored (connection refused / timeout)
+        observed NOTHING — it is INCONCLUSIVE, never a 'channel-confirmed CLEAN' (the 'found nothing !=
+        CLEAN' invariant). We snapshot the channel counter around the probe to decide."""
+        before = state["channels"]
+        ctx = probe_fn()
+        had_channel = state["channels"] > before
+        if not had_channel:
+            res.inconclusive.append((bug_class, item))   # no observation → do NOT let it become CLEAN
+            return
         if ctx is None:
             return
         finding = {"check_id": f"web:{bug_class}:{item}", "bug_class": bug_class,
@@ -116,12 +142,12 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
 
     try:
         # request-level checks (add an evil Origin / Host to the whole request)
-        _adjudicate(CorsActiveCheck().probe(template, send), "cors", url)
-        _adjudicate(HostHeaderCheck().probe(template, send), "host_header_injection", url)
+        _run(lambda: CorsActiveCheck().probe(template, send), "cors", url)
+        _run(lambda: HostHeaderCheck().probe(template, send), "host_header_injection", url)
         # per-insertion-point: open-redirect injects the canary into each query-value point
         orc = OpenRedirectCheck()
         for point in template.insertion_points(kinds=(InsertionKind.QUERY_VALUE,)):
-            _adjudicate(orc.probe(template, point, send), "open_redirect", f"{url}#{point.id}")
+            _run(lambda p=point: orc.probe(template, p, send), "open_redirect", f"{url}#{point.id}")
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"probe error: {type(e).__name__}: {e}")
     return res

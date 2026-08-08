@@ -1,7 +1,7 @@
 {
   "schema": "vigil-capability-matrix/1",
   "upstream": "hexstrike-ai (0x4m4), pinned d689933 — vendored NON-runnable; 79 distinct external tools",
-  "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count. Two FACT families are VIGIL-DIRECT (no tool is the authority): VERSION_RANGE via live.sbom (SBOM/dependency-CVE) and ACHIEVED_STATE via live.web_redrive (open_redirect / cors / host_header_injection over VIGIL's own gated capture). Their proposer tools (trivy/grype, httpx) keep fact_capable=false by design.",
+  "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count. Two FACT families are VIGIL-DIRECT (no tool is the authority): VERSION_RANGE via live.sbom (SBOM/dependency-CVE) and ACHIEVED_STATE via live.web_redrive (open_redirect / cors / host_header_injection over VIGIL's own gated capture, predicates scoped to the exploitable co-located condition; no-channel is INCONCLUSIVE not CLEAN). Their proposer tools (trivy/grype, httpx) keep fact_capable=false by design.",
   "tools": [
     {
       "name": "nmap",
@@ -48,7 +48,7 @@
         "cors",
         "host-header-injection"
       ],
-      "notes": "HTTP exposure is re-derived by VIGIL's live.web_redrive ACHIEVED_STATE path (SHIPPED, no install): VIGIL issues its OWN gated, no-redirect HTTP capture and the deterministic predicate_oracle mints open_redirect / cors / host_header_injection FACTs (the near-zero-FP web subset) — the tool is only a URL proposer, never the fact authority (fact_capable stays false). Other web classes stay LEAD-only pending their re-drive."
+      "notes": "HTTP exposure is re-derived by VIGIL's live.web_redrive ACHIEVED_STATE path (SHIPPED, no install): VIGIL issues its OWN gated, no-redirect HTTP capture and the deterministic predicate_oracle mints open_redirect / cors / host_header_injection FACTs — the tool is only a URL proposer, never the fact authority (fact_capable stays false). FACT predicates are scoped to the EXPLOITABLE, co-located condition (open_redirect: canary is an actual meta-refresh/JS navigation target or a 30x Location host; cors: origin REFLECTED with credentials, not '*'+creds which browsers refuse) so a benign reflecting page does not false-FACT. A no-channel probe is INCONCLUSIVE, never CLEAN. Other web classes stay LEAD-only pending their re-drive."
     },
     {
       "name": "katana",
