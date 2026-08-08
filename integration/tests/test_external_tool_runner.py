@@ -523,3 +523,21 @@ def test_unentitled_run_refuses_the_tool_exec(tmp_path: Path, monkeypatch: pytes
     res = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1",
                             scope_gate=gate, backend=spy, engagement_slug="alpha", signers=SIGNERS)
     assert res.refused and "not entitled" in res.reason and spy.runs == []
+
+
+def test_killswitch_check_ERROR_fails_closed_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A kill-switch CHECK that raises (not a clean trip) must REFUSE fail-closed — the tool never launches.
+    Pins the except branch the red-pen flagged as correct-but-untested."""
+    import framework.v2.authority as _authority
+    _charter(tmp_path, "127.0.0.1")
+
+    class _Boom:
+        def __init__(self, slug): ...
+        def is_tripped(self):
+            raise OSError("stat blew up")
+    monkeypatch.setattr(_authority, "KillSwitch", _Boom)
+    spy = _SpyBackend()
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    res = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1",
+                            scope_gate=gate, backend=spy, engagement_slug="alpha", signers=SIGNERS)
+    assert res.refused and "fail-closed" in res.reason and spy.runs == []
