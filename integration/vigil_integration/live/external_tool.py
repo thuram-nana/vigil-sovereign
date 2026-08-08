@@ -442,6 +442,31 @@ def _default_capture(host: str, port: int, *, slug: str, protocol: str) -> dict:
     return capture_handshake(host, port, slug=slug, protocol=protocol)
 
 
+def _preflight_gate_refusal(engagement_slug: str) -> "str | None":
+    """Fail-closed pre-flight for the TOOL EXEC itself — returns a refusal reason, or None to proceed.
+
+    Mirrors the oracle re-drive's gate order (``verify.reachability._authorize``: kill-switch → entitlement)
+    so the tool SUBPROCESS — not merely the later oracle re-drive — is halted by a tripped kill-switch, a
+    missing charter context, or an un-entitled run, BEFORE any traffic leaves. Charter SCOPE + egress are
+    additionally enforced by ``ScopeGate.authorize`` right after this. Framework imports are function-local
+    (FATAL-2): importing this module co-loads no offense engine. A failing check REFUSES (never proceeds)."""
+    if not engagement_slug:
+        return "an external tool run requires an engagement slug (no charter context = no authorization)"
+    try:
+        from framework.v2.authority import KillSwitch  # offense-side only
+        if KillSwitch(engagement_slug).is_tripped():
+            return "kill-switch tripped"
+    except Exception as e:  # noqa: BLE001 — a failing kill-switch check REFUSES (fail-closed)
+        return f"kill-switch check failed (fail-closed): {e}"
+    try:
+        from framework.v2.entitlement import require_capability  # offense-side only
+        from framework.v2.entitlement.models import Capability
+        require_capability(Capability.ACTIVE_RECON)
+    except Exception as e:  # noqa: BLE001 — no entitlement ⇒ refuse
+        return f"active_recon not entitled (fail-closed): {e}"
+    return None
+
+
 def _capture_tool_version(spec: "ToolSpec", backend: "ExecBackend", timeout: float) -> str:
     """Best-effort tool version via ``spec.version_argv`` through the SAME gated backend (no target). The
     parsed value is the producer's ASSERTED version (stamped + signed into the cert; NOT a proof of which
@@ -498,6 +523,15 @@ def run_external_tool(
 
     ``signers`` = the governance authorisers ``[(key_id, priv_b64)]`` — required (a zero-signature
     certificate is never labelled a fact; confirm_and_certify enforces this)."""
+    # 0. PRE-FLIGHT GATE on the tool exec (crit 3/11): kill-switch + charter-context + entitlement, BEFORE
+    #    scope/egress or any traffic — so a tripped kill-switch halts the tool SUBPROCESS, not just the later
+    #    oracle re-drive. (WARDEN A2 + the m-of-n conjunctive approval are enforced upstream at the body/
+    #    orchestrator layer — HexstrikeAgentBody._warden_gate — which is sovereign-side; the offense runner
+    #    cannot import that gate under FATAL-2, so it self-enforces the offense-side floor here.)
+    refusal = _preflight_gate_refusal(engagement_slug)
+    if refusal is not None:
+        return RunnerResult("refused", f"pre-flight gate: {refusal}", spec.name, target)
+
     allowed, reason = scope_gate.authorize(target)
     if not allowed:
         return RunnerResult("refused", reason, spec.name, target)

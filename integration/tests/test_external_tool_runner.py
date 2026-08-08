@@ -484,3 +484,42 @@ def test_tls_no_cert_yields_no_crypto_fact():
 
     assert _weak_crypto_context({"connected": True}) is None      # no cert_der_b64 -> skip
     assert _weak_tls_context({"connected": False}) is None        # failed handshake -> skip
+
+
+# ===================================================================================================
+# 5. PHASE 0.5 — the tool-exec PRE-FLIGHT GATE (kill-switch + charter-context + entitlement), so the
+#    TOOL SUBPROCESS itself is gated (not only the later oracle re-drive). Fail-closed BEFORE any traffic.
+# ===================================================================================================
+def test_tripped_killswitch_refuses_the_tool_exec_before_traffic(tmp_path: Path) -> None:
+    from framework.v2.authority import KillSwitch
+    _charter(tmp_path, "127.0.0.1")
+    KillSwitch("alpha").trip("red-pen: halt")   # writes the monkeypatched tmp halt file
+    spy = _SpyBackend()
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    res = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1",
+                            scope_gate=gate, backend=spy, engagement_slug="alpha", signers=SIGNERS)
+    assert res.refused and "kill-switch tripped" in res.reason
+    assert spy.runs == []          # the tool NEVER launched
+    assert res.facts == []
+
+
+def test_empty_engagement_slug_refuses_the_tool_exec(tmp_path: Path) -> None:
+    _charter(tmp_path, "127.0.0.1")
+    spy = _SpyBackend()
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    res = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1",
+                            scope_gate=gate, backend=spy, engagement_slug="", signers=SIGNERS)
+    assert res.refused and "engagement slug" in res.reason and spy.runs == []
+
+
+def test_unentitled_run_refuses_the_tool_exec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _charter(tmp_path, "127.0.0.1")
+    from framework.v2 import entitlement
+    def _deny(cap):
+        raise PermissionError("ACTIVE_RECON not granted")
+    monkeypatch.setattr(entitlement, "require_capability", _deny)   # overrides the autouse no-op
+    spy = _SpyBackend()
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    res = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1",
+                            scope_gate=gate, backend=spy, engagement_slug="alpha", signers=SIGNERS)
+    assert res.refused and "not entitled" in res.reason and spy.runs == []
