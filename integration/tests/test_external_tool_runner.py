@@ -541,3 +541,29 @@ def test_killswitch_check_ERROR_fails_closed_refuses(tmp_path: Path, monkeypatch
     res = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1",
                             scope_gate=gate, backend=spy, engagement_slug="alpha", signers=SIGNERS)
     assert res.refused and "fail-closed" in res.reason and spy.runs == []
+
+
+def test_run_attaches_a_canonical_observation(tmp_path: Path) -> None:
+    """PHASE 0.3: every run — refused or ran — attaches the canonical Observation (crit 4)."""
+    _charter(tmp_path, "127.0.0.1")
+    gate_in = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    gate_out = ScopeGate(scope=StaticScopeSource(["10.99.99.99"]), loopback_allowed_if_scoped=True)
+
+    # refused (out of scope) → a 'refused' Observation, tool never ran
+    ref = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1", scope_gate=gate_out,
+                            backend=_SpyBackend(), engagement_slug="alpha", signers=SIGNERS)
+    assert ref.refused and ref.observation is not None and ref.observation.outcome_class == "refused"
+    assert ref.observation.raw_output_sha256 == "" and ref.observation.proposals == ()
+
+    # ran → a 'ran' Observation binding the tool's raw output by digest, with the parsed proposals
+    class _Reached:
+        name = "b"
+        def available(self):  # noqa: E704
+            return True, ""
+        def run(self, argv, *, timeout=0):
+            return ToolOutcome(list(argv), 0, "Host: 127.0.0.1 ()\tPorts: 80/open/tcp//x///\n", "", self.name)
+    ran = run_external_tool(nmap_service_scan(ports="80"), "127.0.0.1", scope_gate=gate_in,
+                            backend=_Reached(), engagement_slug="alpha", signers=SIGNERS)
+    assert ran.observation is not None and ran.observation.outcome_class == "ran"
+    assert ran.observation.tool == "nmap" and ran.observation.raw_output_sha256.startswith("sha256:")
+    assert ("127.0.0.1", 80, "tcp") in ran.observation.proposals

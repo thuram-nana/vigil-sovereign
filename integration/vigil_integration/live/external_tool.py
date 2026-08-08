@@ -429,6 +429,9 @@ class RunnerResult:
                                                         # positive/clean/inconclusive/unsupported/error/skipped
                                                         # taxonomy (criterion 7), so no state is conflated.
     tool_errored: bool = False                          # the tool run itself errored (timeout / spawn failure)
+    observation: Any = None                             # the canonical normalized Observation (crit 4):
+                                                        # tool identity+version, target, raw-output digest,
+                                                        # proposals, outcome_class — one shape per run.
 
     @property
     def refused(self) -> bool:
@@ -530,11 +533,15 @@ def run_external_tool(
     #    cannot import that gate under FATAL-2, so it self-enforces the offense-side floor here.)
     refusal = _preflight_gate_refusal(engagement_slug)
     if refusal is not None:
-        return RunnerResult("refused", f"pre-flight gate: {refusal}", spec.name, target)
+        from .observation import refused_observation  # noqa: PLC0415
+        return RunnerResult("refused", f"pre-flight gate: {refusal}", spec.name, target,
+                            observation=refused_observation(spec, target))
 
     allowed, reason = scope_gate.authorize(target)
     if not allowed:
-        return RunnerResult("refused", reason, spec.name, target)
+        from .observation import refused_observation  # noqa: PLC0415
+        return RunnerResult("refused", reason, spec.name, target,
+                            observation=refused_observation(spec, target))
 
     ok, why = backend.available()
     if not ok:
@@ -600,5 +607,8 @@ def run_external_tool(
     detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} service(s), "
               f"oracle-confirmed {len(facts)} FACT(s), {len(leads)} lead(s)"
               + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else ""))
+    from .observation import observe  # noqa: PLC0415
+    observation = observe(spec, target, outcome, proposed, tool_version=tool_version,
+                          outcome_class="errored" if tool_errored else "ran")
     return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts,
-                        outcomes=outcomes, tool_errored=tool_errored)
+                        outcomes=outcomes, tool_errored=tool_errored, observation=observation)
