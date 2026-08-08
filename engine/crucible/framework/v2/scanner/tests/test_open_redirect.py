@@ -91,6 +91,36 @@ def test_safe_redirect_not_confirmed() -> None:
         assert findings == [], "an app that only redirects to its own host must not be flagged"
 
 
+_CANARY_URL = f"https://{_CANARY_HOST}/pwned"
+
+
+def test_markup_redirect_hosts_extracts_only_real_navigation_targets() -> None:
+    """Re-red-pen BLOCK-C: `content=` must be anchored to a real ATTRIBUTE boundary. A plain `\\b` is NOT
+    enough (`-` is a non-word char, so `\\bcontent` matches inside `data-content=`), which let a benign
+    own-host redirect mint a signed false FACT. Every real sink must still be extracted."""
+    from framework.v2.scanner.checks import _markup_redirect_hosts as hosts
+
+    # TRUE POSITIVES — real navigation targets must still be found
+    assert _CANARY_HOST in hosts(f'<meta http-equiv="refresh" content="0; url={_CANARY_URL}">')
+    assert _CANARY_HOST in hosts(f'<meta HTTP-EQUIV = "Refresh" content = "5; URL={_CANARY_URL}">')
+    assert _CANARY_HOST in hosts(f"<meta http-equiv='refresh' content='0;url={_CANARY_URL}'>")
+    assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
+    assert _CANARY_HOST in hosts(f'<script>location.assign("{_CANARY_URL}")</script>')
+    assert _CANARY_HOST in hosts(f'<script>window.location="{_CANARY_URL}"</script>')
+    # `.` is deliberately allowed before `location` so real sinks like top/parent/self still match
+    assert _CANARY_HOST in hosts(f'<script>top.location.href="{_CANARY_URL}"</script>')
+
+    # NEGATIVES — none of these is a navigation target; none may contribute a host
+    assert _CANARY_HOST not in hosts(   # BLOCK-C: a *content-named attribute is not `content`
+        f'<meta http-equiv="refresh" data-content="0;url={_CANARY_URL}" content="0;url=/home">')
+    assert _CANARY_HOST not in hosts(   # reflected next to an unrelated charset meta (BLOCK-1)
+        f'<meta http-equiv="Content-Type" content="text/html"><p>next: {_CANARY_URL}</p>')
+    assert _CANARY_HOST not in hosts(f'<script>var back="{_CANARY_URL}"</script>')   # a string, not a sink
+    assert _CANARY_HOST not in hosts(   # the canary is a query param of an OWN-host redirect
+        f'<meta http-equiv="refresh" content="0;url=/go?returnurl={_CANARY_URL}">')
+    assert hosts(f'<!-- {_CANARY_URL} -->') == []
+
+
 def test_markup_redirect_hosts_is_bounded_on_a_hostile_body() -> None:
     """Re-red-pen BLOCK-B: the markup parse must stay ~linear on a hostile, unterminated-<meta> body — a
     target-controlled response must not be able to make it super-linear (availability). 1.2MB of '<meta '

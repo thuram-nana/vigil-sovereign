@@ -104,3 +104,21 @@ def test_host_header_injection_confirmed_and_safe() -> None:
         req = HttpRequest(method="GET", url=f"http://{h}:{p}/reset")
         f = AuditEngine(_send(h, p)).audit(req, checks=(), request_checks=(HostHeaderCheck(),))
         assert f == [], "an app using relative links must not be flagged for host-header injection"
+
+
+def test_absolute_url_hosts_matches_whole_authorities_not_prefixes() -> None:
+    """The hostile Host counts only when it is the WHOLE authority of an absolute URL. A substring test
+    (`"//evil" in body`) also fires on `//evil.cdn.example.com` — a different, NON-attacker-controlled host
+    that an app using the Host header as a subdomain component emits — which would be a false FACT."""
+    from framework.v2.scanner.checks import _absolute_url_hosts as hosts
+
+    evil = HostHeaderCheck().evil_host
+    # real reflections into a URL authority — all must be found
+    assert evil in hosts(f'<a href="https://{evil}/reset?t=1">reset</a>')
+    assert evil in hosts(f'<a href="//{evil}/reset">reset</a>')
+    assert evil in hosts(f'{{"reset_url": "https://{evil}/r/abc"}}')   # JSON API, not just HTML links
+    # NOT the evil host / not an authority at all
+    assert evil not in hosts(f'<img src="https://{evil}.cdn.example.com/logo.png">')  # subdomain prefix
+    assert evil not in hosts(f"<p>Host: {evil}</p>")                                  # plain-text echo
+    assert evil not in hosts(f'<a href="https://app.example/go?to={evil}">x</a>')     # in the path/query
+    assert hosts('<a href="/reset">reset</a>') == []                                  # relative links only

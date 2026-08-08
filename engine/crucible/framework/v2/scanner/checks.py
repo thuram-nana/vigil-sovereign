@@ -355,14 +355,17 @@ class HostHeaderCheck:
         rh = resp.get("headers", []) or []
         location = next((str(v) for k, v in rh if str(k).lower() == "location"), "")
         # The oracle checks whether the hostile Host became a URL authority: a
-        # redirect Location to it, or an absolute //evil-host URL in the body. A
-        # plain-text echo of the host does NOT satisfy the predicate.
+        # redirect Location to it, or an absolute URL in the body whose authority IS
+        # the evil host. A plain-text echo of the host does NOT satisfy the predicate,
+        # and matching is on the WHOLE authority — a substring test would also fire on
+        # `//evil-host.cdn.example.com`, a different, non-attacker-controlled host that
+        # an app using the Host header as a subdomain component would emit.
         return FindingContext.from_predicate(
             {"location_host": _host(location), "evil_host": self.evil_host,
-             "body": body, "evil_url": f"//{self.evil_host}"},
+             "body": body, "body_url_hosts": _absolute_url_hosts(body)},
             {"any": [
                 {"eq": [{"var": "location_host"}, {"var": "evil_host"}]},
-                {"contains": [{"var": "body"}, {"var": "evil_url"}]},
+                {"in": [{"var": "evil_host"}, {"var": "body_url_hosts"}]},
             ]},
             bug_class=self.bug_class)
 
@@ -611,14 +614,34 @@ def _host(url: str) -> str:
 # <meta> tag or redirect URL never approaches these limits, but an attacker-controlled response could
 # otherwise pack many "<meta " starts with no ">" (each greedy [^>]* rescanning to end → O(n^2)).
 _MARKUP_SCAN_CAP = 512_000        # only the head of a response carries navigation markup; cap the parse
+# Each pattern is anchored to a real ATTRIBUTE/IDENTIFIER boundary with `(?<![-\w])`: a plain `\b` is NOT
+# sufficient, because `-` is a non-word character, so `\bcontent` still matches inside `data-content=`
+# (that gap let a benign own-host redirect mint a false FACT — re-red-pen BLOCK-C). The lookbehind excludes
+# `-` and word chars but deliberately ALLOWS `.`, so real sinks like `top.location.href` still match.
 _META_TAG = re.compile(r"<meta\b[^>]{0,4096}>", re.IGNORECASE)
-_HTTP_EQUIV_REFRESH = re.compile(r"http-equiv\s*=\s*[\"']?\s*refresh", re.IGNORECASE)
-_META_CONTENT = re.compile(r"content\s*=\s*[\"']([^\"']{0,4096})[\"']", re.IGNORECASE)
-_META_CONTENT_URL = re.compile(r"\burl\s*=\s*(.{0,4096}?)\s*$", re.IGNORECASE)
+_HTTP_EQUIV_REFRESH = re.compile(r"(?<![-\w])http-equiv\s*=\s*[\"']?\s*refresh", re.IGNORECASE)
+_META_CONTENT = re.compile(r"(?<![-\w])content\s*=\s*[\"']([^\"']{0,4096})[\"']", re.IGNORECASE)
+_META_CONTENT_URL = re.compile(r"(?<![-\w])url\s*=\s*(.{0,4096}?)\s*$", re.IGNORECASE)
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
 _JS_REDIRECT = re.compile(
-    r"(?:(?:window|document)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*[\"']([^\"']{1,4096})[\"']",
+    r"(?<![-\w])(?:(?:window|document)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*"
+    r"[\"']([^\"']{1,4096})[\"']",
     re.IGNORECASE)
+
+
+_ABSOLUTE_URL_AUTHORITY = re.compile(r"//([^/?#\"'<>\s\\]{1,4096})")
+
+
+def _absolute_url_hosts(body: str) -> list[str]:
+    """Every host that appears as an ABSOLUTE-URL AUTHORITY in the body (the ``//<authority>`` position),
+    lowercased. Used to decide whether a hostile ``Host`` header was reflected into a real URL authority.
+
+    Exact hosts, never a substring: a bare ``"//evil.test" in body`` test also matches
+    ``//evil.test.cdn.example.com`` — a DIFFERENT, non-attacker-controlled host — which an app that uses the
+    Host header as a subdomain component would emit, producing a false FACT. Comparing whole authorities
+    removes that prefix-collision. Bounded like the markup scan (hostile bodies must not be super-linear)."""
+    body = (body or "")[:_MARKUP_SCAN_CAP]
+    return [a.lower() for a in _ABSOLUTE_URL_AUTHORITY.findall(body)]
 
 
 def _markup_redirect_hosts(body: str) -> list[str]:
@@ -630,7 +653,14 @@ def _markup_redirect_hosts(body: str) -> list[str]:
     substring reflected somewhere in the body next to an unrelated ``<meta http-equiv=Content-Type>``.
 
     The body is length-capped and the tag/URL scans are bounded so a hostile response body cannot make
-    this parse super-linear (availability, per the re-red-pen)."""
+    this parse super-linear (availability, per the re-red-pen).
+
+    HONEST RESIDUAL: the extracted host list is a DERIVED observation stored in ``observed_evidence``
+    alongside the raw ``body``, so re-verification re-fires the predicate over the derived list rather than
+    re-parsing the body. The certificate signature makes the stored evidence tamper-evident, but the
+    veracity firewall cannot demote a MINT-TIME derivation bug in this parser — which is why the parser is
+    pinned by explicit true-positive AND negative-control tests. This is the same property every shipped
+    predicate has (e.g. ``location_host = _host(location)``), not one specific to this helper."""
     body = (body or "")[:_MARKUP_SCAN_CAP]
     hosts: list[str] = []
     for tag in _META_TAG.findall(body):
