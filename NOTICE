@@ -92,6 +92,50 @@ and bars redistribution of derivatives — reimplementing the ideas in original
 Python avoids any derivative-of-source question while honoring the design credit.
 
 --------------------------------------------------------------------------------
+hexstrike-ai — https://github.com/0x4m4/hexstrike-ai  (MIT License)
+--------------------------------------------------------------------------------
+
+VIGIL reuses hexstrike-ai's deterministic DECISION MODEL (target profiling, tool-
+effectiveness heuristics, per-tool parameter optimization, and named attack-pattern
+playbooks) as the reasoning core of a pluggable agent body. This is a CLEAN-ROOM
+reimplementation in integration/vigil_integration/brains/hexstrike_brain.py (design
+credit + upstream line references in the module header), CURATED to recon/assessment
+and DRIFT-FREE by construction — the upstream's evasion/stealth, credential-poisoning
+(responder LLMNR/WPAD), WAF-tamper, and live-exploit/persistence stages are omitted.
+The reimplementation is PROPOSE-ONLY: it emits proposed tools/params/chains as LEADs;
+every proposal crosses VIGIL's conjunctive gate + egress gate and is executed only via
+the gated external-tool runner, and a finding is minted a FACT only by a deterministic
+VIGIL oracle.
+
+The upstream hexstrike_server.py / hexstrike_mcp.py (a full offensive-execution
+framework) are vendored under vendor/hexstrike-ai/ ONLY as non-runnable ".reference"
+blobs — never imported, never executed, never on PYTHONPATH (see vendor/hexstrike-ai/
+UPSTREAM.md; pinned commit d689933ff579d839c676c82b231f8e98326c5f04). The MIT LICENSE
+is retained verbatim in that directory.
+
+    MIT License
+
+    Copyright (c) 2026 Muhammad Osama (0x4m4) <contact@0x4m4.com>
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+--------------------------------------------------------------------------------
 AI-Gauntlet subprocess tools (later phases)
 --------------------------------------------------------------------------------
 

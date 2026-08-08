@@ -123,7 +123,17 @@ jobs:
               --ignore=integration/tests/test_live_adapter_tls.py \
               --ignore=integration/tests/test_live_adapter_f2.py \
               --ignore=integration/tests/test_spine_verify.py \
-              --ignore=integration/tests/test_cli_remediate.py -q
+              --ignore=integration/tests/test_cli_remediate.py \
+              --ignore=integration/tests/test_posture_certificate.py \
+              --ignore=integration/tests/test_posture_vf_differential.py \
+              --ignore=integration/tests/test_posture_live.py \
+              --ignore=integration/tests/test_posture_series.py \
+              --ignore=integration/tests/test_posture_endpoint.py \
+              --ignore=integration/tests/test_authority.py \
+              --ignore=integration/tests/test_hexstrike_brain.py \
+              --ignore=integration/tests/test_hexstrike_body.py \
+              --ignore=integration/tests/test_vendor_hexstrike_quarantine.py \
+              --ignore=integration/tests/test_brain_engine.py -q
             # The offense-process suite: framework-dependent tests run in their OWN process. The
             # scoped-executor test (WS-A) exercises the signed-scope egress guard, which resolves scope via
             # vigil_gateway.scope_source → CRUCIBLE host_matches_scope, so it belongs here (it would load
@@ -157,7 +167,17 @@ jobs:
               integration/tests/test_live_adapter_tls.py \
               integration/tests/test_live_adapter_f2.py \
               integration/tests/test_spine_verify.py \
-              integration/tests/test_cli_remediate.py -q
+              integration/tests/test_cli_remediate.py \
+              integration/tests/test_posture_certificate.py \
+              integration/tests/test_posture_vf_differential.py \
+              integration/tests/test_posture_live.py \
+              integration/tests/test_posture_series.py \
+              integration/tests/test_posture_endpoint.py \
+              integration/tests/test_authority.py \
+              integration/tests/test_hexstrike_brain.py \
+              integration/tests/test_hexstrike_body.py \
+              integration/tests/test_vendor_hexstrike_quarantine.py \
+              integration/tests/test_brain_engine.py -q
           else
             echo "integration/ not present on this ref (pre-merge) — nothing to test"
           fi

@@ -1,0 +1,44 @@
+# VIGIL continuous POSTURE re-proof — systemd USER service (oneshot)
+# =====================================================================
+# Posture Phase P3. Runs one posture re-proof cycle: re-scan the authorized target, re-mint a signed
+# PostureCertificate (the Certificate of Non-Exploitability), and append it to the anti-rollback,
+# governance-signed posture attestation SERIES. The timer (vigil-posture.timer) fires this on a cadence,
+# so "continuously re-proven posture" is an OPERATING property (the series grows + verifies over time),
+# never a mere capability. HONEST residual: freshness is only as current as the last cadence fire, and the
+# target must be reachable.
+#
+# Engagement config lives in an EnvironmentFile so the unit is reusable:
+#     ~/.config/vigil/posture.env      (VIGIL_POSTURE_ARGS=…  — see the example)
+#
+# INSTALL (paired with the timer):
+#   mkdir -p ~/.config/systemd/user ~/.config/vigil
+#   cp infra/systemd/vigil-posture.{service,timer} ~/.config/systemd/user/
+#   cp infra/systemd/vigil-posture.env.example       ~/.config/vigil/posture.env
+#   $EDITOR ~/.config/vigil/posture.env              # set VIGIL_POSTURE_ARGS + VIGIL_BASE_DIR
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vigil-posture.timer
+
+[Unit]
+Description=VIGIL continuous posture re-proof (one cadence cycle: re-scan, re-mint, append a signed tick)
+Documentation=file:%h/vigil/docs/BRAIN-SLOT-INTEGRATION.md
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/vigil/posture.env
+Environment=PYTHONUNBUFFERED=1 PYTHONPATH=%h/vigil/integration:%h/vigil/engine/crucible:%h/vigil/gateway
+WorkingDirectory=%h/vigil
+# --cycles 1 is fixed here (the timer owns the cadence); VIGIL_POSTURE_ARGS is word-split by systemd
+# (leave it UNQUOTED in the env file) into --series-dir / --engagement flags.
+ExecStart=%h/vigil/.venv-offense/bin/python -m vigil_integration.posture.reprove --cycles 1 $VIGIL_POSTURE_ARGS
+
+# --- hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=${VIGIL_BASE_DIR}
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT set (would break it): PrivateNetwork (the re-scan needs egress to the chartered target).

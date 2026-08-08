@@ -197,6 +197,10 @@ class EngineConfig:
     # think backend
     replay: Optional[Any] = None            # a ReplayThinker (keyless-live) — else the live Claude path
     api_key: Optional[str] = None
+    brain: Optional[Any] = None             # a propose-only brain ThinkFn(state)->LLMDecision (the "brain
+                                            # slot", e.g. brains.engine_think.BrainThink); when set it drives
+                                            # `think` instead of the Claude/replay path — gate/executor/oracle
+                                            # unchanged (the brain proposes; the engine gates; the oracle confirms)
     # attestation
     operator_keypair: Optional[KeyPair] = None
     # spine
@@ -469,6 +473,12 @@ def build_engine(config: EngineConfig) -> VigilEngine:
 
     # -- think (F2) — folds the session's PRIOR graph context (F3) as UNTRUSTED advisory priors ----------
     def think_seam(state: AgentState) -> Any:
+        # BRAIN SLOT: a homegrown, propose-only brain (e.g. the hexstrike decision brain) drives `think`
+        # when wired via config.brain. It emits the SAME non-authoritative LLMDecision the loop consumes,
+        # so the gate + governed executor + oracle are UNCHANGED — the brain only proposes; the engine
+        # gates and the oracle confirms. All invariants hold; nothing self-authorizes.
+        if config.brain is not None:
+            return config.brain(state)
         ctx = _prompt_ctx(state)
         if graph_writer is not None:
             # F4: union the operator-CONSENTED connected sessions' partitions (read-time; each row stays

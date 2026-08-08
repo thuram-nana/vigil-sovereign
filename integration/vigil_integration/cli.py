@@ -95,10 +95,18 @@ def _cmd_engage(args: argparse.Namespace) -> int:
 
     scope = [s.strip() for s in str(getattr(args, "scope", "") or "").split(",") if s.strip()]
     connect = [c.strip() for c in str(getattr(args, "connect", "") or "").split(",") if c.strip()]
+    # --brain hexstrike: drive `think` with the homegrown, drift-free, propose-only decision brain instead
+    # of the Claude/replay path. The gate + governed executor + oracle are unchanged (the brain proposes;
+    # the engine gates; the oracle confirms). Import is local so a non-brain engage pulls nothing extra.
+    brain = None
+    if str(getattr(args, "brain", "") or "").strip().lower() == "hexstrike":
+        from .brains.engine_think import BrainThink
+        from .brains.hexstrike_brain import HexstrikeBrain
+        brain = BrainThink(HexstrikeBrain(), target=args.url, objective=args.objective)
     cfg = EngineConfig(
         slug=args.slug, session_id=str(getattr(args, "session", "") or ""),
         connections=tuple(connect),
-        base_dir=args.base_dir, replay=replay, api_key=None,
+        base_dir=args.base_dir, replay=replay, api_key=None, brain=brain,
         scope=tuple(scope) or ("127.0.0.1",),   # --scope is signed into the authority + enforced end-to-end
         access_log=args.access_log, auth_log=args.auth_log, conn_log=args.conn_log,
         max_iterations=args.max_iterations, owner_approves_offense=args.approve_offense,
@@ -1471,6 +1479,9 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--auth-log", default="")
     pe.add_argument("--conn-log", default="")
     pe.add_argument("--max-iterations", type=int, default=12)
+    pe.add_argument("--brain", default="", choices=("", "hexstrike"),
+                    help="drive `think` with a homegrown propose-only decision brain (e.g. hexstrike) "
+                         "instead of the Claude/replay path — gate + executor + oracle unchanged")
     pe.add_argument("--approve-offense", action="store_true",
                     help="the operator's standing approval to run queued offense tools against their "
                          "own chartered loopback (the human leg of the conjunctive gate; scope still enforced)")

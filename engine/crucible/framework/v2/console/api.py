@@ -1327,3 +1327,182 @@ def certs() -> dict[str, Any]:
                             ".fingerprint.txt is written by the same signer and is NOT independent, so its "
                             "trust root shows UNPINNED unless you supply the operator-held out-of-band pin."),
     }
+
+
+# ---------------------------------------------------------------------------
+# Proof of Posture — the signed, offline-verifiable Certificate of Non-Exploitability.
+# ---------------------------------------------------------------------------
+
+_POSTURE_MAX = 12  # cap the number of attestations listed (dedicated dir + newest run dirs first)
+
+_POSTURE_DOCTRINE = (
+    "A PostureCertificate is a Certificate of Non-Exploitability: a signed, coverage-bounded proof that, "
+    "for each (surface, parameter, vuln-class) marked CLOSED, an applicable deterministic oracle had a LIVE "
+    "channel to the real target and did NOT fire — bound to the target's owner-signed identity, carrying its "
+    "coverage DENOMINATOR and honest RESIDUAL verbatim in the signed bytes. CLOSED means non-exploitable BY "
+    "THE DETERMINISTIC ORACLE FAMILY OVER THE REACHED SURFACE as of the freshness bound — NOT 'secure against "
+    "everything'; undiscovered endpoints/parameters are out of the denominator. It re-verifies OFFLINE with no "
+    "VIGIL installed (the portable bundle ships its own verifier): the offline check re-derives the m-of-n "
+    "signature + the coverage projection + the target-binding, but does NOT re-fire the oracle (that needs "
+    "VIGIL). This screen READS the certificate; the bundle's verify_offline.py is the PASS/FAIL authority."
+)
+
+
+def _read_posture_triple(core_path, *, cert_id: str, run_id: str | None = None) -> dict[str, Any]:
+    """Read a signed PostureCertificate triple (``posture-certificate.json`` + ``.sig.json`` +
+    ``.fingerprint.txt``, with an optional sibling ``bundle/``) into the uniform Proof-of-Posture shape.
+    ``present`` is computed from disk (core AND sig must exist) — never faked; NONE of the claims /
+    denominator / summary fields are fabricated. Reads only — verifies NOTHING (the bundle's own
+    ``verify_offline.py`` is the offline PASS/FAIL authority)."""
+    core_path = Path(core_path)
+    sig_path = core_path.with_suffix(".sig.json")
+    fp_path = core_path.with_suffix(".fingerprint.txt")
+    bundle_dir = core_path.parent / "bundle"
+    shape: dict[str, Any] = {
+        "id": cert_id, "run_id": run_id, "present": False,
+        "schema": None, "scorecard_digest": None,
+        "trust_root": {"threshold": None, "authorizers": []},
+        "fingerprint": None, "owner_pubkey": None, "engagement": None,
+        "target_sample": {}, "denominator": {}, "scope": "", "residual": None,
+        "posture_claims": [], "summary": {},
+        "bundle_present": False, "bundle_dir": None,
+    }
+    present = _safe(lambda: core_path.is_file() and sig_path.is_file(), default=False)
+    if not present:
+        shape["note"] = ("not yet attested — run `python -m vigil_integration.posture attest --out <dir>` "
+                         "to mint + sign a Certificate of Non-Exploitability.")
+        return shape
+    core = _safe(lambda: json.loads(core_path.read_text(encoding="utf-8")), default={}) or {}
+    sig = _safe(lambda: json.loads(sig_path.read_text(encoding="utf-8")), default={}) or {}
+    fp = _safe(lambda: fp_path.read_text(encoding="utf-8").strip(), default=None)
+    ident = core.get("target_identity", {}) or {}
+    tr = sig.get("trust_root", {}) or {}
+    authz = [{"key_id": a.get("key_id"), "public_key_b64": a.get("public_key_b64")}
+             for a in (tr.get("authorizers", []) or []) if isinstance(a, dict)]
+    has_bundle = _safe(lambda: (bundle_dir / "bundle.json").is_file(), default=False)
+    shape.update({
+        "present": True,
+        "schema": core.get("schema"),
+        "scorecard_digest": sig.get("scorecard_digest"),
+        "trust_root": {"threshold": tr.get("threshold"), "authorizers": authz},
+        # For a posture bundle the .fingerprint.txt IS the out-of-band trust-root pin the operator publishes
+        # on a SEPARATE channel (see bundle.TRUST-ROOT-FINGERPRINT.txt) — the value a verifier passes as
+        # --posture-fingerprint. owner_pubkey + engagement come from the embedded owner-signed identity.
+        "fingerprint": fp,
+        "owner_pubkey": ident.get("owner_pubkey"),
+        "engagement": ident.get("engagement"),
+        "target_sample": {str(k): str(v) for k, v in (core.get("target_sample", {}) or {}).items()},
+        "denominator": core.get("denominator", {}) or {},
+        "scope": core.get("scope", "") or "",
+        "residual": core.get("residual"),
+        "posture_claims": [c for c in (core.get("posture_claims", []) or []) if isinstance(c, dict)],
+        "summary": core.get("summary", {}) or {},
+        "bundle_present": bool(has_bundle),
+        "bundle_dir": str(bundle_dir) if has_bundle else None,
+    })
+    return shape
+
+
+def posture() -> dict[str, Any]:
+    """Proof of Posture: the signed, offline-verifiable PostureCertificate(s) — the Certificate of
+    Non-Exploitability — rendered with their coverage denominator + honest residual + per-(surface, param,
+    class) claims. Read-only; verifies NOTHING (the bundle's own ``verify_offline.py`` is the PASS/FAIL
+    authority). Scans a dedicated posture dir (``<v2_root>/.console/posture``: the triple directly in it
+    and/or one per subdirectory) and each console run dir for a ``posture-certificate.json`` triple.
+    ``present`` is read from disk, so an un-attested tree returns an honest empty list — never a fabricated
+    posture. ``_safe`` throughout — never 500s on a fresh tree."""
+    from . import actions
+
+    out: list[dict[str, Any]] = []
+
+    def _scan(d, cert_id, run_id=None):
+        core = Path(d) / "posture-certificate.json"
+        if _safe(lambda: core.is_file(), default=False):
+            out.append(_read_posture_triple(core, cert_id=cert_id, run_id=run_id))
+
+    # 1) the dedicated posture dir — the triple directly in it, and/or one attestation per subdirectory.
+    base = _safe(lambda: actions.console_dir() / "posture", default=None)
+    if base is not None and _safe(lambda: base.is_dir(), default=False):
+        _scan(base, "posture")
+        subs = _safe(lambda: sorted((p for p in base.iterdir() if p.is_dir()),
+                                    key=lambda p: p.name, reverse=True), default=[]) or []
+        for sub in subs:
+            _scan(sub, f"posture/{sub.name}")
+
+    # 2) console run dirs (newest first) — a run may attest its posture into its own dir.
+    run_ids = _safe(lambda: [r["run_id"] for r in list_runs().get("runs", []) if r.get("run_id")],
+                    default=[]) or []
+    for rid in run_ids:
+        rd = _safe(lambda r=rid: actions.run_dir(r), default=None)
+        if rd is not None:
+            _scan(rd, f"{rid}/posture", run_id=rid)
+
+    return {"posture": out[:_POSTURE_MAX], "doctrine": _POSTURE_DOCTRINE}
+
+
+# ---------------------------------------------------------------------------
+# Brain — the pluggable, PROPOSE-ONLY agent-body decision engine.
+# ---------------------------------------------------------------------------
+
+_BRAIN_DECISION_DOCTRINE = (
+    "Proposals only. The brain is PROPOSE-ONLY: given a TargetProfile assembled from VIGIL's gated "
+    "sensor/oracle observations (never URL-string guesses, no network side effects), it proposes an ORDERED "
+    "recon/assessment chain of LEADs. It computes no facts, self-authorizes nothing, and carries no "
+    "exploit/poisoning/evasion stage (those are removed by construction). Every proposed step crosses "
+    "VIGIL's conjunctive gate + egress gate and runs only through the gated external-tool runner; a finding "
+    "becomes a FACT solely when a deterministic VIGIL oracle fires. On a LIVE target the A2 floor holds: "
+    "nothing auto-fires — a RECON step is auto-eligible ONLY under a staging/twin posture; an ACTIVE step "
+    "always QUEUES for a signed owner approval."
+)
+
+
+def brain_decision() -> dict[str, Any]:
+    """Brain / Decision engine: the ACTIVE propose-only agent-body brain + its live proposal (if any).
+
+    READ-ONLY. Reports the installed brain's identity + design credit + the propose-only doctrine (all
+    true of the shipped component). A live proposal — an ordered attack chain of LEADs — is surfaced ONLY
+    from a real persisted proposal artifact (``<run_dir>/brain-proposal.json``): the provider NEVER runs
+    the brain over a synthesized profile (that would fabricate a chain) and NEVER invents tool runs or
+    results. None persisted → ``proposal.present: false`` with an honest note. ``_safe`` throughout."""
+    from . import actions
+
+    brain = {
+        "name": "HexstrikeBrain",
+        "propose_only": True,
+        "design_credit": ("hexstrike-ai (Muhammad Osama / 0x4m4), MIT — a clean-room, drift-free "
+                          "reimplementation of the deterministic decision model; evasion / exploit / "
+                          "credential-poisoning stages removed by construction, not stripped after the fact."),
+        "module": "integration/vigil_integration/brains/hexstrike_brain.py",
+    }
+
+    proposal: dict[str, Any] = {"present": False, "note": (
+        "No live proposal wired into this console yet. The brain proposes an ordered recon/assessment "
+        "chain over a TargetProfile assembled from VIGIL's gated observations (never URL guesses); wire "
+        "an engagement's observations to the agent body "
+        "(integration/vigil_integration/brains/hexstrike_body.py) to surface its chain here. The brain is "
+        "PROPOSE-ONLY — it computes no facts and self-authorizes nothing, and every step it proposes still "
+        "crosses the gate + egress gate before anything can run.")}
+
+    # Surface a live proposal ONLY from a real persisted artifact — never fabricated, never brain-invoked here.
+    run_ids = _safe(lambda: [r["run_id"] for r in list_runs().get("runs", []) if r.get("run_id")],
+                    default=[]) or []
+    for rid in run_ids:
+        rd = _safe(lambda r=rid: actions.run_dir(r), default=None)
+        if rd is None:
+            continue
+        doc = _safe(lambda p=(rd / "brain-proposal.json"):
+                    json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None, default=None)
+        if isinstance(doc, dict) and isinstance(doc.get("steps"), list):
+            steps = [s for s in doc["steps"] if isinstance(s, dict)]
+            proposal = {
+                "present": True, "run_id": rid,
+                "target": doc.get("target"),
+                "objective": doc.get("objective", "comprehensive"),
+                # the operating posture governs the queue-vs-auto call the WARDEN gate makes per step.
+                "posture": doc.get("posture", "live"),
+                "profile": doc.get("profile", {}) if isinstance(doc.get("profile"), dict) else {},
+                "steps": steps,
+            }
+            break
+
+    return {"brain": brain, "proposal": proposal, "doctrine": _BRAIN_DECISION_DOCTRINE}
