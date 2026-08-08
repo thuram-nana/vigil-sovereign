@@ -106,19 +106,30 @@ def test_host_header_injection_confirmed_and_safe() -> None:
         assert f == [], "an app using relative links must not be flagged for host-header injection"
 
 
-def test_absolute_url_hosts_matches_whole_authorities_not_prefixes() -> None:
-    """The hostile Host counts only when it is the WHOLE authority of an absolute URL. A substring test
-    (`"//evil" in body`) also fires on `//evil.cdn.example.com` — a different, NON-attacker-controlled host
-    that an app using the Host header as a subdomain component emits — which would be a false FACT."""
-    from framework.v2.scanner.checks import _absolute_url_hosts as hosts
+def test_emitted_url_hosts_counts_emission_not_inert_echo() -> None:
+    """The hostile Host counts only when it is the AUTHORITY of a URL the app EMITS (href/src/action, or a
+    meta/JS redirect) — a URL a victim's browser would use. A plain-text ECHO of the reconstructed URL back
+    to the requester (a 404 message, a <pre> sample, a comment, a JSON error string) is NOT exploitable and
+    must NOT count (re-red-pen BLOCK-D). Matching is on the WHOLE authority, so a subdomain reflection does
+    not collide with the evil host."""
+    from framework.v2.scanner.checks import _emitted_url_hosts as hosts
 
     evil = HostHeaderCheck().evil_host
-    # real reflections into a URL authority — all must be found
+    # EMISSIONS — a link / resource / form target / redirect the app builds from the Host: all must be found
     assert evil in hosts(f'<a href="https://{evil}/reset?t=1">reset</a>')
-    assert evil in hosts(f'<a href="//{evil}/reset">reset</a>')
-    assert evil in hosts(f'{{"reset_url": "https://{evil}/r/abc"}}')   # JSON API, not just HTML links
-    # NOT the evil host / not an authority at all
-    assert evil not in hosts(f'<img src="https://{evil}.cdn.example.com/logo.png">')  # subdomain prefix
-    assert evil not in hosts(f"<p>Host: {evil}</p>")                                  # plain-text echo
-    assert evil not in hosts(f'<a href="https://app.example/go?to={evil}">x</a>')     # in the path/query
-    assert hosts('<a href="/reset">reset</a>') == []                                  # relative links only
+    assert evil in hosts(f'<a href="//{evil}/reset">reset</a>')          # scheme-relative
+    assert evil in hosts(f'<img src="https://{evil}/logo.png">')
+    assert evil in hosts(f'<form action="https://{evil}/submit">')
+    assert evil in hosts(f'<meta http-equiv="refresh" content="0;url=https://{evil}/x">')  # redirect emission
+    assert evil in hosts(f'<meta property="og:url" content="https://{evil}/">')   # canonical URL metadata
+    assert evil in hosts(f'<link rel="canonical" href="https://{evil}/">')        # canonical link (href)
+    # NON-EMISSIONS — inert echoes shown only to the requester, or not the evil authority at all
+    assert evil not in hosts(f'<meta name="description" content="visit https://{evil} today">')  # prose, not URL meta
+    assert evil not in hosts(f'Cannot GET http://{evil}/foo')                    # 404 text echo (BLOCK-D)
+    assert evil not in hosts(f'<pre>curl http://{evil}/api</pre>')               # code sample
+    assert evil not in hosts(f'<!-- built from host: //{evil}/ -->')            # HTML comment
+    assert evil not in hosts(f'{{"error": "unknown path http://{evil}/x"}}')     # JSON error echo
+    assert evil not in hosts(f'<img src="https://{evil}.cdn.example.com/l.png">')  # subdomain prefix
+    assert evil not in hosts(f"<p>Host: {evil}</p>")                             # bare plain-text echo
+    assert evil not in hosts(f'<a href="https://app.example/go?to=//{evil}">x</a>')  # evil in path/query
+    assert hosts('<a href="/reset">reset</a>') == []                            # relative link only

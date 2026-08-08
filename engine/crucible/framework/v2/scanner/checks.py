@@ -354,18 +354,19 @@ class HostHeaderCheck:
         body = str(resp.get("body", ""))
         rh = resp.get("headers", []) or []
         location = next((str(v) for k, v in rh if str(k).lower() == "location"), "")
-        # The oracle checks whether the hostile Host became a URL authority: a
-        # redirect Location to it, or an absolute URL in the body whose authority IS
-        # the evil host. A plain-text echo of the host does NOT satisfy the predicate,
-        # and matching is on the WHOLE authority — a substring test would also fire on
-        # `//evil-host.cdn.example.com`, a different, non-attacker-controlled host that
-        # an app using the Host header as a subdomain component would emit.
+        # The oracle checks whether the hostile Host became the AUTHORITY of a URL the
+        # app EMITS (a redirect Location, an href/src/action link/resource/form, or a
+        # meta/JS redirect) — the only forms a victim's browser would actually use. A
+        # plain-text ECHO of the reconstructed URL back to the requester does NOT fire
+        # (not exploitable), and matching is on the WHOLE authority, so a subdomain
+        # reflection like `//evil-host.cdn.example.com` does not collide with the evil
+        # host either.
         return FindingContext.from_predicate(
             {"location_host": _host(location), "evil_host": self.evil_host,
-             "body": body, "body_url_hosts": _absolute_url_hosts(body)},
+             "body": body, "emitted_url_hosts": _emitted_url_hosts(body)},
             {"any": [
                 {"eq": [{"var": "location_host"}, {"var": "evil_host"}]},
-                {"in": [{"var": "evil_host"}, {"var": "body_url_hosts"}]},
+                {"in": [{"var": "evil_host"}, {"var": "emitted_url_hosts"}]},
             ]},
             bug_class=self.bug_class)
 
@@ -629,19 +630,45 @@ _JS_REDIRECT = re.compile(
     re.IGNORECASE)
 
 
-_ABSOLUTE_URL_AUTHORITY = re.compile(r"//([^/?#\"'<>\s\\]{1,4096})")
+# A URL the app EMITS as a navigable link / loadable resource / form target — the only place a reflected
+# Host becomes attacker-controllable for a VICTIM (cache-poisoned resource, reset-link, form post). An href/
+# src/action attribute value is bounded (a URL never approaches 4096). `(?<![-\w])` anchors the attribute
+# name so `data-href`/`x-src` do not match (the same attribute-boundary lesson as _META_CONTENT).
+_URL_ATTR = re.compile(r"(?<![-\w])(?:href|src|action)\s*=\s*[\"']([^\"']{1,4096})[\"']", re.IGNORECASE)
+# URL-valued canonical / social metadata: og:url is THE canonical link that crawlers, link-preview and cache
+# layers consume as authoritative — poisoning it via the Host header is a real cache/canonical-hijack sink
+# (and is the benchmark's host-header primitive). This is a STRUCTURED metadata emission, distinct from an
+# inert free-text echo of a reconstructed URL, so counting it does not reopen BLOCK-D.
+_META_PROPERTY = re.compile(r"(?<![-\w])(?:property|name)\s*=\s*[\"']([^\"']{0,256})[\"']", re.IGNORECASE)
+_URL_VALUED_META = re.compile(r"og:(?:url|image|audio|video)|twitter:(?:url|image)", re.IGNORECASE)
 
 
-def _absolute_url_hosts(body: str) -> list[str]:
-    """Every host that appears as an ABSOLUTE-URL AUTHORITY in the body (the ``//<authority>`` position),
-    lowercased. Used to decide whether a hostile ``Host`` header was reflected into a real URL authority.
+def _emitted_url_hosts(body: str) -> list[str]:
+    """The hosts that appear as the AUTHORITY of a URL the app EMITS — an href/src/action attribute value,
+    or a meta-refresh / JS-location redirect target — lowercased. These are URLs a VICTIM's browser would
+    actually use, which is what makes a reflected ``Host`` exploitable (cache poisoning, poisoned reset link).
 
-    Exact hosts, never a substring: a bare ``"//evil.test" in body`` test also matches
-    ``//evil.test.cdn.example.com`` — a DIFFERENT, non-attacker-controlled host — which an app that uses the
-    Host header as a subdomain component would emit, producing a false FACT. Comparing whole authorities
-    removes that prefix-collision. Bounded like the markup scan (hostile bodies must not be super-linear)."""
+    Crucially this is EMISSION, not mere presence: a ``//authority`` that only appears as inert body text — a
+    404 message echoing the reconstructed ``http://<Host>/path`` back to the requester, a ``<pre>`` sample, an
+    HTML comment, a JSON error string — is NOT counted. Such an echo is shown only to the requester (who set
+    their own Host) and is not exploitable; counting it minted a signed false FACT (re-red-pen BLOCK-D). The
+    authority is parsed with stdlib ``urlsplit`` (via ``_host``), so a relative URL whose QUERY contains
+    ``//evil`` (``/x?u=//evil``) is correctly NOT an emission of ``evil``. Bounded like the markup scan."""
     body = (body or "")[:_MARKUP_SCAN_CAP]
-    return [a.lower() for a in _ABSOLUTE_URL_AUTHORITY.findall(body)]
+    hosts = list(_markup_redirect_hosts(body))          # meta-refresh + JS location sinks (redirect emission)
+    for val in _URL_ATTR.findall(body):                 # href/src/action link/resource/form emission
+        h = _host(val.strip())                          # urlsplit authority: '' for relative/same-origin URLs
+        if h:
+            hosts.append(h)
+    for tag in _META_TAG.findall(body):                 # canonical / social URL metadata (og:url, ...)
+        prop = _META_PROPERTY.search(tag)
+        if prop and _URL_VALUED_META.search(prop.group(1)):
+            content = _META_CONTENT.search(tag)
+            if content:
+                h = _host(content.group(1).strip())
+                if h:
+                    hosts.append(h)
+    return hosts
 
 
 def _markup_redirect_hosts(body: str) -> list[str]:
