@@ -65,7 +65,11 @@ def test_unconfirmed_finding_is_a_lead_not_a_fact():
     res = confirm_and_certify(
         _finding("sqli", ctx={"bug_class": "sqli", "note": "inert — no probe rounds"}),
         engagement_slug="acme", signers=SIGNERS)
-    assert res.status == "lead" and res.signed is None and "did not fire" in res.reason
+    # unconfirmed → LEAD, never a signed FACT (the invariant). Phase 0.1 additionally classifies WHY: an
+    # inert context with no probe rounds gave no oracle a decisive channel → the typed INCONCLUSIVE outcome
+    # (never CLEAN, which requires a conclusive non-firing oracle).
+    assert res.status == "lead" and res.signed is None
+    assert res.outcome == "inconclusive"
 
 
 def test_confirmed_but_unmapped_class_stays_a_lead_honesty_invariant():
