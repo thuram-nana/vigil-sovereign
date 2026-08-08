@@ -100,11 +100,18 @@ def verify_posture_series(series_dir: str | Path, trust_root: TrustRoot,
     if not cok:
         return False, f"chain: {creason}"
     head = SignedChainHead(**json.loads(head_p.read_text(encoding="utf-8")))
-    hok, hreason = verify_head(head, entries, trust_root,
-                              prev_highwater=prev_highwater if prev_highwater is not None
-                              else load_highwater(hw_p))
+    # the durable floor (dict: entry_count PRIMARY, last_seq secondary). A caller may pass one to assert a
+    # stronger anti-rollback bound; else use the persisted floor.
+    floor = prev_highwater if prev_highwater is not None else load_highwater(hw_p)
+    # verify_head takes the last_seq INT high-water; the entry_count floor is checked via check_highwater.
+    hw_last_seq = floor.get("last_seq") if isinstance(floor, dict) else floor
+    hok, hreason = verify_head(head, entries, trust_root, prev_highwater=hw_last_seq)
     if not hok:
         return False, f"head: {hreason}"
+    if isinstance(floor, dict):
+        cok, creason = check_highwater(head, floor)
+        if not cok:
+            return False, f"head: high-water rollback refused ({creason})"
     # each tick's persisted certificate must re-hash to its chain digest (the cert is what was attested)
     for e in entries:
         tp = ticks / f"{e.seq}.json"

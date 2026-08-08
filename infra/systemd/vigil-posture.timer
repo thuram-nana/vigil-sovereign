@@ -1,0 +1,15 @@
+# VIGIL continuous POSTURE re-proof — systemd USER timer
+# Fires vigil-posture.service on a cadence so the posture attestation series grows + verifies over time.
+# Adjust OnUnitActiveSec to your desired freshness (the posture certificate's no-later-than bound is only
+# as current as the last fire). Enable: `systemctl --user enable --now vigil-posture.timer`.
+[Unit]
+Description=VIGIL posture re-proof cadence (grows the signed anti-rollback posture series)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=vigil-posture.service
+
+[Install]
+WantedBy=timers.target
