@@ -111,7 +111,7 @@ def build_coverage_certificate(
 
     rows: list[dict[str, Any]] = []
     for p in probes:
-        rows.append({
+        row = {
             "surface": _surface(p.endpoint),
             "insertion_point": p.insertion_point,
             "param": p.param,
@@ -119,7 +119,15 @@ def build_coverage_certificate(
             "class": p.bug_class,
             "verdict": p.verdict,
             "oracle_kinds_run": list(p.oracle_kinds_run),
-        })
+        }
+        # OPT-IN re-executable-tier evidence (Proof-of-Posture): emitted ONLY when a probe actually
+        # retained it (AuditEngine.retain_evidence), so a certificate scanned without retention is
+        # byte-identical to before — the make-gate invariant. Present ⇒ a VIGIL-free verifier re-runs the
+        # pure predicate oracle over these values to re-derive the verdict producer-independently.
+        evidence = getattr(p, "evidence", None)
+        if evidence:
+            row["evidence"] = evidence
+        rows.append(row)
     # Stable sort on the normalised surface identity so the port-normalisation cannot
     # reorder rows between two runs.
     rows.sort(key=lambda r: (r["surface"], r["insertion_point"], r["check_id"], r["class"]))

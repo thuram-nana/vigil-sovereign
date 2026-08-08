@@ -49,15 +49,120 @@ POSTURE_RESIDUAL = (
     "endpoints/parameters are discovery/recall (out of the denominator), NOT covered. Freshness is "
     "only as current as the last scan (see the bundle's time anchor). A standalone verifier re-checks "
     "signatures / target-binding / coverage-projection / denominator / freshness / witnesses OFFLINE "
-    "with no VIGIL installed, but does NOT re-fire the oracle — re-firing needs VIGIL "
-    "(`python -m framework.v2 evidence verify` / a coverage re-run)."
+    "with no VIGIL installed. Each CLOSED claim carries a verification TIER: a RE-EXECUTABLE claim "
+    "embeds the oracle's retained input (a pure predicate + the observed values) and the standalone "
+    "verifier RE-RUNS the oracle over it to re-derive the negative producer-INDEPENDENTLY (trusting no "
+    "producer); a BINDING claim is re-checked against the signed coverage verdict, but re-firing its "
+    "oracle needs VIGIL (`python -m framework.v2 evidence verify` / a coverage re-run) — the honest H4 "
+    "residual that applies only to binding-tier claims."
 )
 
 _CLOSED, _OPEN, _UNPROVEN = "CLOSED", "OPEN", "UNPROVEN"
+_BINDING, _REEXECUTABLE = "binding", "re-executable"
 
 
 class PostureError(Exception):
     """A malformed / forged / unbindable posture certificate — always fail-closed."""
+
+
+# --------------------------------------------------------------------------------------------------
+# The re-executable posture tier (Proof-of-Posture): a VIGIL-free verifier RE-RUNS the deterministic
+# predicate oracle over the retained observed values and re-derives the verdict itself — the sound
+# NEGATIVE made producer-INDEPENDENT (it no longer trusts the signed verdict, it recomputes it). The
+# kernel is a pure JSON-AST evaluator — a byte-faithful port of ``verify.oracles._eval_predicate`` /
+# ``predicate_oracle`` (a byte-parity test pins it to the real oracle). vigil_core + stdlib only.
+# --------------------------------------------------------------------------------------------------
+
+
+def _probe_reexec_evidence(probe: dict) -> dict | None:
+    """The re-execution kernel input a coverage-cert probe row carries, or ``None``. Well-formed iff it
+    holds a JSON-AST ``predicate`` (a dict) and an ``observed_evidence`` (a dict) — the exact pair the
+    ``predicate_oracle`` re-derives. This function (identical in the standalone ``verify_vf``) DEFINES
+    which probes are re-executable, so the tier projection and the re-execution agree by construction."""
+    ev = probe.get("evidence")
+    if not isinstance(ev, dict):
+        return None
+    pred, obs = ev.get("predicate"), ev.get("observed_evidence")
+    if isinstance(pred, dict) and isinstance(obs, dict):
+        return {"predicate": pred, "observed_evidence": obs}
+    return None
+
+
+def _reexec_resolve_operand(operand: Any, observed: dict) -> Any:
+    """Port of ``oracles._resolve_operand``: ``{"var": name}`` → observed value; else a literal."""
+    if isinstance(operand, dict) and set(operand.keys()) == {"var"}:
+        return observed.get(operand["var"])
+    return operand
+
+
+def _reexec_eval_predicate(pred: Any, observed: dict) -> bool:
+    """Port of ``oracles._eval_predicate`` (the ``fired`` half only): evaluate the pure JSON-AST predicate
+    over the observed values. Ops: all/any/not, eq/ieq, contains/icontains, in, min_len, gt/ge. Raises
+    ``PostureError`` on a malformed node (the oracle treats a malformed predicate as NOT fired and
+    non-conclusive — a non-conclusive probe is never ``clean``, so a malformed re-exec kernel can never
+    UPHOLD a CLOSED claim; we fail-closed and refuse rather than silently pass)."""
+    if not isinstance(pred, dict) or len(pred) != 1:
+        raise PostureError(f"malformed re-execution predicate node: {pred!r}")
+    op, args = next(iter(pred.items()))
+    if op == "all":
+        return all(_reexec_eval_predicate(p, observed) for p in args)
+    if op == "any":
+        return any(_reexec_eval_predicate(p, observed) for p in args)
+    if op == "not":
+        return not _reexec_eval_predicate(args, observed)
+    a = _reexec_resolve_operand(args[0], observed)
+    b = _reexec_resolve_operand(args[1], observed) if len(args) > 1 else None
+    if op == "eq":
+        return a == b
+    if op == "ieq":
+        return str(a).lower() == str(b).lower()
+    if op == "contains":
+        return bool(a) and bool(b) and str(b) in str(a)
+    if op == "icontains":
+        return bool(a) and bool(b) and str(b).lower() in str(a).lower()
+    if op == "in":
+        return a in (b or [])
+    if op == "min_len":
+        return len(str(a or "")) >= int(b)
+    if op == "gt":
+        return a is not None and b is not None and a > b
+    if op == "ge":
+        return a is not None and b is not None and a >= b
+    raise PostureError(f"unknown re-execution predicate op {op!r}")
+
+
+def reexecute_posture_claims(cert: dict) -> None:
+    """RE-RUN the oracle over every re-executable probe's retained evidence and refuse on disagreement —
+    the producer-independent soundness check behind the ``re-executable`` tier. Fail-closed (raises
+    ``PostureError``) if:
+
+      * a probe recorded ``clean`` (evidence for a CLOSED claim) whose predicate ACTUALLY FIRES over its
+        own retained values — a forged negative;  OR
+      * a probe recorded ``finding`` whose predicate does NOT fire over its retained values — a forged
+        positive.
+
+    Only probes carrying a well-formed re-execution kernel are re-run; ``binding``-tier probes are left
+    to the signature/projection checks (the honest H4 residual). This is the SAME logic the standalone
+    ``verify_vf`` runs with no VIGIL installed."""
+    coverage = cert.get("coverage") or {}
+    for probe in coverage.get("probes") or []:
+        if not isinstance(probe, dict):
+            continue
+        kernel = _probe_reexec_evidence(probe)
+        if kernel is None:
+            continue
+        fired = _reexec_eval_predicate(kernel["predicate"], dict(kernel["observed_evidence"]))
+        verdict = probe.get("verdict")
+        if verdict == "clean" and fired:
+            raise PostureError(
+                "re-execution REFUTED a CLOSED claim: the predicate fires over the probe's own retained "
+                f"values (surface={probe.get('surface')!r} param={probe.get('param')!r} "
+                f"class={probe.get('class')!r}) — a forged negative")
+        if verdict == "finding" and not fired:
+            raise PostureError(
+                "re-execution REFUTED an OPEN claim: the predicate does not fire over the probe's own "
+                f"retained values (surface={probe.get('surface')!r} class={probe.get('class')!r}) — a "
+                "forged positive")
 
 
 def _as_identity(att: IdentityAttestation | dict) -> IdentityAttestation:
@@ -89,12 +194,18 @@ def project_posture_claims(coverage_cert: dict) -> list[dict]:
                 "(a clean verdict is earned only by a conclusive oracle) — refusing to mint CLOSED"
             )
         key = (str(p.get("surface", "")), str(p.get("param", "")), str(p.get("class", "")))
-        g = groups.setdefault(key, {"finding": 0, "clean": 0, "inconclusive": 0, "kinds": set(), "n": 0})
+        g = groups.setdefault(
+            key, {"finding": 0, "clean": 0, "inconclusive": 0, "kinds": set(), "n": 0, "clean_reexec": 0})
         g["n"] += 1
         if verdict in ("finding", "clean", "inconclusive"):
             g[verdict] += 1
         if verdict == "clean":
             g["kinds"].update(str(k) for k in kinds)
+            # Count clean probes that carry a well-formed re-execution kernel (predicate + observed
+            # values). A CLOSED claim is the RE-EXECUTABLE tier only when EVERY clean probe backing it is
+            # re-runnable — so the whole negative is producer-independently re-derivable, not just part.
+            if _probe_reexec_evidence(p) is not None:
+                g["clean_reexec"] += 1
 
     claims: list[dict] = []
     for (surface, param, cls), g in groups.items():
@@ -104,16 +215,24 @@ def project_posture_claims(coverage_cert: dict) -> list[dict]:
             status, kinds = _CLOSED, sorted(g["kinds"])
         else:
             status, kinds = _UNPROVEN, []
+        # verification TIER (honest, in the signed bytes, computed IDENTICALLY here and in the standalone
+        # verify_vf mirror so posture_claims re-project byte-for-byte):
+        #   "re-executable" — a CLOSED claim whose EVERY clean probe carries a re-execution kernel
+        #                     (predicate + observed values); a VIGIL-FREE verifier re-runs the oracle over
+        #                     those values and re-derives the NEGATIVE itself (producer-INDEPENDENT).
+        #   "binding"       — the verifier re-checks the signed coverage verdict + projection offline, but
+        #                     re-firing the oracle needs VIGIL (the H4 residual). The default when no
+        #                     re-execution evidence was retained (retain_evidence off) — byte-identical.
+        if status == _CLOSED and g["clean"] > 0 and g["clean_reexec"] == g["clean"]:
+            verification = _REEXECUTABLE
+        else:
+            verification = _BINDING
         claims.append({
             "surface": surface,
             "param": param,
             "class": cls,
             "status": status,
-            # verification TIER (honest, in the signed bytes): "binding" = the standalone verifier
-            # re-checks the signed coverage verdict + projection offline, but re-firing the oracle
-            # needs VIGIL (the H4 residual). P1 upgrades the flagship class to "re-executable" —
-            # raw bytes are embedded and the verifier re-runs a pinned oracle kernel over them.
-            "verification": "binding",
+            "verification": verification,
             "evidence_oracle_kinds": kinds,
             "n_probes": g["n"],
         })
@@ -240,6 +359,12 @@ def verify_posture_certificate(
 
     # 2. coverage binding (the claims cannot drift from their evidence)
     _reproject_matches(cert)
+
+    # 2b. RE-EXECUTION (the re-executable tier): re-run the oracle over every re-executable probe's
+    #     retained values and refuse a forged negative/positive. Producer-independent; the standalone
+    #     verify_vf runs the identical check with no VIGIL. Binding-tier probes carry no kernel and are
+    #     left to the signature/projection checks (the honest H4 residual).
+    reexecute_posture_claims(cert)
 
     # 3. target binding (closes target-swap) — present a uniform PostureError for any binding failure
     att = _as_identity(cert.get("target_identity", {}))

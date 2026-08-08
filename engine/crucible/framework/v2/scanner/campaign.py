@@ -225,10 +225,15 @@ class WebScanCampaign:
         enable_graphql_dos: bool = False,
         enable_access_control: bool = False,
         access_control_config: AccessControlConfig | None = None,
+        retain_evidence: bool = False,
     ) -> None:
         self._send = send
         self.scope = scope
         self.checks = checks
+        # OPT-IN re-executable-tier evidence retention (Proof-of-Posture): threaded to the AuditEngine so
+        # predicate-oracle probes retain their minimal, deterministic kernel input for a VIGIL-free
+        # re-derivation of the negative. Default OFF → byte-identical certificates (the make-gate invariant).
+        self.retain_evidence = retain_evidence
         # OPT-IN live-progress sink (scanner.progress). Default None -> the run makes
         # NO calls (byte-for-byte the current behaviour, zero cost). When attached it
         # is invoked only on rare events (phase boundaries + confirmed findings, never
@@ -933,7 +938,7 @@ class WebScanCampaign:
                 engine = AuditEngine(
                     self._send, max_requests=self.max_audit_requests, oob=oob,
                     bandit=bandit, bandit_context=self.bandit_context,
-                    waf_adaptive=self.waf_adaptive)
+                    waf_adaptive=self.waf_adaptive, retain_evidence=self.retain_evidence)
                 selector = select_checks if self.targeted else None
                 for req in all_requests:
                     # Request-level checks are host/endpoint-level, so run them once

@@ -900,9 +900,93 @@ def _identity_matches(policy: dict, sample: Any) -> bool:
     return True
 
 
+# --- the re-executable posture tier (VIGIL-FREE): re-run the oracle over retained values ------------
+# A byte-faithful port of verify.oracles._eval_predicate / predicate_oracle (a byte-parity test in
+# integration/tests pins it to the real oracle). Pure stdlib — no framework, no vigil_core. This is what
+# makes the NEGATIVE producer-INDEPENDENT: the relying party re-derives 'clean' itself, trusting nobody.
+
+
+def _reexec_probe_evidence(probe: dict):
+    """The re-execution kernel input a coverage-cert probe row carries, or None. Must match
+    posture.certificate._probe_reexec_evidence exactly (so the tier projection agrees byte-for-byte)."""
+    ev = probe.get("evidence")
+    if not isinstance(ev, dict):
+        return None
+    pred, obs = ev.get("predicate"), ev.get("observed_evidence")
+    if isinstance(pred, dict) and isinstance(obs, dict):
+        return {"predicate": pred, "observed_evidence": obs}
+    return None
+
+
+def _reexec_resolve_operand(operand, observed: dict):
+    if isinstance(operand, dict) and set(operand.keys()) == {"var"}:
+        return observed.get(operand["var"])
+    return operand
+
+
+def _reexec_eval_predicate(pred, observed: dict) -> bool:
+    """Port of oracles._eval_predicate (the 'fired' half). Raises ValueError on a malformed node —
+    fail-closed: a malformed kernel can never UPHOLD a CLOSED claim."""
+    if not isinstance(pred, dict) or len(pred) != 1:
+        raise ValueError(f"malformed re-execution predicate node: {pred!r}")
+    op, args = next(iter(pred.items()))
+    if op == "all":
+        return all(_reexec_eval_predicate(p, observed) for p in args)
+    if op == "any":
+        return any(_reexec_eval_predicate(p, observed) for p in args)
+    if op == "not":
+        return not _reexec_eval_predicate(args, observed)
+    a = _reexec_resolve_operand(args[0], observed)
+    b = _reexec_resolve_operand(args[1], observed) if len(args) > 1 else None
+    if op == "eq":
+        return a == b
+    if op == "ieq":
+        return str(a).lower() == str(b).lower()
+    if op == "contains":
+        return bool(a) and bool(b) and str(b) in str(a)
+    if op == "icontains":
+        return bool(a) and bool(b) and str(b).lower() in str(a).lower()
+    if op == "in":
+        return a in (b or [])
+    if op == "min_len":
+        return len(str(a or "")) >= int(b)
+    if op == "gt":
+        return a is not None and b is not None and a > b
+    if op == "ge":
+        return a is not None and b is not None and a >= b
+    raise ValueError(f"unknown re-execution predicate op {op!r}")
+
+
+def _reexecute_posture(coverage_cert: dict) -> tuple[bool, str]:
+    """Re-run the oracle over every re-executable probe's retained values; refuse a forged negative
+    (a 'clean' probe whose predicate fires) or a forged positive (a 'finding' probe that does not). This
+    is the producer-independent soundness check — no VIGIL involved."""
+    n = 0
+    for probe in coverage_cert.get("probes") or []:
+        if not isinstance(probe, dict):
+            continue
+        kernel = _reexec_probe_evidence(probe)
+        if kernel is None:
+            continue
+        try:
+            fired = _reexec_eval_predicate(kernel["predicate"], dict(kernel["observed_evidence"]))
+        except (ValueError, TypeError) as e:
+            return False, f"re-execution kernel malformed for {probe.get('surface')!r}: {e}"
+        n += 1
+        verdict = probe.get("verdict")
+        if verdict == "clean" and fired:
+            return False, (f"re-execution REFUTED a CLOSED claim: predicate fires over the probe's own "
+                           f"retained values (surface={probe.get('surface')!r} class={probe.get('class')!r})")
+        if verdict == "finding" and not fired:
+            return False, (f"re-execution REFUTED an OPEN claim: predicate does not fire over the probe's "
+                           f"own retained values (surface={probe.get('surface')!r} class={probe.get('class')!r})")
+    return True, f"re-executed {n} probe(s) producer-independently"
+
+
 def _project_posture_claims(coverage_cert: dict) -> list:
     """VIGIL-free mirror of posture.certificate.project_posture_claims (fail-closed on a false-CLOSED
-    source: a 'clean' probe with no conclusive oracle)."""
+    source: a 'clean' probe with no conclusive oracle). The ``verification`` tier is computed here
+    IDENTICALLY to the in-tree projection, so posture_claims re-project byte-for-byte."""
     probes = coverage_cert.get("probes")
     if not isinstance(probes, list):
         raise ValueError("coverage certificate has no probes list")
@@ -915,12 +999,15 @@ def _project_posture_claims(coverage_cert: dict) -> list:
         if verdict == "clean" and not kinds:
             raise ValueError("a 'clean' probe carries no oracle_kinds_run — invalid coverage certificate")
         key = (str(p.get("surface", "")), str(p.get("param", "")), str(p.get("class", "")))
-        g = groups.setdefault(key, {"finding": 0, "clean": 0, "inconclusive": 0, "kinds": set(), "n": 0})
+        g = groups.setdefault(
+            key, {"finding": 0, "clean": 0, "inconclusive": 0, "kinds": set(), "n": 0, "clean_reexec": 0})
         g["n"] += 1
         if verdict in ("finding", "clean", "inconclusive"):
             g[verdict] += 1
         if verdict == "clean":
             g["kinds"].update(str(k) for k in kinds)
+            if _reexec_probe_evidence(p) is not None:
+                g["clean_reexec"] += 1
     claims = []
     for (surface, param, cls), g in groups.items():
         if g["finding"] > 0:
@@ -929,8 +1016,12 @@ def _project_posture_claims(coverage_cert: dict) -> list:
             status, kinds = "CLOSED", sorted(g["kinds"])
         else:
             status, kinds = "UNPROVEN", []
+        if status == "CLOSED" and g["clean"] > 0 and g["clean_reexec"] == g["clean"]:
+            verification = "re-executable"
+        else:
+            verification = "binding"
         claims.append({"surface": surface, "param": param, "class": cls, "status": status,
-                       "verification": "binding", "evidence_oracle_kinds": kinds, "n_probes": g["n"]})
+                       "verification": verification, "evidence_oracle_kinds": kinds, "n_probes": g["n"]})
     claims.sort(key=lambda c: (c["surface"], c["param"], c["class"]))
     return claims
 
@@ -968,6 +1059,14 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
     for c in rederived:
         if c["status"] == "CLOSED" and not c.get("evidence_oracle_kinds"):
             return False, "a CLOSED claim names no conclusive oracle"
+    # 3b. RE-EXECUTION (the re-executable tier): re-run the oracle over every re-executable probe's
+    #     retained values and refuse a forged negative/positive — the producer-INDEPENDENT check, run
+    #     here with NO VIGIL installed. Binding-tier probes carry no kernel and are skipped (the H4
+    #     residual). A claim marked "re-executable" whose clean probes carried no kernel would have
+    #     failed the byte-for-byte projection binding above, so the tier label cannot be forged.
+    rok, rreason = _reexecute_posture(cert.get("coverage") or {})
+    if not rok:
+        return False, f"posture re-execution: {rreason}"
     # 4. target binding (closes target-swap)
     iok, ireason = _verify_identity_attestation(cert.get("target_identity") or {}, owner_pubkey, engagement, now)
     if not iok:
@@ -975,9 +1074,12 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
     if not _identity_matches((cert.get("target_identity") or {}).get("policy") or {}, cert.get("target_sample") or {}):
         return False, "posture target_sample does not satisfy the owner's identity policy"
     s = cert.get("summary") or {}
+    n_reexec = s.get("n_closed_re_executable", 0) or 0
+    n_binding = s.get("n_closed_binding_only", s.get("n_closed", "?"))
+    tier_note = (f"{n_reexec} CLOSED re-derived producer-independently (re-executable tier), "
+                 f"{n_binding} binding-only (re-firing those needs VIGIL)")
     return True, (f"SOUND: {s.get('n_closed', '?')} CLOSED / {s.get('n_open', '?')} OPEN / "
-                  f"{s.get('n_unproven', '?')} UNPROVEN over {cert.get('target_sample')} "
-                  f"(re-firing the oracle needs VIGIL — binding tier)")
+                  f"{s.get('n_unproven', '?')} UNPROVEN over {cert.get('target_sample')} — {tier_note}")
 
 
 # ---------------------------------------------------------------------------

@@ -47,6 +47,28 @@ def _context_dump(ctx: object) -> dict | None:
     return None
 
 
+def reexecutable_evidence(ctx: object) -> dict | None:
+    """The MINIMAL, deterministic evidence a standalone (VIGIL-free) verifier re-runs the oracle over —
+    for the RE-EXECUTABLE posture tier (Proof-of-Posture). Today: the ``predicate`` + ``observed_evidence``
+    of a predicate-oracle probe (open_redirect / CORS / host-header / IDOR / …), which the pure JSON-AST
+    ``predicate_oracle`` re-derives byte-for-byte with no framework — so a relying party re-derives the
+    NEGATIVE itself, not merely trusts the signed verdict. Returns ``None`` for any probe whose retained
+    context carries no such re-runnable kernel input (those stay the ``binding`` tier — honest).
+
+    Only these two keys are retained (never the whole context): they are a small, deterministic JSON AST
+    plus the raw observed values the oracle judged, so embedding them keeps the certificate compact and the
+    re-derivation faithful. This is OPT-IN (``AuditEngine.retain_evidence``); with it off, nothing is
+    retained and every certificate is byte-identical to before (the make-gate invariant)."""
+    dump = _context_dump(ctx)
+    if not isinstance(dump, dict):
+        return None
+    pred = dump.get("predicate")
+    obs = dump.get("observed_evidence")
+    if isinstance(pred, dict) and isinstance(obs, dict):
+        return {"predicate": pred, "observed_evidence": obs}
+    return None
+
+
 class AuditFinding(BaseModel):
     """One oracle-confirmed finding: the check that produced it, the exact
     insertion point, and the deterministic proof (which oracle fired, its
@@ -107,6 +129,14 @@ class ProbeRecord(BaseModel):
     oracle_kinds_run: tuple[str, ...] = Field(
         default=(), description="SORTED oracle kinds that RAN over the observed data.")
     verdict: Literal["finding", "clean", "inconclusive"]
+    evidence: dict | None = Field(
+        default=None, description=(
+            "OPT-IN re-executable-tier evidence (Proof-of-Posture): the minimal, deterministic kernel "
+            "input (a predicate + the observed values) a VIGIL-FREE verifier re-runs the oracle over to "
+            "re-derive this probe's verdict producer-independently. ``None`` (the default) unless "
+            "``AuditEngine.retain_evidence`` is set — so a certificate is byte-identical to before when "
+            "retention is off. Never emitted into a certificate row when falsy (see "
+            "``coverage_oracle.build_coverage_certificate``), so the make-gate byte-identity holds."))
 
 
 def probe_verdict(result: VerificationResult) -> tuple[str, tuple[str, ...]]:
@@ -165,10 +195,16 @@ class AuditEngine:
         bandit: ContextualBandit | None = None,
         bandit_context: str = "default",
         waf_adaptive: bool = False,
+        retain_evidence: bool = False,
     ) -> None:
         self._send = send
         self.verifier = verifier or OracleVerifier()
         self.max_requests = max_requests
+        # OPT-IN re-executable-tier evidence retention (Proof-of-Posture). Default OFF: no probe carries
+        # `evidence`, so every coverage/posture certificate is byte-identical to before (the make-gate
+        # invariant). When ON, a predicate-oracle probe retains its minimal, deterministic kernel input
+        # (predicate + observed values) so a VIGIL-FREE verifier can re-derive the NEGATIVE itself.
+        self.retain_evidence = retain_evidence
         # Opt-in adaptive WAF-bypass: when a check's canonical payload is filtered
         # but the sink is plausibly reachable, checks that implement `adapt` get a
         # second chance to SYNTHESIZE a bypassing form (evasion ladder, then a small
@@ -203,16 +239,22 @@ class AuditEngine:
     def _record_probe(
         self, *, endpoint: str, insertion_point: str, param: str,
         check_id: str, bug_class: str, result: VerificationResult,
-        method: str = "GET",
+        method: str = "GET", ctx: object | None = None,
     ) -> None:
         """Retain one adjudicated probe. Called ONLY when an oracle layer actually
         ran over observed data (a real VerificationResult), so the record honestly
-        reflects an EXERCISED surface — never a check that never engaged."""
+        reflects an EXERCISED surface — never a check that never engaged.
+
+        When ``retain_evidence`` is set (OPT-IN), a predicate-oracle probe also retains its minimal,
+        deterministic re-execution kernel input (``predicate`` + ``observed_evidence``) so a VIGIL-free
+        verifier can re-derive the verdict producer-independently (the re-executable posture tier). With
+        the flag off (the default), ``evidence`` stays ``None`` and the certificate is byte-identical."""
         verdict, kinds = probe_verdict(result)
+        evidence = reexecutable_evidence(ctx) if self.retain_evidence else None
         self.exercised.append(ProbeRecord(
             endpoint=endpoint, method=method, insertion_point=insertion_point, param=param,
             check_id=check_id, bug_class=bug_class,
-            oracle_kinds_run=kinds, verdict=verdict,
+            oracle_kinds_run=kinds, verdict=verdict, evidence=evidence,
         ))
 
     def audit(
@@ -259,7 +301,7 @@ class AuditEngine:
                 self._record_probe(
                     endpoint=request.url, method=request.method, insertion_point=f"request:{rcheck.id}",
                     param="(request)", check_id=rcheck.id, bug_class=rcheck.bug_class,
-                    result=rresult,
+                    result=rresult, ctx=ctx,
                 )
                 confirmed = confirmed_from_result(rresult, rfinding, self.verifier)
                 if confirmed is not None:
@@ -352,7 +394,7 @@ class AuditEngine:
                     if result is not None:
                         self._record_probe(
                             endpoint=request.url, method=request.method, insertion_point=point.id, param=point.name,
-                            check_id=check.id, bug_class=check.bug_class, result=result,
+                            check_id=check.id, bug_class=check.bug_class, result=result, ctx=ctx,
                         )
                     if confirmed is None:
                         continue
