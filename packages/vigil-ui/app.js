@@ -45,6 +45,7 @@
     ]},
     { group: "LEARN", items: [
       { id: "trust", label: "Trust Center", icon: "shield", ready: true },
+      { id: "posture", label: "Proof of Posture", icon: "check", ready: true },
       { id: "manual", label: "Manual", icon: "book", ready: true },
       { id: "knowledge", label: "Knowledge Engine", icon: "brain", ready: true },
     ]},
@@ -633,6 +634,254 @@
         ? trustKv("Signed by", r.which_authorizers.join(", ")) : null,
       r.digest ? trustKv("Digest", h("span.mono", null, trustShort(r.digest))) : null,
       r.pin_source ? h("div.hint", null, "Pin source: " + r.pin_source) : null,
+    ]);
+  }
+
+  // ==========================================================================
+  // Proof of Posture — the signed, offline-verifiable Certificate of Non-Exploitability.
+  // Renders each PostureCertificate AS a certificate: the target + freshness, the CLOSED /
+  // OPEN / UNPROVEN posture claims grouped by surface (with the vuln-class, the conclusive
+  // oracle(s), and the verification TIER — binding vs re-executable), the PROMINENT coverage
+  // DENOMINATOR + the honest RESIDUAL (the boundary is the point — CLOSED is never "secure
+  // against everything"), the out-of-band fingerprint PIN, and the exact offline-verify
+  // command (copy). READ-ONLY: reads the certificate; the bundle's own verify_offline.py is
+  // the offline PASS/FAIL authority. No fabricated numbers — an un-attested tree is EMPTY.
+  // ==========================================================================
+
+  var POSTURE_STATE = { CLOSED: "confirmed", OPEN: "blocked", UNPROVEN: "queued" };
+  function postureBadge(status) {
+    var s = String(status || "").toUpperCase();
+    return h("span.st.st-" + (POSTURE_STATE[s] || "idle"), null, [h("span.dot"), s || "—"]);
+  }
+  function postureTier(v) {
+    // "re-executable" = raw bytes embedded + a pinned oracle kernel re-runs them (stronger);
+    // "binding" = the offline verifier re-checks the signed coverage verdict + projection, but
+    // re-firing the oracle needs VIGIL (the honest residual). Never dress binding up as re-exec.
+    var re = String(v || "") === "re-executable";
+    return h("span.pill.sm" + (re ? ".ok" : ""), null, [re ? "re-executable" : "binding"]);
+  }
+
+  function renderPosture(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Proof of Posture"),
+        h("span.sub", null, "The Certificate of Non-Exploitability — a signed, coverage-bounded, "
+          + "offline-verifiable proof that, over the surface the scanner REACHED, an applicable oracle "
+          + "had a live channel and did not fire. The boundary (denominator + residual) is the point.")]),
+      h("div#posture-doctrine", { style: { marginBottom: "14px" } }),
+      h("div#posture-body", null, h("div.empty", null, "Loading posture certificates…")),
+    ]);
+    V.getJSON(OFF("/api/posture")).then(renderPostureData).catch(function () {
+      V.mount(V.$("#posture-body"), h("div.empty", null, [
+        h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not reach the offense console to read posture certificates. "
+          + "Start it (vigil up / the console server) and reload."),
+      ]));
+    });
+  }
+
+  function renderPostureData(d) {
+    var doc = V.$("#posture-doctrine");
+    if (doc && d && d.doctrine) V.mount(doc, h("div.hint", null, d.doctrine));
+    var body = V.$("#posture-body"); if (!body) return;
+    var certs = (d && d.posture) || [];
+    var present = certs.filter(function (c) { return c && c.present; });
+    if (!present.length) {
+      V.mount(body, h("div.empty", null, [
+        h("div.big", null, "No posture attested yet"),
+        h("p", null, "Nothing here is fabricated. Mint a signed Certificate of Non-Exploitability with:"),
+        h("pre.code", { style: { textAlign: "left", maxWidth: "640px", margin: "12px auto 0" } },
+          "python -m vigil_integration.posture attest --out <dir>"),
+        h("p", { style: { marginTop: "10px" } }, "Attest into the console's posture dir "
+          + "(<v2_root>/.console/posture/<name>) or a run dir, then reload."),
+      ]));
+      return;
+    }
+    V.mount(body, h("div.stack", null, present.map(postureCard)));
+  }
+
+  function postureCard(c) {
+    var sum = c.summary || {};
+    var tr = c.trust_root || {};
+    var authz = tr.authorizers || [];
+    var target = (c.target_sample && (c.target_sample.host || c.target_sample.url
+      || Object.values(c.target_sample)[0])) || c.engagement || "target";
+
+    var head = h("div.card-h", null, [
+      h("span.label", null, "certificate of non-exploitability"),
+      h("h3", null, String(target)),
+      c.engagement ? V.pill("engagement " + c.engagement, null, null) : null,
+      c.run_id ? V.pill("run " + c.run_id, null, null) : null,
+    ]);
+
+    // freshness — HONEST: the signed core is deterministic (no wall-clock); the freshness bound is the
+    // bundle's external RFC3161 time anchor, applied as a sidecar. Never invent a timestamp.
+    var freshness = h("div.hint", { style: { marginTop: "2px" } },
+      "Freshness: this proof is only as current as the last coverage scan. The signed certificate core is "
+      + "deterministic (no wall-clock); the freshness bound is the bundle's external RFC3161 time anchor "
+      + "(a sidecar), not a field of the signed bytes.");
+
+    var tiles = h("div.grid.cols-4", { style: { marginTop: "12px" } }, [
+      V.tile("Closed", String(sum.n_closed != null ? sum.n_closed : "—"),
+        "oracle had a channel & did NOT fire", "ok"),
+      V.tile("Open", String(sum.n_open != null ? sum.n_open : "—"),
+        "an oracle FIRED (a finding)", (sum.n_open ? "danger" : "")),
+      V.tile("Unproven", String(sum.n_unproven != null ? sum.n_unproven : "—"),
+        "payload sent, no oracle adjudicated", (sum.n_unproven ? "warn" : "")),
+      V.tile("Re-executable", (sum.n_closed_re_executable != null ? sum.n_closed_re_executable : 0)
+        + " / " + (sum.n_closed != null ? sum.n_closed : 0),
+        "CLOSED that re-fire offline; the rest are binding-only (need VIGIL)"),
+    ]);
+
+    var denom = postureDenominator(c);
+    var residual = c.residual ? h("div.legend", { style: { marginTop: "12px", alignItems: "flex-start" } },
+      [V.icon("info"), h("span", null, [h("b", null, "Residual (the honest boundary): "), c.residual])]) : null;
+
+    var claims = postureClaims(c.posture_claims || []);
+    var trust = postureTrust(c, tr, authz);
+    var verify = postureVerify(c);
+
+    return h("div.card", null, [head, freshness, tiles, denom, residual, claims, trust, verify]);
+  }
+
+  // The PROMINENT coverage denominator — CLOSED is bounded to the REACHED surface; this panel says so.
+  function postureDenominator(c) {
+    var dm = c.denominator || {};
+    function row(k, v) { return (v == null || v === "") ? null : trustKv(k, String(v)); }
+    var known = [
+      row("Surfaces reached", dm.surfaces_reached),
+      row("Insertion points probed", dm.insertion_points_probed),
+      row("Distinct classes probed", dm.distinct_classes_probed),
+      row("Crawl bound", (dm.max_pages != null ? dm.max_pages + " pages" : "")
+        + (dm.max_depth != null ? " · depth " + dm.max_depth : "")),
+      row("Frontier truncated", dm.frontier_truncated != null ? dm.frontier_truncated : null),
+      row("Budget exhausted", dm.budget_exhausted != null ? (dm.budget_exhausted ? "yes" : "no") : null),
+    ].filter(Boolean);
+    return h("div.card", { style: { marginTop: "12px", background: "var(--bg-2)" } }, [
+      h("div.card-h", null, [h("span.label", null, "coverage denominator"),
+        h("h3", { style: { fontSize: "var(--fs-lg)" } }, "What this proof covers — and what it does NOT")]),
+      known.length ? h("div.kv", { style: { marginTop: "8px" } }, known)
+        : h("div.hint", null, "denominator not recorded in this certificate."),
+      c.scope ? h("div.hint", { style: { marginTop: "10px" } }, c.scope) : null,
+      h("div.hint", { style: { marginTop: "6px", color: "var(--st-blocked)" } },
+        "CLOSED is bounded to the surface the scanner REACHED (the denominator above). Undiscovered "
+        + "endpoints/parameters are discovery/recall — OUT of this denominator, NOT covered. A CLOSED "
+        + "certificate is never a claim of security against everything."),
+    ]);
+  }
+
+  // The claims table, grouped by surface (OPEN first, then UNPROVEN, then CLOSED within a surface).
+  function postureClaims(claims) {
+    if (!claims.length) return h("div.hint", { style: { marginTop: "12px" } }, "no posture claims recorded.");
+    var rank = { OPEN: 0, UNPROVEN: 1, CLOSED: 2 };
+    var bySurface = {};
+    claims.forEach(function (c) { (bySurface[c.surface || "—"] = bySurface[c.surface || "—"] || []).push(c); });
+    var surfaces = Object.keys(bySurface).sort();
+    var sections = surfaces.map(function (surf) {
+      var rows = bySurface[surf].slice().sort(function (a, b) {
+        var r = (rank[String(a.status).toUpperCase()] || 9) - (rank[String(b.status).toUpperCase()] || 9);
+        return r !== 0 ? r : String(a.class).localeCompare(String(b.class));
+      });
+      var counts = { OPEN: 0, CLOSED: 0, UNPROVEN: 0 };
+      rows.forEach(function (c) { var s = String(c.status).toUpperCase(); if (counts[s] != null) counts[s]++; });
+      var chips = h("span", { style: { marginLeft: "auto", display: "inline-flex", gap: "6px", flexWrap: "wrap" } }, [
+        counts.OPEN ? V.pill(counts.OPEN + " open", "danger", null) : null,
+        counts.UNPROVEN ? V.pill(counts.UNPROVEN + " unproven", "reconnect", null) : null,
+        counts.CLOSED ? V.pill(counts.CLOSED + " closed", "sm ok", null) : null,
+      ]);
+      var table = h("div.scroll-x", null, h("table.tbl", null, [
+        h("thead", null, h("tr", null, [
+          h("th", null, "Parameter"), h("th", null, "Class"), h("th", null, "Status"),
+          h("th", null, "Evidence oracle(s)"), h("th", null, "Verification"), h("th", null, "Probes")])),
+        h("tbody", null, rows.map(function (c) {
+          var oracles = (c.evidence_oracle_kinds || []);
+          return h("tr", null, [
+            h("td.mono", null, c.param || "—"),
+            h("td", null, c.class || "—"),
+            h("td", null, postureBadge(c.status)),
+            h("td", null, oracles.length
+              ? h("span", { style: { display: "inline-flex", gap: "4px", flexWrap: "wrap" } },
+                  oracles.map(function (k) { return V.pill(k, "sm", null); }))
+              : h("span.dim", null, String(c.status).toUpperCase() === "CLOSED" ? "—" : "(none fired)")),
+            h("td", null, postureTier(c.verification)),
+            h("td.mono", null, String(c.n_probes != null ? c.n_probes : "—")),
+          ]);
+        })),
+      ]));
+      return h("div", { style: { marginTop: "12px" } }, [
+        h("div.row-flex", { style: { alignItems: "center" } }, [
+          h("b.mono", { style: { fontSize: "var(--fs-sm)" } }, surf), chips]),
+        table,
+      ]);
+    });
+    return h("div", { style: { marginTop: "8px" } }, [
+      h("span.label", null, "posture claims by surface"), sections]);
+  }
+
+  function postureTrust(c, tr, authz) {
+    return h("div", { style: { marginTop: "14px" } }, [
+      h("span.label", null, "trust root & out-of-band pin"),
+      h("div.kv", { style: { marginTop: "8px" } }, [
+        c.schema ? trustKv("Schema", h("span.mono", null, c.schema)) : null,
+        trustKv("Signed digest", h("span.mono", null, trustShort(c.scorecard_digest))),
+        trustKv("Trust root", "m-of-n threshold " + (tr.threshold != null ? tr.threshold : "?") + " of " + authz.length),
+        h("div.kv", null, [h("div.k", null, "Authorizers"), h("div.v", null, authz.length
+          ? authz.map(function (a) { return h("div", { style: { marginBottom: "3px" } },
+              [V.pill(a.key_id || "?", null, null), " ", h("span.mono", null, trustShort(a.public_key_b64, 14, 6))]); })
+          : "—")]),
+        trustKv("Fingerprint pin (out-of-band)", c.fingerprint
+          ? h("span.mono", null, trustShort(c.fingerprint, 26, 8)) : "—"),
+        trustKv("Owner pubkey", c.owner_pubkey ? h("span.mono", null, trustShort(c.owner_pubkey, 16, 6)) : "—"),
+      ]),
+      h("div.hint", { style: { marginTop: "8px" } },
+        "Publish the fingerprint pin + owner pubkey on a channel SEPARATE from the bundle. A verifier passes "
+        + "the pin as --posture-fingerprint; a forger who re-signs a tampered certificate with a fresh key is "
+        + "rejected before any signature check."),
+    ]);
+  }
+
+  function postureVerifyCommand(c) {
+    var fp = c.fingerprint || "<publish-out-of-band>";
+    var owner = c.owner_pubkey || "<publish-out-of-band>";
+    var eng = c.engagement || "<engagement>";
+    var lines = [];
+    if (c.bundle_dir) lines.push("cd " + c.bundle_dir);
+    lines.push("python3 verify_offline.py verify \\");
+    lines.push("    --bundle bundle.json \\");
+    lines.push("    --posture-fingerprint " + fp + " \\");
+    lines.push("    --posture-owner-pubkey " + owner + " \\");
+    lines.push("    --posture-engagement " + eng + " \\");
+    lines.push("    --posture-now $(date +%s)");
+    return lines.join("\n");
+  }
+
+  function postureVerify(c) {
+    var cmd = postureVerifyCommand(c);
+    return h("div", { style: { marginTop: "14px" } }, [
+      h("span.label", null, "verify offline (no VIGIL, no trust in us)"),
+      h("div.hint", { style: { margin: "6px 0 8px" } },
+        "Exit 0 = SOUND. Re-checks, fail-closed: the m-of-n signature over the canonical bytes; the "
+        + "out-of-band pin; that every claim re-projects from the embedded coverage evidence (a forged "
+        + "CLOSED is refused); and the owner-signed target binding. It does NOT re-fire the oracle "
+        + "(that needs VIGIL) — the certificate states this residual on its face."),
+      h("div", { style: { display: "flex", gap: "8px", alignItems: "stretch" } }, [
+        h("pre.code.scroll-x", { style: { flex: "1", margin: "0" } }, cmd),
+        h("button.btn", { title: "Copy the offline-verify command",
+          onClick: function () { copyText(cmd); } }, "Copy"),
+      ]),
+      c.bundle_present
+        ? h("div", { style: { marginTop: "10px" } }, [
+            h("span.label", null, "portable bundle"),
+            h("div.hint", { style: { margin: "6px 0 6px" } },
+              "Self-contained: bundle.json + its own verify_offline.py + HOW-TO-VERIFY.md + the out-of-band "
+              + "pins. Copy this directory off-box and run the command above inside it."),
+            h("div", { style: { display: "flex", gap: "8px", alignItems: "stretch" } }, [
+              h("pre.code.scroll-x", { style: { flex: "1", margin: "0" } }, c.bundle_dir || ""),
+              h("button.btn", { title: "Copy the bundle path",
+                onClick: function () { copyText(c.bundle_dir || ""); } }, "Copy path"),
+            ]),
+          ])
+        : h("div.hint", { style: { marginTop: "8px" } },
+            "No portable bundle exported for this attestation (only the signed triple on disk)."),
     ]);
   }
 
@@ -3655,14 +3904,15 @@
   // Every tab is REAL data from an existing read endpoint; honest empty states throughout — no fabricated
   // priors/scores. Reasoning is presented as advisory-only (it never promotes a finding — the oracle does).
   var BRAIN_TABS = [
+    { id: "decide", label: "Decision engine" },
     { id: "memory", label: "Memory" }, { id: "benchmark", label: "Benchmark" },
     { id: "catalog", label: "Catalog" }, { id: "intel", label: "Intel" }, { id: "planner", label: "Planner" },
   ];
   function renderBrain(screen) {
-    var B = { tab: (hashQuery().tab) || "memory", runs: [], run: null, catalogQ: "" };
+    var B = { tab: (hashQuery().tab) || "decide", runs: [], run: null, catalogQ: "" };
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Brain"),
-        h("span.sub", null, "What the system has learned, how well it scores, and the capabilities it can bring to bear.")]),
+        h("span.sub", null, "The propose-only decision engine, plus what the system has learned, how well it scores, and the capabilities it can bring to bear.")]),
       h("div.segmented#brain-tabs", { style: { flexWrap: "wrap" } }),
       h("div#brain-view", { style: { marginTop: "16px" } }),
     ]);
@@ -3675,12 +3925,124 @@
     function drawView() {
       var v = V.$("#brain-view"); if (!v) return;
       V.mount(v, h("div.empty", null, "Loading…"));
-      if (B.tab === "memory") brainMemory(v);
+      if (B.tab === "decide") brainDecision(v);
+      else if (B.tab === "memory") brainMemory(v);
       else if (B.tab === "benchmark") brainBenchmark(v);
       else if (B.tab === "catalog") brainCatalog(v, B);
       else brainRunScoped(v, B, B.tab);   // intel / planner (per-engagement)
     }
     drawTabs(); drawView();
+  }
+
+  // ---- Brain > Decision engine (the pluggable, PROPOSE-ONLY agent-body brain) -----------------
+  // Shows the ACTIVE brain + the propose-only banner + the gate posture (queue vs auto), and the proposed
+  // attack chain of LEADs IF a real proposal is persisted. It NEVER invents a chain: no live proposal
+  // source → honest empty state. Danger chip (recon/active) + effectiveness bar + a per-step QUEUE-vs-
+  // auto verdict mirror the WARDEN gate (A2 floor on a live target; recon auto-eligible only in staging/twin).
+  function brainStepGate(danger, posture) {
+    var p = String(posture || "live");
+    if ((p === "staging" || p === "twin") && danger === "recon")
+      return { auto: true, label: "auto-eligible", detail: "recon in " + p + " posture" };
+    return { auto: false, label: "queues for owner approval",
+             detail: (danger === "recon" ? "recon" : "active") + " on a " + p + " target (A2 floor)" };
+  }
+  function brainDangerChip(danger) {
+    return danger === "recon" ? V.pill("recon", "sm", null) : V.pill("active", "sm warn", null);
+  }
+  function brainEffBar(eff) {
+    var pct = Math.max(0, Math.min(100, Math.round((Number(eff) || 0) * 100)));
+    var cls = pct >= 80 ? "" : (pct >= 50 ? ".mid" : ".hi");
+    return h("div", { style: { minWidth: "128px" } }, [
+      h("div.dim", { style: { fontSize: "var(--fs-micro)" } }, "effectiveness (prior) " + pct + "%"),
+      h("div.bar", { style: { margin: "4px 0 0" } }, h("div.bar-fill" + cls, { style: { width: pct + "%" } })),
+    ]);
+  }
+  function brainProfile(profile) {
+    var p = profile || {};
+    function row(k, v) {
+      if (v == null || v === "" || (Array.isArray(v) && !v.length)) return null;
+      return trustKv(k, Array.isArray(v) ? v.join(", ") : String(v));
+    }
+    var svc = p.services && Object.keys(p.services).length
+      ? Object.keys(p.services).map(function (k) { return k + "/" + p.services[k]; }).join(", ") : null;
+    var kvs = [
+      row("Target", p.target),
+      row("Type", p.target_type),
+      row("IP addresses", p.ip_addresses),
+      row("Open ports", (p.open_ports || []).map(String)),
+      row("Services", svc),
+      row("Technologies", p.technologies),
+      row("CMS", p.cms_type),
+      row("Cloud", p.cloud_provider),
+      row("Attack surface", p.attack_surface_score),
+      row("Risk", p.risk_level),
+      row("Confidence", p.confidence_score),
+    ].filter(Boolean);
+    if (!kvs.length) return h("div.hint", null, "no profile fields recorded for this proposal.");
+    return h("div.kv", { style: { marginTop: "8px" } }, kvs);
+  }
+  function brainChain(prop) {
+    var steps = prop.steps || [];
+    var posture = prop.posture || "live";
+    var head = h("div.row-flex", { style: { flexWrap: "wrap", gap: "8px", alignItems: "center" } }, [
+      h("span.label", null, "proposed attack chain"),
+      prop.objective ? V.pill("objective " + prop.objective, "sm", null) : null,
+      V.pill("posture " + posture, (posture === "live" ? "sm warn" : "sm"), null),
+      prop.run_id ? V.pill("run " + prop.run_id, "sm", null) : null,
+    ]);
+    var list = h("div.stack", { style: { marginTop: "10px", gap: "10px" } }, steps.map(function (s, i) {
+      var gate = brainStepGate(s.danger, posture);
+      var params = s.params ? Object.keys(s.params).filter(function (k) { return k !== "danger"; })
+        .map(function (k) { return k + "=" + JSON.stringify(s.params[k]); }).join("  ") : "";
+      return h("div.fix-card", null, [
+        h("div.fix-h", null, [
+          h("span.pill.sm", null, "#" + (s.priority != null ? s.priority : i + 1)),
+          h("b.mono", null, s.tool || "?"),
+          brainDangerChip(s.danger),
+          gate.auto ? h("span.st.st-confirmed", null, [h("span.dot"), gate.label])
+                    : h("span.st.st-queued", null, [h("span.dot"), gate.label]),
+          h("span", { style: { marginLeft: "auto" } }, brainEffBar(s.effectiveness)),
+        ]),
+        params ? h("div.dim.mono", { style: { marginTop: "8px", fontSize: "var(--fs-xs)", wordBreak: "break-word" } }, params) : null,
+        h("div.dim", { style: { marginTop: "4px", fontSize: "var(--fs-micro)" } }, "LEAD · " + gate.detail),
+      ]);
+    }));
+    return h("div", { style: { marginTop: "12px" } }, [head, list]);
+  }
+  function brainDecision(v) {
+    V.getJSON(OFF("/api/brain/decision")).then(function (d) {
+      var brain = (d && d.brain) || {};
+      var prop = (d && d.proposal) || { present: false };
+      var doctrine = (d && d.doctrine) || "";
+      var banner = h("div.legend", { style: { alignItems: "flex-start",
+        borderColor: "var(--owner-line)", background: "var(--owner-dim)" } },
+        [V.icon("info"), h("span", null, [h("b", null, "Proposals only. "),
+          "Every step crosses the conjunctive gate + egress gate; a finding is a FACT only when a VIGIL oracle fires."])]);
+      var brainCard = V.card("Active brain", "DECISION ENGINE", h("div", null, [
+        h("div.row-flex", { style: { flexWrap: "wrap", gap: "8px", alignItems: "center" } }, [
+          h("b", null, brain.name || "—"),
+          brain.propose_only ? V.pill("propose-only", "sm ok", null) : null,
+        ]),
+        brain.design_credit ? h("div.hint", { style: { marginTop: "8px" } },
+          [h("b", null, "Design credit: "), brain.design_credit]) : null,
+        brain.module ? h("div.dim.mono", { style: { marginTop: "6px", fontSize: "var(--fs-micro)" } }, brain.module) : null,
+      ]), false);
+      var gatePosture = doctrine ? h("div.legend", { style: { marginTop: "12px", alignItems: "flex-start" } },
+        [V.icon("shield"), h("span", null, doctrine)]) : null;
+      var chain;
+      if (prop.present) {
+        chain = h("div", { style: { marginTop: "12px" } }, [
+          V.card("Target profile", "OBSERVED", brainProfile(prop.profile), false),
+          brainChain(prop),
+        ]);
+      } else {
+        chain = h("div.empty", { style: { marginTop: "12px" } }, [
+          h("div.big", null, "No live proposal wired"),
+          h("p", null, prop.note || "No proposal source is wired into this console yet."),
+        ]);
+      }
+      V.mount(v, [banner, brainCard, gatePosture, chain]);
+    }).catch(function () { V.mount(v, offlineEmpty()); });
   }
 
   function brainMemory(v) {
@@ -4962,6 +5324,7 @@
     if (id === "knowledge") { renderKnowledge(screen); return; }
     if (id === "tools") { renderTools(screen); return; }
     if (id === "trust") { renderTrust(screen); return; }
+    if (id === "posture") { renderPosture(screen); return; }
     if (id === "replay") { renderReplay(screen); return; }
     if (id === "governance") { renderGovernance(screen); return; }
     if (id === "assess") { renderAssess(screen); return; }
