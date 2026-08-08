@@ -65,8 +65,8 @@ def parse_package_lock(text: str) -> list[tuple[str, str]]:
     entries without a concrete version are skipped. Never raises on malformed JSON (returns [])."""
     try:
         data = json.loads(text or "{}")
-    except (json.JSONDecodeError, TypeError):
-        return []
+    except (json.JSONDecodeError, TypeError, RecursionError):
+        return []   # malformed OR a pathologically-deep doc that recurses json.loads → fail-safe empty
     out: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
@@ -82,13 +82,13 @@ def parse_package_lock(text: str) -> list[tuple[str, str]]:
         if isinstance(meta, dict):
             _add(name, meta.get("version"))
 
-    def _walk(deps: Any) -> None:                              # v1 (recursive)
-        if not isinstance(deps, dict):
+    def _walk(deps: Any, depth: int = 0) -> None:              # v1 (recursive, depth-capped)
+        if not isinstance(deps, dict) or depth > 200:          # a hostile/degenerate lockfile can't blow the stack
             return
         for name, meta in deps.items():
             if isinstance(meta, dict):
                 _add(name, meta.get("version"))
-                _walk(meta.get("dependencies"))
+                _walk(meta.get("dependencies"), depth + 1)
 
     _walk(data.get("dependencies"))
     return out
@@ -100,10 +100,32 @@ _PARSERS = {
 }
 
 
+class SnapshotError(ValueError):
+    """A malformed OSV snapshot — fail-closed at load rather than risk an over-broad range at verify."""
+
+
 def load_osv_snapshot(path: str | Path) -> dict:
-    """Load the pinned vendored OSV snapshot → ``{ecosystem: {package: [advisory, ...]}}``."""
+    """Load + VALIDATE the pinned vendored OSV snapshot → ``{ecosystem: {package: [advisory, ...]}}``.
+
+    Every advisory's ``affected`` MUST be a list of dict ranges of the form ``{introduced, fixed}`` /
+    ``{introduced, last_affected}`` (an ``introduced`` is required). Bare comparator STRINGS (``">=1.0"``)
+    are REJECTED here (red-pen LOW-1): the dict path fail-closes on an open-ended range but the
+    comparator-string path does not, so a curator writing ``">=0"`` could mint a FACT for every version.
+    Requiring dict-form-with-explicit-bounds at load removes that foot-gun before any adjudication."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return data.get("ecosystems", {}) if isinstance(data, dict) else {}
+    ecosystems = data.get("ecosystems", {}) if isinstance(data, dict) else {}
+    for eco, pkgs in ecosystems.items():
+        for pkg, advisories in (pkgs or {}).items():
+            for adv in (advisories or []):
+                affected = adv.get("affected")
+                if not isinstance(affected, list) or not affected:
+                    raise SnapshotError(f"{eco}:{pkg}: advisory {adv.get('vuln_id')!r} has no affected-range list")
+                for rng in affected:
+                    if not isinstance(rng, dict) or "introduced" not in rng:
+                        raise SnapshotError(
+                            f"{eco}:{pkg}: advisory {adv.get('vuln_id')!r} range {rng!r} is not a dict with "
+                            f"'introduced' (comparator strings are rejected — use {{introduced, fixed}})")
+    return ecosystems
 
 
 def _advisories_for(osv: dict, ecosystem: str, package: str) -> list[dict]:

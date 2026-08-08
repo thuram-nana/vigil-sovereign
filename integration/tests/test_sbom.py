@@ -47,6 +47,33 @@ def test_committed_osv_snapshot_loads():
     assert any(a.get("vuln_id") for a in osv["PyPI"]["pyyaml"])
 
 
+def test_snapshot_load_rejects_comparator_string_ranges(tmp_path):
+    """Red-pen LOW-1: a comparator-string range (which the comparator path does NOT fail-close on an
+    open-ended '>=0') is rejected at LOAD — only dict-form {introduced, fixed} is allowed."""
+    import json as _json
+    bad = tmp_path / "bad.json"
+    bad.write_text(_json.dumps({"ecosystems": {"PyPI": {"x": [{"vuln_id": "V", "affected": [">=0"]}]}}}))
+    from vigil_integration.live.sbom import SnapshotError
+    with pytest.raises(SnapshotError):
+        load_osv_snapshot(bad)
+    # a dict range missing 'introduced' is also rejected
+    bad2 = tmp_path / "bad2.json"
+    bad2.write_text(_json.dumps({"ecosystems": {"PyPI": {"x": [{"vuln_id": "V", "affected": [{"fixed": "2.0"}]}]}}}))
+    with pytest.raises(SnapshotError):
+        load_osv_snapshot(bad2)
+
+
+def test_package_lock_deep_v1_does_not_blow_the_stack():
+    """Red-pen LOW-2: a deep v1 lockfile is depth-capped in the walk (never a RecursionError). Build the
+    JSON as a STRING (no json.dumps recursion) at a depth that json.loads handles but exceeds the 200 cap."""
+    inner = '{"version":"1.0.0"}'
+    for _ in range(300):   # > the 200 walk cap; json.loads handles ~300 nesting fine
+        inner = '{"version":"1.0.0","dependencies":{"d":' + inner + '}}'
+    doc = '{"lockfileVersion":1,"dependencies":{"top":' + inner + '}}'
+    out = parse_package_lock(doc)   # must not raise
+    assert ("top", "1.0.0") in out   # the shallow entries are collected; the deep tail is capped, not crashed
+
+
 # ---- the VIGIL-direct FACT path (framework) ------------------------------------------------------
 
 def _signers_and_trust():
