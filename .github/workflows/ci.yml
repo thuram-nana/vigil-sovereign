@@ -101,6 +101,7 @@ jobs:
               --ignore=integration/tests/test_external_tool_runner.py \
               --ignore=integration/tests/test_conformance.py \
               --ignore=integration/tests/test_sbom.py \
+              --ignore=integration/tests/test_web_redrive.py \
               --ignore=integration/tests/test_typed_outcomes.py \
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_engine_terminal.py \
@@ -147,6 +148,7 @@ jobs:
               integration/tests/test_external_tool_runner.py \
               integration/tests/test_conformance.py \
               integration/tests/test_sbom.py \
+              integration/tests/test_web_redrive.py \
               integration/tests/test_typed_outcomes.py \
               integration/tests/test_engine_live.py \
               integration/tests/test_engine_terminal.py \

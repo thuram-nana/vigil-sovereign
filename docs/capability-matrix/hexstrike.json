@@ -1,7 +1,7 @@
 {
   "schema": "vigil-capability-matrix/1",
-  "upstream": "hexstrike-ai (0x4m4), pinned d689933 \u2014 vendored NON-runnable; 79 distinct external tools",
-  "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count.",
+  "upstream": "hexstrike-ai (0x4m4), pinned d689933 — vendored NON-runnable; 79 distinct external tools",
+  "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count. Two FACT families are VIGIL-DIRECT (no tool is the authority): VERSION_RANGE via live.sbom (SBOM/dependency-CVE) and ACHIEVED_STATE via live.web_redrive (open_redirect / cors / host_header_injection over VIGIL's own gated capture). Their proposer tools (trivy/grype, httpx) keep fact_capable=false by design.",
   "tools": [
     {
       "name": "nmap",
@@ -40,12 +40,15 @@
       "install": "go",
       "privileges": "none",
       "network_effect": "connects-out",
-      "oracle_family": "",
+      "oracle_family": "ACHIEVED_STATE",
       "fact_capable": false,
       "claim_families": [
-        "http-exposure"
+        "http-exposure",
+        "open-redirect",
+        "cors",
+        "host-header-injection"
       ],
-      "notes": "LEAD-only until a runner-owned gated HTTP-fetch capture + ACHIEVED_STATE predicate re-drive exists (Phase-1 wave #3)."
+      "notes": "HTTP exposure is re-derived by VIGIL's live.web_redrive ACHIEVED_STATE path (SHIPPED, no install): VIGIL issues its OWN gated, no-redirect HTTP capture and the deterministic predicate_oracle mints open_redirect / cors / host_header_injection FACTs (the near-zero-FP web subset) — the tool is only a URL proposer, never the fact authority (fact_capable stays false). Other web classes stay LEAD-only pending their re-drive."
     },
     {
       "name": "katana",
@@ -87,7 +90,7 @@
       "claim_families": [
         "vuln-template-match"
       ],
-      "notes": "template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor \u2014 queues on live)."
+      "notes": "template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor — queues on live)."
     },
     {
       "name": "gobuster",
@@ -117,7 +120,7 @@
         "container-cve",
         "iac-misconfig"
       ],
-      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT \u2014 the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
+      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT — the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
     },
     {
       "name": "grype",
@@ -131,7 +134,7 @@
       "claim_families": [
         "dependency-cve"
       ],
-      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT \u2014 the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
+      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT — the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
     },
     {
       "name": "checkov",
@@ -199,7 +202,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 SQLi exploitation/DB dump. VIGIL owns SQLi confirmation via its own gated payload re-drive + oracle, never sqlmap."
+      "notes": "EXCLUDED — SQLi exploitation/DB dump. VIGIL owns SQLi confirmation via its own gated payload re-drive + oracle, never sqlmap."
     },
     {
       "name": "xsser",
@@ -211,7 +214,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 XSS exploitation."
+      "notes": "EXCLUDED — XSS exploitation."
     },
     {
       "name": "metasploit",
@@ -223,7 +226,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 exploit + payload framework."
+      "notes": "EXCLUDED — exploit + payload framework."
     },
     {
       "name": "pacu",
@@ -235,7 +238,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 AWS exploitation."
+      "notes": "EXCLUDED — AWS exploitation."
     },
     {
       "name": "pwntools",
@@ -247,7 +250,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 exploit-dev; also does not install offline."
+      "notes": "EXCLUDED — exploit-dev; also does not install offline."
     },
     {
       "name": "angr",
@@ -259,7 +262,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 symbolic auto-exploit; does not install offline."
+      "notes": "EXCLUDED — symbolic auto-exploit; does not install offline."
     },
     {
       "name": "ropgadget",
@@ -271,7 +274,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 ROP gadget finder."
+      "notes": "EXCLUDED — ROP gadget finder."
     },
     {
       "name": "ropper",
@@ -283,7 +286,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 ROP gadget finder."
+      "notes": "EXCLUDED — ROP gadget finder."
     },
     {
       "name": "one-gadget",
@@ -295,7 +298,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 one-shot RCE gadget finder."
+      "notes": "EXCLUDED — one-shot RCE gadget finder."
     },
     {
       "name": "libc-database",
@@ -307,7 +310,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 libc offset lookup for exploits."
+      "notes": "EXCLUDED — libc offset lookup for exploits."
     },
     {
       "name": "pwninit",
@@ -319,7 +322,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 CTF exploit-env setup."
+      "notes": "EXCLUDED — CTF exploit-env setup."
     },
     {
       "name": "hashpump",
@@ -331,7 +334,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 hash length-extension attack."
+      "notes": "EXCLUDED — hash length-extension attack."
     },
     {
       "name": "hydra",
@@ -343,7 +346,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 online brute-force."
+      "notes": "EXCLUDED — online brute-force."
     },
     {
       "name": "netexec",
@@ -355,7 +358,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 network credential spray + post-ex."
+      "notes": "EXCLUDED — network credential spray + post-ex."
     },
     {
       "name": "responder",
@@ -367,7 +370,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED \u2014 LLMNR/NBT-NS poisoning; also LAN-destructive."
+      "notes": "EXCLUDED — LLMNR/NBT-NS poisoning; also LAN-destructive."
     },
     {
       "name": "john",
@@ -379,7 +382,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED (exceptional authorization only) \u2014 offline password cracker; handles credential material."
+      "notes": "EXCLUDED (exceptional authorization only) — offline password cracker; handles credential material."
     },
     {
       "name": "hashcat",
@@ -391,7 +394,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED (exceptional authorization only) \u2014 GPU offline cracker."
+      "notes": "EXCLUDED (exceptional authorization only) — GPU offline cracker."
     }
   ]
 }
