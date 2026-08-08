@@ -162,3 +162,50 @@ def test_runner_records_skipped_when_capture_yields_no_evidence(tmp_path):
                             engagement_slug="alpha", signers=SIGNERS)
     assert res.facts == [] and res.tool_errored is False
     assert any(o["outcome"] == Outcome.SKIPPED.value for o in res.outcomes)
+
+
+class _TimeoutButProposingBackend:
+    """A tool that TIMED OUT yet emitted a partial row a naive parser would trust."""
+    name = "toerr"
+
+    def available(self):
+        return True, ""
+
+    def run(self, argv, *, timeout=0):
+        return ToolOutcome(list(argv), None, "80/open/tcp (partial, truncated)", "", self.name, timed_out=True)
+
+
+_FIRE_OR = {"any": [{"all": [{"in": [{"var": "status"}, [302]]},
+                            {"eq": [{"var": "location_host"}, {"var": "canary_host"}]}]}]}
+
+
+def _firing_redrive_ctx(_cap):
+    from framework.v2.verify.adapter import FindingContext
+    return FindingContext.from_predicate(
+        observed_evidence={"status": 302, "location_host": "c.test", "canary_host": "c.test", "body": ""},
+        predicate=_FIRE_OR, bug_class="open_redirect").to_verifier_context()
+
+
+def test_tool_errored_fact_still_comes_from_the_runner_owned_redrive(tmp_path):
+    """Criterion-3 soundness lock-in (red-pen advisory): even when the TOOL errored, any FACT is minted
+    from the runner's OWN re-drive capture — never the (untrusted, truncated) tool output. The ERROR and
+    the POSITIVE are recorded as DISTINCT outcomes; the FACT's oracle_context carries the re-drive keys and
+    contains none of the tool's stdout."""
+    import json as _json
+
+    _charter(tmp_path, "127.0.0.1")
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    spec = ToolSpec(
+        "toerr", lambda t: ["toerr", t],
+        lambda o, t: [ProposedService(host=t, port=443, protocol="tcp")],
+        redrives=(Redrive("open_redirect", lambda h, p, *, slug, protocol: {}, _firing_redrive_ctx),),
+    )
+    res = run_external_tool(spec, "127.0.0.1", scope_gate=gate, backend=_TimeoutButProposingBackend(),
+                            engagement_slug="alpha", signers=SIGNERS)
+    assert res.tool_errored is True
+    outs = {o["outcome"] for o in res.outcomes}
+    assert Outcome.ERROR.value in outs and Outcome.POSITIVE.value in outs   # distinct, not conflated
+    assert res.facts, "expected a FACT from the runner-owned re-drive"
+    fact_ctx = res.contexts[res.facts[0].finding_ref]
+    assert "predicate" in fact_ctx and "observed_evidence" in fact_ctx      # re-drive evidence, not tool output
+    assert "80/open/tcp" not in _json.dumps(fact_ctx)                       # tool stdout never enters the FACT
