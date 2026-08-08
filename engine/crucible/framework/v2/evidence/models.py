@@ -18,6 +18,8 @@ existing oracle_context, and the runtime only ever VERIFIES (signing is provisio
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 from vigil_core import ChainEntry, Signature, SignedChainHead
 
@@ -47,7 +49,10 @@ class ReportClaim(BaseModel):
 
     sentence: str
     bug_class: str = ""
-    render_as: str = "analyst-commentary"   # producer's claim; verify re-derives fact truth
+    # A CLOSED label set (pydantic rejects any other value at construction — fail-closed): a typo or an
+    # unexpected value like "verified"/"machine-fact" cannot slip through as neither-fact-nor-commentary and
+    # be mis-rendered downstream. "fact" is re-derived by verify (the label is never trusted for grounding).
+    render_as: Literal["fact", "analyst-commentary"] = "analyst-commentary"
 
 
 class ArtifactRef(BaseModel):
@@ -108,12 +113,24 @@ class EvidenceCertificate(BaseModel):
     # so a certificate built without it — and every existing evidence bundle — serialises BYTE-IDENTICALLY,
     # keeping its signature valid.
     how_to_verify: str = ""
+    # The external TOOL that produced the PROPOSAL this FACT re-drove (e.g. "nmap 7.99", "sslscan 2.1.5"),
+    # captured at MINT and thus SIGNED (criterion 9). HONEST BOUND: this is the producer's ASSERTED version
+    # string, not a proof of which binary ran — a stronger sensor identity (executable/image/SBOM digest +
+    # invocation args) is a future enhancement (Phase 0.4). It is NOT a source of truth for the finding: the
+    # FACT rests on the runner-owned oracle re-drive, not the tool. Deterministic; "" for a non-tool finding.
+    # Dropped from the canonical form when empty (below) → byte-identical for every existing certificate.
+    tool_version: str = ""
+    # A DECLARED validity window in seconds (a freshness/TTL policy), captured at MINT and SIGNED. 0 = no
+    # declared expiry. The actual "as-of" time is the external RFC3161 time anchor carried as a SIDECAR on
+    # SignedEvidence (never in these deterministic signed bytes, so the cert stays byte-stable — the split
+    # the posture certificate uses). A verifier holding the anchor refuses a FACT older than the TTL.
+    freshness_ttl_seconds: int = 0
 
     @model_serializer(mode="wrap")
     def _ser(self, handler):
-        """Drop the additive ``report_claims`` / ``oracle_version`` / ``how_to_verify`` members from the
-        canonical form when they are empty, so a certificate built without them hashes/signs exactly as it did
-        before those fields existed (default-safety: no existing evidence bundle changes bytes)."""
+        """Drop the additive ``report_claims`` / ``oracle_version`` / ``how_to_verify`` / ``tool_version`` /
+        ``freshness_ttl_seconds`` members from the canonical form when empty, so a certificate built without
+        them hashes/signs exactly as before those fields existed (no existing evidence bundle changes bytes)."""
         data = handler(self)
         if not data.get("report_claims"):
             data.pop("report_claims", None)
@@ -121,6 +138,10 @@ class EvidenceCertificate(BaseModel):
             data.pop("oracle_version", None)
         if not data.get("how_to_verify"):
             data.pop("how_to_verify", None)
+        if not data.get("tool_version"):
+            data.pop("tool_version", None)
+        if not data.get("freshness_ttl_seconds"):
+            data.pop("freshness_ttl_seconds", None)
         return data
 
     @property
@@ -137,6 +158,21 @@ class SignedEvidence(BaseModel):
 
     certificate: EvidenceCertificate
     signatures: list[Signature] = Field(default_factory=list)
+    # OPTIONAL external RFC3161 time-anchor SIDECAR (the as-of "timestamp" for criterion 9): an
+    # independently-signed third-party token over this certificate's cert_digest, so the FACT's freshness
+    # is trustworthy WITHOUT putting a wallclock into the deterministic signed cert (the cert stays
+    # byte-stable; the anchor is verified separately, exactly as the posture certificate does). ``None`` by
+    # default and dropped from the canonical form (below), so a SignedEvidence without an anchor serialises
+    # BYTE-IDENTICALLY to before this field existed. The governance signatures cover only the certificate,
+    # not this sidecar — the anchor is self-authenticating (its own RFC3161 signature binds the digest).
+    time_anchor: dict | None = None
+
+    @model_serializer(mode="wrap")
+    def _ser(self, handler):
+        data = handler(self)
+        if not data.get("time_anchor"):
+            data.pop("time_anchor", None)
+        return data
 
 
 class PathStep(BaseModel):

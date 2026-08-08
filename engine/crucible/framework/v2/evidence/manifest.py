@@ -45,6 +45,36 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
+def _sha256_regular_nofollow(path: Path) -> tuple[str, int]:
+    """Hash a REGULAR file at ``path`` for VERIFICATION over an UNTRUSTED bundle, defending against a
+    symlink swapped in between the check and the open (TOCTOU) and against non-regular files: open with
+    ``O_NOFOLLOW`` (the final component must not be a symlink) and ``fstat`` the OPEN descriptor to confirm
+    ``S_ISREG`` — a device/FIFO/socket, or a symlink swapped in at open, is refused. ``_confined`` +
+    ``is_within`` already reject ``..``/absolute/parent-symlink escapes above this."""
+    import hashlib
+    import os
+    import stat as _stat
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)  # OSError (ELOOP on a symlink final component) → caller reports unreadable
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise OSError("not a regular file (refused)")
+        h = hashlib.sha256()
+        size = 0
+        while True:
+            chunk = os.read(fd, _READ_CHUNK)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _MAX_ARTIFACT_BYTES:
+                raise _TooLarge(f"artifact exceeds {_MAX_ARTIFACT_BYTES} bytes")
+            h.update(chunk)
+        return h.hexdigest(), size
+    finally:
+        os.close(fd)
+
+
 def _confined(root: Path, rel: str) -> Path | None:
     """Join ``rel`` under ``root`` iff it stays inside root: reject absolute paths, any
     ``..`` component, and (via resolution) symlink escapes. Returns None on any escape —
@@ -88,16 +118,21 @@ def verify_manifest(artifacts: list[ArtifactRef], *, root: Path) -> list[tuple[s
         if fp is None:
             results.append((a.path, False, "path escapes the evidence root (refused)"))
             continue
-        if not fp.is_file():
+        if fp.is_symlink():
+            results.append((a.path, False, "artifact is a symlink (refused)"))
+            continue
+        if not fp.exists():
             results.append((a.path, False, "missing"))
             continue
         try:
-            digest, size = _sha256_file(fp)
+            # O_NOFOLLOW + fstat-regular: race-safe against a symlink swapped in at open, and rejects a
+            # device/FIFO/socket the operator's directory tree should never contain.
+            digest, size = _sha256_regular_nofollow(fp)
         except _TooLarge as e:
             results.append((a.path, False, str(e)))
             continue
         except OSError as e:
-            results.append((a.path, False, f"unreadable: {e}"))
+            results.append((a.path, False, f"unreadable/not-a-regular-file: {e}"))
             continue
         if digest != a.sha256:
             results.append((a.path, False, "sha256 mismatch (bytes altered)"))
