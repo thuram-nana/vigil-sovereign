@@ -334,3 +334,153 @@ def test_docker_container_topology_live_run_is_deferred_when_absent() -> None:
     if ok:  # pragma: no cover - only if an operator has actually stood the topology up
         pytest.skip("docker topology + image present — live container path is exercised out-of-band")
     assert ok is False and why  # a precise reason (no daemon / no network / no image), never a fake pass
+
+
+# ===================================================================================================
+# 4. BRAIN-SLOT SLICE 4 — a SECOND runner-owned oracle re-drive: TLS posture (weak protocol/cipher +
+#    a broken-hash cert). Proves the runner generalizes past nmap/reachability while keeping the
+#    HIGH-3 discipline: the tool only PROPOSES the endpoint; the runner negotiates its OWN gated
+#    handshake and the deterministic oracle judges THAT.
+# ===================================================================================================
+import ssl
+import threading
+
+
+class _FakeTLSBackend:
+    """A backend that returns a canned sslscan-shaped 'reached a TLS service' output (so the ToolSpec
+    proposes the endpoint) WITHOUT requiring sslscan installed — the FACT then comes entirely from the
+    runner's OWN gated TLS handshake against the real loopback server."""
+    name = "fake-tls"
+
+    def available(self):
+        return True, ""
+
+    def run(self, argv, *, timeout=0):
+        return ToolOutcome(argv=list(argv), exit_code=0, stdout="Connected to 127.0.0.1\nAccepted  TLSv1.2\n",
+                           stderr="", timed_out=False, truncated=False, backend=self.name)
+
+
+def _weakcrypto_selfsigned_cert():
+    """A self-signed X.509 cert with a 2048-bit RSA key signed with the BROKEN SHA-1 hash + its key (PEM).
+    weak_crypto_artifact fires on the broken sig hash. We use SHA-1 (not a short key) so a DEFAULT TLS
+    client can complete the handshake: on modern OpenSSL (CI security level 2) a <2048-bit key is rejected
+    at handshake (EE_KEY_TOO_SMALL) before the cert can be retrieved, whereas a 2048-bit key handshakes and
+    — under the capture's CERT_NONE — its SHA-1 signature is not verified but IS retrieved for the oracle to
+    judge. Generated via the ``openssl`` CLI because modern ``cryptography`` refuses to SIGN with SHA-1;
+    skips (never fakes) if openssl is absent or refuses SHA-1."""
+    import subprocess
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    cert_p, key_p = Path(d) / "c.pem", Path(d) / "k.pem"
+    proc = subprocess.run(
+        ["openssl", "req", "-x509", "-sha1", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key_p), "-out", str(cert_p), "-days", "3650",
+         "-subj", "/CN=vigil-weakhash-test.local"],
+        capture_output=True, text=True)
+    if proc.returncode != 0 or not cert_p.is_file():
+        pytest.skip(f"openssl could not mint a SHA-1 cert here (rc={proc.returncode}): {proc.stderr[:200]}")
+    return cert_p.read_bytes(), key_p.read_bytes()
+
+
+class _TLSServer:
+    """A minimal threaded loopback TLS server that completes handshakes presenting the given cert."""
+    def __init__(self, cert_pem: bytes, key_pem: bytes):
+        import tempfile
+        self._d = tempfile.mkdtemp()
+        self._cf = Path(self._d) / "c.pem"
+        self._kf = Path(self._d) / "k.pem"
+        self._cf.write_bytes(cert_pem)
+        self._kf.write_bytes(key_pem)
+        self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._ctx.load_cert_chain(str(self._cf), str(self._kf))
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(8)
+        self.port = self._sock.getsockname()[1]
+        self._stop = False
+        self._t = threading.Thread(target=self._serve, daemon=True)
+        self._t.start()
+
+    def _serve(self):
+        while not self._stop:
+            try:
+                self._sock.settimeout(0.5)
+                raw, _ = self._sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            try:
+                with self._ctx.wrap_socket(raw, server_side=True) as tls:
+                    tls.recv(16)
+            except (ssl.SSLError, OSError):
+                pass
+
+    def close(self):
+        self._stop = True
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+def test_tls_scan_toolspec_argv_and_propose():
+    from vigil_integration.live.external_tool import tls_scan
+
+    spec = tls_scan(port=8443)
+    assert spec.name == "tls_scan"
+    assert spec.build_argv("example.test") == ["sslscan", "--no-colour", "example.test:8443"]
+    assert len(spec.redrives) == 2 and {r.bug_class for r in spec.redrives} == {"weak_tls", "weak_crypto_artifact"}
+    # proposes ONLY when the tool actually reached a TLS service
+    reached = ToolOutcome(argv=[], exit_code=0, stdout="Connected to 1.2.3.4\n", stderr="",
+                          timed_out=False, truncated=False, backend="x")
+    missed = ToolOutcome(argv=[], exit_code=1, stdout="Connection refused\n", stderr="",
+                         timed_out=False, truncated=False, backend="x")
+    assert [p.port for p in spec.propose(reached, "1.2.3.4")] == [8443]
+    assert spec.propose(missed, "1.2.3.4") == []
+
+
+def test_nmap_spec_uses_the_legacy_reachability_redrive():
+    """Backward-compat: nmap carries NO redrives on the spec, so the runner uses the legacy reachability
+    re-drive (service_reachable) exactly as before — the change is additive."""
+    assert nmap_service_scan(ports="80").redrives == ()
+
+
+def test_loopback_tls_broken_hash_cert_mints_a_weak_crypto_fact(tmp_path: Path, monkeypatch):
+    """THE slice-4 live proof: a real loopback TLS server presenting a SHA-1-signed cert. The runner
+    negotiates its OWN gated handshake, retains the presented cert, and the weak_crypto_artifact oracle
+    fires → a signed FACT that survives CRUCIBLE's verifier end-to-end. No sslscan binary needed — the
+    tool is only the proposer; the FACT is the runner's independent re-drive."""
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.external_tool import tls_scan
+
+    _charter(tmp_path, "127.0.0.1")
+    cert_pem, key_pem = _weakcrypto_selfsigned_cert()
+    srv = _TLSServer(cert_pem, key_pem)
+    gate = ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True)
+    try:
+        res = run_external_tool(
+            tls_scan(port=srv.port), "127.0.0.1",
+            scope_gate=gate, backend=_FakeTLSBackend(),
+            engagement_slug="alpha", signers=SIGNERS, timeout=30.0)
+    finally:
+        srv.close()
+
+    assert res.status == "ran"
+    assert any(p.port == srv.port for p in res.proposed)
+    # the weak_crypto_artifact oracle CONFIRMED the SHA-1 cert the runner itself retrieved → a signed FACT
+    crypto_facts = [f for f in res.facts if f.confirmed_by == "tls_weakness"]
+    assert crypto_facts, f"expected a TLS_WEAKNESS FACT over the SHA-1 cert; facts={res.facts} leads={res.leads}"
+    fact = crypto_facts[0]
+    oracle_context = res.contexts[fact.finding_ref]
+    ver = verify_certificate(fact.signed, oracle_context=oracle_context, trust_root=TRUST)
+    assert ver.ok is True, f"the TLS FACT must verify end-to-end offline, got: {ver}"
+
+
+def test_tls_no_cert_yields_no_crypto_fact():
+    """If the runner's handshake retains no cert (a re-drive returning None), no weak_crypto FACT is
+    minted — the runner never fabricates one from the tool's row (the None-skip path)."""
+    from vigil_integration.live.external_tool import _weak_crypto_context, _weak_tls_context
+
+    assert _weak_crypto_context({"connected": True}) is None      # no cert_der_b64 -> skip
+    assert _weak_tls_context({"connected": False}) is None        # failed handshake -> skip

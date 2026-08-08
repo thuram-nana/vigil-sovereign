@@ -235,13 +235,88 @@ class ProposedService:
 
 
 @dataclass(frozen=True)
+class Redrive:
+    """One RUNNER-OWNED oracle re-drive for a proposed (host, port): an independent, gated ``capture`` the
+    runner performs itself + a ``context`` builder that turns the captured evidence into an oracle_context
+    for ``bug_class``. The runner judges what IT captured, never the tool's row — so a tool proposing a
+    finding it cannot reproduce yields no FACT. ``context`` returning ``None`` skips this re-drive (the
+    captured evidence did not support it, e.g. no cert presented). Every framework import inside ``capture``
+    / ``context`` is FUNCTION-LOCAL (FATAL-2)."""
+    bug_class: str
+    capture: Callable[..., dict]              # (host, port, *, slug, protocol) -> captured evidence
+    context: Callable[[dict], "dict | None"]  # captured evidence -> oracle_context (None -> skip)
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     name: str
     build_argv: Callable[[str], list[str]]
     propose: Callable[[ToolOutcome, str], list[ProposedService]]
+    # The runner-owned re-drives to run for EACH proposed service. Empty ⇒ the runner uses the legacy
+    # reachability re-drive (the injectable ``capture`` param + reachable_context + service_reachable), so
+    # nmap and every existing caller are byte-for-byte unchanged. A spec that mints a non-reachability FACT
+    # (e.g. TLS) carries its re-drives HERE — never body-supplied provenance (the HIGH-3 guard).
+    redrives: "tuple[Redrive, ...]" = ()
 
 
 _NMAP_GREPABLE_OPEN = re.compile(r"\b(\d{1,5})/open/(tcp|udp)\b")
+
+
+# --- TLS posture re-drives (weak protocol/cipher + broken-hash cert) -------------------------------
+# The runner negotiates its OWN bounded, gated TLS handshake (capture_tls_handshake, the same audited gate
+# as reachability) and judges THAT with the pure tls/weak-crypto oracles — never sslscan's output rows.
+
+def _tls_capture(host: str, port: int, *, slug: str, protocol: str = "tcp") -> dict:
+    from framework.v2.verify import capture_tls_handshake  # offense-side only (FATAL-2: function-local)
+    return capture_tls_handshake(host, int(port), slug=slug)
+
+
+def _weak_tls_context(handshake: dict) -> "dict | None":
+    from framework.v2.verify import weak_tls_context  # offense-side only
+    if not handshake.get("connected"):
+        return None
+    return weak_tls_context(handshake)
+
+
+def _weak_crypto_context(handshake: dict) -> "dict | None":
+    import base64
+    from framework.v2.verify import weak_crypto_context  # offense-side only
+    b64 = handshake.get("cert_der_b64")
+    if not b64:
+        return None
+    try:
+        der = base64.b64decode(b64)
+    except Exception:
+        return None
+    fc = weak_crypto_context(der)
+    return fc.to_verifier_context() if fc is not None else None
+
+
+# Both re-drives SHARE the one _tls_capture function object, so the runner negotiates ONE handshake and
+# judges it for both a weak protocol/cipher and a broken-hash cert.
+_TLS_REDRIVES: "tuple[Redrive, ...]" = (
+    Redrive("weak_tls", _tls_capture, _weak_tls_context),
+    Redrive("weak_crypto_artifact", _tls_capture, _weak_crypto_context),
+)
+
+
+def tls_scan(*, port: int = 443, extra_args: Sequence[str] = ()) -> ToolSpec:
+    """A :class:`ToolSpec` for ``sslscan`` as a PROPOSER of a TLS endpoint. ``build_argv`` emits
+    ``sslscan --no-colour <target>:<port>``; ``propose`` yields the (host, port) only when the tool
+    actually reached a TLS service. The tool's per-cipher rows are never trusted — the runner re-drives its
+    OWN gated handshake and the deterministic oracle judges the NEGOTIATED (protocol, cipher) and the
+    PRESENTED cert. HONEST SCOPE: capture_tls_handshake uses a standard client, so ``weak_tls`` fires only
+    on a weakness a modern client still negotiates; ``weak_crypto_artifact`` fires unconditionally on an
+    MD5/SHA1-signed cert (offline-re-verifiable) — the two together are the runner-owned TLS FACTs."""
+    def build(target: str) -> list[str]:
+        return ["sslscan", "--no-colour", *list(extra_args), f"{target}:{port}"]
+
+    def propose(outcome: ToolOutcome, target: str) -> list[ProposedService]:
+        text = (outcome.stdout or "") + "\n" + (outcome.stderr or "")
+        reached = any(m in text for m in ("Connected to", "Testing SSL server", "Accepted", "Preferred"))
+        return [ProposedService(host=target, port=port, protocol="tcp")] if reached else []
+
+    return ToolSpec("tls_scan", build, propose, redrives=_TLS_REDRIVES)
 
 
 def nmap_service_scan(*, ports: str = "1-1024", extra_args: Sequence[str] = ()) -> ToolSpec:
@@ -404,24 +479,36 @@ def run_external_tool(
     from ..oracle_adapter import confirm_and_certify
 
     proposed = spec.propose(outcome, target)
+    # The re-drives to run per proposed service. Empty spec.redrives ⇒ the legacy reachability re-drive
+    # (built from the injectable `capture` param), so nmap + every existing caller are byte-for-byte
+    # unchanged. A TLS/etc. spec carries its OWN runner-owned re-drives on the spec.
+    redrives = spec.redrives or (Redrive("service_reachable", capture, _reachable_context),)
     facts: list = []
     leads: list = []
     contexts: dict = {}
     for svc in proposed:
-        handshake = capture(svc.host, svc.port, slug=engagement_slug, protocol=svc.protocol)
-        oracle_context = _reachable_context(handshake)
-        finding = {
-            "check_id": f"{spec.name}:{svc.host}:{svc.port}/{svc.protocol}",
-            "bug_class": "service_reachable",
-            "insertion_point": f"{svc.host}:{svc.port}",
-            "oracle_context": oracle_context,
-        }
-        res = confirm_and_certify(
-            finding, engagement_slug=engagement_slug, signers=signers, provenance="live_redrive")
-        # retain the exact context keyed by the result's finding_ref so a caller can re-verify the
-        # signed certificate OFFLINE (verify_certificate needs the context, the cert stores only its digest).
-        contexts[res.finding_ref] = oracle_context
-        (facts if res.is_fact else leads).append(res)
+        # One capture per distinct capture callable per service (so two re-drives sharing a handshake —
+        # weak_tls + weak_crypto — negotiate it ONCE), then judge it for each re-drive's bug_class.
+        captured: dict = {}
+        for rd in redrives:
+            cap_key = id(rd.capture)
+            if cap_key not in captured:
+                captured[cap_key] = rd.capture(svc.host, svc.port, slug=engagement_slug, protocol=svc.protocol)
+            oracle_context = rd.context(captured[cap_key])
+            if oracle_context is None:
+                continue  # this re-drive did not apply to the captured evidence (e.g. no cert presented)
+            finding = {
+                "check_id": f"{spec.name}:{svc.host}:{svc.port}/{svc.protocol}#{rd.bug_class}",
+                "bug_class": rd.bug_class,
+                "insertion_point": f"{svc.host}:{svc.port}",
+                "oracle_context": oracle_context,
+            }
+            res = confirm_and_certify(
+                finding, engagement_slug=engagement_slug, signers=signers, provenance="live_redrive")
+            # retain the exact context keyed by the result's finding_ref so a caller can re-verify the
+            # signed certificate OFFLINE (verify_certificate needs the context; the cert stores its digest).
+            contexts[res.finding_ref] = oracle_context
+            (facts if res.is_fact else leads).append(res)
 
     detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} service(s), "
               f"oracle-confirmed {len(facts)} FACT(s), {len(leads)} lead(s)")
