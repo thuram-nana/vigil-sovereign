@@ -49,6 +49,42 @@ def test_brain_drives_the_live_engine_gated_and_oracle_authoritative(tmp_path):
     assert report.fact_count == 0
 
 
+def test_engage_cli_wires_the_brain(monkeypatch, tmp_path):
+    """`vigil engage --brain hexstrike` sets cfg.brain to a BrainThink; without it, cfg.brain is None."""
+    from types import SimpleNamespace
+
+    from vigil_integration import cli
+    from vigil_integration.brains.engine_think import BrainThink
+
+    captured = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _fake_build_engine(cfg):
+        captured["brain"] = cfg.brain
+
+        class _E:
+            def engage(self, *a, **k):
+                raise _Stop()
+        return _E()
+
+    monkeypatch.setattr("vigil_integration.live.wiring.build_engine", _fake_build_engine)
+
+    def _args(brain):
+        return SimpleNamespace(url=TARGET, slug="loopback", objective="", scope="127.0.0.1", connect="",
+                               session="", base_dir=str(tmp_path), replay="", access_log="", auth_log="",
+                               conn_log="", max_iterations=4, approve_offense=False, brain=brain)
+
+    with pytest.raises(_Stop):
+        cli._cmd_engage(_args("hexstrike"))
+    assert isinstance(captured["brain"], BrainThink)
+
+    with pytest.raises(_Stop):
+        cli._cmd_engage(_args(""))
+    assert captured["brain"] is None
+
+
 def test_without_owner_approval_offense_tools_queue_not_run(tmp_path):
     brain = BrainThink(HexstrikeBrain(), target=TARGET)
     report = build_engine(_cfg(tmp_path, brain, owner_approves=False)).engage(TARGET)
