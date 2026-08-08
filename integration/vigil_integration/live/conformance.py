@@ -23,6 +23,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
+# The REQUIRED properties for a tool to be certified conformant (integration criteria 6, 7, 10, 11). A
+# report is conformant ONLY if EVERY one is present AND True — a missing property is NON-conformant, never
+# vacuously satisfied. (Red-pen BLOCK-1: without a fixed required set, omitting the kill-switch callables
+# silently dropped the crit-11 property and all() passed over the remainder.)
+REQUIRED_PROPERTIES = frozenset({
+    "positive_fact",
+    "positive_verified_offline",
+    "deceptive_proposed",              # the deceptive fixture actually PROPOSED an endpoint (crit-6 substance)
+    "deceptive_no_fact",
+    "tool_error_typed",
+    "killswitch_refused_no_traffic",
+    "out_of_scope_refused_no_traffic",
+})
+
+
 @dataclass
 class ConformanceReport:
     tool: str
@@ -31,12 +46,23 @@ class ConformanceReport:
 
     @property
     def conformant(self) -> bool:
-        return bool(self.checks) and all(self.checks.values())
+        # EVERY required property must be present AND True. A required property never run (e.g. kill-switch
+        # callables omitted) makes the report NON-conformant — it is not silently skipped.
+        missing = REQUIRED_PROPERTIES - set(self.checks)
+        if missing:
+            return False
+        return all(self.checks[p] for p in REQUIRED_PROPERTIES)
 
     def summary(self) -> str:
         status = "CONFORMANT" if self.conformant else "NON-CONFORMANT"
-        failed = [k for k, v in self.checks.items() if not v]
-        return f"{self.tool}: {status}" + (f" (failed: {', '.join(failed)})" if failed else "")
+        missing = sorted(REQUIRED_PROPERTIES - set(self.checks))
+        failed = sorted(k for k, v in self.checks.items() if not v)
+        bits = []
+        if missing:
+            bits.append(f"missing: {', '.join(missing)}")
+        if failed:
+            bits.append(f"failed: {', '.join(failed)}")
+        return f"{self.tool}: {status}" + (f" ({'; '.join(bits)})" if bits else "")
 
 
 class _SpyBackend:
@@ -107,11 +133,19 @@ def run_toolspec_conformance(
         r.checks["positive_verified_offline"] = False
         r.notes.append(f"positive raised: {type(e).__name__}: {e}")
 
-    # 2. DECEPTIVE — a proposed endpoint the runner's re-drive cannot reproduce → NO fact
+    # 2. DECEPTIVE — the tool must actually PROPOSE an endpoint (deceptive_proposed), and the runner's own
+    #    re-drive must then refuse it → NO fact (deceptive_no_fact). Both are required: a backend that
+    #    proposes NOTHING would make "no fact" vacuously true and never exercise the crit-6 firewall
+    #    property ("a scanner's say-so never confirms") — red-pen BLOCK-2.
     try:
         res, _ = _run(deceptive_spec, deceptive_backend, scope_gate_in)
-        r.checks["deceptive_no_fact"] = bool(res) and not (getattr(res, "facts", []) or [])
+        proposed = list(getattr(res, "proposed", []) or []) if res else []
+        r.checks["deceptive_proposed"] = len(proposed) > 0
+        r.checks["deceptive_no_fact"] = bool(res) and len(proposed) > 0 and not (getattr(res, "facts", []) or [])
+        if not proposed:
+            r.notes.append("deceptive backend proposed NOTHING — the crit-6 property was not exercised")
     except Exception as e:  # noqa: BLE001
+        r.checks["deceptive_proposed"] = False
         r.checks["deceptive_no_fact"] = False
         r.notes.append(f"deceptive raised: {type(e).__name__}: {e}")
 

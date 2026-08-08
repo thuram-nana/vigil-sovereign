@@ -101,9 +101,9 @@ def test_nmap_toolspec_passes_the_full_conformance_battery(tmp_path):
         srv.close()
 
     assert report.conformant, report.summary() + " | notes: " + "; ".join(report.notes)
-    # every property was actually exercised (no silently-missing check)
-    for prop in ("positive_fact", "positive_verified_offline", "deceptive_no_fact", "tool_error_typed",
-                 "killswitch_refused_no_traffic", "out_of_scope_refused_no_traffic"):
+    # EVERY required property was actually exercised + True (no silently-missing check)
+    from vigil_integration.live.conformance import REQUIRED_PROPERTIES
+    for prop in REQUIRED_PROPERTIES:
         assert report.checks.get(prop) is True, f"{prop} not satisfied: {report.summary()}"
 
 
@@ -112,3 +112,52 @@ def test_conformance_report_non_conformant_when_a_check_fails():
     from vigil_integration.live.conformance import ConformanceReport
     r = ConformanceReport(tool="x", checks={"positive_fact": True, "deceptive_no_fact": False})
     assert r.conformant is False and "deceptive_no_fact" in r.summary()
+
+
+def test_conformant_requires_the_full_property_set_no_vacuous_pass():
+    """Red-pen BLOCK-1 pin: a report MISSING a required property (e.g. kill-switch omitted) is NON-conformant
+    — not vacuously conformant over the present subset."""
+    from vigil_integration.live.conformance import ConformanceReport, REQUIRED_PROPERTIES
+    # all-but-killswitch present + True
+    checks = {p: True for p in REQUIRED_PROPERTIES if p != "killswitch_refused_no_traffic"}
+    r = ConformanceReport(tool="x", checks=checks)
+    assert r.conformant is False and "killswitch_refused_no_traffic" in r.summary()
+    # add it → now conformant
+    checks["killswitch_refused_no_traffic"] = True
+    assert ConformanceReport(tool="x", checks=checks).conformant is True
+
+
+def test_deceptive_backend_proposing_nothing_is_non_conformant(tmp_path):
+    """Red-pen BLOCK-2 pin: a deceptive backend that proposes NOTHING must NOT pass the crit-6 property —
+    deceptive_proposed is False, so the report is non-conformant even though no fact resulted."""
+    from framework.v2.authority import KillSwitch
+    _charter(tmp_path, "127.0.0.1")
+
+    class _EmptyBackend:      # proposes nothing
+        name = "empty"
+        def available(self):  # noqa: E704
+            return True, ""
+        def run(self, argv, *, timeout=0):
+            return ToolOutcome(list(argv), 0, "", "", self.name)
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0)); srv.listen(8)
+    open_port = srv.getsockname()[1]
+    halt = tmp_path / "alpha.halt"
+    try:
+        report = run_toolspec_conformance(
+            tool_name="nmap", positive_spec=nmap_service_scan(ports=str(open_port)),
+            positive_backend=LocalSubprocessBackend(),
+            deceptive_spec=nmap_service_scan(ports="1"), deceptive_backend=_EmptyBackend(),
+            target="127.0.0.1",
+            scope_gate_in=ScopeGate(scope=StaticScopeSource(["127.0.0.1"]), loopback_allowed_if_scoped=True),
+            scope_gate_out=ScopeGate(scope=StaticScopeSource(["10.99.99.99"]), loopback_allowed_if_scoped=True),
+            engagement_slug="alpha", signers=SIGNERS, trust_root=TRUST,
+            trip_killswitch=lambda: KillSwitch("alpha").trip("c"),
+            clear_killswitch=lambda: halt.unlink(missing_ok=True), timeout=60.0)
+    finally:
+        srv.close()
+    if shutil.which("nmap") is None:
+        pytest.skip("nmap not installed")
+    assert report.checks.get("deceptive_proposed") is False
+    assert report.conformant is False and "deceptive_proposed" in report.summary()

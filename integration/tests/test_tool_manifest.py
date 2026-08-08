@@ -61,3 +61,14 @@ def test_validator_rejects_overclaims():
     assert validate_manifest(ToolManifest(name="x", category="recon", network_effect="lasers"))
     # a clean recon LEAD-only tool validates
     assert validate_manifest(ToolManifest(name="httpx", category="recon", network_effect="connects-out")) == []
+
+
+def test_known_offense_binary_cannot_escape_exclusion_by_relabeling():
+    """Red-pen FINDING-3 backstop: relabeling a known offense binary's category cannot escape exclusion."""
+    # sqlmap mislabeled as recon + not excluded → still caught by the NAME backstop
+    errs = validate_manifest(ToolManifest(name="sqlmap", category="recon", excluded=False))
+    assert any("known offense" in e for e in errs)
+    for name in ("metasploit", "hydra", "responder", "hashcat"):
+        assert validate_manifest(ToolManifest(name=name, category="recon", excluded=False))
+    # correctly excluded → clean
+    assert validate_manifest(ToolManifest(name="sqlmap", category="exploitation", excluded=True)) == []

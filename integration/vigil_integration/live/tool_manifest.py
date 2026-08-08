@@ -3,12 +3,18 @@
 Every external tool VIGIL is willing to run carries a MANIFEST: its version-source, license, install method,
 required privileges, network effect, danger class, and — the load-bearing fields — which VIGIL oracle family
 (if any) can re-derive its output into a FACT, and whether it is EXCLUDED (offense-drift). The manifest is the
-machine-readable answer to "is this tool integrated?", and its invariants encode the honesty rules so the
-capability matrix can never overclaim:
+machine-readable answer to "is this tool integrated?", and its invariants encode the STRUCTURAL honesty
+rules so the capability matrix cannot structurally overclaim:
 
   * ``excluded`` ⇒ NOT ``fact_capable`` and NOT proposable (an offense/credential tool is never a FACT source).
-  * ``fact_capable`` ⇒ names a non-empty ``oracle_family`` (a FACT needs a runner-owned oracle re-drive).
+  * ``fact_capable`` ⇒ names a NON-EMPTY ``oracle_family`` (necessary, not sufficient — see the bound below).
   * a tool with no ``oracle_family`` is LEAD-only by construction (honest — the fallback the runner enforces).
+  * a known offense/credential binary (by NAME) must be excluded regardless of its self-declared category.
+
+HONEST BOUND: this validator checks STRUCTURE only — it does NOT verify that ``oracle_family`` names a real
+oracle or that a runner-owned re-drive is wired. Those are enforced by the conformance battery
+(``live.conformance.run_toolspec_conformance`` — a tool must PASS it before ``fact_capable`` is set) and by
+the pinned ``fact_capable`` set test in ``test_tool_manifest`` (the CI anti-overclaim gate).
 
 vigil_core + stdlib only (no framework import) — the manifest is pure data + validation, loadable in either env.
 """
@@ -26,6 +32,13 @@ CATEGORIES = frozenset({
 })
 # Danger classes that must NEVER be fact_capable or proposable (offense drift). Mirrors the brain's exclusion.
 _EXCLUDED_CATEGORIES = frozenset({"exploitation", "credential-access", "persistence", "destructive"})
+# A NAME backstop (defense-in-depth): these known offense/credential binaries must be excluded REGARDLESS of
+# the self-declared category, so a row cannot relabel e.g. sqlmap as "recon" to escape the category rule.
+_KNOWN_OFFENSE_BINARIES = frozenset({
+    "sqlmap", "xsser", "metasploit", "msfconsole", "msfvenom", "pacu", "pwntools", "angr", "ropgadget",
+    "ropper", "one-gadget", "libc-database", "pwninit", "hashpump", "hydra", "netexec", "nxc", "responder",
+    "john", "hashcat",
+})
 NETWORK_EFFECTS = frozenset({"none", "connects-out", "scans-target", "intrusive", "sends-exploit"})
 PRIVILEGES = frozenset({"none", "root", "sometimes"})
 
@@ -70,6 +83,9 @@ def validate_manifest(m: ToolManifest) -> list[str]:
         errs.append(f"{m.name}: EXCLUDED tool cannot be fact_capable (offense-drift honesty invariant)")
     if m.category in _EXCLUDED_CATEGORIES and not m.excluded:
         errs.append(f"{m.name}: category {m.category!r} MUST be excluded (offense/credential/persistence/destructive)")
+    if m.name.lower() in _KNOWN_OFFENSE_BINARIES and not m.excluded:
+        errs.append(f"{m.name}: known offense/credential binary MUST be excluded (name backstop — a "
+                    f"relabeled category cannot escape exclusion)")
     if m.fact_capable and not m.oracle_family:
         errs.append(f"{m.name}: fact_capable requires a non-empty oracle_family (a FACT needs an oracle re-drive)")
     if m.fact_capable and m.excluded:
