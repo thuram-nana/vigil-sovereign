@@ -1018,6 +1018,8 @@ def _project_posture_claims(coverage_cert: dict) -> list:
             raise ValueError("malformed probe row")
         verdict = p.get("verdict")
         kinds = p.get("oracle_kinds_run") or []
+        if not isinstance(kinds, (list, tuple)):
+            raise ValueError("oracle_kinds_run is not a list — invalid coverage certificate")
         if verdict == "clean" and not kinds:
             raise ValueError("a 'clean' probe carries no oracle_kinds_run — invalid coverage certificate")
         key = (str(p.get("surface", "")), str(p.get("param", "")), str(p.get("class", "")))
@@ -1082,7 +1084,8 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
         if c["status"] == "CLOSED" and not c.get("evidence_oracle_kinds"):
             return False, "a CLOSED claim names no conclusive oracle"
     # 3b. RE-EXECUTION (the re-executable tier): re-run the oracle over every re-executable probe's
-    #     retained values and refuse a forged negative/positive — the producer-INDEPENDENT check, run
+    #     retained values and refuse a forged negative/positive — a tamper-check that re-derives the verdict
+    #     (NOT a liveness proof; values are producer-supplied), run
     #     here with NO VIGIL installed. Binding-tier probes carry no kernel and are skipped (the H4
     #     residual). A claim marked "re-executable" whose clean probes carried no kernel would have
     #     failed the byte-for-byte projection binding above, so the tier label cannot be forged.

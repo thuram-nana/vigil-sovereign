@@ -208,6 +208,9 @@ def project_posture_claims(coverage_cert: dict) -> list[dict]:
             raise PostureError("malformed probe row")
         verdict = p.get("verdict")
         kinds = p.get("oracle_kinds_run") or []
+        if not isinstance(kinds, (list, tuple)):
+            raise PostureError(
+                "coverage certificate is INVALID: oracle_kinds_run is not a list — refusing (fail-closed)")
         if verdict == "clean" and not kinds:
             raise PostureError(
                 "coverage certificate is INVALID: a 'clean' probe carries no oracle_kinds_run "
@@ -282,7 +285,7 @@ def build_posture_certificate(
     n_closed = sum(1 for c in claims if c["status"] == _CLOSED)
     n_open = sum(1 for c in claims if c["status"] == _OPEN)
     n_unproven = sum(1 for c in claims if c["status"] == _UNPROVEN)
-    # How much of the negative is producer-independently RE-EXECUTABLE vs binding-only (honest count).
+    # How much of the negative is RE-EXECUTABLE (verdict re-derivable from the retained values) vs binding-only.
     n_reexecutable = sum(1 for c in claims if c["status"] == _CLOSED and c.get("verification") == "re-executable")
     n_binding = sum(1 for c in claims if c["status"] == _CLOSED and c.get("verification") != "re-executable")
     return {
@@ -384,7 +387,7 @@ def verify_posture_certificate(
     _reproject_matches(cert)
 
     # 2b. RE-EXECUTION (the re-executable tier): re-run the oracle over every re-executable probe's
-    #     retained values and refuse a forged negative/positive. Producer-independent; the standalone
+    #     retained values and refuse a forged negative/positive (re-derives the verdict, not a liveness proof); the standalone
     #     verify_vf runs the identical check with no VIGIL. Binding-tier probes carry no kernel and are
     #     left to the signature/projection checks (the honest H4 residual).
     reexecute_posture_claims(cert)

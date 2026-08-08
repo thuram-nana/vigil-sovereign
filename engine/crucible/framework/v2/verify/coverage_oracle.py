@@ -123,7 +123,7 @@ def build_coverage_certificate(
         # OPT-IN re-executable-tier evidence (Proof-of-Posture): emitted ONLY when a probe actually
         # retained it (AuditEngine.retain_evidence), so a certificate scanned without retention is
         # byte-identical to before — the make-gate invariant. Present ⇒ a VIGIL-free verifier re-runs the
-        # pure predicate oracle over these values to re-derive the verdict producer-independently.
+        # pure predicate oracle over these values to re-derive the verdict from the retained evidence.
         evidence = getattr(p, "evidence", None)
         if evidence:
             row["evidence"] = evidence

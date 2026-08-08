@@ -67,7 +67,7 @@ def attest_loopback_benchmark(
     dict of the artifacts (cert path, fingerprint, owner_pubkey, engagement, bundle dir, summary).
 
     ``retain_evidence`` (OPT-IN) mints RE-EXECUTABLE CLOSED claims (predicate + observed values embedded)
-    so a third party re-derives the negative producer-independently; the returned summary reports the
+    so a third party re-derives the VERDICT from the retained (producer-supplied) values; the returned summary reports the
     per-tier CLOSED counts. Default OFF → a byte-identical binding-tier certificate."""
     owner = owner_key or generate_keypair()
     gov = gov_key or generate_keypair()

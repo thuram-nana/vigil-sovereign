@@ -52,7 +52,8 @@ def reexecutable_evidence(ctx: object) -> dict | None:
     for the RE-EXECUTABLE posture tier (Proof-of-Posture). Today: the ``predicate`` + ``observed_evidence``
     of a predicate-oracle probe (open_redirect / CORS / host-header / IDOR / …), which the pure JSON-AST
     ``predicate_oracle`` re-derives byte-for-byte with no framework — so a relying party re-derives the
-    NEGATIVE itself, not merely trusts the signed verdict. Returns ``None`` for any probe whose retained
+    VERDICT itself from the retained (producer-supplied) values, not merely trusts the signed verdict. Returns
+    ``None`` for any probe whose retained
     context carries no such re-runnable kernel input (those stay the ``binding`` tier — honest).
 
     Only these two keys are retained (never the whole context): they are a small, deterministic JSON AST
@@ -133,7 +134,7 @@ class ProbeRecord(BaseModel):
         default=None, description=(
             "OPT-IN re-executable-tier evidence (Proof-of-Posture): the minimal, deterministic kernel "
             "input (a predicate + the observed values) a VIGIL-FREE verifier re-runs the oracle over to "
-            "re-derive this probe's verdict producer-independently. ``None`` (the default) unless "
+            "re-derive this probe's verdict from the retained (producer-supplied) values. ``None`` (default) unless "
             "``AuditEngine.retain_evidence`` is set — so a certificate is byte-identical to before when "
             "retention is off. Never emitted into a certificate row when falsy (see "
             "``coverage_oracle.build_coverage_certificate``), so the make-gate byte-identity holds."))
@@ -247,7 +248,7 @@ class AuditEngine:
 
         When ``retain_evidence`` is set (OPT-IN), a predicate-oracle probe also retains its minimal,
         deterministic re-execution kernel input (``predicate`` + ``observed_evidence``) so a VIGIL-free
-        verifier can re-derive the verdict producer-independently (the re-executable posture tier). With
+        verifier can re-derive the verdict from the retained (producer-supplied) values (the re-executable posture tier). With
         the flag off (the default), ``evidence`` stays ``None`` and the certificate is byte-identical."""
         verdict, kinds = probe_verdict(result)
         evidence = reexecutable_evidence(ctx) if self.retain_evidence else None

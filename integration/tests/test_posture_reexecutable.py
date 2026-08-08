@@ -294,3 +294,48 @@ def _bundle_verify_cmd_eng(res: dict, engagement: str):
     return [sys.executable, str(d / "verify_offline.py"), "verify", "--bundle", str(d / "bundle.json"),
             "--posture-fingerprint", res["fingerprint"], "--posture-owner-pubkey", res["owner_pubkey"],
             "--posture-engagement", engagement, "--posture-now", "1000"]
+
+
+# ---- 6. red-pen re-check fixes: overclaim absent EVERYWHERE + projection fails closed ----------------
+
+_REPO = Path(__file__).resolve().parents[2]
+_POSTURE_PATH_FILES = [
+    "integration/vigil_integration/posture/certificate.py",
+    "integration/vigil_integration/posture/cli.py",
+    "integration/vigil_integration/posture/attest.py",
+    "docs/proof-carrying-finding/verify_vf.py",
+    "engine/crucible/framework/v2/scanner/engine.py",
+    "engine/crucible/framework/v2/verify/coverage_oracle.py",
+    "docs/POSTURE.md",
+    "docs/TRUTHENOVATION.md",
+]
+
+
+def test_no_producer_independent_overclaim_anywhere_in_posture_path():
+    """BLOCK-1b: the overclaim must be absent from EVERY relying-party/operator/code surface — not just
+    POSTURE_RESIDUAL + the verifier stdout (the two the first fix covered). Greps the whole posture path so
+    the overclaim cannot regress in a doc, CLI help, the Pydantic Field schema, or a code comment."""
+    forbidden = ("producer-independent", "re-derives the negative producer", "trusting no producer")
+    offenders = []
+    for rel in _POSTURE_PATH_FILES:
+        text = (_REPO / rel).read_text(encoding="utf-8").lower()
+        for phrase in forbidden:
+            if phrase in text:
+                offenders.append(f"{rel}: {phrase!r}")
+    assert not offenders, "producer-independent overclaim still present:\n  " + "\n  ".join(offenders)
+
+
+def test_projection_fails_closed_on_non_iterable_oracle_kinds():
+    """MEDIUM: a probe whose oracle_kinds_run is a non-iterable scalar must FAIL-CLOSED in the projection
+    (which runs before re-execution) — PostureError in-tree, ValueError caught → (False, ...) standalone —
+    never an uncaught TypeError."""
+    bad = {"coverage": {"probes": [{
+        "surface": "/x", "insertion_point": "query_value:0", "param": "q", "check_id": "c",
+        "class": "sqli", "verdict": "clean", "oracle_kinds_run": 5,
+    }]}}
+    with pytest.raises(C.PostureError):
+        C.project_posture_claims(bad["coverage"])
+    vf = _load_verify_vf()
+    # the standalone projection raises ValueError (caught by verify_posture's wrapper → NOT SOUND, no crash)
+    with pytest.raises(ValueError):
+        vf._project_posture_claims(bad["coverage"])

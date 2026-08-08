@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--reexecutable", action="store_true",
                    help="mint RE-EXECUTABLE CLOSED claims: embed each predicate-oracle probe's kernel "
                         "(predicate + observed values) so a VIGIL-free verifier re-derives the negative "
-                        "itself (producer-independent). Default: the byte-identical binding tier.")
+                        "itself from the retained values (which stay producer-supplied — trusting the negative needs a live re-run). Default: the byte-identical binding tier.")
     a.set_defaults(fn=_cmd_attest)
 
     v = sub.add_parser("verify", help="re-verify a bundle offline via its own shipped verify_offline.py")
