@@ -1,0 +1,30 @@
+{
+  "schema": "vigil-osv-snapshot/1",
+  "provenance": "A PINNED, hand-curated slice of OSV.dev advisories (https://osv.dev), captured 2026-08-08. VIGIL's SBOM FACT path re-derives version membership from THIS snapshot + the operator's own manifest parse — it never trusts a scanner's CVE match. Refresh deliberately (a pinned data artifact, like the vendored oracle version). affected ranges are OSV {introduced, fixed} events (semver/pep440 ordered).",
+  "ecosystems": {
+    "PyPI": {
+      "pyyaml": [
+        {"vuln_id": "CVE-2020-14343", "summary": "arbitrary code execution via full_load/FullLoader",
+         "affected": [{"introduced": "0", "fixed": "5.4"}]}
+      ],
+      "requests": [
+        {"vuln_id": "CVE-2023-32681", "summary": "Proxy-Authorization leak on redirect",
+         "affected": [{"introduced": "2.3.0", "fixed": "2.31.0"}]}
+      ],
+      "jinja2": [
+        {"vuln_id": "CVE-2024-22195", "summary": "XSS via xmlattr filter",
+         "affected": [{"introduced": "0", "fixed": "3.1.3"}]}
+      ]
+    },
+    "npm": {
+      "lodash": [
+        {"vuln_id": "CVE-2021-23337", "summary": "command injection via template",
+         "affected": [{"introduced": "0", "fixed": "4.17.21"}]}
+      ],
+      "minimist": [
+        {"vuln_id": "CVE-2021-44906", "summary": "prototype pollution",
+         "affected": [{"introduced": "0", "fixed": "1.2.6"}]}
+      ]
+    }
+  }
+}
