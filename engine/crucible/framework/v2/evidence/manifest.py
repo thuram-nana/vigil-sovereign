@@ -125,8 +125,11 @@ def verify_manifest(artifacts: list[ArtifactRef], *, root: Path) -> list[tuple[s
             results.append((a.path, False, "missing"))
             continue
         try:
-            # O_NOFOLLOW + fstat-regular: race-safe against a symlink swapped in at open, and rejects a
-            # device/FIFO/socket the operator's directory tree should never contain.
+            # O_NOFOLLOW + fstat-regular: closes a FINAL-COMPONENT symlink swap at open and rejects a
+            # device/FIFO/socket. (Honest bound: O_NOFOLLOW guards only the last path component — a
+            # PARENT-directory symlink swapped between the is_within resolve() above and this open() is NOT
+            # race-protected; that is outside the threat model, which is untrusted bundle BYTES, not a live
+            # filesystem-racing attacker.)
             digest, size = _sha256_regular_nofollow(fp)
         except _TooLarge as e:
             results.append((a.path, False, str(e)))

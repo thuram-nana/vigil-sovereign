@@ -435,8 +435,11 @@ def verify_bundle(
     refs = [sc.certificate.finding_ref for sc in certificates]
     refs_unique = len(set(refs)) == len(refs)
 
-    # SINGLE-ENGAGEMENT — every finding cert, path cert, and (if present) the signed head must name ONE
-    # engagement, so valid components from different engagements cannot be assembled into one bundle.
+    # SINGLE-ENGAGEMENT — components from two DIFFERENT NAMED engagements cannot be assembled into one
+    # bundle. Empty ("") slugs are discarded so a uniform legacy bundle (findings default to "") under a
+    # named head still passes. KNOWN BOUND (red-pen LOW, tracked in DEFERRED-INFRA): an empty-slug cert can
+    # therefore ride a named bundle — defense-in-depth only, since it still requires a governance-signed
+    # head over the mixed chain (compromised governance is already out of model).
     engagements = ({sc.certificate.engagement_slug for sc in certificates}
                    | {pc.engagement_slug for pc in path_certs}
                    | ({head.engagement_slug} if head is not None and getattr(head, "engagement_slug", None) else set()))
