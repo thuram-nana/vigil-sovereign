@@ -31,12 +31,16 @@ layer, so the certificate core stays byte-deterministic.
   CLOSED with no conclusive oracle is refused), and the owner target-binding — **offline, with no VIGIL
   installed** (`docs/proof-carrying-finding/verify_vf.py`). It does **not** re-fire the oracle; re-firing
   needs VIGIL (a coverage re-run) — the same residual as the H4 audit package.
-- **`re-executable`** (marked enhancement) — for a flagship class, the certificate additionally embeds the
-  probe's raw request/response bytes + the TLS channel-binding transcript, and the standalone verifier
-  ships a pinned oracle kernel that **re-derives** `clean`/`fired` from the bytes — a producer-independent
-  sound negative. The certificate's summary counts claims per tier so a reader sees exactly how much of the
-  negative is re-executable vs binding-only. (Requires retaining clean-probe bytes through the coverage
-  layer; the binding tier is the complete, verifiable artifact today.)
+- **`re-executable`** (shipped, for predicate-oracle classes such as open_redirect) — the certificate
+  additionally embeds each clean probe's re-execution kernel: the pure JSON-AST `predicate` + the
+  `observed_evidence` the oracle judged. The standalone verifier ships a byte-faithful predicate evaluator
+  and **re-derives** the verdict from those retained values — confirming the verdict is the correct function
+  of the evidence **without trusting the producer's asserted verdict** (a tamper-check stronger than
+  binding). The summary counts claims per tier. **Honest bound:** the retained values are still
+  **producer-supplied** — re-execution proves the verdict↔evidence binding, NOT that the evidence reflects
+  the live target; trusting the negative reflects reality (for **both** tiers) still needs a live VIGIL
+  re-run, and true independence of the *observation* from the producer would require a channel-bound live
+  capture (not embedded here).
 
 ## The honest boundary (this is the feature, not a footnote)
 CLOSED means *non-exploitability by the oracle family, over the reached surface, as of the freshness

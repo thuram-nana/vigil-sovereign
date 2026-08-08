@@ -31,9 +31,14 @@ def coverage_cert_from_report(report: Any, *, max_pages: int, max_depth: int,
                                          budget_exhausted=budget_exhausted)
 
 
-def scan_loopback_benchmark(*, max_pages: int = 25, max_depth: int = 4) -> Any:
+def scan_loopback_benchmark(*, max_pages: int = 25, max_depth: int = 4,
+                            retain_evidence: bool = False) -> Any:
     """Run ONE real coverage scan of the in-process benchmark app → its ScanReport (framework
-    import is function-local). The reproducible, authorized live target for the MVP proof."""
+    import is function-local). The reproducible, authorized live target for the MVP proof.
+
+    ``retain_evidence`` (OPT-IN) retains the re-execution kernel (predicate + observed values) on
+    predicate-oracle probes so the resulting posture certificate carries RE-EXECUTABLE CLOSED claims a
+    VIGIL-free verifier re-derives itself. Default OFF → the coverage certificate is byte-identical."""
     from framework.v2.eval.benchmark_app import serve  # noqa: PLC0415 (FATAL-2: function-local)
     from framework.v2.eval.benchmark_run import loopback_send  # noqa: PLC0415
     from framework.v2.scanner.campaign import WebScanCampaign  # noqa: PLC0415
@@ -42,7 +47,7 @@ def scan_loopback_benchmark(*, max_pages: int = 25, max_depth: int = 4) -> Any:
     with serve() as base:
         return WebScanCampaign(
             loopback_send, max_pages=max_pages, max_depth=max_depth, enable_oob=False,
-            insertion_kinds=(InsertionKind.QUERY_VALUE,),
+            insertion_kinds=(InsertionKind.QUERY_VALUE,), retain_evidence=retain_evidence,
         ).run(base)
 
 
@@ -54,14 +59,20 @@ def attest_loopback_benchmark(
     engagement: str = "posture-demo",
     max_pages: int = 25,
     max_depth: int = 4,
+    retain_evidence: bool = False,
 ) -> dict:
     """End-to-end: scan the loopback benchmark app → coverage cert → posture cert → sign → export the
     portable bundle at ``out_dir``. Keys default to fresh ephemerals (the operator pins the returned
     fingerprint + owner pubkey OUT OF BAND, mirroring the benchmark's --sign fresh-key mode). Returns a
-    dict of the artifacts (cert path, fingerprint, owner_pubkey, engagement, bundle dir, summary)."""
+    dict of the artifacts (cert path, fingerprint, owner_pubkey, engagement, bundle dir, summary).
+
+    ``retain_evidence`` (OPT-IN) mints RE-EXECUTABLE CLOSED claims (predicate + observed values embedded)
+    so a third party re-derives the VERDICT from the retained (producer-supplied) values; the returned summary reports the
+    per-tier CLOSED counts. Default OFF → a byte-identical binding-tier certificate."""
     owner = owner_key or generate_keypair()
     gov = gov_key or generate_keypair()
-    report = scan_loopback_benchmark(max_pages=max_pages, max_depth=max_depth)
+    report = scan_loopback_benchmark(max_pages=max_pages, max_depth=max_depth,
+                                     retain_evidence=retain_evidence)
     coverage = coverage_cert_from_report(report, max_pages=max_pages, max_depth=max_depth)
 
     # The target's identity: the benchmark app is loopback. Bind to host 127.0.0.1.

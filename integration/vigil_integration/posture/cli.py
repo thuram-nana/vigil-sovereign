@@ -24,7 +24,8 @@ def _cmd_attest(args: argparse.Namespace) -> int:
     from .attest import attest_loopback_benchmark  # function-local (framework touch is deeper still)
 
     res = attest_loopback_benchmark(args.out, engagement=args.engagement,
-                                    max_pages=args.max_pages, max_depth=args.max_depth)
+                                    max_pages=args.max_pages, max_depth=args.max_depth,
+                                    retain_evidence=args.reexecutable)
     print(json.dumps(res, indent=2, sort_keys=True))
     print("\nPUBLISH THESE OUT-OF-BAND (a verifier needs them, on a channel separate from the bundle):")
     print(f"  --posture-fingerprint   {res['fingerprint']}")
@@ -79,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--engagement", default="posture-demo")
     a.add_argument("--max-pages", type=int, default=25)
     a.add_argument("--max-depth", type=int, default=4)
+    a.add_argument("--reexecutable", action="store_true",
+                   help="mint RE-EXECUTABLE CLOSED claims: embed each predicate-oracle probe's kernel "
+                        "(predicate + observed values) so a VIGIL-free verifier re-derives the negative "
+                        "itself from the retained values (which stay producer-supplied — trusting the negative needs a live re-run). Default: the byte-identical binding tier.")
     a.set_defaults(fn=_cmd_attest)
 
     v = sub.add_parser("verify", help="re-verify a bundle offline via its own shipped verify_offline.py")

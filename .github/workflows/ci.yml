@@ -129,6 +129,7 @@ jobs:
               --ignore=integration/tests/test_posture_live.py \
               --ignore=integration/tests/test_posture_series.py \
               --ignore=integration/tests/test_posture_endpoint.py \
+              --ignore=integration/tests/test_posture_reexecutable.py \
               --ignore=integration/tests/test_authority.py \
               --ignore=integration/tests/test_hexstrike_brain.py \
               --ignore=integration/tests/test_hexstrike_body.py \
@@ -173,6 +174,7 @@ jobs:
               integration/tests/test_posture_live.py \
               integration/tests/test_posture_series.py \
               integration/tests/test_posture_endpoint.py \
+              integration/tests/test_posture_reexecutable.py \
               integration/tests/test_authority.py \
               integration/tests/test_hexstrike_brain.py \
               integration/tests/test_hexstrike_body.py \
