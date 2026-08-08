@@ -224,5 +224,29 @@ A claim that cannot pass all seven is downgraded to its true state or removed �
 
 ---
 
+## Phase P — Proof of Posture (the world-first *negative*) + the accountability twin
+
+| Slice | What | State |
+|---|---|---|
+| P0–P2 | **PostureCertificate** — the Certificate of Non-Exploitability: a signed, deterministic projection of the coverage oracle into CLOSED/OPEN/UNPROVEN per `(surface,param,class)`, bound to an owner-signed target identity, with the coverage denominator + honest residual in the signed bytes; a portable bundle re-verified OFFLINE by the VIGIL-free `verify_vf.py` (byte-parity differential); `vigil posture attest\|verify`; a **live loopback proof** (real scan → cert → third-party offline SOUND; tamper → NOT SOUND). | **BUILT + tested + live-proven** (binding tier) |
+| P3 | **Continuous anti-rollback series** — `posture/series.py` + `reprove.py` + a systemd unit: each cycle re-mints + appends a signed tick; a rollback/truncation is refused; deterministic (identical digests across runs). | **BUILT + tested** |
+| P4 | **Queryable endpoint** — read-only, loopback/tunnel-bound (`bind_ok` refuses public); a counterparty POLLs the bundle and re-verifies it offline → SOUND ("HTTPS for security posture"). | **BUILT + tested** |
+| P5 | **Authority-Envelope certificate** (the accountability twin) — prove an autonomous agent took only actions its owner-signed authority permitted: owner envelope + action ledger + a re-derivable conformance proof; standalone `verify_vf.py authority` component + differential. | **BUILT + tested** |
+| P-resid | **Re-executable tier** — embed raw bytes + a pinned oracle kernel so the standalone verifier re-derives the negative producer-independently for a flagship class. | marked enhancement (binding tier is the complete artifact today; residual stated in the signed cert) |
+
+**Honest boundary:** CLOSED = non-exploitability *by the oracle family, over the reached surface, as of T* — never "secure against everything"; the binding-tier verifier re-checks signatures/binding/identity/coverage offline but does not re-fire the oracle (re-firing needs VIGIL). See `docs/POSTURE.md`.
+
+## The "better brain" slot — hexstrike-ai integration
+
+The empty homegrown-brain socket (`agent_body.AgentBody`) is filled: hexstrike-ai (MIT, 0x4m4) vendored
+**non-runnable**; a clean-room, **drift-free** decision brain (no evasion/poisoning/exploit, no DNS,
+propose-only); a fully-wired `HexstrikeAgentBody` (real WARDEN A2-floor gate + real R4 gated execution +
+runner-owned provenance) with a **live nmap FACT proof**; and the brain drives the **production engine**
+(`EngineConfig.brain`) — one gated executor, oracle-authoritative. Gate-marshal red-pen: BUILD-WITH-FIXES,
+all applied. See `docs/BRAIN-SLOT-INTEGRATION.md`. **Residual:** hexstrike's heavy tools don't install
+offline (live-fire tooling-gated); tools beyond nmap mint FACTs only as each gets an oracle-mapped ToolSpec.
+
+---
+
 *Status: program opened 2026-08. This scoreboard is updated as each slice's verification passes; nothing here is
 called a fact before then.*
