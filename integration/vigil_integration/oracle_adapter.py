@@ -37,7 +37,32 @@ egress gate, the same deferral shape as P8's live-fire.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
+
+
+class Outcome(str, Enum):
+    """The typed adjudication outcome for one probe/tool result — the six distinct states VIGIL keeps
+    separate (criterion 7), so a caller never conflates "the oracle proved a channel-confirmed negative"
+    with "no oracle had a channel" with "the tool errored". Only POSITIVE is a signed FACT.
+
+      POSITIVE     — an oracle fired at high confidence, the class is oracle-mapped, the context is
+                     runner-owned/reproduced, and the certificate is signed (the sole FACT state).
+      CLEAN        — an applicable oracle had an observable channel and CONCLUSIVELY did not fire
+                     (a channel-confirmed negative — the coverage `clean` verdict).
+      INCONCLUSIVE — an oracle ran but had no decisive channel (a one-sided non-signal); NEVER clean.
+      UNSUPPORTED  — an oracle fired but VIGIL structurally cannot mint a FACT: the class has no oracle
+                     mapping, or the context is not runner-owned/reproduced (LLM-provenanced). A LEAD.
+      ERROR        — the tool/probe errored (timeout / spawn failure / crash). Set by the runner.
+      SKIPPED      — not attempted (no capture channel for this class, budget/scope refusal). Set by the
+                     runner.
+    """
+    POSITIVE = "positive"
+    CLEAN = "clean"
+    INCONCLUSIVE = "inconclusive"
+    UNSUPPORTED = "unsupported"
+    ERROR = "error"
+    SKIPPED = "skipped"
 
 
 # Provenance of the oracle_context — WHERE the evidence the oracle re-fires over came from. Only a
@@ -57,6 +82,9 @@ class AdapterResult:
     signed: Any = None     # a CRUCIBLE SignedEvidence when status == "fact", else None
     confirmed_by: str = ""  # the oracle kind that fired (empty for an unconfirmed lead)
     confidence: float = 0.0
+    outcome: str = ""      # the typed Outcome value (positive/clean/inconclusive/unsupported/error/skipped).
+                           # `status` stays the authoritative FACT-vs-not flag; `outcome` refines the LEAD
+                           # bucket into distinct states (criterion 7). Default "" only for legacy callers.
 
     @property
     def is_fact(self) -> bool:
@@ -107,18 +135,28 @@ def confirm_and_certify(
         )
     # Lazy CRUCIBLE imports — offense-side only; keeps the module import-clean for the sovereign env.
     from framework.v2.evidence.certify import build_certificate, sign_certificate
-    from framework.v2.verify.confirmation import confirm_finding
-    from framework.v2.verify.verifier import is_known_bug_class, normalize_bug_class
+    from framework.v2.verify.confirmation import adjudicate_finding, confirmed_from_result
+    from framework.v2.verify.verifier import OracleVerifier, is_known_bug_class, normalize_bug_class
+    from framework.v2.scanner.engine import probe_verdict
 
     oracle_context = finding.get("oracle_context") or {}
     bug_class = normalize_bug_class(str(finding.get("bug_class", "")))
 
-    # 1. deterministic confirmation — None unless an oracle actually fired at high confidence.
-    confirmed = confirm_finding(finding, oracle_context, verifier)
+    # 1. deterministic adjudication. adjudicate_finding + confirmed_from_result is EXACTLY confirm_finding
+    #    (same FACT decision, verified in confirmation.py), but it also retains the full VerificationResult
+    #    so we can classify the NON-fired outcome as CLEAN (conclusive channel, did not fire) vs
+    #    INCONCLUSIVE (no decisive channel) — the criterion-7 distinction confirm_finding discards.
+    verifier = verifier or OracleVerifier()
+    result = adjudicate_finding(finding, oracle_context, verifier)
+    confirmed = confirmed_from_result(result, finding, verifier)
     if confirmed is None:
+        verdict, _kinds = probe_verdict(result)   # "clean" | "inconclusive" (never "finding" here)
+        oc = Outcome.CLEAN if verdict == "clean" else Outcome.INCONCLUSIVE
+        reason = ("oracle CONCLUSIVELY did not fire over the retained context (channel-confirmed negative)"
+                  if oc is Outcome.CLEAN else
+                  "no applicable oracle had a decisive channel over the retained context (inconclusive)")
         return AdapterResult(
-            "lead", "oracle did not fire — the retained context does not reproduce the finding",
-            bug_class, _finding_ref(finding),
+            "lead", reason, bug_class, _finding_ref(finding), outcome=oc.value,
         )
 
     # 2. honesty invariant — a signed FACT requires a known oracle-mapped class.
@@ -130,6 +168,7 @@ def confirm_and_certify(
             f"oracle mapping — retained as a labelled lead, not a signed fact",
             confirmed_class, _finding_ref(finding),
             confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
+            outcome=Outcome.UNSUPPORTED.value,
         )
 
     # 2b. sovereign anti-hallucination gate (audit G4) — a signed FACT requires the oracle_context to be
@@ -144,6 +183,7 @@ def confirm_and_certify(
             f"captured raw output / live re-drive); retained as a labelled lead",
             confirmed_class, _finding_ref(finding),
             confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
+            outcome=Outcome.UNSUPPORTED.value,
         )
 
     # 3. mint + sign the proof-carrying certificate over the exact confirmed evidence.
@@ -161,6 +201,7 @@ def confirm_and_certify(
         f"oracle-confirmed by {_kind_str(confirmed.confirmed_by)} and signed (proof-carrying certificate)",
         confirmed_class, cert.finding_ref, signed=signed,
         confirmed_by=_kind_str(confirmed.confirmed_by), confidence=float(confirmed.confidence),
+        outcome=Outcome.POSITIVE.value,
     )
 
 

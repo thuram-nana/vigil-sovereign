@@ -420,6 +420,10 @@ class RunnerResult:
     leads: list = field(default_factory=list)          # AdapterResult (status=="lead")
     proposed: list = field(default_factory=list)        # ProposedService parsed from the tool output
     contexts: dict = field(default_factory=dict)        # finding_ref -> oracle_context (for offline re-verify)
+    outcomes: list = field(default_factory=list)        # per-item {check_id, bug_class, outcome} — the typed
+                                                        # positive/clean/inconclusive/unsupported/error/skipped
+                                                        # taxonomy (criterion 7), so no state is conflated.
+    tool_errored: bool = False                          # the tool run itself errored (timeout / spawn failure)
 
     @property
     def refused(self) -> bool:
@@ -476,7 +480,13 @@ def run_external_tool(
     outcome = backend.run(spec.build_argv(target), timeout=timeout)
 
     # function-local (FATAL-2): drive the existing anti-hallucination adapter — do NOT reimplement it.
-    from ..oracle_adapter import confirm_and_certify
+    from ..oracle_adapter import Outcome, confirm_and_certify
+
+    # Tool-level ERROR: the run timed out or the process could not spawn (exit_code is None). Its output is
+    # untrustworthy — a chatty scanner that timed out mid-write must not have a truncated row treated as a
+    # clean/positive signal. We still parse proposals (propose is total), but the ERROR is recorded so a
+    # caller never conflates "the tool errored" with "the tool ran and found nothing".
+    tool_errored = bool(outcome.timed_out) or (outcome.exit_code is None)
 
     proposed = spec.propose(outcome, target)
     # The re-drives to run per proposed service. Empty spec.redrives ⇒ the legacy reachability re-drive
@@ -486,6 +496,9 @@ def run_external_tool(
     facts: list = []
     leads: list = []
     contexts: dict = {}
+    outcomes: list = []
+    if tool_errored:
+        outcomes.append({"check_id": spec.name, "bug_class": "", "outcome": Outcome.ERROR.value})
     for svc in proposed:
         # One capture per distinct capture callable per service (so two re-drives sharing a handshake —
         # weak_tls + weak_crypto — negotiate it ONCE), then judge it for each re-drive's bug_class.
@@ -494,11 +507,15 @@ def run_external_tool(
             cap_key = id(rd.capture)
             if cap_key not in captured:
                 captured[cap_key] = rd.capture(svc.host, svc.port, slug=engagement_slug, protocol=svc.protocol)
+            item = f"{spec.name}:{svc.host}:{svc.port}/{svc.protocol}#{rd.bug_class}"
             oracle_context = rd.context(captured[cap_key])
             if oracle_context is None:
-                continue  # this re-drive did not apply to the captured evidence (e.g. no cert presented)
+                # SKIPPED: the runner's own capture yielded no evidence this re-drive can judge (e.g. no
+                # cert presented for weak_crypto) — NOT a clean negative, and never a fabricated FACT.
+                outcomes.append({"check_id": item, "bug_class": rd.bug_class, "outcome": Outcome.SKIPPED.value})
+                continue
             finding = {
-                "check_id": f"{spec.name}:{svc.host}:{svc.port}/{svc.protocol}#{rd.bug_class}",
+                "check_id": item,
                 "bug_class": rd.bug_class,
                 "insertion_point": f"{svc.host}:{svc.port}",
                 "oracle_context": oracle_context,
@@ -508,8 +525,12 @@ def run_external_tool(
             # retain the exact context keyed by the result's finding_ref so a caller can re-verify the
             # signed certificate OFFLINE (verify_certificate needs the context; the cert stores its digest).
             contexts[res.finding_ref] = oracle_context
+            outcomes.append({"check_id": item, "bug_class": rd.bug_class,
+                             "outcome": res.outcome or (Outcome.POSITIVE.value if res.is_fact else "")})
             (facts if res.is_fact else leads).append(res)
 
     detail = (f"{spec.name} ran via {outcome.backend}; proposed {len(proposed)} service(s), "
-              f"oracle-confirmed {len(facts)} FACT(s), {len(leads)} lead(s)")
-    return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts)
+              f"oracle-confirmed {len(facts)} FACT(s), {len(leads)} lead(s)"
+              + ("; TOOL ERRORED (timeout/spawn)" if tool_errored else ""))
+    return RunnerResult("ran", detail, spec.name, target, outcome, facts, leads, proposed, contexts,
+                        outcomes=outcomes, tool_errored=tool_errored)
