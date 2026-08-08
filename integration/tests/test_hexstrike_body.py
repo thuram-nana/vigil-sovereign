@@ -88,6 +88,22 @@ def test_unmapped_tool_stays_a_lead():
     assert out.executed is False and "LEAD" in out.blocked_reason
 
 
+def test_sslscan_is_oracle_mapped_and_dispatches_to_the_tls_runner():
+    """Slice 4: sslscan is oracle-mapped (a second FACT-capable tool). With no runner provisioned it
+    reaches the runner dispatch (a DIFFERENT LEAD reason than an unmapped tool), proving the body routes
+    sslscan to the TLS ToolSpec rather than rejecting it as unmapped."""
+    from vigil_integration.brains.hexstrike_body import _ORACLE_MAPPED_TOOLS
+
+    assert "sslscan" in _ORACLE_MAPPED_TOOLS
+    body = HexstrikeAgentBody(runner=None)
+    unmapped = body.execute(ProposedAction(kind="whatweb", target="127.0.0.1", params={}),
+                            GateDecision(authorized=True))
+    mapped = body.execute(ProposedAction(kind="sslscan", target="127.0.0.1", params={"port": 443}),
+                          GateDecision(authorized=True))
+    assert "no oracle-mapped ToolSpec" in unmapped.blocked_reason      # unmapped -> rejected before dispatch
+    assert "runner not provisioned" in mapped.blocked_reason           # mapped -> reached the runner dispatch
+
+
 def test_propose_returns_host_targeted_action_without_authority():
     body = HexstrikeAgentBody()
     action = body.propose(body.think(_obs()))

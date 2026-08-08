@@ -45,7 +45,9 @@ from .hexstrike_brain import HexstrikeBrain, TargetType, ToolDanger
 # brain tool name -> the runner-owned oracle-mapped ToolSpec builder. ONLY these can mint a FACT (via the
 # runner's own independent re-drive); every other tool stays a LEAD. Adding a tool = adding a ToolSpec +
 # a runner-owned per-class oracle re-drive — never a body-supplied provenance.
-_ORACLE_MAPPED_TOOLS = frozenset({"nmap"})
+#   nmap    -> service_reachable        (gated handshake re-drive)
+#   sslscan -> weak_tls + weak_crypto_artifact (gated TLS handshake re-drive; slice 4)
+_ORACLE_MAPPED_TOOLS = frozenset({"nmap", "sslscan"})
 # a provenance/context/authorization key must NEVER originate from the body/brain (red-pen HIGH-3 guard).
 _FORBIDDEN_EXEC_KEYS = frozenset({"provenance", "oracle_context", "_authorized", "authorized"})
 
@@ -147,9 +149,13 @@ class HexstrikeAgentBody(AgentBody):
         if self._runner is None:
             return ActionOutcome(executed=False, ok=False,
                                  blocked_reason="runner not provisioned (no RunnerDeps) — stays a LEAD")
-        from ..live.external_tool import nmap_service_scan, run_external_tool  # noqa: PLC0415 (FATAL-2)
+        from ..live.external_tool import nmap_service_scan, run_external_tool, tls_scan  # noqa: PLC0415 (FATAL-2)
 
-        spec = nmap_service_scan(ports=str((action.params or {}).get("ports", "1-1024")))
+        params = action.params or {}
+        if action.kind == "sslscan":
+            spec = tls_scan(port=int(params.get("port", 443)))
+        else:  # nmap (the only other oracle-mapped tool)
+            spec = nmap_service_scan(ports=str(params.get("ports", "1-1024")))
         res = run_external_tool(
             spec, action.target, scope_gate=self._runner.scope_gate, backend=self._runner.backend,
             engagement_slug=self._runner.engagement_slug, signers=self._runner.signers,

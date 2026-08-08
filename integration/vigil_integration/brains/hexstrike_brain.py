@@ -78,6 +78,9 @@ _TOOL_DANGER: dict[str, ToolDanger] = {
     "amass": ToolDanger.RECON, "arp-scan": ToolDanger.RECON, "nbtscan": ToolDanger.RECON,
     "rustscan": ToolDanger.RECON, "masscan": ToolDanger.RECON, "autorecon": ToolDanger.RECON,
     "paramspider": ToolDanger.RECON,
+    # TLS posture (read-only assessment): the runner re-drives its OWN gated handshake and judges a weak
+    # protocol/cipher (weak_tls) or a broken-hash cert (weak_crypto_artifact) — never sslscan's rows.
+    "sslscan": ToolDanger.RECON,
     # active assessment (mutating/probing — QUEUE on live)
     "nuclei": ToolDanger.ACTIVE, "gobuster": ToolDanger.ACTIVE, "ffuf": ToolDanger.ACTIVE,
     "feroxbuster": ToolDanger.ACTIVE, "dirsearch": ToolDanger.ACTIVE, "nikto": ToolDanger.ACTIVE,
@@ -181,15 +184,16 @@ class HexstrikeBrain:
                 "nmap": 0.8, "httpx": 0.85, "katana": 0.88, "nuclei": 0.95, "gobuster": 0.9,
                 "ffuf": 0.9, "feroxbuster": 0.85, "dirsearch": 0.87, "nikto": 0.85, "sqlmap": 0.9,
                 "dalfox": 0.93, "arjun": 0.9, "paramspider": 0.85, "x8": 0.88, "jaeles": 0.92,
-                "wpscan": 0.95, "gau": 0.82, "waybackurls": 0.8,
+                "wpscan": 0.95, "gau": 0.82, "waybackurls": 0.8, "sslscan": 0.78,
             },
             TargetType.NETWORK_HOST.value: {
                 "nmap": 0.95, "rustscan": 0.9, "masscan": 0.92, "autorecon": 0.95,
                 "enum4linux-ng": 0.88, "smbmap": 0.85, "nbtscan": 0.75, "arp-scan": 0.85, "amass": 0.7,
+                "sslscan": 0.72,
             },
             TargetType.API_ENDPOINT.value: {
                 "httpx": 0.9, "nuclei": 0.9, "arjun": 0.95, "x8": 0.92, "paramspider": 0.88,
-                "katana": 0.85, "ffuf": 0.85, "jaeles": 0.88,
+                "katana": 0.85, "ffuf": 0.85, "jaeles": 0.88, "sslscan": 0.75,
             },
             TargetType.CLOUD_SERVICE.value: {
                 "prowler": 0.95, "scout-suite": 0.92, "trivy": 0.9, "checkov": 0.9, "terrascan": 0.88,
@@ -206,10 +210,11 @@ class HexstrikeBrain:
         return {
             "web_reconnaissance": [
                 {"tool": "nmap", "priority": 1, "params": {"scan_type": "-sV -sC", "ports": "80,443,8080,8443"}},
-                {"tool": "httpx", "priority": 2, "params": {"probe": True, "tech_detect": True}},
-                {"tool": "katana", "priority": 3, "params": {"depth": 3, "js_crawl": True}},
-                {"tool": "nuclei", "priority": 4, "params": {"severity": "critical,high", "tags": "tech"}},
-                {"tool": "gobuster", "priority": 5, "params": {"mode": "dir", "extensions": "php,html,js,txt"}},
+                {"tool": "sslscan", "priority": 2, "params": {"port": 443}},
+                {"tool": "httpx", "priority": 3, "params": {"probe": True, "tech_detect": True}},
+                {"tool": "katana", "priority": 4, "params": {"depth": 3, "js_crawl": True}},
+                {"tool": "nuclei", "priority": 5, "params": {"severity": "critical,high", "tags": "tech"}},
+                {"tool": "gobuster", "priority": 6, "params": {"mode": "dir", "extensions": "php,html,js,txt"}},
             ],
             "api_testing": [
                 {"tool": "httpx", "priority": 1, "params": {"probe": True, "tech_detect": True}},
@@ -220,8 +225,9 @@ class HexstrikeBrain:
             "network_discovery": [
                 {"tool": "rustscan", "priority": 1, "params": {"ulimit": 5000, "scripts": True}},
                 {"tool": "nmap", "priority": 2, "params": {"scan_type": "-sV -sC", "os_detection": True}},
-                {"tool": "enum4linux-ng", "priority": 3, "params": {"shares": True, "users": True}},
-                {"tool": "smbmap", "priority": 4, "params": {"recursive": True}},
+                {"tool": "sslscan", "priority": 3, "params": {"port": 443}},
+                {"tool": "enum4linux-ng", "priority": 4, "params": {"shares": True, "users": True}},
+                {"tool": "smbmap", "priority": 5, "params": {"recursive": True}},
             ],
             "vulnerability_assessment": [
                 {"tool": "nuclei", "priority": 1, "params": {"severity": "critical,high,medium"}},
