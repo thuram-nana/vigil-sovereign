@@ -607,13 +607,17 @@ def _host(url: str) -> str:
     return urlsplit(url).netloc.lower()
 
 
-_META_TAG = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+# Scan windows are BOUNDED so a hostile, unterminated body cannot cause quadratic backtracking: a real
+# <meta> tag or redirect URL never approaches these limits, but an attacker-controlled response could
+# otherwise pack many "<meta " starts with no ">" (each greedy [^>]* rescanning to end → O(n^2)).
+_MARKUP_SCAN_CAP = 512_000        # only the head of a response carries navigation markup; cap the parse
+_META_TAG = re.compile(r"<meta\b[^>]{0,4096}>", re.IGNORECASE)
 _HTTP_EQUIV_REFRESH = re.compile(r"http-equiv\s*=\s*[\"']?\s*refresh", re.IGNORECASE)
-_META_CONTENT = re.compile(r"content\s*=\s*[\"']([^\"']*)[\"']", re.IGNORECASE)
-_META_CONTENT_URL = re.compile(r"\burl\s*=\s*(.+?)\s*$", re.IGNORECASE)
+_META_CONTENT = re.compile(r"content\s*=\s*[\"']([^\"']{0,4096})[\"']", re.IGNORECASE)
+_META_CONTENT_URL = re.compile(r"\burl\s*=\s*(.{0,4096}?)\s*$", re.IGNORECASE)
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
 _JS_REDIRECT = re.compile(
-    r"(?:(?:window|document)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*[\"']([^\"']+)[\"']",
+    r"(?:(?:window|document)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*[\"']([^\"']{1,4096})[\"']",
     re.IGNORECASE)
 
 
@@ -623,16 +627,20 @@ def _markup_redirect_hosts(body: str) -> list[str]:
     (``location.href/.assign/.replace``, ``window/document.location``). Returns lowercased netlocs; a
     relative / same-origin target contributes nothing (dropped). This is the co-location test that makes
     open-redirect confirmation sound: the canary host must be an ACTUAL navigation target, not merely a
-    substring reflected somewhere in the body next to an unrelated ``<meta http-equiv=Content-Type>``."""
+    substring reflected somewhere in the body next to an unrelated ``<meta http-equiv=Content-Type>``.
+
+    The body is length-capped and the tag/URL scans are bounded so a hostile response body cannot make
+    this parse super-linear (availability, per the re-red-pen)."""
+    body = (body or "")[:_MARKUP_SCAN_CAP]
     hosts: list[str] = []
-    for tag in _META_TAG.findall(body or ""):
+    for tag in _META_TAG.findall(body):
         if _HTTP_EQUIV_REFRESH.search(tag):
             m = _META_CONTENT.search(tag)
             if m:
                 u = _META_CONTENT_URL.search(m.group(1))
                 if u:
                     hosts.append(_host(u.group(1).strip().strip("'\"")))
-    for u in _JS_REDIRECT.findall(body or ""):
+    for u in _JS_REDIRECT.findall(body):
         hosts.append(_host(u.strip()))
     return [h for h in hosts if h]   # only real authorities — a relative target is not an open redirect
 

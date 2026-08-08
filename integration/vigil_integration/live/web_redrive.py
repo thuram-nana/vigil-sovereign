@@ -67,6 +67,7 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
             return None
 
     _EMPTY = {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
+    _READ_CAP = 2_000_000   # bound the body read — a hostile/huge target response must not exhaust memory
     state = {"channels": 0, "no_channel": 0}
 
     def send(req: Any) -> dict:
@@ -81,9 +82,9 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         t0 = time.monotonic()
         try:
             with opener.open(r, timeout=timeout) as resp:
-                status, raw, headers = resp.status, resp.read(), list(resp.headers.items())
+                status, raw, headers = resp.status, resp.read(_READ_CAP), list(resp.headers.items())
         except urllib.error.HTTPError as e:      # a 4xx/5xx is a real, useful response — a genuine channel
-            status, raw, headers = e.code, e.read(), list(e.headers.items())
+            status, raw, headers = e.code, e.read(_READ_CAP), list(e.headers.items())
         except Exception:                        # noqa: BLE001 — transport error (no channel) → INCONCLUSIVE
             state["no_channel"] += 1
             return dict(_EMPTY)

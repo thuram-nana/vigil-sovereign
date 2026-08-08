@@ -89,3 +89,18 @@ def test_safe_redirect_not_confirmed() -> None:
         findings = AuditEngine(_non_following_send(host, port)).audit(
             req, checks=(OpenRedirectCheck(),), insertion_kinds=(InsertionKind.QUERY_VALUE,))
         assert findings == [], "an app that only redirects to its own host must not be flagged"
+
+
+def test_markup_redirect_hosts_is_bounded_on_a_hostile_body() -> None:
+    """Re-red-pen BLOCK-B: the markup parse must stay ~linear on a hostile, unterminated-<meta> body — a
+    target-controlled response must not be able to make it super-linear (availability). 1.2MB of '<meta '
+    (no '>') used to be quadratic (~minutes); it must now complete quickly and return no hosts."""
+    import time as _time
+
+    from framework.v2.scanner.checks import _markup_redirect_hosts
+    body = "<meta " * 200_000   # ~1.2MB, no '>' anywhere — the pathological O(n^2) input
+    t0 = _time.perf_counter()
+    out = _markup_redirect_hosts(body)
+    dt = _time.perf_counter() - t0
+    assert out == [], "an unterminated-meta body has no navigation target"
+    assert dt < 2.0, f"markup parse must be bounded (was {dt:.2f}s) — quadratic-backtracking regression"

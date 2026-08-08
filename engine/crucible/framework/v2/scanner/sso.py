@@ -52,7 +52,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..verify.adapter import FindingContext
 from . import jwt as _jwt
-from .checks import Send
+from .checks import Send, _markup_redirect_hosts
 from .insertion import HttpRequest, RequestTemplate
 
 # SAML / XML-DSig namespaces.
@@ -558,9 +558,15 @@ class OidcRedirectUriCheck:
         resp = send(_replace_param(req, self.param, self.canary))
         if not isinstance(resp, dict):
             return None
+        # The oracle confirms the RP redirected to the ATTACKER host: a 30x Location to the attacker host,
+        # OR a meta-refresh / JS-location sink whose target host IS the attacker host. The attacker host
+        # must be an ACTUAL navigation target — not merely reflected in an error page next to an unrelated
+        # <meta http-equiv=Content-Type> (the co-location fix, shared with OpenRedirectCheck).
+        _body_text = _body(resp)
         return FindingContext.from_predicate(
             {"status": _status(resp), "location_host": _host(_location(resp)),
-             "canary_host": _host(self.canary), "body": _body(resp)},
+             "canary_host": _host(self.canary), "body": _body_text,
+             "markup_redirect_hosts": _markup_redirect_hosts(_body_text)},
             {"any": [
                 {"all": [
                     {"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
@@ -568,12 +574,7 @@ class OidcRedirectUriCheck:
                 ]},
                 {"all": [
                     {"min_len": [{"var": "canary_host"}, 1]},
-                    {"contains": [{"var": "body"}, {"var": "canary_host"}]},
-                    {"any": [
-                        {"icontains": [{"var": "body"}, "http-equiv"]},
-                        {"icontains": [{"var": "body"}, "location.href"]},
-                        {"icontains": [{"var": "body"}, "location.replace"]},
-                    ]},
+                    {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
                 ]},
             ]},
             bug_class=self.bug_class)
