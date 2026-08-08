@@ -1,39 +1,397 @@
 {
   "schema": "vigil-capability-matrix/1",
-  "upstream": "hexstrike-ai (0x4m4), pinned d689933 — vendored NON-runnable; 79 distinct external tools",
+  "upstream": "hexstrike-ai (0x4m4), pinned d689933 \u2014 vendored NON-runnable; 79 distinct external tools",
   "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count.",
   "tools": [
-    {"name": "nmap", "category": "active-assessment", "license": "NPSL", "install": "apt", "privileges": "sometimes", "network_effect": "scans-target", "oracle_family": "SERVICE_REACHABILITY", "fact_capable": true, "claim_families": ["network-reachability", "service-identity"], "notes": "runner re-drives its own gated TCP handshake; service_reachable FACT. NPSL restricts commercial redistribution."},
-    {"name": "sslscan", "category": "recon", "license": "GPL-3.0", "install": "apt", "privileges": "none", "network_effect": "connects-out", "oracle_family": "TLS_WEAKNESS", "fact_capable": true, "claim_families": ["tls-config", "cert-posture"], "notes": "runner re-drives its own gated TLS handshake; weak_tls + weak_crypto_artifact FACTs. weak_tls is scoped to what a modern client still negotiates (honest)."},
-
-    {"name": "httpx", "category": "recon", "license": "MIT", "install": "go", "privileges": "none", "network_effect": "connects-out", "oracle_family": "", "fact_capable": false, "claim_families": ["http-exposure"], "notes": "LEAD-only until a runner-owned gated HTTP-fetch capture + ACHIEVED_STATE predicate re-drive exists (Phase-1 wave #3)."},
-    {"name": "katana", "category": "recon", "license": "MIT", "install": "go", "privileges": "none", "network_effect": "scans-target", "oracle_family": "", "fact_capable": false, "claim_families": ["url-discovery"], "notes": "content/URL discovery is a hypothesis feeder; LEAD-only."},
-    {"name": "subfinder", "category": "recon", "license": "MIT", "install": "go", "privileges": "none", "network_effect": "connects-out", "oracle_family": "", "fact_capable": false, "claim_families": ["subdomain"], "notes": "a resolved subdomain becomes a FACT only via a SERVICE_REACHABILITY re-drive per host; bare enumeration is a LEAD."},
-    {"name": "nuclei", "category": "active-assessment", "license": "MIT", "install": "go", "privileges": "none", "network_effect": "intrusive", "oracle_family": "", "fact_capable": false, "claim_families": ["vuln-template-match"], "notes": "template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor — queues on live)."},
-    {"name": "gobuster", "category": "active-assessment", "license": "Apache-2.0", "install": "go", "privileges": "none", "network_effect": "scans-target", "oracle_family": "", "fact_capable": false, "claim_families": ["content-discovery"], "notes": "existence+anon-reach is FACT-capable via a future ACTIVE_EXPOSURE re-drive; LEAD-only today."},
-    {"name": "trivy", "category": "local-analysis", "license": "Apache-2.0", "install": "go", "privileges": "none", "network_effect": "connects-out", "oracle_family": "VERSION_RANGE", "fact_capable": false, "claim_families": ["dependency-cve", "container-cve", "iac-misconfig"], "notes": "FACT-capable once the Phase-1 VERSION_RANGE re-derive lands (VIGIL parses the inventory itself; trivy is the proposer). Not yet conformance-passed."},
-    {"name": "grype", "category": "local-analysis", "license": "Apache-2.0", "install": "go", "privileges": "none", "network_effect": "connects-out", "oracle_family": "VERSION_RANGE", "fact_capable": false, "claim_families": ["dependency-cve"], "notes": "same as trivy — Phase-1 VERSION_RANGE re-derive."},
-    {"name": "checkov", "category": "local-analysis", "license": "Apache-2.0", "install": "pip", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "claim_families": ["iac-misconfig"], "notes": "near-zero-FP subset maps to CLOUD_POSTURE parse-proof (Phase-1 posture family); opinionated checks stay LEADs."},
-    {"name": "prowler", "category": "cloud-analysis", "license": "Apache-2.0", "install": "pip", "privileges": "none", "network_effect": "connects-out", "oracle_family": "", "fact_capable": false, "claim_families": ["cloud-misconfig"], "notes": "subset maps to CLOUD_POSTURE/POLICY_PATH (Phase-1); LEAD-only today."},
-    {"name": "kube-bench", "category": "local-analysis", "license": "Apache-2.0", "install": "go", "privileges": "sometimes", "network_effect": "none", "oracle_family": "", "fact_capable": false, "claim_families": ["k8s-posture"], "notes": "maps to K8S_POSTURE over a retained control (Phase-1); LEAD-only today."},
-    {"name": "gdb", "category": "local-analysis", "license": "GPL-3.0", "install": "apt", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "claim_families": ["binary-analysis"], "notes": "local RE; no fact-minting claim class."},
-
-    {"name": "sqlmap", "category": "exploitation", "license": "GPL-2.0", "install": "apt", "privileges": "none", "network_effect": "sends-exploit", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — SQLi exploitation/DB dump. VIGIL owns SQLi confirmation via its own gated payload re-drive + oracle, never sqlmap."},
-    {"name": "xsser", "category": "exploitation", "license": "GPL-3.0", "install": "apt", "privileges": "none", "network_effect": "sends-exploit", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — XSS exploitation."},
-    {"name": "metasploit", "category": "exploitation", "license": "BSD-3", "install": "apt", "privileges": "sometimes", "network_effect": "sends-exploit", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — exploit + payload framework."},
-    {"name": "pacu", "category": "exploitation", "license": "BSD-3", "install": "pip", "privileges": "none", "network_effect": "sends-exploit", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — AWS exploitation."},
-    {"name": "pwntools", "category": "exploitation", "license": "MIT", "install": "pip", "privileges": "none", "network_effect": "sends-exploit", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — exploit-dev; also does not install offline."},
-    {"name": "angr", "category": "exploitation", "license": "BSD-2", "install": "pip", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — symbolic auto-exploit; does not install offline."},
-    {"name": "ropgadget", "category": "exploitation", "license": "BSD-3", "install": "pip", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — ROP gadget finder."},
-    {"name": "ropper", "category": "exploitation", "license": "GPL-2.0", "install": "pip", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — ROP gadget finder."},
-    {"name": "one-gadget", "category": "exploitation", "license": "MIT", "install": "gem", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — one-shot RCE gadget finder."},
-    {"name": "libc-database", "category": "exploitation", "license": "MIT", "install": "git", "privileges": "none", "network_effect": "connects-out", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — libc offset lookup for exploits."},
-    {"name": "pwninit", "category": "exploitation", "license": "MIT", "install": "cargo", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — CTF exploit-env setup."},
-    {"name": "hashpump", "category": "exploitation", "license": "unknown", "install": "git", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — hash length-extension attack."},
-    {"name": "hydra", "category": "credential-access", "license": "AGPL-3.0", "install": "apt", "privileges": "none", "network_effect": "intrusive", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — online brute-force."},
-    {"name": "netexec", "category": "credential-access", "license": "BSD-2", "install": "pip", "privileges": "none", "network_effect": "intrusive", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — network credential spray + post-ex."},
-    {"name": "responder", "category": "credential-access", "license": "GPL-3.0", "install": "apt", "privileges": "root", "network_effect": "intrusive", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED — LLMNR/NBT-NS poisoning; also LAN-destructive."},
-    {"name": "john", "category": "credential-access", "license": "GPL-2.0", "install": "apt", "privileges": "none", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED (exceptional authorization only) — offline password cracker; handles credential material."},
-    {"name": "hashcat", "category": "credential-access", "license": "MIT", "install": "apt", "privileges": "sometimes", "network_effect": "none", "oracle_family": "", "fact_capable": false, "excluded": true, "notes": "EXCLUDED (exceptional authorization only) — GPU offline cracker."}
+    {
+      "name": "nmap",
+      "category": "active-assessment",
+      "license": "NPSL",
+      "install": "apt",
+      "privileges": "sometimes",
+      "network_effect": "scans-target",
+      "oracle_family": "SERVICE_REACHABILITY",
+      "fact_capable": true,
+      "claim_families": [
+        "network-reachability",
+        "service-identity"
+      ],
+      "notes": "runner re-drives its own gated TCP handshake; service_reachable FACT. NPSL restricts commercial redistribution."
+    },
+    {
+      "name": "sslscan",
+      "category": "recon",
+      "license": "GPL-3.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "TLS_WEAKNESS",
+      "fact_capable": true,
+      "claim_families": [
+        "tls-config",
+        "cert-posture"
+      ],
+      "notes": "runner re-drives its own gated TLS handshake; weak_tls + weak_crypto_artifact FACTs. weak_tls is scoped to what a modern client still negotiates (honest)."
+    },
+    {
+      "name": "httpx",
+      "category": "recon",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "http-exposure"
+      ],
+      "notes": "LEAD-only until a runner-owned gated HTTP-fetch capture + ACHIEVED_STATE predicate re-drive exists (Phase-1 wave #3)."
+    },
+    {
+      "name": "katana",
+      "category": "recon",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "url-discovery"
+      ],
+      "notes": "content/URL discovery is a hypothesis feeder; LEAD-only."
+    },
+    {
+      "name": "subfinder",
+      "category": "recon",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "subdomain"
+      ],
+      "notes": "a resolved subdomain becomes a FACT only via a SERVICE_REACHABILITY re-drive per host; bare enumeration is a LEAD."
+    },
+    {
+      "name": "nuclei",
+      "category": "active-assessment",
+      "license": "MIT",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "intrusive",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "vuln-template-match"
+      ],
+      "notes": "template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor \u2014 queues on live)."
+    },
+    {
+      "name": "gobuster",
+      "category": "active-assessment",
+      "license": "Apache-2.0",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "content-discovery"
+      ],
+      "notes": "existence+anon-reach is FACT-capable via a future ACTIVE_EXPOSURE re-drive; LEAD-only today."
+    },
+    {
+      "name": "trivy",
+      "category": "local-analysis",
+      "license": "Apache-2.0",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "VERSION_RANGE",
+      "fact_capable": false,
+      "claim_families": [
+        "dependency-cve",
+        "container-cve",
+        "iac-misconfig"
+      ],
+      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT \u2014 the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
+    },
+    {
+      "name": "grype",
+      "category": "local-analysis",
+      "license": "Apache-2.0",
+      "install": "go",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "VERSION_RANGE",
+      "fact_capable": false,
+      "claim_families": [
+        "dependency-cve"
+      ],
+      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT \u2014 the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
+    },
+    {
+      "name": "checkov",
+      "category": "local-analysis",
+      "license": "Apache-2.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "iac-misconfig"
+      ],
+      "notes": "near-zero-FP subset maps to CLOUD_POSTURE parse-proof (Phase-1 posture family); opinionated checks stay LEADs."
+    },
+    {
+      "name": "prowler",
+      "category": "cloud-analysis",
+      "license": "Apache-2.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "cloud-misconfig"
+      ],
+      "notes": "subset maps to CLOUD_POSTURE/POLICY_PATH (Phase-1); LEAD-only today."
+    },
+    {
+      "name": "kube-bench",
+      "category": "local-analysis",
+      "license": "Apache-2.0",
+      "install": "go",
+      "privileges": "sometimes",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "k8s-posture"
+      ],
+      "notes": "maps to K8S_POSTURE over a retained control (Phase-1); LEAD-only today."
+    },
+    {
+      "name": "gdb",
+      "category": "local-analysis",
+      "license": "GPL-3.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "binary-analysis"
+      ],
+      "notes": "local RE; no fact-minting claim class."
+    },
+    {
+      "name": "sqlmap",
+      "category": "exploitation",
+      "license": "GPL-2.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "sends-exploit",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 SQLi exploitation/DB dump. VIGIL owns SQLi confirmation via its own gated payload re-drive + oracle, never sqlmap."
+    },
+    {
+      "name": "xsser",
+      "category": "exploitation",
+      "license": "GPL-3.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "sends-exploit",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 XSS exploitation."
+    },
+    {
+      "name": "metasploit",
+      "category": "exploitation",
+      "license": "BSD-3",
+      "install": "apt",
+      "privileges": "sometimes",
+      "network_effect": "sends-exploit",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 exploit + payload framework."
+    },
+    {
+      "name": "pacu",
+      "category": "exploitation",
+      "license": "BSD-3",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "sends-exploit",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 AWS exploitation."
+    },
+    {
+      "name": "pwntools",
+      "category": "exploitation",
+      "license": "MIT",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "sends-exploit",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 exploit-dev; also does not install offline."
+    },
+    {
+      "name": "angr",
+      "category": "exploitation",
+      "license": "BSD-2",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 symbolic auto-exploit; does not install offline."
+    },
+    {
+      "name": "ropgadget",
+      "category": "exploitation",
+      "license": "BSD-3",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 ROP gadget finder."
+    },
+    {
+      "name": "ropper",
+      "category": "exploitation",
+      "license": "GPL-2.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 ROP gadget finder."
+    },
+    {
+      "name": "one-gadget",
+      "category": "exploitation",
+      "license": "MIT",
+      "install": "gem",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 one-shot RCE gadget finder."
+    },
+    {
+      "name": "libc-database",
+      "category": "exploitation",
+      "license": "MIT",
+      "install": "git",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 libc offset lookup for exploits."
+    },
+    {
+      "name": "pwninit",
+      "category": "exploitation",
+      "license": "MIT",
+      "install": "cargo",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 CTF exploit-env setup."
+    },
+    {
+      "name": "hashpump",
+      "category": "exploitation",
+      "license": "unknown",
+      "install": "git",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 hash length-extension attack."
+    },
+    {
+      "name": "hydra",
+      "category": "credential-access",
+      "license": "AGPL-3.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "intrusive",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 online brute-force."
+    },
+    {
+      "name": "netexec",
+      "category": "credential-access",
+      "license": "BSD-2",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "intrusive",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 network credential spray + post-ex."
+    },
+    {
+      "name": "responder",
+      "category": "credential-access",
+      "license": "GPL-3.0",
+      "install": "apt",
+      "privileges": "root",
+      "network_effect": "intrusive",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED \u2014 LLMNR/NBT-NS poisoning; also LAN-destructive."
+    },
+    {
+      "name": "john",
+      "category": "credential-access",
+      "license": "GPL-2.0",
+      "install": "apt",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED (exceptional authorization only) \u2014 offline password cracker; handles credential material."
+    },
+    {
+      "name": "hashcat",
+      "category": "credential-access",
+      "license": "MIT",
+      "install": "apt",
+      "privileges": "sometimes",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "excluded": true,
+      "notes": "EXCLUDED (exceptional authorization only) \u2014 GPU offline cracker."
+    }
   ]
 }
