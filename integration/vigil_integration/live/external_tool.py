@@ -218,9 +218,14 @@ class DockerTopologyBackend:
 
     @staticmethod
     def _is_digest_pinned(image: str) -> bool:
-        # a digest-pinned image is <name>@sha256:<64 hex> — a tag (":latest") is mutable and NOT pinned.
-        _, _, digest = image.partition("@")
-        return digest.startswith("sha256:") and len(digest) == len("sha256:") + 64
+        # a digest-pinned image is <name>@sha256:<64 LOWERCASE-HEX> — a tag (":latest") is mutable and NOT
+        # pinned. Validate the hex explicitly (rpartition on the LAST '@' so a<@sha256:...>@sha256:<good>
+        # can't ride a leading junk segment); non-hex/uppercase/wrong-length is NOT pinned (fail-closed).
+        _, sep, digest = image.rpartition("@")
+        if not sep or not digest.startswith("sha256:"):
+            return False
+        hexpart = digest[len("sha256:"):]
+        return len(hexpart) == 64 and all(c in "0123456789abcdef" for c in hexpart)
 
     def _network_exists(self, docker: str) -> bool:
         try:

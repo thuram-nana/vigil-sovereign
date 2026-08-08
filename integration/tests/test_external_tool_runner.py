@@ -330,7 +330,9 @@ def test_docker_container_topology_live_run_is_deferred_when_absent() -> None:
     """The docker-container topology + LLM-red-team tools (garak/PyRIT/promptfoo) live-fire is the R4
     residual. This asserts the honest DEFERRAL: without the built sandbox network + a tool image, the
     backend is unavailable and the runner refuses to run un-gated — it does NOT fabricate a FACT."""
-    b = DockerTopologyBackend(image="vigil-garak:latest")  # an image that does not exist here
+    # a DIGEST-PINNED garak image (absent locally) so available() reaches the no-daemon/no-network/no-image
+    # path this test is about — not the pin gate.
+    b = DockerTopologyBackend(image="vigil-garak@sha256:" + "d" * 64)
     ok, why = b.available()
     if ok:  # pragma: no cover - only if an operator has actually stood the topology up
         pytest.skip("docker topology + image present — live container path is exercised out-of-band")
@@ -596,6 +598,14 @@ def test_docker_refuses_an_unpinned_image_by_default() -> None:
     ok3, why3 = DockerTopologyBackend(image="dev:latest", docker_bin="/nonexistent/docker",
                                       require_digest_pin=False).available()
     assert ok3 is False and "not digest-pinned" not in why3
+    # a MALFORMED "digest" is NOT pinned (non-hex / uppercase / wrong length / leading-junk@) — fail-closed
+    for bad in ("x@sha256:" + "g" * 64, "x@sha256:" + "A" * 64, "x@sha256:" + "a" * 63,
+                "x@sha256:" + "a" * 65, "x@sha256:" + "a" * 63 + " ", "x:latest",
+                "a@sha256:" + "a" * 64 + "@sha256:zz"):
+        assert DockerTopologyBackend._is_digest_pinned(bad) is False, f"wrongly pinned: {bad!r}"
+    # a genuine lowercase-hex digest IS pinned (incl. a leading junk@ segment, via rpartition on last @)
+    assert DockerTopologyBackend._is_digest_pinned("x@sha256:" + "0a" * 32) is True
+    assert DockerTopologyBackend._is_digest_pinned("junk@x@sha256:" + "0a" * 32) is True
 
 
 def test_local_backend_refused_against_a_non_loopback_target(tmp_path: Path) -> None:
