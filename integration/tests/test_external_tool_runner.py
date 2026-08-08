@@ -361,29 +361,26 @@ class _FakeTLSBackend:
 
 
 def _weakcrypto_selfsigned_cert():
-    """A self-signed X.509 cert with an UNDERSIZED 1024-bit RSA key (below the 2048-bit floor) + its
-    key (PEM). weak_crypto_artifact fires on the short key — a clean, offline-re-verifiable TLS FACT. (An
-    undersized key rather than a SHA-1 signature: modern `cryptography` refuses to SIGN with SHA-1; the
-    oracle fires on either — broken hash OR undersized key.)"""
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-    import datetime as _dt
+    """A self-signed X.509 cert with a 2048-bit RSA key signed with the BROKEN SHA-1 hash + its key (PEM).
+    weak_crypto_artifact fires on the broken sig hash. We use SHA-1 (not a short key) so a DEFAULT TLS
+    client can complete the handshake: on modern OpenSSL (CI security level 2) a <2048-bit key is rejected
+    at handshake (EE_KEY_TOO_SMALL) before the cert can be retrieved, whereas a 2048-bit key handshakes and
+    — under the capture's CERT_NONE — its SHA-1 signature is not verified but IS retrieved for the oracle to
+    judge. Generated via the ``openssl`` CLI because modern ``cryptography`` refuses to SIGN with SHA-1;
+    skips (never fakes) if openssl is absent or refuses SHA-1."""
+    import subprocess
+    import tempfile
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=1024)  # undersized (< 2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "vigil-weakcrypto-test.local")])
-    # fixed, past validity window (deterministic-ish; validity is not what the oracle judges)
-    nb = _dt.datetime(2024, 1, 1, tzinfo=_dt.timezone.utc)
-    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
-            .public_key(key.public_key()).serial_number(1)
-            .not_valid_before(nb).not_valid_after(nb + _dt.timedelta(days=3650))
-            .sign(key, hashes.SHA256()))  # modern signature — the WEAKNESS is the 1024-bit key
-    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-    key_pem = key.private_bytes(serialization.Encoding.PEM,
-                                serialization.PrivateFormat.TraditionalOpenSSL,
-                                serialization.NoEncryption())
-    return cert_pem, key_pem
+    d = tempfile.mkdtemp()
+    cert_p, key_p = Path(d) / "c.pem", Path(d) / "k.pem"
+    proc = subprocess.run(
+        ["openssl", "req", "-x509", "-sha1", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key_p), "-out", str(cert_p), "-days", "3650",
+         "-subj", "/CN=vigil-weakhash-test.local"],
+        capture_output=True, text=True)
+    if proc.returncode != 0 or not cert_p.is_file():
+        pytest.skip(f"openssl could not mint a SHA-1 cert here (rc={proc.returncode}): {proc.stderr[:200]}")
+    return cert_p.read_bytes(), key_p.read_bytes()
 
 
 class _TLSServer:
@@ -449,7 +446,7 @@ def test_nmap_spec_uses_the_legacy_reachability_redrive():
     assert nmap_service_scan(ports="80").redrives == ()
 
 
-def test_loopback_tls_broken_cert_mints_a_weak_crypto_fact(tmp_path: Path, monkeypatch):
+def test_loopback_tls_broken_hash_cert_mints_a_weak_crypto_fact(tmp_path: Path, monkeypatch):
     """THE slice-4 live proof: a real loopback TLS server presenting a SHA-1-signed cert. The runner
     negotiates its OWN gated handshake, retains the presented cert, and the weak_crypto_artifact oracle
     fires → a signed FACT that survives CRUCIBLE's verifier end-to-end. No sslscan binary needed — the
