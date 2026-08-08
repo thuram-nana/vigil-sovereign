@@ -56,6 +56,14 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return subprocess.run(cmd).returncode
 
 
+def _cmd_endpoint(args: argparse.Namespace) -> int:
+    from .endpoint import run_posture_endpoint_forever
+    print(f"serving posture bundle {args.bundle} read-only at http://{args.host}:{args.port}/posture "
+          f"(GET-only; loopback/tunnel-bound). Ctrl-C to stop.")
+    run_posture_endpoint_forever(args.host, args.port, args.bundle)
+    return 0
+
+
 def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8").strip() if p.is_file() else ""
 
@@ -80,6 +88,13 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--posture-engagement", default="", help="override the bundle's engagement")
     v.add_argument("--posture-now", type=int, default=None, help="epoch time to check not_after (default: now)")
     v.set_defaults(fn=_cmd_verify)
+
+    e = sub.add_parser("endpoint", help="serve the latest signed bundle read-only (loopback/tunnel only) so "
+                                        "a counterparty can poll + verify it offline")
+    e.add_argument("--bundle", required=True, help="the bundle directory to serve")
+    e.add_argument("--host", default="127.0.0.1")
+    e.add_argument("--port", type=int, default=8787)
+    e.set_defaults(fn=_cmd_endpoint)
 
     args = ap.parse_args(argv)
     return int(args.fn(args))
