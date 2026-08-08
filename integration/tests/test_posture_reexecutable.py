@@ -1,17 +1,23 @@
 """SLICE A — the RE-EXECUTABLE posture tier (Proof-of-Posture).
 
 The binding tier proves "trust this signed CLOSED verdict, offline". The re-executable tier is stronger:
-the standalone VIGIL-free verifier RE-RUNS the deterministic oracle over the probe's own retained values
-and re-derives the NEGATIVE itself — producer-INDEPENDENT. These tests prove:
+the standalone VIGIL-free verifier RE-DERIVES the verdict by re-running the deterministic oracle over the
+probe's own retained values — confirming the verdict is the correct function of that evidence WITHOUT
+trusting the producer's asserted verdict. HONEST BOUND: the values are producer-supplied, so this proves
+the verdict↔evidence binding, NOT that the evidence is live (trusting the negative reflects reality still
+needs a live re-run). These tests prove:
 
   1. byte-PARITY: the stdlib predicate kernel (in posture.certificate AND in the standalone verify_vf)
-     agrees with the REAL framework oracle (verify.oracles.predicate_oracle) on `fired`, over many cases;
+     agrees with the REAL framework oracle (verify.oracles.predicate_oracle) on `fired`, over many cases,
+     INCLUDING ill-typed children (eager eval + exception→non-conclusive, faithful to the oracle);
   2. LIVE: a retain_evidence scan of the benchmark mints RE-EXECUTABLE CLOSED claims (open_redirect),
-     and both the in-tree and the standalone verifier accept them, re-executing producer-independently;
+     and both the in-tree and the standalone verifier accept them, re-deriving the verdict from evidence;
   3. FORGE-A-FALSE-NEGATIVE: tampering a CLOSED probe's retained values so the predicate ACTUALLY FIRES
-     is caught by re-execution (in-tree AND standalone) — NOT SOUND;
+     (or becomes non-conclusive) is caught by re-execution (in-tree AND standalone) — NOT SOUND;
   4. BYTE-IDENTITY: with retention OFF (the default), the coverage + posture certificates are byte-for-
-     byte identical to before (no evidence keys, every claim binding) — the make-gate invariant.
+     byte identical to before (no evidence keys, every claim binding) — the make-gate invariant;
+  5. RED-PEN FIXES: malformed predicates fail CLOSED (not crash); the residual/reason carry the honest
+     bound (no 'producer-independent' overclaim).
 """
 from __future__ import annotations
 
@@ -62,6 +68,10 @@ _PREDICATE_CASES = [
     ({"any": [{"all": [{"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
                        {"eq": [{"var": "location_host"}, {"var": "canary_host"}]}]}]},
      {"status": 200, "location_host": "", "canary_host": "c.test"}),
+    # ill-typed child under any/: the real oracle EAGERLY evaluates + catches TypeError -> fired=False;
+    # the faithful kernel must agree (this is the LOW divergence the red-pen found under short-circuit).
+    ({"any": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}),
+    ({"all": [{"eq": [1, 1]}, {"gt": ["x", 1]}]}, {}),
 ]
 
 
@@ -76,13 +86,15 @@ def _load_verify_vf():
 
 @pytest.mark.parametrize("pred,obs", _PREDICATE_CASES)
 def test_kernel_matches_real_oracle(pred, obs):
-    """The stdlib kernel (both copies) must equal the REAL oracle's `fired` on every case."""
+    """The stdlib kernel (both copies) must equal the REAL oracle's `fired` on every case — via the
+    faithful `_reexec_fired_conclusive` wrapper, which (like predicate_oracle) EAGERLY evaluates and turns
+    a ValueError/TypeError into a non-conclusive non-fire, so ill-typed children agree too."""
     from framework.v2.verify import oracles
 
     real = oracles.predicate_oracle(obs, pred).fired
-    assert C._reexec_eval_predicate(pred, dict(obs)) is real, (pred, obs)
+    assert C._reexec_fired_conclusive(pred, dict(obs))[0] is real, (pred, obs)
     vf = _load_verify_vf()
-    assert vf._reexec_eval_predicate(pred, dict(obs)) is real, (pred, obs)
+    assert vf._reexec_fired_conclusive(pred, dict(obs))[0] is real, (pred, obs)
 
 
 def test_kernel_faithful_over_real_scan_contexts():
@@ -99,7 +111,7 @@ def test_kernel_faithful_over_real_scan_contexts():
             continue
         seen += 1
         real = oracles.predicate_oracle(ev["observed_evidence"], ev["predicate"]).fired
-        assert C._reexec_eval_predicate(ev["predicate"], dict(ev["observed_evidence"])) is real
+        assert C._reexec_fired_conclusive(ev["predicate"], dict(ev["observed_evidence"]))[0] is real
     assert seen > 0, "the scan produced no re-executable evidence to check parity over"
 
 
@@ -216,3 +228,69 @@ def test_retain_on_adds_only_reexec_evidence_keys():
     assert with_ev, "retention on should retain some evidence"
     for p in with_ev:
         assert set(p["evidence"].keys()) == {"predicate", "observed_evidence"}
+
+
+# ---- 5. red-pen fixes: malformed fails CLOSED; honest bound (no producer-independent overclaim) --------
+
+def _reexec_cert_with_probe(evidence: dict, verdict: str = "clean"):
+    """A minimal coverage cert carrying one predicate-oracle probe with the given evidence + verdict."""
+    return {"coverage": {"probes": [{
+        "surface": "http://t/", "insertion_point": "query_value:0", "param": "url",
+        "check_id": "open-redirect", "class": "open_redirect", "verdict": verdict,
+        "oracle_kinds_run": ["achieved_state"], "evidence": evidence,
+    }]}}
+
+
+def test_malformed_predicate_fails_closed_not_crash():
+    """MEDIUM fix: a re-executable probe whose predicate is a dict but ill-formed ({"eq": []} -> IndexError
+    upstream) must FAIL-CLOSED — the in-tree re-execution raises PostureError (not IndexError), and the
+    standalone _reexecute_posture returns (False, ...) (not an uncaught traceback)."""
+    cert = _reexec_cert_with_probe({"predicate": {"eq": []}, "observed_evidence": {}}, verdict="clean")
+    with pytest.raises(C.PostureError):
+        C.reexecute_posture_claims(cert)
+    vf = _load_verify_vf()
+    ok, reason = vf._reexecute_posture(cert["coverage"])
+    assert ok is False and "REFUTED a CLOSED" in reason
+
+
+def test_non_conclusive_clean_is_refused():
+    """A probe recorded `clean` whose retained values make the re-derivation NON-CONCLUSIVE (an ill-typed
+    child) does not support a conclusive-clean and is refused (fail-closed), in-tree and standalone."""
+    cert = _reexec_cert_with_probe(
+        {"predicate": {"any": [{"gt": ["x", 1]}]}, "observed_evidence": {}}, verdict="clean")
+    with pytest.raises(C.PostureError):
+        C.reexecute_posture_claims(cert)
+    vf = _load_verify_vf()
+    ok, _ = vf._reexecute_posture(cert["coverage"])
+    assert ok is False
+
+
+def test_honest_bound_no_producer_independent_overclaim(tmp_path):
+    """BLOCK fix (honesty): re-execution proves the verdict is the correct function of the RETAINED values
+    — it does NOT claim producer-INDEPENDENCE of the observation. The signed residual and the standalone
+    SOUND reason must state the values are producer-supplied and a live re-run is still required, and must
+    NOT contain the old overclaim ('producer-independent' / 'trusting no producer')."""
+    # the residual carried in the signed bytes
+    residual = C.POSTURE_RESIDUAL.lower()
+    assert "producer-supplied" in residual
+    assert "live" in residual
+    assert "producer-independent" not in residual        # no overclaim (the honest phrase avoids it too)
+    assert "trusting no producer" not in residual
+
+    # the standalone SOUND reason string over a real re-executable cert
+    owner, gov = generate_keypair(), generate_keypair()
+    res = attest_loopback_benchmark(tmp_path / "out", owner_key=owner, gov_key=gov,
+                                    engagement="honesty", retain_evidence=True)
+    r = subprocess.run(_bundle_verify_cmd_eng(res, "honesty"), capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = (r.stdout + r.stderr).lower()
+    assert "re-executable" in out                     # the tier is still surfaced
+    assert "producer-independent" not in out          # but not the overclaim
+    assert ("producer-supplied" in out) or ("live re-run" in out)
+
+
+def _bundle_verify_cmd_eng(res: dict, engagement: str):
+    d = Path(res["bundle_dir"])
+    return [sys.executable, str(d / "verify_offline.py"), "verify", "--bundle", str(d / "bundle.json"),
+            "--posture-fingerprint", res["fingerprint"], "--posture-owner-pubkey", res["owner_pubkey"],
+            "--posture-engagement", engagement, "--posture-now", "1000"]

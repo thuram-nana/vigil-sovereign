@@ -191,7 +191,13 @@ def main(argv: list[str]) -> int:
         # formats intentionally omit the certificate, so this is the re-verifiable
         # artifact a CI/console re-check consumes.
         from pathlib import Path as _P
-        _P(args.reverifiable_out).write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        # Exclude the opt-in re-executable-tier `evidence` field from the per-probe rows: it belongs in the
+        # coverage/posture certificate (where it is emitted only when present), not this dump — keeping the
+        # reverifiable artifact byte-identical to before the posture re-executable tier (default None would
+        # otherwise serialize as `"evidence":null`).
+        _P(args.reverifiable_out).write_text(
+            report.model_dump_json(indent=2, exclude={"exercised_probes": {"__all__": {"evidence"}}}),
+            encoding="utf-8")
 
     if args.format != "text":
         from .report import render
