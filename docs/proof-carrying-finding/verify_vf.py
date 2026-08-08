@@ -76,6 +76,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -979,6 +980,98 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
                   f"(re-firing the oracle needs VIGIL — binding tier)")
 
 
+# ---------------------------------------------------------------------------
+# 9. Authority-Envelope certificate (the accountability twin) — standalone, VIGIL-free.
+#    Re-checks: the m-of-n governance signature + the out-of-band pin; the owner-signed envelope; and
+#    re-derives CONFORMANCE (every EXECUTED action inside the envelope) — a forged "conformant" verdict,
+#    or an executed action that left the envelope, is refused. Mirrors posture.authority byte-for-byte.
+# ---------------------------------------------------------------------------
+_AUTH_ENVELOPE_DOMAIN = b"vigil-authority-envelope-v1\x00"
+
+
+def _auth_envelope_core(env: dict) -> dict:
+    return {
+        "schema_version": env.get("schema_version", 1),
+        "owner_pubkey": env.get("owner_pubkey"),
+        "engagement": env.get("engagement"),
+        "scope_hosts": sorted(str(h) for h in (env.get("scope_hosts") or [])),
+        "action_allowlist": sorted(str(a) for a in (env.get("action_allowlist") or [])),
+        "not_before": int(env.get("not_before", 0)),
+        "not_after": int(env.get("not_after", 0)),
+    }
+
+
+def _verify_auth_envelope(env: dict, owner_pubkey: str, engagement: str) -> tuple[bool, str]:
+    if not isinstance(env, dict) or env.get("owner_pubkey") != owner_pubkey:
+        return False, "authority envelope is not by the pinned owner key"
+    if env.get("engagement") != engagement:
+        return False, f"envelope engagement {env.get('engagement')!r} != required {engagement!r}"
+    sig = env.get("sig")
+    if not sig or not verify_one(str(owner_pubkey), _AUTH_ENVELOPE_DOMAIN + canonical_json(_auth_envelope_core(env)), str(sig)):
+        return False, "authority envelope signature does not verify against the owner key"
+    return True, "envelope OK"
+
+
+def _auth_host(target: str) -> str:
+    return urlsplit(str(target)).hostname or (str(target) or "")
+
+
+def _derive_conformance(env: dict, actions: list) -> dict:
+    scope = set(env.get("scope_hosts") or [])
+    allow = set(env.get("action_allowlist") or [])
+    nb, na = int(env.get("not_before", 0)), int(env.get("not_after", 0))
+    violations, n_exec = [], 0
+    for a in actions:
+        executed = bool(a.get("executed")) or str(a.get("gate_outcome", "")).lower() in ("allow", "auto", "executed")
+        if not executed:
+            continue
+        n_exec += 1
+        reasons = []
+        if _auth_host(a.get("target", "")) not in scope:
+            reasons.append("target out of scope")
+        if str(a.get("action_kind", "")) not in allow:
+            reasons.append("action kind not permitted")
+        at = int(a.get("at", 0))
+        if na and not (nb <= at <= na):
+            reasons.append("outside the authority window")
+        if reasons:
+            violations.append({"seq": a.get("seq"), "action_kind": a.get("action_kind"),
+                               "target": a.get("target"), "reasons": reasons})
+    return {"conformant": not violations, "violations": violations,
+            "n_actions": len(actions), "n_executed": n_exec}
+
+
+def verify_authority(authority: dict, *, pin: str, owner_pubkey: str, engagement: str) -> tuple[bool, str]:
+    """Standalone-verify an Authority-Envelope certificate. ``authority`` = {"certificate": {...},
+    "signature": {...}}. Fail-closed: pin, m-of-n signature, owner envelope, re-derived conformance."""
+    cert = authority.get("certificate") or {}
+    sig_env = authority.get("signature") or {}
+    tr = sig_env.get("trust_root") or {}
+    fp = _authorizer_fingerprint(tr.get("authorizers") or [])
+    pin_s = (pin or "").strip()
+    if not pin_s:
+        return False, f"UNPINNED — supply the out-of-band authority fingerprint ({fp})"
+    want = pin_s if pin_s.startswith("sha256:") else ("sha256:" + pin_s)
+    if want.lower() != fp.lower():
+        return False, f"authority trust-root pin MISMATCH — expected {want}, got {fp}"
+    msg = canonical_json(cert)
+    if sig_env.get("scorecard_digest") is not None and sig_env.get("scorecard_digest") != "sha256:" + sha256_hex(msg):
+        return False, "authority certificate digest does not match the canonical bytes"
+    ok, _valid, reason = verify_threshold(msg, sig_env.get("signatures") or [], tr)
+    if not ok:
+        return False, f"authority signature: {reason}"
+    eok, ereason = _verify_auth_envelope(cert.get("envelope") or {}, owner_pubkey, engagement)
+    if not eok:
+        return False, f"authority envelope: {ereason}"
+    rederived = _derive_conformance(cert.get("envelope") or {}, cert.get("actions") or [])
+    if rederived != cert.get("conformance"):
+        return False, "conformance does not match the re-derivation from the recorded ledger"
+    if not rederived["conformant"]:
+        return False, f"NON-CONFORMANT: {len(rederived['violations'])} executed action(s) left the envelope"
+    return True, (f"SOUND: {rederived['n_executed']}/{rederived['n_actions']} executed action(s) all inside "
+                  f"the owner-signed authority envelope (conformance over the recorded ledger)")
+
+
 def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
                   trust_root: Optional[dict] = None, witness_trust_root: Optional[dict] = None,
                   pin: str = "", witness_pin: str = "",
@@ -986,7 +1079,9 @@ def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
                   tsa_cert_pin: Optional[str] = None,
                   notary_pin: str = "",
                   posture_pin: str = "", posture_owner_pubkey: str = "",
-                  posture_engagement: str = "", posture_now: Optional[int] = None) -> tuple[bool, list]:
+                  posture_engagement: str = "", posture_now: Optional[int] = None,
+                  authority_pin: str = "", authority_owner_pubkey: str = "",
+                  authority_engagement: str = "") -> tuple[bool, list]:
     """Verify every component present in ``bundle`` against the out-of-band-pinned trust material. Returns
     (sound, log_lines). ``sound`` is True iff at least one component is present and EVERY present component
     is SOUND. A component whose required trust material is missing is a NOT-SOUND (fail-closed)."""
@@ -1077,6 +1172,20 @@ def verify_bundle(bundle: dict, *, signer_pubkeys: Optional[dict] = None,
             log.append(f"  [{'OK ' if ok else 'BAD'}] posture: {reason}")
             results.append(ok)
 
+    # --- Authority-Envelope certificate (the accountability twin) ---
+    if "authority" in bundle:
+        if not authority_pin:
+            log.append("  [BAD] authority present but no --authority-fingerprint (out-of-band) — fail-closed")
+            results.append(False)
+        elif not authority_owner_pubkey or not authority_engagement:
+            log.append("  [BAD] authority present but --authority-owner-pubkey / --authority-engagement missing")
+            results.append(False)
+        else:
+            ok, reason = verify_authority(bundle["authority"] or {}, pin=authority_pin,
+                                          owner_pubkey=authority_owner_pubkey, engagement=authority_engagement)
+            log.append(f"  [{'OK ' if ok else 'BAD'}] authority: {reason}")
+            results.append(ok)
+
     sound = bool(results) and all(results)
     log.append(f"bundle {'SOUND' if sound else 'NOT SOUND'} "
                f"(standalone: signatures + binding + structure + chain + quorum; "
@@ -1099,10 +1208,10 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError) as e:
         print(f"[ERROR] {type(e).__name__}: {e}", file=sys.stderr)
         return 3
-    _known = {"prove_cert", "attestation", "witnessed", "channel_binding", "posture"}
+    _known = {"prove_cert", "attestation", "witnessed", "channel_binding", "posture", "authority"}
     if not isinstance(bundle, dict) or not (_known & set(bundle)):
-        print("[ERROR] bundle has none of prove_cert / attestation / witnessed / channel_binding / posture",
-              file=sys.stderr)
+        print("[ERROR] bundle has none of prove_cert / attestation / witnessed / channel_binding / "
+              "posture / authority", file=sys.stderr)
         return 3
     sound, log = verify_bundle(
         bundle, signer_pubkeys=signer_pubkeys, trust_root=trust_root,
@@ -1112,7 +1221,10 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         posture_pin=getattr(args, "posture_fingerprint", "") or "",
         posture_owner_pubkey=getattr(args, "posture_owner_pubkey", "") or "",
         posture_engagement=getattr(args, "posture_engagement", "") or "",
-        posture_now=getattr(args, "posture_now", None))
+        posture_now=getattr(args, "posture_now", None),
+        authority_pin=getattr(args, "authority_fingerprint", "") or "",
+        authority_owner_pubkey=getattr(args, "authority_owner_pubkey", "") or "",
+        authority_engagement=getattr(args, "authority_engagement", "") or "")
     for line in log:
         print(line)
     return 0 if sound else 2
@@ -1158,6 +1270,14 @@ def main(argv: list) -> int:
                    help="the engagement the IdentityAttestation must be for")
     v.add_argument("--posture-now", type=int, default=None, dest="posture_now",
                    help="the epoch time to check the IdentityAttestation's not_after against")
+    # --- Authority-Envelope certificate (the accountability twin) ---
+    v.add_argument("--authority-fingerprint", default="", dest="authority_fingerprint",
+                   help="REQUIRED for an `authority` bundle: the out-of-band pin on the certificate's "
+                        "authorizer set (fail-closed without it)")
+    v.add_argument("--authority-owner-pubkey", default="", dest="authority_owner_pubkey",
+                   help="the owner's Ed25519 public key (base64) that signed the authority envelope")
+    v.add_argument("--authority-engagement", default="", dest="authority_engagement",
+                   help="the engagement the authority envelope must be for")
     v.set_defaults(fn=_cmd_verify)
 
     args = p.parse_args(argv)
