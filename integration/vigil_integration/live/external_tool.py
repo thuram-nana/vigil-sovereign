@@ -70,6 +70,16 @@ def _gateway_modules():
 
 _DEFAULT_TIMEOUT = 120.0
 _OUTPUT_CAP = 2_000_000  # 2 MB per stream — a scanner can be chatty
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+
+def _is_loopback_host(target: str) -> bool:
+    """True iff ``target`` (a host or URL) resolves to the loopback name/IP literally — a conservative,
+    offline check (no DNS) used only to keep the unisolated LocalSubprocessBackend off external targets."""
+    from urllib.parse import urlsplit
+    t = (target or "").strip()
+    host = (urlsplit(t).hostname if "//" in t else t) or t
+    return host.strip("[]").lower() in _LOOPBACK_HOSTS
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +150,15 @@ class LocalSubprocessBackend:
     it in scope (the tool receives ONLY the already-authorised target). Used for the loopback-service
     proof: the docker/bwrap isolation backends unshare the net namespace and cannot reach a HOST
     loopback listener, so this is the backend that exercises the scope-gate → oracle → FACT path
-    against a loopback target the owner's charter authorises."""
+    against a loopback target the owner's charter authorises.
+
+    ``loopback_only`` (default True): this backend runs the tool UNISOLATED on the host, so the runner
+    refuses it against a NON-loopback target (crit 1) — an external scan must go through the network-
+    namespaced, resource-capped DockerTopologyBackend. Set False only for a deliberate host-run against a
+    non-loopback target the operator has isolated by other means."""
 
     name: str = "local"
+    loopback_only: bool = True
 
     def available(self) -> tuple[bool, str]:
         return True, "host subprocess"
@@ -173,17 +189,43 @@ class DockerTopologyBackend:
     network: str = "vigil_sandbox"
     docker_bin: Optional[str] = None
     name: str = "docker"
+    # Least-privilege resource limits (crit 1/11) — a hostile/runaway tool cannot exhaust the host or spawn
+    # a fork bomb, and writes nowhere but an ephemeral tmpfs. All overridable for a tool that needs more.
+    memory: str = "1g"                 # hard memory cap (== --memory-swap ⇒ no swap)
+    cpus: str = "1.0"                  # CPU quota
+    pids_limit: int = 256             # fork-bomb guard
+    read_only_rootfs: bool = True     # read-only container FS + a size-capped /tmp tmpfs
+    tmpfs_size: str = "64m"
+    run_user: str = "65534:65534"     # nobody:nogroup — never root inside the container
+    require_digest_pin: bool = True   # fail-closed: refuse an image that is not pinned by @sha256 digest
 
     def _docker(self) -> Optional[str]:
         return self.docker_bin or shutil.which("docker")
 
     def build_argv(self, tool_argv: Sequence[str]) -> list[str]:
         docker = self._docker() or "docker"
-        return [
+        argv = [
             docker, "run", "--rm", "--network", self.network,
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-            self.image, *list(tool_argv),
+            "--memory", self.memory, "--memory-swap", self.memory,
+            "--cpus", str(self.cpus), "--pids-limit", str(self.pids_limit),
+            "--user", self.run_user,
         ]
+        if self.read_only_rootfs:
+            argv += ["--read-only", "--tmpfs", f"/tmp:rw,size={self.tmpfs_size}"]
+        argv += [self.image, *list(tool_argv)]
+        return argv
+
+    @staticmethod
+    def _is_digest_pinned(image: str) -> bool:
+        # a digest-pinned image is <name>@sha256:<64 LOWERCASE-HEX> — a tag (":latest") is mutable and NOT
+        # pinned. Validate the hex explicitly (rpartition on the LAST '@' so a<@sha256:...>@sha256:<good>
+        # can't ride a leading junk segment); non-hex/uppercase/wrong-length is NOT pinned (fail-closed).
+        _, sep, digest = image.rpartition("@")
+        if not sep or not digest.startswith("sha256:"):
+            return False
+        hexpart = digest[len("sha256:"):]
+        return len(hexpart) == 64 and all(c in "0123456789abcdef" for c in hexpart)
 
     def _network_exists(self, docker: str) -> bool:
         try:
@@ -202,6 +244,11 @@ class DockerTopologyBackend:
             return False
 
     def available(self) -> tuple[bool, str]:
+        # crit-1 fail-closed: a mutable tag can be repointed at arbitrary bytes between provisioning and
+        # run — refuse to run an image that is not pinned by @sha256 digest (unless explicitly opted out).
+        if self.require_digest_pin and not self._is_digest_pinned(self.image):
+            return False, (f"image {self.image!r} is not digest-pinned (@sha256:...) — refusing "
+                           f"(set require_digest_pin=False only for a trusted local dev image)")
         docker = self._docker()
         if not docker:
             return False, "docker binary not found"
@@ -542,6 +589,17 @@ def run_external_tool(
         from .observation import refused_observation  # noqa: PLC0415
         return RunnerResult("refused", reason, spec.name, target,
                             observation=refused_observation(spec, target))
+
+    # crit-1 isolation floor: a loopback-only backend (LocalSubprocessBackend runs UNISOLATED on the host)
+    # must NOT be used against a NON-loopback target — an external scan goes through the network-namespaced,
+    # resource-capped DockerTopologyBackend. Refuse before any traffic.
+    if getattr(backend, "loopback_only", False) and not _is_loopback_host(target):
+        from .observation import refused_observation  # noqa: PLC0415
+        return RunnerResult(
+            "refused",
+            f"{backend.name} backend is loopback-only (unisolated host run); target {target!r} is not "
+            f"loopback — use the network-namespaced DockerTopologyBackend for an external target",
+            spec.name, target, observation=refused_observation(spec, target))
 
     ok, why = backend.available()
     if not ok:

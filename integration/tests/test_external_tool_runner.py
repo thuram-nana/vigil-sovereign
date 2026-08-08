@@ -309,7 +309,8 @@ def test_docker_backend_builds_a_pinned_internal_network_argv() -> None:
 
 
 def test_docker_backend_reports_unavailable_when_docker_is_absent() -> None:
-    b = DockerTopologyBackend(image="vigil-nmap:latest", docker_bin="/nonexistent/docker")
+    # a DIGEST-PINNED image so the pin check passes and we reach the docker-absent path (the test's intent)
+    b = DockerTopologyBackend(image="vigil-nmap@sha256:" + "c" * 64, docker_bin="/nonexistent/docker")
     ok, why = b.available()
     assert ok is False and "unreachable" in why.lower()
 
@@ -329,7 +330,9 @@ def test_docker_container_topology_live_run_is_deferred_when_absent() -> None:
     """The docker-container topology + LLM-red-team tools (garak/PyRIT/promptfoo) live-fire is the R4
     residual. This asserts the honest DEFERRAL: without the built sandbox network + a tool image, the
     backend is unavailable and the runner refuses to run un-gated — it does NOT fabricate a FACT."""
-    b = DockerTopologyBackend(image="vigil-garak:latest")  # an image that does not exist here
+    # a DIGEST-PINNED garak image (absent locally) so available() reaches the no-daemon/no-network/no-image
+    # path this test is about — not the pin gate.
+    b = DockerTopologyBackend(image="vigil-garak@sha256:" + "d" * 64)
     ok, why = b.available()
     if ok:  # pragma: no cover - only if an operator has actually stood the topology up
         pytest.skip("docker topology + image present — live container path is exercised out-of-band")
@@ -567,3 +570,53 @@ def test_run_attaches_a_canonical_observation(tmp_path: Path) -> None:
     assert ran.observation is not None and ran.observation.outcome_class == "ran"
     assert ran.observation.tool == "nmap" and ran.observation.raw_output_sha256.startswith("sha256:")
     assert ("127.0.0.1", 80, "tcp") in ran.observation.proposals
+
+
+# ===================================================================================================
+# 6. PHASE 0.4 — runner isolation + resource limits (crit 1/11): least-privilege docker argv, a
+#    fail-closed digest pin, and the loopback-only guard on the unisolated host backend.
+# ===================================================================================================
+def test_docker_argv_has_resource_limits_and_least_privilege() -> None:
+    argv = DockerTopologyBackend(image="x@sha256:" + "a" * 64, docker_bin="/usr/bin/docker").build_argv(["nmap"])
+    for flag, val in (("--memory", "1g"), ("--memory-swap", "1g"), ("--cpus", "1.0"),
+                      ("--pids-limit", "256"), ("--user", "65534:65534")):
+        assert flag in argv and argv[argv.index(flag) + 1] == val, f"{flag} missing/wrong"
+    assert "--read-only" in argv
+    assert "--tmpfs" in argv and argv[argv.index("--tmpfs") + 1].startswith("/tmp:rw,size=")
+    assert "--cap-drop" in argv and "no-new-privileges:true" in argv
+
+
+def test_docker_refuses_an_unpinned_image_by_default() -> None:
+    # fail-closed: a mutable :latest tag is refused BEFORE any docker call
+    ok, why = DockerTopologyBackend(image="vigil-nmap:latest", docker_bin="/nonexistent/docker").available()
+    assert ok is False and "not digest-pinned" in why
+    # a digest-pinned image passes the pin check (then fails only because docker is absent — a DIFFERENT,
+    # non-pin reason: the pin gate no longer applies)
+    ok2, why2 = DockerTopologyBackend(image="x@sha256:" + "b" * 64, docker_bin="/nonexistent/docker").available()
+    assert ok2 is False and "not digest-pinned" not in why2
+    # explicit opt-out lets an unpinned image past the pin check (still fails on absent docker)
+    ok3, why3 = DockerTopologyBackend(image="dev:latest", docker_bin="/nonexistent/docker",
+                                      require_digest_pin=False).available()
+    assert ok3 is False and "not digest-pinned" not in why3
+    # a MALFORMED "digest" is NOT pinned (non-hex / uppercase / wrong length / leading-junk@) — fail-closed
+    for bad in ("x@sha256:" + "g" * 64, "x@sha256:" + "A" * 64, "x@sha256:" + "a" * 63,
+                "x@sha256:" + "a" * 65, "x@sha256:" + "a" * 63 + " ", "x:latest",
+                "a@sha256:" + "a" * 64 + "@sha256:zz"):
+        assert DockerTopologyBackend._is_digest_pinned(bad) is False, f"wrongly pinned: {bad!r}"
+    # a genuine lowercase-hex digest IS pinned (incl. a leading junk@ segment, via rpartition on last @)
+    assert DockerTopologyBackend._is_digest_pinned("x@sha256:" + "0a" * 32) is True
+    assert DockerTopologyBackend._is_digest_pinned("junk@x@sha256:" + "0a" * 32) is True
+
+
+def test_local_backend_refused_against_a_non_loopback_target(tmp_path: Path) -> None:
+    """The unisolated host backend must NOT run against a non-loopback target — refused before any run."""
+    _charter(tmp_path, "10.1.2.3")
+    gate = ScopeGate(scope=StaticScopeSource(["10.1.2.3"]), loopback_allowed_if_scoped=True)
+    res = run_external_tool(nmap_service_scan(ports="80"), "10.1.2.3", scope_gate=gate,
+                            backend=LocalSubprocessBackend(), engagement_slug="alpha", signers=SIGNERS)
+    assert res.refused and "loopback-only" in res.reason
+    # opting out (loopback_only=False) removes THAT refusal (it then proceeds past the guard)
+    res2 = run_external_tool(nmap_service_scan(ports="80"), "10.1.2.3", scope_gate=gate,
+                             backend=LocalSubprocessBackend(loopback_only=False), engagement_slug="alpha",
+                             signers=SIGNERS)
+    assert "loopback-only" not in res2.reason
