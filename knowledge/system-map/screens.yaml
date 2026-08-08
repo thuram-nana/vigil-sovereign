@@ -142,8 +142,8 @@ screens:
     group: MANAGE
     owner: false
     plane: unified
-    description: The reasoning brain — intelligence, memory, priors, and the capability catalog.
-    synonyms: [brain, intelligence, reasoning, memory, catalog, capabilities]
+    description: The reasoning brain — the propose-only decision engine (an ordered attack chain of gated LEADs), intelligence, memory, priors, and the capability catalog.
+    synonyms: [brain, intelligence, reasoning, memory, catalog, capabilities, decision engine, attack chain, propose, hexstrike, agent body]
 
   - id: compliance
     label: Compliance
@@ -176,6 +176,14 @@ screens:
     plane: unified
     description: VIGIL's signed, offline-verifiable certificates rendered as certificates — trust root, out-of-band fingerprint pin, and a live offline PASS/FAIL verification.
     synonyms: [trust center, certificates, certs, signed certificate, trust root, fingerprint pin, offline verify, verify certificate, provable, recall baseline, accuracy baseline]
+
+  - id: posture
+    label: Proof of Posture
+    group: LEARN
+    owner: false
+    plane: unified
+    description: The Certificate of Non-Exploitability — a signed, coverage-bounded, offline-verifiable proof that, over the surface the scanner reached, an applicable oracle had a live channel and did not fire; shows CLOSED/OPEN/UNPROVEN claims per surface, the coverage denominator, the honest residual, the out-of-band fingerprint pin, and the exact offline-verify command.
+    synonyms: [proof of posture, posture, certificate of non-exploitability, non-exploitability, closed claims, coverage denominator, residual, provable absence, posture certificate, prove it is not vulnerable]
 
   - id: replay
     label: Replay Proof

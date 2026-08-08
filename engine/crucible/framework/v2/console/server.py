@@ -72,6 +72,8 @@ _EXACT_ROUTES = {
     "/api/telemetry": api.telemetry,            # G2: live assurance/metrics snapshot over the signed spine
     "/api/terminal/history": actions.terminal_history,   # T2: recent signed terminal.run records (read-only)
     "/api/certs": api.certs,                    # Trust Center: signed offline-verifiable certificates (metadata only)
+    "/api/posture": api.posture,                # Proof of Posture: signed Certificate(s) of Non-Exploitability (metadata only)
+    "/api/brain/decision": api.brain_decision,  # Brain: the propose-only decision engine + its live proposal (if any)
     "/api/governance": api.governance_data,     # Governance & Gate audit: READ-ONLY posture + m-of-n destruction quorum
 }
 
