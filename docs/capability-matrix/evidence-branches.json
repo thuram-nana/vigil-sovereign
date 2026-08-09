@@ -204,6 +204,44 @@
       "implementation_refs": [
         "integration/vigil_integration/live/sbom.py:sbom_verify"
       ]
+    },
+    {
+      "id": "iac.cloud_posture.achieved_state",
+      "check": "iac_verify",
+      "evidence": "a resource VIGIL parsed from the target's OWN IaC artifact (a Terraform plan-JSON / tfstate, or a processed CloudFormation template) declares an UNAMBIGUOUS insecure achieved state — encryption-at-rest explicitly disabled on a sensitive store, an explicit public flag, a LITERAL wildcard principal in a policy document, an ACL/AccessControl literally granting AllUsers, or a security-group ingress literally open to 0.0.0.0/0 — re-derived by the deterministic cloud_posture oracle",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to the REPRESENTED/RESOLVED state of the parsed artifact ('this tfstate/template declares X'), NEVER a claim about live infrastructure. NOT CLEAN-capable: an IaC export is a PARTIAL, represented state, so a non-firing cannot distinguish 'no insecure state declared' from 'the artifact does not represent the whole resource'. An ambiguous attribute is UNKNOWN, never a guessed insecure fact: block_public_access=false -> public=None (not True); a missing SSE block -> encrypted=None (not False); a CloudFormation intrinsic (Ref/Fn::*) principal -> the grant is dropped. A plan's DESIRED value is weaker than applied state.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a COMPLETENESS proof over the artifact: prove the parsed plan/state/template enumerates the resource's FULL achieved policy surface (all attached bucket-policy/ACL/public-access-block/SSE/security-group resources resolved and cross-linked to the resource), and that intrinsics/parameters are fully resolved, so 'no insecure state declared' becomes a bounded negative about the resource rather than an absence of data. Until then a non-firing over a partial export stays INCONCLUSIVE.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/iac_posture.py:iac_verify",
+        "integration/vigil_integration/live/iac_posture.py:parse_terraform",
+        "integration/vigil_integration/live/iac_posture.py:parse_cloudformation"
+      ]
+    },
+    {
+      "id": "iac.policy_path.iam_grant_path",
+      "check": "iac_verify",
+      "evidence": "a REAL IAM grant PATH re-derived over the policy graph built from the target's OWN IaC artifact lets an anonymous/over-privileged principal reach a resource — judged by the deterministic policy_path oracle over the retained graph",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to the policy graph the parsed artifact REPRESENTS, NEVER a claim about a live cloud account. NOT CLEAN-capable: an IaC export is a PARTIAL represented state, so the absence of a firing path proves nothing about grants the artifact does not represent. The graph is re-derived from the raw artifact (never laundered from a scanner's say-so); a wildcard principal expressed via a CloudFormation intrinsic is UNKNOWN and contributes no grant.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof that the parsed artifact represents the resource's ENTIRE IAM grant surface (every policy/role/attachment/assume/member edge resolved, no intrinsic or cross-stack reference unresolved), so 'no anonymous grant path' becomes a bounded negative rather than an absence of policy data. Until then a non-firing over a partial graph stays INCONCLUSIVE.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/iac_posture.py:iac_verify"
+      ]
     }
   ]
 }
