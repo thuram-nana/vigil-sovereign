@@ -47,6 +47,26 @@ Unlisted subdomains discovered during recon are **conditionally in
 scope**: agent surfaces them and waits for operator confirmation
 before testing.
 
+## 2b. Cloud scope (Track B — cloud / Kubernetes)
+
+Track B (live cloud / K8s assessment) authorizes by **cloud-native
+identity**, not by a URL host. Authorizing a shared cloud endpoint
+(`ec2.amazonaws.com`, `*.amazonaws.com`) must **not** authorize every
+tenant behind it — name each account / project / subscription
+explicitly below. Omit this section entirely to leave Track B
+unauthorized (the gate fails closed on an empty scope). Column rules:
+
+- **Provider** and **Account / Project / Subscription** are matched
+  EXACTLY (case-insensitive). A wildcard / blank / `*` / `any` in
+  either field authorizes **nothing** — the tenant must be explicit.
+- **Region** and **Resource** are OPTIONAL globs. Blank = any. When
+  set, the requested region/resource must match the glob; an empty
+  requested region/resource is refused when the row constrains it.
+
+| Provider | Account / Project / Subscription | Region | Resource (glob) |
+|----------|----------------------------------|--------|-----------------|
+| `<aws / gcp / azure / k8s>` | `<account-id / project-id / subscription-id / cluster>` | `<region or blank>` | `<resource glob or blank>` |
+
 ## 3. Out of scope (explicit)
 
 These systems are not authorized for testing regardless of how the
