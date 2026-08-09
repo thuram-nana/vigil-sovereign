@@ -176,6 +176,34 @@ def check(manifest_path: Path, *, expect_passed: int | None, expect_commit: str 
           expect_nodes: int | None = None, expect_suite_digest: str | None = None) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     problems: list[str] = []
+
+    # Re-derive from the bound artifact rather than trusting the manifest's own summary. A manifest that says
+    # `passed: 1885` is only checking itself; the JUnit XML it is bound to is the evidence. When that artifact
+    # is present, re-hash it and recompute counts + suite identity from it — a hand-edited count, a swapped
+    # digest, or a stale bound file is then caught. When it is absent (a check on another machine), say so
+    # plainly: the claim is internally consistent, not artifact-reverified.
+    junit_path = manifest.get("junit_path", "")
+    reverified = False
+    if junit_path:
+        jp = Path(junit_path)
+        if not jp.is_absolute():
+            jp = manifest_path.parent / jp
+        if jp.is_file():
+            reverified = True
+            actual_sha = hashlib.sha256(jp.read_bytes()).hexdigest()
+            if actual_sha != manifest.get("junit_sha256"):
+                problems.append("the bound JUnit artifact hashes differently from junit_sha256 "
+                                "(the manifest describes a different run than the file it points to)")
+            else:
+                re_counts, re_skips = _from_junit(jp)
+                if re_counts and re_counts != manifest.get("counts"):
+                    problems.append(f"manifest counts {manifest.get('counts')} do not match the bound "
+                                    f"JUnit artifact {re_counts}")
+                re_suite = _suite_identity(jp)
+                if re_suite.get("node_digest") != manifest.get("suite", {}).get("node_digest"):
+                    problems.append("manifest suite identity does not match the bound JUnit artifact "
+                                    "(a different set of tests is recorded than the file contains)")
+
     if manifest.get("exit_status") != 0:
         problems.append(f"the run FAILED (exit {manifest.get('exit_status')})")
     if expect_passed is not None and manifest["counts"].get("passed") != expect_passed:
@@ -206,7 +234,8 @@ def check(manifest_path: Path, *, expect_passed: int | None, expect_commit: str 
     by_category: dict[str, int] = {}
     for skip in manifest.get("skips", []):
         by_category[skip.get("category", "other")] = by_category.get(skip.get("category", "other"), 0) + 1
-    print(f"verification claim OK: {manifest['counts']} at {manifest.get('commit','')[:8]} "
+    grounding = "artifact-reverified" if reverified else "manifest-internal only (bound artifact not present here)"
+    print(f"verification claim OK [{grounding}]: {manifest['counts']} at {manifest.get('commit','')[:8]} "
           f"({manifest.get('suite', {}).get('node_count')} tests"
           + (f", skips: {by_category}" if by_category else "") + ")")
     return 0
