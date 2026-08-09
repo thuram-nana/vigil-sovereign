@@ -78,7 +78,11 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         r = urllib.request.Request(req.url, data=data, method=getattr(req, "method", "GET"))
         for k, v in getattr(req, "headers", []) or []:
             r.add_header(k, v)
-        opener = urllib.request.build_opener(_NoRedirect)
+        # An EMPTY ProxyHandler is MANDATORY (mirrors the shipped gated connector): without it urllib honours
+        # http_proxy/https_proxy/ALL_PROXY, so the real TCP peer would be a proxy the gate never authorized —
+        # the charter/single-host scope check would pass while traffic went elsewhere, and the proxy's bytes
+        # would be labelled provenance="live_redrive". No auth handler either: the probe stays anonymous.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
         t0 = time.monotonic()
         try:
             with opener.open(r, timeout=timeout) as resp:

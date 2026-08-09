@@ -619,9 +619,23 @@ _MARKUP_SCAN_CAP = 512_000        # only the head of a response carries navigati
 # sufficient, because `-` is a non-word character, so `\bcontent` still matches inside `data-content=`
 # (that gap let a benign own-host redirect mint a false FACT — re-red-pen BLOCK-C). The lookbehind excludes
 # `-` and word chars but deliberately ALLOWS `.`, so real sinks like `top.location.href` still match.
-_META_TAG = re.compile(r"<meta\b[^>]{0,4096}>", re.IGNORECASE)
+# `<` is excluded from the tag body as well as `>`: a real tag never contains a raw `<`, and excluding it
+# makes a hostile run of unterminated `<meta<meta<meta…` fail after ONE character instead of re-scanning the
+# 4096-char bound at every start position (the last super-linear hot spot on the mint path).
+_META_TAG = re.compile(r"<meta\b[^<>]{0,4096}>", re.IGNORECASE)
 _HTTP_EQUIV_REFRESH = re.compile(r"(?<![-\w])http-equiv\s*=\s*[\"']?\s*refresh", re.IGNORECASE)
-_META_CONTENT = re.compile(r"(?<![-\w])content\s*=\s*[\"']([^\"']{0,4096})[\"']", re.IGNORECASE)
+# The value is delimited by the SAME quote it opened with, so an inner quote of the other kind is part of
+# the value: `content="0; url='https://x/'"` is a real redirect browsers honour (WHATWG strips the inner
+# quotes), and a single `["']` class would have truncated it to `0; url=` and MISSED it.
+_META_CONTENT = re.compile(r"(?<![-\w])content\s*=\s*(?:\"([^\"]{0,4096})\"|'([^']{0,4096})')", re.IGNORECASE)
+
+
+def _meta_content_value(tag: str) -> str | None:
+    """The ``content`` attribute value of a meta tag (either quote style), or None."""
+    m = _META_CONTENT.search(tag)
+    if m is None:
+        return None
+    return m.group(1) if m.group(1) is not None else m.group(2)
 _META_CONTENT_URL = re.compile(r"(?<![-\w])url\s*=\s*(.{0,4096}?)\s*$", re.IGNORECASE)
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
 _JS_REDIRECT = re.compile(
@@ -634,7 +648,9 @@ _JS_REDIRECT = re.compile(
 # Host becomes attacker-controllable for a VICTIM (cache-poisoned resource, reset-link, form post). An href/
 # src/action attribute value is bounded (a URL never approaches 4096). `(?<![-\w])` anchors the attribute
 # name so `data-href`/`x-src` do not match (the same attribute-boundary lesson as _META_CONTENT).
-_URL_ATTR = re.compile(r"(?<![-\w])(?:href|src|action)\s*=\s*[\"']([^\"']{1,4096})[\"']", re.IGNORECASE)
+# `<`/`>` excluded from the value for the same fail-fast reason as _META_TAG (a URL attribute value in HTML
+# never contains a raw angle bracket).
+_URL_ATTR = re.compile(r"(?<![-\w])(?:href|src|action)\s*=\s*[\"']([^\"'<>]{1,4096})[\"']", re.IGNORECASE)
 # URL-valued canonical / social metadata: og:url is THE canonical link that crawlers, link-preview and cache
 # layers consume as authoritative — poisoning it via the Host header is a real cache/canonical-hijack sink
 # (and is the benchmark's host-header primitive). This is a STRUCTURED metadata emission, distinct from an
@@ -664,7 +680,7 @@ def _emitted_url_hosts(body: str) -> list[str]:
     hosts = list(_markup_redirect_hosts(raw))           # meta-refresh + JS location sinks (redirect emission)
     # Attribute/metadata emission is read from markup a browser actually PARSES: comments and raw-text
     # elements (script/style/textarea) are dropped, so an href/<meta> merely echoed into one is not counted.
-    body = _strip_inert_markup(raw)
+    body = _mask_inert(raw, _INERT_EMISSION)
     for val in _URL_ATTR.findall(body):                 # href/src/action link/resource/form emission
         h = _host(val.strip())                          # urlsplit authority: '' for relative/same-origin URLs
         if h:
@@ -672,32 +688,72 @@ def _emitted_url_hosts(body: str) -> list[str]:
     for tag in _META_TAG.findall(body):                 # canonical / social URL metadata (og:url, ...)
         prop = _META_PROPERTY.search(tag)
         if prop and _URL_VALUED_META.fullmatch(prop.group(1).strip()):
-            content = _META_CONTENT.search(tag)
-            if content:
-                h = _host(content.group(1).strip())
+            content = _meta_content_value(tag)
+            if content is not None:
+                h = _host(content.strip())
                 if h:
                     hosts.append(h)
     return hosts
 
 
-# Inert regions: markup inside an HTML comment is never parsed, and script/style/textarea are RAW-TEXT
-# elements whose contents are never parsed as markup. A `href=`/`<meta>` echoed into one of them is NOT an
-# emission — counting it minted a false FACT. `<pre>`/`<code>` are deliberately NOT stripped: tags inside
-# them ARE live (a <pre><a href> is a real, clickable link). Lazy quantifiers keep both scans linear.
-_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-_RAW_TEXT_ELEMENT = re.compile(r"<(script|style|textarea)\b[^>]{0,4096}>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+# Inert regions: markup inside an HTML comment is never parsed, and raw-text / escapable-text elements have
+# contents a browser renders LITERALLY rather than parsing as markup. A `href=` / `<meta>` echoed into one of
+# them is NOT an emission and does not navigate — counting it minted false FACTs. `<pre>`/`<code>` are
+# deliberately NOT inert: tags inside them ARE live (a <pre><a href> is a real, clickable link).
+#
+# `<plaintext>` has no end tag (everything after it is literal), and an unterminated inert element likewise
+# swallows the rest of the document — both are handled by masking to EOF.
+_INERT_EMISSION = ("script", "style", "textarea", "title", "xmp", "plaintext",
+                   "noscript", "noembed", "noframes", "template", "iframe")
+# For REDIRECT sinks, `<script>` content is deliberately NOT masked: JS location sinks legitimately live
+# there. Everything else that renders literally still cannot navigate.
+_INERT_REDIRECT = tuple(e for e in _INERT_EMISSION if e != "script")
+
+
+def _mask_inert(body: str, elements: tuple[str, ...]) -> str:
+    """Blank out HTML comments and the CONTENT of inert ``elements``, in ONE LINEAR pass (``str.find`` only).
+
+    Deliberately implemented without a regex: a lazy ``.*?`` over attacker-controlled bytes backtracks
+    quadratically (a body of unterminated ``<!--`` / ``<script>`` stalled the mint path for minutes). Each
+    character is visited a bounded number of times here, so runtime is linear in the (already capped) body.
+
+    An element's OPENING TAG is preserved — only its inner text is blanked — so URL attributes on the tag
+    itself (``<script src="https://host/x.js">``, ``<iframe src=...>``) remain visible to the emission scan;
+    blanking the whole element dropped that genuine, high-severity sink."""
+    body = body or ""
+    low = body.lower()
+    out = list(body)
+    n = len(body)
+    i = 0
+    while i < n:
+        j = low.find("<", i)
+        if j < 0:
+            break
+        if low.startswith("<!--", j):                       # comment: blank the whole thing (incl. markers)
+            end = low.find("-->", j + 4)
+            stop = n if end < 0 else end + 3                # unterminated comment runs to EOF
+            out[j:stop] = " " * (stop - j)
+            i = stop
+            continue
+        el = next((e for e in elements if low.startswith("<" + e, j)
+                   and (j + 1 + len(e) >= n or not (low[j + 1 + len(e)].isalnum()
+                                                    or low[j + 1 + len(e)] in "-_"))), None)
+        if el is None:
+            i = j + 1
+            continue
+        gt = low.find(">", j)
+        if gt < 0:                                          # unterminated opening tag: nothing after parses
+            break
+        close = low.find("</" + el, gt + 1)
+        stop = n if close < 0 else close                    # no end tag (or <plaintext>): literal to EOF
+        out[gt + 1:stop] = " " * (stop - gt - 1)            # keep the opening tag, blank the content
+        i = stop
+    return "".join(out)
 
 
 def _strip_html_comments(body: str) -> str:
-    """Drop HTML comments — commented-out markup is never parsed by a browser, so it emits nothing."""
-    return _HTML_COMMENT.sub(" ", body or "")
-
-
-def _strip_inert_markup(body: str) -> str:
-    """Drop comments AND raw-text elements (script/style/textarea), whose contents a browser never parses as
-    markup. Used for ATTRIBUTE/metadata emission only — NOT for JS redirect sinks, which legitimately live
-    inside ``<script>``."""
-    return _RAW_TEXT_ELEMENT.sub(" ", _strip_html_comments(body))
+    """Drop HTML comments only — commented-out markup is never parsed, so it emits and navigates nothing."""
+    return _mask_inert(body, ())
 
 
 def _markup_redirect_hosts(body: str) -> list[str]:
@@ -719,13 +775,13 @@ def _markup_redirect_hosts(body: str) -> list[str]:
     predicate has (e.g. ``location_host = _host(location)``), not one specific to this helper."""
     # HTML comments are stripped — commented-out markup never navigates. ``<script>`` is deliberately NOT
     # stripped here: JS location sinks legitimately live inside it.
-    body = _strip_html_comments((body or "")[:_MARKUP_SCAN_CAP])
+    body = _mask_inert((body or "")[:_MARKUP_SCAN_CAP], _INERT_REDIRECT)
     hosts: list[str] = []
     for tag in _META_TAG.findall(body):
         if _HTTP_EQUIV_REFRESH.search(tag):
-            m = _META_CONTENT.search(tag)
-            if m:
-                u = _META_CONTENT_URL.search(m.group(1))
+            m = _meta_content_value(tag)
+            if m is not None:
+                u = _META_CONTENT_URL.search(m)
                 if u:
                     hosts.append(_host(u.group(1).strip().strip("'\"")))
     for u in _JS_REDIRECT.findall(body):

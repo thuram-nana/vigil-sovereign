@@ -127,16 +127,43 @@ def test_markup_redirect_hosts_extracts_only_real_navigation_targets() -> None:
     assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
 
 
+def test_markup_redirect_hosts_ignores_inert_elements_and_reads_inner_quoted_content() -> None:
+    """Convergence red-pen: a meta-refresh / JS sink inside an escapable- or raw-text element (textarea,
+    title, xmp, plaintext, noscript, template, iframe) renders LITERALLY and never navigates, so it must not
+    count — while `<script>` content still does (JS sinks live there). And a `content` value delimited by one
+    quote may legitimately contain the other (`content="0; url='...'"`), which browsers honour."""
+    from framework.v2.scanner.checks import _markup_redirect_hosts as hosts
+
+    for el in ("textarea", "title", "xmp", "noscript", "template", "iframe"):
+        assert _CANARY_HOST not in hosts(
+            f'<{el}><meta http-equiv="refresh" content="0;url={_CANARY_URL}"></{el}>'), el
+    assert _CANARY_HOST not in hosts(f'<plaintext><meta http-equiv="refresh" content="0;url={_CANARY_URL}">')
+    # ... while the real sinks still fire
+    assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
+    assert _CANARY_HOST in hosts(f"""<meta http-equiv="refresh" content="0; url='{_CANARY_URL}'">""")
+    assert _CANARY_HOST in hosts(f'<meta http-equiv="refresh" content="0; url={_CANARY_URL}">')
+
+
 def test_markup_redirect_hosts_is_bounded_on_a_hostile_body() -> None:
     """Re-red-pen BLOCK-B: the markup parse must stay ~linear on a hostile, unterminated-<meta> body — a
     target-controlled response must not be able to make it super-linear (availability). 1.2MB of '<meta '
     (no '>') used to be quadratic (~minutes); it must now complete quickly and return no hosts."""
     import time as _time
 
-    from framework.v2.scanner.checks import _markup_redirect_hosts
-    body = "<meta " * 200_000   # ~1.2MB, no '>' anywhere — the pathological O(n^2) input
-    t0 = _time.perf_counter()
-    out = _markup_redirect_hosts(body)
-    dt = _time.perf_counter() - t0
-    assert out == [], "an unterminated-meta body has no navigation target"
-    assert dt < 2.0, f"markup parse must be bounded (was {dt:.2f}s) — quadratic-backtracking regression"
+    from framework.v2.scanner.checks import _emitted_url_hosts, _markup_redirect_hosts
+
+    # Every shape that has been super-linear at some point in this parser's history. An unterminated
+    # comment/script used to backtrack quadratically (minutes at the cap); a `<meta`-run used to re-scan the
+    # 4096 bound at each start. All must now complete well inside the bound and find no navigation target.
+    for label, body in (
+        ("unterminated meta", "<meta " * 200_000),
+        ("unterminated comment", "<!--" * 128_000),
+        ("unterminated script", "<script>" * 64_000),
+        ("unterminated href", '<a href="' * 56_000),
+        ("angle-bracket spam", '<meta<a href="' * 36_000),
+    ):
+        t0 = _time.perf_counter()
+        assert _markup_redirect_hosts(body) == [], label
+        assert _emitted_url_hosts(body) == [], label
+        dt = _time.perf_counter() - t0
+        assert dt < 3.0, f"{label}: markup parse must stay bounded (was {dt:.2f}s) — super-linear regression"

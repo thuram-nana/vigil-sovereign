@@ -146,12 +146,19 @@ def test_emitted_url_hosts_ignores_inert_markup_contexts() -> None:
     # INERT — never parsed as markup, so nothing is emitted
     assert evil not in hosts(f'<!-- <a href="https://{evil}/">x</a> -->')
     assert evil not in hosts(f"""<script>var t = "<a href='https://{evil}/'>";</script>""")
-    assert evil not in hosts(f'<textarea><a href="https://{evil}/">x</a></textarea>')
-    assert evil not in hosts(f'<style>/* <a href="https://{evil}/"> */</style>')
     assert evil not in hosts(f'<!-- <meta property="og:url" content="https://{evil}/"> -->')
+    for el in ("style", "textarea", "title", "xmp", "noscript", "noembed", "noframes", "template", "iframe"):
+        assert evil not in hosts(f'<{el}><a href="https://{evil}/">x</a></{el}>'), el
+    assert evil not in hosts(f'<plaintext><a href="https://{evil}/">x</a>')   # no end tag: literal to EOF
+    assert evil not in hosts(f'<template><meta property="og:url" content="https://{evil}/"></template>')
     # LIVE — <pre>/<code> contents ARE parsed, so a link inside them is a real emission
     assert evil in hosts(f'<pre><a href="https://{evil}/">x</a></pre>')
     assert evil in hosts(f'<a href="https://{evil}/reset">reset</a>')
+    # ... and an inert element's OPENING TAG still emits: <script src>/<iframe src> load attacker content,
+    # the canonical high-severity host-header sink. Masking the whole element dropped this real finding.
+    assert evil in hosts(f'<script src="https://{evil}/evil.js"></script>')
+    assert evil in hosts(f'<iframe src="https://{evil}/x"></iframe>')
+    assert evil in hosts(f'<link rel="stylesheet" href="https://{evil}/x.css">')
     assert evil not in hosts(f'Cannot GET http://{evil}/foo')                    # 404 text echo (BLOCK-D)
     assert evil not in hosts(f'<pre>curl http://{evil}/api</pre>')               # code sample
     assert evil not in hosts(f'<!-- built from host: //{evil}/ -->')            # HTML comment

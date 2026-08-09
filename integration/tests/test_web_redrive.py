@@ -220,6 +220,47 @@ def test_out_of_scope_target_is_refused_before_any_traffic(monkeypatch, tmp_path
     assert res.refused is True and res.leads == [], "an out-of-scope refusal must not mint (false-CLEAN) leads"
 
 
+def test_the_gated_send_never_honours_an_environment_proxy(monkeypatch, tmp_path):
+    """CONVERGENCE RED-PEN (critical): urllib honours http_proxy/https_proxy/ALL_PROXY by default, so an
+    opener built without an EMPTY ProxyHandler would send the "gated" request to a proxy the scope gate
+    never authorized — the charter/single-host check would pass while the real TCP peer was somewhere else,
+    and the proxy's fabricated bytes would be minted as provenance="live_redrive". The opener must be
+    proxy-free: the request has to reach the authorized target itself."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import _gated_web_send
+    from framework.v2.scanner.insertion import HttpRequest
+
+    class _Proxy(http.server.BaseHTTPRequestHandler):
+        """Answers everything with a DISTINCTIVE body, so a response that came via the proxy is
+        unmistakable (a proxy sharing the target's handler would make this test pass vacuously)."""
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"PROXIED-NOT-THE-TARGET")
+
+        def log_message(self, *a):
+            return
+
+    proxy = http.server.HTTPServer(("127.0.0.1", 0), _Proxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    proxy_port = proxy.server_address[1]
+    target = _serve()                     # the real, authorized target
+    target_port = target.server_address[1]
+    for var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(var, f"http://127.0.0.1:{proxy_port}")
+    try:
+        send, _state = _gated_web_send("alpha")
+        resp = send(HttpRequest(method="GET", url=f"http://127.0.0.1:{target_port}/safe?next=x"))
+    finally:
+        proxy.shutdown()
+        target.shutdown()
+    # the response came from the AUTHORIZED target (its /safe body), not from the proxy
+    assert "PROXIED" not in resp["body"], f"the gated send was routed through an env proxy: {resp}"
+    assert resp["status"] == 200 and "you requested" in resp["body"], (
+        f"the gated send must reach the authorized target directly, not an env proxy: {resp}")
+
+
 # ---- red-pen regression: the exact false-FACT / false-CLEAN surfaces, now permanent negative controls -
 
 def test_benign_html_reflecting_page_mints_no_open_redirect_fact(monkeypatch, tmp_path):
