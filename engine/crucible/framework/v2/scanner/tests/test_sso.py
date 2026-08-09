@@ -269,6 +269,41 @@ def test_oidc_redirect_uri_not_flagged_when_validated() -> None:
     assert findings == []
 
 
+def _benign_reflecting_error(req: HttpRequest) -> dict:
+    """SAFE: the IdP rejects the unregistered redirect_uri (400), keeps the redirect on its OWN host, and
+    renders an error page that echoes the rejected value next to an unrelated <meta http-equiv=Content-Type>
+    — the co-location false-FACT shape (re-red-pen BLOCK-A). The attacker host is NEVER a navigation target."""
+    ru = _redirect_uri_of(req)
+    body = ('<!doctype html><html><head>'
+            '<meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head>'
+            f'<body><p>Unregistered redirect_uri: {ru}</p></body></html>')
+    return {"status": 400, "headers": [], "body": body}
+
+
+def _benign_own_host_redirect_with_data_content(req: HttpRequest) -> dict:
+    """SAFE (re-red-pen BLOCK-C): the IdP redirects only to its OWN host, but stashes the requested URL in a
+    ``data-content`` attribute. `content=` must be anchored to a real attribute boundary, so the attacker
+    host must NOT be extracted as a navigation target."""
+    ru = _redirect_uri_of(req)
+    body = (f'<meta http-equiv="refresh" data-content="0;url={ru}" content="0;url=/home">'
+            '<body>returning home</body>')
+    return {"status": 200, "headers": [], "body": body}
+
+
+def test_oidc_redirect_uri_not_flagged_on_data_content_attribute() -> None:
+    findings = AuditEngine(_benign_own_host_redirect_with_data_content).audit(
+        _authorize_request(), checks=(), request_checks=(sso.OidcRedirectUriCheck(),))
+    assert findings == [], "a *content-named attribute is not the meta-refresh target — must not be flagged"
+
+
+def test_oidc_redirect_uri_not_flagged_on_benign_reflecting_error_page() -> None:
+    # BLOCK-A regression: reflecting the canary in a 400 error page + a legacy <meta http-equiv> must NOT
+    # mint an oidc_redirect_uri FACT — the canary must be an ACTUAL navigation target (co-location fix).
+    findings = AuditEngine(_benign_reflecting_error).audit(
+        _authorize_request(), checks=(), request_checks=(sso.OidcRedirectUriCheck(),))
+    assert findings == [], "a benign reflecting error page must not be flagged as an open redirect"
+
+
 # ---------------------------------------------------------------------------
 # OIDC id_token forgery (alg:none) at the operator's RP callback
 # ---------------------------------------------------------------------------

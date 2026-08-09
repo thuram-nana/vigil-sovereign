@@ -38,7 +38,12 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
+          # framework/v2/scanner carries the probe + oracle-predicate suites (open-redirect / CORS /
+          # host-header / SSO co-location, the inert-markup content models, the parse-time bounds and the
+          # tokenizer differential). They were absent from CI, so a soundness regression in a shipped
+          # predicate could merge green — exactly the class this wave had to fix.
           pytest framework/v2/evidence framework/v2/entitlement framework/v2/common \
+                 framework/v2/scanner \
                  framework/v2/verify framework/v2/confidence framework/v2/worldmodel \
                  framework/v2/calibration framework/v2/authority \
                  framework/v2/console framework/v2/api framework/v2/report \
@@ -101,6 +106,7 @@ jobs:
               --ignore=integration/tests/test_external_tool_runner.py \
               --ignore=integration/tests/test_conformance.py \
               --ignore=integration/tests/test_sbom.py \
+              --ignore=integration/tests/test_web_redrive.py \
               --ignore=integration/tests/test_typed_outcomes.py \
               --ignore=integration/tests/test_engine_live.py \
               --ignore=integration/tests/test_engine_terminal.py \
@@ -147,6 +153,7 @@ jobs:
               integration/tests/test_external_tool_runner.py \
               integration/tests/test_conformance.py \
               integration/tests/test_sbom.py \
+              integration/tests/test_web_redrive.py \
               integration/tests/test_typed_outcomes.py \
               integration/tests/test_engine_live.py \
               integration/tests/test_engine_terminal.py \

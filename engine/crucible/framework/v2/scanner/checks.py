@@ -24,7 +24,9 @@ tokens), not weaponized exploits.
 from __future__ import annotations
 
 import math
+import re
 import time
+from html.parser import HTMLParser
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
 from urllib.parse import urljoin, urlsplit
@@ -297,10 +299,13 @@ class RequestCheck(Protocol):
 @dataclass(frozen=True)
 class CorsActiveCheck:
     """Active CORS misconfiguration: send a hostile ``Origin`` and check whether
-    the server reflects it (or wildcards) with credentials — the combination that
-    lets an attacker page read authenticated responses. Confirmed via
-    achieved-state only on the dangerous reflection, so a properly-scoped CORS
-    policy does not fire."""
+    the server REFLECTS it back with credentials — the exact combination that lets
+    an attacker page read authenticated responses. Confirmed via achieved-state
+    only on the dangerous reflection, so a properly-scoped CORS policy does not
+    fire. Note: ``Access-Control-Allow-Origin: *`` WITH credentials is deliberately
+    NOT confirmed here — browsers refuse ``*``+credentials, so it is not
+    credential-readable and would be an over-claim as an exploitable FACT (a passive
+    check may still surface it as a lower-severity misconfiguration lead)."""
 
     id: str = "cors-active"
     bug_class: str = "cors"
@@ -316,14 +321,14 @@ class CorsActiveCheck:
         rh = resp.get("headers", []) or []
         acao = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-origin"), "")
         acac = next((str(v) for k, v in rh if str(k).lower() == "access-control-allow-credentials"), "")
-        # The ORACLE decides the dangerous condition over the raw header values:
-        # (ACAO reflects the hostile origin OR is a wildcard) AND credentials are
-        # allowed. A properly-scoped policy fails the predicate and does not fire.
+        # The ORACLE decides the exploitable condition over the raw header values:
+        # ACAO REFLECTS the hostile origin AND credentials are allowed. A wildcard
+        # (`*`) is excluded — browsers do not honour `*`+credentials, so it cannot
+        # read authenticated responses. A properly-scoped policy fails the predicate.
         return FindingContext.from_predicate(
             {"acao": acao, "acac": acac, "evil_origin": self.evil_origin},
             {"all": [
-                {"any": [{"eq": [{"var": "acao"}, {"var": "evil_origin"}]},
-                         {"eq": [{"var": "acao"}, "*"]}]},
+                {"eq": [{"var": "acao"}, {"var": "evil_origin"}]},
                 {"ieq": [{"var": "acac"}, "true"]},
             ]},
             bug_class=self.bug_class)
@@ -350,15 +355,26 @@ class HostHeaderCheck:
         body = str(resp.get("body", ""))
         rh = resp.get("headers", []) or []
         location = next((str(v) for k, v in rh if str(k).lower() == "location"), "")
-        # The oracle checks whether the hostile Host became a URL authority: a
-        # redirect Location to it, or an absolute //evil-host URL in the body. A
-        # plain-text echo of the host does NOT satisfy the predicate.
+        # The oracle checks whether the hostile Host became the AUTHORITY of a URL the
+        # app EMITS (a redirect Location, an href/src/action link/resource/form, or a
+        # meta/JS redirect) — the only forms a victim's browser would actually use. A
+        # plain-text ECHO of the reconstructed URL back to the requester does NOT fire
+        # (not exploitable), and matching is on the WHOLE authority, so a subdomain
+        # reflection like `//evil-host.cdn.example.com` does not collide with the evil
+        # host either.
+        # As above: on a followed 3xx the body is never rendered, so a Host-derived link inside it is not
+        # something a victim can use. The Location disjunct still stands on its own.
+        followed = bool(location) and int(resp.get("status", 0) or 0) in (301, 302, 303, 307, 308)
         return FindingContext.from_predicate(
             {"location_host": _host(location), "evil_host": self.evil_host,
-             "body": body, "evil_url": f"//{self.evil_host}"},
+             "body": body, "followed_redirect": followed,
+             "emitted_url_hosts": _emitted_url_hosts(body)},
             {"any": [
                 {"eq": [{"var": "location_host"}, {"var": "evil_host"}]},
-                {"contains": [{"var": "body"}, {"var": "evil_url"}]},
+                {"all": [
+                    {"not": {"eq": [{"var": "followed_redirect"}, True]}},
+                    {"in": [{"var": "evil_host"}, {"var": "emitted_url_hosts"}]},
+                ]},
             ]},
             bug_class=self.bug_class)
 
@@ -390,25 +406,28 @@ class OpenRedirectCheck:
         body = str(resp.get("body", ""))
 
         # The oracle decides redirection to the canary host over the raw status,
-        # Location, and body: a 30x Location to the canary host, OR a meta/JS
-        # redirect in the body that resolves to it. Reflection on the app's own
-        # host fails the predicate (no false positive on echoed-but-safe params).
+        # Location, and the body's ACTUAL navigation targets: a 30x Location to the
+        # canary host, OR a meta-refresh / JS-location sink whose target host IS the
+        # canary host. Reflection on the app's own host — or the canary merely echoed
+        # somewhere in the body next to an unrelated <meta http-equiv=...> — fails the
+        # predicate (no false positive on echoed-but-safe params).
+        # A 3xx that carries a Location is FOLLOWED by the browser, so its body is never rendered: any
+        # navigation the body describes cannot happen, and counting it would be a false FACT.
+        followed = bool(location) and status in (301, 302, 303, 307, 308)
         return FindingContext.from_predicate(
             {"status": status, "location_host": _host(location),
-             "canary_host": _host(self.canary), "body": body},
+             "canary_host": _host(self.canary), "body": body,
+             "followed_redirect": followed,
+             "markup_redirect_hosts": _markup_redirect_hosts(body)},
             {"any": [
                 {"all": [
                     {"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
                     {"eq": [{"var": "location_host"}, {"var": "canary_host"}]},
                 ]},
                 {"all": [
+                    {"not": {"eq": [{"var": "followed_redirect"}, True]}},
                     {"min_len": [{"var": "canary_host"}, 1]},
-                    {"contains": [{"var": "body"}, {"var": "canary_host"}]},
-                    {"any": [
-                        {"icontains": [{"var": "body"}, "http-equiv"]},
-                        {"icontains": [{"var": "body"}, "location.href"]},
-                        {"icontains": [{"var": "body"}, "location.replace"]},
-                    ]},
+                    {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
                 ]},
             ]},
             bug_class=self.bug_class)
@@ -603,6 +622,321 @@ def _slugify(s: str) -> str:
 def _host(url: str) -> str:
     """The netloc of a URL, lowercased, or '' if it has none (relative URL)."""
     return urlsplit(url).netloc.lower()
+
+
+# Scan windows are BOUNDED so a hostile, unterminated body cannot cause quadratic backtracking: a real
+# <meta> tag or redirect URL never approaches these limits, but an attacker-controlled response could
+# otherwise pack many "<meta " starts with no ">" (each greedy [^>]* rescanning to end → O(n^2)).
+_MARKUP_SCAN_CAP = 512_000        # only the head of a response carries navigation markup; cap the parse
+# Only two regexes remain: the URL inside a meta-refresh `content` value, and the JS navigation sinks inside
+# script text. Everything structural — which bytes are markup at all, where a tag ends, which quote closes an
+# attribute, what a raw-text element swallows — is delegated to the stdlib tokenizer below.
+_META_REFRESH_VALUE_CAP = 4096    # a real refresh target never approaches this
+
+
+_HTML_WHITESPACE = " \t\n\x0c\r"     # the HTML Standard's ASCII-whitespace set, not str.isspace()
+
+
+def _meta_refresh_url(content: str) -> str:
+    """The URL a browser would navigate to from a ``<meta http-equiv=refresh>`` ``content`` value, or "".
+
+    This follows the HTML Standard's *shared declarative refresh steps* rather than approximating them —
+    twice now an approximation was wrong in BOTH directions at once. Searching the value for any ``url=``
+    minted a false FACT on ``content="url=http://evil/"`` (no time component, so a browser refreshes
+    NOTHING) and on ``content="0; please wait;url=http://evil/"`` (the URL is the whole remainder after the
+    separator, so it is the relative string ``please wait;url=…`` and stays same-origin). Requiring a
+    literal ``url=`` simultaneously MISSED ``content="0;http://evil/"`` — the keyword is optional and every
+    major browser navigates it — reporting a real open redirect as CLEAN.
+
+    The steps, in order: skip whitespace; require a time (digits, or a leading ``.``); skip the fractional
+    part; skip whitespace; consume ONE ``;`` or ``,``; skip whitespace; if the rest starts with ``url``,
+    consume it plus an optional ``=`` (each with surrounding whitespace); the URL is then the remainder,
+    optionally delimited by a quote. Bounded input, single forward pass, no backtracking."""
+    value = (content or "")[:_META_REFRESH_VALUE_CAP]
+    i, n = 0, len(value)
+
+    def skip_ws(k: int) -> int:
+        while k < n and value[k] in _HTML_WHITESPACE:
+            k += 1
+        return k
+
+    i = skip_ws(i)
+    start = i
+    while i < n and value[i].isascii() and value[i].isdigit():
+        i += 1
+    if i == start and not (i < n and value[i] == "."):
+        return ""                       # no time component: the browser refreshes nothing at all
+    while i < n and ((value[i].isascii() and value[i].isdigit()) or value[i] == "."):
+        i += 1                          # fractional part is parsed and ignored
+    if i >= n:
+        return ""                       # a bare time reloads the SAME page — not a navigation elsewhere
+    if value[i] not in ";," and value[i] not in _HTML_WHITESPACE:
+        return ""                       # the code point right after the time MUST be `;`, `,` or ASCII
+                                        # whitespace; anything else ends parsing, so `0url=http://evil/`
+                                        # and `0http://evil/` navigate NOWHERE (they reload same-origin)
+    i = skip_ws(i)
+    if i < n and value[i] in ";,":
+        i = skip_ws(i + 1)
+    if i >= n:
+        return ""
+    if value[i:i + 3].lower() == "url":
+        i = skip_ws(i + 3)              # the keyword is consumed whether or not an `=` follows it
+        if i < n and value[i] == "=":
+            i = skip_ws(i + 1)
+    if i < n and value[i] in "\"'":     # a quote delimits the URL; anything after the match is dropped
+        quote, i = value[i], i + 1
+        end = value.find(quote, i)
+        return value[i:end if end >= 0 else n].strip(_HTML_WHITESPACE)
+    # strip only ASCII whitespace: urlsplit (and a browser) KEEP other Unicode spaces such as U+00A0
+    return value[i:].strip(_HTML_WHITESPACE)
+# JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
+#
+# KNOWN LIMITATION (tracked, not fixed here): this is a regex over script TEXT, so it also fires on a sink
+# that sits inside a JS comment or a string literal — e.g. `// location.href="//evil/"` — which a browser
+# never executes. That is a false-FACT surface for `open_redirect`. It is PRE-EXISTING (the previous code
+# ran the same regex over the WHOLE body, so scoping it to live script text narrowed it) and reaching a
+# signed FACT requires the target to reflect the injected canary into exactly such a commented-out or
+# quoted sink, which is contrived. It is NOT fixed here on purpose: distinguishing a real sink from one in
+# a comment/string needs a JS lexer, and this wave's central lesson is that hand-approximating a lexer over
+# adversary-controlled input does not converge (a hand-written HTML masker produced ~15 defects across four
+# adversarial rounds before it was deleted in favour of the stdlib tokenizer). The sound fix is a real JS
+# tokenizer — or demoting the body branch of the JS sink to a LEAD — and is filed as the next wave's first
+# item rather than guessed at here.
+_JS_REDIRECT = re.compile(
+    r"(?<![-\w])(?:(?:window|document|top|parent|self)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*"
+    r"[\"']([^\"']{1,4096})[\"']",
+    re.IGNORECASE)
+# The property name must match the WHOLE value against an allow-list of genuinely URL-valued properties
+# (`fullmatch`). A substring test would fire on `not-og:url`, on a value that merely CONTAINS `og:url`, and
+# — worst — on `twitter:image:alt` / `og:image:alt`, which are ALT TEXT, not URLs.
+_URL_VALUED_META = re.compile(
+    r"og:(?:url|(?:image|audio|video)(?::(?:url|secure_url))?)|twitter:(?:url|image(?::src)?)",
+    re.IGNORECASE)
+
+
+class _MarkupScan(HTMLParser):
+    """Tokenize a response body with the STDLIB HTML tokenizer and record only what the app actually EMITS.
+
+    This deliberately replaces a hand-written masker. Deciding "is this URL live markup or inert text?" is a
+    tokenizer problem — comments, raw-text and escapable-raw-text elements, attribute quoting (including
+    unquoted values), malformed and unterminated tags — and every hand-rolled approximation of it leaked in
+    BOTH directions: inert text counted as an emission (a benign page minting a signed FALSE FACT) and live
+    markup masked away (a real vulnerability silently DROPPED), plus repeated super-linear blowups on
+    attacker-controlled bodies. ``html.parser`` gets those cases right, is linear, and ships with Python.
+
+    Two things are layered on top, because the tokenizer does not model them and both change a verdict:
+
+    * ``<template>`` content is an inert document fragment — it is not rendered and its resources are not
+      fetched — but the tokenizer reports its children as ordinary tags, so emissions are suppressed while
+      inside one. Depth is tracked on real tokenizer events, so a ``</template>`` appearing inside a script
+      string or an attribute value cannot close it.
+    * The WHATWG script-data DOUBLE-ESCAPE state: after ``<!--<script`` the next ``</script>`` returns to the
+      escaped state instead of closing the element, so the markup after it is still script text. The
+      tokenizer closes at the first ``</script>``, so emissions are suppressed until the following one —
+      unless a ``-->`` ends the escape first.
+
+    Everything the tokenizer already gets right (comments, ``script``/``style``/``textarea``/``title``/
+    ``xmp``/``plaintext``/``noembed``/``noframes``/``iframe`` content, and live ``noscript``/``pre``/``code``
+    content) is simply trusted.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.url_attrs: list[str] = []          # href/src/action values of LIVE tags
+        self.metas: list[dict[str, str]] = []   # attributes of LIVE <meta> tags
+        self.script_text: list[str] = []        # raw text of LIVE <script> elements (JS sink source)
+        self._template_depth = 0
+        self._in_script = False                 # the tokenizer is inside a <script> element
+        self._script_open = False               # a script element is LOGICALLY still open (WHATWG state)
+        self._escaped = False                   # script-data-escaped   (entered by `<!--`)
+        self._double = False                    # script-data-double-escaped (entered by `<script` there)
+
+    @property
+    def _live(self) -> bool:
+        # `_script_open` while the tokenizer is NOT in a script element means WHATWG considers us still
+        # inside script data — what the tokenizer is now reporting as markup is really script text.
+        return self._template_depth == 0 and not (self._script_open and not self._in_script)
+
+    def _record(self, tag: str, attrs: "list[tuple[str, str | None]]") -> None:
+        if not self._live:
+            return
+        # FIRST duplicate wins, as WHATWG specifies ("if there is already an attribute with that name, drop
+        # the new one"). A plain dict comprehension keeps the LAST, which both mints a false FACT (a benign
+        # first href with a hostile second) and drops a real one (hostile first, benign second).
+        d: dict[str, str] = {}
+        for key, value in attrs:
+            d.setdefault(key.lower(), value or "")
+        if tag == "meta":
+            self.metas.append(d)
+        for key in ("href", "src", "action"):
+            if d.get(key):
+                self.url_attrs.append(d[key])
+
+    @property
+    def _in_script_data(self) -> bool:
+        """WHATWG still considers us inside script TEXT even though the tokenizer thinks it left the
+        element. Tags it reports here are not tags at all, so they must not move any state."""
+        return self._script_open and not self._in_script
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if tag == "template":
+            self._template_depth += 1
+            return
+        if tag == "script":
+            # A `<script>` seen while a script element is still logically OPEN (the tokenizer closed it at a
+            # `</script>` that WHATWG treats as double-escape-exit) re-enters the double-escaped state.
+            if self._script_open:
+                self._double = True
+            else:
+                self._script_open, self._double, self._escaped = True, False, False
+            self._in_script = True
+        self._record(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if self._in_script_data:
+            return
+        # The solidus is IGNORED on a non-void element, so `<template/>` OPENS a template: its content is an
+        # inert fragment until the matching end tag. Treating it as open-and-closed left that content live.
+        if tag == "template":
+            self._template_depth += 1
+            return
+        self._record(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_script_data and tag != "script":
+            return                          # a `</template>` inside script text closes nothing
+        if tag == "template":
+            self._template_depth = max(0, self._template_depth - 1)
+            return
+        if tag == "script":
+            self._in_script = False
+            if self._double:
+                self._double = False        # double-escaped: this end tag returns to escaped, not a close
+            else:
+                # A real close ends the element AND its escape state: `_escaped` leaking into the next
+                # script element made a later `<script ` look like a double-escape entry and suppressed a
+                # live sink after it (a real vulnerability reported CLEAN).
+                self._script_open, self._escaped = False, False
+
+    def handle_data(self, data: str) -> None:
+        # The escape state must also advance while the tokenizer is OUTSIDE the element but WHATWG still
+        # considers us in script data: that text is script text, so a `-->` in it really does end the
+        # escape. Ignoring it left `_escaped` stale, and a later `<script ` then looked like a fresh
+        # double-escape entry and suppressed a live page (a real vulnerability reported CLEAN).
+        if not (self._in_script or self._in_script_data):
+            return
+        if self._live and self._in_script:
+            self.script_text.append(data)
+        self._escaped, self._double = _script_data_state(data, self._escaped, self._double)
+
+
+def _script_data_state(text: str, escaped: bool, double: bool) -> tuple[bool, bool]:
+    """Advance the WHATWG script-data escape state across one chunk of script text.
+
+    Models the actual state machine rather than guessing from substrings, because both guesses were wrong:
+    a bare ``rfind("<!--<script")`` missed a NON-ADJACENT entry (``<!-- x <script>``, which really does
+    double-escape) and fired on ``<!--<script<`` / ``<!--<scripting`` (which really do NOT, because
+    ``<script`` must be followed by whitespace, ``/`` or ``>``) — minting a false FACT in the first case and
+    certifying a genuinely vulnerable page CLEAN in the second. ``find``-based, so it stays linear."""
+    i, n = 0, len(text)
+    while i < n:
+        if not escaped:
+            start = text.find("<!--", i)
+            if start < 0:
+                break
+            escaped, i = True, start + 4
+            continue
+        close = text.find("-->", i)
+        entry = -1
+        if not double:
+            k = i
+            while True:
+                k = text.find("<script", k)
+                if k < 0:
+                    break
+                after = k + 7
+                if after >= n or text[after].isspace() or text[after] in "/>":
+                    entry = k
+                    break
+                k += 7
+        if close >= 0 and (entry < 0 or close < entry):
+            escaped, double, i = False, False, close + 3      # `-->` leaves both escaped states
+        elif entry >= 0:
+            double, i = True, entry + 7                       # `<script` + terminator enters double-escape
+        else:
+            break
+    return escaped, double
+
+
+def _scan_markup(body: str) -> _MarkupScan:
+    """Tokenize (a capped prefix of) ``body``. Malformed input never raises: whatever was tokenized before
+    the error is what a browser would have parsed up to that point, and is what we judge."""
+    text = (body or "")[:_MARKUP_SCAN_CAP]
+    scan = _MarkupScan()
+    if ">" not in text:
+        return scan          # no complete tag can exist, so nothing is emitted — skip the tokenizer
+    try:
+        scan.feed(text)
+        scan.close()
+    except Exception:                             # noqa: BLE001 — keep what parsed; never fail the probe
+        pass
+    return scan
+
+
+def _redirect_hosts(scan: _MarkupScan) -> list[str]:
+    """Hosts a browser would NAVIGATE to from parsed markup: a meta-refresh target or a JS location sink."""
+    hosts: list[str] = []
+    for meta in scan.metas:
+        if (meta.get("http-equiv") or "").strip().lower() == "refresh":
+            target = _meta_refresh_url(meta.get("content") or "")
+            if target:
+                hosts.append(_host(target))
+    for text in scan.script_text:
+        for url in _JS_REDIRECT.findall(text):
+            hosts.append(_host(url.strip()))
+    return [h for h in hosts if h]
+
+
+def _markup_redirect_hosts(body: str) -> list[str]:
+    """The hosts a browser would actually NAVIGATE to from the response markup — the target of a
+    meta-refresh or a JS location sink. Returns lowercased netlocs; a relative / same-origin target
+    contributes nothing. This is the co-location test that makes open-redirect confirmation sound: the
+    canary host must be an ACTUAL navigation target, not merely a substring reflected somewhere in the body
+    next to an unrelated ``<meta http-equiv=Content-Type>``.
+
+    HONEST RESIDUAL: the extracted host list is a DERIVED observation stored in ``observed_evidence``
+    alongside the raw ``body``, so re-verification re-fires the predicate over the derived list rather than
+    re-parsing the body. The certificate signature makes the stored evidence tamper-evident, but the
+    veracity firewall cannot demote a MINT-TIME derivation bug here — which is why this path is pinned by
+    explicit true-positive AND negative-control tests plus a differential test against the stdlib tokenizer.
+    This is the same property every shipped predicate has (e.g. ``location_host = _host(location)``)."""
+    return _redirect_hosts(_scan_markup(body))
+
+
+def _emitted_url_hosts(body: str) -> list[str]:
+    """The hosts that appear as the AUTHORITY of a URL the app EMITS — an href/src/action attribute value, a
+    URL-valued canonical/social meta (og:url, …), or a meta-refresh / JS-location redirect target. These are
+    URLs a VICTIM's browser or a cache/crawler actually uses, which is what makes a reflected ``Host``
+    exploitable (cache poisoning, poisoned reset link, canonical hijack).
+
+    Crucially this is EMISSION, not mere presence: a URL that only appears as inert text — a 404 message
+    echoing the reconstructed ``http://<Host>/path`` back to the requester, a ``<pre>`` sample, an HTML
+    comment, a JSON error string — is NOT counted. Such an echo is shown only to the requester (who set
+    their own Host) and is not exploitable. Authorities come from stdlib ``urlsplit`` (via ``_host``), so a
+    relative URL whose QUERY contains ``//evil`` is correctly NOT an emission of ``evil``."""
+    scan = _scan_markup(body)
+    hosts = _redirect_hosts(scan)
+    for value in scan.url_attrs:
+        host = _host(value.strip())
+        if host:
+            hosts.append(host)
+    for meta in scan.metas:
+        prop = (meta.get("property") or meta.get("name") or "").strip()
+        if _URL_VALUED_META.fullmatch(prop):
+            host = _host((meta.get("content") or "").strip())
+            if host:
+                hosts.append(host)
+    return [h for h in hosts if h]
 
 
 # ---------------------------------------------------------------------------

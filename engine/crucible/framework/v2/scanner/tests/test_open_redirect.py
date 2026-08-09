@@ -89,3 +89,98 @@ def test_safe_redirect_not_confirmed() -> None:
         findings = AuditEngine(_non_following_send(host, port)).audit(
             req, checks=(OpenRedirectCheck(),), insertion_kinds=(InsertionKind.QUERY_VALUE,))
         assert findings == [], "an app that only redirects to its own host must not be flagged"
+
+
+_CANARY_URL = f"https://{_CANARY_HOST}/pwned"
+
+
+def test_markup_redirect_hosts_extracts_only_real_navigation_targets() -> None:
+    """Re-red-pen BLOCK-C: `content=` must be anchored to a real ATTRIBUTE boundary. A plain `\\b` is NOT
+    enough (`-` is a non-word char, so `\\bcontent` matches inside `data-content=`), which let a benign
+    own-host redirect mint a signed false FACT. Every real sink must still be extracted."""
+    from framework.v2.scanner.checks import _markup_redirect_hosts as hosts
+
+    # TRUE POSITIVES — real navigation targets must still be found
+    assert _CANARY_HOST in hosts(f'<meta http-equiv="refresh" content="0; url={_CANARY_URL}">')
+    assert _CANARY_HOST in hosts(f'<meta HTTP-EQUIV = "Refresh" content = "5; URL={_CANARY_URL}">')
+    assert _CANARY_HOST in hosts(f"<meta http-equiv='refresh' content='0;url={_CANARY_URL}'>")
+    assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
+    assert _CANARY_HOST in hosts(f'<script>location.assign("{_CANARY_URL}")</script>')
+    assert _CANARY_HOST in hosts(f'<script>window.location="{_CANARY_URL}"</script>')
+    # `.` is deliberately allowed before `location` so real sinks like top/parent/self still match
+    assert _CANARY_HOST in hosts(f'<script>top.location.href="{_CANARY_URL}"</script>')
+
+    # NEGATIVES — none of these is a navigation target; none may contribute a host
+    assert _CANARY_HOST not in hosts(   # BLOCK-C: a *content-named attribute is not `content`
+        f'<meta http-equiv="refresh" data-content="0;url={_CANARY_URL}" content="0;url=/home">')
+    assert _CANARY_HOST not in hosts(   # reflected next to an unrelated charset meta (BLOCK-1)
+        f'<meta http-equiv="Content-Type" content="text/html"><p>next: {_CANARY_URL}</p>')
+    assert _CANARY_HOST not in hosts(f'<script>var back="{_CANARY_URL}"</script>')   # a string, not a sink
+    assert _CANARY_HOST not in hosts(   # the canary is a query param of an OWN-host redirect
+        f'<meta http-equiv="refresh" content="0;url=/go?returnurl={_CANARY_URL}">')
+    assert hosts(f'<!-- {_CANARY_URL} -->') == []
+    # commented-out markup never navigates — a meta-refresh or JS sink inside an HTML comment emits nothing
+    assert _CANARY_HOST not in hosts(
+        f'<!-- <meta http-equiv="refresh" content="0;url={_CANARY_URL}"> -->')
+    assert _CANARY_HOST not in hosts(f'<!-- location.href="{_CANARY_URL}" -->')
+    # ... but a JS sink in a real <script> is still a true positive (script is NOT stripped for redirects)
+    assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
+
+
+def test_markup_redirect_hosts_ignores_inert_elements_and_reads_inner_quoted_content() -> None:
+    """Convergence red-pen: a meta-refresh / JS sink inside an escapable- or raw-text element (textarea,
+    title, xmp, plaintext, noscript, template, iframe) renders LITERALLY and never navigates, so it must not
+    count — while `<script>` content still does (JS sinks live there). And a `content` value delimited by one
+    quote may legitimately contain the other (`content="0; url='...'"`), which browsers honour."""
+    from framework.v2.scanner.checks import _markup_redirect_hosts as hosts
+
+    for el in ("textarea", "title", "xmp", "template", "iframe"):
+        assert _CANARY_HOST not in hosts(
+            f'<{el}><meta http-equiv="refresh" content="0;url={_CANARY_URL}"></{el}>'), el
+    assert _CANARY_HOST not in hosts(f'<plaintext><meta http-equiv="refresh" content="0;url={_CANARY_URL}">')
+    # `<noscript>` is a FALLBACK element parsed as LIVE markup when scripting is off — a no-JS consumer
+    # (link-preview crawler, plain HTTP client) really does follow this refresh, so it must still fire.
+    assert _CANARY_HOST in hosts(
+        f'<noscript><meta http-equiv="refresh" content="0;url={_CANARY_URL}"></noscript>')
+    # an end tag closes only when `</el` is followed by a terminator: `</textareax>` does NOT close it, so
+    # the content after it is still inert and must not be counted
+    assert _CANARY_HOST not in hosts(
+        f'<textarea></textareax><meta http-equiv="refresh" content="0;url={_CANARY_URL}"></textarea>')
+    assert _CANARY_HOST in hosts(   # ... but a real end tag does close it
+        f'<textarea></textarea><meta http-equiv="refresh" content="0;url={_CANARY_URL}">')
+    # ... while the real sinks still fire
+    assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
+    assert _CANARY_HOST in hosts(f"""<meta http-equiv="refresh" content="0; url='{_CANARY_URL}'">""")
+    assert _CANARY_HOST in hosts(f'<meta http-equiv="refresh" content="0; url={_CANARY_URL}">')
+
+
+def test_markup_redirect_hosts_is_bounded_on_a_hostile_body() -> None:
+    """Re-red-pen BLOCK-B: the markup parse must stay ~linear on a hostile, unterminated-<meta> body — a
+    target-controlled response must not be able to make it super-linear (availability). 1.2MB of '<meta '
+    (no '>') used to be quadratic (~minutes); it must now complete quickly and return no hosts."""
+    import time as _time
+
+    from framework.v2.scanner.checks import _emitted_url_hosts, _markup_redirect_hosts
+
+    # Every shape that has been super-linear at some point in this parser's history. An unterminated
+    # comment/script used to backtrack quadratically (minutes at the cap); a `<meta`-run used to re-scan the
+    # 4096 bound at each start. All must now complete well inside the bound and find no navigation target.
+    for label, body in (
+        ("unterminated meta", "<meta " * 200_000),
+        ("unterminated comment", "<!--" * 128_000),
+        ("unterminated script", "<script>" * 64_000),
+        ("unterminated href", '<a href="' * 56_000),
+        ("angle-bracket spam", '<meta<a href="' * 36_000),
+        ("bare '<' spam", "<" * 512_000),          # the maximal per-character case for the tag scanner
+        ("nested inert", "<textarea><script>" * 28_000),
+        ("nested template", "<template>" * 51_200),
+        ("script double-escape", "<script><!--<script>" * 25_600),
+        ("close-tag near-miss", "<script>" + "</scriptx" * 56_000),
+        ("many closed elements", "<script>a</script>" * 28_000),   # quote-free: unbounded finds were O(n^2)
+        ("quote spam", '"' * 512_000),
+    ):
+        t0 = _time.perf_counter()
+        assert _markup_redirect_hosts(body) == [], label
+        assert _emitted_url_hosts(body) == [], label
+        dt = _time.perf_counter() - t0
+        assert dt < 3.0, f"{label}: markup parse must stay bounded (was {dt:.2f}s) — super-linear regression"

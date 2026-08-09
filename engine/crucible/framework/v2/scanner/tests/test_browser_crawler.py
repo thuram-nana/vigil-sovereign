@@ -19,12 +19,14 @@ from typing import Iterator
 
 import pytest
 
-from framework.v2.scanner.browser import find_browser
+from framework.v2.scanner.browser import browser_usable
 from framework.v2.scanner.browser_crawler import BrowserCrawler
 from framework.v2.scanner.crawler import Crawler
 from framework.v2.scanner.insertion import HttpRequest
 
-pytestmark = pytest.mark.skipif(find_browser() is None, reason="no headless browser installed")
+pytestmark = pytest.mark.skipif(
+    not browser_usable(),
+    reason="no WORKING headless browser (a binary may be installed but unable to render here)")
 
 # route -> links its JavaScript injects after load (never present in the raw HTML)
 _ROUTES = {
