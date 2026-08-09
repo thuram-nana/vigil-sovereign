@@ -257,3 +257,24 @@ def test_oversized_artifact_is_refused_before_parsing():
     res = k8s_posture_verify(_kube_bench([_FAIL_ANON_AUTH]), engagement_slug="acme", signers=signers,
                              budget=tiny)
     assert res.parse_error == "oversize" and res.n_facts == 0 and res.admissions == []
+
+
+def test_incomplete_rolref_never_mints_a_false_workload_fact():
+    """RED-PEN A1-MEDIUM: a RoleBinding whose roleRef OMITS kind AND apiGroup (a hand-authored/incomplete
+    manifest) named 'edit' with an anonymous subject must NOT mint a K8S_WORKLOAD FACT — the workload oracle's
+    empty-string tolerance would otherwise treat absent kind/apiGroup as the dangerous BUILT-IN ClusterRole.
+    The reducer now carries a non-matching sentinel so the built-in check fails -> INCONCLUSIVE, no FACT. A
+    complete binding still FACTs."""
+    import json
+    signers, tr = _signers_and_trust()
+    bad = json.dumps({"kind": "RoleBinding", "metadata": {"name": "x", "namespace": "dev"},
+                      "roleRef": {"name": "edit"},
+                      "subjects": [{"kind": "User", "name": "system:anonymous"}]})
+    r = ingest_k8s_rbac(bad, engagement_slug="acme", signers=signers)
+    assert r.n_facts == 0, "incomplete-roleRef anonymous binding minted a false built-in-ClusterRole FACT"
+    good = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                       "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
+                                   "name": "cluster-admin"},
+                       "subjects": [{"kind": "User", "name": "system:anonymous"}]})
+    r2 = ingest_k8s_rbac(good, engagement_slug="acme", signers=signers)
+    assert r2.n_facts >= 1, "a complete anon->cluster-admin binding must still FACT"

@@ -25,8 +25,9 @@ when it is UNAMBIGUOUS. Concretely:
     document ``Principal: "*"`` / ``{"AWS": "*"}``, an S3 ACL / CloudFormation ``AccessControl`` of
     ``public-read`` / ``PublicRead(Write)``, or a security-group ingress ``CidrIp/cidr_blocks`` of
     ``0.0.0.0/0``. A ``block_public_access = false`` (a bucket-level toggle, NOT an achieved grant) leaves
-    ``public`` UNKNOWN (None) — never True. A plan's DESIRED value is weaker than applied state; we prefer
-    ``values`` (state) over ``planned_values``.
+    ``public`` UNKNOWN (None) — never True. A plan's DESIRED state (``planned_values``) is what an apply
+    WOULD create, not the deployed reality, so it is NEVER read for a FACT — only APPLIED state (a tfstate, a
+    ``terraform show -json`` of state, or a plan file's ``prior_state.values``) is.
   * ``encrypted`` is False ONLY on an EXPLICIT disable (``storage_encrypted``/``encrypted``/
     ``encryption_enabled`` literally false). A missing SSE block is UNKNOWN (None), not False.
   * ``sensitive`` is True ONLY from an explicit tag/attribute, never inferred from a name.
@@ -329,15 +330,29 @@ def _tf_walk_module(module: Any, out: list) -> None:
 
 
 def _terraform_native(doc: dict) -> tuple[list[tuple[str, dict, str]], str]:
-    """Extract ``(address, attributes, type)`` triples from a parsed Terraform document. Handles a tfstate
-    (top-level ``resources[].instances[].attributes``) AND a plan-JSON (``values`` / ``planned_values``
-    root_module). Prefers ``values`` (applied/state) over ``planned_values`` (desired) per near-zero-FP."""
+    """Extract ``(address, attributes, type)`` triples from a parsed Terraform document, reading ONLY APPLIED
+    (achieved) state. Handles a tfstate (top-level ``resources[].instances[].attributes``) and a
+    ``terraform show -json`` of STATE (top-level ``values.root_module``) and a plan-file's PRIOR state
+    (``prior_state.values.root_module`` — the real infra as it existed before the plan).
+
+    NEAR-ZERO-FP (BLOCKER-3): ``planned_values`` is DESIRED state — what an apply WOULD create — NOT the
+    deployed reality, so it is NEVER read for an achieved-state FACT. A plan file that carries only
+    ``planned_values`` (no state, no prior_state) yields ZERO resources here → no FACT (a plan proves nothing
+    about live posture; export a tfstate or a `terraform show -json` of state instead)."""
     triples: list[tuple[str, dict, str]] = []
-    # plan-JSON (terraform show -json) — prefer state ``values`` over ``planned_values`` (desired).
-    if isinstance(doc.get("values"), dict) or isinstance(doc.get("planned_values"), dict):
-        root = doc.get("values") if isinstance(doc.get("values"), dict) else doc.get("planned_values")
+    # `terraform show -json` — read applied state only: top-level `values` (a state show) or a plan file's
+    # `prior_state.values` (the pre-apply real state). `planned_values` (desired) is deliberately ignored.
+    root = None
+    if isinstance(doc.get("values"), dict):
+        root = doc["values"]
+    elif isinstance(doc.get("prior_state"), dict) and isinstance(doc["prior_state"].get("values"), dict):
+        root = doc["prior_state"]["values"]
+    if root is not None:
         rootmod = root.get("root_module") if isinstance(root, dict) else None
         _tf_walk_module(rootmod, triples)
+        return triples, str(doc.get("terraform_version") or "")
+    # A plan-only document (planned_values but no state/prior_state) → no achieved resources → no FACT.
+    if isinstance(doc.get("planned_values"), dict) and "resources" not in doc:
         return triples, str(doc.get("terraform_version") or "")
     # tfstate (version 4) — resources[].instances[].attributes
     for r in doc.get("resources") or []:

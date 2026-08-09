@@ -376,3 +376,27 @@ def test_iac_malformed_artifact_raises_before_any_mint():
     signers, _ = _signers_and_trust()
     with pytest.raises(IacParseError):
         iac_verify('{"resources": [', fmt="terraform", engagement_slug="acme", signers=signers)
+
+
+def test_terraform_plan_desired_state_never_mints_an_achieved_fact():
+    """RED-PEN A3-HIGH: `terraform show -json <planfile>` carries `planned_values` (DESIRED state) and no
+    `values`. A plan's desired state is not the deployed reality (BLOCKER-3), so it must NOT mint an
+    achieved-state CLOUD_POSTURE FACT. Only APPLIED state (`values` / a plan file's `prior_state.values`) is
+    read."""
+    import json
+    from vigil_integration.live.iac_posture import iac_verify
+    signers, tr = _signers_and_trust()
+    pub_res = {"address": "aws_s3_bucket.b", "type": "aws_s3_bucket", "name": "b",
+               "values": {"acl": "public-read"}}
+    plan_only = json.dumps({"terraform_version": "1.5",
+                            "planned_values": {"root_module": {"resources": [pub_res]}}})
+    assert iac_verify(plan_only, fmt="terraform", engagement_slug="acme", signers=signers).n_facts == 0, \
+        "a plan's planned_values (desired) minted an achieved-state FACT"
+    applied = json.dumps({"terraform_version": "1.5", "values": {"root_module": {"resources": [pub_res]}}})
+    assert iac_verify(applied, fmt="terraform", engagement_slug="acme", signers=signers).n_facts >= 1, \
+        "applied `values` state must still FACT"
+    prior = json.dumps({"terraform_version": "1.5",
+                        "prior_state": {"values": {"root_module": {"resources": [pub_res]}}},
+                        "planned_values": {"root_module": {"resources": []}}})
+    assert iac_verify(prior, fmt="terraform", engagement_slug="acme", signers=signers).n_facts >= 1, \
+        "a plan file's prior_state (applied) must FACT"

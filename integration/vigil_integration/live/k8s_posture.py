@@ -266,10 +266,15 @@ def _reduce_rbac_binding(doc: Any) -> dict | None:
         reduced["namespace"] = namespace
     if role not in (None, ""):
         reduced["role"] = str(role)
-    if role_kind not in (None, ""):
-        reduced["role_kind"] = str(role_kind)
-    if role_apigroup not in (None, ""):
-        reduced["role_apigroup"] = str(role_apigroup)
+    # A roleRef in a real Kubernetes manifest ALWAYS carries kind AND apiGroup (the API server rejects a
+    # binding without them). If EITHER is absent we must NOT let the workload oracle's empty-string tolerance
+    # (role_kind in ('clusterrole','') AND role_apigroup in ('rbac.authorization.k8s.io','')) treat this as a
+    # dangerous BUILT-IN ClusterRole binding — that mints a signed FALSE FACT off a hand-authored/incomplete
+    # manifest (red-pen A1-MEDIUM). Carry an explicit NON-matching sentinel so the built-in check fails →
+    # non-fire → INCONCLUSIVE, never a FACT. A well-formed binding (both present) is unaffected and still
+    # FACTs correctly; the binding is still adjudicated (not silently dropped).
+    reduced["role_kind"] = str(role_kind) if role_kind not in (None, "") else "unspecified"
+    reduced["role_apigroup"] = str(role_apigroup) if role_apigroup not in (None, "") else "unspecified"
     return reduced
 
 
