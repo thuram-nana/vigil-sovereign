@@ -1133,8 +1133,8 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
 #
 # HONEST BOUND (identical to _reexecute_posture / the module header): the retained control is producer-
 # supplied. Re-firing proves the verdict is the correct FUNCTION of the retained evidence — it does NOT
-# prove the evidence reflects the live target (that still needs a VIGIL live re-run; a producer-independent
-# OBSERVATION needs a channel-bound live capture).
+# prove the evidence reflects the live target (that still needs a VIGIL live re-run; and an OBSERVATION whose
+# truth does not rest on the producer's word needs a channel-bound live capture).
 # ---------------------------------------------------------------------------
 def _pp_coerce_text(value: Any) -> str:
     """Byte-identical to oracles._coerce_text (the single text-coercion the posture oracles use)."""
