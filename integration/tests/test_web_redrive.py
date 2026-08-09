@@ -10,6 +10,7 @@ the server. No external tool is installed or run — the transport is VIGIL's ow
 from __future__ import annotations
 
 import http.server
+import pathlib
 import threading
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -79,7 +80,7 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
         elif parts.path == "/safe":                        # SAFE: reflects the value in plain text only
             nxt = (q.get("next") or [""])[0]
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")   # declared: body is adjudicable
             self.end_headers()
             self.wfile.write(f"you requested: {nxt}".encode("utf-8"))
         elif parts.path == "/preview":                     # SAFE (red-pen BLOCK-1): 200 HTML that reflects
@@ -340,3 +341,153 @@ def test_a_connection_refused_midrun_is_inconclusive_not_clean(tmp_path, monkeyp
     assert res.n_facts == 0
     assert res.leads == [], f"a target that was never reached must NOT yield CLEAN leads: {res.leads}"
     assert res.inconclusive, "a no-channel probe must be recorded INCONCLUSIVE, not clean"
+
+
+# ---- per-surface negative controls: each insertion surface has its own way of looking like a redirect ----
+
+class _RoutingApp(http.server.BaseHTTPRequestHandler):
+    """Benign framework behaviour that superficially resembles an open redirect on each surface."""
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def do_GET(self):  # noqa: N802
+        _HITS["n"] += 1
+        parts = urlsplit(self.path)
+        if parts.path.startswith("/canon") and not parts.path.endswith("/"):
+            return self._redirect(parts.path + "/")          # canonical-slash normalisation
+        if parts.path.startswith("/dbl"):
+            return self._redirect(parts.path.replace("//", "/"))  # path normalisation
+        if parts.path.startswith("/auth"):
+            return self._redirect("/login?next=" + parts.path)    # generic login redirect
+        if parts.path.startswith("/missing"):
+            return self._redirect("/404")                    # framework not-found redirect
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *a):
+        return
+
+
+def _serve_routing():
+    _HITS["n"] = 0
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _RoutingApp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+@pytest.mark.parametrize("route", ["/canon/x", "/dbl//x", "/auth/x", "/missing/x"])
+def test_path_normalisation_and_framework_redirects_mint_no_fact(monkeypatch, tmp_path, route) -> None:
+    """PATH-surface control. Probing a path segment means the canary lands in the URL PATH, where a framework
+    will happily 302 — for a trailing slash, a collapsed `//`, a login gate, or a 404. None of those is an
+    application-controlled redirect to the attacker: the Location authority stays the app's own. A re-drive
+    that scored any of them would turn ordinary routing into a signed FACT."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve_routing()
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}{route}",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert _HITS["n"] > 0, "the control must actually be probed, not gated off"
+    assert res.n_facts == 0, f"routing behaviour minted a FACT: {[f.finding_ref for f in res.facts]}"
+
+
+def test_every_insertion_surface_is_admitted_and_attributed(monkeypatch, tmp_path) -> None:
+    """Whatever the surface, an outcome must reach a REGISTERED branch — an unattributed probe would be a
+    verdict no capability check ever saw."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    import sys
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "integration"))
+    from vigil_integration.live.verdict import branch_ids
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+    srv = _serve_routing()
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}/canon/x?next=orig",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    assert res.admissions, "no admission was recorded for any probe"
+    unknown = [b for b, _v, _r in res.admissions if b not in branch_ids()]
+    assert not unknown, f"outcomes attributed to unregistered branches: {unknown}"
+
+
+
+def test_location_header_branch_requires_a_real_3xx_not_a_reflected_location(monkeypatch, tmp_path):
+    """ADVERSARIAL BLOCK-1: a status-200 page that reflects the canary into a Location header (and carries a
+    body redirect) must NOT mint an open_redirect.location_header FACT — that branch's declared evidence is
+    a 3xx REDIRECT, and attributing a render-dependent body redirect to the header surface laundered
+    evidence that was never observed into a clean-capable, offline-verifiable certificate. The body branch
+    still fires on its real evidence, so the family verdict stays FACT via the branch actually observed."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+
+    class _Soft(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            nxt = (parse_qs(urlsplit(self.path).query).get("next") or [""])[0]
+            self.send_response(200)                       # NOT a redirect
+            self.send_header("Location", nxt)             # ... but reflects the canary into Location
+            self.send_header("Content-Type", "text/html; charset=utf-8")   # declared: body is adjudicable
+            self.end_headers()
+            self.wfile.write(f'<meta http-equiv="refresh" content="0;url={nxt}">'.encode())
+
+        def log_message(self, *a):
+            return
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Soft)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}/x?next=orig",
+                          slug="alpha", engagement_slug="alpha", signers=signers)
+    finally:
+        srv.shutdown()
+    verdicts = res.branch_verdicts.get("open_redirect", {})
+    assert verdicts.get("open_redirect.location_header") != "FACT", (
+        "a status-200 reflected Location was laundered into a header-surface FACT")
+    assert verdicts.get("open_redirect.body_markup") == "FACT", "the real body evidence should still fire"
+    assert res.family_verdict("open_redirect") == "FACT", "the family is FACT via the branch truly observed"
+
+
+def test_family_verdict_survives_a_benign_insertion_point_after_the_firing_one(monkeypatch, tmp_path):
+    """RE-ATTACK BLOCK: _run fires once per insertion point with the same branch names, so a benign point
+    processed AFTER the firing one used to OVERWRITE its verdict (last-wins), reporting the family as
+    INCONCLUSIVE while a live signed FACT sat in res.facts. `?next=<redirect>&utm_source=x` is an everyday
+    URL. The family must be FACT whenever ANY point produced one, independent of param order."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+
+    class _Meta(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            nxt = (parse_qs(urlsplit(self.path).query).get("next") or [""])[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")   # declared: body is adjudicable
+            self.end_headers()
+            self.wfile.write(f'<meta http-equiv="refresh" content="0;url={nxt}">'.encode())
+
+        def log_message(self, *a):
+            return
+
+    for path in ("/x?next=orig&z=orig", "/x?a=orig&next=orig"):   # firing point last, then first
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _Meta)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}{path}",
+                              slug="alpha", engagement_slug="alpha", signers=signers)
+        finally:
+            srv.shutdown()
+        assert res.n_facts >= 1, f"{path}: expected a signed FACT"
+        assert res.family_verdict("open_redirect") == "FACT", (
+            f"{path}: family collapsed to {res.family_verdict('open_redirect')} despite a live FACT")

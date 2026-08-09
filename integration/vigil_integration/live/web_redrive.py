@@ -33,6 +33,8 @@ class WebRedriveResult:
     facts: list = field(default_factory=list)     # AdapterResult (status=="fact"), signed
     leads: list = field(default_factory=list)     # AdapterResult (status=="lead") — CHANNEL-CONFIRMED
     inconclusive: list = field(default_factory=list)  # (bug_class, item) — a probe with NO channel; never CLEAN
+    admissions: list = field(default_factory=list)    # (branch, verdict, reason) — the audit trail
+    branch_verdicts: dict = field(default_factory=dict)  # bug_class -> {branch: verdict}
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
     refused: bool = False
     notes: list = field(default_factory=list)
@@ -40,6 +42,18 @@ class WebRedriveResult:
     @property
     def n_facts(self) -> int:
         return len(self.facts)
+
+    def family_verdict(self, bug_class: str) -> str:
+        """The conservative composition over every branch of ``bug_class`` (see verdict.compose).
+
+        Reporting must use this rather than any single branch: a CLEAN header branch sitting beside a FACT
+        body branch would otherwise be summarised as a clean family, asserting safety no branch established."""
+        from .verdict import compose  # noqa: PLC0415
+        return compose(list(self.branch_verdicts.get(bug_class, {}).values())).value
+
+    def family_verdicts(self) -> dict:
+        """Every examined family, conservatively composed."""
+        return {bug: self.family_verdict(bug) for bug in self.branch_verdicts}
 
 
 def _gated_web_send(slug: str, *, timeout: float = 8.0):
@@ -66,9 +80,22 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, D401
             return None
 
-    _EMPTY = {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
-    _READ_CAP = 2_000_000   # bound the body read — a hostile/huge target response must not exhaust memory
-    state = {"channels": 0, "no_channel": 0}
+    from urllib.parse import urlsplit
+
+    from .body_decode import MAX_RAW_BYTES, decode_body
+    from .dns_pin import pinned_handlers, resolve_and_validate
+
+    def _address_authorized(address: str) -> bool:
+        """Re-ask the SAME gate about the resolved address. Reusing the charter decision (rather than a
+        second, looser rule) is what keeps the pin honest: an address the gate would refuse as a target is
+        refused as a destination."""
+        scheme = "https" if str(address).count(":") > 1 else "http"   # bracket IPv6 for the URL form
+        literal = f"[{address}]" if str(address).count(":") > 1 else address
+        return _authorize(f"http://{literal}/", slug) is None
+
+    _EMPTY = {"status": 0, "body": "", "headers": [], "latency_ms": 0.0,
+              "body_semantically_available": False, "body_unavailable_reason": "no channel"}
+    state = {"channels": 0, "no_channel": 0, "body_unavailable": 0}
 
     def send(req: Any) -> dict:
         if _authorize(req.url, slug) is not None:
@@ -78,25 +105,146 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         r = urllib.request.Request(req.url, data=data, method=getattr(req, "method", "GET"))
         for k, v in getattr(req, "headers", []) or []:
             r.add_header(k, v)
+        if not r.has_header("Accept-encoding"):
+            # Ask only for encodings we can reverse. A target may still answer with something else (some
+            # CDNs compress unconditionally) — that path is handled by decode_body, which refuses rather
+            # than guessing, so the body is INCONCLUSIVE rather than silently mangled.
+            r.add_header("Accept-Encoding", "gzip, deflate, identity")
         # An EMPTY ProxyHandler is MANDATORY (mirrors the shipped gated connector): without it urllib honours
         # http_proxy/https_proxy/ALL_PROXY, so the real TCP peer would be a proxy the gate never authorized —
         # the charter/single-host scope check would pass while traffic went elsewhere, and the proxy's bytes
         # would be labelled provenance="live_redrive". No auth handler either: the probe stays anonymous.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+        # DNS time-of-check/time-of-use: the gate authorized a NAME, but urllib would resolve that name
+        # again at connect time, so nothing binds the authorization to the endpoint actually reached
+        # (rebinding, a short TTL, a poisoned resolver, or a multi-A record with one address out of scope).
+        # Resolve once, require EVERY address to satisfy the same charter scope the gate used, then PIN the
+        # connection to the validated address while still presenting the original hostname for TLS/Host.
+        parts = urlsplit(req.url)
+        target_host = parts.hostname or ""
+        target_port = parts.port or (443 if parts.scheme == "https" else 80)
+        resolution = resolve_and_validate(target_host, target_port, _address_authorized)
+        if not resolution.allowed:
+            state["no_channel"] += 1
+            refused = dict(_EMPTY)
+            refused["body_unavailable_reason"] = resolution.refused_reason
+            return refused
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect,
+                                             *pinned_handlers(resolution.pinned))
         t0 = time.monotonic()
         try:
+            # Read ONE BYTE PAST the bound: reading exactly the cap cannot distinguish "the response was
+            # this long" from "the response was longer and we hold a prefix", and a body-dependent NEGATIVE
+            # over a prefix cannot prove the absence of markup.
             with opener.open(r, timeout=timeout) as resp:
-                status, raw, headers = resp.status, resp.read(_READ_CAP), list(resp.headers.items())
+                status, raw, headers = resp.status, resp.read(MAX_RAW_BYTES + 1), list(resp.headers.items())
         except urllib.error.HTTPError as e:      # a 4xx/5xx is a real, useful response — a genuine channel
-            status, raw, headers = e.code, e.read(_READ_CAP), list(e.headers.items())
+            status, raw, headers = e.code, e.read(MAX_RAW_BYTES + 1), list(e.headers.items())
         except Exception:                        # noqa: BLE001 — transport error (no channel) → INCONCLUSIVE
             state["no_channel"] += 1
             return dict(_EMPTY)
         state["channels"] += 1
-        return {"status": status, "body": raw.decode("utf-8", "replace"),
-                "headers": [(str(k), str(v)) for k, v in headers], "latency_ms": (time.monotonic() - t0) * 1000.0}
+        headers = [(str(k), str(v)) for k, v in headers]
+        truncated = len(raw) > MAX_RAW_BYTES
+        body = decode_body(raw[:MAX_RAW_BYTES], headers, truncated=truncated)
+        # The capture carries its own decoding provenance so an adjudicator can tell "the document said
+        # nothing" from "we never read the document".
+        if not body.body_semantically_available:
+            # A real channel, but NOT a readable document. Header-derived evidence in this same response
+            # stays adjudicable; body-derived evidence must not be scored as CLEAN over bytes we never
+            # decoded, so the runner is told.
+            state["body_unavailable"] += 1
+        return {"status": status, "body": body.text, "headers": headers,
+                "latency_ms": (time.monotonic() - t0) * 1000.0,
+                "pinned_ip": resolution.pinned, "resolved_addresses": list(resolution.addresses),
+                "raw_sha256": body.raw_sha256, "raw_len": body.raw_len,
+                "content_encoding": body.content_encoding, "charset": body.charset,
+                "decoded": body.decoded, "truncated": body.truncated,
+                "body_semantically_available": body.body_semantically_available,
+                "body_unavailable_reason": body.reason}
 
     return send, state
+
+
+# The insertion points this re-drive ACTUALLY probes. It builds a bare GET template from the proposed URL,
+# whose only insertion points are the URL — so QUERY_VALUE and URL_PATH_SEG is the honest coverage today.
+# COOKIE_VALUE / BODY_FORM_VALUE / JSON_VALUE would need the runner to synthesise a cookie / a urlencoded
+# body / a JSON body with the correct method + Content-Type and a benign-twin baseline; listing them while
+# the template makes them inert was an overclaim (the adversarial round caught it), so they are declared as
+# blocking_work on the branches instead. QUERY_NAME / BODY_FORM_NAME / JSON_KEY stay out as an ORACLE
+# BOUNDARY: a URL injected as a parameter NAME does not model the redirect-value property under test.
+# Named by VALUE, not by enum member: the framework import is function-local (FATAL-2), so this module must
+# not reference InsertionKind at import time. _redrive_kinds() resolves them where the enum is available.
+_REDRIVE_INSERTION_KIND_NAMES = (
+    "QUERY_VALUE", "URL_PATH_SEG",
+)
+
+
+def _redrive_kinds(insertion_kind):
+    """The InsertionKind members this re-drive probes, resolved against the caller's enum."""
+    return tuple(getattr(insertion_kind, name) for name in _REDRIVE_INSERTION_KIND_NAMES
+                 if hasattr(insertion_kind, name))
+
+
+def _oracle_signal(context: "dict"):
+    """Run the deterministic oracle over the retained context and return its (fired, conclusive) signal.
+
+    Kept separate from minting so admission can see the oracle's answer BEFORE any certificate exists."""
+    from framework.v2.verify.oracles import predicate_oracle  # noqa: PLC0415 (FATAL-2: function-local)
+
+    evidence = context.get("observed_evidence") or {}
+    predicate = context.get("predicate") or {}
+    return predicate_oracle(evidence, predicate)
+
+
+def _branch_outcomes(bug_class: str, context: "dict", overall_fired: bool) -> "list[tuple[str, bool]]":
+    """Every ATOMIC branch outcome present in this response, as ``(branch_id, fired)``.
+
+    Deliberately NOT "one branch per response". A single response can carry a 302 ``Location``, a body
+    meta-refresh AND a JavaScript sink at once; collapsing that to a single branch by precedence would
+    discard real evidence and, worse, hide the LIMITATIONS of the branches it dropped — the body branches
+    are not CLEAN-capable, so silently reporting only the header branch would let a response look more
+    conclusively examined than it was.
+
+    Each outcome is admitted separately, so each is judged against ITS OWN declared capability and appears
+    in the audit trail with its own verdict."""
+    evidence = context.get("observed_evidence") or {}
+    followed = bool(evidence.get("followed_redirect"))
+    body = evidence.get("body") or ""
+    # A Location host equals the target only when the response ACTUALLY REDIRECTED. Without this, a status
+    # 200 that merely reflects the canary into a Location header (or a render-dependent body/JS redirect on
+    # a page that also sets Location) was attributed to the `location_header` branch — laundering
+    # body/JS-derived, render-dependent evidence into a 3xx-header FACT whose DECLARED evidence surface was
+    # never observed. The status gate MUST match the oracle's own Location disjunct (checks.py: a 3xx status
+    # AND a matching Location host), so the branch fires exactly when its declared evidence is present.
+    is_redirect = int(evidence.get("status", 0) or 0) in (301, 302, 303, 307, 308)
+    location_host = evidence.get("location_host")
+
+    if bug_class == "cors":
+        return [("cors.reflected_origin_with_credentials", overall_fired)]
+
+    if bug_class == "host_header_injection":
+        # The host-header Location disjunct is itself status-free (checks.py:HostHeaderCheck), so branch and
+        # oracle already agree here — do not add a gate the oracle does not have.
+        evil = evidence.get("evil_host")
+        emitted = evidence.get("emitted_url_hosts") or []
+        return [
+            ("host_header.location_header", bool(evil) and location_host == evil),
+            ("host_header.body_emission", bool(evil) and evil in emitted and not followed),
+        ]
+
+    prefix = "oidc_redirect_uri" if bug_class == "oidc_redirect_uri" else "open_redirect"
+    canary = evidence.get("canary_host")
+    outcomes = [(f"{prefix}.location_header",
+                 bool(canary) and is_redirect and location_host == canary)]
+    meta_fired = js_fired = False
+    if canary and body:
+        from framework.v2.scanner.checks import js_sink_hosts, meta_refresh_hosts  # noqa: PLC0415
+        meta_fired = canary in meta_refresh_hosts(body) and not followed
+        js_fired = canary in js_sink_hosts(body) and not followed
+    outcomes.append((f"{prefix}.body_markup", meta_fired))
+    if prefix == "open_redirect":       # the SSO check has no registered JS-sink branch
+        outcomes.append(("open_redirect.js_sink", js_fired))
+    return outcomes
 
 
 def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
@@ -109,7 +257,8 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
 
-    from ..oracle_adapter import confirm_and_certify  # noqa: PLC0415 (FATAL-2: function-local)
+    from ..oracle_adapter import certify_admitted  # noqa: PLC0415 (FATAL-2: function-local)
+    from .verdict import Verdict, admit, compose as _compose  # noqa: PLC0415
 
     res = WebRedriveResult(url=url)
     # PRE-FLIGHT the gate ONCE: a refused engagement (kill-switch / out-of-scope / no-slug / bad URL) means
@@ -130,20 +279,55 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         send was gate-refused (kill-switch tripped mid-run) or errored (connection refused / timeout)
         observed NOTHING — it is INCONCLUSIVE, never a 'channel-confirmed CLEAN' (the 'found nothing !=
         CLEAN' invariant). We snapshot the channel counter around the probe to decide."""
-        before = state["channels"]
+        before, before_bodies = state["channels"], state["body_unavailable"]
         ctx = probe_fn()
         had_channel = state["channels"] > before
         if not had_channel:
             res.inconclusive.append((bug_class, item))   # no observation → do NOT let it become CLEAN
             return
+        body_unreadable = state["body_unavailable"] > before_bodies
         if ctx is None:
             return
+        context = ctx.to_verifier_context()
         finding = {"check_id": f"web:{bug_class}:{item}", "bug_class": bug_class,
-                   "insertion_point": item, "oracle_context": ctx.to_verifier_context()}
-        r = confirm_and_certify(finding, engagement_slug=engagement_slug, signers=signers,
-                                provenance="live_redrive")
-        res.contexts[r.finding_ref] = finding["oracle_context"]
-        (res.facts if r.is_fact else res.leads).append(r)
+                   "insertion_point": item, "oracle_context": context}
+
+        # ADMISSION DECIDES, MINTING EXECUTES. Run the deterministic oracle, attribute the outcome to ONE
+        # registered evidence branch, and let admit() apply that branch's declared capabilities against what
+        # this observation actually supports. Calling confirm_and_certify directly would let a verdict reach
+        # a certificate without any capability check ever running.
+        signal = _oracle_signal(context)
+        observed = {
+            "channel_established": True,
+            "body_semantically_available": not body_unreadable,
+            "not_followed_redirect": not bool(context.get("observed_evidence", {}).get("followed_redirect")),
+            "gate_authorized": True,
+        }
+        # One admission PER ATOMIC BRANCH OUTCOME. A response carrying several kinds of evidence yields
+        # several admissions, each judged against its own declared capability, so nothing is hidden by the
+        # precedence of a stronger sibling.
+        for branch, fired in _branch_outcomes(bug_class, context, signal.fired):
+            admitted = admit(branch, fired=fired, conclusive=signal.conclusive, observed=observed)
+            res.admissions.append((branch, admitted.verdict.value, admitted.reason))
+            # STRONGEST-wins across insertion points, not last-wins. `_run` fires once PER insertion point,
+            # all with the same branch names, so a benign point processed AFTER the firing one used to
+            # overwrite its verdict — reporting a family as INCONCLUSIVE while it held a live signed FACT
+            # (?next=<redirect>&utm_source=x is an everyday URL). A branch is FACT for the family if ANY
+            # point produced a FACT; compose() over {prior, new} takes the stronger under the same lattice.
+            branch_map = res.branch_verdicts.setdefault(bug_class, {})
+            prior = branch_map.get(branch)
+            branch_map[branch] = _compose([prior, admitted.verdict.value]).value if prior else admitted.verdict.value
+            per_branch = dict(finding, check_id=f"{finding['check_id']}#{branch}")
+            r = certify_admitted(per_branch, admitted, engagement_slug=engagement_slug, signers=signers,
+                                 provenance="live_redrive")
+            res.contexts[r.finding_ref] = context
+            if r.is_fact:
+                res.facts.append(r)
+            elif admitted.verdict is Verdict.INCONCLUSIVE:
+                res.inconclusive.append((bug_class, f"{item}#{branch}"))
+                res.notes.append(f"{bug_class} [{branch}]: {admitted.reason}")
+            else:
+                res.leads.append(r)
 
     try:
         # request-level checks (add an evil Origin / Host to the whole request)
@@ -151,7 +335,12 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         _run(lambda: HostHeaderCheck().probe(template, send), "host_header_injection", url)
         # per-insertion-point: open-redirect injects the canary into each query-value point
         orc = OpenRedirectCheck()
-        for point in template.insertion_points(kinds=(InsertionKind.QUERY_VALUE,)):
+        # A redirect parameter is not only a query value: apps take `next`/`returnTo` from a path segment,
+        # a cookie, or a urlencoded/JSON body just as often. Restricting the re-drive to QUERY_VALUE meant
+        # those insertion points were ABSENT from adjudication — not reported as unexamined, simply missing,
+        # which reads to a consumer as "nothing there". Every point below is covered by the same admission
+        # path, so each one's outcome is attributed and capability-checked like any other.
+        for point in template.insertion_points(kinds=_redrive_kinds(InsertionKind)):
             _run(lambda p=point: orc.probe(template, p, send), "open_redirect", f"{url}#{point.id}")
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"probe error: {type(e).__name__}: {e}")

@@ -33,6 +33,7 @@ from urllib.parse import urljoin, urlsplit
 
 from ..verify.adapter import FindingContext
 from ..verify.oob import OOBReceiver
+from . import js_lex as _js_lex
 from .insertion import HttpRequest, InsertionPoint, RequestTemplate
 
 # A `send` turns a rendered request into an observed response dict
@@ -365,13 +366,15 @@ class HostHeaderCheck:
         # As above: on a followed 3xx the body is never rendered, so a Host-derived link inside it is not
         # something a victim can use. The Location disjunct still stands on its own.
         followed = bool(location) and int(resp.get("status", 0) or 0) in (301, 302, 303, 307, 308)
+        body_available = bool(resp.get("body_semantically_available", True))
         return FindingContext.from_predicate(
             {"location_host": _host(location), "evil_host": self.evil_host,
-             "body": body, "followed_redirect": followed,
+             "body": body, "followed_redirect": followed, "body_available": body_available,
              "emitted_url_hosts": _emitted_url_hosts(body)},
             {"any": [
                 {"eq": [{"var": "location_host"}, {"var": "evil_host"}]},
                 {"all": [
+                    {"eq": [{"var": "body_available"}, True]},
                     {"not": {"eq": [{"var": "followed_redirect"}, True]}},
                     {"in": [{"var": "evil_host"}, {"var": "emitted_url_hosts"}]},
                 ]},
@@ -414,10 +417,15 @@ class OpenRedirectCheck:
         # A 3xx that carries a Location is FOLLOWED by the browser, so its body is never rendered: any
         # navigation the body describes cannot happen, and counting it would be a false FACT.
         followed = bool(location) and status in (301, 302, 303, 307, 308)
+        # A body VIGIL could not decode (unsupported Content-Encoding, undeclared non-UTF-8 charset, a
+        # truncated response) is NOT evidence: the body disjunct must not fire over it, and a non-firing
+        # over it is INCONCLUSIVE for the runner, never CLEAN. Captures without the flag are treated as
+        # available so the engine's own plain-text sends behave exactly as before.
+        body_available = bool(resp.get("body_semantically_available", True))
         return FindingContext.from_predicate(
             {"status": status, "location_host": _host(location),
              "canary_host": _host(self.canary), "body": body,
-             "followed_redirect": followed,
+             "followed_redirect": followed, "body_available": body_available,
              "markup_redirect_hosts": _markup_redirect_hosts(body)},
             {"any": [
                 {"all": [
@@ -425,6 +433,7 @@ class OpenRedirectCheck:
                     {"eq": [{"var": "location_host"}, {"var": "canary_host"}]},
                 ]},
                 {"all": [
+                    {"eq": [{"var": "body_available"}, True]},
                     {"not": {"eq": [{"var": "followed_redirect"}, True]}},
                     {"min_len": [{"var": "canary_host"}, 1]},
                     {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
@@ -691,17 +700,10 @@ def _meta_refresh_url(content: str) -> str:
     return value[i:].strip(_HTML_WHITESPACE)
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
 #
-# KNOWN LIMITATION (tracked, not fixed here): this is a regex over script TEXT, so it also fires on a sink
-# that sits inside a JS comment or a string literal — e.g. `// location.href="//evil/"` — which a browser
-# never executes. That is a false-FACT surface for `open_redirect`. It is PRE-EXISTING (the previous code
-# ran the same regex over the WHOLE body, so scoping it to live script text narrowed it) and reaching a
-# signed FACT requires the target to reflect the injected canary into exactly such a commented-out or
-# quoted sink, which is contrived. It is NOT fixed here on purpose: distinguishing a real sink from one in
-# a comment/string needs a JS lexer, and this wave's central lesson is that hand-approximating a lexer over
-# adversary-controlled input does not converge (a hand-written HTML masker produced ~15 defects across four
-# adversarial rounds before it was deleted in favour of the stdlib tokenizer). The sound fix is a real JS
-# tokenizer — or demoting the body branch of the JS sink to a LEAD — and is filed as the next wave's first
-# item rather than guessed at here.
+# Sinks are filtered by lexical region (see js_lex): a match only counts when it BEGINS in executable code,
+# so a commented-out or quoted sink is excluded structurally rather than by hoping the regex misses it. The
+# one ambiguity JavaScript's grammar cannot settle without parsing — `/` as regex-start vs division — is
+# resolved AWAY from minting, so an ambiguous span can never produce a FACT.
 _JS_REDIRECT = re.compile(
     r"(?<![-\w])(?:(?:window|document|top|parent|self)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*"
     r"[\"']([^\"']{1,4096})[\"']",
@@ -883,18 +885,46 @@ def _scan_markup(body: str) -> _MarkupScan:
     return scan
 
 
-def _redirect_hosts(scan: _MarkupScan) -> list[str]:
-    """Hosts a browser would NAVIGATE to from parsed markup: a meta-refresh target or a JS location sink."""
+def _meta_refresh_hosts(scan: _MarkupScan) -> list[str]:
+    """Hosts a declarative ``<meta http-equiv=refresh>`` would navigate to."""
     hosts: list[str] = []
     for meta in scan.metas:
         if (meta.get("http-equiv") or "").strip().lower() == "refresh":
             target = _meta_refresh_url(meta.get("content") or "")
             if target:
                 hosts.append(_host(target))
-    for text in scan.script_text:
-        for url in _JS_REDIRECT.findall(text):
-            hosts.append(_host(url.strip()))
     return [h for h in hosts if h]
+
+
+def _js_sink_hosts(scan: _MarkupScan) -> list[str]:
+    """Hosts a JS location sink would navigate to — counting ONLY sinks that begin in executable code."""
+    hosts: list[str] = []
+    for text in scan.script_text:
+        for match in _JS_REDIRECT.finditer(text):
+            # A sink inside a comment, a string, a template literal, or an ambiguous `/`-span never runs (or
+            # cannot be shown to run without parsing); counting it was the false-FACT surface that kept this
+            # branch quarantined LEAD-only.
+            if _js_lex.sink_is_executable(text, match.start()):
+                hosts.append(_host(match.group(1).strip()))
+    return [h for h in hosts if h]
+
+
+def _redirect_hosts(scan: _MarkupScan) -> list[str]:
+    """Every host parsed markup would navigate to. Kept as the union for the predicate, while the two
+    sources stay separately available: they are DIFFERENT evidence branches with different capabilities
+    (a declarative refresh is statically decidable; a JS sink is only lexically decidable), so a verdict
+    must be attributable to one of them rather than to their merger."""
+    return _meta_refresh_hosts(scan) + _js_sink_hosts(scan)
+
+
+def meta_refresh_hosts(body: str) -> list[str]:
+    """Public: declarative-refresh navigation targets in ``body`` (branch ``*.body_markup``)."""
+    return _meta_refresh_hosts(_scan_markup(body))
+
+
+def js_sink_hosts(body: str) -> list[str]:
+    """Public: executable JS-sink navigation targets in ``body`` (branch ``open_redirect.js_sink``)."""
+    return _js_sink_hosts(_scan_markup(body))
 
 
 def _markup_redirect_hosts(body: str) -> list[str]:

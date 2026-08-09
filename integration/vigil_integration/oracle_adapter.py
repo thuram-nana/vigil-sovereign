@@ -106,6 +106,56 @@ def _kind_str(kind: Any) -> str:
     return getattr(kind, "value", None) or str(kind)
 
 
+def certify_admitted(
+    finding: dict,
+    admitted,
+    *,
+    engagement_slug: str,
+    signers: "list[tuple[str, str]]",
+    seq: int = 0,
+    verifier: Any = None,
+    provenance: str = "llm",
+    tool_version: str = "",
+    freshness_ttl_seconds: int = 0,
+) -> AdapterResult:
+    """Mint a certificate ONLY for a verdict that has already passed admission.
+
+    ``confirm_and_certify`` decides confirmation itself, so a caller can reach a signed FACT without any
+    capability check ever running — the registry then describes policy that nothing applies. This entry
+    point inverts that: admission decides, minting executes. It REQUIRES an
+    :class:`~vigil_integration.live.verdict.AdmittedVerdict` (which only ``admit()`` can construct), and
+    mints only when that verdict is a FACT. Anything else is returned as a labelled lead, carrying the
+    admission reason so the demotion is auditable rather than silent.
+
+    Passing a raw string or a raw oracle result is a TypeError, not a coercion: accepting them is precisely
+    how a verdict would acquire authority nobody reviewed."""
+    from .live.verdict import AdmittedVerdict, Verdict  # noqa: PLC0415 (FATAL-2: function-local)
+
+    if not isinstance(admitted, AdmittedVerdict):
+        raise TypeError(
+            f"certify_admitted requires an AdmittedVerdict from verdict.admit(), got "
+            f"{type(admitted).__name__} — minting may not accept a raw verdict")
+
+    if admitted.verdict is not Verdict.FACT:
+        return AdapterResult(
+            status="lead",
+            reason=f"admission returned {admitted.verdict.value} for branch {admitted.branch!r}: "
+                   f"{admitted.reason}",
+            bug_class=str(finding.get("bug_class", "")),
+            finding_ref=str(finding.get("check_id", "")),
+            outcome=("clean" if admitted.verdict is Verdict.CLEAN else "inconclusive"),
+        )
+
+    result = confirm_and_certify(
+        finding, engagement_slug=engagement_slug, signers=signers, seq=seq, verifier=verifier,
+        provenance=provenance, tool_version=tool_version, freshness_ttl_seconds=freshness_ttl_seconds)
+    if not result.is_fact:
+        # Admission said FACT but the deterministic layer refused (unmapped class, LLM provenance, signing
+        # failure). The stricter answer wins — admission grants permission, it does not manufacture proof.
+        return result
+    return result
+
+
 def confirm_and_certify(
     finding: dict,
     *,
