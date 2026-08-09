@@ -240,6 +240,37 @@ def test_emitted_url_hosts_models_the_script_data_and_template_state_machines() 
     assert evil in hosts(f'<a href="https://{evil}/x" href="https://cdn.example.com/x">')
 
 
+def test_meta_refresh_follows_the_declarative_refresh_steps() -> None:
+    """``content`` must be parsed with the HTML Standard's shared declarative-refresh steps. Approximating
+    them was wrong in BOTH directions at once: searching for any ``url=`` minted a false FACT on a value
+    with NO time component (a browser refreshes nothing) and on one where ``url=`` is not the front token
+    (the URL is the whole remainder, so it stays same-origin); requiring a literal ``url=`` simultaneously
+    MISSED ``0;https://evil/``, where the keyword is optional and every browser navigates."""
+    from framework.v2.scanner.checks import _markup_redirect_hosts as redirects
+
+    evil = "evil.example.test"
+
+    def hosts(content: str) -> list[str]:
+        return redirects(f'<meta http-equiv="refresh" content="{content}">')
+
+    # NAVIGATES — all of these send a browser to `evil`
+    for content in (f"0; url=https://{evil}/x", f"0;URL=https://{evil}/x", f"0; url = https://{evil}/x",
+                    f"0;url https://{evil}/x",          # the `url` keyword takes no `=`
+                    f"0;https://{evil}/x",              # ... and is optional entirely
+                    f"0, https://{evil}/x",             # `,` is a valid separator
+                    f"0.5;url=https://{evil}/x", f".5;url=https://{evil}/x",
+                    f"""0;url='https://{evil}/x'"""):
+        assert evil in hosts(content), content
+    # DOES NOT NAVIGATE (off-site) — none of these may contribute a host
+    assert hosts(f"url=https://{evil}/x") == []          # no time component: no refresh at all
+    assert hosts(f"0; please wait;url=https://{evil}/x") == []   # URL is the whole remainder -> relative
+    assert hosts("5") == []                               # a bare time reloads the same page
+    assert hosts("") == []
+    assert hosts("0;url=/local") == []                    # same-origin
+    # the URL runs to the end of the value, so a ';' inside the path is not a terminator
+    assert "x.test" in hosts("0;url=https://x.test/a;b")
+
+
 def test_meta_refresh_url_extraction_is_bounded_and_faithful() -> None:
     """A meta-refresh ``content`` value is attacker-influenced and arrives UNBOUNDED from the tokenizer. The
     previous end-anchored lazy regex took 11 SECONDS on a sub-cap value packed with ``url=`` tokens."""
@@ -247,10 +278,15 @@ def test_meta_refresh_url_extraction_is_bounded_and_faithful() -> None:
 
     from framework.v2.scanner.checks import _markup_redirect_hosts as redirects
 
-    body = '<meta http-equiv="refresh" content="' + ("url=a;" * 80_000) + '">'
-    t0 = _time.perf_counter()
-    redirects(body)
-    assert (_time.perf_counter() - t0) < 1.0, "meta-refresh URL extraction must stay bounded"
+    # Each shape defeated a previous implementation. `url=a;`*N made the old end-anchored lazy regex retry
+    # at every token (11s). `urlx`/`url `*N are the NON-matching variants: they never return early, so they
+    # are the ones that expose a quadratic scan — a payload that matches on iteration 1 would keep this test
+    # green while the slow path stayed open (the red-pen's point about the earlier version of this test).
+    for payload in ("url=a;" * 80_000, "urlx" * 200_000, "url " * 200_000, "0;" + "u" * 400_000):
+        body = f'<meta http-equiv="refresh" content="{payload}">'
+        t0 = _time.perf_counter()
+        redirects(body)
+        assert (_time.perf_counter() - t0) < 1.0, f"meta-refresh extraction must stay bounded: {payload[:12]!r}"
     # faithful: the URL runs to the end of the value, so a ';' inside the path is NOT a terminator
     assert "x.test" in redirects('<meta http-equiv=refresh content="0; url=https://x.test/a;b">')
     assert "y.test" in redirects("<meta http-equiv=refresh content=0;url=https://y.test/z>")   # unquoted

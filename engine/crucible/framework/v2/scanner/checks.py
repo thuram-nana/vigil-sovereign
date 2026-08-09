@@ -622,26 +622,54 @@ _MARKUP_SCAN_CAP = 512_000        # only the head of a response carries navigati
 _META_REFRESH_VALUE_CAP = 4096    # a real refresh target never approaches this
 
 
-def _meta_refresh_url(content: str) -> str:
-    """The URL a browser would navigate to from a ``<meta http-equiv=refresh>`` ``content`` value.
+_HTML_WHITESPACE = " \t\n\x0c\r"     # the HTML Standard's ASCII-whitespace set, not str.isspace()
 
-    Deliberately NOT a regex. The previous ``url\\s*=\\s*(.{0,4096}?)\\s*$`` was anchored to the end of an
-    attribute value the tokenizer hands over UNBOUNDED, so a value packed with ``url=`` tokens made it
-    retry a bounded lazy expansion at every one — 11 SECONDS on a sub-cap body, target-controlled. This
-    takes the FIRST ``url=`` at an identifier boundary (as browsers do) and returns the rest of the value;
-    the URL runs to the end, so nothing is split on ``;``."""
+
+def _meta_refresh_url(content: str) -> str:
+    """The URL a browser would navigate to from a ``<meta http-equiv=refresh>`` ``content`` value, or "".
+
+    This follows the HTML Standard's *shared declarative refresh steps* rather than approximating them —
+    twice now an approximation was wrong in BOTH directions at once. Searching the value for any ``url=``
+    minted a false FACT on ``content="url=http://evil/"`` (no time component, so a browser refreshes
+    NOTHING) and on ``content="0; please wait;url=http://evil/"`` (the URL is the whole remainder after the
+    separator, so it is the relative string ``please wait;url=…`` and stays same-origin). Requiring a
+    literal ``url=`` simultaneously MISSED ``content="0;http://evil/"`` — the keyword is optional and every
+    major browser navigates it — reporting a real open redirect as CLEAN.
+
+    The steps, in order: skip whitespace; require a time (digits, or a leading ``.``); skip the fractional
+    part; skip whitespace; consume ONE ``;`` or ``,``; skip whitespace; if the rest starts with ``url``,
+    consume it plus an optional ``=`` (each with surrounding whitespace); the URL is then the remainder,
+    optionally delimited by a quote. Bounded input, single forward pass, no backtracking."""
     value = (content or "")[:_META_REFRESH_VALUE_CAP]
-    low = value.lower()
-    index = 0
-    while True:
-        index = low.find("url", index)
-        if index < 0:
-            return ""
-        before = value[index - 1] if index else ""
-        after = value[index + 3:].lstrip()
-        if (not before or not (before.isalnum() or before in "-_")) and after.startswith("="):
-            return after[1:].strip().strip("'\"")
-        index += 3
+    i, n = 0, len(value)
+
+    def skip_ws(k: int) -> int:
+        while k < n and value[k] in _HTML_WHITESPACE:
+            k += 1
+        return k
+
+    i = skip_ws(i)
+    start = i
+    while i < n and value[i].isascii() and value[i].isdigit():
+        i += 1
+    if i == start and not (i < n and value[i] == "."):
+        return ""                       # no time component: the browser refreshes nothing at all
+    while i < n and ((value[i].isascii() and value[i].isdigit()) or value[i] == "."):
+        i += 1                          # fractional part is parsed and ignored
+    i = skip_ws(i)
+    if i < n and value[i] in ";,":
+        i = skip_ws(i + 1)
+    if i >= n:
+        return ""                       # a bare time reloads the SAME page — not a navigation elsewhere
+    if value[i:i + 3].lower() == "url":
+        i = skip_ws(i + 3)              # the keyword is consumed whether or not an `=` follows it
+        if i < n and value[i] == "=":
+            i = skip_ws(i + 1)
+    if i < n and value[i] in "\"'":     # a quote delimits the URL; anything after the match is dropped
+        quote, i = value[i], i + 1
+        end = value.find(quote, i)
+        return value[i:end if end >= 0 else n].strip()
+    return value[i:].strip()
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
 #
 # KNOWN LIMITATION (tracked, not fixed here): this is a regex over script TEXT, so it also fires on a sink
@@ -725,7 +753,15 @@ class _MarkupScan(HTMLParser):
             if d.get(key):
                 self.url_attrs.append(d[key])
 
+    @property
+    def _in_script_data(self) -> bool:
+        """WHATWG still considers us inside script TEXT even though the tokenizer thinks it left the
+        element. Tags it reports here are not tags at all, so they must not move any state."""
+        return self._script_open and not self._in_script
+
     def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if self._in_script_data and tag != "script":
+            return                          # not a real tag: it is script text
         if tag == "template":
             self._template_depth += 1
             return
@@ -735,11 +771,13 @@ class _MarkupScan(HTMLParser):
             if self._script_open:
                 self._double = True
             else:
-                self._script_open, self._double = True, False
+                self._script_open, self._double, self._escaped = True, False, False
             self._in_script = True
         self._record(tag, attrs)
 
     def handle_startendtag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if self._in_script_data:
+            return
         # The solidus is IGNORED on a non-void element, so `<template/>` OPENS a template: its content is an
         # inert fragment until the matching end tag. Treating it as open-and-closed left that content live.
         if tag == "template":
@@ -748,6 +786,8 @@ class _MarkupScan(HTMLParser):
         self._record(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
+        if self._in_script_data and tag != "script":
+            return                          # a `</template>` inside script text closes nothing
         if tag == "template":
             self._template_depth = max(0, self._template_depth - 1)
             return
@@ -756,7 +796,10 @@ class _MarkupScan(HTMLParser):
             if self._double:
                 self._double = False        # double-escaped: this end tag returns to escaped, not a close
             else:
-                self._script_open = False   # escaped or normal: this end tag really closes the element
+                # A real close ends the element AND its escape state: `_escaped` leaking into the next
+                # script element made a later `<script ` look like a double-escape entry and suppressed a
+                # live sink after it (a real vulnerability reported CLEAN).
+                self._script_open, self._escaped = False, False
 
     def handle_data(self, data: str) -> None:
         if not self._in_script:
