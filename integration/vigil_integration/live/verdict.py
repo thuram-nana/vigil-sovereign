@@ -76,7 +76,14 @@ class UnregisteredBranch(KeyError):
 
 @dataclass(frozen=True)
 class AdmittedVerdict:
-    """A verdict that has passed admission. Constructible only by :func:`admit`."""
+    """A verdict that has passed admission.
+
+    Every idiomatic construction route is refused outside :func:`admit` — a direct call,
+    ``dataclasses.replace``, ``copy``/``deepcopy``, and ``pickle`` all run ``__post_init__`` with the
+    construction-scope flag False and raise. A low-level ``object.__new__`` / ``object.__setattr__`` bypass
+    can still forge an instance (as it can defeat any in-process Python guard), but that path is CONTAINED,
+    not relied upon: minting a signed FACT re-executes the deterministic oracle over the retained context, so
+    a forged verdict that never went through admission does not fire and cannot become a signed FACT/CLEAN."""
 
     verdict: Verdict
     branch: str
