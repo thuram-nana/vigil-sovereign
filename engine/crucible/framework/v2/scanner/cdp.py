@@ -370,6 +370,26 @@ class CdpBrowser:
         self.stop()
 
 
+_CDP_USABLE: "bool | None" = None
+
+
 def cdp_available() -> bool:
-    """Whether a browser binary exists for the CDP driver (gates the dynamic path)."""
-    return find_browser() is not None
+    """Whether the CDP driver can actually DRIVE a browser — not merely whether a binary is on PATH.
+
+    ``find_browser() is not None`` proves a binary exists; it does not prove that launching it with remote
+    debugging yields a usable page target. A CI runner ships Chrome that then exposes no page target
+    ("no page target exposed by the browser"), so a test gated on binary-presence RAN and FAILED there
+    instead of skipping. This does one bounded launch + page-target acquisition and caches the result — the
+    same capability-not-installation guard the ``browser`` layer uses, applied to the CDP path."""
+    global _CDP_USABLE
+    if _CDP_USABLE is None:
+        if find_browser() is None:
+            _CDP_USABLE = False
+        else:
+            try:
+                with CdpBrowser(launch_timeout=20.0) as browser:
+                    browser.session()              # the exact step that raised in CI when no page appears
+                    _CDP_USABLE = True
+            except Exception:                       # noqa: BLE001 — any launch/connect failure => unusable
+                _CDP_USABLE = False
+    return _CDP_USABLE
