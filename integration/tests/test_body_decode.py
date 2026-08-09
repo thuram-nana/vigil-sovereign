@@ -183,7 +183,7 @@ def test_malformed_gzip_is_refused():
 
 def test_unknown_charset_label_is_refused():
     d = decode_body(HTML, [("content-type", "text/html; charset=made-up-9000")])
-    assert d.body_semantically_available is False and "unknown charset" in d.reason
+    assert d.body_semantically_available is False and "not a recognized WHATWG encoding label" in d.reason
 
 
 def test_strict_decode_failure_is_refused_not_mangled():
@@ -216,3 +216,90 @@ def test_caller_truncated_flag_is_honoured():
 def test_cannot_decompress_a_truncated_compressed_stream():
     d = decode_body(_gzip(HTML)[:20], [("content-encoding", "gzip"), *UTF8], truncated=True)
     assert d.body_semantically_available is False
+
+
+# ---- WHATWG "get an encoding" charset resolution (red-pen BLOCK-1..4) ----
+
+@pytest.mark.parametrize("label", [
+    "utf-7", "cp037", "cp500", "koi8-r-x", "rot13", "punycode", "hz", "iso-2022-jp",
+    "hz-gb-2312", "iso-2022-cn", "iso-2022-kr", "replacement", "big5", "shift_jis", "euc-jp",
+    "x-user-defined", "made-up-9000",
+])
+def test_labels_a_browser_rejects_or_we_cannot_decode_faithfully_are_refused(label):
+    """BLOCK-1: resolving through Python's codec registry decoded labels a browser IGNORES (utf-7, EBCDIC,
+    the replacement set) — a false-FACT (utf-7 `+ADw-`) and false-CLEAN (EBCDIC over an ASCII sink) surface.
+    Only WHATWG labels mapped to a byte-faithful codec may decode; everything else is INCONCLUSIVE."""
+    d = decode_body(b"+ADw-meta http-equiv=refresh content=0;url=//evil/+AD4-",
+                    [("content-type", f"text/html; charset={label}")])
+    assert d.body_semantically_available is False, f"{label} was decoded"
+    assert not d.text
+
+
+def test_utf7_would_have_been_a_false_fact():
+    """The concrete BLOCK-1 false-FACT: utf-7 `+ADw-...+AD4-` decodes to a live <meta> sink under Python but
+    a browser (utf-7 is not a WHATWG encoding) renders the literal text. Must be refused."""
+    d = decode_body(b"+ADw-meta http-equiv=refresh content=0;url=//evil.example/+AD4-",
+                    [("content-type", "text/html; charset=utf-7")])
+    assert d.body_semantically_available is False
+    assert "evil.example" not in d.text
+
+
+def test_ebcdic_would_have_been_a_false_clean():
+    d = decode_body(b'<meta http-equiv="refresh" content="0;url=//evil.example/">',
+                    [("content-type", "text/html; charset=cp037")])
+    assert d.body_semantically_available is False
+
+
+def test_bare_utf16_resolves_to_utf16le_not_host_byte_order():
+    """BLOCK-2: CPython's `utf-16` codec (no BOM) uses sys.byteorder — host-dependent, so the verdict flipped
+    with the machine. WHATWG's `utf-16` label is fixed UTF-16LE. Resolution must be deterministic."""
+    body = "<meta http-equiv=refresh content=0;url=//evil.example/>".encode("utf-16-le")
+    d = decode_body(body, [("content-type", "text/html; charset=utf-16")])
+    assert d.body_semantically_available is True and d.charset == "utf-16-le"
+    assert "evil.example" in d.text
+
+
+def test_explicit_utf16le_and_be_stay_deterministic():
+    body_le = "hi//evil/".encode("utf-16-le")
+    body_be = "hi//evil/".encode("utf-16-be")
+    dle = decode_body(body_le, [("content-type", "text/html; charset=utf-16le")])
+    dbe = decode_body(body_be, [("content-type", "text/html; charset=utf-16be")])
+    assert dle.charset == "utf-16-le" and "evil" in dle.text
+    assert dbe.charset == "utf-16-be" and "evil" in dbe.text
+
+
+@pytest.mark.parametrize("label", ["iso-8859-1", "latin1", "ascii", "us-ascii", "cp819", "l1"])
+def test_latin1_family_maps_to_windows_1252(label):
+    """BLOCK-3: WHATWG maps these labels to windows-1252, where 0x80-0x9F are typographic characters, not the
+    C1 controls Python's iso-8859-1 produces. VIGIL must read the same text a browser does."""
+    d = decode_body(b"quote \x93hi\x94 dash\x97end", [("content-type", f"text/html; charset={label}")])
+    assert d.body_semantically_available is True and d.charset == "cp1252"
+    assert "“" in d.text and "—" in d.text        # curly quote + em dash (windows-1252)
+
+
+@pytest.mark.parametrize("label,codec", [
+    ("unicode-1-1-utf-8", "utf-8"), ("utf8", "utf-8"), ("x-mac-cyrillic", "mac_cyrillic"),
+    ("iso-8859-9", "cp1254"), ("iso-8859-11", "cp874"), ("gb2312", "gb18030"), ("gbk", "gb18030"),
+    ("euc-kr", "cp949"), ("windows-949", "cp949"), ("koi8-u", "koi8-u"), ("tis-620", "cp874"),
+])
+def test_valid_whatwg_labels_resolve_to_their_faithful_codec(label, codec):
+    """BLOCK-4: valid WHATWG labels Python's registry rejects or remaps differently must be accepted and
+    resolved to the WHATWG-faithful codec."""
+    d = decode_body("<p>ok</p>".encode("utf-8"), [("content-type", f"text/html; charset={label}")])
+    assert d.charset == codec, f"{label} resolved to {d.charset}, expected {codec}"
+
+
+def test_conflicting_duplicate_content_type_is_ambiguous():
+    d = decode_body(b"<p>hi</p>", [("content-type", "text/html"),
+                                    ("content-type", "text/html; charset=utf-7")])
+    assert d.body_semantically_available is False and "ambiguous" in d.reason
+
+
+def test_conflicting_duplicate_content_encoding_is_ambiguous():
+    d = decode_body(_gzip(HTML), [("content-encoding", "gzip"), ("content-encoding", "identity"), *UTF8])
+    assert d.body_semantically_available is False and "ambiguous" in d.reason
+
+
+def test_label_is_case_and_whitespace_insensitive():
+    d = decode_body("<p>x</p>".encode("utf-8"), [("content-type", "text/html; charset= UTF-8 ")])
+    assert d.charset == "utf-8" and d.body_semantically_available is True
