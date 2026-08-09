@@ -66,9 +66,22 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, D401
             return None
 
-    _EMPTY = {"status": 0, "body": "", "headers": [], "latency_ms": 0.0}
-    _READ_CAP = 2_000_000   # bound the body read — a hostile/huge target response must not exhaust memory
-    state = {"channels": 0, "no_channel": 0}
+    from urllib.parse import urlsplit
+
+    from .body_decode import MAX_RAW_BYTES, decode_body
+    from .dns_pin import pinned_handlers, resolve_and_validate
+
+    def _address_authorized(address: str) -> bool:
+        """Re-ask the SAME gate about the resolved address. Reusing the charter decision (rather than a
+        second, looser rule) is what keeps the pin honest: an address the gate would refuse as a target is
+        refused as a destination."""
+        scheme = "https" if str(address).count(":") > 1 else "http"   # bracket IPv6 for the URL form
+        literal = f"[{address}]" if str(address).count(":") > 1 else address
+        return _authorize(f"http://{literal}/", slug) is None
+
+    _EMPTY = {"status": 0, "body": "", "headers": [], "latency_ms": 0.0,
+              "body_semantically_available": False, "body_unavailable_reason": "no channel"}
+    state = {"channels": 0, "no_channel": 0, "body_unavailable": 0}
 
     def send(req: Any) -> dict:
         if _authorize(req.url, slug) is not None:
@@ -78,23 +91,62 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
         r = urllib.request.Request(req.url, data=data, method=getattr(req, "method", "GET"))
         for k, v in getattr(req, "headers", []) or []:
             r.add_header(k, v)
+        if not r.has_header("Accept-encoding"):
+            # Ask only for encodings we can reverse. A target may still answer with something else (some
+            # CDNs compress unconditionally) — that path is handled by decode_body, which refuses rather
+            # than guessing, so the body is INCONCLUSIVE rather than silently mangled.
+            r.add_header("Accept-Encoding", "gzip, deflate, identity")
         # An EMPTY ProxyHandler is MANDATORY (mirrors the shipped gated connector): without it urllib honours
         # http_proxy/https_proxy/ALL_PROXY, so the real TCP peer would be a proxy the gate never authorized —
         # the charter/single-host scope check would pass while traffic went elsewhere, and the proxy's bytes
         # would be labelled provenance="live_redrive". No auth handler either: the probe stays anonymous.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+        # DNS time-of-check/time-of-use: the gate authorized a NAME, but urllib would resolve that name
+        # again at connect time, so nothing binds the authorization to the endpoint actually reached
+        # (rebinding, a short TTL, a poisoned resolver, or a multi-A record with one address out of scope).
+        # Resolve once, require EVERY address to satisfy the same charter scope the gate used, then PIN the
+        # connection to the validated address while still presenting the original hostname for TLS/Host.
+        parts = urlsplit(req.url)
+        target_host = parts.hostname or ""
+        target_port = parts.port or (443 if parts.scheme == "https" else 80)
+        resolution = resolve_and_validate(target_host, target_port, _address_authorized)
+        if not resolution.allowed:
+            state["no_channel"] += 1
+            refused = dict(_EMPTY)
+            refused["body_unavailable_reason"] = resolution.refused_reason
+            return refused
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect,
+                                             *pinned_handlers(resolution.pinned))
         t0 = time.monotonic()
         try:
+            # Read ONE BYTE PAST the bound: reading exactly the cap cannot distinguish "the response was
+            # this long" from "the response was longer and we hold a prefix", and a body-dependent NEGATIVE
+            # over a prefix cannot prove the absence of markup.
             with opener.open(r, timeout=timeout) as resp:
-                status, raw, headers = resp.status, resp.read(_READ_CAP), list(resp.headers.items())
+                status, raw, headers = resp.status, resp.read(MAX_RAW_BYTES + 1), list(resp.headers.items())
         except urllib.error.HTTPError as e:      # a 4xx/5xx is a real, useful response — a genuine channel
-            status, raw, headers = e.code, e.read(_READ_CAP), list(e.headers.items())
+            status, raw, headers = e.code, e.read(MAX_RAW_BYTES + 1), list(e.headers.items())
         except Exception:                        # noqa: BLE001 — transport error (no channel) → INCONCLUSIVE
             state["no_channel"] += 1
             return dict(_EMPTY)
         state["channels"] += 1
-        return {"status": status, "body": raw.decode("utf-8", "replace"),
-                "headers": [(str(k), str(v)) for k, v in headers], "latency_ms": (time.monotonic() - t0) * 1000.0}
+        headers = [(str(k), str(v)) for k, v in headers]
+        truncated = len(raw) > MAX_RAW_BYTES
+        body = decode_body(raw[:MAX_RAW_BYTES], headers, truncated=truncated)
+        # The capture carries its own decoding provenance so an adjudicator can tell "the document said
+        # nothing" from "we never read the document".
+        if not body.body_semantically_available:
+            # A real channel, but NOT a readable document. Header-derived evidence in this same response
+            # stays adjudicable; body-derived evidence must not be scored as CLEAN over bytes we never
+            # decoded, so the runner is told.
+            state["body_unavailable"] += 1
+        return {"status": status, "body": body.text, "headers": headers,
+                "latency_ms": (time.monotonic() - t0) * 1000.0,
+                "pinned_ip": resolution.pinned, "resolved_addresses": list(resolution.addresses),
+                "raw_sha256": body.raw_sha256, "raw_len": body.raw_len,
+                "content_encoding": body.content_encoding, "charset": body.charset,
+                "decoded": body.decoded, "truncated": body.truncated,
+                "body_semantically_available": body.body_semantically_available,
+                "body_unavailable_reason": body.reason}
 
     return send, state
 
@@ -130,12 +182,13 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         send was gate-refused (kill-switch tripped mid-run) or errored (connection refused / timeout)
         observed NOTHING — it is INCONCLUSIVE, never a 'channel-confirmed CLEAN' (the 'found nothing !=
         CLEAN' invariant). We snapshot the channel counter around the probe to decide."""
-        before = state["channels"]
+        before, before_bodies = state["channels"], state["body_unavailable"]
         ctx = probe_fn()
         had_channel = state["channels"] > before
         if not had_channel:
             res.inconclusive.append((bug_class, item))   # no observation → do NOT let it become CLEAN
             return
+        body_unreadable = state["body_unavailable"] > before_bodies
         if ctx is None:
             return
         finding = {"check_id": f"web:{bug_class}:{item}", "bug_class": bug_class,
@@ -143,7 +196,16 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         r = confirm_and_certify(finding, engagement_slug=engagement_slug, signers=signers,
                                 provenance="live_redrive")
         res.contexts[r.finding_ref] = finding["oracle_context"]
-        (res.facts if r.is_fact else res.leads).append(r)
+        if r.is_fact:
+            res.facts.append(r)                          # header-derived evidence still stands on its own
+        elif body_unreadable:
+            # The oracle did not fire, but we could not read the document (unsupported Content-Encoding,
+            # undeclared non-UTF-8 charset, truncated response). "Found nothing" over bytes we never
+            # decoded is NOT a channel-confirmed CLEAN — it is INCONCLUSIVE.
+            res.inconclusive.append((bug_class, item))
+            res.notes.append(f"{bug_class}: body not semantically available — reported INCONCLUSIVE")
+        else:
+            res.leads.append(r)
 
     try:
         # request-level checks (add an evil Origin / Host to the whole request)
