@@ -28,12 +28,16 @@ Defenses, and why each is sound:
     other unregistered tag raise ``ConstructorError`` (→ ``outcome="error"``), never a constructed object. We
     do not hand-roll a YAML parser; if PyYAML is missing we degrade to the inconclusive path, not to a bespoke
     scanner.
-  * **Alias/anchor-bomb defense, two independent bounds.** (1) A counting loader aborts once the number of
-    alias references resolved during composition exceeds ``max_aliases``. (2) PyYAML shares one object across
-    all aliases to an anchor, so the classic "billion laughs" is a small DAG that only explodes when WALKED;
-    the post-parse structural walk counts every visit (including via shared references) and trips ``max_nodes``
-    long before the expansion is materialised, aborting after at most ``max_nodes+1`` visits. Either bound
-    alone turns the bomb into ``outcome="error"``.
+  * **Alias / merge-key bomb defense, three independent bounds.** (1) A counting loader aborts once the number
+    of alias references resolved during composition exceeds ``max_aliases``. (2) PyYAML shares one object
+    across all aliases to an anchor, so the classic pure-alias "billion laughs" is a small DAG that only
+    explodes when WALKED; the post-parse structural walk counts every visit (including via shared references)
+    and trips ``max_nodes`` long before the expansion is materialised. (3) A YAML ``<<`` MERGE key is REFUSED
+    outright (``outcome="error"``, reason ``"merge_key"``): PyYAML expands merges during CONSTRUCTION
+    (``flatten_mapping`` materialises a list of length refs**levels), which BOTH (1) — merge alias EVENTS grow
+    only linearly — AND (2) — the merged mapping collapses to a tiny dict — miss, so a ~600-byte nested-merge
+    bomb would otherwise hang/OOM or silently bypass the node budget. We do not expand merges. Each bound
+    alone turns its bomb class into ``outcome="error"``.
   * **Depth and node caps, enforced by an iterative walk.** Recursion depth is bounded by ``max_depth`` and
     total structure size by ``max_nodes`` in an explicit-stack walk (no Python recursion, so a deep document
     cannot blow the interpreter stack during the check itself). True reference CYCLES (possible via recursive
@@ -63,6 +67,15 @@ DEFAULT_MAX_ALIASES = 100
 
 class _AliasBudgetExceeded(Exception):
     """Raised inside the counting YAML loader when alias references pass ``max_aliases``. Never escapes."""
+
+
+class _MergeKeyRefused(Exception):
+    """Raised inside the loader when a YAML ``<<`` merge key is seen. PyYAML expands merges during
+    CONSTRUCTION (``flatten_mapping`` materialises a real list of length refs**levels), which BOTH the
+    compose-time alias counter (alias EVENTS grow only linearly, refs*levels) AND the post-parse node walk
+    (the merged mapping collapses to a tiny dict) miss — so a ~600-byte nested-merge bomb hangs/OOMs or
+    silently bypasses the node budget. This safe parser does NOT expand merges: a ``<<``-bearing document is
+    refused (outcome="error"/"merge_key") rather than expanded. Never escapes."""
 
 
 @dataclass(frozen=True)
@@ -218,6 +231,17 @@ def _counting_safe_loader(max_aliases: int):
                     raise _AliasBudgetExceeded(max_aliases)
             return super().compose_node(parent, index)
 
+        def flatten_mapping(self, node):  # type: ignore[override]
+            # Refuse a `<<` merge key BEFORE the base class expands it. flatten_mapping runs for every mapping
+            # at CONSTRUCTION; the base implementation materialises the merge (exponential for a nested-merge
+            # bomb) — the vector the alias counter and node walk both miss. We do not expand merges: raise on
+            # the merge tag so the bomb is refused instead of built. Non-merge mappings fall through unchanged.
+            for item in getattr(node, "value", ()):
+                key_node = item[0] if isinstance(item, tuple) and item else None
+                if key_node is not None and getattr(key_node, "tag", "") == "tag:yaml.org,2002:merge":
+                    raise _MergeKeyRefused()
+            return super().flatten_mapping(node)
+
     return _CountingSafeLoader
 
 
@@ -249,6 +273,8 @@ def safe_yaml(text: str | bytes, budget: ParseBudget | None = None) -> ParseResu
         value = yaml.load(text, Loader=loader_cls)  # SafeLoader subclass: no arbitrary object construction.
     except _AliasBudgetExceeded:
         return _error("alias_bomb")
+    except _MergeKeyRefused:
+        return _error("merge_key")     # a `<<` merge key — refused, never expanded (nested-merge bomb vector)
     except RecursionError:
         return _error("too_deep")
     except yaml.constructor.ConstructorError:

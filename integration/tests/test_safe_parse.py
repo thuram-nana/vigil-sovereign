@@ -217,3 +217,46 @@ def test_helpers_never_raise(bad):
 def test_default_budget_used_when_none():
     r = safe_json('{"ok": 1}', None)
     assert r.ok
+
+
+# ---- YAML merge-key (`<<`) bomb — the cross-slice blind spot the final integration red-pen found ----
+
+def _merge_bomb(refs: int, levels: int) -> str:
+    """A nested YAML merge-key bomb: `top` merges `refs` copies of the previous anchor, `levels` deep. Merge
+    alias EVENTS grow linearly (refs*levels, so they slip under the alias cap), but PyYAML's flatten_mapping
+    expands the merged mapping to length refs**levels at CONSTRUCTION — the exponential vector the alias
+    counter and the post-parse node walk both miss."""
+    out = ["a0: &a0 {k: v}"]
+    prev = "a0"
+    for i in range(1, levels + 1):
+        merges = "\n".join(["    <<: *%s" % prev] * refs)
+        out.append("a%d: &a%d\n%s" % (i, i, merges))
+        prev = "a%d" % i
+    out.append("top:\n" + "\n".join(["  <<: *%s" % prev] * refs))
+    return "\n".join(out)
+
+
+@pytest.mark.parametrize("refs,levels", [(2, 23), (8, 8), (8, 12)])
+def test_yaml_merge_key_bomb_is_a_typed_error_at_default_budget(refs, levels):
+    """A ~600B-1.4KB nested-merge bomb must yield a TYPED error FAST at the DEFAULT budget — never a
+    hang/OOM, and never outcome='ok' (a silent node-budget bypass). PyYAML expands merges during
+    construction, so the safe loader REFUSES the `<<` merge key before it is expanded."""
+    import time
+    doc = _merge_bomb(refs, levels)
+    t = time.time()
+    r = safe_yaml(doc)
+    assert time.time() - t < 2.0, "merge-key bomb hung (>2s)"
+    assert r.outcome == "error", f"merge bomb slipped through as {r.outcome!r}"
+    assert r.reason in ("merge_key", "alias_bomb")
+
+
+def test_yaml_merge_key_is_refused_not_silently_expanded():
+    """Even a tiny, benign `<<` merge is refused (outcome='error', reason='merge_key') — the safe parser does
+    NOT expand merges, so it can never be steered into the exponential construction path."""
+    r = safe_yaml("base: &b {x: 1}\nchild:\n  <<: *b\n  y: 2")
+    assert r.outcome == "error" and r.reason == "merge_key"
+
+
+def test_non_merge_document_still_parses_after_the_merge_guard():
+    r = safe_yaml("name: prod\nlist: [1, 2, 3]\nnested: {a: {b: c}}")
+    assert r.outcome == "ok" and r.value == {"name": "prod", "list": [1, 2, 3], "nested": {"a": {"b": "c"}}}
