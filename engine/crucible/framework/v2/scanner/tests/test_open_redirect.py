@@ -134,10 +134,20 @@ def test_markup_redirect_hosts_ignores_inert_elements_and_reads_inner_quoted_con
     quote may legitimately contain the other (`content="0; url='...'"`), which browsers honour."""
     from framework.v2.scanner.checks import _markup_redirect_hosts as hosts
 
-    for el in ("textarea", "title", "xmp", "noscript", "template", "iframe"):
+    for el in ("textarea", "title", "xmp", "template", "iframe"):
         assert _CANARY_HOST not in hosts(
             f'<{el}><meta http-equiv="refresh" content="0;url={_CANARY_URL}"></{el}>'), el
     assert _CANARY_HOST not in hosts(f'<plaintext><meta http-equiv="refresh" content="0;url={_CANARY_URL}">')
+    # `<noscript>` is a FALLBACK element parsed as LIVE markup when scripting is off — a no-JS consumer
+    # (link-preview crawler, plain HTTP client) really does follow this refresh, so it must still fire.
+    assert _CANARY_HOST in hosts(
+        f'<noscript><meta http-equiv="refresh" content="0;url={_CANARY_URL}"></noscript>')
+    # an end tag closes only when `</el` is followed by a terminator: `</textareax>` does NOT close it, so
+    # the content after it is still inert and must not be counted
+    assert _CANARY_HOST not in hosts(
+        f'<textarea></textareax><meta http-equiv="refresh" content="0;url={_CANARY_URL}"></textarea>')
+    assert _CANARY_HOST in hosts(   # ... but a real end tag does close it
+        f'<textarea></textarea><meta http-equiv="refresh" content="0;url={_CANARY_URL}">')
     # ... while the real sinks still fire
     assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
     assert _CANARY_HOST in hosts(f"""<meta http-equiv="refresh" content="0; url='{_CANARY_URL}'">""")
@@ -161,6 +171,8 @@ def test_markup_redirect_hosts_is_bounded_on_a_hostile_body() -> None:
         ("unterminated script", "<script>" * 64_000),
         ("unterminated href", '<a href="' * 56_000),
         ("angle-bracket spam", '<meta<a href="' * 36_000),
+        ("bare '<' spam", "<" * 512_000),          # the maximal per-character case for the tag scanner
+        ("nested inert", "<textarea><script>" * 28_000),
     ):
         t0 = _time.perf_counter()
         assert _markup_redirect_hosts(body) == [], label

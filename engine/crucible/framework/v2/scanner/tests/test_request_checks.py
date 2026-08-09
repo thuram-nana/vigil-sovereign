@@ -147,8 +147,20 @@ def test_emitted_url_hosts_ignores_inert_markup_contexts() -> None:
     assert evil not in hosts(f'<!-- <a href="https://{evil}/">x</a> -->')
     assert evil not in hosts(f"""<script>var t = "<a href='https://{evil}/'>";</script>""")
     assert evil not in hosts(f'<!-- <meta property="og:url" content="https://{evil}/"> -->')
-    for el in ("style", "textarea", "title", "xmp", "noscript", "noembed", "noframes", "template", "iframe"):
+    for el in ("style", "textarea", "title", "xmp", "template", "iframe"):
         assert evil not in hosts(f'<{el}><a href="https://{evil}/">x</a></{el}>'), el
+    # FALLBACK elements are parsed as LIVE markup when the feature is off — a no-JS user really can click
+    # this link, so it is a genuine emission and must NOT be masked away.
+    for el in ("noscript", "noembed", "noframes"):
+        assert evil in hosts(f'<{el}><a href="https://{evil}/">x</a></{el}>'), el
+    # an end tag closes only when `</el` is followed by a terminator — `</scriptx>` does not close <script>,
+    # so what follows is still inert (treating it as a close would un-mask it and mint a false FACT)
+    assert evil not in hosts(f'<script></scriptx><a href="https://{evil}/">x</a></script>')
+    assert evil in hosts(f'<script></script ><a href="https://{evil}/">x</a>')   # a real close tag does close
+    # the opening tag ends at the first `>` OUTSIDE a quoted attribute, so a `>` inside srcdoc/data-* must
+    # not end the tag early and hide the real src (that dropped a genuine <script src>/<iframe src> sink)
+    assert evil in hosts(f'<script data-cfg="{{a:1>0}}" src="https://{evil}/app.js"></script>')
+    assert evil in hosts(f'<iframe srcdoc="<p>hi</p>" src="https://{evil}/"></iframe>')
     assert evil not in hosts(f'<plaintext><a href="https://{evil}/">x</a>')   # no end tag: literal to EOF
     assert evil not in hosts(f'<template><meta property="og:url" content="https://{evil}/"></template>')
     # LIVE — <pre>/<code> contents ARE parsed, so a link inside them is a real emission

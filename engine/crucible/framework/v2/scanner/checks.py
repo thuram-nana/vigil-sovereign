@@ -703,11 +703,17 @@ def _emitted_url_hosts(body: str) -> list[str]:
 #
 # `<plaintext>` has no end tag (everything after it is literal), and an unterminated inert element likewise
 # swallows the rest of the document — both are handled by masking to EOF.
-_INERT_EMISSION = ("script", "style", "textarea", "title", "xmp", "plaintext",
-                   "noscript", "noembed", "noframes", "template", "iframe")
+# `noscript`/`noembed`/`noframes` are deliberately NOT inert: they are FALLBACK elements, parsed as LIVE
+# markup whenever the corresponding feature is off. A `<noscript><meta http-equiv=refresh>` really does
+# navigate for a no-JS consumer (link-preview crawlers, plain HTTP clients), so masking them dropped a real
+# open redirect.
+_INERT_EMISSION = ("script", "style", "textarea", "title", "xmp", "plaintext", "template", "iframe")
 # For REDIRECT sinks, `<script>` content is deliberately NOT masked: JS location sinks legitimately live
 # there. Everything else that renders literally still cannot navigate.
 _INERT_REDIRECT = tuple(e for e in _INERT_EMISSION if e != "script")
+# first-letter buckets: lets the scanner reject a `<` that cannot begin an inert tag in O(1) instead of
+# testing every element name (a target-controlled `<`-spam body is the maximal per-character case).
+_INERT_BY_INITIAL = {e: tuple(x for x in _INERT_EMISSION if x[0] == e) for e in {n[0] for n in _INERT_EMISSION}}
 
 
 def _mask_inert(body: str, elements: tuple[str, ...]) -> str:
@@ -719,7 +725,13 @@ def _mask_inert(body: str, elements: tuple[str, ...]) -> str:
 
     An element's OPENING TAG is preserved — only its inner text is blanked — so URL attributes on the tag
     itself (``<script src="https://host/x.js">``, ``<iframe src=...>``) remain visible to the emission scan;
-    blanking the whole element dropped that genuine, high-severity sink."""
+    blanking the whole element dropped that genuine, high-severity sink.
+
+    Tag boundaries follow what a browser actually does, because getting either edge wrong flips a verdict:
+    the opening tag ends at the first ``>`` OUTSIDE a quoted attribute (a ``>`` inside ``srcdoc``/``data-*``
+    would otherwise end the tag early and hide the real ``src``), and an end tag counts only when ``</el`` is
+    followed by a terminator — ``</scriptx>`` does NOT close ``<script>``, so treating it as a close would
+    un-mask genuinely inert content and mint a false FACT."""
     body = body or ""
     low = body.lower()
     out = list(body)
@@ -735,20 +747,59 @@ def _mask_inert(body: str, elements: tuple[str, ...]) -> str:
             out[j:stop] = " " * (stop - j)
             i = stop
             continue
-        el = next((e for e in elements if low.startswith("<" + e, j)
+        nxt = low[j + 1] if j + 1 < n else ""
+        if not nxt.isalpha():                               # fast path: cannot begin a tag name
+            i = j + 1
+            continue
+        el = next((e for e in _INERT_BY_INITIAL.get(nxt, ()) if e in elements
+                   and low.startswith("<" + e, j)
                    and (j + 1 + len(e) >= n or not (low[j + 1 + len(e)].isalnum()
                                                     or low[j + 1 + len(e)] in "-_"))), None)
         if el is None:
             i = j + 1
             continue
-        gt = low.find(">", j)
+        gt = _tag_end(low, j, n)
         if gt < 0:                                          # unterminated opening tag: nothing after parses
             break
-        close = low.find("</" + el, gt + 1)
+        close = _close_tag(low, el, gt + 1, n)
         stop = n if close < 0 else close                    # no end tag (or <plaintext>): literal to EOF
         out[gt + 1:stop] = " " * (stop - gt - 1)            # keep the opening tag, blank the content
         i = stop
     return "".join(out)
+
+
+def _tag_end(low: str, start: int, n: int) -> int:
+    """Index of the ``>`` that ends the tag opened at ``start``, skipping quoted attribute values (a ``>``
+    inside ``srcdoc="<p>x</p>"`` or ``data-cfg="{a:1>0}"`` does NOT end the tag), or -1 if unterminated."""
+    k = start + 1
+    quote = ""
+    while k < n:
+        c = low[k]
+        if quote:
+            if c == quote:
+                quote = ""
+        elif c in "\"'":
+            quote = c
+        elif c == ">":
+            return k
+        k += 1
+    return -1
+
+
+def _close_tag(low: str, el: str, start: int, n: int) -> int:
+    """Index of the end tag that actually CLOSES ``el`` at or after ``start``, or -1. A browser closes a
+    raw-text element only when ``</el`` is followed by whitespace, ``/`` or ``>`` — ``</scriptx>`` does not
+    close ``<script>``, so a bare substring search would stop masking too early."""
+    needle = "</" + el
+    k = start
+    while True:
+        k = low.find(needle, k)
+        if k < 0:
+            return -1
+        after = k + len(needle)
+        if after >= n or low[after].isspace() or low[after] in "/>":
+            return k
+        k += 1
 
 
 def _strip_html_comments(body: str) -> str:
