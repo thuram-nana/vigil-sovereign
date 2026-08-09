@@ -204,6 +204,42 @@
       "implementation_refs": [
         "integration/vigil_integration/live/sbom.py:sbom_verify"
       ]
+    },
+    {
+      "id": "k8s_posture.cis_control",
+      "check": "k8s_posture_verify",
+      "evidence": "a kube-bench CIS control VIGIL parsed from the operator's --json export hard-FAILED AND its retained actual_value literally carries a dangerous flag (--anonymous-auth=true, --authorization-mode=AlwaysAllow, a non-zero --insecure-port/--read-only-port, a static auth file, etc.)",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "kube_bench_parsed"
+      ],
+      "limitation": "NOT CLEAN-capable: a kube-bench export is a PARTIAL, point-in-time snapshot of one target's control-plane flags, so the absence of a firing control does not prove the cluster is hardened. Claims are bounded to the parsed ARTIFACT ('this export records control X FAILED with value Y'), never to the live cluster; a WARN or a FAIL whose value shows the SECURE flag stays a LEAD.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof over the artifact: that the export enumerates the FULL CIS control set for the target's role (master/etcd/controlmanager/scheduler/node) and that every applicable control PASSED, so 'no control fired' becomes a bounded negative rather than an absence of data. That needs a control-coverage manifest (the expected control IDs per node role + kube-bench version) checked against the parsed export before any CLEAN may be asserted.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/k8s_posture.py:k8s_posture_verify"
+      ]
+    },
+    {
+      "id": "k8s_workload_posture.rbac_binding",
+      "check": "ingest_k8s_rbac",
+      "evidence": "a ClusterRoleBinding/RoleBinding VIGIL parsed from the operator's manifest binds an ANONYMOUS subject (system:anonymous / system:unauthenticated) to a dangerous BUILT-IN ClusterRole (cluster-admin / admin / edit), with roleRef.kind=ClusterRole in the rbac.authorization.k8s.io apiGroup",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "rbac_parsed"
+      ],
+      "limitation": "NOT CLEAN-capable: a manifest export is a PARTIAL snapshot of the bindings the operator handed us, so the absence of an anonymous-privileged binding does not prove none exists cluster-wide. Claims are bounded to the parsed ARTIFACT, never to the live cluster. NEAR-ZERO-FP by faithful roleRef carry: a namespaced Role named 'edit'/'admin', an anonymous binding to a custom/non-dangerous role, or a binding with no anonymous subject does NOT fire.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof that the manifest stream enumerates EVERY ClusterRoleBinding and RoleBinding in the cluster (a full RBAC export, not a hand-picked subset) AND that the dangerous-role set is exhaustive (transitive aggregation into cluster-admin via aggregationRule, and custom roles whose rules grant '*' verbs on '*' resources). Only then is 'no anonymous-privileged binding found' a bounded negative rather than an absence of data.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/k8s_posture.py:ingest_k8s_rbac"
+      ]
     }
   ]
 }

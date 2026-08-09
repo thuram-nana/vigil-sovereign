@@ -321,3 +321,66 @@ def safe_yaml(text: str | bytes, budget: ParseBudget | None = None) -> ParseResu
     if walk_err is not None:
         return walk_err
     return _ok(value)
+
+
+def safe_yaml_all(text: str | bytes, budget: ParseBudget | None = None) -> ParseResult:
+    """Parse a MULTI-document YAML stream (``---``-separated) under ONE shared ``budget``, without ever
+    raising on ``text``. On success ``value`` is a ``list`` of the parsed documents (an empty document —
+    a bare ``---`` or trailing separator — yields a ``None`` member, left in place so the caller can decide;
+    it is not silently dropped here).
+
+    Every defense of :func:`safe_yaml` applies, and the resource bounds are enforced across the WHOLE stream,
+    not per document: the byte cap is measured once on the input; the counting SafeLoader is created ONCE and
+    drives the entire stream (``yaml.load_all`` instantiates a single loader), so the alias-reference and
+    composed-node budgets accumulate over all documents and a stream that is individually-small-but-many
+    cannot bypass them; and the post-parse structural walk runs over the aggregate ``list`` under the same
+    node/depth/cycle budget. A multi-document RBAC export is therefore parsed exactly as safely as one
+    document — a bomb in ANY member (or spread across members) trips the same typed error, never an
+    unbounded hang, an OOM, or a constructed Python object.
+
+    If PyYAML is not importable, returns ``outcome="inconclusive"`` (reason ``"yaml_unavailable"``) — never
+    a hand-rolled split-on-``---`` (which is unsound: ``---`` occurs inside block scalars and strings) and
+    never a CLEAN.
+    """
+    budget = budget or ParseBudget()
+
+    size = _byte_len(text)
+    if size > budget.max_bytes:
+        return _error("oversize")
+
+    try:
+        import yaml  # noqa: PLC0415 - optional; absence is an inconclusive, not a crash.
+    except Exception:  # noqa: BLE001 - ImportError or a broken install both mean "cannot parse YAML here".
+        return _inconclusive("yaml_unavailable")
+
+    try:
+        loader_cls = _counting_safe_loader(budget.max_aliases, budget.max_nodes)
+    except Exception:  # noqa: BLE001 - PyYAML present at import but internals unavailable: stay honest.
+        return _inconclusive("yaml_unavailable")
+
+    docs: list[Any] = []
+    try:
+        # load_all builds ONE loader over the stream, so the alias/node counters span every document.
+        for doc in yaml.load_all(text, Loader=loader_cls):
+            docs.append(doc)
+    except _AliasBudgetExceeded:
+        return _error("alias_bomb")
+    except _NodeBudgetExceeded:
+        return _error("too_many_nodes")
+    except _MergeKeyRefused:
+        return _error("merge_key")
+    except RecursionError:
+        return _error("too_deep")
+    except yaml.constructor.ConstructorError:
+        return _error("unsafe_tag")
+    except yaml.YAMLError:
+        return _error("malformed")
+    except Exception:  # noqa: BLE001 - defensive: never propagate a loader fault on hostile input.
+        return _error("malformed")
+
+    # Walk the aggregate under one budget so an alias-EXPANDED structure (a small compose-time DAG) is fully
+    # re-counted across documents, exactly as the single-document path does.
+    walk_err = _walk_within_budget(docs, budget)
+    if walk_err is not None:
+        return walk_err
+    return _ok(docs)
