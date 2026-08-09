@@ -146,3 +146,27 @@ def test_certify_to_scitt_refuses_a_lead():
     assert res.status == "lead"
     with pytest.raises(ValueError, match="confirmed fact"):
         certify_to_scitt(res, SIGNERS, author="a", timestamp="t")
+
+
+def test_d2_binding_threads_into_the_signed_cert_and_is_filtered():
+    """D2 (Wave #4): confirm_and_certify forwards `binding=` into the SIGNED certificate, filtered to the D2
+    key allowlist, so a posture FACT proves WHICH artifact/scope/when/completeness. Surfaced by
+    verify_certificate.bound_identity WITHOUT gating .ok; a hostile extra key is dropped; no binding =>
+    no D2 fields (the byte-identity path)."""
+    from framework.v2.evidence.certify import verify_certificate
+    binding = {"artifact_sha256": "c" * 64, "collector_id": "iac-parser",
+               "resource_scope": {"provider": "aws", "account": "111122223333"},
+               "completeness": "partial", "capture_method": "artifact:terraform-state"}
+    ctx = _finding("sqli")["oracle_context"]
+    res = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS,
+                              provenance="reproduced", binding=binding)
+    assert res.is_fact
+    ver = verify_certificate(res.signed, oracle_context=ctx, trust_root=TRUST)
+    assert ver.ok and ver.bound_identity == binding          # surfaced, does NOT gate .ok
+    res_evil = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS,
+                                   provenance="reproduced", binding={**binding, "evil": "smuggled"})
+    assert "evil" not in verify_certificate(res_evil.signed, oracle_context=ctx,
+                                            trust_root=TRUST).bound_identity
+    res0 = confirm_and_certify(_finding("sqli"), engagement_slug="acme", signers=SIGNERS,
+                               provenance="reproduced")
+    assert verify_certificate(res0.signed, oracle_context=ctx, trust_root=TRUST).bound_identity == {}

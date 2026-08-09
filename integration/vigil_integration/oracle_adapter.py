@@ -117,6 +117,7 @@ def certify_admitted(
     provenance: str = "llm",
     tool_version: str = "",
     freshness_ttl_seconds: int = 0,
+    binding: "dict | None" = None,
 ) -> AdapterResult:
     """Mint a certificate ONLY for a verdict that has already passed admission.
 
@@ -148,12 +149,23 @@ def certify_admitted(
 
     result = confirm_and_certify(
         finding, engagement_slug=engagement_slug, signers=signers, seq=seq, verifier=verifier,
-        provenance=provenance, tool_version=tool_version, freshness_ttl_seconds=freshness_ttl_seconds)
+        provenance=provenance, tool_version=tool_version, freshness_ttl_seconds=freshness_ttl_seconds,
+        binding=binding)
     if not result.is_fact:
         # Admission said FACT but the deterministic layer refused (unmapped class, LLM provenance, signing
         # failure). The stricter answer wins — admission grants permission, it does not manufacture proof.
         return result
     return result
+
+
+# D2 (Wave #4): the artifact-identity / scope / freshness / completeness fields a caller may bind into the
+# signed certificate via `binding=`. Filtered to this allowlist before forwarding to build_certificate, so a
+# caller cannot smuggle arbitrary kwargs; the EvidenceCertificate validators (completeness enum, scope-key
+# allowlist) still fail closed on a bad value.
+_D2_BINDING_KEYS = frozenset({
+    "artifact_sha256", "collector_id", "collector_version", "resource_scope", "capture_time_epoch",
+    "capture_method", "requested_scope", "returned_scope", "completeness", "collector_signature",
+})
 
 
 def confirm_and_certify(
@@ -166,6 +178,7 @@ def confirm_and_certify(
     provenance: str = "llm",
     tool_version: str = "",
     freshness_ttl_seconds: int = 0,
+    binding: "dict | None" = None,
 ) -> AdapterResult:
     """Drive CRUCIBLE's oracle over ``finding['oracle_context']`` and, on a confirmed + oracle-mapped +
     REPRODUCED finding, mint + sign a proof-carrying certificate. ``signers`` = [(key_id, priv_b64)]
@@ -250,7 +263,8 @@ def confirm_and_certify(
         "tool_version": tool_version or str(finding.get("tool_version", "") or ""),
         "freshness_ttl_seconds": int(freshness_ttl_seconds or finding.get("freshness_ttl_seconds", 0) or 0),
     }
-    cert = build_certificate(enriched, engagement_slug=engagement_slug, seq=seq)
+    d2 = {k: v for k, v in (binding or {}).items() if k in _D2_BINDING_KEYS}
+    cert = build_certificate(enriched, engagement_slug=engagement_slug, seq=seq, **d2)
     signed = sign_certificate(cert, signers)
     return AdapterResult(
         "fact",
