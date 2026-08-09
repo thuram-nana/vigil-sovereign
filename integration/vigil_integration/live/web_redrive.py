@@ -33,6 +33,7 @@ class WebRedriveResult:
     facts: list = field(default_factory=list)     # AdapterResult (status=="fact"), signed
     leads: list = field(default_factory=list)     # AdapterResult (status=="lead") — CHANNEL-CONFIRMED
     inconclusive: list = field(default_factory=list)  # (bug_class, item) — a probe with NO channel; never CLEAN
+    admissions: list = field(default_factory=list)    # (branch, verdict, reason) — the audit trail
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
     refused: bool = False
     notes: list = field(default_factory=list)
@@ -151,6 +152,67 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
     return send, state
 
 
+# The insertion points a redirect parameter realistically occupies. QUERY_NAME / BODY_FORM_NAME / JSON_KEY
+# are deliberately excluded: injecting a canary URL as a parameter NAME does not model any real redirect
+# flow, and probing them would add requests without adding evidence.
+# Named by VALUE, not by enum member: the framework import is function-local (FATAL-2), so this module must
+# not reference InsertionKind at import time. _redrive_kinds() resolves them where the enum is available.
+_REDRIVE_INSERTION_KIND_NAMES = (
+    "QUERY_VALUE", "URL_PATH_SEG", "COOKIE_VALUE", "BODY_FORM_VALUE", "JSON_VALUE",
+)
+
+
+def _redrive_kinds(insertion_kind):
+    """The InsertionKind members this re-drive probes, resolved against the caller's enum."""
+    return tuple(getattr(insertion_kind, name) for name in _REDRIVE_INSERTION_KIND_NAMES
+                 if hasattr(insertion_kind, name))
+
+
+def _oracle_signal(context: "dict"):
+    """Run the deterministic oracle over the retained context and return its (fired, conclusive) signal.
+
+    Kept separate from minting so admission can see the oracle's answer BEFORE any certificate exists."""
+    from framework.v2.verify.oracles import predicate_oracle  # noqa: PLC0415 (FATAL-2: function-local)
+
+    evidence = context.get("observed_evidence") or {}
+    predicate = context.get("predicate") or {}
+    return predicate_oracle(evidence, predicate)
+
+
+def _attribute_branch(bug_class: str, context: "dict", fired: bool) -> str:
+    """Map an outcome to exactly ONE registered evidence branch.
+
+    A verdict that cannot be attributed to a single branch cannot be checked against any branch's declared
+    capability, so attribution is part of admission rather than a reporting detail. Header-derived evidence
+    is preferred when it is what actually fired, because it carries the stronger capability (it is
+    CLEAN-capable, and independent of whether the body could be decoded)."""
+    evidence = context.get("observed_evidence") or {}
+    if bug_class == "cors":
+        return "cors.reflected_origin_with_credentials"
+    if bug_class == "host_header_injection":
+        if evidence.get("location_host") and evidence.get("location_host") == evidence.get("evil_host"):
+            return "host_header.location_header"
+        return "host_header.body_emission"
+    if bug_class == "oidc_redirect_uri":
+        if evidence.get("location_host") and evidence.get("location_host") == evidence.get("canary_host"):
+            return "oidc_redirect_uri.location_header"
+        return "oidc_redirect_uri.body_markup"
+    # open_redirect: header first, then the two body sources, which are DIFFERENT branches with different
+    # capabilities (a declarative refresh is statically decidable; a JS sink is only lexically decidable).
+    if evidence.get("location_host") and evidence.get("location_host") == evidence.get("canary_host"):
+        return "open_redirect.location_header"
+    canary = evidence.get("canary_host")
+    body = evidence.get("body") or ""
+    if canary and body:
+        from framework.v2.scanner.checks import js_sink_hosts, meta_refresh_hosts  # noqa: PLC0415
+        if canary in meta_refresh_hosts(body):
+            return "open_redirect.body_markup"
+        if canary in js_sink_hosts(body):
+            return "open_redirect.js_sink"
+    return "open_redirect.body_markup"      # nothing fired: attribute to the body branch, whose declared
+                                            # capability correctly refuses to call that a CLEAN
+
+
 def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
                 timeout: float = 8.0) -> WebRedriveResult:
     """Re-drive ``url`` through the shipped web checks via a gated send and mint a signed FACT for every
@@ -161,7 +223,8 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
     from framework.v2.scanner.insertion import HttpRequest, InsertionKind, RequestTemplate  # noqa: PLC0415
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
 
-    from ..oracle_adapter import confirm_and_certify  # noqa: PLC0415 (FATAL-2: function-local)
+    from ..oracle_adapter import certify_admitted  # noqa: PLC0415 (FATAL-2: function-local)
+    from .verdict import Verdict, admit  # noqa: PLC0415
 
     res = WebRedriveResult(url=url)
     # PRE-FLIGHT the gate ONCE: a refused engagement (kill-switch / out-of-scope / no-slug / bad URL) means
@@ -191,19 +254,32 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         body_unreadable = state["body_unavailable"] > before_bodies
         if ctx is None:
             return
+        context = ctx.to_verifier_context()
         finding = {"check_id": f"web:{bug_class}:{item}", "bug_class": bug_class,
-                   "insertion_point": item, "oracle_context": ctx.to_verifier_context()}
-        r = confirm_and_certify(finding, engagement_slug=engagement_slug, signers=signers,
-                                provenance="live_redrive")
-        res.contexts[r.finding_ref] = finding["oracle_context"]
+                   "insertion_point": item, "oracle_context": context}
+
+        # ADMISSION DECIDES, MINTING EXECUTES. Run the deterministic oracle, attribute the outcome to ONE
+        # registered evidence branch, and let admit() apply that branch's declared capabilities against what
+        # this observation actually supports. Calling confirm_and_certify directly would let a verdict reach
+        # a certificate without any capability check ever running.
+        signal = _oracle_signal(context)
+        branch = _attribute_branch(bug_class, context, signal.fired)
+        observed = {
+            "channel_established": True,
+            "body_semantically_available": not body_unreadable,
+            "not_followed_redirect": not bool(context.get("observed_evidence", {}).get("followed_redirect")),
+            "gate_authorized": True,
+        }
+        admitted = admit(branch, fired=signal.fired, conclusive=signal.conclusive, observed=observed)
+        r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
+                             provenance="live_redrive")
+        res.contexts[r.finding_ref] = context
+        res.admissions.append((branch, admitted.verdict.value, admitted.reason))
         if r.is_fact:
-            res.facts.append(r)                          # header-derived evidence still stands on its own
-        elif body_unreadable:
-            # The oracle did not fire, but we could not read the document (unsupported Content-Encoding,
-            # undeclared non-UTF-8 charset, truncated response). "Found nothing" over bytes we never
-            # decoded is NOT a channel-confirmed CLEAN — it is INCONCLUSIVE.
+            res.facts.append(r)
+        elif admitted.verdict is Verdict.INCONCLUSIVE:
             res.inconclusive.append((bug_class, item))
-            res.notes.append(f"{bug_class}: body not semantically available — reported INCONCLUSIVE")
+            res.notes.append(f"{bug_class} [{branch}]: {admitted.reason}")
         else:
             res.leads.append(r)
 
@@ -213,7 +289,12 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         _run(lambda: HostHeaderCheck().probe(template, send), "host_header_injection", url)
         # per-insertion-point: open-redirect injects the canary into each query-value point
         orc = OpenRedirectCheck()
-        for point in template.insertion_points(kinds=(InsertionKind.QUERY_VALUE,)):
+        # A redirect parameter is not only a query value: apps take `next`/`returnTo` from a path segment,
+        # a cookie, or a urlencoded/JSON body just as often. Restricting the re-drive to QUERY_VALUE meant
+        # those insertion points were ABSENT from adjudication — not reported as unexamined, simply missing,
+        # which reads to a consumer as "nothing there". Every point below is covered by the same admission
+        # path, so each one's outcome is attributed and capability-checked like any other.
+        for point in template.insertion_points(kinds=_redrive_kinds(InsertionKind)):
             _run(lambda p=point: orc.probe(template, p, send), "open_redirect", f"{url}#{point.id}")
     except Exception as e:  # noqa: BLE001 — a probe error never fabricates a FACT; record + return what held
         res.notes.append(f"probe error: {type(e).__name__}: {e}")

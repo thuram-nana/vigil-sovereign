@@ -885,22 +885,46 @@ def _scan_markup(body: str) -> _MarkupScan:
     return scan
 
 
-def _redirect_hosts(scan: _MarkupScan) -> list[str]:
-    """Hosts a browser would NAVIGATE to from parsed markup: a meta-refresh target or a JS location sink."""
+def _meta_refresh_hosts(scan: _MarkupScan) -> list[str]:
+    """Hosts a declarative ``<meta http-equiv=refresh>`` would navigate to."""
     hosts: list[str] = []
     for meta in scan.metas:
         if (meta.get("http-equiv") or "").strip().lower() == "refresh":
             target = _meta_refresh_url(meta.get("content") or "")
             if target:
                 hosts.append(_host(target))
+    return [h for h in hosts if h]
+
+
+def _js_sink_hosts(scan: _MarkupScan) -> list[str]:
+    """Hosts a JS location sink would navigate to — counting ONLY sinks that begin in executable code."""
+    hosts: list[str] = []
     for text in scan.script_text:
         for match in _JS_REDIRECT.finditer(text):
-            # Only a sink that BEGINS in executable code counts. One inside a comment, a string, a template
-            # literal, or an ambiguous `/`-span never runs (or cannot be shown to run without parsing), and
-            # counting it was the false-FACT surface that kept this branch quarantined LEAD-only.
+            # A sink inside a comment, a string, a template literal, or an ambiguous `/`-span never runs (or
+            # cannot be shown to run without parsing); counting it was the false-FACT surface that kept this
+            # branch quarantined LEAD-only.
             if _js_lex.sink_is_executable(text, match.start()):
                 hosts.append(_host(match.group(1).strip()))
     return [h for h in hosts if h]
+
+
+def _redirect_hosts(scan: _MarkupScan) -> list[str]:
+    """Every host parsed markup would navigate to. Kept as the union for the predicate, while the two
+    sources stay separately available: they are DIFFERENT evidence branches with different capabilities
+    (a declarative refresh is statically decidable; a JS sink is only lexically decidable), so a verdict
+    must be attributable to one of them rather than to their merger."""
+    return _meta_refresh_hosts(scan) + _js_sink_hosts(scan)
+
+
+def meta_refresh_hosts(body: str) -> list[str]:
+    """Public: declarative-refresh navigation targets in ``body`` (branch ``*.body_markup``)."""
+    return _meta_refresh_hosts(_scan_markup(body))
+
+
+def js_sink_hosts(body: str) -> list[str]:
+    """Public: executable JS-sink navigation targets in ``body`` (branch ``open_redirect.js_sink``)."""
+    return _js_sink_hosts(_scan_markup(body))
 
 
 def _markup_redirect_hosts(body: str) -> list[str]:

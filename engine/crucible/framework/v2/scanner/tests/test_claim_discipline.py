@@ -280,6 +280,50 @@ def test_admission_never_reports_clean_from_a_branch_that_is_not_clean_capable()
         assert got.verdict != verdict.CLEAN, f"{branch['id']}: not clean_capable but admitted CLEAN"
 
 
+def test_certificate_minting_requires_an_admitted_verdict() -> None:
+    """Rule 2's architectural half, at the OUTPUT end.
+
+    A verdict type that only admission can construct is worth little if minting still accepts a raw string
+    or a raw oracle result — the registry would describe policy that nothing applies at the point where
+    authority is actually conferred. Minting must refuse anything that has not passed admission."""
+    import sys
+    integration = str(_ROOT / "integration")
+    if integration not in sys.path:
+        sys.path.insert(0, integration)
+    try:
+        from vigil_integration.oracle_adapter import certify_admitted
+    except Exception as exc:                       # noqa: BLE001
+        pytest.fail(f"admission-gated minting unavailable — the contract is unenforced here: {exc}")
+    verdict = _admit()
+
+    finding = {"check_id": "t", "bug_class": "open_redirect", "oracle_context": {}}
+    for raw in ("FACT", {"verdict": "FACT"}, None, 1, object()):
+        with pytest.raises(TypeError):
+            certify_admitted(finding, raw, engagement_slug="a", signers=[])
+
+    # An admission that did NOT return FACT must not mint, and must say why.
+    demoted = verdict.admit("open_redirect.body_markup", fired=False, conclusive=True,
+                            observed={"channel_established": True, "body_semantically_available": True,
+                                      "not_followed_redirect": True})
+    result = certify_admitted(finding, demoted, engagement_slug="a", signers=[])
+    assert not result.is_fact, "minting produced a FACT from a non-FACT admission"
+    assert demoted.branch in result.reason, "the demotion is not auditable — no branch in the reason"
+
+
+def test_body_branches_are_attributable_to_one_evidence_source() -> None:
+    """A verdict must be attributable to ONE registered branch. Meta-refresh and JS sinks are different
+    branches with different capabilities (declarative refresh is statically decidable; a JS sink is only
+    lexically decidable), so merging them would make a verdict unattributable — and an unattributable
+    verdict cannot be checked against any branch's declared capability."""
+    from framework.v2.scanner.checks import js_sink_hosts, meta_refresh_hosts
+
+    canary = "canary.example.test"
+    meta = f'<meta http-equiv=refresh content="0;url=https://{canary}/a">'
+    js = f'<script>location.href="//{canary}/b"</script>'
+    assert canary in meta_refresh_hosts(meta) and js_sink_hosts(meta) == []
+    assert canary in js_sink_hosts(js) and meta_refresh_hosts(js) == []
+
+
 @pytest.mark.parametrize("doc", ["docs/CLAIM-DISCIPLINE.md", "docs/capability-matrix/hexstrike.json",
                                  "docs/capability-matrix/evidence-branches.json"])
 def test_capability_documents_make_no_unqualified_absolute_claims(doc: str) -> None:
