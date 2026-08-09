@@ -285,3 +285,14 @@ def test_capture_scope_empty_is_not_conclusive() -> None:
     assert not cs.conclusive
     assert cs.completeness() == "empty"
     assert cs.to_dict() == {"completeness": "empty"}
+
+
+def test_resource_path_traversal_segment_is_refused_fail_closed() -> None:
+    """RED-PEN D5-LOW: fnmatch '*' spans '/', so a charter glob 'ns/payments/*' would otherwise also match
+    'ns/payments/../admin/root'. A requested resource carrying a '..' segment is refused fail-closed, so a
+    downstream path-normalizer cannot escape the scoped prefix. A canonical resource still authorizes."""
+    gate = _static_gate([CloudScopeEntry(provider="k8s", account="prod", region="", resource="ns/payments/*")])
+    ok, reason = gate.authorize("k8s", "prod", resource="ns/payments/../admin/root")
+    assert ok is False and "traversal" in reason
+    # the legitimate canonical resource under the same glob still authorizes
+    assert gate.authorize("k8s", "prod", resource="ns/payments/svc-a")[0] is True

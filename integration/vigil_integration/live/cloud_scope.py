@@ -254,6 +254,15 @@ class CloudScopeGate:
         r = _norm(region)
         res = (resource or "").strip()
 
+        # Fail-closed on a path-traversal segment in the requested resource: fnmatch '*' spans '/', so a
+        # glob like 'ns/payments/*' would otherwise also match 'ns/payments/../admin/root'. Cloud resource
+        # IDs (ARNs, k8s ns/name) are canonical and never contain a '..' segment; a request that does is
+        # refused rather than risk a downstream path-normalizer escaping the scoped prefix (red-pen D5-LOW).
+        # '*' is NOT '/'-anchored — a resource glob must be written to match the full canonical id.
+        if res and ".." in res.split("/"):
+            return False, (f"requested resource {resource!r} contains a '..' path-traversal segment "
+                           "(resource IDs must be canonical; refusing fail-closed)")
+
         for e in entries:
             if _norm(e.provider) != p:
                 continue

@@ -359,14 +359,44 @@ def test_no_sovereign_live_module_mints_by_calling_confirm_and_certify_directly(
     classes that have no registered evidence branch yet, so admission has nothing to key on until those
     branches exist) and ``external_tool.py`` (the tool-runner). The frontier may only SHRINK — a NEW direct
     caller, or a regression in any migrated module (including sbom.py), fails here."""
+    import ast  # noqa: PLC0415
+
     live = _ROOT / "integration" / "vigil_integration" / "live"
     assert live.is_dir(), f"{live} is missing — the sovereign live surface must exist to be governed"
-    call = re.compile(r"\bconfirm_and_certify\s*\(")   # a CALL, not a prose/backtick mention
+    # The mint primitives a sovereign live/* module may NOT call directly — reaching any of them skips the
+    # admission/branch-capability layer. ``certify_admitted`` is the ONLY sanctioned path (it lives in
+    # oracle_adapter.py, not under live/, so it is not scanned). AST-based (not a text grep) so an aliased
+    # import (`from ..oracle_adapter import confirm_and_certify as cc; cc(...)`), an attribute call
+    # (`oracle_adapter.confirm_and_certify(...)` / `certify.build_certificate(...)`), a `getattr(...)`
+    # dispatch, or a direct `build_certificate`/`sign_certificate` mint are all caught (red-pen D1-LOW).
+    _FORBIDDEN = {"confirm_and_certify", "build_certificate", "sign_certificate"}
+
+    def _mints_directly(src: str) -> bool:
+        tree = ast.parse(src)
+        aliases = set()          # local names bound to a forbidden symbol via `import ... as`
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name in _FORBIDDEN:
+                        aliases.add(a.asname or a.name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if isinstance(fn, ast.Name) and fn.id in (aliases | _FORBIDDEN):
+                return True                                  # cc(...) or confirm_and_certify(...)
+            if isinstance(fn, ast.Attribute) and fn.attr in _FORBIDDEN:
+                return True                                  # oracle_adapter.confirm_and_certify(...)
+            if (isinstance(fn, ast.Name) and fn.id == "getattr" and node.args        # getattr(x,"...")(...)
+                    and isinstance(node.args[-1], ast.Constant) and node.args[-1].value in _FORBIDDEN):
+                return True
+        return False
+
     # The migration FRONTIER, not a permanent exemption. sbom.py is deliberately NOT here.
     _PENDING_MIGRATION = {"wiring.py", "external_tool.py"}
 
     offenders = {py.name for py in sorted(live.glob("*.py"))
-                 if call.search(py.read_text(encoding="utf-8"))}
+                 if _mints_directly(py.read_text(encoding="utf-8"))}
 
     assert "sbom.py" not in offenders, (
         "sbom.py calls confirm_and_certify() DIRECTLY — SLICE D1 requires it route through verdict.admit() "
