@@ -149,10 +149,14 @@ def test_emitted_url_hosts_ignores_inert_markup_contexts() -> None:
     assert evil not in hosts(f'<!-- <meta property="og:url" content="https://{evil}/"> -->')
     for el in ("style", "textarea", "title", "xmp", "template", "iframe"):
         assert evil not in hosts(f'<{el}><a href="https://{evil}/">x</a></{el}>'), el
-    # FALLBACK elements are parsed as LIVE markup when the feature is off — a no-JS user really can click
-    # this link, so it is a genuine emission and must NOT be masked away.
-    for el in ("noscript", "noembed", "noframes"):
-        assert evil in hosts(f'<{el}><a href="https://{evil}/">x</a></{el}>'), el
+    # `<noscript>` is parsed as LIVE markup when scripting is disabled — a no-JS consumer (link-preview
+    # crawler, plain HTTP client) really can follow this link, so it is a genuine emission.
+    assert evil in hosts(f'<noscript><a href="https://{evil}/">x</a></noscript>')
+    # `<noembed>`/`<noframes>`, despite also being "fallback" elements, are RAWTEXT per the HTML parsing
+    # spec — their content is never markup in any configuration — so they stay inert. (An earlier revision
+    # of this test lumped all three together; the tokenizer differential caught the over-generalisation.)
+    for el in ("noembed", "noframes"):
+        assert evil not in hosts(f'<{el}><a href="https://{evil}/">x</a></{el}>'), el
     # an end tag closes only when `</el` is followed by a terminator — `</scriptx>` does not close <script>,
     # so what follows is still inert (treating it as a close would un-mask it and mint a false FACT)
     assert evil not in hosts(f'<script></scriptx><a href="https://{evil}/">x</a></script>')

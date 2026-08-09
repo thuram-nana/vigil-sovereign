@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 import re
 import time
+from html.parser import HTMLParser
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Protocol, runtime_checkable
 from urllib.parse import urljoin, urlsplit
@@ -615,327 +616,177 @@ def _host(url: str) -> str:
 # <meta> tag or redirect URL never approaches these limits, but an attacker-controlled response could
 # otherwise pack many "<meta " starts with no ">" (each greedy [^>]* rescanning to end → O(n^2)).
 _MARKUP_SCAN_CAP = 512_000        # only the head of a response carries navigation markup; cap the parse
-# Each pattern is anchored to a real ATTRIBUTE/IDENTIFIER boundary with `(?<![-\w])`: a plain `\b` is NOT
-# sufficient, because `-` is a non-word character, so `\bcontent` still matches inside `data-content=`
-# (that gap let a benign own-host redirect mint a false FACT — re-red-pen BLOCK-C). The lookbehind excludes
-# `-` and word chars but deliberately ALLOWS `.`, so real sinks like `top.location.href` still match.
-# `<` is excluded from the tag body as well as `>`: a real tag never contains a raw `<`, and excluding it
-# makes a hostile run of unterminated `<meta<meta<meta…` fail after ONE character instead of re-scanning the
-# 4096-char bound at every start position (the last super-linear hot spot on the mint path).
-_META_TAG = re.compile(r"<meta\b[^<>]{0,4096}>", re.IGNORECASE)
-_HTTP_EQUIV_REFRESH = re.compile(r"(?<![-\w])http-equiv\s*=\s*[\"']?\s*refresh", re.IGNORECASE)
-# The value is delimited by the SAME quote it opened with, so an inner quote of the other kind is part of
-# the value: `content="0; url='https://x/'"` is a real redirect browsers honour (WHATWG strips the inner
-# quotes), and a single `["']` class would have truncated it to `0; url=` and MISSED it.
-_META_CONTENT = re.compile(r"(?<![-\w])content\s*=\s*(?:\"([^\"]{0,4096})\"|'([^']{0,4096})')", re.IGNORECASE)
-
-
-def _meta_content_value(tag: str) -> str | None:
-    """The ``content`` attribute value of a meta tag (either quote style), or None."""
-    m = _META_CONTENT.search(tag)
-    if m is None:
-        return None
-    return m.group(1) if m.group(1) is not None else m.group(2)
+# Only two regexes remain: the URL inside a meta-refresh `content` value, and the JS navigation sinks inside
+# script text. Everything structural — which bytes are markup at all, where a tag ends, which quote closes an
+# attribute, what a raw-text element swallows — is delegated to the stdlib tokenizer below.
 _META_CONTENT_URL = re.compile(r"(?<![-\w])url\s*=\s*(.{0,4096}?)\s*$", re.IGNORECASE)
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
 _JS_REDIRECT = re.compile(
-    r"(?<![-\w])(?:(?:window|document)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*"
+    r"(?<![-\w])(?:(?:window|document|top|parent|self)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*"
     r"[\"']([^\"']{1,4096})[\"']",
     re.IGNORECASE)
-
-
-# A URL the app EMITS as a navigable link / loadable resource / form target — the only place a reflected
-# Host becomes attacker-controllable for a VICTIM (cache-poisoned resource, reset-link, form post). An href/
-# src/action attribute value is bounded (a URL never approaches 4096). `(?<![-\w])` anchors the attribute
-# name so `data-href`/`x-src` do not match (the same attribute-boundary lesson as _META_CONTENT).
-# `<`/`>` excluded from the value for the same fail-fast reason as _META_TAG (a URL attribute value in HTML
-# never contains a raw angle bracket).
-_URL_ATTR = re.compile(r"(?<![-\w])(?:href|src|action)\s*=\s*[\"']([^\"'<>]{1,4096})[\"']", re.IGNORECASE)
-# URL-valued canonical / social metadata: og:url is THE canonical link that crawlers, link-preview and cache
-# layers consume as authoritative — poisoning it via the Host header is a real cache/canonical-hijack sink
-# (and is the benchmark's host-header primitive). This is a STRUCTURED metadata emission, distinct from an
-# inert free-text echo of a reconstructed URL, so counting it does not reopen BLOCK-D.
-_META_PROPERTY = re.compile(r"(?<![-\w])(?:property|name)\s*=\s*[\"']([^\"']{0,256})[\"']", re.IGNORECASE)
 # The property name must match the WHOLE value against an allow-list of genuinely URL-valued properties
 # (`fullmatch`). A substring test would fire on `not-og:url`, on a value that merely CONTAINS `og:url`, and
-# — worst — on `twitter:image:alt` / `og:image:alt`, which are ALT TEXT, not URLs. Text sub-properties are
-# excluded by construction; only the `:url` / `:secure_url` / `:src` sub-properties are URL-valued.
+# — worst — on `twitter:image:alt` / `og:image:alt`, which are ALT TEXT, not URLs.
 _URL_VALUED_META = re.compile(
     r"og:(?:url|(?:image|audio|video)(?::(?:url|secure_url))?)|twitter:(?:url|image(?::src)?)",
     re.IGNORECASE)
 
 
-def _emitted_url_hosts(body: str) -> list[str]:
-    """The hosts that appear as the AUTHORITY of a URL the app EMITS — an href/src/action attribute value,
-    or a meta-refresh / JS-location redirect target — lowercased. These are URLs a VICTIM's browser would
-    actually use, which is what makes a reflected ``Host`` exploitable (cache poisoning, poisoned reset link).
+class _MarkupScan(HTMLParser):
+    """Tokenize a response body with the STDLIB HTML tokenizer and record only what the app actually EMITS.
 
-    Crucially this is EMISSION, not mere presence: a ``//authority`` that only appears as inert body text — a
-    404 message echoing the reconstructed ``http://<Host>/path`` back to the requester, a ``<pre>`` sample, an
-    HTML comment, a JSON error string — is NOT counted. Such an echo is shown only to the requester (who set
-    their own Host) and is not exploitable; counting it minted a signed false FACT (re-red-pen BLOCK-D). The
-    authority is parsed with stdlib ``urlsplit`` (via ``_host``), so a relative URL whose QUERY contains
-    ``//evil`` (``/x?u=//evil``) is correctly NOT an emission of ``evil``. Bounded like the markup scan."""
-    raw = (body or "")[:_MARKUP_SCAN_CAP]
-    hosts = list(_markup_redirect_hosts(raw))           # meta-refresh + JS location sinks (redirect emission)
-    # Attribute/metadata emission is read from markup a browser actually PARSES: comments and raw-text
-    # elements (script/style/textarea) are dropped, so an href/<meta> merely echoed into one is not counted.
-    body = _mask_inert(raw, _INERT_EMISSION)
-    for val in _URL_ATTR.findall(body):                 # href/src/action link/resource/form emission
-        h = _host(val.strip())                          # urlsplit authority: '' for relative/same-origin URLs
-        if h:
-            hosts.append(h)
-    for tag in _META_TAG.findall(body):                 # canonical / social URL metadata (og:url, ...)
-        prop = _META_PROPERTY.search(tag)
-        if prop and _URL_VALUED_META.fullmatch(prop.group(1).strip()):
-            content = _meta_content_value(tag)
-            if content is not None:
-                h = _host(content.strip())
-                if h:
-                    hosts.append(h)
-    return hosts
+    This deliberately replaces a hand-written masker. Deciding "is this URL live markup or inert text?" is a
+    tokenizer problem — comments, raw-text and escapable-raw-text elements, attribute quoting (including
+    unquoted values), malformed and unterminated tags — and every hand-rolled approximation of it leaked in
+    BOTH directions: inert text counted as an emission (a benign page minting a signed FALSE FACT) and live
+    markup masked away (a real vulnerability silently DROPPED), plus repeated super-linear blowups on
+    attacker-controlled bodies. ``html.parser`` gets those cases right, is linear, and ships with Python.
 
+    Two things are layered on top, because the tokenizer does not model them and both change a verdict:
 
-# Inert regions: markup inside an HTML comment is never parsed, and raw-text / escapable-text elements have
-# contents a browser renders LITERALLY rather than parsing as markup. A `href=` / `<meta>` echoed into one of
-# them is NOT an emission and does not navigate — counting it minted false FACTs. `<pre>`/`<code>` are
-# deliberately NOT inert: tags inside them ARE live (a <pre><a href> is a real, clickable link).
-#
-# `<plaintext>` has no end tag (everything after it is literal), and an unterminated inert element likewise
-# swallows the rest of the document — both are handled by masking to EOF.
-# `noscript`/`noembed`/`noframes` are deliberately NOT inert: they are FALLBACK elements, parsed as LIVE
-# markup whenever the corresponding feature is off. A `<noscript><meta http-equiv=refresh>` really does
-# navigate for a no-JS consumer (link-preview crawlers, plain HTTP clients), so masking them dropped a real
-# open redirect.
-_INERT_EMISSION = ("script", "style", "textarea", "title", "xmp", "plaintext", "template", "iframe")
-# For REDIRECT sinks, `<script>` content is deliberately NOT masked: JS location sinks legitimately live
-# there. Everything else that renders literally still cannot navigate.
-_INERT_REDIRECT = tuple(e for e in _INERT_EMISSION if e != "script")
-# first-letter buckets: lets the scanner reject a `<` that cannot begin an inert tag in O(1) instead of
-# testing every element name (a target-controlled `<`-spam body is the maximal per-character case).
-_INERT_BY_INITIAL = {e: tuple(x for x in _INERT_EMISSION if x[0] == e) for e in {n[0] for n in _INERT_EMISSION}}
+    * ``<template>`` content is an inert document fragment — it is not rendered and its resources are not
+      fetched — but the tokenizer reports its children as ordinary tags, so emissions are suppressed while
+      inside one. Depth is tracked on real tokenizer events, so a ``</template>`` appearing inside a script
+      string or an attribute value cannot close it.
+    * The WHATWG script-data DOUBLE-ESCAPE state: after ``<!--<script`` the next ``</script>`` returns to the
+      escaped state instead of closing the element, so the markup after it is still script text. The
+      tokenizer closes at the first ``</script>``, so emissions are suppressed until the following one —
+      unless a ``-->`` ends the escape first.
 
+    Everything the tokenizer already gets right (comments, ``script``/``style``/``textarea``/``title``/
+    ``xmp``/``plaintext``/``noembed``/``noframes``/``iframe`` content, and live ``noscript``/``pre``/``code``
+    content) is simply trusted.
+    """
 
-def _mask_inert(body: str, elements: tuple[str, ...]) -> str:
-    """Blank out HTML comments and the CONTENT of inert ``elements``, in ONE LINEAR pass (``str.find`` only).
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.url_attrs: list[str] = []          # href/src/action values of LIVE tags
+        self.metas: list[dict[str, str]] = []   # attributes of LIVE <meta> tags
+        self.script_text: list[str] = []        # raw text of LIVE <script> elements (JS sink source)
+        self._template_depth = 0
+        self._in_script = False
+        self._suppress_scripts = 0              # script-data double-escape carry-over
+        self._pending_double = False
 
-    Deliberately implemented without a regex: a lazy ``.*?`` over attacker-controlled bytes backtracks
-    quadratically (a body of unterminated ``<!--`` / ``<script>`` stalled the mint path for minutes). Each
-    character is visited a bounded number of times here, so runtime is linear in the (already capped) body.
+    @property
+    def _live(self) -> bool:
+        return self._template_depth == 0 and self._suppress_scripts == 0
 
-    An element's OPENING TAG is preserved — only its inner text is blanked — so URL attributes on the tag
-    itself (``<script src="https://host/x.js">``, ``<iframe src=...>``) remain visible to the emission scan;
-    blanking the whole element dropped that genuine, high-severity sink.
+    def _record(self, tag: str, attrs: "list[tuple[str, str | None]]") -> None:
+        if not self._live:
+            return
+        d = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "meta":
+            self.metas.append(d)
+        for key in ("href", "src", "action"):
+            if d.get(key):
+                self.url_attrs.append(d[key])
 
-    Tag boundaries follow what a browser actually does, because getting either edge wrong flips a verdict:
-    the opening tag ends at the first ``>`` OUTSIDE a quoted attribute (a ``>`` inside ``srcdoc``/``data-*``
-    would otherwise end the tag early and hide the real ``src``), and an end tag counts only when ``</el`` is
-    followed by a terminator — ``</scriptx>`` does NOT close ``<script>``, so treating it as a close would
-    un-mask genuinely inert content and mint a false FACT."""
-    body = body or ""
-    low = body.lower()
-    out = list(body)
-    n = len(body)
-    i = 0
-    while i < n:
-        j = low.find("<", i)
-        if j < 0:
-            break
-        if low.startswith("<!--", j):                       # comment: blank the whole thing (incl. markers)
-            end = low.find("-->", j + 4)
-            stop = n if end < 0 else end + 3                # unterminated comment runs to EOF
-            out[j:stop] = " " * (stop - j)
-            i = stop
-            continue
-        nxt = low[j + 1] if j + 1 < n else ""
-        if not nxt.isalpha():                               # fast path: cannot begin a tag name
-            i = j + 1
-            continue
-        el = next((e for e in _INERT_BY_INITIAL.get(nxt, ()) if e in elements
-                   and low.startswith("<" + e, j)
-                   and (j + 1 + len(e) >= n or not (low[j + 1 + len(e)].isalnum()
-                                                    or low[j + 1 + len(e)] in "-_"))), None)
-        gt = _tag_end(low, j, n)
-        if el is None:
-            # Not inert — but SKIP THE WHOLE TAG. Advancing one character would walk into this tag's
-            # attribute VALUES, where a `<plaintext>`/`<textarea>` inside `value="…"` would be mistaken for
-            # a real element and mask the rest of the document, deleting genuine sinks.
-            if gt < 0:
-                break        # this tag never terminates, so nothing after it is parsed as markup
-            i = gt + 1
-            continue
-        if gt < 0:
-            # Unterminated opening tag: the tag is incomplete and nothing after it is parsed as markup, so
-            # mask to EOF. (Breaking here left the whole tail visible and minted a false FACT.)
-            out[j:n] = " " * (n - j)
-            break
-        stop = _inert_content_end(low, el, gt + 1, n)
-        out[gt + 1:stop] = " " * (stop - gt - 1)            # keep the opening tag, blank the content
-        i = stop
-    return "".join(out)
+    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if tag == "template":
+            self._template_depth += 1
+            return
+        if tag == "script":
+            self._in_script = True
+        self._record(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:  # noqa: ANN001 — `<x/>` opens and closes at once
+        if tag == "template":
+            return
+        self._record(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "template":
+            self._template_depth = max(0, self._template_depth - 1)
+            return
+        if tag == "script":
+            self._in_script = False
+            if self._pending_double:
+                self._pending_double = False
+                self._suppress_scripts += 1     # this end tag did not really close the element
+            elif self._suppress_scripts:
+                self._suppress_scripts -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._in_script:
+            return
+        if self._live:
+            self.script_text.append(data)
+        entry = data.rfind("<!--<script")         # last double-escape entry in this script's text
+        if entry >= 0 and data.find("-->", entry) < 0:
+            self._pending_double = True           # ... and nothing ended the escape before the end tag
 
 
-def _is_tag_at(low: str, k: int, name: str, close: bool = False) -> bool:
-    """True if a (possibly closing) ``name`` tag starts at ``k``, delimited by a real terminator."""
-    lead = "</" if close else "<"
-    if not low.startswith(lead + name, k):
-        return False
-    after = k + len(lead) + len(name)
-    return after >= len(low) or low[after].isspace() or low[after] in "/>"
+def _scan_markup(body: str) -> _MarkupScan:
+    """Tokenize (a capped prefix of) ``body``. Malformed input never raises: whatever was tokenized before
+    the error is what a browser would have parsed up to that point, and is what we judge."""
+    text = (body or "")[:_MARKUP_SCAN_CAP]
+    scan = _MarkupScan()
+    if ">" not in text:
+        return scan          # no complete tag can exist, so nothing is emitted — skip the tokenizer
+    try:
+        scan.feed(text)
+        scan.close()
+    except Exception:                             # noqa: BLE001 — keep what parsed; never fail the probe
+        pass
+    return scan
 
 
-def _inert_content_end(low: str, el: str, start: int, n: int) -> int:
-    """Index where ``el``'s inert content ends — i.e. where a browser resumes parsing markup.
-
-    Three content models, because using one rule for all of them flips verdicts:
-      * ``template`` is element-content and NESTS, so the matching end tag is depth-tracked (closing at the
-        first ``</template>`` un-masked the outer fragment and minted a false FACT);
-      * ``script`` follows the WHATWG script-data DOUBLE-ESCAPE rule: after ``<!--<script`` the next
-        ``</script`` only returns to the escaped state instead of closing, so it consumes one extra end tag;
-      * every other raw-text element ends at its first properly-terminated end tag (or EOF)."""
-    if el == "template":
-        depth, k = 1, start
-        while True:
-            close = _find_tag(low, "template", k, n, close=True)
-            if close < 0:
-                return n
-            nested = _find_tag(low, "template", k, n)
-            if 0 <= nested < close:
-                depth, k = depth + 1, nested + 9
-                continue
-            depth -= 1
-            if depth == 0:
-                return close
-            k = close + 10
-    if el == "script":
-        k, double = start, False
-        while True:
-            close = _find_tag(low, "script", k, n, close=True)
-            if close < 0:
-                return n
-            if double:                                      # this end tag only leaves the double-escape
-                double, k = False, close + 9
-                continue
-            # bounded by `close`: an unbounded find scans to EOF for every script element in a
-            # comment-free document, which is quadratic across many elements
-            cm = low.find("<!--", k, close)                 # does a double-escape entry precede the close?
-            if cm >= 0:
-                nested = _find_tag(low, "script", cm + 4, close)
-                ends = low.find("-->", cm + 4, close)
-                if 0 <= nested < close and (ends < 0 or ends > nested):
-                    double, k = True, nested + 7
-                    continue
-            return close
-    close = _close_tag(low, el, start, n)
-    return n if close < 0 else close                        # no end tag (or <plaintext>): literal to EOF
-
-
-def _tag_end(low: str, start: int, n: int) -> int:
-    """Index of the ``>`` that ends the tag opened at ``start``, skipping quoted attribute values (a ``>``
-    inside ``srcdoc="<p>x</p>"`` or ``data-cfg="{a:1>0}"`` does NOT end the tag), or -1 if unterminated.
-
-    ``str.find``-based rather than a per-character Python loop: this runs for EVERY tag in a
-    target-controlled body, and a char loop made the whole mask quadratic in practice."""
-    k = start + 1
-    while k < n:
-        gt = low.find(">", k)
-        if gt < 0:
-            return -1
-        # Find the first quote before `gt` that actually OPENS an attribute value. Per HTML a quote
-        # delimits a value only when it comes right after `=`; an apostrophe inside an UNQUOTED value
-        # (`title=it's`) is a literal character. Treating it as a delimiter made this return -1, which
-        # aborted the whole scan and left genuinely inert markup after it unmasked.
-        # The lookups are bounded by `gt`: an unbounded find scans to EOF on every tag of a quote-free
-        # body, which is quadratic across a document full of tags.
-        q, p = -1, k
-        while True:
-            cands = [x for x in (low.find('"', p, gt), low.find("'", p, gt)) if x >= 0]
-            if not cands:
-                break
-            c = min(cands)
-            b = c - 1
-            while b >= 0 and low[b].isspace():
-                b -= 1
-            if b >= 0 and low[b] == "=":
-                q = c
-                break
-            p = c + 1                                   # a literal quote in an unquoted value — skip it
-        if q < 0:
-            return gt                                   # no quote opens a value before the '>'
-        end = low.find(low[q], q + 1)
-        if end < 0:
-            return -1                                   # unterminated quote: the tag never ends
-        k = end + 1
-    return -1
-
-
-def _find_tag(low: str, name: str, start: int, n: int, *, close: bool = False) -> int:
-    """Index of the next properly-terminated ``<name`` / ``</name`` at or after ``start``, or -1.
-    ``find``-based for the same reason as :func:`_tag_end`."""
-    needle = ("</" if close else "<") + name
-    k = start
-    while True:
-        k = low.find(needle, k)
-        if k < 0:
-            return -1
-        after = k + len(needle)
-        if after >= n or low[after].isspace() or low[after] in "/>":
-            return k
-        k += 1
-
-
-def _close_tag(low: str, el: str, start: int, n: int) -> int:
-    """Index of the end tag that actually CLOSES ``el`` at or after ``start``, or -1. A browser closes a
-    raw-text element only when ``</el`` is followed by whitespace, ``/`` or ``>`` — ``</scriptx>`` does not
-    close ``<script>``, so a bare substring search would stop masking too early."""
-    needle = "</" + el
-    k = start
-    while True:
-        k = low.find(needle, k)
-        if k < 0:
-            return -1
-        after = k + len(needle)
-        if after >= n or low[after].isspace() or low[after] in "/>":
-            return k
-        k += 1
-
-
-def _strip_html_comments(body: str) -> str:
-    """Drop HTML comments only — commented-out markup is never parsed, so it emits and navigates nothing."""
-    return _mask_inert(body, ())
+def _redirect_hosts(scan: _MarkupScan) -> list[str]:
+    """Hosts a browser would NAVIGATE to from parsed markup: a meta-refresh target or a JS location sink."""
+    hosts: list[str] = []
+    for meta in scan.metas:
+        if (meta.get("http-equiv") or "").strip().lower() == "refresh":
+            found = _META_CONTENT_URL.search(meta.get("content") or "")
+            if found:
+                hosts.append(_host(found.group(1).strip().strip("'\"")))
+    for text in scan.script_text:
+        for url in _JS_REDIRECT.findall(text):
+            hosts.append(_host(url.strip()))
+    return [h for h in hosts if h]
 
 
 def _markup_redirect_hosts(body: str) -> list[str]:
     """The hosts a browser would actually NAVIGATE to from the response markup — the target of a
-    meta-refresh (``<meta http-equiv=refresh content='...;url=<URL>'>``) or a JS location sink
-    (``location.href/.assign/.replace``, ``window/document.location``). Returns lowercased netlocs; a
-    relative / same-origin target contributes nothing (dropped). This is the co-location test that makes
-    open-redirect confirmation sound: the canary host must be an ACTUAL navigation target, not merely a
-    substring reflected somewhere in the body next to an unrelated ``<meta http-equiv=Content-Type>``.
-
-    The body is length-capped and the tag/URL scans are bounded so a hostile response body cannot make
-    this parse super-linear (availability, per the re-red-pen).
+    meta-refresh or a JS location sink. Returns lowercased netlocs; a relative / same-origin target
+    contributes nothing. This is the co-location test that makes open-redirect confirmation sound: the
+    canary host must be an ACTUAL navigation target, not merely a substring reflected somewhere in the body
+    next to an unrelated ``<meta http-equiv=Content-Type>``.
 
     HONEST RESIDUAL: the extracted host list is a DERIVED observation stored in ``observed_evidence``
     alongside the raw ``body``, so re-verification re-fires the predicate over the derived list rather than
     re-parsing the body. The certificate signature makes the stored evidence tamper-evident, but the
-    veracity firewall cannot demote a MINT-TIME derivation bug in this parser — which is why the parser is
-    pinned by explicit true-positive AND negative-control tests. This is the same property every shipped
-    predicate has (e.g. ``location_host = _host(location)``), not one specific to this helper."""
-    # HTML comments are stripped — commented-out markup never navigates. ``<script>`` is deliberately NOT
-    # stripped here: JS location sinks legitimately live inside it.
-    body = _mask_inert((body or "")[:_MARKUP_SCAN_CAP], _INERT_REDIRECT)
-    hosts: list[str] = []
-    for tag in _META_TAG.findall(body):
-        if _HTTP_EQUIV_REFRESH.search(tag):
-            m = _meta_content_value(tag)
-            if m is not None:
-                u = _META_CONTENT_URL.search(m)
-                if u:
-                    hosts.append(_host(u.group(1).strip().strip("'\"")))
-    for u in _JS_REDIRECT.findall(body):
-        hosts.append(_host(u.strip()))
-    return [h for h in hosts if h]   # only real authorities — a relative target is not an open redirect
+    veracity firewall cannot demote a MINT-TIME derivation bug here — which is why this path is pinned by
+    explicit true-positive AND negative-control tests plus a differential test against the stdlib tokenizer.
+    This is the same property every shipped predicate has (e.g. ``location_host = _host(location)``)."""
+    return _redirect_hosts(_scan_markup(body))
+
+
+def _emitted_url_hosts(body: str) -> list[str]:
+    """The hosts that appear as the AUTHORITY of a URL the app EMITS — an href/src/action attribute value, a
+    URL-valued canonical/social meta (og:url, …), or a meta-refresh / JS-location redirect target. These are
+    URLs a VICTIM's browser or a cache/crawler actually uses, which is what makes a reflected ``Host``
+    exploitable (cache poisoning, poisoned reset link, canonical hijack).
+
+    Crucially this is EMISSION, not mere presence: a URL that only appears as inert text — a 404 message
+    echoing the reconstructed ``http://<Host>/path`` back to the requester, a ``<pre>`` sample, an HTML
+    comment, a JSON error string — is NOT counted. Such an echo is shown only to the requester (who set
+    their own Host) and is not exploitable. Authorities come from stdlib ``urlsplit`` (via ``_host``), so a
+    relative URL whose QUERY contains ``//evil`` is correctly NOT an emission of ``evil``."""
+    scan = _scan_markup(body)
+    hosts = _redirect_hosts(scan)
+    for value in scan.url_attrs:
+        host = _host(value.strip())
+        if host:
+            hosts.append(host)
+    for meta in scan.metas:
+        prop = (meta.get("property") or meta.get("name") or "").strip()
+        if _URL_VALUED_META.fullmatch(prop):
+            host = _host((meta.get("content") or "").strip())
+            if host:
+                hosts.append(host)
+    return [h for h in hosts if h]
 
 
 # ---------------------------------------------------------------------------
