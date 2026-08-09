@@ -204,6 +204,42 @@
       "implementation_refs": [
         "integration/vigil_integration/live/sbom.py:sbom_verify"
       ]
+    },
+    {
+      "id": "mesh_posture.achieved_state",
+      "check": "mesh_posture_verify",
+      "evidence": "an Istio/Linkerd manifest VIGIL parsed declares an insecure achieved state the mesh_posture oracle re-derives: PERMISSIVE/DISABLE PeerAuthentication mTLS, an ALLOW AuthorizationPolicy that admits every caller, or an all-unauthenticated Linkerd default-inbound-policy",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to what the RETAINED mesh CONFIG declares — the claim is about the manifest artifact, never that the live mesh accepts plaintext. NOT CLEAN-capable: a non-firing manifest is a lead, not a clean bill of health, because a partial/incomplete config export (only some namespaces/resources) cannot prove the ABSENCE of a permissive policy elsewhere, and an absent mtls_mode inherits a parent this slice does not resolve. requestPrincipals ['*'] is JWT-gated (not allow-all) and does not fire.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof over the mesh config: enumerate every namespace/workload in scope, resolve PeerAuthentication mTLS inheritance to an effective mode per workload, and record that the export is complete, so 'no permissive policy matched' becomes a bounded negative rather than an absence of data. Until then a non-fire stays INCONCLUSIVE.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/mesh_cicd_posture.py:mesh_posture_verify"
+      ]
+    },
+    {
+      "id": "cicd_posture.workflow_construct",
+      "check": "cicd_posture_verify",
+      "evidence": "a GitHub-Actions workflow VIGIL parsed contains a dangerous construct the cicd_posture oracle re-derives: a third-party action pinned to a MUTABLE ref, a pull_request_target that checks out the untrusted PR head (pwn-request), or a run step interpolating an untrusted github.event.* expression (script-injection)",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to what the RETAINED workflow FILE declares — the claim is about the workflow artifact, never that the pipeline was exploited. NOT CLEAN-capable: a non-firing workflow is a lead, not clean, because a single workflow file cannot prove the ABSENCE of risk across the repo's other workflows / reusable-workflow callees / composite actions this slice does not follow. First-party (actions/github) and SHA-pinned actions, a plain pull_request base checkout, and a quoted-literal-only interpolation do not fire.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof over the CI/CD surface: enumerate every workflow file plus the reusable-workflow and composite-action callees they reference, resolve each transitively, and record the enumeration is complete, so 'no dangerous construct matched' becomes a bounded negative rather than an absence of data. Until then a non-fire stays INCONCLUSIVE.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/mesh_cicd_posture.py:cicd_posture_verify"
+      ]
     }
   ]
 }
