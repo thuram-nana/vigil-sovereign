@@ -165,10 +165,13 @@ def _undeclared_hint(payload: bytes) -> str:
 #
 # Faithful subset (checked by a byte-level differential against the WHATWG index files): UTF-8, UTF-16LE/BE
 # (bare `utf-16` -> LE, never host order), the ISO-8859 / windows-125X single-byte encodings plus cp866 /
-# cp874 / mac_roman / mac_cyrillic / koi8-r, and EUC-KR (cp949 / UHC). Two honesty caveats, BOTH in the safe
-# (under-claim) direction, never a decode disagreement: (a) WHATWG maps a few bytes in windows-1252/1254/1255
-# to C1 controls (e.g. 0x81 -> U+0081) and windows-1255 0xCA -> U+05BA; CPython refuses these under a strict
-# decode, so such a page is reported INCONCLUSIVE rather than mis-decoded. (b) GBK/gb18030 and koi8-u are NOT
+# cp874 / mac_roman / mac_cyrillic / koi8-r, and EUC-KR (cp949 / UHC). An exhaustive byte differential vs the
+# WHATWG index files confirmed none of these decodes any byte to a DIFFERENT character than a browser (the
+# false-verdict direction). Two honesty caveats, BOTH in the safe (under-claim) direction, never a decode
+# disagreement: (a) WHATWG maps several unassigned bytes in the windows/cp single-byte encodings (windows-1250
+# /1251/1252/1253/1254/1255/1257/1258 and windows-874) to C1 controls (U+008x/U+009x) — and windows-1255 0xCA
+# -> U+05BA; CPython strict-refuses those bytes, so such a page is reported INCONCLUSIVE rather than
+# mis-decoded. (b) GBK/gb18030 and koi8-u are NOT
 # byte-faithful — CPython ships GB18030-2000 (browsers use -2005; ~20 two-byte points differ) and CPython
 # koi8-u differs from the WHATWG index at 0xAE/0xBE — so they are REFUSED (see _WHATWG_REFUSED), not
 # resolved. Security-relevant remaps baked into the label lists: iso-8859-1/latin1/ascii/us-ascii -> cp1252;
