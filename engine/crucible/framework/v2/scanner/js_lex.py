@@ -80,9 +80,11 @@ def _string_end(text: str, i: int, quote: str) -> int:
 
 
 def _template_end(text: str, i: int) -> int:
-    """Index just past the closing backtick. ``${ ... }`` substitutions are code, but they are reported as
-    part of the template span: a sink inside one is real code, so the caller treats the whole template as
-    NON-code, which under-claims (a LEAD) rather than risking a false FACT."""
+    """Index just past the closing backtick, skipping over ``${ ... }`` substitutions.
+
+    The substitutions themselves are CODE and are classified separately by :func:`regions` — swallowing them
+    into the template span would hide a real sink inside `${...}`, which is a dropped vulnerability, not a
+    safe under-claim."""
     k = i + 1
     n = len(text)
     depth = 0
@@ -103,6 +105,41 @@ def _template_end(text: str, i: int) -> int:
             return k + 1
         k += 1
     return n
+
+
+def _template_regions(text: str, start: int, end: int) -> "list[Region]":
+    """Split a template literal into TEMPLATE text and the CODE inside its ``${ ... }`` substitutions."""
+    out: "list[Region]" = []
+    k = start
+    literal_from = start
+    while k < end:
+        if text[k] == "\\":
+            k += 2
+            continue
+        if text[k] == "$" and k + 1 < end and text[k + 1] == "{":
+            depth, j = 1, k + 2
+            while j < end and depth:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                j += 1
+            if k > literal_from:
+                out.append(Region(literal_from, k + 2, TEMPLATE))
+            inner_start, inner_end = k + 2, max(k + 2, j - 1)
+            # Recurse: a substitution can itself contain strings, comments and nested templates.
+            for region in regions(text[inner_start:inner_end]):
+                out.append(Region(region.start + inner_start, region.end + inner_start, region.kind))
+            out.append(Region(inner_end, min(j, end), TEMPLATE))
+            k = literal_from = j
+            continue
+        k += 1
+    if literal_from < end:
+        out.append(Region(literal_from, end, TEMPLATE))
+    return out
 
 
 def _regex_end(text: str, i: int) -> int:
@@ -165,7 +202,9 @@ def regions(text: str) -> "list[Region]":
         if c == "`":
             close_code(i)
             end = _template_end(text, i)
-            out.append(Region(i, end, TEMPLATE))
+            # A template is literal TEXT interleaved with `${...}` CODE. Classify each part for what it is:
+            # a sink in the text cannot run, a sink in a substitution can.
+            out.extend(_template_regions(text, i, end))
             i = code_start = end
             continue
         if c == "/":
@@ -177,8 +216,16 @@ def regions(text: str) -> "list[Region]":
                 i = code_start = end
                 continue
             if prev in ")]" or prev.isalnum() or prev in "_$":
-                # Division OR a regex literal — undecidable without parsing. Mark the span up to a plausible
-                # terminator AMBIGUOUS so a sink inside it can never mint a FACT.
+                # After a VALUE (identifier, number, `)`, `]`) a `/` is DIVISION — that is the standard
+                # previous-token rule and it is not ambiguous. Treating it as a possible regex would swallow
+                # the rest of the statement and hide a real sink after it (`a / b; location.href=...`),
+                # which is a dropped vulnerability rather than a cautious under-claim.
+                i += 1
+                continue
+            if prev == "}":
+                # Genuinely undecidable without parsing: `}` ends either a block (so `/` starts a regex) or
+                # an object/function expression (so `/` is division). Mark AMBIGUOUS — a sink inside a span
+                # VIGIL cannot classify must never mint a FACT.
                 end = _regex_end(text, i)
                 if end > i + 1 and "\n" not in text[i:end]:
                     close_code(i)
