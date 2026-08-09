@@ -176,7 +176,7 @@
       "claim_families": [
         "k8s-posture"
       ],
-      "notes": "maps to K8S_POSTURE over a retained control (Phase-1); LEAD-only today."
+      "notes": "kube-bench is only a PROPOSER of where to look; it is NOT fact-capable. VIGIL-DIRECT: integration/vigil_integration/live/k8s_posture.py parses the operator's kube-bench --json ARTIFACT and re-derives the insecure setting over the retained control via the K8S_POSTURE oracle (branch k8s_posture.cis_control), so the FACT rests on VIGIL's own parse, never the scanner's say-so. NOT CLEAN-capable: a partial export cannot prove the cluster is hardened."
     },
     {
       "name": "gdb",
