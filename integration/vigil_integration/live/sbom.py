@@ -3,16 +3,25 @@
 The first FACT-capable family that needs NO external tool: VIGIL parses the target's OWN manifest/lockfile
 for CONCRETE package versions (the authoritative version channel — not a scanner's say-so), looks each up in
 a PINNED, vendored OSV snapshot, and drives the deterministic ``version_range`` oracle over the retained
-``{package, version, affected}`` evidence via ``oracle_adapter.confirm_and_certify``. A package version that
-PROVABLY falls in an advisory's affected range mints a signed, offline-re-verifiable FACT; anything else is a
-labelled LEAD. A grype/syft/trivy/osv-scanner run is only a PROPOSER of where to look — its CVE match never
+``{package, version, affected}`` evidence. A package version that PROVABLY falls in an advisory's affected
+range mints a signed, offline-re-verifiable FACT; anything else is INCONCLUSIVE (never a labelled-clean
+negative). A grype/syft/trivy/osv-scanner run is only a PROPOSER of where to look — its CVE match never
 mints a FACT; VIGIL's own parse + ``version_in_affected`` is the sole authority (the criterion-6 firewall).
+
+ADMISSION, not a direct mint. This module DOES NOT call ``oracle_adapter.confirm_and_certify`` — doing so
+would let a verdict reach a certificate with no capability check ever running, and the ``version_range``
+branch is declared ``clean_capable: false`` in ``docs/capability-matrix/evidence-branches.json``, so a
+conclusive OUT-OF-RANGE non-fire must be demoted to INCONCLUSIVE rather than escape as ``Outcome.CLEAN``.
+Instead — mirroring ``web_redrive`` — it runs the oracle to obtain ``(fired, conclusive)``, attributes the
+outcome to the ONE registered branch ``version_range.manifest_membership`` via ``verdict.admit(...)``, then
+lets ``oracle_adapter.certify_admitted`` mint ONLY what admission returned as a FACT. Admission decides,
+minting executes.
 
 provenance="reproduced": the evidence is re-derived by VIGIL from the operator-supplied manifest bytes + the
 vendored advisory DB — a non-LLM channel — so the anti-hallucination gate admits it (never "llm").
 
-FATAL-2: the framework imports (confirm_and_certify) are FUNCTION-LOCAL; the manifest parsers + OSV loader are
-pure stdlib, so importing this module co-loads no offense engine.
+FATAL-2: the framework imports + the admission/mint imports are FUNCTION-LOCAL; the manifest parsers + OSV
+loader are pure stdlib, so importing this module co-loads no offense engine.
 """
 
 from __future__ import annotations
@@ -29,13 +38,24 @@ class SbomResult:
     ecosystem: str
     packages: int                       # concrete (package, version) pairs parsed
     facts: list = field(default_factory=list)     # AdapterResult (status=="fact"), signed
-    leads: list = field(default_factory=list)     # AdapterResult (status=="lead")
+    leads: list = field(default_factory=list)     # AdapterResult status=="lead" AND outcome=="lead"/"unsupported"
+    inconclusive: list = field(default_factory=list)  # AdapterResult with outcome=="inconclusive" — NEVER clean
+    admissions: list = field(default_factory=list)    # (branch_id, verdict, reason) — the admission audit trail
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
     notes: list = field(default_factory=list)
 
     @property
     def n_facts(self) -> int:
         return len(self.facts)
+
+    def family_verdict(self) -> str:
+        """The conservative composition over every admitted branch outcome (see verdict.compose).
+
+        An EMPTY set of admissions (nothing examined — a malformed/empty manifest, or a manifest with no
+        advisory match) composes to INCONCLUSIVE, NOT CLEAN: nothing examined is not the same as nothing
+        found. The ``version_range`` branch is not CLEAN-capable, so CLEAN can never appear here regardless."""
+        from .verdict import compose  # noqa: PLC0415 (FATAL-2: function-local)
+        return compose([v for _branch, v, _reason in self.admissions]).value
 
 
 # --------------------------------------------------------------------------------------------------
@@ -137,6 +157,40 @@ def _advisories_for(osv: dict, ecosystem: str, package: str) -> list[dict]:
     return list(eco.get(key, []) or [])
 
 
+# The ONE registered evidence branch this capability produces (docs/capability-matrix/evidence-branches.json).
+# fact_capable:true (a proven in-range membership is a FACT), clean_capable:false (absence from a PINNED
+# advisory snapshot is not absence of vulnerability), precondition ``manifest_parsed`` (VIGIL parsed a
+# concrete pinned version from the manifest — always true by the time a package reaches adjudication).
+_SBOM_BRANCH = "version_range.manifest_membership"
+
+
+def _oracle_signal(oracle_context: "dict") -> "tuple[bool, bool]":
+    """Run the deterministic version-range oracle over the retained context and return ``(fired, conclusive)``
+    WITHOUT minting anything — so admission sees the oracle's answer BEFORE any certificate exists (mirrors
+    ``web_redrive._oracle_signal``).
+
+      * ``fired``      — an oracle fired at/above the verifier threshold: the concrete version PROVABLY falls
+                         in the advisory's affected range (an in-range membership).
+      * ``conclusive`` — the oracle rendered a DECISIVE verdict (``probe_verdict`` == ``clean``). The
+                         version-range oracle emits a non-conclusive non-signal on out-of-range, so an
+                         out-of-range match is ``(False, False)`` → INCONCLUSIVE at admission. Even were it
+                         conclusive, the branch is ``clean_capable: false``, so admission still returns
+                         INCONCLUSIVE — the CLEAN escape this slice closes.
+
+    All framework imports are function-local (FATAL-2)."""
+    from framework.v2.scanner.engine import probe_verdict  # noqa: PLC0415
+    from framework.v2.verify.confirmation import adjudicate_finding, confirmed_from_result  # noqa: PLC0415
+    from framework.v2.verify.verifier import OracleVerifier  # noqa: PLC0415
+
+    verifier = OracleVerifier()
+    finding = {"bug_class": "vulnerable_dependency", "oracle_context": oracle_context}
+    result = adjudicate_finding(finding, oracle_context, verifier)
+    fired = confirmed_from_result(result, finding, verifier) is not None
+    verdict, _kinds = probe_verdict(result)
+    conclusive = fired or verdict == "clean"
+    return fired, conclusive
+
+
 def sbom_verify(
     manifest_text: str,
     *,
@@ -146,10 +200,18 @@ def sbom_verify(
     signers: "list[tuple[str, str]]",
 ) -> SbomResult:
     """Parse ``manifest_text`` for the given ``ecosystem``, look each concrete package version up in the
-    ``osv`` snapshot, and mint a signed FACT for every package version the ``version_range`` oracle PROVES
-    is in an advisory's affected range. VIGIL's parse + the oracle are the sole authority — a scanner's CVE
-    claim is never trusted. Returns an :class:`SbomResult` (facts + leads + retained contexts)."""
-    from ..oracle_adapter import confirm_and_certify  # noqa: PLC0415 (FATAL-2: function-local)
+    ``osv`` snapshot, and — THROUGH ADMISSION — mint a signed FACT for every package version the
+    ``version_range`` oracle PROVES is in an advisory's affected range.
+
+    Admission decides, minting executes. For each candidate this runs the oracle to get ``(fired,
+    conclusive)``, calls ``verdict.admit(_SBOM_BRANCH, ...)`` so the branch's declared capabilities are
+    applied, and only then calls ``oracle_adapter.certify_admitted`` (which mints ONLY a FACT verdict). It
+    does NOT call ``confirm_and_certify`` directly: the ``version_range`` branch is ``clean_capable: false``,
+    so a conclusive out-of-range non-fire is demoted to INCONCLUSIVE rather than allowed to escape as CLEAN.
+    VIGIL's parse + the oracle are the sole authority — a scanner's CVE claim is never trusted. Returns an
+    :class:`SbomResult` (facts + inconclusive + leads + the admission audit trail + retained contexts)."""
+    from ..oracle_adapter import certify_admitted  # noqa: PLC0415 (FATAL-2: function-local)
+    from .verdict import admit  # noqa: PLC0415 (FATAL-2: function-local — pure stdlib module)
 
     parser = _PARSERS.get(ecosystem)
     if parser is None:
@@ -171,8 +233,19 @@ def sbom_verify(
                 "insertion_point": f"{ecosystem}:{package}",
                 "oracle_context": oracle_context,
             }
-            r = confirm_and_certify(finding, engagement_slug=engagement_slug, signers=signers,
-                                    provenance="reproduced")
+            # ADMISSION DECIDES, MINTING EXECUTES. Reaching this point means VIGIL parsed a concrete pinned
+            # version from the manifest, so the ``manifest_parsed`` precondition holds by construction.
+            fired, conclusive = _oracle_signal(oracle_context)
+            admitted = admit(_SBOM_BRANCH, fired=fired, conclusive=conclusive,
+                             observed={"manifest_parsed": True})
+            res.admissions.append((_SBOM_BRANCH, admitted.verdict.value, admitted.reason))
+            r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
+                                 provenance="reproduced")
             res.contexts[r.finding_ref] = oracle_context
-            (res.facts if r.is_fact else res.leads).append(r)
+            if r.is_fact:
+                res.facts.append(r)
+            elif r.outcome == "inconclusive":
+                res.inconclusive.append(r)   # out-of-range / non-conclusive → NEVER a labelled-clean lead
+            else:
+                res.leads.append(r)          # a genuine LEAD (e.g. unmapped class / unsupported)
     return res

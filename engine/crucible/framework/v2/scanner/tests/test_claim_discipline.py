@@ -344,6 +344,80 @@ def test_certificate_minting_requires_an_admitted_verdict() -> None:
     assert demoted.branch in result.reason, "the demotion is not auditable — no branch in the reason"
 
 
+def test_no_sovereign_live_module_mints_by_calling_confirm_and_certify_directly() -> None:
+    """SLICE D1 static guarantee. A certificate must be reached ONLY through admission
+    (``oracle_adapter.certify_admitted``, which alone may call ``confirm_and_certify`` and which lives in
+    ``oracle_adapter.py`` — NOT under ``live/``). A sovereign ``live/*`` module that calls
+    ``confirm_and_certify`` DIRECTLY bypasses every branch-capability check, so a verdict can reach a signed
+    certificate with no capability ever applied — exactly the ``Outcome.CLEAN`` escape ``sbom_verify`` used
+    to have (the version_range branch is clean_capable:false, yet a direct mint let a conclusive non-fire
+    return CLEAN).
+
+    This scans the SOURCE of every ``integration/vigil_integration/live/*.py`` and fails on a direct call.
+    ``sbom.py`` (this slice's migration) MUST be clean. A small, DOCUMENTED residual allowlist names the
+    modules whose own admission migration is a LATER slice: ``wiring.py`` (drives arbitrary LLM-proposed bug
+    classes that have no registered evidence branch yet, so admission has nothing to key on until those
+    branches exist) and ``external_tool.py`` (the tool-runner). The frontier may only SHRINK — a NEW direct
+    caller, or a regression in any migrated module (including sbom.py), fails here."""
+    live = _ROOT / "integration" / "vigil_integration" / "live"
+    assert live.is_dir(), f"{live} is missing — the sovereign live surface must exist to be governed"
+    call = re.compile(r"\bconfirm_and_certify\s*\(")   # a CALL, not a prose/backtick mention
+    # The migration FRONTIER, not a permanent exemption. sbom.py is deliberately NOT here.
+    _PENDING_MIGRATION = {"wiring.py", "external_tool.py"}
+
+    offenders = {py.name for py in sorted(live.glob("*.py"))
+                 if call.search(py.read_text(encoding="utf-8"))}
+
+    assert "sbom.py" not in offenders, (
+        "sbom.py calls confirm_and_certify() DIRECTLY — SLICE D1 requires it route through verdict.admit() "
+        "+ oracle_adapter.certify_admitted() so the clean_capable:false version_range branch cannot leak "
+        "Outcome.CLEAN")
+    unexpected = offenders - _PENDING_MIGRATION
+    assert not unexpected, (
+        f"sovereign live module(s) call confirm_and_certify() directly, bypassing admission: "
+        f"{sorted(unexpected)}. Route them through oracle_adapter.certify_admitted (admission decides, "
+        f"minting executes); only a genuinely pending-migration module belongs on the documented "
+        f"_PENDING_MIGRATION frontier, with the branch-registry work that unblocks it.")
+    # Anti-rot: an allowlisted module that no longer offends means its migration LANDED — it must be removed
+    # from the frontier so the allowlist keeps shrinking and cannot silently shelter a future direct caller.
+    stale = _PENDING_MIGRATION - offenders
+    assert not stale, (
+        f"{sorted(stale)} no longer call confirm_and_certify() directly (migration landed) — remove them "
+        f"from _PENDING_MIGRATION so the frontier reflects reality")
+
+
+def test_admission_over_a_clean_incapable_branch_never_mints_or_clears() -> None:
+    """SLICE D1 runtime guarantee, on the exact ``version_range`` branch ``sbom_verify`` uses. A CONCLUSIVE
+    non-fire over a branch declared clean_capable:false is INCONCLUSIVE (never CLEAN), and minting that
+    admission yields NO signed FACT and NO CLEAN outcome — the certificate path cannot manufacture a verdict
+    admission refused. This is the runtime half of the BLOCKER-1 fix: even the strongest negative an oracle
+    can give (conclusive, decisive) cannot clear a branch that is not entitled to assert absence."""
+    verdict = _admit()
+    branch = "version_range.manifest_membership"
+    decl = next(b for b in _load(_BRANCHES)["branches"] if b["id"] == branch)
+    assert decl["clean_capable"] is False, "precondition of this test: the branch is not clean_capable"
+
+    admitted = verdict.admit(branch, fired=False, conclusive=True, observed={"manifest_parsed": True})
+    assert admitted.verdict is verdict.Verdict.INCONCLUSIVE, (
+        f"a clean_capable:false branch cleared to {admitted.verdict} on a conclusive non-fire")
+
+    import sys
+    integration = str(_ROOT / "integration")
+    if integration not in sys.path:
+        sys.path.insert(0, integration)
+    try:
+        from vigil_integration.oracle_adapter import certify_admitted
+    except Exception as exc:                       # noqa: BLE001
+        pytest.fail(f"admission-gated minting unavailable — the contract is unenforced here: {exc}")
+
+    finding = {"check_id": "sbom:test", "bug_class": "vulnerable_dependency", "oracle_context": {}}
+    result = certify_admitted(finding, admitted, engagement_slug="a", signers=[])
+    assert not result.is_fact, "an INCONCLUSIVE admission produced a signed FACT"
+    assert result.signed is None, "no certificate may be signed for a non-FACT admission"
+    assert result.outcome != "clean", "an INCONCLUSIVE admission leaked a CLEAN outcome"
+    assert result.outcome == "inconclusive"
+
+
 def test_body_branches_are_attributable_to_one_evidence_source() -> None:
     """A verdict must be attributable to ONE registered branch. Meta-refresh and JS sinks are different
     branches with different capabilities (declarative refresh is statically decidable; a JS sink is only
