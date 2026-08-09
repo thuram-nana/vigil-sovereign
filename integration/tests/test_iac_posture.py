@@ -383,6 +383,7 @@ def test_terraform_plan_desired_state_never_mints_an_achieved_fact():
     `values`. A plan's desired state is not the deployed reality (BLOCKER-3), so it must NOT mint an
     achieved-state CLOUD_POSTURE FACT. Only APPLIED state (`values` / a plan file's `prior_state.values`) is
     read."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
     import json
     from vigil_integration.live.iac_posture import iac_verify
     signers, tr = _signers_and_trust()
@@ -412,6 +413,7 @@ def _tf_policy(pol: dict) -> str:
 def test_iam_missing_effect_and_fabricated_action_never_mint():
     """RED-PEN B4/H1: a statement with NO Effect was treated as Allow; a list/missing Action was invented as
     'read'. Now only a literal Effect:Allow grants, and the Action is preserved faithfully (never fabricated)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
     import json
     from vigil_integration.live.iac_posture import iac_verify
     signers, tr = _signers_and_trust()
@@ -427,6 +429,7 @@ def test_iam_missing_effect_and_fabricated_action_never_mint():
 def test_unknown_resource_type_and_sg_ingress_do_not_mint():
     """RED-PEN H4/H5: a lookalike `acl` on an unsupported/custom resource type must not mint; a security-group
     0.0.0.0/0 ingress is network reachability, not an achieved public-DATA grant, so it no longer sets public."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
     import json
     from vigil_integration.live.iac_posture import iac_verify
     signers, tr = _signers_and_trust()

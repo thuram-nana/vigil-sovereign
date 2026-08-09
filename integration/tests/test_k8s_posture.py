@@ -269,6 +269,7 @@ def test_incomplete_rolref_never_mints_a_false_workload_fact():
     empty-string tolerance would otherwise treat absent kind/apiGroup as the dangerous BUILT-IN ClusterRole.
     The reducer now carries a non-matching sentinel so the built-in check fails -> INCONCLUSIVE, no FACT. A
     complete binding still FACTs."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
     import json
     signers, tr = _signers_and_trust()
     bad = json.dumps({"kind": "RoleBinding", "metadata": {"name": "x", "namespace": "dev"},
@@ -289,6 +290,7 @@ def test_whitespace_rolref_never_mints_a_false_workload_fact():
     normalizes with .strip().lower() and tolerates empty — so a WHITESPACE-only roleRef.kind/apiGroup passed
     the guard, collapsed to '' at the oracle, and minted a signed false built-in-ClusterRole FACT. The
     reducer now treats .strip()-empty as absent."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
     import json
     signers, tr = _signers_and_trust()
     for kind, ag in (("  ", "  "), ("ClusterRole", "  "), ("  ", "rbac.authorization.k8s.io"), ("\t", "\t")):
@@ -303,6 +305,7 @@ def test_serviceaccount_named_system_anonymous_is_not_the_anonymous_principal():
     """RED-PEN B3: a ServiceAccount NAMED 'system:anonymous' is a different principal from the anonymous USER.
     Matching on name alone laundered it into the real anon principal → false FACT. The reducer now requires
     kind=User for system:anonymous (and kind=Group for system:unauthenticated)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
     import json
     signers, tr = _signers_and_trust()
     imposter = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
