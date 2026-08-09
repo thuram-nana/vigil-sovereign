@@ -260,3 +260,28 @@ def test_yaml_merge_key_is_refused_not_silently_expanded():
 def test_non_merge_document_still_parses_after_the_merge_guard():
     r = safe_yaml("name: prod\nlist: [1, 2, 3]\nnested: {a: {b: c}}")
     assert r.outcome == "ok" and r.value == {"name": "prod", "list": [1, 2, 3], "nested": {"a": {"b": "c"}}}
+
+
+def test_large_flat_document_within_byte_cap_is_bounded_during_parse():
+    """RED-PEN (integration): a large flat/shallow doc WITHIN max_bytes (e.g. 1M scalars) must not parse for
+    tens of seconds / OOM before the post-parse walk runs. The loader counts composed nodes DURING parse and
+    refuses past max_nodes (too_many_nodes) — bounded, deterministic, typed; never outcome='ok' over a
+    node-budget-exceeding doc, never an unbounded hang."""
+    import time
+    doc = "[" + ",".join(["1"] * 1_000_000) + "]"          # ~2MB, under the default 5MB byte cap
+    t = time.time()
+    r = safe_yaml(doc)
+    elapsed = time.time() - t
+    assert r.outcome == "error" and r.reason == "too_many_nodes", f"got {r.outcome}/{r.reason}"
+    assert elapsed < 15.0, f"parse was not bounded ({elapsed:.1f}s)"   # O(max_nodes), not O(document)
+
+
+def test_node_budget_is_enforced_during_parse_not_only_after():
+    """A flat sequence longer than max_nodes is refused even though it is shallow (depth 1) and the post-parse
+    walk alone would have to materialize the whole list first."""
+    small = ParseBudget(max_nodes=1000)
+    r = safe_yaml("[" + ",".join(["1"] * 5000) + "]", small)
+    assert r.outcome == "error" and r.reason == "too_many_nodes"
+    # a sequence within the node budget still parses
+    ok = safe_yaml("[" + ",".join(["1"] * 100) + "]", small)
+    assert ok.outcome == "ok" and len(ok.value) == 100

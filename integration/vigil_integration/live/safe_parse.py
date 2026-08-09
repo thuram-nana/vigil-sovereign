@@ -38,10 +38,20 @@ Defenses, and why each is sound:
     only linearly — AND (2) — the merged mapping collapses to a tiny dict — miss, so a ~600-byte nested-merge
     bomb would otherwise hang/OOM or silently bypass the node budget. We do not expand merges. Each bound
     alone turns its bomb class into ``outcome="error"``.
-  * **Depth and node caps, enforced by an iterative walk.** Recursion depth is bounded by ``max_depth`` and
-    total structure size by ``max_nodes`` in an explicit-stack walk (no Python recursion, so a deep document
-    cannot blow the interpreter stack during the check itself). True reference CYCLES (possible via recursive
-    YAML anchors) are detected against the current DFS path and reported as an error rather than looped on.
+  * **Node cap, enforced DURING parse AND by the post-parse walk.** ``max_nodes`` is counted twice over: (1)
+    the YAML loader counts each newly-composed node and aborts past ``max_nodes`` WHILE parsing (alias refs
+    are O(1) via the anchor cache, so this bounds the RAW parse work) — without this, a large flat/shallow
+    document within the byte cap (e.g. 1M scalars, well under ``max_bytes``) would parse for tens of seconds
+    or OOM before any post-parse budget applied; and (2) the post-parse structural walk counts every visit
+    including via shared references, catching an alias-EXPANDED structure the compose-time count (which sees
+    the small DAG) would miss. Parse work is therefore bounded to O(``max_nodes``): at the default ceiling a
+    pathological document is REFUSED (``too_many_nodes``) in a few seconds — bounded and deterministic, not an
+    unbounded hang or OOM. A latency-sensitive caller over untrusted live bytes (Track B) should pass a
+    tighter ``ParseBudget``.
+  * **Depth cap + cycle detection, enforced by an iterative walk.** Recursion depth is bounded by
+    ``max_depth`` in an explicit-stack walk (no Python recursion, so a deep document cannot blow the
+    interpreter stack during the check itself). True reference CYCLES (possible via recursive YAML anchors)
+    are detected against the current DFS path and reported as an error rather than looped on.
   * **No network, no file includes.** Neither ``json`` nor ``yaml.SafeLoader`` dereferences URLs or file
     paths; this module adds no such capability.
 
@@ -67,6 +77,12 @@ DEFAULT_MAX_ALIASES = 100
 
 class _AliasBudgetExceeded(Exception):
     """Raised inside the counting YAML loader when alias references pass ``max_aliases``. Never escapes."""
+
+
+class _NodeBudgetExceeded(Exception):
+    """Raised inside the counting YAML loader when the number of composed nodes passes ``max_nodes`` — the
+    DURING-parse node bound that stops a large flat/shallow document (within the byte cap) from parsing for
+    tens of seconds / OOMing before the post-parse walk can run. Never escapes."""
 
 
 class _MergeKeyRefused(Exception):
@@ -210,11 +226,19 @@ def safe_json(text: str | bytes, budget: ParseBudget | None = None) -> ParseResu
     return _ok(value)
 
 
-def _counting_safe_loader(max_aliases: int):
-    """Build a one-shot ``yaml.SafeLoader`` subclass that aborts past ``max_aliases`` alias references.
+def _counting_safe_loader(max_aliases: int, max_nodes: int):
+    """Build a one-shot ``yaml.SafeLoader`` subclass that aborts past ``max_aliases`` alias references OR
+    ``max_nodes`` composed nodes.
+
+    The node counter is enforced DURING composition, not only by the post-parse walk: PyYAML's pure-Python
+    parser fully materialises the structure before any post-parse budget applies, so a large flat/shallow
+    document within the byte cap (e.g. 1M scalars) would otherwise parse for tens of seconds / OOM before the
+    walk ever runs. Counting each composed node bounds parse work to O(max_nodes). (Alias references still
+    compose in O(1) via the anchor cache, so an alias bomb stays cheap here and is caught by the alias cap +
+    the post-parse expanded-node walk.)
 
     Imported types are function-local (FATAL-2: no module-level third-party import). The loader is created
-    fresh per call so the cap is captured without shared mutable class state.
+    fresh per call so the caps are captured without shared mutable class state.
     """
     import yaml  # noqa: PLC0415 - optional third-party dep, imported lazily and function-locally.
     from yaml.events import AliasEvent  # noqa: PLC0415
@@ -223,12 +247,18 @@ def _counting_safe_loader(max_aliases: int):
         def __init__(self, stream: Any) -> None:
             super().__init__(stream)
             self._alias_seen = 0
+            self._nodes_composed = 0
 
         def compose_node(self, parent, index):  # type: ignore[override]
             if self.check_event(AliasEvent):
                 self._alias_seen += 1
                 if self._alias_seen > max_aliases:
                     raise _AliasBudgetExceeded(max_aliases)
+            else:
+                # A genuinely new node (not an O(1) alias ref) is about to be composed — bound the raw parse.
+                self._nodes_composed += 1
+                if self._nodes_composed > max_nodes:
+                    raise _NodeBudgetExceeded(max_nodes)
             return super().compose_node(parent, index)
 
         def flatten_mapping(self, node):  # type: ignore[override]
@@ -265,7 +295,7 @@ def safe_yaml(text: str | bytes, budget: ParseBudget | None = None) -> ParseResu
         return _inconclusive("yaml_unavailable")
 
     try:
-        loader_cls = _counting_safe_loader(budget.max_aliases)
+        loader_cls = _counting_safe_loader(budget.max_aliases, budget.max_nodes)
     except Exception:  # noqa: BLE001 - PyYAML present at import but internals unavailable: stay honest.
         return _inconclusive("yaml_unavailable")
 
@@ -273,6 +303,8 @@ def safe_yaml(text: str | bytes, budget: ParseBudget | None = None) -> ParseResu
         value = yaml.load(text, Loader=loader_cls)  # SafeLoader subclass: no arbitrary object construction.
     except _AliasBudgetExceeded:
         return _error("alias_bomb")
+    except _NodeBudgetExceeded:
+        return _error("too_many_nodes")   # bounded DURING parse (large flat/shallow doc within the byte cap)
     except _MergeKeyRefused:
         return _error("merge_key")     # a `<<` merge key — refused, never expanded (nested-merge bomb vector)
     except RecursionError:
