@@ -80,7 +80,7 @@ class _WebApp(http.server.BaseHTTPRequestHandler):
         elif parts.path == "/safe":                        # SAFE: reflects the value in plain text only
             nxt = (q.get("next") or [""])[0]
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")   # declared: body is adjudicable
             self.end_headers()
             self.wfile.write(f"you requested: {nxt}".encode("utf-8"))
         elif parts.path == "/preview":                     # SAFE (red-pen BLOCK-1): 200 HTML that reflects
@@ -438,7 +438,7 @@ def test_location_header_branch_requires_a_real_3xx_not_a_reflected_location(mon
             nxt = (parse_qs(urlsplit(self.path).query).get("next") or [""])[0]
             self.send_response(200)                       # NOT a redirect
             self.send_header("Location", nxt)             # ... but reflects the canary into Location
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", "text/html; charset=utf-8")   # declared: body is adjudicable
             self.end_headers()
             self.wfile.write(f'<meta http-equiv="refresh" content="0;url={nxt}">'.encode())
 
@@ -473,7 +473,7 @@ def test_family_verdict_survives_a_benign_insertion_point_after_the_firing_one(m
         def do_GET(self):  # noqa: N802
             nxt = (parse_qs(urlsplit(self.path).query).get("next") or [""])[0]
             self.send_response(200)
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", "text/html; charset=utf-8")   # declared: body is adjudicable
             self.end_headers()
             self.wfile.write(f'<meta http-equiv="refresh" content="0;url={nxt}">'.encode())
 
