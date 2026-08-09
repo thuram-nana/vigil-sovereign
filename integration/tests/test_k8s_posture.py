@@ -103,7 +103,11 @@ def test_rbac_reduction_carries_rolekind_and_apigroup_faithfully():
     r = _reduce_rbac_binding(json.loads(_RBAC_ANON_CLUSTER_ADMIN))
     assert r["role"] == "cluster-admin" and r["role_kind"] == "ClusterRole"
     assert r["role_apigroup"] == "rbac.authorization.k8s.io"
-    assert r["subjects"] == ["system:unauthenticated", "alice"] and r["resource_kind"] == "clusterrolebinding"
+    # B3: a Group subject named system:unauthenticated stays BARE (it is the real anon principal, so the
+    # oracle's anon-name check can fire); a non-anon User (alice) is KIND-QUALIFIED so a name-only match can
+    # never launder it (or a same-named impostor of a different kind) into the anonymous principal.
+    assert r["subjects"] == ["system:unauthenticated", "user::alice"]
+    assert r["resource_kind"] == "clusterrolebinding"
     # a namespaced Role named "edit" is carried as role_kind=Role — NOT defaulted to ClusterRole
     d = _reduce_rbac_binding(json.loads(_RBAC_DECEPTIVE_NS_EDIT))
     assert d["role"] == "edit" and d["role_kind"] == "Role" and d["namespace"] == "dev"
@@ -278,3 +282,37 @@ def test_incomplete_rolref_never_mints_a_false_workload_fact():
                        "subjects": [{"kind": "User", "name": "system:anonymous"}]})
     r2 = ingest_k8s_rbac(good, engagement_slug="acme", signers=signers)
     assert r2.n_facts >= 1, "a complete anon->cluster-admin binding must still FACT"
+
+
+def test_whitespace_rolref_never_mints_a_false_workload_fact():
+    """RED-PEN re-attack (CRITICAL): the empty-roleRef guard tested byte-exact emptiness, but the oracle
+    normalizes with .strip().lower() and tolerates empty — so a WHITESPACE-only roleRef.kind/apiGroup passed
+    the guard, collapsed to '' at the oracle, and minted a signed false built-in-ClusterRole FACT. The
+    reducer now treats .strip()-empty as absent."""
+    import json
+    signers, tr = _signers_and_trust()
+    for kind, ag in (("  ", "  "), ("ClusterRole", "  "), ("  ", "rbac.authorization.k8s.io"), ("\t", "\t")):
+        m = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                        "roleRef": {"kind": kind, "apiGroup": ag, "name": "cluster-admin"},
+                        "subjects": [{"kind": "User", "name": "system:anonymous"}]})
+        assert ingest_k8s_rbac(m, engagement_slug="a", signers=signers).n_facts == 0, \
+            f"whitespace roleRef (kind={kind!r}, apiGroup={ag!r}) minted a false FACT"
+
+
+def test_serviceaccount_named_system_anonymous_is_not_the_anonymous_principal():
+    """RED-PEN B3: a ServiceAccount NAMED 'system:anonymous' is a different principal from the anonymous USER.
+    Matching on name alone laundered it into the real anon principal → false FACT. The reducer now requires
+    kind=User for system:anonymous (and kind=Group for system:unauthenticated)."""
+    import json
+    signers, tr = _signers_and_trust()
+    imposter = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                           "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
+                                       "name": "cluster-admin"},
+                           "subjects": [{"kind": "ServiceAccount", "name": "system:anonymous",
+                                         "namespace": "default"}]})
+    assert ingest_k8s_rbac(imposter, engagement_slug="a", signers=signers).n_facts == 0
+    real = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                       "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
+                                   "name": "cluster-admin"},
+                       "subjects": [{"kind": "Group", "name": "system:unauthenticated"}]})
+    assert ingest_k8s_rbac(real, engagement_slug="a", signers=signers).n_facts >= 1  # real Group anon FACTs

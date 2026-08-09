@@ -400,3 +400,41 @@ def test_terraform_plan_desired_state_never_mints_an_achieved_fact():
                         "planned_values": {"root_module": {"resources": []}}})
     assert iac_verify(prior, fmt="terraform", engagement_slug="acme", signers=signers).n_facts >= 1, \
         "a plan file's prior_state (applied) must FACT"
+
+
+def _tf_policy(pol: dict) -> str:
+    import json
+    return json.dumps({"values": {"root_module": {"resources": [
+        {"address": "aws_s3_bucket.b", "type": "aws_s3_bucket", "name": "b",
+         "values": {"policy": json.dumps(pol)}}]}}})
+
+
+def test_iam_missing_effect_and_fabricated_action_never_mint():
+    """RED-PEN B4/H1: a statement with NO Effect was treated as Allow; a list/missing Action was invented as
+    'read'. Now only a literal Effect:Allow grants, and the Action is preserved faithfully (never fabricated)."""
+    import json
+    from vigil_integration.live.iac_posture import iac_verify
+    signers, tr = _signers_and_trust()
+    no_effect = _tf_policy({"Statement": [{"Principal": "*", "Action": "s3:GetObject"}]})
+    assert iac_verify(no_effect, fmt="terraform", engagement_slug="a", signers=signers).n_facts == 0
+    deny = _tf_policy({"Statement": [{"Effect": "Deny", "Principal": "*", "Action": "*"}]})
+    assert iac_verify(deny, fmt="terraform", engagement_slug="a", signers=signers).n_facts == 0
+    allow_list = _tf_policy({"Statement": [{"Effect": "Allow", "Principal": "*",
+                                            "Action": ["s3:GetObject", "s3:PutObject"]}]})
+    assert iac_verify(allow_list, fmt="terraform", engagement_slug="a", signers=signers).n_facts >= 1
+
+
+def test_unknown_resource_type_and_sg_ingress_do_not_mint():
+    """RED-PEN H4/H5: a lookalike `acl` on an unsupported/custom resource type must not mint; a security-group
+    0.0.0.0/0 ingress is network reachability, not an achieved public-DATA grant, so it no longer sets public."""
+    import json
+    from vigil_integration.live.iac_posture import iac_verify
+    signers, tr = _signers_and_trust()
+    custom = json.dumps({"values": {"root_module": {"resources": [
+        {"address": "custom_thing.x", "type": "custom_thing", "name": "x",
+         "values": {"acl": "public-read"}}]}}})
+    assert iac_verify(custom, fmt="terraform", engagement_slug="a", signers=signers).n_facts == 0
+    sg = json.dumps({"values": {"root_module": {"resources": [
+        {"address": "aws_security_group.s", "type": "aws_security_group", "name": "s",
+         "values": {"ingress": [{"cidr_blocks": ["0.0.0.0/0"]}]}}]}}})
+    assert iac_verify(sg, fmt="terraform", engagement_slug="a", signers=signers).n_facts == 0

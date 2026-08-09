@@ -1,11 +1,14 @@
 """iac_posture — VIGIL-direct Infrastructure-as-Code posture FACT capability (Wave #4, CLOUD_POSTURE +
 POLICY_PATH oracle families, the artifact-evidence column).
 
-The IaC column of prove-don't-guess. VIGIL parses the target's OWN IaC artifact — a Terraform plan-JSON
-(``terraform show -json``) or a ``.tfstate`` (both JSON), or a PROCESSED CloudFormation template (JSON/YAML)
-— for the CONCRETE, RESOLVED achieved state it declares, normalises it to the framework's native cloud
-inventory, and drives the deterministic ``cloud_posture`` + ``policy_path`` oracles over the retained
-evidence. A resource whose REPRESENTED state PROVABLY carries an insecure achieved fact (encryption-at-rest
+The IaC column of prove-don't-guess. VIGIL parses the target's OWN IaC artifact — Terraform APPLIED state (a
+``.tfstate`` or a ``terraform show -json`` of state / a plan's ``prior_state``; never ``planned_values``), or
+a PROCESSED CloudFormation template (JSON/YAML) — for the CONCRETE, RESOLVED state it REPRESENTS, normalises
+it to the framework's native cloud inventory, and drives the deterministic ``cloud_posture`` + ``policy_path``
+oracles over the retained evidence. HONEST SCOPE: a Terraform tfstate reflects REAL applied resources; a
+CloudFormation template is a DEPLOYMENT DECLARATION (represented, not proof the stack was deployed, succeeded,
+or is drift-free). Every FACT is bounded to the represented artifact (signed ``capture_method=artifact:<fmt>``),
+never a live achieved-state claim — only a VIGIL-owned live query (Track B) supports that. A resource whose REPRESENTED state PROVABLY carries an insecure achieved fact (encryption-at-rest
 explicitly disabled on a sensitive store, an explicit public flag, a LITERAL wildcard principal in a policy
 document, an ACL/AccessControl literally granting AllUsers, a security-group ingress literally open to
 ``0.0.0.0/0``) mints a signed, offline-re-verifiable FACT; a firing anonymous IAM grant PATH mints a
@@ -183,15 +186,24 @@ def _wildcard_grants(policy_doc: Any) -> list[dict]:
     An intrinsic principal is skipped (unresolved). Returns ``[{"principal": "*", "access": <action>}]``."""
     grants: list[dict] = []
     for st in _statements(policy_doc):
+        # Only an EXPLICIT literal `Effect: "Allow"` may grant. A MISSING Effect, a Deny, a list, or an
+        # intrinsic (Ref/Fn::*) is NOT an unambiguous Allow -> skip (red-pen B4: absent Effect was treated
+        # as Allow). Never infer Allow.
         effect = st.get("Effect")
-        if isinstance(effect, str) and effect.strip().lower() != "allow":
-            continue                            # explicit Deny (or a non-Allow) — never a public grant
-        if _is_intrinsic(effect):
-            continue                            # unresolved Effect — cannot claim Allow
+        if not (isinstance(effect, str) and effect.strip().lower() == "allow"):
+            continue
         if _is_literal_wildcard_principal(st.get("Principal")):
+            # Preserve the LITERAL Action faithfully; never fabricate one (red-pen H1: a list/missing/
+            # intrinsic Action was invented as "read"). An unknown action -> "" (the wildcard-PRINCIPAL rule
+            # still fires on the anonymous principal itself; policy_path cannot over-dominate on "").
             action = st.get("Action")
-            acc = action if isinstance(action, str) else ("*" if action == "*" else "read")
-            grants.append({"principal": "*", "access": acc if isinstance(acc, str) else "read"})
+            if isinstance(action, str):
+                acc = action
+            elif isinstance(action, list) and action and all(isinstance(a, str) for a in action):
+                acc = ",".join(action)
+            else:
+                acc = ""
+            grants.append({"principal": "*", "access": acc})
     return grants
 
 
@@ -286,19 +298,45 @@ def _sensitive(attrs: dict) -> bool:
     return False
 
 
+# Resource types whose attribute semantics we read SCHEMA-FAITHFULLY for the near-zero-FP rules. A resource
+# of any other type contributes NO achieved-state signal — a lookalike `acl`/`encrypted`/`policy` attribute
+# on an unrelated or custom resource (a different provider, a Helm/null/local resource) must NOT be misread
+# as an achieved public/unencrypted grant (red-pen H4). Keyed to Terraform types and (lowercased)
+# CloudFormation type names. Unknown/unsupported -> no FACT.
+_SUPPORTED_RESOURCE_TYPES = frozenset({
+    # Terraform (AWS) object/data stores + policy carriers where acl/policy/encryption are schema-faithful:
+    "aws_s3_bucket", "aws_s3_bucket_policy", "aws_s3_bucket_acl", "aws_db_instance", "aws_rds_cluster",
+    "aws_dynamodb_table", "aws_ebs_volume", "aws_efs_file_system", "aws_sqs_queue", "aws_sns_topic",
+    "aws_kms_key", "aws_iam_role", "aws_iam_policy", "aws_iam_role_policy",
+    # CloudFormation equivalents (type names lowercased for the match):
+    "aws::s3::bucket", "aws::s3::bucketpolicy", "aws::rds::dbinstance", "aws::rds::dbcluster",
+    "aws::dynamodb::table", "aws::ec2::volume", "aws::efs::filesystem", "aws::sqs::queue", "aws::sns::topic",
+    "aws::kms::key", "aws::iam::role", "aws::iam::policy",
+})
+
+
 def _resource_record(rid: str, attrs: dict, *, kind: str = "") -> dict:
     """Build ONE native-inventory resource record from a resource's resolved attributes/properties, applying
-    the near-zero-FP rules. Only UNAMBIGUOUS signals are attached; an unknown flag is simply absent (None)."""
+    the near-zero-FP rules. Only UNAMBIGUOUS signals on a SUPPORTED resource type are attached; an unknown
+    flag is simply absent (None), and an unsupported resource type contributes NOTHING."""
     rec: dict[str, Any] = {"id": rid}
-    if kind:
-        rec["kind"] = "datastore" if any(t in kind.lower() for t in (
-            "bucket", "s3", "db", "rds", "dynamodb", "efs", "ebs", "storage", "sqs", "sns")) else "cloud_resource"
+    ktype = (kind or "").strip().lower()
+    if ktype not in _SUPPORTED_RESOURCE_TYPES:
+        # No schema-faithful rule for this type -> attach no achieved-state signal -> no FACT (red-pen H4).
+        return rec
+    rec["kind"] = "datastore" if any(t in ktype for t in (
+        "bucket", "s3", "db", "rds", "dynamodb", "efs", "ebs", "storage", "sqs", "sns")) else "cloud_resource"
     grants: list[dict] = []
     for pol in _policy_documents(attrs):
         grants.extend(_wildcard_grants(pol))
     if grants:
         rec["grants"] = grants
-    if _public_acl(attrs) or _open_ingress(attrs):
+    # H5: an achieved PUBLIC signal is a literal anonymous-DATA grant only (a bucket policy Principal:"*" via
+    # grants, or an ACL granting AllUsers). A security-group 0.0.0.0/0 INGRESS is NOT that — it declares
+    # network reachability on some port/protocol/direction, not that anonymous principals can read the data,
+    # so it does NOT set `public` (that conflation over-claimed a vuln). A structural SG-exposure FACT, with
+    # port/protocol, is a distinct future branch.
+    if _public_acl(attrs):
         rec["public"] = True
     enc = _encryption_state(attrs)
     if enc is not None:
@@ -373,7 +411,7 @@ def _terraform_native(doc: dict) -> tuple[list[tuple[str, dict, str]], str]:
     return triples, str(doc.get("terraform_version") or "")
 
 
-def parse_terraform(text: str) -> dict:
+def parse_terraform(text: "str | bytes") -> dict:
     """Parse a Terraform plan-JSON (``terraform show -json``) OR a ``.tfstate`` (BOTH JSON) into the native
     cloud inventory, applying the near-zero-FP rules. Governed parse (``safe_json``): a malformed / oversized
     / bomb document raises :class:`IacParseError`. Raw HCL is NOT accepted (there is no achieved state to
@@ -390,7 +428,7 @@ def parse_terraform(text: str) -> dict:
     return {"provider": provider, "principals": [], "resources": resources}
 
 
-def parse_cloudformation(text: str) -> dict:
+def parse_cloudformation(text: "str | bytes") -> dict:
     """Parse a PROCESSED CloudFormation template (JSON or YAML) into the native cloud inventory from RESOLVED
     values only. Governed parse: ``safe_json`` first, then ``safe_yaml`` (SafeLoader — a short-form intrinsic
     tag like ``!Ref`` is refused as a typed error, the conservative outcome; use long-form ``{"Ref": ...}``
@@ -450,7 +488,7 @@ def _oracle_signal(bug_class: str, oracle_context: dict) -> "tuple[bool, bool]":
 
 
 def iac_verify(
-    artifact_text: str,
+    artifact: "str | bytes",
     *,
     fmt: str,
     engagement_slug: str,
@@ -475,7 +513,11 @@ def iac_verify(
         return IacPostureResult(fmt=str(fmt), notes=[f"unsupported IaC format {fmt!r} "
                                                      f"(have: terraform, cloudformation)"])
 
-    native = parse_terraform(artifact_text) if fmt == "terraform" else parse_cloudformation(artifact_text)
+    # B2: the artifact digest MUST be over the ORIGINAL bytes, not a re-encoding of a decoded str (which
+    # diverges on UTF-16/BOM/newline/normalization). Hash the raw bytes and PARSE the SAME bytes (safe_json/
+    # safe_yaml decode per the format's own rules). A str caller is accepted; its UTF-8 encoding is the raw.
+    raw = artifact.encode("utf-8") if isinstance(artifact, str) else (artifact or b"")
+    native = parse_terraform(raw) if fmt == "terraform" else parse_cloudformation(raw)
 
     # normalise (re-expresses public->anonymous grant so the achieved public fact is oracle-provable) — the
     # SAME normaliser the framework cloud sensor runs.
@@ -489,7 +531,7 @@ def iac_verify(
     inv = normalize_cloud_export(native, "native")
     res = IacPostureResult(fmt=fmt, resources=len(inv.get("resources") or []))
 
-    artifact_sha256 = hashlib.sha256((artifact_text or "").encode("utf-8", "surrogatepass")).hexdigest()
+    artifact_sha256 = hashlib.sha256(raw).hexdigest()   # B2: digest of the ORIGINAL bytes
     binding = {
         "artifact_sha256": artifact_sha256,
         "collector_id": collector_id,
@@ -528,8 +570,12 @@ def iac_verify(
     for pf in confirm_cloud_posture_facts(inv):
         principal, resource, access = pf.get("principal", ""), pf.get("resource", ""), pf.get("access", "")
         oracle_context = policy_path_context(graph, principal, resource, access)
+        # Include ACCESS + a digest of the full (principal, resource, access) claim in the id: two distinct
+        # grants sharing principal->resource but differing in access would otherwise collide and overwrite
+        # res.contexts / the finding_ref (red-pen integrity finding).
+        claim = hashlib.sha256(f"{principal}\x00{resource}\x00{access}".encode()).hexdigest()[:12]
         finding = {
-            "check_id": f"iac:{fmt}:policy_path:{principal}->{resource}",
+            "check_id": f"iac:{fmt}:policy_path:{principal}->{resource}#{access or '-'}#{claim}",
             "bug_class": "privilege_path",
             "insertion_point": f"iac:{fmt}:{resource}",
             "oracle_context": oracle_context,

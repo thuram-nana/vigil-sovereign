@@ -113,7 +113,7 @@ def _extract_kube_bench_controls(data: Any) -> list[dict]:
     a status is not a control and is skipped."""
     controls: list[dict] = []
 
-    def _add_result(result: Any, section: str) -> None:
+    def _add_result(result: Any, section: str, target: str) -> None:
         if not isinstance(result, dict):
             return
         check_id = result.get("test_number") or result.get("id") or result.get("check_id")
@@ -130,6 +130,11 @@ def _extract_kube_bench_controls(data: Any) -> list[dict]:
         sec = result.get("section") or section
         if sec not in (None, ""):
             control["section"] = str(sec)
+        # The TARGET/node the group ran against (master/node/etcd/controlplane). The SAME CIS test_number
+        # appears once per target in a full export, so the target is part of the control's identity — without
+        # it, distinct per-node controls collide on one finding_ref (red-pen integrity finding).
+        if target:
+            control["target"] = target
         controls.append(control)
 
     def _add_object(obj: Any) -> None:
@@ -138,26 +143,27 @@ def _extract_kube_bench_controls(data: Any) -> list[dict]:
         for group in (obj.get("Controls") or []):
             if not isinstance(group, dict):
                 continue
+            target = str(group.get("node_type") or group.get("text") or group.get("id") or "")
             for test in (group.get("tests") or []):
                 if not isinstance(test, dict):
                     continue
                 section = str(test.get("section") or "")
                 for result in (test.get("results") or []):
-                    _add_result(result, section)
+                    _add_result(result, section, target)
 
     if isinstance(data, list):
         for obj in data:
             if isinstance(obj, dict) and "Controls" in obj:
                 _add_object(obj)
             else:
-                _add_result(obj, "")   # a bare list of result records
+                _add_result(obj, "", "")   # a bare list of result records
     elif isinstance(data, dict):
         _add_object(data)
     return controls
 
 
 def k8s_posture_verify(
-    kube_bench_text: str,
+    kube_bench_text: "str | bytes",
     *,
     engagement_slug: str,
     signers: "list[tuple[str, str]]",
@@ -202,10 +208,14 @@ def k8s_posture_verify(
     for control in controls:
         from framework.v2.verify.k8s_posture import k8s_posture_context  # noqa: PLC0415
         oracle_context = k8s_posture_context(control)
+        # Identity = target(node) + section + CIS id, so the same test_number on master vs node vs etcd does
+        # not collide on one finding_ref (red-pen integrity finding).
+        _tgt = control.get("target") or "-"
+        _sec = control.get("section") or "-"
         finding = {
-            "check_id": f"k8s:cis:{control['check_id']}",
+            "check_id": f"k8s:cis:{_tgt}:{_sec}:{control['check_id']}",
             "bug_class": "k8s_misconfiguration",
-            "insertion_point": f"kube-bench:{control['check_id']}",
+            "insertion_point": f"kube-bench:{_tgt}:{control['check_id']}",
             "oracle_context": oracle_context,
         }
         # ADMISSION DECIDES, MINTING EXECUTES. Reaching here means VIGIL parsed a concrete control from the
@@ -252,8 +262,21 @@ def _reduce_rbac_binding(doc: Any) -> dict | None:
     raw_subjects = doc.get("subjects")
     if isinstance(raw_subjects, (list, tuple)):
         for s in raw_subjects:
-            if isinstance(s, dict) and s.get("name") not in (None, ""):
-                subjects.append(str(s.get("name")))
+            if not isinstance(s, dict) or s.get("name") in (None, ""):
+                continue
+            nm = str(s.get("name"))
+            skind = str(s.get("kind") or "").strip().lower()
+            sgroup = str(s.get("apiGroup") or "").strip().lower()
+            # A subject is an ANONYMOUS PRINCIPAL only when its k8s KIND matches the principal, not merely its
+            # name: `system:anonymous` is the anonymous USER, `system:unauthenticated` the unauthenticated
+            # GROUP (both in the rbac.authorization.k8s.io apiGroup, or empty). A ServiceAccount — or any
+            # other kind — merely NAMED "system:anonymous" is a DIFFERENT principal (red-pen B3), so it is
+            # carried KIND-QUALIFIED and can never match the oracle's bare anon-name set. A genuine anon
+            # subject is emitted verbatim so the oracle fires correctly.
+            group_ok = sgroup in ("rbac.authorization.k8s.io", "")
+            is_anon = group_ok and ((skind == "user" and nm == "system:anonymous")
+                                    or (skind == "group" and nm == "system:unauthenticated"))
+            subjects.append(nm if is_anon else f"{skind or 'unknownkind'}:{s.get('namespace') or ''}:{nm}")
 
     reduced: dict[str, Any] = {
         "check_id": f"{kind.lower()}:{namespace + '/' if namespace else ''}{name}" if name else kind.lower(),
@@ -273,13 +296,19 @@ def _reduce_rbac_binding(doc: Any) -> dict | None:
     # manifest (red-pen A1-MEDIUM). Carry an explicit NON-matching sentinel so the built-in check fails →
     # non-fire → INCONCLUSIVE, never a FACT. A well-formed binding (both present) is unaffected and still
     # FACTs correctly; the binding is still adjudicated (not silently dropped).
-    reduced["role_kind"] = str(role_kind) if role_kind not in (None, "") else "unspecified"
-    reduced["role_apigroup"] = str(role_apigroup) if role_apigroup not in (None, "") else "unspecified"
+    # Treat a WHITESPACE-only kind/apiGroup as ABSENT, not present: the workload oracle normalizes with
+    # `.strip().lower()` and tolerates empty, so a byte-exact `not in (None,"")` guard let "  " / "\t" pass as
+    # "present", collapse to "" at the oracle, and re-enter the empty-string tolerance → signed false FACT
+    # (red-pen re-attack of the A1 fix). Match the oracle's normalization here.
+    reduced["role_kind"] = (str(role_kind) if role_kind is not None and str(role_kind).strip()
+                            else "unspecified")
+    reduced["role_apigroup"] = (str(role_apigroup) if role_apigroup is not None and str(role_apigroup).strip()
+                                else "unspecified")
     return reduced
 
 
 def ingest_k8s_rbac(
-    manifests_text: str,
+    manifests_text: "str | bytes",
     *,
     engagement_slug: str,
     signers: "list[tuple[str, str]]",
