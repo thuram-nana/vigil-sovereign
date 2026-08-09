@@ -224,6 +224,8 @@ def test_cannot_decompress_a_truncated_compressed_stream():
     "utf-7", "cp037", "cp500", "koi8-r-x", "rot13", "punycode", "hz", "iso-2022-jp",
     "hz-gb-2312", "iso-2022-cn", "iso-2022-kr", "replacement", "big5", "shift_jis", "euc-jp",
     "x-user-defined", "made-up-9000",
+    # NOT byte-faithful to the WHATWG index (differential caught CPython table divergences) -> refused:
+    "gbk", "gb2312", "gb18030", "koi8-u",
 ])
 def test_labels_a_browser_rejects_or_we_cannot_decode_faithfully_are_refused(label):
     """BLOCK-1: resolving through Python's codec registry decoded labels a browser IGNORES (utf-7, EBCDIC,
@@ -279,8 +281,8 @@ def test_latin1_family_maps_to_windows_1252(label):
 
 @pytest.mark.parametrize("label,codec", [
     ("unicode-1-1-utf-8", "utf-8"), ("utf8", "utf-8"), ("x-mac-cyrillic", "mac_cyrillic"),
-    ("iso-8859-9", "cp1254"), ("iso-8859-11", "cp874"), ("gb2312", "gb18030"), ("gbk", "gb18030"),
-    ("euc-kr", "cp949"), ("windows-949", "cp949"), ("koi8-u", "koi8-u"), ("tis-620", "cp874"),
+    ("iso-8859-9", "cp1254"), ("iso-8859-11", "cp874"), ("euc-kr", "cp949"), ("windows-949", "cp949"),
+    ("koi8-r", "koi8-r"), ("tis-620", "cp874"),
 ])
 def test_valid_whatwg_labels_resolve_to_their_faithful_codec(label, codec):
     """BLOCK-4: valid WHATWG labels Python's registry rejects or remaps differently must be accepted and
@@ -295,9 +297,23 @@ def test_conflicting_duplicate_content_type_is_ambiguous():
     assert d.body_semantically_available is False and "ambiguous" in d.reason
 
 
-def test_conflicting_duplicate_content_encoding_is_ambiguous():
+def test_repeated_content_encoding_headers_are_rfc_combined_not_last_wins():
+    """RE-ATTACK HIGH: per RFC 7230 §3.2.2 two `Content-Encoding: gzip` headers == `gzip, gzip` == gzip twice.
+    last-wins silently decompressed ONE layer and marked a double-encoded body available (false CLEAN). Both
+    spellings must be treated identically — a multi-layer chain we do not implement is refused."""
+    gz = _gzip(b"<p>secret</p>")
+    two_headers = decode_body(gz, [("content-encoding", "gzip"), ("content-encoding", "gzip"), *UTF8])
+    comma_form = decode_body(gz, [("content-encoding", "gzip, gzip"), *UTF8])
+    assert two_headers.body_semantically_available is False, "two gzip headers slipped through as one layer"
+    assert comma_form.body_semantically_available is False
+    assert two_headers.reason == comma_form.reason, "RFC-equivalent spellings must give the same verdict"
+    # a genuinely single-encoded body still decodes
+    assert decode_body(gz, [("content-encoding", "gzip"), *UTF8]).body_semantically_available is True
+
+
+def test_conflicting_content_encoding_layers_are_refused():
     d = decode_body(_gzip(HTML), [("content-encoding", "gzip"), ("content-encoding", "identity"), *UTF8])
-    assert d.body_semantically_available is False and "ambiguous" in d.reason
+    assert d.body_semantically_available is False and "unsupported" in d.reason
 
 
 def test_label_is_case_and_whitespace_insensitive():

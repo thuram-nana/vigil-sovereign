@@ -163,12 +163,16 @@ def _undeclared_hint(payload: bytes) -> str:
 # now resolved the WHATWG way, to a Python codec PROVEN byte-faithful to the WHATWG index, and everything
 # else is refused (INCONCLUSIVE).
 #
-# Faithful subset: UTF-8, UTF-16LE/BE (bare `utf-16` -> LE, never host order), every single-byte encoding
-# (Python's cpXXXX / iso8859-X match the WHATWG indices; the few bytes WHATWG leaves undefined make a STRICT
-# decode refuse, which is the safe direction), and the two multi-byte encodings whose WHATWG decoder equals a
-# stdlib codec exactly (GBK/gb2312 -> gb18030, EUC-KR -> cp949/UHC). Note the security-relevant remaps baked
-# into the label lists: iso-8859-1/latin1/ascii/us-ascii -> cp1252; iso-8859-9 -> cp1254; iso-8859-11 ->
-# cp874; gbk/gb2312 -> gb18030; the `utf-16` label -> utf-16-le.
+# Faithful subset (checked by a byte-level differential against the WHATWG index files): UTF-8, UTF-16LE/BE
+# (bare `utf-16` -> LE, never host order), the ISO-8859 / windows-125X single-byte encodings plus cp866 /
+# cp874 / mac_roman / mac_cyrillic / koi8-r, and EUC-KR (cp949 / UHC). Two honesty caveats, BOTH in the safe
+# (under-claim) direction, never a decode disagreement: (a) WHATWG maps a few bytes in windows-1252/1254/1255
+# to C1 controls (e.g. 0x81 -> U+0081) and windows-1255 0xCA -> U+05BA; CPython refuses these under a strict
+# decode, so such a page is reported INCONCLUSIVE rather than mis-decoded. (b) GBK/gb18030 and koi8-u are NOT
+# byte-faithful — CPython ships GB18030-2000 (browsers use -2005; ~20 two-byte points differ) and CPython
+# koi8-u differs from the WHATWG index at 0xAE/0xBE — so they are REFUSED (see _WHATWG_REFUSED), not
+# resolved. Security-relevant remaps baked into the label lists: iso-8859-1/latin1/ascii/us-ascii -> cp1252;
+# iso-8859-9 -> cp1254; iso-8859-11 -> cp874; euc-kr -> cp949; the `utf-16` label -> utf-16-le.
 _LABEL_TO_CODEC: "dict[str, str]" = {}
 
 
@@ -195,7 +199,6 @@ _reg_labels("iso8859-14", "iso-8859-14 iso8859-14 iso885914")
 _reg_labels("iso8859-15", "csisolatin9 iso-8859-15 iso8859-15 iso885915 iso_8859-15 l9")
 _reg_labels("iso8859-16", "iso-8859-16")
 _reg_labels("koi8-r", "cskoi8r koi koi8 koi8-r koi8_r")
-_reg_labels("koi8-u", "koi8-ru koi8-u")
 _reg_labels("mac_roman", "csmacintosh mac macintosh x-mac-roman")
 _reg_labels("cp874", "dos-874 iso-8859-11 iso8859-11 iso885911 tis-620 windows-874")
 _reg_labels("cp1250", "cp1250 windows-1250 x-cp1250")
@@ -210,7 +213,6 @@ _reg_labels("cp1256", "cp1256 windows-1256 x-cp1256")
 _reg_labels("cp1257", "cp1257 windows-1257 x-cp1257")
 _reg_labels("cp1258", "cp1258 windows-1258 x-cp1258")
 _reg_labels("mac_cyrillic", "x-mac-cyrillic x-mac-ukrainian")
-_reg_labels("gb18030", "chinese csgb2312 csiso58gb231280 gb2312 gb_2312 gb_2312-80 gbk iso-ir-58 x-gbk gb18030")
 _reg_labels("cp949", "cseuckr csksc56011987 euc-kr iso-ir-149 korean ks_c_5601-1987 ks_c_5601-1989 ksc5601 "
             "ksc_5601 windows-949")
 _reg_labels("utf-16-be", "unicodefffe utf-16be")
@@ -227,7 +229,14 @@ _WHATWG_REFUSED = set(
     "big5 big5-hkscs cn-big5 csbig5 x-x-big5 "
     "cseucpkdfmtjapanese euc-jp x-euc-jp "
     "csiso2022jp iso-2022-jp "
-    "csshiftjis ms932 ms_kanji shift-jis shift_jis sjis windows-31j x-sjis".split())
+    "csshiftjis ms932 ms_kanji shift-jis shift_jis sjis windows-31j x-sjis "
+    # A ground-truth differential vs the WHATWG index files showed CPython's tables DIVERGE from WHATWG for
+    # these (not just refuse-undefined-bytes, but decode to the WRONG character): GBK/gb18030 — CPython ships
+    # GB18030-2000, browsers use GB18030-2005 (~20 two-byte points differ, e.g. A3A0 -> U+E5E5 PUA vs
+    # U+3000); koi8-u — bytes 0xAE/0xBE decode to box-drawing in CPython vs Cyrillic short-u in WHATWG. Refuse
+    # them (safe under-claim) rather than assert availability over text a browser would not produce.
+    "chinese csgb2312 csiso58gb231280 gb2312 gb_2312 gb_2312-80 gbk iso-ir-58 x-gbk gb18030 "
+    "koi8-ru koi8-u".split())
 
 
 def _whatwg_codec(label: str) -> "tuple[str | None, str]":
@@ -282,7 +291,14 @@ def decode_body(raw: bytes, headers: "list[tuple[str, str]]", *, truncated: bool
     input rather than trusting the caller to have done so."""
     raw_headers = headers or []
     lowered = {k.lower(): v for k, v in raw_headers}
-    encoding = (lowered.get("content-encoding") or "").strip().lower()
+    # RFC 7230 §3.2.2: repeated field lines with the same name are equivalent to ONE line whose value is the
+    # fields joined by commas. Content-Encoding is a comma-list (1#content-coding), so two
+    # `Content-Encoding: gzip` headers mean gzip applied TWICE — byte-identical to `Content-Encoding:
+    # gzip, gzip`. Join the occurrences BEFORE parsing so both spellings are treated identically: a
+    # multi-layer chain we do not implement falls to the unsupported path and is refused, instead of
+    # last-wins silently decompressing a single layer and marking a double-encoded body available.
+    encoding = ", ".join(v.strip() for k, v in raw_headers
+                         if k.lower() == "content-encoding" and v.strip()).lower()
     content_type = lowered.get("content-type", "")
     charset = _charset_of(content_type)
     truncated = truncated or len(raw) > MAX_RAW_BYTES
@@ -293,16 +309,11 @@ def decode_body(raw: bytes, headers: "list[tuple[str, str]]", *, truncated: bool
     if truncated:
         out.notes.append("response exceeded the read bound; only a prefix was captured")
 
-    # Conflicting duplicate framing headers make the response AMBIGUOUS (which Content-Encoding layer applies?
-    # which charset?). last-wins would silently pick one and could be steered to force a mis-decode, so a
-    # genuine conflict is refused rather than resolved. (A single header carrying a comma-list, e.g.
-    # "gzip, br", is one value handled by the unsupported-encoding path below, not a duplicate.)
-    def _distinct(name: str) -> int:
-        return len({v.strip().lower() for k, v in raw_headers if k.lower() == name})
-    if _distinct("content-encoding") > 1:
-        out.reason = "ambiguous response: conflicting Content-Encoding headers"
-        return out
-    if _distinct("content-type") > 1:
+    # Content-Type is NOT a comma-list, so repeated Content-Type lines are a genuine ambiguity (which charset
+    # applies?) rather than an RFC-combinable value. Conflicting duplicates are refused; identical repeats
+    # collapse to one and are harmless. (Content-Encoding is a comma-list and was already RFC-combined above,
+    # so a repeated/multi-layer encoding reaches the unsupported path and is refused there.)
+    if len({v.strip().lower() for k, v in raw_headers if k.lower() == "content-type"}) > 1:
         out.reason = "ambiguous response: conflicting Content-Type headers"
         return out
 
