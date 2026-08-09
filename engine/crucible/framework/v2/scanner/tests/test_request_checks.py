@@ -165,6 +165,24 @@ def test_emitted_url_hosts_ignores_inert_markup_contexts() -> None:
     # not end the tag early and hide the real src (that dropped a genuine <script src>/<iframe src> sink)
     assert evil in hosts(f'<script data-cfg="{{a:1>0}}" src="https://{evil}/app.js"></script>')
     assert evil in hosts(f'<iframe srcdoc="<p>hi</p>" src="https://{evil}/"></iframe>')
+    assert evil not in hosts(f'<plaintext><a href="https://{evil}/">x</a>')   # no end tag: literal to EOF
+    assert evil not in hosts(f'<template><meta property="og:url" content="https://{evil}/"></template>')
+    # LIVE — <pre>/<code> contents ARE parsed, so a link inside them is a real emission
+    assert evil in hosts(f'<pre><a href="https://{evil}/">x</a></pre>')
+    assert evil in hosts(f'<a href="https://{evil}/reset">reset</a>')
+    # ... and an inert element's OPENING TAG still emits: <script src>/<iframe src> load attacker content,
+    # the canonical high-severity host-header sink. Masking the whole element dropped this real finding.
+    assert evil in hosts(f'<script src="https://{evil}/evil.js"></script>')
+    assert evil in hosts(f'<iframe src="https://{evil}/x"></iframe>')
+    assert evil in hosts(f'<link rel="stylesheet" href="https://{evil}/x.css">')
+    assert evil not in hosts(f'Cannot GET http://{evil}/foo')                    # 404 text echo (BLOCK-D)
+    assert evil not in hosts(f'<pre>curl http://{evil}/api</pre>')               # code sample
+    assert evil not in hosts(f'<!-- built from host: //{evil}/ -->')            # HTML comment
+    assert evil not in hosts(f'{{"error": "unknown path http://{evil}/x"}}')     # JSON error echo
+    assert evil not in hosts(f'<img src="https://{evil}.cdn.example.com/l.png">')  # subdomain prefix
+    assert evil not in hosts(f"<p>Host: {evil}</p>")                             # bare plain-text echo
+    assert evil not in hosts(f'<a href="https://app.example/go?to=//{evil}">x</a>')  # evil in path/query
+    assert hosts('<a href="/reset">reset</a>') == []                            # relative link only
 
 
 def test_emitted_url_hosts_follows_the_html_content_models() -> None:
@@ -193,21 +211,46 @@ def test_emitted_url_hosts_follows_the_html_content_models() -> None:
     # script-data double escape: the FIRST </script> after `<!--<script` does not close the element
     assert evil not in hosts(f'<script><!--<script>q</script><a href="https://{evil}/w"></a></script>')
     assert evil in hosts(f'<script>var a=1</script><a href="https://{evil}/">x</a>')  # ordinary script closes
-    assert evil not in hosts(f'<plaintext><a href="https://{evil}/">x</a>')   # no end tag: literal to EOF
-    assert evil not in hosts(f'<template><meta property="og:url" content="https://{evil}/"></template>')
-    # LIVE — <pre>/<code> contents ARE parsed, so a link inside them is a real emission
-    assert evil in hosts(f'<pre><a href="https://{evil}/">x</a></pre>')
-    assert evil in hosts(f'<a href="https://{evil}/reset">reset</a>')
-    # ... and an inert element's OPENING TAG still emits: <script src>/<iframe src> load attacker content,
-    # the canonical high-severity host-header sink. Masking the whole element dropped this real finding.
-    assert evil in hosts(f'<script src="https://{evil}/evil.js"></script>')
-    assert evil in hosts(f'<iframe src="https://{evil}/x"></iframe>')
-    assert evil in hosts(f'<link rel="stylesheet" href="https://{evil}/x.css">')
-    assert evil not in hosts(f'Cannot GET http://{evil}/foo')                    # 404 text echo (BLOCK-D)
-    assert evil not in hosts(f'<pre>curl http://{evil}/api</pre>')               # code sample
-    assert evil not in hosts(f'<!-- built from host: //{evil}/ -->')            # HTML comment
-    assert evil not in hosts(f'{{"error": "unknown path http://{evil}/x"}}')     # JSON error echo
-    assert evil not in hosts(f'<img src="https://{evil}.cdn.example.com/l.png">')  # subdomain prefix
-    assert evil not in hosts(f"<p>Host: {evil}</p>")                             # bare plain-text echo
-    assert evil not in hosts(f'<a href="https://app.example/go?to=//{evil}">x</a>')  # evil in path/query
-    assert hosts('<a href="/reset">reset</a>') == []                            # relative link only
+
+
+def test_emitted_url_hosts_models_the_script_data_and_template_state_machines() -> None:
+    """The two layers built on top of the tokenizer must follow the SPEC, not a substring guess — each of
+    these flipped a verdict when they didn't: the solidus is ignored on a non-void element (so
+    ``<template/>`` OPENS an inert fragment); script-data double-escape is entered by a NON-ADJACENT
+    ``<!-- … <script`` and requires a terminator after ``<script``; and duplicate attributes are FIRST-wins
+    per WHATWG, not last-wins as a dict comprehension yields."""
+    from framework.v2.scanner.checks import _emitted_url_hosts as hosts
+    from framework.v2.scanner.checks import _markup_redirect_hosts as redirects
+
+    evil = HostHeaderCheck().evil_host
+    # `<template/>` opens an inert fragment — its content is neither rendered nor fetched
+    assert hosts(f'<template/><a href="https://{evil}/x">l</a>') == []
+    assert redirects(f'<template/><meta http-equiv=refresh content="url=https://{evil}/">') == []
+    # double-escape entered NON-adjacently, and re-entered across a would-be close: still script text
+    assert redirects(
+        f'<script><!-- x <script></script>\n<meta http-equiv=refresh content="url=https://{evil}/">') == []
+    assert hosts(f'<script><!--<script></script><script></script><a href="https://{evil}/x"></a>') == []
+    # ... but `<script` NOT followed by a terminator does not double-escape, so the next script is LIVE and
+    # its sink must still be found (guessing here certified a vulnerable page CLEAN)
+    for bad in ("<script<", "<scripting"):
+        assert "evil.com" in redirects(
+            f"<script><!--{bad}</script>\n<script>location.href='//evil.com/'</script>"), bad
+    # duplicate attributes: the FIRST wins, so neither a hostile second nor a benign second changes the verdict
+    assert hosts(f'<a href="https://home.example.com/d" href="https://{evil}/x">') == ["home.example.com"]
+    assert evil in hosts(f'<a href="https://{evil}/x" href="https://cdn.example.com/x">')
+
+
+def test_meta_refresh_url_extraction_is_bounded_and_faithful() -> None:
+    """A meta-refresh ``content`` value is attacker-influenced and arrives UNBOUNDED from the tokenizer. The
+    previous end-anchored lazy regex took 11 SECONDS on a sub-cap value packed with ``url=`` tokens."""
+    import time as _time
+
+    from framework.v2.scanner.checks import _markup_redirect_hosts as redirects
+
+    body = '<meta http-equiv="refresh" content="' + ("url=a;" * 80_000) + '">'
+    t0 = _time.perf_counter()
+    redirects(body)
+    assert (_time.perf_counter() - t0) < 1.0, "meta-refresh URL extraction must stay bounded"
+    # faithful: the URL runs to the end of the value, so a ';' inside the path is NOT a terminator
+    assert "x.test" in redirects('<meta http-equiv=refresh content="0; url=https://x.test/a;b">')
+    assert "y.test" in redirects("<meta http-equiv=refresh content=0;url=https://y.test/z>")   # unquoted

@@ -619,8 +619,42 @@ _MARKUP_SCAN_CAP = 512_000        # only the head of a response carries navigati
 # Only two regexes remain: the URL inside a meta-refresh `content` value, and the JS navigation sinks inside
 # script text. Everything structural — which bytes are markup at all, where a tag ends, which quote closes an
 # attribute, what a raw-text element swallows — is delegated to the stdlib tokenizer below.
-_META_CONTENT_URL = re.compile(r"(?<![-\w])url\s*=\s*(.{0,4096}?)\s*$", re.IGNORECASE)
+_META_REFRESH_VALUE_CAP = 4096    # a real refresh target never approaches this
+
+
+def _meta_refresh_url(content: str) -> str:
+    """The URL a browser would navigate to from a ``<meta http-equiv=refresh>`` ``content`` value.
+
+    Deliberately NOT a regex. The previous ``url\\s*=\\s*(.{0,4096}?)\\s*$`` was anchored to the end of an
+    attribute value the tokenizer hands over UNBOUNDED, so a value packed with ``url=`` tokens made it
+    retry a bounded lazy expansion at every one — 11 SECONDS on a sub-cap body, target-controlled. This
+    takes the FIRST ``url=`` at an identifier boundary (as browsers do) and returns the rest of the value;
+    the URL runs to the end, so nothing is split on ``;``."""
+    value = (content or "")[:_META_REFRESH_VALUE_CAP]
+    low = value.lower()
+    index = 0
+    while True:
+        index = low.find("url", index)
+        if index < 0:
+            return ""
+        before = value[index - 1] if index else ""
+        after = value[index + 3:].lstrip()
+        if (not before or not (before.isalnum() or before in "-_")) and after.startswith("="):
+            return after[1:].strip().strip("'\"")
+        index += 3
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
+#
+# KNOWN LIMITATION (tracked, not fixed here): this is a regex over script TEXT, so it also fires on a sink
+# that sits inside a JS comment or a string literal — e.g. `// location.href="//evil/"` — which a browser
+# never executes. That is a false-FACT surface for `open_redirect`. It is PRE-EXISTING (the previous code
+# ran the same regex over the WHOLE body, so scoping it to live script text narrowed it) and reaching a
+# signed FACT requires the target to reflect the injected canary into exactly such a commented-out or
+# quoted sink, which is contrived. It is NOT fixed here on purpose: distinguishing a real sink from one in
+# a comment/string needs a JS lexer, and this wave's central lesson is that hand-approximating a lexer over
+# adversary-controlled input does not converge (a hand-written HTML masker produced ~15 defects across four
+# adversarial rounds before it was deleted in favour of the stdlib tokenizer). The sound fix is a real JS
+# tokenizer — or demoting the body branch of the JS sink to a LEAD — and is filed as the next wave's first
+# item rather than guessed at here.
 _JS_REDIRECT = re.compile(
     r"(?<![-\w])(?:(?:window|document|top|parent|self)\.)?location(?:\.href|\.assign|\.replace)?\s*(?:=|\()\s*"
     r"[\"']([^\"']{1,4096})[\"']",
@@ -665,18 +699,26 @@ class _MarkupScan(HTMLParser):
         self.metas: list[dict[str, str]] = []   # attributes of LIVE <meta> tags
         self.script_text: list[str] = []        # raw text of LIVE <script> elements (JS sink source)
         self._template_depth = 0
-        self._in_script = False
-        self._suppress_scripts = 0              # script-data double-escape carry-over
-        self._pending_double = False
+        self._in_script = False                 # the tokenizer is inside a <script> element
+        self._script_open = False               # a script element is LOGICALLY still open (WHATWG state)
+        self._escaped = False                   # script-data-escaped   (entered by `<!--`)
+        self._double = False                    # script-data-double-escaped (entered by `<script` there)
 
     @property
     def _live(self) -> bool:
-        return self._template_depth == 0 and self._suppress_scripts == 0
+        # `_script_open` while the tokenizer is NOT in a script element means WHATWG considers us still
+        # inside script data — what the tokenizer is now reporting as markup is really script text.
+        return self._template_depth == 0 and not (self._script_open and not self._in_script)
 
     def _record(self, tag: str, attrs: "list[tuple[str, str | None]]") -> None:
         if not self._live:
             return
-        d = {k.lower(): (v or "") for k, v in attrs}
+        # FIRST duplicate wins, as WHATWG specifies ("if there is already an attribute with that name, drop
+        # the new one"). A plain dict comprehension keeps the LAST, which both mints a false FACT (a benign
+        # first href with a hostile second) and drops a real one (hostile first, benign second).
+        d: dict[str, str] = {}
+        for key, value in attrs:
+            d.setdefault(key.lower(), value or "")
         if tag == "meta":
             self.metas.append(d)
         for key in ("href", "src", "action"):
@@ -688,11 +730,20 @@ class _MarkupScan(HTMLParser):
             self._template_depth += 1
             return
         if tag == "script":
+            # A `<script>` seen while a script element is still logically OPEN (the tokenizer closed it at a
+            # `</script>` that WHATWG treats as double-escape-exit) re-enters the double-escaped state.
+            if self._script_open:
+                self._double = True
+            else:
+                self._script_open, self._double = True, False
             self._in_script = True
         self._record(tag, attrs)
 
-    def handle_startendtag(self, tag: str, attrs) -> None:  # noqa: ANN001 — `<x/>` opens and closes at once
+    def handle_startendtag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        # The solidus is IGNORED on a non-void element, so `<template/>` OPENS a template: its content is an
+        # inert fragment until the matching end tag. Treating it as open-and-closed left that content live.
         if tag == "template":
+            self._template_depth += 1
             return
         self._record(tag, attrs)
 
@@ -702,20 +753,55 @@ class _MarkupScan(HTMLParser):
             return
         if tag == "script":
             self._in_script = False
-            if self._pending_double:
-                self._pending_double = False
-                self._suppress_scripts += 1     # this end tag did not really close the element
-            elif self._suppress_scripts:
-                self._suppress_scripts -= 1
+            if self._double:
+                self._double = False        # double-escaped: this end tag returns to escaped, not a close
+            else:
+                self._script_open = False   # escaped or normal: this end tag really closes the element
 
     def handle_data(self, data: str) -> None:
         if not self._in_script:
             return
         if self._live:
             self.script_text.append(data)
-        entry = data.rfind("<!--<script")         # last double-escape entry in this script's text
-        if entry >= 0 and data.find("-->", entry) < 0:
-            self._pending_double = True           # ... and nothing ended the escape before the end tag
+        self._escaped, self._double = _script_data_state(data, self._escaped, self._double)
+
+
+def _script_data_state(text: str, escaped: bool, double: bool) -> tuple[bool, bool]:
+    """Advance the WHATWG script-data escape state across one chunk of script text.
+
+    Models the actual state machine rather than guessing from substrings, because both guesses were wrong:
+    a bare ``rfind("<!--<script")`` missed a NON-ADJACENT entry (``<!-- x <script>``, which really does
+    double-escape) and fired on ``<!--<script<`` / ``<!--<scripting`` (which really do NOT, because
+    ``<script`` must be followed by whitespace, ``/`` or ``>``) — minting a false FACT in the first case and
+    certifying a genuinely vulnerable page CLEAN in the second. ``find``-based, so it stays linear."""
+    i, n = 0, len(text)
+    while i < n:
+        if not escaped:
+            start = text.find("<!--", i)
+            if start < 0:
+                break
+            escaped, i = True, start + 4
+            continue
+        close = text.find("-->", i)
+        entry = -1
+        if not double:
+            k = i
+            while True:
+                k = text.find("<script", k)
+                if k < 0:
+                    break
+                after = k + 7
+                if after >= n or text[after].isspace() or text[after] in "/>":
+                    entry = k
+                    break
+                k += 7
+        if close >= 0 and (entry < 0 or close < entry):
+            escaped, double, i = False, False, close + 3      # `-->` leaves both escaped states
+        elif entry >= 0:
+            double, i = True, entry + 7                       # `<script` + terminator enters double-escape
+        else:
+            break
+    return escaped, double
 
 
 def _scan_markup(body: str) -> _MarkupScan:
@@ -738,9 +824,9 @@ def _redirect_hosts(scan: _MarkupScan) -> list[str]:
     hosts: list[str] = []
     for meta in scan.metas:
         if (meta.get("http-equiv") or "").strip().lower() == "refresh":
-            found = _META_CONTENT_URL.search(meta.get("content") or "")
-            if found:
-                hosts.append(_host(found.group(1).strip().strip("'\"")))
+            target = _meta_refresh_url(meta.get("content") or "")
+            if target:
+                hosts.append(_host(target))
     for text in scan.script_text:
         for url in _JS_REDIRECT.findall(text):
             hosts.append(_host(url.strip()))
