@@ -17,9 +17,11 @@ from typing import Iterator
 
 import pytest
 
-from framework.v2.scanner.browser import find_browser, render_dom, scan_dom_xss
+from framework.v2.scanner.browser import browser_usable, render_dom, scan_dom_xss
 
-pytestmark = pytest.mark.skipif(find_browser() is None, reason="no headless Chromium/Chrome installed")
+pytestmark = pytest.mark.skipif(
+    not browser_usable(),
+    reason="no WORKING headless Chromium/Chrome (a binary may be installed but unable to render here)")
 
 _VULN = b"""<html><body><div id="out"></div><script>
   var h = decodeURIComponent(location.hash.slice(1));

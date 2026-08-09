@@ -33,12 +33,34 @@ _BROWSERS = ("chromium", "chromium-browser", "google-chrome-stable", "google-chr
 
 
 def find_browser() -> str | None:
-    """Path to a usable headless Chromium/Chrome, or None."""
+    """Path to an INSTALLED headless Chromium/Chrome, or None. Installed is not the same as usable — see
+    :func:`browser_usable`."""
     for name in _BROWSERS:
         path = shutil.which(name)
         if path:
             return path
     return None
+
+
+_USABLE: bool | None = None
+
+
+def browser_usable(*, timeout: float = 25.0) -> bool:
+    """Whether a headless browser is not merely INSTALLED but actually able to render.
+
+    ``find_browser()`` only proves a binary is on PATH. A CI runner can ship Chrome that then fails to start
+    (container sandbox, missing shared libraries, no writable profile dir), so a browser-dependent test
+    guarded on ``find_browser() is None`` alone FAILS there instead of skipping — which is what happened the
+    first time the scanner suite was wired into CI. This does one bounded smoke render of a ``data:`` URL and
+    caches the answer for the process."""
+    global _USABLE
+    if _USABLE is None:
+        try:
+            dom = render_dom("data:text/html,<b id=probe>ok</b>", timeout=timeout, virtual_time_ms=0)
+        except Exception:          # noqa: BLE001 — a probe must never break collection; treat as unusable
+            dom = None
+        _USABLE = bool(dom and "probe" in dom)
+    return _USABLE
 
 
 def render_dom(
@@ -54,7 +76,9 @@ def render_dom(
     exe = browser or find_browser()
     if exe is None:
         return None
-    with tempfile.TemporaryDirectory(prefix="crucible-hb-") as profile:
+    # ignore_cleanup_errors: the browser can still be flushing its profile when we return, and a failed
+    # rmtree used to escape as OSError("Directory not empty") — a render helper must never raise at teardown.
+    with tempfile.TemporaryDirectory(prefix="crucible-hb-", ignore_cleanup_errors=True) as profile:
         cmd = [
             exe, "--headless=new", "--dump-dom",
             "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
