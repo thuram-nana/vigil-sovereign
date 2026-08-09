@@ -18,7 +18,7 @@ existing oracle_context, and the runtime only ever VERIFIES (signing is provisio
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 from vigil_core import ChainEntry, Signature, SignedChainHead
@@ -125,12 +125,66 @@ class EvidenceCertificate(BaseModel):
     # SignedEvidence (never in these deterministic signed bytes, so the cert stays byte-stable — the split
     # the posture certificate uses). A verifier holding the anchor refuses a FACT older than the TTL.
     freshness_ttl_seconds: int = 0
+    # ---- D2 (Wave #4): artifact identity + scope + freshness + completeness binding -----------------
+    # A posture FACT must prove WHICH artifact, of WHAT scope, captured WHEN, and whether the capture was
+    # COMPLETE — else a valid m-of-n signature could ride over an obsolete, partial, or unrelated artifact
+    # and still "verify". These OPTIONAL fields bind that provenance INTO the signed certificate, so the
+    # governance signature covers them (a flipped value breaks authenticity) and a verifier can decide
+    # freshness/scope for itself. Every field is dropped from the canonical form when empty (serializer
+    # below), so a certificate minted without any of them — and every existing evidence bundle — serialises
+    # BYTE-IDENTICALLY and keeps its signature valid. They are SURFACED by ``verify_certificate``
+    # (``bound_identity``) but do NOT gate ``.ok`` (an honest, non-gating binding is still tamper-evident
+    # once signed; a caller acts on the surfaced provenance itself).
+    artifact_sha256: str = ""          # sha256 of the primary artifact the finding is about
+    collector_id: str = ""             # which collector/sensor captured the evidence
+    collector_version: str = ""        # its content/version tag (stale-collector detection)
+    # {provider, account, project, subscription, cluster, region, resource} — only the keys that apply.
+    resource_scope: dict[str, str] | None = None
+    capture_time_epoch: int | None = Field(default=None, ge=0)  # unix seconds; caller/time-anchor supplied
+    capture_method: str = ""           # how it was captured, e.g. "api:list" / "http:probe"
+    requested_scope: str = ""          # the scope the collector was ASKED to cover
+    returned_scope: str = ""           # the scope the collector actually returned
+    completeness: str = ""             # "complete" | "partial" | "unknown"  (else "")
+    collector_signature: str = ""      # opaque collector-side signature over the raw capture, if any
+
+    # The additive D2 members whose empty value is dropped for byte-identity (canonical bytes sort keys, so
+    # order-independent — listed once here so the serializer and the ``bound_identity`` view agree).
+    _D2_FIELDS: ClassVar[tuple[str, ...]] = (
+        "artifact_sha256", "collector_id", "collector_version", "resource_scope",
+        "capture_time_epoch", "capture_method", "requested_scope", "returned_scope",
+        "completeness", "collector_signature",
+    )
+
+    @field_validator("completeness")
+    @classmethod
+    def _completeness_enum(cls, v: str) -> str:
+        allowed = {"", "complete", "partial", "unknown"}
+        if v not in allowed:
+            raise ValueError(f"completeness must be one of {sorted(allowed - {''})} or empty, got {v!r}")
+        return v
+
+    @field_validator("resource_scope")
+    @classmethod
+    def _scope_keys_allowlisted(cls, v: "dict[str, str] | None") -> "dict[str, str] | None":
+        # A schema allowlist so a hostile bundle cannot smuggle arbitrary signed key/values in under the
+        # guise of "scope"; values must be strings so the canonical bytes are deterministic.
+        if v is None:
+            return v
+        allowed = {"provider", "account", "project", "subscription", "cluster", "region", "resource"}
+        bad = set(v) - allowed
+        if bad:
+            raise ValueError(f"resource_scope keys must be within {sorted(allowed)}, got extra {sorted(bad)}")
+        for k, val in v.items():
+            if not isinstance(val, str):
+                raise ValueError(f"resource_scope[{k!r}] must be a string, got {type(val).__name__}")
+        return v
 
     @model_serializer(mode="wrap")
     def _ser(self, handler):
         """Drop the additive ``report_claims`` / ``oracle_version`` / ``how_to_verify`` / ``tool_version`` /
-        ``freshness_ttl_seconds`` members from the canonical form when empty, so a certificate built without
-        them hashes/signs exactly as before those fields existed (no existing evidence bundle changes bytes)."""
+        ``freshness_ttl_seconds`` members AND every empty D2 identity/scope/freshness/completeness member
+        from the canonical form when empty, so a certificate built without them hashes/signs exactly as
+        before those fields existed (no existing evidence bundle changes bytes)."""
         data = handler(self)
         if not data.get("report_claims"):
             data.pop("report_claims", None)
@@ -142,7 +196,21 @@ class EvidenceCertificate(BaseModel):
             data.pop("tool_version", None)
         if not data.get("freshness_ttl_seconds"):
             data.pop("freshness_ttl_seconds", None)
+        for k in self._D2_FIELDS:
+            if not data.get(k):        # None / "" / {} / 0 are all "absent" for canonical bytes
+                data.pop(k, None)
         return data
+
+    @property
+    def bound_identity(self) -> "dict[str, Any]":
+        """The non-empty D2 artifact-identity / scope / freshness / completeness fields bound into this
+        certificate. Surfaced by ``verify_certificate``; purely descriptive (never gates ``.ok``)."""
+        out: "dict[str, Any]" = {}
+        for k in self._D2_FIELDS:
+            val = getattr(self, k)
+            if val:
+                out[k] = val
+        return out
 
     @property
     def cert_digest(self) -> str:

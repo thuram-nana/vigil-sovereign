@@ -58,6 +58,16 @@ def build_certificate(
     evidence_root: Path | None = None,
     action_id: str | None = None,
     report_claims: "list[ReportClaim] | None" = None,
+    artifact_sha256: str = "",
+    collector_id: str = "",
+    collector_version: str = "",
+    resource_scope: "dict[str, str] | None" = None,
+    capture_time_epoch: int | None = None,
+    capture_method: str = "",
+    requested_scope: str = "",
+    returned_scope: str = "",
+    completeness: str = "",
+    collector_signature: str = "",
 ) -> EvidenceCertificate:
     """Build an (unsigned) certificate from a serialized finding carrying an
     `oracle_context`. If an evidence dir is given, its raw artifacts are manifested by
@@ -93,6 +103,19 @@ def build_certificate(
         # the external tool identity that produced the proposal, and a declared freshness/TTL policy.
         tool_version=str(finding.get("tool_version", "") or ""),
         freshness_ttl_seconds=int(finding.get("freshness_ttl_seconds", 0) or 0),
+        # D2 (Wave #4) artifact-identity / scope / freshness / completeness binding (dropped-when-empty →
+        # byte-identical when a caller passes none). capture_time_epoch is caller/time-anchor supplied; no
+        # wall-clock default is injected (that would break determinism/byte-identity).
+        artifact_sha256=artifact_sha256,
+        collector_id=collector_id,
+        collector_version=collector_version,
+        resource_scope=resource_scope,
+        capture_time_epoch=capture_time_epoch,
+        capture_method=capture_method,
+        requested_scope=requested_scope,
+        returned_scope=returned_scope,
+        completeness=completeness,
+        collector_signature=collector_signature,
     )
 
 
@@ -177,6 +200,10 @@ class EvidenceVerification(BaseModel):
     oracle_version_current: bool = True   # stamped oracle version == current (else: oracle body changed)
     currently_fresh: "bool | None" = None  # posture validity vs an authenticated time (None = not asserted)
     valid_signers: tuple[str, ...] = ()
+    # D2 (Wave #4): the non-empty artifact-identity / scope / freshness / completeness fields the certificate
+    # binds. SURFACED for the caller (freshness/scope decisions are the caller's) — it does NOT gate ``.ok``.
+    # Because these ride the signed certificate bytes, they are authentic whenever ``authentic`` is True.
+    bound_identity: dict = Field(default_factory=dict)
     reason: str = ""
 
     @property
@@ -313,15 +340,17 @@ def verify_certificate(
 
     authentic = thr.satisfied and tr_pinned
     schema_note = "" if schema_ok else f"; UNKNOWN schema_version {cert.schema_version} (refusing)"
+    bound_identity = cert.bound_identity
+    identity_note = (f"; identity: {sorted(bound_identity)}" if bound_identity else "; identity: none bound")
     reason = (f"signature: {thr.reason}; "
               f"binding: {'oracle_context matches digest' if bound else 'DIGEST MISMATCH — signature is for different evidence'}; "
               f"reproduction: {rr.note}; claims: {claims_note}"
-              f"{artifact_note}{tr_note}{schema_note}{ov_note}{fresh_note}")
+              f"{artifact_note}{tr_note}{schema_note}{ov_note}{fresh_note}{identity_note}")
     return EvidenceVerification(
         finding_ref=cert.finding_ref, authentic=authentic, bound=bound,
         artifacts_ok=artifacts_ok, reproduced=rr.ok, claims_grounded=claims_grounded,
         schema_ok=schema_ok, oracle_version_current=oracle_version_current, currently_fresh=currently_fresh,
-        valid_signers=thr.valid_signers, reason=reason)
+        valid_signers=thr.valid_signers, bound_identity=bound_identity, reason=reason)
 
 
 class PathVerification(BaseModel):

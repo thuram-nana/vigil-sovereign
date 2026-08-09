@@ -38,10 +38,16 @@ NOT re-fire the oracle. Re-executing a full deterministic oracle over a retained
 check that turns "the bytes are authentic and bound" into "the oracle is genuinely silent / genuinely
 fired" — is framework-specific (it needs the oracle bodies) and is the VIGIL verifier's job
 (``prove_driver.verify_prove_certificate`` / ``remediation_cert.verify_remediation_certificate`` /
-``attestation_log.verify_log``). THE ONE EXCEPTION is the posture RE-EXECUTABLE tier: the predicate oracle
-is a pure JSON-AST evaluator, so this file DOES re-derive those verdicts standalone (``_reexecute_posture``)
-— confirming the verdict is the correct function of the retained values, WITHOUT proving the values are
-live (that still needs a VIGIL re-run; see the posture section). Otherwise this file checks SIGNATURES,
+``attestation_log.verify_log``). THE EXCEPTION is the posture tier, whose oracles are pure, offline,
+deterministic functions of their retained ``oracle_context`` — so this file DOES re-fire them standalone,
+in TWO forms: (1) the predicate RE-EXECUTABLE probe kernel (a pure JSON-AST evaluator, ``_reexecute_posture``);
+and (2) L3 — a faithful VIGIL-FREE port of each of the SIX posture oracle bodies
+(``verify.oracles.{policy_path,k8s_posture,k8s_workload_posture,cloud_posture,mesh_posture,cicd_posture}_oracle``)
+as ``posture_*_fires`` + the ``reexecute_posture_oracle`` context reader (section 8b) — so a posture FACT's
+retained ``oracle_context`` re-fires with ZERO VIGIL import and yields the SAME fire/no-fire verdict (a
+byte-for-byte semantic-parity differential test pins each family to the in-tree oracle). Both forms confirm
+the verdict is the correct function of the retained values, WITHOUT proving the values are live (that still
+needs a VIGIL re-run; see the posture section). Otherwise this file checks SIGNATURES,
 BINDING, and STRUCTURE — authenticity, cross-binding, digest binding, chain, anti-rollback, quorum, and the
 median clock — all fully checkable standalone. A single flipped byte anywhere flips a standalone verdict to
 NOT SOUND.
@@ -73,10 +79,12 @@ import binascii
 import datetime
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
@@ -1107,6 +1115,391 @@ def verify_posture(posture: dict, *, pin: str, owner_pubkey: str, engagement: st
                  f"{n_binding} binding-only (re-firing those needs VIGIL)")
     return True, (f"SOUND: {s.get('n_closed', '?')} CLOSED / {s.get('n_open', '?')} OPEN / "
                   f"{s.get('n_unproven', '?')} UNPROVEN over {cert.get('target_sample')} — {tier_note}")
+
+
+# ---------------------------------------------------------------------------
+# 8b. L3 — VIGIL-FREE ports of the SIX posture ORACLE bodies + a canonical-context reader.
+#
+# Each ``posture_*_fires`` is a faithful, byte-for-byte-semantic port of the corresponding oracle in
+# ``framework.v2.verify.oracles`` (policy_path / k8s_posture / k8s_workload_posture / cloud_posture /
+# mesh_posture / cicd_posture). A posture FACT retains, under its ``oracle_context``, exactly the observed
+# control the oracle judges (``ctx["policy"]`` / ``ctx["k8s_control"]`` / … — see verify.adapter.from_* +
+# verifier._run_oracle's dispatch). ``reexecute_posture_oracle`` re-fires the right one over that context
+# with ZERO VIGIL import and returns the SAME fire/no-fire verdict the in-tree oracle would.
+#
+# These are the whole point of the L3 bar: a third party re-executes the posture check itself — not just the
+# signature/binding — without VIGIL. A byte-for-byte differential test (integration/tests/test_vf_differential
+# .py) pins every family to the in-tree oracle over both a FIRED and a HARDENED fixture.
+#
+# HONEST BOUND (identical to _reexecute_posture / the module header): the retained control is producer-
+# supplied. Re-firing proves the verdict is the correct FUNCTION of the retained evidence — it does NOT
+# prove the evidence reflects the live target (that still needs a VIGIL live re-run; and an OBSERVATION whose
+# truth does not rest on the producer's word needs a channel-bound live capture).
+# ---------------------------------------------------------------------------
+def _pp_coerce_text(value: Any) -> str:
+    """Byte-identical to oracles._coerce_text (the single text-coercion the posture oracles use)."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+# --- policy_path_oracle: an IAM grant PATH exists over the retained policy graph (BFS closure) -----------
+_PP_ACCESS_LEVEL: dict[str, int] = {
+    "list": 1, "read": 2, "get": 2, "describe": 2, "readonly": 2, "read_only": 2, "view": 2,
+    "write": 3, "put": 3, "modify": 3, "update": 3, "delete": 3, "create": 3,
+    "read_write": 3, "readwrite": 3,
+    "admin": 4, "owner": 4, "full": 4, "root": 4, "all": 4, "*": 4, "manage": 4,
+}
+
+
+def _pp_norm_id(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _pp_access_level(access: Any) -> int:
+    a = str(access or "").strip().lower().replace("-", "_")
+    if not a:
+        return 1
+    return _PP_ACCESS_LEVEL.get(a, 2)
+
+
+def _pp_access_grants(granted: Any, requested: Any) -> bool:
+    if not str(requested or "").strip():
+        return True
+    return _pp_access_level(granted) >= _pp_access_level(requested)
+
+
+def posture_policy_path_fires(observed_policy: Any) -> bool:
+    """Port of oracles.policy_path_oracle (fire iff a grant path exists). BFS from the query principal over
+    the assume/member_of closure; fire iff some reachable principal holds a grant over the resource whose
+    access dominates the requested access (empty access = any grant path). (Adjacency/grant SORTING in the
+    oracle only makes the reconstructed PATH deterministic — it never changes WHETHER a hit exists — so the
+    fired verdict is byte-identical without it.)"""
+    if not isinstance(observed_policy, Mapping):
+        return False
+    start = _pp_norm_id(observed_policy.get("principal"))
+    target = _pp_norm_id(observed_policy.get("resource"))
+    requested = str(observed_policy.get("access") or "").strip()
+    if not start or not target:
+        return False
+    adj: dict[str, list[str]] = {}
+    for rel_key in ("assume", "member_of"):
+        for e in observed_policy.get(rel_key) or []:
+            if not isinstance(e, Mapping):
+                continue
+            src, dst = _pp_norm_id(e.get("src")), _pp_norm_id(e.get("dst"))
+            if src and dst:
+                adj.setdefault(src, []).append(dst)
+    grants: dict[str, list[tuple[str, str]]] = {}
+    for g in observed_policy.get("grants") or []:
+        if not isinstance(g, Mapping):
+            continue
+        p, r = _pp_norm_id(g.get("principal")), _pp_norm_id(g.get("resource"))
+        if p and r:
+            grants.setdefault(p, []).append((r, str(g.get("access") or "")))
+    order = [start]
+    seen = {start}
+    i = 0
+    while i < len(order):
+        cur = order[i]
+        i += 1
+        for res, acc in grants.get(cur, ()):
+            if res == target and _pp_access_grants(acc, requested):
+                return True
+        for nxt in adj.get(cur, ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                order.append(nxt)
+    return False
+
+
+# --- k8s_posture_oracle: a kube-bench control hard-FAILED with a concrete insecure --flag ---------------
+_PP_K8S_VALUE_CAP = 8192
+_PP_INSECURE_SETTING_RULES: tuple["re.Pattern[str]", ...] = (
+    re.compile(r"(?i)--anonymous-auth[=:\s]+true\b"),
+    re.compile(r"(?i)--authorization-mode[=:\s]+\S*alwaysallow"),
+    re.compile(r"(?i)--insecure-port[=:\s]+0*[1-9]\d*"),
+    re.compile(r"(?i)--read-only-port[=:\s]+0*[1-9]\d*"),
+    re.compile(r"(?i)--basic-auth-file[=:\s]+\S+"),
+    re.compile(r"(?i)--token-auth-file[=:\s]+\S+"),
+    re.compile(r"(?i)--client-cert-auth[=:\s]+false\b"),
+    re.compile(r"(?i)--profiling[=:\s]+true\b"),
+)
+
+
+def posture_k8s_fires(observed_control: Any) -> bool:
+    """Port of oracles.k8s_posture_oracle: fire iff status is a hard FAIL AND the retained actual_value
+    literally carries a recognised dangerous flag. WARN/PASS/INFO, an empty value, or a value showing the
+    SECURE setting all do not fire."""
+    if not isinstance(observed_control, Mapping):
+        return False
+    status = _pp_coerce_text(observed_control.get("status")).strip().upper()
+    actual = _pp_coerce_text(observed_control.get("actual_value"))[:_PP_K8S_VALUE_CAP]
+    if status != "FAIL" or not actual.strip():
+        return False
+    return any(pattern.search(actual) is not None for pattern in _PP_INSECURE_SETTING_RULES)
+
+
+# --- k8s_workload_posture_oracle: an anonymous subject bound to a dangerous built-in ClusterRole --------
+_PP_K8S_WL_STR_CAP = 4096
+_PP_K8S_ANON_SUBJECTS = frozenset({"system:anonymous", "system:unauthenticated"})
+_PP_K8S_DANGEROUS_ROLES = frozenset({"cluster-admin", "admin", "edit"})
+
+
+def _pp_k8s_norm(value: Any) -> str:
+    return _pp_coerce_text(value)[:_PP_K8S_WL_STR_CAP].strip().lower()
+
+
+def posture_k8s_workload_fires(observed_control: Any) -> bool:
+    """Port of oracles.k8s_workload_posture_oracle: fire iff a subject is system:anonymous /
+    system:unauthenticated AND the bound role is a dangerous built-in ClusterRole (cluster-admin / admin /
+    edit) in the RBAC apiGroup (a non-ClusterRole kind or non-RBAC apiGroup is rejected; empty is tolerated
+    for hand-authored evidence)."""
+    if not isinstance(observed_control, Mapping):
+        return False
+    ctl = observed_control
+    state = ctl.get("achieved_state") if isinstance(ctl.get("achieved_state"), Mapping) else ctl
+    raw_subjects = state.get("subjects")
+    subjects = raw_subjects if isinstance(raw_subjects, (list, tuple)) else []
+    role = _pp_k8s_norm(state.get("role"))
+    role_kind = _pp_k8s_norm(state.get("role_kind"))
+    role_apigroup = _pp_k8s_norm(state.get("role_apigroup"))
+    anon = any(_pp_k8s_norm(s) in _PP_K8S_ANON_SUBJECTS for s in subjects)
+    dangerous = (role in _PP_K8S_DANGEROUS_ROLES
+                 and role_kind in ("clusterrole", "")
+                 and role_apigroup in ("rbac.authorization.k8s.io", ""))
+    return bool(anon and dangerous)
+
+
+# --- cloud_posture_oracle: encryption-at-rest-disabled / public-exposure / wildcard-principal -----------
+_PP_CLOUD_STR_CAP = 4096
+_PP_CLOUD_MAX_PRINCIPALS = 4096
+_PP_CLOUD_COMPLIANT_STATUSES = frozenset({
+    "pass", "passed", "ok", "compliant", "pass_manual", "info", "informational", "not_applicable",
+    "na", "n/a", "skipped", "manual",
+})
+_PP_CLOUD_ANON_PRINCIPALS = frozenset({
+    "*", "allusers", "anonymous", "public", "everyone", "authenticatedusers", "allauthenticatedusers",
+    "principal:*", "arn:aws:iam::*:root", "**",
+})
+
+
+def _pp_cloud_tri_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes", "on", "enabled", "enable"):
+            return True
+        if v in ("false", "0", "no", "off", "disabled", "disable"):
+            return False
+    return None
+
+
+def _pp_cloud_norm_principal(p: Any) -> str:
+    return _pp_coerce_text(p)[:_PP_CLOUD_STR_CAP].strip().lower().replace("-", "").replace("_", "")
+
+
+def _pp_cloud_is_anon_principal(p: Any) -> bool:
+    norm = _pp_cloud_norm_principal(p)
+    return norm in {a.replace("-", "").replace("_", "") for a in _PP_CLOUD_ANON_PRINCIPALS}
+
+
+def _pp_cloud_achieved_state(control: Mapping[str, Any]) -> dict[str, Any]:
+    src = control.get("achieved_state") if isinstance(control.get("achieved_state"), Mapping) else control
+    principals: list[str] = []
+    raw_principals = src.get("principals")
+    if isinstance(raw_principals, (list, tuple)):
+        principals.extend(_pp_coerce_text(p) for p in raw_principals[:_PP_CLOUD_MAX_PRINCIPALS])
+    grants = src.get("grants")
+    if isinstance(grants, (list, tuple)):
+        for g in grants[:_PP_CLOUD_MAX_PRINCIPALS]:
+            if isinstance(g, Mapping) and g.get("principal") is not None:
+                principals.append(_pp_coerce_text(g.get("principal")))
+    return {
+        "encrypted": _pp_cloud_tri_bool(src.get("encrypted")),
+        "public": _pp_cloud_tri_bool(src.get("public")),
+        "sensitive": _pp_cloud_tri_bool(src.get("sensitive")),
+        "principals": principals,
+    }
+
+
+def posture_cloud_fires(observed_control: Any) -> bool:
+    """Port of oracles.cloud_posture_oracle (fixed rule order): an EXPLICIT compliant status never fires;
+    otherwise fire iff (1) encrypted is explicitly false AND sensitive is explicitly true, OR (2) public is
+    explicitly true, OR (3) a wildcard/anonymous principal is named in the retained policy. Absent/unknown
+    flags never fire."""
+    if not isinstance(observed_control, Mapping):
+        return False
+    status = _pp_coerce_text(observed_control.get("status")).strip().lower()
+    if status in _PP_CLOUD_COMPLIANT_STATUSES:
+        return False
+    state = _pp_cloud_achieved_state(observed_control)
+    if state["encrypted"] is False and state["sensitive"] is True:
+        return True
+    if state["public"] is True:
+        return True
+    return any(_pp_cloud_is_anon_principal(p) for p in state["principals"])
+
+
+# --- mesh_posture_oracle: permissive-mtls / authz-allow-all / linkerd-unauthenticated -------------------
+_PP_MESH_STR_CAP = 4096
+_PP_MESH_MAX_RULES = 4096
+_PP_MESH_PERMISSIVE_MTLS = frozenset({"permissive", "disable"})
+_PP_MESH_UNAUTH_INBOUND = frozenset({"all-unauthenticated", "all_unauthenticated"})
+_PP_MESH_ANON_PRINCIPALS = frozenset({"*"})
+_PP_MESH_COMPLIANT_STATUSES = frozenset({
+    "pass", "passed", "ok", "compliant", "info", "informational", "not_applicable",
+    "na", "n/a", "skipped", "manual",
+})
+
+
+def _pp_mesh_authz_allows_all(action: Any, rules: Any) -> bool:
+    """Port of oracles._mesh_authz_allows_all (the boolean half). ALLOW/unset action AND a rule matching
+    everyone: an empty catch-all rule, or a `*` PEER principal in a from.source.principals clause
+    (requestPrincipals `*` is deliberately NOT allow-all — it requires a valid JWT)."""
+    act = _pp_coerce_text(action).strip().upper() or "ALLOW"
+    if act != "ALLOW":
+        return False
+    if not isinstance(rules, (list, tuple)):
+        return False
+    for rule in list(rules)[:_PP_MESH_MAX_RULES]:
+        if not isinstance(rule, Mapping):
+            continue
+        froms, tos, whens = rule.get("from"), rule.get("to"), rule.get("when")
+        if not froms and not tos and not whens:
+            return True
+        if isinstance(froms, (list, tuple)):
+            for f in froms:
+                if not isinstance(f, Mapping):
+                    continue
+                src = f.get("source")
+                if not isinstance(src, Mapping):
+                    continue
+                vals = src.get("principals")
+                if isinstance(vals, (list, tuple)) and any(
+                        _pp_coerce_text(v).strip() in _PP_MESH_ANON_PRINCIPALS for v in vals):
+                    return True
+    return False
+
+
+def posture_mesh_fires(observed_control: Any) -> bool:
+    """Port of oracles.mesh_posture_oracle (fixed rule order): an EXPLICIT compliant status never fires;
+    otherwise fire iff (1) effective mTLS mode is PERMISSIVE/DISABLE, OR (2) an ALLOW AuthorizationPolicy
+    admits every caller, OR (3) a Linkerd default-inbound-policy is all-unauthenticated."""
+    if not isinstance(observed_control, Mapping):
+        return False
+    ctl = observed_control
+    status = _pp_coerce_text(ctl.get("status")).strip().lower()
+    if status in _PP_MESH_COMPLIANT_STATUSES:
+        return False
+    mtls_mode = _pp_coerce_text(ctl.get("mtls_mode")).strip().lower()
+    if mtls_mode in _PP_MESH_PERMISSIVE_MTLS:
+        return True
+    if _pp_mesh_authz_allows_all(ctl.get("action"), ctl.get("rules")):
+        return True
+    inbound = _pp_coerce_text(ctl.get("default_inbound_policy") or ctl.get("inbound_policy")).strip().lower()
+    return inbound in _PP_MESH_UNAUTH_INBOUND
+
+
+# --- cicd_posture_oracle: unpinned-action / pwn-request / script-injection ------------------------------
+_PP_CICD_VALUE_CAP = 8192
+_PP_SHA40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_PP_CICD_FIRST_PARTY = frozenset({"actions", "github"})
+_PP_ACTION_REF_RE = re.compile(r"^([^/@\s]+)/([^@\s]+)@(\S+)$")
+_PP_QUOTED_LIT_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_PP_UNTRUSTED_CTX_RES: tuple["re.Pattern[str]", ...] = tuple(re.compile(p, re.I) for p in (
+    r"(?<![\w.])github\.head_ref(?![\w.])",
+    r"(?<![\w.])github\.event\.issue\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.pull_request\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.pull_request\.head\.(?:ref|label)(?![\w.])",
+    r"(?<![\w.])github\.event\.comment\.body(?![\w.])",
+    r"(?<![\w.])github\.event\.(?:review|review_comment)\.body(?![\w.])",
+    r"(?<![\w.])github\.event\.discussion\.(?:title|body)(?![\w.])",
+    r"(?<![\w.])github\.event\.head_commit\.(?:message|author\.(?:name|email))(?![\w.])",
+    r"(?<![\w.])github\.event\.commits(?:\[[^\]]*\]|\.\*)?\.(?:message|author\.(?:name|email))(?![\w.])",
+    r"(?<![\w.])github\.event\.pages(?:\[[^\]]*\]|\.\*)?\.page_name(?![\w.])",
+))
+_PP_UNTRUSTED_PR_CHECKOUT_RE = re.compile(
+    r"(?i)(github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref|refs/pull/)")
+_PP_INTERP_RE = re.compile(r"\$\{\{(.+?)\}\}", re.S)
+
+
+def posture_cicd_fires(observed_control: Any) -> bool:
+    """Port of oracles.cicd_posture_oracle: fire per the retained ``rule`` — unpinned_action (a third-party
+    owner/repo@ref pinned to a MUTABLE ref, i.e. not SHA-40, not first-party/local/docker), pwn_request
+    (pull_request_target checking out the UNTRUSTED PR head), or script_injection (a `run:` body
+    interpolating an untrusted github.event.* / github.head_ref expression, quoted literals stripped). An
+    unrecognised rule never fires."""
+    if not isinstance(observed_control, Mapping):
+        return False
+    ctl = observed_control
+    rule = _pp_coerce_text(ctl.get("rule")).strip().lower()
+
+    if rule == "unpinned_action":
+        uses = _pp_coerce_text(ctl.get("uses"))[:_PP_CICD_VALUE_CAP].strip()
+        m = _PP_ACTION_REF_RE.match(uses)
+        if m is None:
+            return False
+        owner, ref = m.group(1), m.group(3)
+        if owner.lower() in _PP_CICD_FIRST_PARTY or uses.startswith("./") or uses.startswith("docker://"):
+            return False
+        if _PP_SHA40_RE.match(ref):
+            return False
+        return True
+
+    if rule == "pwn_request":
+        trigger = _pp_coerce_text(ctl.get("trigger")).strip().lower()
+        checkout = _pp_coerce_text(ctl.get("checkout_ref"))[:_PP_CICD_VALUE_CAP]
+        if trigger != "pull_request_target":
+            return False
+        return _PP_UNTRUSTED_PR_CHECKOUT_RE.search(checkout) is not None
+
+    if rule == "script_injection":
+        run = _pp_coerce_text(ctl.get("run"))[:_PP_CICD_VALUE_CAP]
+        for m in _PP_INTERP_RE.finditer(run):
+            body = _PP_QUOTED_LIT_RE.sub(" ", m.group(1))   # a quoted literal never dereferences a context
+            if any(rx.search(body) is not None for rx in _PP_UNTRUSTED_CTX_RES):
+                return True
+        return False
+
+    return False
+
+
+# --- the canonical-context reader: dispatch a posture oracle_context to its ported oracle ----------------
+# (surface_key -> ported oracle, kind label). Mirrors verifier._run_oracle's posture dispatch: a posture
+# FACT retains exactly ONE of these keys (the observed control the oracle judges). First present wins.
+_POSTURE_ORACLE_DISPATCH: tuple[tuple[str, Any, str], ...] = (
+    ("policy", posture_policy_path_fires, "policy_path"),
+    ("k8s_control", posture_k8s_fires, "k8s_posture"),
+    ("k8s_workload_control", posture_k8s_workload_fires, "k8s_workload_posture"),
+    ("cloud_control", posture_cloud_fires, "cloud_posture"),
+    ("mesh_control", posture_mesh_fires, "mesh_posture"),
+    ("cicd_control", posture_cicd_fires, "cicd_posture"),
+)
+
+
+def reexecute_posture_oracle(oracle_context: Any) -> tuple[Optional[bool], str]:
+    """VIGIL-FREE re-execution of a posture FACT's ``oracle_context``. Reads the canonical retained context
+    (as produced by verify.adapter.FindingContext.to_verifier_context), picks the first present posture key,
+    re-fires the ported standalone oracle over its retained observed control, and returns (fired, kind).
+    Returns (None, "") when the context carries no posture key (nothing to re-fire standalone).
+
+    This is the L3 bar: a third party re-executes the posture CHECK itself, ZERO VIGIL import, and gets the
+    same fire/no-fire verdict the in-tree oracle would. HONEST BOUND: the retained values are producer-
+    supplied — this proves the verdict↔evidence binding, NOT that the evidence is live (needs a live re-run)."""
+    if not isinstance(oracle_context, Mapping):
+        return None, ""
+    for key, fn, kind in _POSTURE_ORACLE_DISPATCH:
+        if key in oracle_context:
+            return bool(fn(oracle_context[key])), kind
+    return None, ""
 
 
 # ---------------------------------------------------------------------------

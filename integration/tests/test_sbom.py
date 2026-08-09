@@ -88,7 +88,7 @@ def _signers_and_trust():
 
 @pytest.mark.parametrize("ecosystem,manifest,pkg,vulnerable", [
     ("PyPI", "pyyaml==5.3.1\n", "pyyaml", True),          # < 5.4 → in affected range → FACT
-    ("PyPI", "pyyaml==6.0\n", "pyyaml", False),           # >= 5.4 → out of range → NO fact (refuted)
+    ("PyPI", "pyyaml==6.0\n", "pyyaml", False),           # >= 5.4 → out of range → INCONCLUSIVE (not CLEAN)
     ("npm", '{"packages":{"node_modules/lodash":{"version":"4.17.20"}}}', "lodash", True),   # <4.17.21
     ("npm", '{"packages":{"node_modules/lodash":{"version":"4.17.21"}}}', "lodash", False),  # patched
 ])
@@ -106,9 +106,23 @@ def test_sbom_mints_a_fact_only_when_the_version_is_provably_in_range(ecosystem,
         ctx = res.contexts[f.finding_ref]
         # the FACT re-verifies offline end-to-end (authentic + bound + reproduced)
         assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+        # the admission path attributed the FACT to the ONE clean_capable:false branch
+        assert res.admissions and all(a[0] == "version_range.manifest_membership" for a in res.admissions)
+        assert any(a[1] == "FACT" for a in res.admissions)
+        assert res.family_verdict() == "FACT"
     else:
-        # the advisory EXISTS for this package, but VIGIL's version re-derivation REFUTES it → no FACT
+        # BLOCKER-1: the advisory EXISTS for this package, but VIGIL's version re-derivation REFUTES it. The
+        # version_range branch is clean_capable:false, so this must be INCONCLUSIVE — NOT a FACT, NOT CLEAN,
+        # NOT a lead labelled clean. This is exactly the Outcome.CLEAN escape the admission migration closes.
         assert res.n_facts == 0, f"a patched/out-of-range version must NOT mint a FACT: {res.facts}"
+        assert res.inconclusive, "an out-of-range match must be recorded as INCONCLUSIVE, not silently dropped"
+        assert all(r.outcome == "inconclusive" for r in res.inconclusive)
+        # no result anywhere carries a CLEAN outcome, and the family verdict is INCONCLUSIVE (not CLEAN)
+        all_results = res.facts + res.leads + res.inconclusive
+        assert all(r.outcome != "clean" for r in all_results), "a clean_capable:false branch leaked CLEAN"
+        assert res.family_verdict() == "INCONCLUSIVE"
+        # the admission audit trail shows the demotion happened at admission, not silently
+        assert res.admissions and all(a[1] == "INCONCLUSIVE" for a in res.admissions)
 
 
 def test_sbom_no_advisory_no_fact():
@@ -116,10 +130,61 @@ def test_sbom_no_advisory_no_fact():
     from vigil_integration.live.sbom import sbom_verify
     osv = load_osv_snapshot(_OSV_PATH)
     signers, _ = _signers_and_trust()
-    # a package not in the snapshot → nothing to adjudicate → no fact, no lead
+    # a package not in the snapshot → nothing to adjudicate → no fact, no lead, no inconclusive, no admission
     res = sbom_verify("cryptography==42.0.0\n", ecosystem="PyPI", osv=osv, engagement_slug="acme",
                       signers=signers)
-    assert res.n_facts == 0 and res.leads == [] and res.packages == 1
+    assert res.n_facts == 0 and res.leads == [] and res.inconclusive == [] and res.packages == 1
+    assert res.admissions == []               # nothing was adjudicated at all
+    assert res.family_verdict() == "INCONCLUSIVE"   # nothing examined != CLEAN
+
+
+def test_sbom_malformed_manifest_is_inconclusive_never_clean():
+    """A malformed lockfile parses to zero concrete versions → nothing is adjudicated. The family verdict is
+    INCONCLUSIVE (nothing examined), NEVER CLEAN — a manifest VIGIL could not parse is not a clean bill of
+    health. No FACT, no lead, and no CLEAN can appear."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    from vigil_integration.live.sbom import sbom_verify
+    osv = load_osv_snapshot(_OSV_PATH)
+    signers, _ = _signers_and_trust()
+    res = sbom_verify('{"packages":{', ecosystem="npm", osv=osv, engagement_slug="acme", signers=signers)
+    assert res.packages == 0            # the malformed JSON yielded no concrete (package, version) pairs
+    assert res.n_facts == 0 and res.leads == [] and res.inconclusive == []
+    assert res.family_verdict() == "INCONCLUSIVE"
+    assert not any(getattr(r, "outcome", "") == "clean" for r in (res.facts + res.leads + res.inconclusive))
+
+
+def test_sbom_uses_the_admission_path(monkeypatch):
+    """The admission path IS used: sbom_verify reaches a certificate ONLY through
+    ``oracle_adapter.certify_admitted`` with an :class:`AdmittedVerdict` produced by ``verdict.admit`` — never
+    by calling ``confirm_and_certify`` directly. We spy on ``certify_admitted`` (sbom imports it function-
+    locally, so patching the module attribute is honoured at call time) and assert every mint was gated by a
+    genuine AdmittedVerdict for the one registered branch."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    import vigil_integration.oracle_adapter as oa
+    from vigil_integration.live.sbom import sbom_verify
+    from vigil_integration.live.verdict import AdmittedVerdict
+
+    seen: list = []
+    real = oa.certify_admitted
+
+    def _spy(finding, admitted, **kw):
+        assert isinstance(admitted, AdmittedVerdict), "sbom reached minting WITHOUT an admitted verdict"
+        assert admitted.branch == "version_range.manifest_membership"
+        assert kw.get("provenance") == "reproduced"
+        seen.append(admitted.verdict.value)
+        return real(finding, admitted, **kw)
+
+    monkeypatch.setattr(oa, "certify_admitted", _spy)
+    osv = load_osv_snapshot(_OSV_PATH)
+    signers, tr = _signers_and_trust()
+    res = sbom_verify("pyyaml==5.3.1\n", ecosystem="PyPI", osv=osv, engagement_slug="acme", signers=signers)
+    assert seen, "certify_admitted was never called — the admission path was bypassed"
+    assert "FACT" in seen and res.n_facts >= 1
+
+    # and the minted FACT still re-verifies offline end-to-end (the migration did not weaken the proof)
+    from framework.v2.evidence.certify import verify_certificate
+    f = res.facts[0]
+    assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok is True
 
 
 def test_sbom_unsupported_ecosystem_is_honest():

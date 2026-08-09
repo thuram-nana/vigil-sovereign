@@ -61,6 +61,11 @@ from vigil_integration.remediation.prove_driver import (
     prove_remediation, verify_prove_certificate,
 )
 
+# L3 posture re-execution: the in-tree oracle bodies + the canonical context builder, for the
+# byte-for-byte semantic-parity differential against verify_vf's VIGIL-free posture-oracle ports.
+from framework.v2.verify import oracles as posture_oracles
+from framework.v2.verify.adapter import FindingContext as PostureFC
+
 # --- load the STANDALONE verifier. Importing it in-process (offense venv) is legitimate: verify_vf imports
 #     ONLY stdlib + cryptography, so loading it pulls in no VIGIL code (the --prove-standalone subprocess
 #     below proves the stronger property that no VIGIL module is even importable in a clean interpreter). ---
@@ -713,6 +718,179 @@ def test_prove_standalone_subprocess_validates_and_rejects(tmp_path):
          "--trust-root", str(tr), "--witness-trust-root", str(wtr), "--fingerprint", "sha256:" + "0" * 64],
         cwd=str(neutral), env=_clean_env(), capture_output=True, text=True, timeout=180)
     assert wrongpin.returncode == 2 and "MISMATCH" in wrongpin.stdout, wrongpin.stdout
+
+
+# ===================================================================================================
+# 5b. L3 posture-ORACLE re-execution — the STANDALONE verify_vf ports re-fire each of the six posture
+#     oracles over the SAME retained oracle_context and agree with the in-tree oracle byte-for-byte on
+#     fire/no-fire, for a FIRED fixture and a HARDENED fixture per family (plus edge cases). This is the
+#     L3 bar: a third party re-executes the posture CHECK itself — not just the signature/binding — with
+#     ZERO VIGIL import. The in-tree side builds the canonical context via the real adapter (from_*) and
+#     runs the real oracle; the standalone side runs verify_vf.reexecute_posture_oracle over the same ctx.
+# ===================================================================================================
+# each row: (family, case, from_*-builder name, ctx key, in-tree oracle, expected-kind label, control).
+_POSTURE_CASES: list[tuple[str, str, str, str, object, str, dict]] = [
+    # -- policy_path: an IAM grant path exists over the retained policy graph --------------------------
+    ("policy_path", "grant via assume closure (fires)", "from_policy_graph", "policy",
+     posture_oracles.policy_path_oracle, "policy_path",
+     {"principal": "role/dev", "resource": "s3/customer-data", "access": "read",
+      "grants": [{"principal": "role/admin", "resource": "s3/customer-data", "access": "read"}],
+      "assume": [{"src": "role/dev", "dst": "role/admin"}]}),
+    ("policy_path", "requested access dominates grant (hardened)", "from_policy_graph", "policy",
+     posture_oracles.policy_path_oracle, "policy_path",
+     {"principal": "role/dev", "resource": "s3/customer-data", "access": "write",
+      "grants": [{"principal": "role/admin", "resource": "s3/customer-data", "access": "read"}],
+      "assume": [{"src": "role/dev", "dst": "role/admin"}]}),
+    ("policy_path", "no path to resource (hardened)", "from_policy_graph", "policy",
+     posture_oracles.policy_path_oracle, "policy_path",
+     {"principal": "role/dev", "resource": "s3/customer-data",
+      "grants": [{"principal": "role/admin", "resource": "s3/other", "access": "read"}],
+      "member_of": [{"src": "role/dev", "dst": "group/eng"}]}),
+    # -- k8s_posture: a kube-bench control hard-FAILED with a concrete insecure --flag ----------------
+    ("k8s_posture", "FAIL + --anonymous-auth=true (fires)", "from_k8s_posture", "k8s_control",
+     posture_oracles.k8s_posture_oracle, "k8s_posture",
+     {"check_id": "1.2.1", "status": "FAIL",
+      "actual_value": "kube-apiserver --anonymous-auth=true --authorization-mode=RBAC"}),
+    ("k8s_posture", "FAIL but secure value (hardened)", "from_k8s_posture", "k8s_control",
+     posture_oracles.k8s_posture_oracle, "k8s_posture",
+     {"check_id": "1.2.1", "status": "FAIL", "actual_value": "kube-apiserver --anonymous-auth=false"}),
+    ("k8s_posture", "WARN never fires (hardened)", "from_k8s_posture", "k8s_control",
+     posture_oracles.k8s_posture_oracle, "k8s_posture",
+     {"check_id": "1.2.1", "status": "WARN", "actual_value": "--anonymous-auth=true"}),
+    # -- k8s_workload_posture: anonymous subject bound to a dangerous built-in ClusterRole ------------
+    ("k8s_workload_posture", "anonymous -> cluster-admin (fires)", "from_k8s_workload_control",
+     "k8s_workload_control", posture_oracles.k8s_workload_posture_oracle, "k8s_workload_posture",
+     {"check_id": "crb/pwn", "resource_kind": "clusterrolebinding",
+      "achieved_state": {"subjects": ["system:unauthenticated", "alice"], "role": "cluster-admin",
+                         "role_kind": "ClusterRole", "role_apigroup": "rbac.authorization.k8s.io"}}),
+    ("k8s_workload_posture", "anonymous -> view role (hardened)", "from_k8s_workload_control",
+     "k8s_workload_control", posture_oracles.k8s_workload_posture_oracle, "k8s_workload_posture",
+     {"check_id": "crb/pubinfo",
+      "achieved_state": {"subjects": ["system:unauthenticated"], "role": "system:public-info-viewer",
+                         "role_kind": "ClusterRole"}}),
+    ("k8s_workload_posture", "named user -> cluster-admin (hardened)", "from_k8s_workload_control",
+     "k8s_workload_control", posture_oracles.k8s_workload_posture_oracle, "k8s_workload_posture",
+     {"check_id": "crb/ops",
+      "achieved_state": {"subjects": ["ops-team"], "role": "cluster-admin", "role_kind": "ClusterRole"}}),
+    # -- cloud_posture: encryption-at-rest-disabled / public-exposure / wildcard-principal ------------
+    ("cloud_posture", "encryption-at-rest disabled on sensitive (fires)", "from_cloud_control",
+     "cloud_control", posture_oracles.cloud_posture_oracle, "cloud_posture",
+     {"resource_id": "acme-secrets", "provider": "aws",
+      "achieved_state": {"encrypted": False, "sensitive": True, "public": False}}),
+    ("cloud_posture", "public exposure (fires)", "from_cloud_control", "cloud_control",
+     posture_oracles.cloud_posture_oracle, "cloud_posture",
+     {"resource_id": "acme-cdn", "achieved_state": {"public": True, "encrypted": True}}),
+    ("cloud_posture", "wildcard principal in grants (fires)", "from_cloud_control", "cloud_control",
+     posture_oracles.cloud_posture_oracle, "cloud_posture",
+     {"id": "acme-bucket", "grants": [{"principal": "*", "access": "read"}]}),
+    ("cloud_posture", "encrypted + compliant status (hardened)", "from_cloud_control", "cloud_control",
+     posture_oracles.cloud_posture_oracle, "cloud_posture",
+     {"resource_id": "acme-secrets", "status": "PASS",
+      "achieved_state": {"encrypted": True, "sensitive": True, "public": False}}),
+    ("cloud_posture", "encryption unknown (absent) never fires (hardened)", "from_cloud_control",
+     "cloud_control", posture_oracles.cloud_posture_oracle, "cloud_posture",
+     {"resource_id": "acme-x", "achieved_state": {"sensitive": True}}),
+    # -- mesh_posture: permissive-mtls / authz-allow-all / linkerd-unauthenticated --------------------
+    ("mesh_posture", "PeerAuthentication PERMISSIVE (fires)", "from_mesh_control", "mesh_control",
+     posture_oracles.mesh_posture_oracle, "mesh_posture",
+     {"resource_kind": "PeerAuthentication", "name": "default", "namespace": "istio-system",
+      "scope": "mesh", "mtls_mode": "PERMISSIVE"}),
+    ("mesh_posture", "AuthorizationPolicy empty catch-all ALLOW (fires)", "from_mesh_control",
+     "mesh_control", posture_oracles.mesh_posture_oracle, "mesh_posture",
+     {"resource_kind": "AuthorizationPolicy", "name": "ns-allow", "namespace": "prod",
+      "action": "ALLOW", "rules": [{}]}),
+    ("mesh_posture", "Linkerd all-unauthenticated inbound (fires)", "from_mesh_control", "mesh_control",
+     posture_oracles.mesh_posture_oracle, "mesh_posture",
+     {"resource_kind": "Server", "name": "web", "namespace": "prod",
+      "default_inbound_policy": "all-unauthenticated"}),
+    ("mesh_posture", "PeerAuthentication STRICT (hardened)", "from_mesh_control", "mesh_control",
+     posture_oracles.mesh_posture_oracle, "mesh_posture",
+     {"resource_kind": "PeerAuthentication", "name": "default", "scope": "mesh", "mtls_mode": "STRICT"}),
+    ("mesh_posture", "AuthorizationPolicy requestPrincipals '*' is JWT-gated (hardened)",
+     "from_mesh_control", "mesh_control", posture_oracles.mesh_posture_oracle, "mesh_posture",
+     {"resource_kind": "AuthorizationPolicy", "name": "jwt", "action": "ALLOW",
+      "rules": [{"from": [{"source": {"requestPrincipals": ["*"]}}]}]}),
+    # -- cicd_posture: unpinned-action / pwn-request / script-injection -------------------------------
+    ("cicd_posture", "third-party action mutable ref (fires)", "from_cicd_control", "cicd_control",
+     posture_oracles.cicd_posture_oracle, "cicd_posture",
+     {"rule": "unpinned_action", "workflow": "ci.yml", "job": "build", "uses": "evilorg/act@v1"}),
+    ("cicd_posture", "pwn-request checks out PR head (fires)", "from_cicd_control", "cicd_control",
+     posture_oracles.cicd_posture_oracle, "cicd_posture",
+     {"rule": "pwn_request", "workflow": "ci.yml", "trigger": "pull_request_target",
+      "checkout_ref": "github.event.pull_request.head.sha"}),
+    ("cicd_posture", "script-injection untrusted interpolation (fires)", "from_cicd_control",
+     "cicd_control", posture_oracles.cicd_posture_oracle, "cicd_posture",
+     {"rule": "script_injection", "workflow": "ci.yml",
+      "run": "echo building ${{ github.event.issue.title }}"}),
+    ("cicd_posture", "SHA-pinned action (hardened)", "from_cicd_control", "cicd_control",
+     posture_oracles.cicd_posture_oracle, "cicd_posture",
+     {"rule": "unpinned_action", "workflow": "ci.yml",
+      "uses": "evilorg/act@ffffffffffffffffffffffffffffffffffffffff"}),
+    ("cicd_posture", "first-party action never fires (hardened)", "from_cicd_control", "cicd_control",
+     posture_oracles.cicd_posture_oracle, "cicd_posture",
+     {"rule": "unpinned_action", "workflow": "ci.yml", "uses": "actions/checkout@v4"}),
+    ("cicd_posture", "plain pull_request base checkout (hardened)", "from_cicd_control", "cicd_control",
+     posture_oracles.cicd_posture_oracle, "cicd_posture",
+     {"rule": "pwn_request", "workflow": "ci.yml", "trigger": "pull_request",
+      "checkout_ref": "github.event.pull_request.base.sha"}),
+    ("cicd_posture", "run with only quoted-literal ${{ }} (hardened)", "from_cicd_control",
+     "cicd_control", posture_oracles.cicd_posture_oracle, "cicd_posture",
+     {"rule": "script_injection", "workflow": "ci.yml",
+      "run": "echo ${{ 'github.event.issue.title' }}"}),
+]
+
+
+@pytest.mark.parametrize("family,case,builder,key,oracle,exp_kind,control",
+                         _POSTURE_CASES,
+                         ids=[f"{c[0]}:{c[1]}" for c in _POSTURE_CASES])
+def test_posture_oracle_reexecution_agrees(family, case, builder, key, oracle, exp_kind, control):
+    """The VIGIL-FREE verify_vf posture-oracle port re-fires the SAME retained oracle_context and yields
+    the IDENTICAL fire/no-fire verdict as the in-tree oracle — byte-for-byte semantic parity, the L3 bar."""
+    # canonical retained context, built by the REAL adapter (from_*) exactly as a posture FACT retains it.
+    ctx = getattr(PostureFC, builder)(control).to_verifier_context()
+    assert key in ctx, f"adapter did not retain the {key!r} context for {family}"
+
+    # in-tree side: the real oracle over the retained observed control.
+    vigil_fired = bool(oracle(ctx[key]).fired)
+
+    # standalone side (a): the canonical-context reader dispatches to the right ported oracle.
+    standalone_fired, kind = VF.reexecute_posture_oracle(ctx)
+    assert kind == exp_kind, f"reader dispatched {kind!r}, expected {exp_kind!r}"
+    _agree("posture", f"{family}/{case}", vigil_fired, standalone_fired)
+
+    # standalone side (b): the named ported function directly agrees too (same value, no reader in between).
+    direct_fn = {
+        "policy_path": VF.posture_policy_path_fires,
+        "k8s_posture": VF.posture_k8s_fires,
+        "k8s_workload_posture": VF.posture_k8s_workload_fires,
+        "cloud_posture": VF.posture_cloud_fires,
+        "mesh_posture": VF.posture_mesh_fires,
+        "cicd_posture": VF.posture_cicd_fires,
+    }[family]
+    assert bool(direct_fn(ctx[key])) == vigil_fired, (
+        f"direct port {direct_fn.__name__} disagreed with the in-tree oracle for {family}/{case}")
+
+
+def test_posture_reader_ignores_non_posture_context():
+    """The canonical-context reader returns (None, '') when the oracle_context carries no posture key —
+    it never claims to have re-fired a posture check it cannot see."""
+    fired, kind = VF.reexecute_posture_oracle({"baseline": {"status": 200}, "mutated": {"status": 500}})
+    assert fired is None and kind == ""
+    fired, kind = VF.reexecute_posture_oracle("not-a-mapping")
+    assert fired is None and kind == ""
+
+
+def test_posture_fixtures_cover_both_fire_and_no_fire_per_family():
+    """Sanity: every family exercises BOTH a fired fixture and a hardened (no-fire) fixture — otherwise a
+    port that always-returned True (or always-False) would pass the parity assertion vacuously."""
+    seen: dict[str, set[bool]] = {}
+    for family, case, builder, key, oracle, _exp_kind, control in _POSTURE_CASES:
+        ctx = getattr(PostureFC, builder)(control).to_verifier_context()
+        seen.setdefault(family, set()).add(bool(oracle(ctx[key]).fired))
+    for family in ("policy_path", "k8s_posture", "k8s_workload_posture", "cloud_posture",
+                   "mesh_posture", "cicd_posture"):
+        assert seen.get(family) == {True, False}, (
+            f"{family} fixtures must include both a fired and a hardened case, got {seen.get(family)}")
 
 
 # ===================================================================================================
