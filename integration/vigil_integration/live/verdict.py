@@ -23,8 +23,9 @@ Pure stdlib; no framework imports (FATAL-2 safe).
 
 from __future__ import annotations
 
+import contextvars
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -43,9 +44,12 @@ class Verdict(str, Enum):
 # Back-compat aliases for call sites that compare against the module constants.
 FACT, LEAD, CLEAN, INCONCLUSIVE = Verdict.FACT, Verdict.LEAD, Verdict.CLEAN, Verdict.INCONCLUSIVE
 
-# Only :func:`admit` may construct an AdmittedVerdict. Making the token module-private is what turns "every
-# verdict passes through admission" from a convention into something a caller has to deliberately defeat.
-_ADMISSION_TOKEN = object()
+# Only :func:`admit` may construct an AdmittedVerdict. Authorization is a CONSTRUCTION-SCOPE flag, not a
+# field on the instance: a field is copied by ``dataclasses.replace``, so a token field let
+# ``replace(inconclusive, verdict=FACT)`` forge a FACT that carried a valid token (red-pen re-auth bypass).
+# A contextvar set only for the duration of admit()'s own construction cannot be copied onto a replace()d or
+# directly-built instance — those run __post_init__ with the flag False and fail loudly.
+_ADMITTING: "contextvars.ContextVar[bool]" = contextvars.ContextVar("vigil_admitting_verdict", default=False)
 
 
 class DirectVerdictConstruction(RuntimeError):
@@ -77,13 +81,12 @@ class AdmittedVerdict:
     verdict: Verdict
     branch: str
     reason: str = ""
-    _token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._token is not _ADMISSION_TOKEN:
+        if not _ADMITTING.get():
             raise DirectVerdictConstruction(
-                "AdmittedVerdict may only be produced by verdict.admit() — a FACT or CLEAN built directly "
-                "would carry authority nothing reviewed")
+                "AdmittedVerdict may only be produced by verdict.admit() — a FACT or CLEAN built directly, or "
+                "via dataclasses.replace(), would carry authority nothing reviewed")
 
     @property
     def is_fact(self) -> bool:
@@ -127,29 +130,32 @@ def admit(branch_id: str, *, fired: bool, conclusive: bool, observed: "dict") ->
             f"{branch_id!r} is not declared in evidence-branches.json — an unregistered evidence branch "
             f"may not produce a verdict")
 
-    held, why = preconditions_hold(branch_id, observed)
-    if not held:
-        # The observation never satisfied what this branch needs, so neither a positive nor a negative
-        # conclusion is supported over it.
-        return AdmittedVerdict(Verdict.INCONCLUSIVE, branch_id, why, _ADMISSION_TOKEN)
+    # Open the construction scope only around admit()'s own AdmittedVerdict() calls, and always close it, so
+    # no construction outside this function (direct, or via dataclasses.replace) can pass __post_init__.
+    reset = _ADMITTING.set(True)
+    try:
+        held, why = preconditions_hold(branch_id, observed)
+        if not held:
+            # The observation never satisfied what this branch needs, so neither a positive nor a negative
+            # conclusion is supported over it.
+            return AdmittedVerdict(Verdict.INCONCLUSIVE, branch_id, why)
 
-    if fired:
-        if branch["fact_capable"]:
-            return AdmittedVerdict(Verdict.FACT, branch_id,
-                                   "oracle fired over a branch declared FACT-capable", _ADMISSION_TOKEN)
-        return AdmittedVerdict(Verdict.LEAD, branch_id,
-                               f"oracle fired but this branch is not FACT-capable: {branch['limitation']}",
-                               _ADMISSION_TOKEN)
+        if fired:
+            if branch["fact_capable"]:
+                return AdmittedVerdict(Verdict.FACT, branch_id,
+                                       "oracle fired over a branch declared FACT-capable")
+            return AdmittedVerdict(Verdict.LEAD, branch_id,
+                                   f"oracle fired but this branch is not FACT-capable: {branch['limitation']}")
 
-    if not conclusive:
-        return AdmittedVerdict(Verdict.INCONCLUSIVE, branch_id, "oracle was not conclusive",
-                               _ADMISSION_TOKEN)
-    if branch["clean_capable"]:
-        return AdmittedVerdict(Verdict.CLEAN, branch_id,
-                               "conclusive non-firing over a branch declared CLEAN-capable", _ADMISSION_TOKEN)
-    return AdmittedVerdict(Verdict.INCONCLUSIVE, branch_id,
-                           f"non-firing, but this branch may not assert absence: {branch['limitation']}",
-                           _ADMISSION_TOKEN)
+        if not conclusive:
+            return AdmittedVerdict(Verdict.INCONCLUSIVE, branch_id, "oracle was not conclusive")
+        if branch["clean_capable"]:
+            return AdmittedVerdict(Verdict.CLEAN, branch_id,
+                                   "conclusive non-firing over a branch declared CLEAN-capable")
+        return AdmittedVerdict(Verdict.INCONCLUSIVE, branch_id,
+                               f"non-firing, but this branch may not assert absence: {branch['limitation']}")
+    finally:
+        _ADMITTING.reset(reset)
 
 
 def evidence_surface(branch_id: str) -> str:

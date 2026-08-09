@@ -216,6 +216,21 @@ def test_a_verdict_cannot_be_constructed_outside_admission() -> None:
         verdict.AdmittedVerdict(verdict.Verdict.FACT, "open_redirect.location_header")
 
 
+def test_admitted_verdict_cannot_be_escalated_via_dataclasses_replace() -> None:
+    """Re-attack re-auth bypass: authorization is a construction-scope flag, NOT a copyable field. A token
+    field survived dataclasses.replace(), so replace(inconclusive, verdict=FACT) forged a FACT carrying a
+    valid token. The flag is set only inside admit()'s own construction, so a replace() (which re-runs
+    __post_init__ outside that scope) must fail loudly."""
+    import dataclasses
+
+    verdict = _admit()
+    admitted = verdict.admit("open_redirect.location_header", fired=False, conclusive=False,
+                             observed={"channel_established": True})
+    assert admitted.verdict is not verdict.Verdict.FACT
+    with pytest.raises(verdict.DirectVerdictConstruction):
+        dataclasses.replace(admitted, verdict=verdict.Verdict.FACT)
+
+
 def test_admission_refuses_an_unregistered_branch() -> None:
     """Rule 2's runtime claim. A new evidence path must not inherit FACT/CLEAN authority by default."""
     verdict = _admit()
