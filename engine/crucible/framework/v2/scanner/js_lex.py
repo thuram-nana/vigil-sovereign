@@ -35,8 +35,18 @@ AMBIGUOUS = "ambiguous"      # possibly a regex literal — never allowed to min
 # `)` and `]` are only division when the bracket closed an expression, which needs parsing. Those cases are
 # reported AMBIGUOUS rather than guessed.
 _REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%~^<>")
+# After any of these a `/` begins a REGEX literal, never division — either the keyword expects an operand to
+# follow (`return`/`typeof`/…/`case`, `extends`, and `default` in `export default <expr>`) or it ends a
+# statement so the `/` starts a NEW expression statement (`break`/`continue`/`debugger`). Value-producing
+# keywords (`this`, `super`, `true`, `false`, `null`) are DELIBERATELY ABSENT: a `/` after them is division.
+# This set must be COMPLETE for every reserved word that can be immediately followed by `/` in valid JS —
+# a missing operand keyword lets a sink inside a regex literal lex as executable and mint a false, signed
+# js_sink FACT (red-pen FINDING 1: `export default`/`extends`/`debugger` were missing). Reserved words that
+# are always followed by `(` or an identifier (if/for/while/switch/catch/function/class/const/var/let/import/
+# export/try/finally) can never precede a `/`, so they are omitted rather than listed for show.
 _REGEX_KEYWORDS = ("return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
-                   "case", "do", "else", "yield", "await")
+                   "case", "do", "else", "yield", "await",
+                   "break", "continue", "debugger", "default", "extends")
 
 
 @dataclass(frozen=True)
@@ -249,13 +259,15 @@ def regions(text: str) -> "list[Region]":
                 # control head, so there is no `]`-then-regex construct. `)` is DIFFERENT — see below.
                 i += 1
                 continue
-            if prev in "})":
-                # Genuinely undecidable without parsing: `}` ends a block (so `/` starts a regex) OR an
-                # object/function expression (division); `)` ends an `if (...)`/`while (...)` head (regex) OR
-                # a grouping/call value (division). Mark AMBIGUOUS — a sink inside a span VIGIL cannot
-                # classify must never mint a FACT. Now that js_sink is FACT-capable this is a false-FACT
-                # surface, so the ambiguity resolves away from minting even at the cost of an under-claim on
-                # the contrived `(a)/b; location.href=...`-on-one-line shape.
+            if prev == ")":
+                # `)` alone is genuinely undecidable without parsing: it ends an `if (...)`/`while (...)` head
+                # (so `/` starts a regex) OR a grouping/call value (so `/` is division). Mark AMBIGUOUS — a
+                # sink in a span VIGIL cannot classify must never mint a FACT; now that js_sink is
+                # FACT-capable this resolves away from minting, at the cost of an under-claim on the contrived
+                # `(a)/b; location.href=...`-on-one-line shape. (`}` is NOT handled here: it is in
+                # _REGEX_PRECEDERS above, so a `/` after it is treated as a regex literal (STRING) — a `/`
+                # after a block is a regex, and treating the rare object-literal division `({}/2)` as a regex
+                # only ever under-claims, never mints. It never reaches this branch.)
                 end = _regex_end(text, i)
                 if end > i + 1 and "\n" not in text[i:end]:
                     close_code(i)

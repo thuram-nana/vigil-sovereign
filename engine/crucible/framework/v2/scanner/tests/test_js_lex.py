@@ -119,3 +119,31 @@ def test_regex_after_paren_is_ambiguous_but_after_bracket_is_division() -> None:
     assert not sink_is_executable("if(x)/location.href='//evil/'/", len("if(x)/"))
     assert sink_is_executable("var u = arr[0] / n; location.href='//evil/'", None
                               or "var u = arr[0] / n; location.href='//evil/'".index("location"))
+
+
+@pytest.mark.parametrize("src,needle", [
+    ("export default /location.href='//evil/'/", "location"),
+    ("class X extends /location.href='//evil/'/ {}", "location"),
+    ("debugger\n/location.href='//evil/'/", "location"),
+    ("break\n/location.href='//evil/'/", "location"),
+    ("continue\n/location.href='//evil/'/", "location"),
+    ("switch(x){case /location.href='//evil/'/:}", "location"),
+])
+def test_operand_keywords_make_a_following_slash_a_regex_not_division(src: str, needle: str) -> None:
+    """RE-ATTACK FINDING 1: `_REGEX_KEYWORDS` was incomplete — a `/` after `export default`/`extends`/
+    `debugger` (operand or statement-boundary position) is UNAMBIGUOUSLY a regex, but the lexer took the
+    division branch and classified a sink inside the regex as executable, minting a signed false js_sink
+    FACT. Every operand-position keyword must route a following `/` to a regex literal (non-executable)."""
+    assert not sink_is_executable(src, src.index(needle))
+
+
+@pytest.mark.parametrize("src,needle", [
+    ("var a = this / 2; location.href='//evil/'", "location"),
+    ("var a = true / 2; location.href='//evil/'", "location"),
+    ("var a = null; location.href='//evil/'", "location"),
+])
+def test_value_keywords_keep_a_following_slash_as_division(src: str, needle: str) -> None:
+    """The mirror of FINDING 1: value-producing keywords (this/true/null) are followed by DIVISION, so
+    over-adding them to the regex set would swallow and DROP a real following sink (under-claim). A real sink
+    after such a value must stay reachable."""
+    assert sink_is_executable(src, src.index(needle))
