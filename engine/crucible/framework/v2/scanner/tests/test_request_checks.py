@@ -175,6 +175,11 @@ def test_emitted_url_hosts_follows_the_html_content_models() -> None:
     evil = HostHeaderCheck().evil_host
     # unbalanced quote in an inert opening tag -> the tag never ends -> everything after is inert
     assert evil not in hosts(f'<textarea placeholder="a"b"><a href="https://{evil}/x">')
+    # a quote delimits an attribute value only right after `=`; an apostrophe inside an UNQUOTED value
+    # (`title=it's` — ordinary English) is a literal, and mis-reading it as a delimiter aborted the scan and
+    # left the inert markup after it unmasked
+    assert evil not in hosts(
+        f"""<a title=it's>t</a><textarea><a href="https://{evil}/r">x</a></textarea>""")
     # `<plaintext>` inside a quoted attribute value is TEXT, not an element -> the page stays live
     assert evil in hosts(f'<input value="<plaintext>"><link rel="canonical" href="https://{evil}/r">')
     # <template> nests: the inner </template> must not un-mask the outer fragment

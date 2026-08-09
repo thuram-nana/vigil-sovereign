@@ -841,12 +841,27 @@ def _tag_end(low: str, start: int, n: int) -> int:
         gt = low.find(">", k)
         if gt < 0:
             return -1
-        # bound the quote lookups by `gt`: an unbounded find scans to EOF on every tag of a quote-free
-        # body, which is quadratic across a document full of tags
-        cands = [x for x in (low.find('"', k, gt), low.find("'", k, gt)) if x >= 0]
-        if not cands:
-            return gt                                   # no quote opens before the '>'
-        q = min(cands)
+        # Find the first quote before `gt` that actually OPENS an attribute value. Per HTML a quote
+        # delimits a value only when it comes right after `=`; an apostrophe inside an UNQUOTED value
+        # (`title=it's`) is a literal character. Treating it as a delimiter made this return -1, which
+        # aborted the whole scan and left genuinely inert markup after it unmasked.
+        # The lookups are bounded by `gt`: an unbounded find scans to EOF on every tag of a quote-free
+        # body, which is quadratic across a document full of tags.
+        q, p = -1, k
+        while True:
+            cands = [x for x in (low.find('"', p, gt), low.find("'", p, gt)) if x >= 0]
+            if not cands:
+                break
+            c = min(cands)
+            b = c - 1
+            while b >= 0 and low[b].isspace():
+                b -= 1
+            if b >= 0 and low[b] == "=":
+                q = c
+                break
+            p = c + 1                                   # a literal quote in an unquoted value — skip it
+        if q < 0:
+            return gt                                   # no quote opens a value before the '>'
         end = low.find(low[q], q + 1)
         if end < 0:
             return -1                                   # unterminated quote: the tag never ends
