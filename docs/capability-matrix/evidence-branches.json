@@ -17,7 +17,8 @@
       "evidence_surface": "response_headers",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:OpenRedirectCheck"
-      ]
+      ],
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
     },
     {
       "id": "open_redirect.body_markup",
@@ -33,7 +34,7 @@
       "limitation": "NOT CLEAN-capable: a non-firing cannot distinguish 'the document contains no redirect' from 'we could not read the document'. Requires a decoded, untruncated body; suppressed entirely on a followed 3xx, whose body is never rendered.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Body evidence must become CLEAN-capable: complete the decode contract so 'we read the document' is guaranteed — BOM + <meta charset> sniffing, brotli/zstd support, and a truncation-free read for pages under the cap. Then a non-firing IS a channel-confirmed negative.",
+      "blocking_work": "Body evidence must become CLEAN-capable: complete the decode contract so 'we read the document' is guaranteed — BOM + <meta charset> sniffing, brotli/zstd support, and a truncation-free read for pages under the cap. Then a non-firing IS a channel-confirmed negative. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_markup_redirect_hosts"
@@ -52,7 +53,7 @@
       "limitation": "Sinks in comments, string/template literals and ambiguous `/`-spans are excluded structurally by js_lex. The regex-vs-division ambiguity JavaScript cannot settle without parsing is resolved AWAY from minting, so an ambiguous span yields no FACT. NOT CLEAN-capable: this lexes but does not EXECUTE, so a sink built at runtime (string concatenation, eval, a framework router) is invisible and a non-firing cannot assert absence.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "CLEAN requires proving no sink exists, which lexing cannot do: a redirect assembled at runtime never appears literally. Closing it needs the headless browser path (render_dom) to observe actual navigation, not source inspection.",
+      "blocking_work": "CLEAN requires proving no sink exists, which lexing cannot do: a redirect assembled at runtime never appears literally. Closing it needs the headless browser path (render_dom) to observe actual navigation, not source inspection. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/js_lex.py:sink_is_executable",
@@ -91,7 +92,8 @@
       "evidence_surface": "response_headers",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:HostHeaderCheck"
-      ]
+      ],
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
     },
     {
       "id": "host_header.body_emission",
@@ -107,7 +109,7 @@
       "limitation": "NOT CLEAN-capable: a non-firing cannot distinguish 'the app emits no Host-derived URL' from 'we could not read the document'. Inert markup (comments, raw-text elements, template fragments) is excluded via the stdlib tokenizer; an inert-text echo is not an emission.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Same decode-completeness work as open_redirect.body_markup; the emission scan itself is already tokenizer-backed and differential-tested.",
+      "blocking_work": "Same decode-completeness work as open_redirect.body_markup; the emission scan itself is already tokenizer-backed and differential-tested. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_emitted_url_hosts"
@@ -128,7 +130,8 @@
       "evidence_surface": "response_headers",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"
-      ]
+      ],
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
     },
     {
       "id": "oidc_redirect_uri.body_markup",
@@ -144,7 +147,7 @@
       "limitation": "NOT CLEAN-capable, for the same reason as the other body-derived branches.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Same decode-completeness work; shares the markup helper.",
+      "blocking_work": "Same decode-completeness work; shares the markup helper. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"

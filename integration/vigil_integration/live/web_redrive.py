@@ -34,6 +34,7 @@ class WebRedriveResult:
     leads: list = field(default_factory=list)     # AdapterResult (status=="lead") — CHANNEL-CONFIRMED
     inconclusive: list = field(default_factory=list)  # (bug_class, item) — a probe with NO channel; never CLEAN
     admissions: list = field(default_factory=list)    # (branch, verdict, reason) — the audit trail
+    branch_verdicts: dict = field(default_factory=dict)  # bug_class -> {branch: verdict}
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
     refused: bool = False
     notes: list = field(default_factory=list)
@@ -41,6 +42,18 @@ class WebRedriveResult:
     @property
     def n_facts(self) -> int:
         return len(self.facts)
+
+    def family_verdict(self, bug_class: str) -> str:
+        """The conservative composition over every branch of ``bug_class`` (see verdict.compose).
+
+        Reporting must use this rather than any single branch: a CLEAN header branch sitting beside a FACT
+        body branch would otherwise be summarised as a clean family, asserting safety no branch established."""
+        from .verdict import compose  # noqa: PLC0415
+        return compose(list(self.branch_verdicts.get(bug_class, {}).values())).value
+
+    def family_verdicts(self) -> dict:
+        """Every examined family, conservatively composed."""
+        return {bug: self.family_verdict(bug) for bug in self.branch_verdicts}
 
 
 def _gated_web_send(slug: str, *, timeout: float = 8.0):
@@ -152,13 +165,17 @@ def _gated_web_send(slug: str, *, timeout: float = 8.0):
     return send, state
 
 
-# The insertion points a redirect parameter realistically occupies. QUERY_NAME / BODY_FORM_NAME / JSON_KEY
-# are deliberately excluded: injecting a canary URL as a parameter NAME does not model any real redirect
-# flow, and probing them would add requests without adding evidence.
+# The insertion points this re-drive ACTUALLY probes. It builds a bare GET template from the proposed URL,
+# whose only insertion points are the URL — so QUERY_VALUE and URL_PATH_SEG is the honest coverage today.
+# COOKIE_VALUE / BODY_FORM_VALUE / JSON_VALUE would need the runner to synthesise a cookie / a urlencoded
+# body / a JSON body with the correct method + Content-Type and a benign-twin baseline; listing them while
+# the template makes them inert was an overclaim (the adversarial round caught it), so they are declared as
+# blocking_work on the branches instead. QUERY_NAME / BODY_FORM_NAME / JSON_KEY stay out as an ORACLE
+# BOUNDARY: a URL injected as a parameter NAME does not model the redirect-value property under test.
 # Named by VALUE, not by enum member: the framework import is function-local (FATAL-2), so this module must
 # not reference InsertionKind at import time. _redrive_kinds() resolves them where the enum is available.
 _REDRIVE_INSERTION_KIND_NAMES = (
-    "QUERY_VALUE", "URL_PATH_SEG", "COOKIE_VALUE", "BODY_FORM_VALUE", "JSON_VALUE",
+    "QUERY_VALUE", "URL_PATH_SEG",
 )
 
 
@@ -179,38 +196,55 @@ def _oracle_signal(context: "dict"):
     return predicate_oracle(evidence, predicate)
 
 
-def _attribute_branch(bug_class: str, context: "dict", fired: bool) -> str:
-    """Map an outcome to exactly ONE registered evidence branch.
+def _branch_outcomes(bug_class: str, context: "dict", overall_fired: bool) -> "list[tuple[str, bool]]":
+    """Every ATOMIC branch outcome present in this response, as ``(branch_id, fired)``.
 
-    A verdict that cannot be attributed to a single branch cannot be checked against any branch's declared
-    capability, so attribution is part of admission rather than a reporting detail. Header-derived evidence
-    is preferred when it is what actually fired, because it carries the stronger capability (it is
-    CLEAN-capable, and independent of whether the body could be decoded)."""
+    Deliberately NOT "one branch per response". A single response can carry a 302 ``Location``, a body
+    meta-refresh AND a JavaScript sink at once; collapsing that to a single branch by precedence would
+    discard real evidence and, worse, hide the LIMITATIONS of the branches it dropped — the body branches
+    are not CLEAN-capable, so silently reporting only the header branch would let a response look more
+    conclusively examined than it was.
+
+    Each outcome is admitted separately, so each is judged against ITS OWN declared capability and appears
+    in the audit trail with its own verdict."""
     evidence = context.get("observed_evidence") or {}
-    if bug_class == "cors":
-        return "cors.reflected_origin_with_credentials"
-    if bug_class == "host_header_injection":
-        if evidence.get("location_host") and evidence.get("location_host") == evidence.get("evil_host"):
-            return "host_header.location_header"
-        return "host_header.body_emission"
-    if bug_class == "oidc_redirect_uri":
-        if evidence.get("location_host") and evidence.get("location_host") == evidence.get("canary_host"):
-            return "oidc_redirect_uri.location_header"
-        return "oidc_redirect_uri.body_markup"
-    # open_redirect: header first, then the two body sources, which are DIFFERENT branches with different
-    # capabilities (a declarative refresh is statically decidable; a JS sink is only lexically decidable).
-    if evidence.get("location_host") and evidence.get("location_host") == evidence.get("canary_host"):
-        return "open_redirect.location_header"
-    canary = evidence.get("canary_host")
+    followed = bool(evidence.get("followed_redirect"))
     body = evidence.get("body") or ""
+    # A Location host equals the target only when the response ACTUALLY REDIRECTED. Without this, a status
+    # 200 that merely reflects the canary into a Location header (or a render-dependent body/JS redirect on
+    # a page that also sets Location) was attributed to the `location_header` branch — laundering
+    # body/JS-derived, render-dependent evidence into a 3xx-header FACT whose DECLARED evidence surface was
+    # never observed. The status gate MUST match the oracle's own Location disjunct (checks.py: a 3xx status
+    # AND a matching Location host), so the branch fires exactly when its declared evidence is present.
+    is_redirect = int(evidence.get("status", 0) or 0) in (301, 302, 303, 307, 308)
+    location_host = evidence.get("location_host")
+
+    if bug_class == "cors":
+        return [("cors.reflected_origin_with_credentials", overall_fired)]
+
+    if bug_class == "host_header_injection":
+        # The host-header Location disjunct is itself status-free (checks.py:HostHeaderCheck), so branch and
+        # oracle already agree here — do not add a gate the oracle does not have.
+        evil = evidence.get("evil_host")
+        emitted = evidence.get("emitted_url_hosts") or []
+        return [
+            ("host_header.location_header", bool(evil) and location_host == evil),
+            ("host_header.body_emission", bool(evil) and evil in emitted and not followed),
+        ]
+
+    prefix = "oidc_redirect_uri" if bug_class == "oidc_redirect_uri" else "open_redirect"
+    canary = evidence.get("canary_host")
+    outcomes = [(f"{prefix}.location_header",
+                 bool(canary) and is_redirect and location_host == canary)]
+    meta_fired = js_fired = False
     if canary and body:
         from framework.v2.scanner.checks import js_sink_hosts, meta_refresh_hosts  # noqa: PLC0415
-        if canary in meta_refresh_hosts(body):
-            return "open_redirect.body_markup"
-        if canary in js_sink_hosts(body):
-            return "open_redirect.js_sink"
-    return "open_redirect.body_markup"      # nothing fired: attribute to the body branch, whose declared
-                                            # capability correctly refuses to call that a CLEAN
+        meta_fired = canary in meta_refresh_hosts(body) and not followed
+        js_fired = canary in js_sink_hosts(body) and not followed
+    outcomes.append((f"{prefix}.body_markup", meta_fired))
+    if prefix == "open_redirect":       # the SSO check has no registered JS-sink branch
+        outcomes.append(("open_redirect.js_sink", js_fired))
+    return outcomes
 
 
 def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tuple[str, str]]",
@@ -263,25 +297,30 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         # this observation actually supports. Calling confirm_and_certify directly would let a verdict reach
         # a certificate without any capability check ever running.
         signal = _oracle_signal(context)
-        branch = _attribute_branch(bug_class, context, signal.fired)
         observed = {
             "channel_established": True,
             "body_semantically_available": not body_unreadable,
             "not_followed_redirect": not bool(context.get("observed_evidence", {}).get("followed_redirect")),
             "gate_authorized": True,
         }
-        admitted = admit(branch, fired=signal.fired, conclusive=signal.conclusive, observed=observed)
-        r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
-                             provenance="live_redrive")
-        res.contexts[r.finding_ref] = context
-        res.admissions.append((branch, admitted.verdict.value, admitted.reason))
-        if r.is_fact:
-            res.facts.append(r)
-        elif admitted.verdict is Verdict.INCONCLUSIVE:
-            res.inconclusive.append((bug_class, item))
-            res.notes.append(f"{bug_class} [{branch}]: {admitted.reason}")
-        else:
-            res.leads.append(r)
+        # One admission PER ATOMIC BRANCH OUTCOME. A response carrying several kinds of evidence yields
+        # several admissions, each judged against its own declared capability, so nothing is hidden by the
+        # precedence of a stronger sibling.
+        for branch, fired in _branch_outcomes(bug_class, context, signal.fired):
+            admitted = admit(branch, fired=fired, conclusive=signal.conclusive, observed=observed)
+            res.admissions.append((branch, admitted.verdict.value, admitted.reason))
+            res.branch_verdicts.setdefault(bug_class, {})[branch] = admitted.verdict.value
+            per_branch = dict(finding, check_id=f"{finding['check_id']}#{branch}")
+            r = certify_admitted(per_branch, admitted, engagement_slug=engagement_slug, signers=signers,
+                                 provenance="live_redrive")
+            res.contexts[r.finding_ref] = context
+            if r.is_fact:
+                res.facts.append(r)
+            elif admitted.verdict is Verdict.INCONCLUSIVE:
+                res.inconclusive.append((bug_class, f"{item}#{branch}"))
+                res.notes.append(f"{bug_class} [{branch}]: {admitted.reason}")
+            else:
+                res.leads.append(r)
 
     try:
         # request-level checks (add an evil Origin / Host to the whole request)

@@ -89,3 +89,24 @@ def test_regions_cover_the_whole_input_without_gaps() -> None:
         assert start >= cursor, f"overlapping regions at {start}"
         cursor = end
     assert cursor <= len(src)
+
+
+# ---- fail-closed: unsupported or incomplete lexing must never yield a FACT -----------------------
+
+@pytest.mark.parametrize("src,needle", [
+    ("<!-- location.href='//evil/'", "location"),          # legacy HTML open comment, SAME line
+    ("--> location.href='//evil/'", "location"),           # legacy HTML close comment at line start
+    ("\x00location.href='//evil/'", "location"),           # NUL: a real engine rejects the script outright
+    ("a=1;" * 200_000 + "location.href='//evil/'", "location.href"),   # beyond the lex bound
+])
+def test_unlexable_or_commented_input_is_never_executable(src: str, needle: str) -> None:
+    """Incomplete lexing must read as "we could not establish the context" — which yields no FACT, and
+    (because the JS branch is not CLEAN-capable) no CLEAN either. It must never resolve toward minting."""
+    assert not sink_is_executable(src, src.index(needle))
+
+
+def test_a_legacy_html_comment_only_hides_its_own_line() -> None:
+    """`<!--` is a SINGLE-line comment in script data, so the following line is genuinely code. Treating it
+    as a block comment would swallow real sinks — the dropped-vulnerability direction."""
+    src = "<!--\nlocation.href='//evil/'\n//-->"
+    assert sink_is_executable(src, src.index("location"))

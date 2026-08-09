@@ -280,6 +280,25 @@ def test_admission_never_reports_clean_from_a_branch_that_is_not_clean_capable()
         assert got.verdict != verdict.CLEAN, f"{branch['id']}: not clean_capable but admitted CLEAN"
 
 
+def test_family_composition_is_conservative() -> None:
+    """A PRESENTATION invariant, and the last place a false CLEAN can appear.
+
+    Per-branch admission is only half the guarantee: the moment several branch verdicts are summarised, the
+    summary can assert something no branch did. A CLEAN header branch beside a FACT body branch must compose
+    to FACT — reporting that family as "clean" would claim safety nothing established. An EMPTY set composes
+    to INCONCLUSIVE, because nothing examined is not the same as nothing found."""
+    verdict = _admit()
+    V, compose = verdict.Verdict, verdict.compose
+    assert compose([V.CLEAN, V.FACT]) is V.FACT
+    assert compose([V.CLEAN, V.LEAD]) is V.LEAD
+    assert compose([V.CLEAN, V.INCONCLUSIVE]) is V.INCONCLUSIVE
+    assert compose([V.CLEAN, V.CLEAN]) is V.CLEAN
+    assert compose([V.LEAD, V.FACT, V.INCONCLUSIVE, V.CLEAN]) is V.FACT
+    assert compose([]) is V.INCONCLUSIVE, "an unexamined family must never compose to CLEAN"
+    # accepts raw values too, so a reporting layer cannot bypass the lattice by passing strings
+    assert compose(["CLEAN", "FACT"]) is V.FACT
+
+
 def test_certificate_minting_requires_an_admitted_verdict() -> None:
     """Rule 2's architectural half, at the OUTPUT end.
 

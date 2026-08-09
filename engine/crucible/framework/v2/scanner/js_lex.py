@@ -166,10 +166,21 @@ def _regex_end(text: str, i: int) -> int:
     return n
 
 
+# Beyond this, or on input we cannot lex at all, the lexer FAILS CLOSED: the whole text becomes AMBIGUOUS,
+# so no sink inside it is ever "provably executable" and no FACT can be minted from it. Incomplete lexing
+# must read as "we could not establish the context", never as evidence in either direction.
+MAX_LEX_BYTES = 512_000
+
+
 def regions(text: str) -> "list[Region]":
-    """Classify ``text`` into CODE / COMMENT / STRING / TEMPLATE / AMBIGUOUS spans that tile the input."""
-    out: "list[Region]" = []
+    """Classify ``text`` into CODE / COMMENT / STRING / TEMPLATE / AMBIGUOUS spans that tile the input.
+
+    Fails closed on input it cannot faithfully lex — oversized script data, or text containing NUL, which a
+    real engine rejects outright (nothing in such a script executes, so nothing in it is a sink)."""
     n = len(text)
+    if n > MAX_LEX_BYTES or "\x00" in text:
+        return [Region(0, n, AMBIGUOUS)] if n else []
+    out: "list[Region]" = []
     i = 0
     code_start = 0
 
@@ -179,6 +190,23 @@ def regions(text: str) -> "list[Region]":
 
     while i < n:
         c = text[i]
+        # Legacy HTML-like comments are SINGLE-LINE comments in script data (Annex B): `<!--` comments to
+        # end of line anywhere, and `-->` does so at the start of a line. A sink after either on the SAME
+        # line never runs, so counting it was a false-FACT surface.
+        if c == "<" and text.startswith("<!--", i):
+            close_code(i)
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(Region(i, end, COMMENT))
+            i = code_start = end
+            continue
+        if c == "-" and text.startswith("-->", i) and not text[:i].rsplit("\n", 1)[-1].strip():
+            close_code(i)
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(Region(i, end, COMMENT))
+            i = code_start = end
+            continue
         if c == "/" and i + 1 < n and text[i + 1] == "/":
             close_code(i)
             end = text.find("\n", i)

@@ -162,3 +162,30 @@ def evidence_surface(branch_id: str) -> str:
 
 def known_surfaces() -> "frozenset[str]":
     return _EVIDENCE_SURFACES
+
+
+# Family-level composition. Per-branch admission is only half the guarantee: the moment several branch
+# verdicts are summarised for a human or a report, the summary can assert something no branch did.
+# `location_header=CLEAN` next to `body_markup=FACT` must never be presented as "open redirect: CLEAN".
+_COMPOSITION_ORDER = (Verdict.FACT, Verdict.LEAD, Verdict.INCONCLUSIVE, Verdict.CLEAN)
+
+
+def compose(verdicts: "list[Verdict] | list[str]") -> Verdict:
+    """The conservative family verdict over several branch outcomes.
+
+        any FACT          -> FACT
+        else any LEAD     -> LEAD
+        else any INCONCLUSIVE -> INCONCLUSIVE
+        else all CLEAN    -> CLEAN
+
+    CLEAN is reachable ONLY when every relevant branch was itself CLEAN, so a family is called clean only if
+    nothing was left unexamined. An EMPTY set composes to INCONCLUSIVE, not CLEAN: nothing examined is not
+    the same as nothing found, and defaulting the empty case to clean is precisely how a family that was
+    never probed would be reported as safe."""
+    seen = {Verdict(v) if not isinstance(v, Verdict) else v for v in verdicts}
+    if not seen:
+        return Verdict.INCONCLUSIVE
+    for candidate in _COMPOSITION_ORDER:
+        if candidate in seen:
+            return candidate
+    return Verdict.INCONCLUSIVE     # pragma: no cover - the enum is closed, so this is unreachable
