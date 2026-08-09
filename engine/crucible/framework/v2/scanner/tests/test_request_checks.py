@@ -125,6 +125,33 @@ def test_emitted_url_hosts_counts_emission_not_inert_echo() -> None:
     assert evil in hosts(f'<link rel="canonical" href="https://{evil}/">')        # canonical link (href)
     # NON-EMISSIONS — inert echoes shown only to the requester, or not the evil authority at all
     assert evil not in hosts(f'<meta name="description" content="visit https://{evil} today">')  # prose, not URL meta
+    # the property name must match the WHOLE allow-listed value: `:alt` sub-properties are TEXT, not URLs,
+    # and a name that merely CONTAINS an og token is not og metadata (substring matching would false-FACT)
+    assert evil not in hosts(f'<meta name="twitter:image:alt" content="https://{evil}/x">')
+    assert evil not in hosts(f'<meta name="og:image:alt" content="https://{evil}/x">')
+    assert evil not in hosts(f'<meta name="not-og:url" content="https://{evil}/x">')
+    assert evil not in hosts(f'<meta name="x og:url y" content="https://{evil}/x">')
+    # ... while every genuinely URL-valued og/twitter property is still counted
+    for prop in ("og:url", "og:image", "og:image:secure_url", "twitter:url", "twitter:image:src"):
+        assert evil in hosts(f'<meta property="{prop}" content="https://{evil}/x">'), prop
+
+
+def test_emitted_url_hosts_ignores_inert_markup_contexts() -> None:
+    """Markup a browser never PARSES emits nothing: an HTML comment, or the raw-text contents of
+    script/style/textarea. An app echoing attacker text that merely LOOKS like a link into one of those must
+    not mint a FACT. `<pre>` is deliberately NOT inert — tags inside it are live, clickable links."""
+    from framework.v2.scanner.checks import _emitted_url_hosts as hosts
+
+    evil = HostHeaderCheck().evil_host
+    # INERT — never parsed as markup, so nothing is emitted
+    assert evil not in hosts(f'<!-- <a href="https://{evil}/">x</a> -->')
+    assert evil not in hosts(f"""<script>var t = "<a href='https://{evil}/'>";</script>""")
+    assert evil not in hosts(f'<textarea><a href="https://{evil}/">x</a></textarea>')
+    assert evil not in hosts(f'<style>/* <a href="https://{evil}/"> */</style>')
+    assert evil not in hosts(f'<!-- <meta property="og:url" content="https://{evil}/"> -->')
+    # LIVE — <pre>/<code> contents ARE parsed, so a link inside them is a real emission
+    assert evil in hosts(f'<pre><a href="https://{evil}/">x</a></pre>')
+    assert evil in hosts(f'<a href="https://{evil}/reset">reset</a>')
     assert evil not in hosts(f'Cannot GET http://{evil}/foo')                    # 404 text echo (BLOCK-D)
     assert evil not in hosts(f'<pre>curl http://{evil}/api</pre>')               # code sample
     assert evil not in hosts(f'<!-- built from host: //{evil}/ -->')            # HTML comment

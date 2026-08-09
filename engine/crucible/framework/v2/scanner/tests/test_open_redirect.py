@@ -119,6 +119,12 @@ def test_markup_redirect_hosts_extracts_only_real_navigation_targets() -> None:
     assert _CANARY_HOST not in hosts(   # the canary is a query param of an OWN-host redirect
         f'<meta http-equiv="refresh" content="0;url=/go?returnurl={_CANARY_URL}">')
     assert hosts(f'<!-- {_CANARY_URL} -->') == []
+    # commented-out markup never navigates — a meta-refresh or JS sink inside an HTML comment emits nothing
+    assert _CANARY_HOST not in hosts(
+        f'<!-- <meta http-equiv="refresh" content="0;url={_CANARY_URL}"> -->')
+    assert _CANARY_HOST not in hosts(f'<!-- location.href="{_CANARY_URL}" -->')
+    # ... but a JS sink in a real <script> is still a true positive (script is NOT stripped for redirects)
+    assert _CANARY_HOST in hosts(f'<script>location.href="{_CANARY_URL}"</script>')
 
 
 def test_markup_redirect_hosts_is_bounded_on_a_hostile_body() -> None:

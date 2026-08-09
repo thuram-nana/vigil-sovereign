@@ -640,7 +640,13 @@ _URL_ATTR = re.compile(r"(?<![-\w])(?:href|src|action)\s*=\s*[\"']([^\"']{1,4096
 # (and is the benchmark's host-header primitive). This is a STRUCTURED metadata emission, distinct from an
 # inert free-text echo of a reconstructed URL, so counting it does not reopen BLOCK-D.
 _META_PROPERTY = re.compile(r"(?<![-\w])(?:property|name)\s*=\s*[\"']([^\"']{0,256})[\"']", re.IGNORECASE)
-_URL_VALUED_META = re.compile(r"og:(?:url|image|audio|video)|twitter:(?:url|image)", re.IGNORECASE)
+# The property name must match the WHOLE value against an allow-list of genuinely URL-valued properties
+# (`fullmatch`). A substring test would fire on `not-og:url`, on a value that merely CONTAINS `og:url`, and
+# — worst — on `twitter:image:alt` / `og:image:alt`, which are ALT TEXT, not URLs. Text sub-properties are
+# excluded by construction; only the `:url` / `:secure_url` / `:src` sub-properties are URL-valued.
+_URL_VALUED_META = re.compile(
+    r"og:(?:url|(?:image|audio|video)(?::(?:url|secure_url))?)|twitter:(?:url|image(?::src)?)",
+    re.IGNORECASE)
 
 
 def _emitted_url_hosts(body: str) -> list[str]:
@@ -654,21 +660,44 @@ def _emitted_url_hosts(body: str) -> list[str]:
     their own Host) and is not exploitable; counting it minted a signed false FACT (re-red-pen BLOCK-D). The
     authority is parsed with stdlib ``urlsplit`` (via ``_host``), so a relative URL whose QUERY contains
     ``//evil`` (``/x?u=//evil``) is correctly NOT an emission of ``evil``. Bounded like the markup scan."""
-    body = (body or "")[:_MARKUP_SCAN_CAP]
-    hosts = list(_markup_redirect_hosts(body))          # meta-refresh + JS location sinks (redirect emission)
+    raw = (body or "")[:_MARKUP_SCAN_CAP]
+    hosts = list(_markup_redirect_hosts(raw))           # meta-refresh + JS location sinks (redirect emission)
+    # Attribute/metadata emission is read from markup a browser actually PARSES: comments and raw-text
+    # elements (script/style/textarea) are dropped, so an href/<meta> merely echoed into one is not counted.
+    body = _strip_inert_markup(raw)
     for val in _URL_ATTR.findall(body):                 # href/src/action link/resource/form emission
         h = _host(val.strip())                          # urlsplit authority: '' for relative/same-origin URLs
         if h:
             hosts.append(h)
     for tag in _META_TAG.findall(body):                 # canonical / social URL metadata (og:url, ...)
         prop = _META_PROPERTY.search(tag)
-        if prop and _URL_VALUED_META.search(prop.group(1)):
+        if prop and _URL_VALUED_META.fullmatch(prop.group(1).strip()):
             content = _META_CONTENT.search(tag)
             if content:
                 h = _host(content.group(1).strip())
                 if h:
                     hosts.append(h)
     return hosts
+
+
+# Inert regions: markup inside an HTML comment is never parsed, and script/style/textarea are RAW-TEXT
+# elements whose contents are never parsed as markup. A `href=`/`<meta>` echoed into one of them is NOT an
+# emission — counting it minted a false FACT. `<pre>`/`<code>` are deliberately NOT stripped: tags inside
+# them ARE live (a <pre><a href> is a real, clickable link). Lazy quantifiers keep both scans linear.
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_RAW_TEXT_ELEMENT = re.compile(r"<(script|style|textarea)\b[^>]{0,4096}>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_html_comments(body: str) -> str:
+    """Drop HTML comments — commented-out markup is never parsed by a browser, so it emits nothing."""
+    return _HTML_COMMENT.sub(" ", body or "")
+
+
+def _strip_inert_markup(body: str) -> str:
+    """Drop comments AND raw-text elements (script/style/textarea), whose contents a browser never parses as
+    markup. Used for ATTRIBUTE/metadata emission only — NOT for JS redirect sinks, which legitimately live
+    inside ``<script>``."""
+    return _RAW_TEXT_ELEMENT.sub(" ", _strip_html_comments(body))
 
 
 def _markup_redirect_hosts(body: str) -> list[str]:
@@ -688,7 +717,9 @@ def _markup_redirect_hosts(body: str) -> list[str]:
     veracity firewall cannot demote a MINT-TIME derivation bug in this parser — which is why the parser is
     pinned by explicit true-positive AND negative-control tests. This is the same property every shipped
     predicate has (e.g. ``location_host = _host(location)``), not one specific to this helper."""
-    body = (body or "")[:_MARKUP_SCAN_CAP]
+    # HTML comments are stripped — commented-out markup never navigates. ``<script>`` is deliberately NOT
+    # stripped here: JS location sinks legitimately live inside it.
+    body = _strip_html_comments((body or "")[:_MARKUP_SCAN_CAP])
     hosts: list[str] = []
     for tag in _META_TAG.findall(body):
         if _HTTP_EQUIV_REFRESH.search(tag):
