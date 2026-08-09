@@ -161,6 +161,29 @@ def test_emitted_url_hosts_ignores_inert_markup_contexts() -> None:
     # not end the tag early and hide the real src (that dropped a genuine <script src>/<iframe src> sink)
     assert evil in hosts(f'<script data-cfg="{{a:1>0}}" src="https://{evil}/app.js"></script>')
     assert evil in hosts(f'<iframe srcdoc="<p>hi</p>" src="https://{evil}/"></iframe>')
+
+
+def test_emitted_url_hosts_follows_the_html_content_models() -> None:
+    """The masker must model what a browser actually parses, in BOTH directions — each of these flipped a
+    verdict when it was wrong: an inert element whose opening tag has an unbalanced quote never terminates
+    (so the rest of the document is inert, not live); a `<plaintext>` inside an attribute VALUE is not an
+    element (so the document after it is still live); `<template>` NESTS (the first `</template>` closes only
+    the inner one); and after `<!--<script` the next `</script>` returns to the escaped state instead of
+    closing (WHATWG script-data double-escape)."""
+    from framework.v2.scanner.checks import _emitted_url_hosts as hosts
+
+    evil = HostHeaderCheck().evil_host
+    # unbalanced quote in an inert opening tag -> the tag never ends -> everything after is inert
+    assert evil not in hosts(f'<textarea placeholder="a"b"><a href="https://{evil}/x">')
+    # `<plaintext>` inside a quoted attribute value is TEXT, not an element -> the page stays live
+    assert evil in hosts(f'<input value="<plaintext>"><link rel="canonical" href="https://{evil}/r">')
+    # <template> nests: the inner </template> must not un-mask the outer fragment
+    assert evil not in hosts(
+        f'<template>x<template>y</template><a href="https://{evil}/z"></a></template>')
+    assert evil in hosts(f'<template>x</template><a href="https://{evil}/y">z</a>')   # ... and it does close
+    # script-data double escape: the FIRST </script> after `<!--<script` does not close the element
+    assert evil not in hosts(f'<script><!--<script>q</script><a href="https://{evil}/w"></a></script>')
+    assert evil in hosts(f'<script>var a=1</script><a href="https://{evil}/">x</a>')  # ordinary script closes
     assert evil not in hosts(f'<plaintext><a href="https://{evil}/">x</a>')   # no end tag: literal to EOF
     assert evil not in hosts(f'<template><meta property="og:url" content="https://{evil}/"></template>')
     # LIVE — <pre>/<code> contents ARE parsed, so a link inside them is a real emission

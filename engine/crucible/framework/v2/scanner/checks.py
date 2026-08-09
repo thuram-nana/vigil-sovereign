@@ -755,35 +755,118 @@ def _mask_inert(body: str, elements: tuple[str, ...]) -> str:
                    and low.startswith("<" + e, j)
                    and (j + 1 + len(e) >= n or not (low[j + 1 + len(e)].isalnum()
                                                     or low[j + 1 + len(e)] in "-_"))), None)
-        if el is None:
-            i = j + 1
-            continue
         gt = _tag_end(low, j, n)
-        if gt < 0:                                          # unterminated opening tag: nothing after parses
+        if el is None:
+            # Not inert — but SKIP THE WHOLE TAG. Advancing one character would walk into this tag's
+            # attribute VALUES, where a `<plaintext>`/`<textarea>` inside `value="…"` would be mistaken for
+            # a real element and mask the rest of the document, deleting genuine sinks.
+            if gt < 0:
+                break        # this tag never terminates, so nothing after it is parsed as markup
+            i = gt + 1
+            continue
+        if gt < 0:
+            # Unterminated opening tag: the tag is incomplete and nothing after it is parsed as markup, so
+            # mask to EOF. (Breaking here left the whole tail visible and minted a false FACT.)
+            out[j:n] = " " * (n - j)
             break
-        close = _close_tag(low, el, gt + 1, n)
-        stop = n if close < 0 else close                    # no end tag (or <plaintext>): literal to EOF
+        stop = _inert_content_end(low, el, gt + 1, n)
         out[gt + 1:stop] = " " * (stop - gt - 1)            # keep the opening tag, blank the content
         i = stop
     return "".join(out)
 
 
+def _is_tag_at(low: str, k: int, name: str, close: bool = False) -> bool:
+    """True if a (possibly closing) ``name`` tag starts at ``k``, delimited by a real terminator."""
+    lead = "</" if close else "<"
+    if not low.startswith(lead + name, k):
+        return False
+    after = k + len(lead) + len(name)
+    return after >= len(low) or low[after].isspace() or low[after] in "/>"
+
+
+def _inert_content_end(low: str, el: str, start: int, n: int) -> int:
+    """Index where ``el``'s inert content ends — i.e. where a browser resumes parsing markup.
+
+    Three content models, because using one rule for all of them flips verdicts:
+      * ``template`` is element-content and NESTS, so the matching end tag is depth-tracked (closing at the
+        first ``</template>`` un-masked the outer fragment and minted a false FACT);
+      * ``script`` follows the WHATWG script-data DOUBLE-ESCAPE rule: after ``<!--<script`` the next
+        ``</script`` only returns to the escaped state instead of closing, so it consumes one extra end tag;
+      * every other raw-text element ends at its first properly-terminated end tag (or EOF)."""
+    if el == "template":
+        depth, k = 1, start
+        while True:
+            close = _find_tag(low, "template", k, n, close=True)
+            if close < 0:
+                return n
+            nested = _find_tag(low, "template", k, n)
+            if 0 <= nested < close:
+                depth, k = depth + 1, nested + 9
+                continue
+            depth -= 1
+            if depth == 0:
+                return close
+            k = close + 10
+    if el == "script":
+        k, double = start, False
+        while True:
+            close = _find_tag(low, "script", k, n, close=True)
+            if close < 0:
+                return n
+            if double:                                      # this end tag only leaves the double-escape
+                double, k = False, close + 9
+                continue
+            # bounded by `close`: an unbounded find scans to EOF for every script element in a
+            # comment-free document, which is quadratic across many elements
+            cm = low.find("<!--", k, close)                 # does a double-escape entry precede the close?
+            if cm >= 0:
+                nested = _find_tag(low, "script", cm + 4, close)
+                ends = low.find("-->", cm + 4, close)
+                if 0 <= nested < close and (ends < 0 or ends > nested):
+                    double, k = True, nested + 7
+                    continue
+            return close
+    close = _close_tag(low, el, start, n)
+    return n if close < 0 else close                        # no end tag (or <plaintext>): literal to EOF
+
+
 def _tag_end(low: str, start: int, n: int) -> int:
     """Index of the ``>`` that ends the tag opened at ``start``, skipping quoted attribute values (a ``>``
-    inside ``srcdoc="<p>x</p>"`` or ``data-cfg="{a:1>0}"`` does NOT end the tag), or -1 if unterminated."""
+    inside ``srcdoc="<p>x</p>"`` or ``data-cfg="{a:1>0}"`` does NOT end the tag), or -1 if unterminated.
+
+    ``str.find``-based rather than a per-character Python loop: this runs for EVERY tag in a
+    target-controlled body, and a char loop made the whole mask quadratic in practice."""
     k = start + 1
-    quote = ""
     while k < n:
-        c = low[k]
-        if quote:
-            if c == quote:
-                quote = ""
-        elif c in "\"'":
-            quote = c
-        elif c == ">":
+        gt = low.find(">", k)
+        if gt < 0:
+            return -1
+        # bound the quote lookups by `gt`: an unbounded find scans to EOF on every tag of a quote-free
+        # body, which is quadratic across a document full of tags
+        cands = [x for x in (low.find('"', k, gt), low.find("'", k, gt)) if x >= 0]
+        if not cands:
+            return gt                                   # no quote opens before the '>'
+        q = min(cands)
+        end = low.find(low[q], q + 1)
+        if end < 0:
+            return -1                                   # unterminated quote: the tag never ends
+        k = end + 1
+    return -1
+
+
+def _find_tag(low: str, name: str, start: int, n: int, *, close: bool = False) -> int:
+    """Index of the next properly-terminated ``<name`` / ``</name`` at or after ``start``, or -1.
+    ``find``-based for the same reason as :func:`_tag_end`."""
+    needle = ("</" if close else "<") + name
+    k = start
+    while True:
+        k = low.find(needle, k)
+        if k < 0:
+            return -1
+        after = k + len(needle)
+        if after >= n or low[after].isspace() or low[after] in "/>":
             return k
         k += 1
-    return -1
 
 
 def _close_tag(low: str, el: str, start: int, n: int) -> int:

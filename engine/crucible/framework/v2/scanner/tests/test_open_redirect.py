@@ -173,6 +173,11 @@ def test_markup_redirect_hosts_is_bounded_on_a_hostile_body() -> None:
         ("angle-bracket spam", '<meta<a href="' * 36_000),
         ("bare '<' spam", "<" * 512_000),          # the maximal per-character case for the tag scanner
         ("nested inert", "<textarea><script>" * 28_000),
+        ("nested template", "<template>" * 51_200),
+        ("script double-escape", "<script><!--<script>" * 25_600),
+        ("close-tag near-miss", "<script>" + "</scriptx" * 56_000),
+        ("many closed elements", "<script>a</script>" * 28_000),   # quote-free: unbounded finds were O(n^2)
+        ("quote spam", '"' * 512_000),
     ):
         t0 = _time.perf_counter()
         assert _markup_redirect_hosts(body) == [], label
