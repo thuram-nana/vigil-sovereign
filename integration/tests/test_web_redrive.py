@@ -457,3 +457,37 @@ def test_location_header_branch_requires_a_real_3xx_not_a_reflected_location(mon
         "a status-200 reflected Location was laundered into a header-surface FACT")
     assert verdicts.get("open_redirect.body_markup") == "FACT", "the real body evidence should still fire"
     assert res.family_verdict("open_redirect") == "FACT", "the family is FACT via the branch truly observed"
+
+
+def test_family_verdict_survives_a_benign_insertion_point_after_the_firing_one(monkeypatch, tmp_path):
+    """RE-ATTACK BLOCK: _run fires once per insertion point with the same branch names, so a benign point
+    processed AFTER the firing one used to OVERWRITE its verdict (last-wins), reporting the family as
+    INCONCLUSIVE while a live signed FACT sat in res.facts. `?next=<redirect>&utm_source=x` is an everyday
+    URL. The family must be FACT whenever ANY point produced one, independent of param order."""
+    _grant_active_recon(monkeypatch)
+    _charter(tmp_path, "127.0.0.1")
+    from vigil_integration.live.web_redrive import web_redrive
+    signers, _ = _signers_and_trust()
+
+    class _Meta(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            nxt = (parse_qs(urlsplit(self.path).query).get("next") or [""])[0]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(f'<meta http-equiv="refresh" content="0;url={nxt}">'.encode())
+
+        def log_message(self, *a):
+            return
+
+    for path in ("/x?next=orig&z=orig", "/x?a=orig&next=orig"):   # firing point last, then first
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _Meta)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            res = web_redrive(f"http://127.0.0.1:{srv.server_address[1]}{path}",
+                              slug="alpha", engagement_slug="alpha", signers=signers)
+        finally:
+            srv.shutdown()
+        assert res.n_facts >= 1, f"{path}: expected a signed FACT"
+        assert res.family_verdict("open_redirect") == "FACT", (
+            f"{path}: family collapsed to {res.family_verdict('open_redirect')} despite a live FACT")

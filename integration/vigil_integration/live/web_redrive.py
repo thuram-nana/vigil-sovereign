@@ -258,7 +258,7 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
     from framework.v2.verify.reachability_cloud import _authorize  # noqa: PLC0415 — the URL-shaped gate
 
     from ..oracle_adapter import certify_admitted  # noqa: PLC0415 (FATAL-2: function-local)
-    from .verdict import Verdict, admit  # noqa: PLC0415
+    from .verdict import Verdict, admit, compose as _compose  # noqa: PLC0415
 
     res = WebRedriveResult(url=url)
     # PRE-FLIGHT the gate ONCE: a refused engagement (kill-switch / out-of-scope / no-slug / bad URL) means
@@ -309,7 +309,14 @@ def web_redrive(url: str, *, slug: str, engagement_slug: str, signers: "list[tup
         for branch, fired in _branch_outcomes(bug_class, context, signal.fired):
             admitted = admit(branch, fired=fired, conclusive=signal.conclusive, observed=observed)
             res.admissions.append((branch, admitted.verdict.value, admitted.reason))
-            res.branch_verdicts.setdefault(bug_class, {})[branch] = admitted.verdict.value
+            # STRONGEST-wins across insertion points, not last-wins. `_run` fires once PER insertion point,
+            # all with the same branch names, so a benign point processed AFTER the firing one used to
+            # overwrite its verdict — reporting a family as INCONCLUSIVE while it held a live signed FACT
+            # (?next=<redirect>&utm_source=x is an everyday URL). A branch is FACT for the family if ANY
+            # point produced a FACT; compose() over {prior, new} takes the stronger under the same lattice.
+            branch_map = res.branch_verdicts.setdefault(bug_class, {})
+            prior = branch_map.get(branch)
+            branch_map[branch] = _compose([prior, admitted.verdict.value]).value if prior else admitted.verdict.value
             per_branch = dict(finding, check_id=f"{finding['check_id']}#{branch}")
             r = certify_admitted(per_branch, admitted, engagement_slug=engagement_slug, signers=signers,
                                  provenance="live_redrive")

@@ -243,17 +243,19 @@ def regions(text: str) -> "list[Region]":
                 out.append(Region(i, end, STRING))
                 i = code_start = end
                 continue
-            if prev in ")]" or prev.isalnum() or prev in "_$":
-                # After a VALUE (identifier, number, `)`, `]`) a `/` is DIVISION — that is the standard
-                # previous-token rule and it is not ambiguous. Treating it as a possible regex would swallow
-                # the rest of the statement and hide a real sink after it (`a / b; location.href=...`),
-                # which is a dropped vulnerability rather than a cautious under-claim.
+            if prev == "]" or prev.isalnum() or prev in "_$":
+                # After a VALUE (identifier, number, `]`) a `/` is DIVISION — the standard previous-token
+                # rule, and not ambiguous: `]` always ends an array literal or index (a value), never a
+                # control head, so there is no `]`-then-regex construct. `)` is DIFFERENT — see below.
                 i += 1
                 continue
-            if prev == "}":
-                # Genuinely undecidable without parsing: `}` ends either a block (so `/` starts a regex) or
-                # an object/function expression (so `/` is division). Mark AMBIGUOUS — a sink inside a span
-                # VIGIL cannot classify must never mint a FACT.
+            if prev in "})":
+                # Genuinely undecidable without parsing: `}` ends a block (so `/` starts a regex) OR an
+                # object/function expression (division); `)` ends an `if (...)`/`while (...)` head (regex) OR
+                # a grouping/call value (division). Mark AMBIGUOUS — a sink inside a span VIGIL cannot
+                # classify must never mint a FACT. Now that js_sink is FACT-capable this is a false-FACT
+                # surface, so the ambiguity resolves away from minting even at the cost of an under-claim on
+                # the contrived `(a)/b; location.href=...`-on-one-line shape.
                 end = _regex_end(text, i)
                 if end > i + 1 and "\n" not in text[i:end]:
                     close_code(i)

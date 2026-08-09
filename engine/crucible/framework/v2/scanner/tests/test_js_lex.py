@@ -110,3 +110,12 @@ def test_a_legacy_html_comment_only_hides_its_own_line() -> None:
     as a block comment would swallow real sinks — the dropped-vulnerability direction."""
     src = "<!--\nlocation.href='//evil/'\n//-->"
     assert sink_is_executable(src, src.index("location"))
+
+
+def test_regex_after_paren_is_ambiguous_but_after_bracket_is_division() -> None:
+    """A `/` after `)` is genuinely ambiguous (control head -> regex vs grouping value -> division), so a
+    sink inside it must not be executable now that js_sink is FACT-capable. A `/` after `]` is always
+    division — `]` ends a value, never a control head — so a real sink after it must still be reachable."""
+    assert not sink_is_executable("if(x)/location.href='//evil/'/", len("if(x)/"))
+    assert sink_is_executable("var u = arr[0] / n; location.href='//evil/'", None
+                              or "var u = arr[0] / n; location.href='//evil/'".index("location"))
