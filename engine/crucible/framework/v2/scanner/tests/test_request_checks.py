@@ -267,8 +267,38 @@ def test_meta_refresh_follows_the_declarative_refresh_steps() -> None:
     assert hosts("5") == []                               # a bare time reloads the same page
     assert hosts("") == []
     assert hosts("0;url=/local") == []                    # same-origin
+    # the code point right after the time must be ';', ',' or ASCII whitespace — anything else ends parsing
+    assert hosts(f"0url=https://{evil}/x") == []
+    assert hosts(f"0https://{evil}/x") == []
     # the URL runs to the end of the value, so a ';' inside the path is not a terminator
     assert "x.test" in hosts("0;url=https://x.test/a;b")
+
+
+def test_body_navigation_is_ignored_on_a_followed_redirect() -> None:
+    """A 3xx carrying a Location is FOLLOWED by the browser, so its body is never rendered — any navigation
+    that body describes cannot happen, and counting it would mint a false FACT. The Location disjunct still
+    stands on its own, and a body redirect on a page that IS rendered still fires."""
+    from framework.v2.verify.oracles import predicate_oracle
+
+    canary = "crucible-redirect-canary.test"
+
+    def fires(status: int, location_host: str, markup_hosts: list[str]) -> bool:
+        followed = bool(location_host) and status in (301, 302, 303, 307, 308)
+        return predicate_oracle(
+            {"status": status, "location_host": location_host, "canary_host": canary, "body": "",
+             "followed_redirect": followed, "markup_redirect_hosts": markup_hosts},
+            {"any": [
+                {"all": [{"in": [{"var": "status"}, [301, 302, 303, 307, 308]]},
+                         {"eq": [{"var": "location_host"}, {"var": "canary_host"}]}]},
+                {"all": [{"not": {"eq": [{"var": "followed_redirect"}, True]}},
+                         {"min_len": [{"var": "canary_host"}, 1]},
+                         {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]}]},
+            ]}).fired
+
+    assert fires(302, "app.example", [canary]) is False   # redirected somewhere SAFE; body never rendered
+    assert fires(200, "", [canary]) is True               # rendered page: the body redirect is real
+    assert fires(302, canary, []) is True                 # the Location itself goes to the canary
+    assert fires(302, "", [canary]) is True               # a 3xx with no Location is not followed
 
 
 def test_meta_refresh_url_extraction_is_bounded_and_faithful() -> None:

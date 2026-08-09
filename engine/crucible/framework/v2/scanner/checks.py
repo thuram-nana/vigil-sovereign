@@ -362,12 +362,19 @@ class HostHeaderCheck:
         # (not exploitable), and matching is on the WHOLE authority, so a subdomain
         # reflection like `//evil-host.cdn.example.com` does not collide with the evil
         # host either.
+        # As above: on a followed 3xx the body is never rendered, so a Host-derived link inside it is not
+        # something a victim can use. The Location disjunct still stands on its own.
+        followed = bool(location) and int(resp.get("status", 0) or 0) in (301, 302, 303, 307, 308)
         return FindingContext.from_predicate(
             {"location_host": _host(location), "evil_host": self.evil_host,
-             "body": body, "emitted_url_hosts": _emitted_url_hosts(body)},
+             "body": body, "followed_redirect": followed,
+             "emitted_url_hosts": _emitted_url_hosts(body)},
             {"any": [
                 {"eq": [{"var": "location_host"}, {"var": "evil_host"}]},
-                {"in": [{"var": "evil_host"}, {"var": "emitted_url_hosts"}]},
+                {"all": [
+                    {"not": {"eq": [{"var": "followed_redirect"}, True]}},
+                    {"in": [{"var": "evil_host"}, {"var": "emitted_url_hosts"}]},
+                ]},
             ]},
             bug_class=self.bug_class)
 
@@ -404,9 +411,13 @@ class OpenRedirectCheck:
         # canary host. Reflection on the app's own host — or the canary merely echoed
         # somewhere in the body next to an unrelated <meta http-equiv=...> — fails the
         # predicate (no false positive on echoed-but-safe params).
+        # A 3xx that carries a Location is FOLLOWED by the browser, so its body is never rendered: any
+        # navigation the body describes cannot happen, and counting it would be a false FACT.
+        followed = bool(location) and status in (301, 302, 303, 307, 308)
         return FindingContext.from_predicate(
             {"status": status, "location_host": _host(location),
              "canary_host": _host(self.canary), "body": body,
+             "followed_redirect": followed,
              "markup_redirect_hosts": _markup_redirect_hosts(body)},
             {"any": [
                 {"all": [
@@ -414,6 +425,7 @@ class OpenRedirectCheck:
                     {"eq": [{"var": "location_host"}, {"var": "canary_host"}]},
                 ]},
                 {"all": [
+                    {"not": {"eq": [{"var": "followed_redirect"}, True]}},
                     {"min_len": [{"var": "canary_host"}, 1]},
                     {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
                 ]},
@@ -656,11 +668,17 @@ def _meta_refresh_url(content: str) -> str:
         return ""                       # no time component: the browser refreshes nothing at all
     while i < n and ((value[i].isascii() and value[i].isdigit()) or value[i] == "."):
         i += 1                          # fractional part is parsed and ignored
+    if i >= n:
+        return ""                       # a bare time reloads the SAME page — not a navigation elsewhere
+    if value[i] not in ";," and value[i] not in _HTML_WHITESPACE:
+        return ""                       # the code point right after the time MUST be `;`, `,` or ASCII
+                                        # whitespace; anything else ends parsing, so `0url=http://evil/`
+                                        # and `0http://evil/` navigate NOWHERE (they reload same-origin)
     i = skip_ws(i)
     if i < n and value[i] in ";,":
         i = skip_ws(i + 1)
     if i >= n:
-        return ""                       # a bare time reloads the SAME page — not a navigation elsewhere
+        return ""
     if value[i:i + 3].lower() == "url":
         i = skip_ws(i + 3)              # the keyword is consumed whether or not an `=` follows it
         if i < n and value[i] == "=":
@@ -668,8 +686,9 @@ def _meta_refresh_url(content: str) -> str:
     if i < n and value[i] in "\"'":     # a quote delimits the URL; anything after the match is dropped
         quote, i = value[i], i + 1
         end = value.find(quote, i)
-        return value[i:end if end >= 0 else n].strip()
-    return value[i:].strip()
+        return value[i:end if end >= 0 else n].strip(_HTML_WHITESPACE)
+    # strip only ASCII whitespace: urlsplit (and a browser) KEEP other Unicode spaces such as U+00A0
+    return value[i:].strip(_HTML_WHITESPACE)
 # JS navigation sinks: location.href/.assign/.replace, window/document.location[.href], with = or (
 #
 # KNOWN LIMITATION (tracked, not fixed here): this is a regex over script TEXT, so it also fires on a sink
@@ -760,8 +779,6 @@ class _MarkupScan(HTMLParser):
         return self._script_open and not self._in_script
 
     def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
-        if self._in_script_data and tag != "script":
-            return                          # not a real tag: it is script text
         if tag == "template":
             self._template_depth += 1
             return
@@ -802,9 +819,13 @@ class _MarkupScan(HTMLParser):
                 self._script_open, self._escaped = False, False
 
     def handle_data(self, data: str) -> None:
-        if not self._in_script:
+        # The escape state must also advance while the tokenizer is OUTSIDE the element but WHATWG still
+        # considers us in script data: that text is script text, so a `-->` in it really does end the
+        # escape. Ignoring it left `_escaped` stale, and a later `<script ` then looked like a fresh
+        # double-escape entry and suppressed a live page (a real vulnerability reported CLEAN).
+        if not (self._in_script or self._in_script_data):
             return
-        if self._live:
+        if self._live and self._in_script:
             self.script_text.append(data)
         self._escaped, self._double = _script_data_state(data, self._escaped, self._double)
 

@@ -563,9 +563,13 @@ class OidcRedirectUriCheck:
         # must be an ACTUAL navigation target — not merely reflected in an error page next to an unrelated
         # <meta http-equiv=Content-Type> (the co-location fix, shared with OpenRedirectCheck).
         _body_text = _body(resp)
+        # A 3xx carrying a Location is FOLLOWED, so its body is never rendered and any navigation the body
+        # describes cannot happen — the same gate as OpenRedirectCheck, applied to this twin predicate.
+        _followed = bool(_location(resp)) and _status(resp) in (301, 302, 303, 307, 308)
         return FindingContext.from_predicate(
             {"status": _status(resp), "location_host": _host(_location(resp)),
              "canary_host": _host(self.canary), "body": _body_text,
+             "followed_redirect": _followed,
              "markup_redirect_hosts": _markup_redirect_hosts(_body_text)},
             {"any": [
                 {"all": [
@@ -573,6 +577,7 @@ class OidcRedirectUriCheck:
                     {"eq": [{"var": "location_host"}, {"var": "canary_host"}]},
                 ]},
                 {"all": [
+                    {"not": {"eq": [{"var": "followed_redirect"}, True]}},
                     {"min_len": [{"var": "canary_host"}, 1]},
                     {"in": [{"var": "canary_host"}, {"var": "markup_redirect_hosts"}]},
                 ]},
