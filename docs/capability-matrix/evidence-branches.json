@@ -1,6 +1,6 @@
 {
   "schema": "vigil-evidence-branches/1",
-  "note": "Per-EVIDENCE-BRANCH capability CONTRACT, enforced by scanner/tests/test_claim_discipline.py. fact_capable/clean_capable are SEPARATE claims describing what is TRUE TODAY. target_fact_capable/target_clean_capable are what the branch MUST become — this registry is a ladder, not a ceiling. Any gap between current and target REQUIRES `blocking_work`: the concrete engineering that closes it. A gap without blocking work fails the enforcement test, so a capability can never be quietly abandoned by downgrading the claim; the claim stays, and the system is built up to meet it. Downgrading a TARGET requires an explicit `target_downgrade_rationale` stating why the capability is not achievable at all. `evidence_surface` is a CLOSED type (response_headers | response_body | transport | tls_handshake | service_response | artifact | composite) — rules key off the declared type, never off the branch name, so a future body-derived branch cannot escape them by being called something else. `implementation_refs` point at the code that realises the branch; the enforcement test checks the referenced file and symbol actually exist.",
+  "note": "Per-EVIDENCE-BRANCH capability CONTRACT, enforced by scanner/tests/test_claim_discipline.py. fact_capable/clean_capable are SEPARATE claims describing what is TRUE TODAY. target_fact_capable/target_clean_capable are what the branch MUST become \u2014 this registry is a ladder, not a ceiling. Any gap between current and target REQUIRES `blocking_work`: the concrete engineering that closes it. A gap without blocking work fails the enforcement test, so a capability can never be quietly abandoned by downgrading the claim; the claim stays, and the system is built up to meet it. Downgrading a TARGET requires an explicit `target_downgrade_rationale` stating why the capability is not achievable at all. `evidence_surface` is a CLOSED type (response_headers | response_body | transport | tls_handshake | service_response | artifact | composite) \u2014 rules key off the declared type, never off the branch name, so a future body-derived branch cannot escape them by being called something else. `implementation_refs` point at the code that realises the branch; the enforcement test checks the referenced file and symbol actually exist.",
   "branches": [
     {
       "id": "open_redirect.location_header",
@@ -18,7 +18,7 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:OpenRedirectCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed \u2014 the runner builds a bare GET template \u2014 so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
     },
     {
       "id": "open_redirect.body_markup",
@@ -34,7 +34,7 @@
       "limitation": "NOT CLEAN-capable: a non-firing cannot distinguish 'the document contains no redirect' from 'we could not read the document'. Body availability is established ONLY for a complete, single-member gzip/deflate/identity stream whose charset is deterministically known (a BOM, the transport Content-Type charset, or the RFC-8259 UTF-8 default for application/json) and which decodes strictly; an undeclared charset, brotli/zstd, concatenated members, and truncated reads are INCONCLUSIVE, not CLEAN. Suppressed entirely on a followed 3xx, whose body is never rendered.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Body evidence must become CLEAN-capable AND readable for every body, not only deterministically-declared ones. This needs: (1) a spec-compliant HTML encoding-determination implementation — a vendored reference, NOT a regex; a hand-approximated <meta> prescan is rejected under Claim-Discipline rule 4, and the transport charset must outrank the in-document declaration per WHATWG; (2) vendored, version-pinned, bounded STREAMING brotli/zstd decoders whose versions are bound into oracle provenance, so adjudication is host-independent and offline-replayable (dynamic host module-probing was removed for this reason); (3) bounded concatenated-member decoding so a multi-member body is read rather than refused; (4) a truncation-free read for pages under the cap. Only then is a non-firing a channel-confirmed negative. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "Body evidence must become CLEAN-capable AND readable for every body, not only deterministically-declared ones. This needs: (1) a spec-compliant HTML encoding-determination implementation \u2014 a vendored reference, NOT a regex; a hand-approximated <meta> prescan is rejected under Claim-Discipline rule 4, and the transport charset must outrank the in-document declaration per WHATWG; (2) vendored, version-pinned, bounded STREAMING brotli/zstd decoders whose versions are bound into oracle provenance, so adjudication is host-independent and offline-replayable (dynamic host module-probing was removed for this reason); (3) bounded concatenated-member decoding so a multi-member body is read rather than refused; (4) a truncation-free read for pages under the cap. Only then is a non-firing a channel-confirmed negative. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed \u2014 the runner builds a bare GET template \u2014 so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_markup_redirect_hosts"
@@ -53,7 +53,7 @@
       "limitation": "Sinks in comments, string/template literals and ambiguous `/`-spans are excluded structurally by js_lex. The regex-vs-division ambiguity JavaScript cannot settle without parsing is resolved AWAY from minting, so an ambiguous span yields no FACT. NOT CLEAN-capable: this lexes but does not EXECUTE, so a sink built at runtime (string concatenation, eval, a framework router) is invisible and a non-firing cannot assert absence.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "CLEAN requires proving no sink exists, which lexing cannot do: a redirect assembled at runtime never appears literally. Closing it needs the headless browser path (render_dom) to observe actual navigation, not source inspection. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "CLEAN requires proving no sink exists, which lexing cannot do: a redirect assembled at runtime never appears literally. Closing it needs the headless browser path (render_dom) to observe actual navigation, not source inspection. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed \u2014 the runner builds a bare GET template \u2014 so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/js_lex.py:sink_is_executable",
@@ -93,7 +93,7 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:HostHeaderCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed \u2014 the runner builds a bare GET template \u2014 so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
     },
     {
       "id": "host_header.body_emission",
@@ -109,7 +109,7 @@
       "limitation": "NOT CLEAN-capable: a non-firing cannot distinguish 'the app emits no Host-derived URL' from 'we could not read the document'. Inert markup (comments, raw-text elements, template fragments) is excluded via the stdlib tokenizer; an inert-text echo is not an emission.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Same decode-completeness work as open_redirect.body_markup; the emission scan itself is already tokenizer-backed and differential-tested. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "Same decode-completeness work as open_redirect.body_markup; the emission scan itself is already tokenizer-backed and differential-tested. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed \u2014 the runner builds a bare GET template \u2014 so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/checks.py:_emitted_url_hosts"
@@ -131,7 +131,7 @@
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"
       ],
-      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
+      "blocking_work": "INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed \u2014 the runner builds a bare GET template \u2014 so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline."
     },
     {
       "id": "oidc_redirect_uri.body_markup",
@@ -147,7 +147,7 @@
       "limitation": "NOT CLEAN-capable, for the same reason as the other body-derived branches.",
       "target_fact_capable": true,
       "target_clean_capable": true,
-      "blocking_work": "Same decode-completeness work; shares the markup helper. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed — the runner builds a bare GET template — so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
+      "blocking_work": "Same decode-completeness work; shares the markup helper. INSERTION COVERAGE (open_redirect / host_header / oidc): the live re-drive probes QUERY_VALUE and URL_PATH_SEG. Cookie, urlencoded-body and JSON-body redirect parameters are NOT yet probed \u2014 the runner builds a bare GET template \u2014 so a redirect taken only from those surfaces is currently unexamined (reported as such, never as CLEAN). Wiring them needs a synthesised request with the correct method + Content-Type and a benign-twin baseline.",
       "evidence_surface": "response_body",
       "implementation_refs": [
         "engine/crucible/framework/v2/scanner/sso.py:OidcRedirectUriCheck"
@@ -239,6 +239,42 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/k8s_posture.py:ingest_k8s_rbac"
+      ]
+    },
+    {
+      "id": "mesh_posture.achieved_state",
+      "check": "mesh_posture_verify",
+      "evidence": "an Istio/Linkerd manifest VIGIL parsed declares an insecure achieved state the mesh_posture oracle re-derives: PERMISSIVE/DISABLE PeerAuthentication mTLS, an ALLOW AuthorizationPolicy that admits every caller, or an all-unauthenticated Linkerd default-inbound-policy",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to what the RETAINED mesh CONFIG declares \u2014 the claim is about the manifest artifact, never that the live mesh accepts plaintext. NOT CLEAN-capable: a non-firing manifest is a lead, not a clean bill of health, because a partial/incomplete config export (only some namespaces/resources) cannot prove the ABSENCE of a permissive policy elsewhere, and an absent mtls_mode inherits a parent this slice does not resolve. requestPrincipals ['*'] is JWT-gated (not allow-all) and does not fire.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof over the mesh config: enumerate every namespace/workload in scope, resolve PeerAuthentication mTLS inheritance to an effective mode per workload, and record that the export is complete, so 'no permissive policy matched' becomes a bounded negative rather than an absence of data. Until then a non-fire stays INCONCLUSIVE.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/mesh_cicd_posture.py:mesh_posture_verify"
+      ]
+    },
+    {
+      "id": "cicd_posture.workflow_construct",
+      "check": "cicd_posture_verify",
+      "evidence": "a GitHub-Actions workflow VIGIL parsed contains a dangerous construct the cicd_posture oracle re-derives: a third-party action pinned to a MUTABLE ref, a pull_request_target that checks out the untrusted PR head (pwn-request), or a run step interpolating an untrusted github.event.* expression (script-injection)",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to what the RETAINED workflow FILE declares \u2014 the claim is about the workflow artifact, never that the pipeline was exploited. NOT CLEAN-capable: a non-firing workflow is a lead, not clean, because a single workflow file cannot prove the ABSENCE of risk across the repo's other workflows / reusable-workflow callees / composite actions this slice does not follow. First-party (actions/github) and SHA-pinned actions, a plain pull_request base checkout, and a quoted-literal-only interpolation do not fire.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof over the CI/CD surface: enumerate every workflow file plus the reusable-workflow and composite-action callees they reference, resolve each transitively, and record the enumeration is complete, so 'no dangerous construct matched' becomes a bounded negative rather than an absence of data. Until then a non-fire stays INCONCLUSIVE.",
+      "evidence_surface": "artifact",
+      "implementation_refs": [
+        "integration/vigil_integration/live/mesh_cicd_posture.py:cicd_posture_verify"
       ]
     }
   ]
