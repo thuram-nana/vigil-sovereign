@@ -216,6 +216,22 @@ def confirm_and_certify(
     result = adjudicate_finding(finding, oracle_context, verifier)
     confirmed = confirmed_from_result(result, finding, verifier)
     if confirmed is None:
+        # A1 downstream honesty: confirm() may have SUPPRESSED a would-be confirmation because the class is
+        # out-of-vocabulary (unknown-class fail-closed), even though a high-confidence oracle actually FIRED.
+        # That is NOT a channel-confirmed CLEAN negative — the oracle DID fire; the class simply has no oracle
+        # mapping. Report it as the honest UNSUPPORTED lead ("no deterministic oracle mapping"), matching the
+        # pre-A1 behaviour, rather than letting probe_verdict mislabel a fired-but-suppressed result as clean.
+        fired_hi = [s for s in result.signals if s.fired and s.confidence >= verifier.high_confidence]
+        if fired_hi and not is_known_bug_class(bug_class):
+            k = _kind_str(fired_hi[0].kind)
+            return AdapterResult(
+                "lead",
+                f"confirmed by {k} but {normalize_bug_class(bug_class)!r} has no deterministic oracle "
+                f"mapping — retained as a labelled lead, not a signed fact (unknown-class fail-closed)",
+                normalize_bug_class(bug_class), _finding_ref(finding),
+                confirmed_by=k, confidence=float(fired_hi[0].confidence),
+                outcome=Outcome.UNSUPPORTED.value,
+            )
         verdict, _kinds = probe_verdict(result)   # "clean" | "inconclusive" (never "finding" here)
         oc = Outcome.CLEAN if verdict == "clean" else Outcome.INCONCLUSIVE
         reason = ("oracle CONCLUSIVELY did not fire over the retained context (channel-confirmed negative)"
