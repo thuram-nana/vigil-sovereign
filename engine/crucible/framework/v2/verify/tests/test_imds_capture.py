@@ -253,6 +253,11 @@ _BLOCK_SOURCES = (
     "http://٢٨٥٢٠٣٩١٦٦/latest/meta-data/iam/security-credentials/role",
     # Fullwidth-digit host (２８５２０３９１６６) — same class.
     "http://２８５２０３９１６６/iam/security-credentials",
+    # hex host with UNDERSCORES: Python int('0xa9_fe_a9_fe',16) == the metadata IP, but no resolver accepts
+    # underscores in a host — the strict ^0x[0-9a-f]+$ parse must reject it (red-pen hex-underscore vector).
+    "http://0xa9_fe_a9_fe/latest/meta-data/iam/security-credentials/role",
+    # decimal host with underscores / a leading sign — likewise no real reach.
+    "http://2_852_039_166/iam/security-credentials",
 )
 
 

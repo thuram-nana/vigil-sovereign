@@ -4366,11 +4366,19 @@ def _imds_host_to_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
         return ipaddress.ip_address(host)               # textual IPv4 / IPv6 literal
     except ValueError:
         pass
-    try:
-        n = int(host, 16) if host.lower().startswith("0x") else (int(host) if host.isdigit() else None)
-    except ValueError:
+    # A 32-bit integer host (decimal ``2852039166`` / hex ``0xA9FEA9FE``) denotes an IPv4 address. Parse it
+    # ONLY from a STRICT form: bare ASCII digits, or ``0x`` + bare ASCII hex — NO underscores (Python's
+    # ``int()`` accepts ``0xa9_fe_a9_fe`` / ``2_852_039_166``), NO sign, NO whitespace. A host string no OS
+    # resolver / inet_aton would accept must not canonicalize to the metadata IP (red-pen BLOCK-A + the
+    # hex-underscore vector). ``isascii()`` above already rejects Unicode-digit hosts.
+    low = host.lower()
+    if re.fullmatch(r"[0-9]+", host):
+        n = int(host)
+    elif re.fullmatch(r"0x[0-9a-f]+", low):
+        n = int(low, 16)
+    else:
         return None
-    if n is None or not (0 <= n <= 0xFFFFFFFF):
+    if not (0 <= n <= 0xFFFFFFFF):
         return None
     return ipaddress.ip_address(n)                       # a 32-bit integer denotes an IPv4 address
 
