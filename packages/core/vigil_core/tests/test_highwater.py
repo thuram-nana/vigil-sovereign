@@ -27,6 +27,23 @@ def test_absent_floor_loads_none(tmp_path):
     assert load_highwater(tmp_path / "hw.json") is None
 
 
+def test_symlink_floor_is_refused_not_read_as_absent(tmp_path):
+    """RED-PEN class-fix (twin of evidence/cli.py::_load_highwater): a SYMLINK at the floor path is suspicious
+    and must RAISE — a DANGLING symlink must not read as 'absent' (exists() follows the link -> False), which
+    would silently skip the rollback check. is_symlink() is checked BEFORE exists()."""
+    dangling = tmp_path / "hw.json"
+    os.symlink(str(tmp_path / "does-not-exist.json"), str(dangling))
+    with pytest.raises(HighWaterError):
+        load_highwater(dangling)                       # dangling -> refuse, NOT first-run
+    dangling.unlink()
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"entry_count": 3, "last_seq": 5}))
+    link = tmp_path / "hw2.json"
+    os.symlink(str(real), str(link))
+    with pytest.raises(HighWaterError):
+        load_highwater(link)                           # symlink-to-existing -> also refuse
+
+
 def test_advance_then_load_roundtrips(tmp_path):
     p = tmp_path / "hw.json"
     written = advance_highwater(p, _head(entry_count=3, last_seq=2))
