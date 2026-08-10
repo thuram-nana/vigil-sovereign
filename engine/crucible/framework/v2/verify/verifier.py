@@ -249,6 +249,16 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # gate` byte-identical. DISTINCT from the LIVE `saml_signature_wrapping` / `saml_assertion_tampering`
     # classes (ACCEPTANCE proved live via ACHIEVED_STATE) — this proves FORGEABILITY offline, no traffic.
     "saml_structural_forgery": (OracleKind.SAML_STRUCTURAL_FORGERY,),
+    # BUILD-PLAN §E1 (SSRF/foothold -> IMDS/metadata credential capture, the flagship exploitation-chain
+    # oracle): a retrieved-from-IMDS credential LEAD becomes an achieved-effect FACT only when
+    # imds_credential_capture_oracle re-derives, over the RETAINED capture ALONE (offline, ZERO network,
+    # NO exploitation code), BOTH a structurally-valid credential FROM the metadata endpoint AND a
+    # confirming call (sts:GetCallerIdentity / tokeninfo) that proves it authenticated. This is a DEFENSIVE
+    # VERIFICATION oracle, never an attack runner. Like the posture rows, this NEW OracleKind is reachable
+    # ONLY via this row — it is NOT in the frozen _ALL_ORACLES fallback — and fires only when the ctx
+    # carries `imds_capture`, which no benchmark/scan/engage finding does. So appending it leaves the
+    # unknown-class fallback and `make gate` byte-identical.
+    "imds_credential_capture": (OracleKind.IMDS_CREDENTIAL_CAPTURE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -451,6 +461,17 @@ _ALIASES: dict[str, str] = {
     "mongo_injection_attempt": "nosql_injection_attempt",
     "mongodb_injection_attempt": "nosql_injection_attempt",
     "mongodb_operator_injection": "nosql_injection_attempt",
+    # E1 IMDS/metadata credential-capture spelling variants fold onto the single canonical class. This is
+    # the achieved-EFFECT proof (creds retrieved from IMDS AND proven usable), distinct from the cloud
+    # posture classes above — a captured, authenticated credential, not a mis-configuration.
+    "imds_capture": "imds_credential_capture",
+    "imds_credential_theft": "imds_credential_capture",
+    "metadata_credential_capture": "imds_credential_capture",
+    "instance_metadata_credential_capture": "imds_credential_capture",
+    "instance_metadata_credential_theft": "imds_credential_capture",
+    "ssrf_to_imds": "imds_credential_capture",
+    "imds_ssrf": "imds_credential_capture",
+    "cloud_metadata_credential_capture": "imds_credential_capture",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -824,6 +845,13 @@ class OracleVerifier:
                 # verification when supplied AND signxml is importable; absent -> structural-only.
                 return oracles.saml_forgery_oracle(
                     ctx["saml_xml"], candidate_certs=ctx.get("saml_candidate_certs", ()))
+            return None
+        # -- BUILD-PLAN §E1 IMDS/metadata credential capture — fire ONLY when the ctx carries
+        #    `imds_capture` (a retained capture the WARDEN-gated runner produced); no benchmark/scan/engage
+        #    finding does, so it is inert on the gate path. DEFENSIVE VERIFICATION, never an attack runner.
+        if kind is OracleKind.IMDS_CREDENTIAL_CAPTURE:
+            if "imds_capture" in ctx:
+                return oracles.imds_credential_capture_oracle(ctx["imds_capture"])
             return None
         return None
 

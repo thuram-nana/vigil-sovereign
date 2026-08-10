@@ -4275,3 +4275,288 @@ def saml_forgery_oracle(xml: Any, *, candidate_certs: Sequence[str] = ()) -> Ora
         observed={"assertions": len(assertions), "signatures": len(signatures),
                   "consumed_assertion_id": consumed_id, "referenced_ids": sorted(referenced_ids),
                   "whole_doc_sig": whole_doc_sig, "unadjudicable_ref": unadjudicable_ref})
+
+
+# ---------------------------------------------------------------------------
+# E1 — SSRF/foothold -> IMDS/metadata credential capture (BUILD-PLAN §E1; the flagship
+# exploitation-chain oracle). The DEFENSIVE-VERIFICATION dual of an attack: it CONFIRMS an ACHIEVED
+# EFFECT — role/SA credentials were actually retrieved from the instance metadata endpoint AND proven
+# usable — over a JSON-safe RETAINED capture ALONE (offline, ZERO network, NO exploitation code). It is
+# NOT an attack runner: the live "reach 169.254.169.254, mint a token, call GetCallerIdentity" action is
+# a SEPARATE WARDEN-A2-gated runner; THIS pure oracle is the sole authority over the evidence that runner
+# retained and re-derives the same verdict, so a confirmed FACT re-verifies OFFLINE from its certificate
+# with no target. Positive-evidence-only, near-zero-FP by construction: it fires ONLY on BOTH a
+# structurally-valid credential FROM the metadata endpoint AND a retained confirming call that proves it
+# authenticated. A retrieved-but-unconfirmed credential is a LEAD; a 401/timeout / a FAILED confirming
+# call / a credential NOT from the metadata endpoint / a random blob / malformed evidence never fire.
+_IMDS_STR_CAP = 8192
+_IMDS_OBS_CAP = 512
+# An AWS access-key id: ASIA… (STS temporary, the shape IMDS returns) or AKIA… (long-term). The spec's
+# regex matches both; an IMDS capture also requires a Token, which a long-term AKIA key never carries.
+_IMDS_AWS_AKID = re.compile(r"^A[SK]IA[0-9A-Z]{16,}$")
+_IMDS_AWS_ACCOUNT = re.compile(r"^[0-9]{12}$")
+# The two link-local IMDS markers a captured AWS role credential's source must literally carry.
+_IMDS_AWS_IP = "169.254.169.254"
+_IMDS_AWS_CRED_PATH = "iam/security-credentials"
+# The four (lowercased) markers a captured GCP SA-token source must literally carry — the real endpoint
+# is metadata.google.internal/computeMetadata/v1/instance/service-accounts/<sa>/token.
+_IMDS_GCP_SOURCE_MARKERS = ("metadata", "computemetadata/v1", "service-accounts", "token")
+# Keys whose presence-with-a-truthy-value is POSITIVE proof the confirming call FAILED (did not auth).
+_IMDS_ERROR_KEYS = frozenset({"error", "errormessage", "error_message", "errorcode", "error_code"})
+
+
+def _imds_text(value: Any) -> str:
+    return _coerce_text(value)[:_IMDS_STR_CAP]
+
+
+def _imds_credential_obj(capture: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The credential sub-object: a nested ``credential``/``creds``/``credentials`` mapping, or the
+    capture itself (a flat record). Never raises."""
+    for k in ("credential", "creds", "credentials"):
+        v = capture.get(k)
+        if isinstance(v, Mapping):
+            return v
+    return capture
+
+
+def _imds_source(capture: Mapping[str, Any], cred: Mapping[str, Any]) -> str:
+    """The retained SOURCE url/endpoint of the credential — the load-bearing discriminator that a
+    credential came from the metadata endpoint (not an env var / a creds file). Read from the credential
+    first, then the capture."""
+    for obj in (cred, capture):
+        if not isinstance(obj, Mapping):
+            continue
+        for k in ("source", "url", "metadata_url", "endpoint", "uri"):
+            v = obj.get(k)
+            if v not in (None, ""):
+                return _imds_text(v)
+    return ""
+
+
+def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any, bool]:
+    """Return (identity_body, raw_status, present). The confirming call is a nested
+    ``confirming_call``/``confirmation``/… mapping; its identity payload is a nested
+    ``response``/``body``/``identity``/``result``/``json`` mapping, or the call mapping itself."""
+    call: Mapping[str, Any] | None = None
+    for k in ("confirming_call", "confirmation", "confirm_call", "verify_call", "caller_identity"):
+        v = capture.get(k)
+        if isinstance(v, Mapping):
+            call = v
+            break
+    if call is None:
+        return {}, None, False
+    status = call.get("status", call.get("status_code"))
+    for k in ("response", "body", "identity", "result", "json"):
+        v = call.get(k)
+        if isinstance(v, Mapping):
+            return v, status, True
+    return call, status, True   # the call mapping itself carries the identity fields
+
+
+def _imds_status_ok(status: Any) -> bool | None:
+    """True = an explicit 2xx success, False = an explicit failure, None = absent/unparseable (fall back
+    to identity-field presence). Positive-evidence-only: an ambiguous status never asserts success."""
+    if status is None:
+        return None
+    try:
+        code = int(status)
+        return 200 <= code < 300
+    except (TypeError, ValueError):
+        s = _coerce_text(status).strip().lower()
+        if s in ("ok", "success", "succeeded"):
+            return True
+        if s in ("error", "fail", "failed", "forbidden", "unauthorized", "denied"):
+            return False
+        return None
+
+
+def _imds_call_ok(body: Mapping[str, Any], status: Any) -> bool:
+    """No FAILURE signal in the confirming call: the status (if present) is a 2xx AND no error marker
+    carries a truthy value. This is the positive-evidence gate that a FAILED (4xx / error) call must not
+    pass — the identity-field checks below prove the SUCCESS."""
+    if _imds_status_ok(status) is False:
+        return False
+    if isinstance(body, Mapping):
+        for k, val in body.items():
+            if _coerce_text(k).strip().lower() in _IMDS_ERROR_KEYS and val:
+                return False
+    return True
+
+
+def _imds_aws_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
+    """Whether an sts:GetCallerIdentity response echoes a valid identity: an Arn (``arn:``…), a 12-digit
+    Account, and a non-empty UserId — the fields only a SUCCESSFUL, AUTHENTICATED call carries."""
+    arn = _imds_text(body.get("Arn") or body.get("arn")).strip()
+    account = _imds_text(body.get("Account") or body.get("account")).strip()
+    user_id = _imds_text(body.get("UserId") or body.get("user_id") or body.get("userId")).strip()
+    ok = arn.startswith("arn:") and _IMDS_AWS_ACCOUNT.match(account) is not None and bool(user_id)
+    return ok, {"arn": arn, "account": account, "user_id": user_id}
+
+
+def _imds_expiry_present(value: Any) -> bool:
+    """A retained expiry (exp/expires_in/…): a positive number, or a non-empty timestamp string. NO
+    wall-clock is read — presence of an expiry field is the structural fact, not whether it is in the
+    future (that would need a clock, which an oracle must never touch)."""
+    if isinstance(value, bool) or value in (None, ""):
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    return bool(_coerce_text(value).strip())
+
+
+def _imds_gcp_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
+    """Whether a tokeninfo/userinfo response proves the token authenticated: an email or sub, plus an
+    expiry (exp/expires_in/…) — the fields a SUCCESSFUL introspection carries."""
+    email = _imds_text(body.get("email") or body.get("email_address")).strip()
+    sub = _imds_text(body.get("sub") or body.get("subject")).strip()
+    expiry: Any = ""
+    for k in ("exp", "expires_in", "expires_at", "expiry", "expireTime", "expire_time"):
+        if body.get(k) not in (None, ""):
+            expiry = body.get(k)
+            break
+    ok = bool(email or sub) and _imds_expiry_present(expiry)
+    return ok, {"email": email, "sub": sub, "expiry": _imds_text(expiry)}
+
+
+def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
+    """Fire when a RETAINED capture PROVES an IMDS/metadata credential-capture achieved effect — the E1
+    (BUILD-PLAN §E1) exploitation-chain confirmation. The DEFENSIVE dual of an attack: it re-derives,
+    over the JSON-safe retained evidence ALONE (offline, ZERO network, NO exploitation code), that role/SA
+    credentials were actually retrieved from the instance metadata endpoint AND are usable. It NEVER
+    performs the attack — the live reach-IMDS/use-token action is a separate WARDEN-A2-gated runner; this
+    pure oracle judges what that runner captured, so a confirmed FACT re-verifies offline from its
+    certificate.
+
+    ``observed`` is the JSON-safe retained capture::
+
+        {"provider": "aws"?,
+         "credential": {"AccessKeyId": "ASIA…", "SecretAccessKey": "…", "Token": "…",
+                        "source": "http://169.254.169.254/latest/meta-data/iam/security-credentials/role"},
+         "confirming_call": {"action": "sts:GetCallerIdentity", "status": 200,
+                             "response": {"Arn": "arn:aws:sts::123456789012:assumed-role/role/i-0",
+                                          "Account": "123456789012", "UserId": "AROA…:i-0"}}}
+        # or GCP:
+        {"credential": {"access_token": "ya29.…", "token_type": "Bearer",
+                        "source": "http://metadata.google.internal/computeMetadata/v1/instance/"
+                                  "service-accounts/default/token"},
+         "confirming_call": {"action": "tokeninfo", "status": 200,
+                             "response": {"email": "svc@p.iam.gserviceaccount.com", "expires_in": 3599}}}
+
+    Fires (0.95) ONLY when BOTH halves hold (near-zero-FP by construction):
+      (a) a STRUCTURALLY-VALID credential FROM the metadata endpoint —
+          AWS: ``AccessKeyId`` matches ``^A[SK]IA[0-9A-Z]{16,}$`` AND a non-empty ``SecretAccessKey`` AND
+               a non-empty ``Token``, AND the retained source contains BOTH ``169.254.169.254`` and
+               ``iam/security-credentials``; OR
+          GCP: a non-empty ``access_token`` AND ``token_type == "Bearer"``, AND the retained source
+               contains ``metadata`` + ``computeMetadata/v1`` + ``service-accounts`` + ``token``; AND
+      (b) a retained CONFIRMING-CALL response proving the credential AUTHENTICATED, with NO failure signal
+          (no 4xx/5xx status, no truthy error field) —
+          AWS: an sts:GetCallerIdentity response echoing an Arn (``arn:``…) + a 12-digit Account + a
+               UserId; OR
+          GCP: a tokeninfo/userinfo success carrying an email/sub + an expiry (exp/expires_in/…).
+    The credential's provider and the confirming call's provider MUST agree (an AWS credential needs an
+    AWS confirming call; a GCP token needs a GCP one).
+
+    Does NOT fire (stays an honest LEAD / INCONCLUSIVE downstream): a credential retrieved from IMDS but
+    with NO confirming call (retrieved-but-unconfirmed = LEAD); a credential + a FAILED confirming call
+    (error / 4xx); a 401/timeout metadata response (no valid credential); a credential whose source is NOT
+    the metadata endpoint (a normal env-var key / a creds file — never mistaken for an IMDS capture); a
+    random JSON blob; malformed/absent evidence (never raises). Positive-evidence-only: an absent/unknown
+    signal never fires. Pure + deterministic, so the same verdict re-verifies offline from the retained
+    context. GROUNDING is procedural exactly as for every oracle: the capture MUST be the runner's RETAINED
+    evidence, never a re-run of a live IMDS/STS call laundered as a fact."""
+    kind = OracleKind.IMDS_CREDENTIAL_CAPTURE
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no IMDS credential-capture evidence")
+    capture = observed
+    cred = _imds_credential_obj(capture)
+    source = _imds_source(capture, cred)
+    source_lc = source.lower()
+    body, status, call_present = _imds_confirming_call(capture)
+
+    # -- AWS: an STS-temporary instance-role credential from the IMDS security-credentials path --------
+    akid = _imds_text(cred.get("AccessKeyId") or cred.get("access_key_id")).strip()
+    aws_cred_valid = (
+        _IMDS_AWS_AKID.match(akid) is not None
+        and bool(_imds_text(cred.get("SecretAccessKey") or cred.get("secret_access_key")).strip())
+        and bool(_imds_text(cred.get("Token") or cred.get("SessionToken")
+                            or cred.get("session_token")).strip())
+    )
+    aws_from_imds = aws_cred_valid and _IMDS_AWS_IP in source_lc and _IMDS_AWS_CRED_PATH in source_lc
+    if aws_from_imds:
+        if not call_present:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=("AWS instance-role credential retrieved from the IMDS security-credentials path "
+                          "but NO confirming sts:GetCallerIdentity call is retained — retrieved-but-"
+                          "unconfirmed (stays a LEAD; a credential alone does not prove it is usable)"),
+                observed={"provider": "aws", "reason": "no_confirming_call", "access_key_id": akid})
+        ok, ident = _imds_aws_identity(body)
+        if _imds_call_ok(body, status) and ok:
+            return OracleSignal(
+                kind=kind, fired=True, confidence=0.95,
+                evidence=(f"IMDS credential capture (AWS): a structurally-valid instance-role credential "
+                          f"(AccessKeyId {akid!r}) was retrieved from the metadata endpoint ({source!r}) "
+                          f"AND sts:GetCallerIdentity authenticated with it (Arn={ident['arn']!r}, "
+                          f"Account={ident['account']!r}, UserId={ident['user_id']!r}) — the credential is "
+                          f"proven usable. SUBJECT = the retained capture the WARDEN-gated runner produced; "
+                          f"VIGIL re-derives the achieved effect over the retained evidence offline (no "
+                          f"network, no re-exploitation)."),
+                observed={"provider": "aws", "reason": "imds_credential_authenticated",
+                          "access_key_id": akid, "account": ident["account"], "arn": ident["arn"],
+                          "user_id": ident["user_id"], "source": source[:_IMDS_OBS_CAP],
+                          "confirming_call": "sts:GetCallerIdentity"})
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("AWS instance-role credential retrieved from IMDS but the confirming "
+                      "sts:GetCallerIdentity call FAILED or did not echo a valid identity (Arn + 12-digit "
+                      "Account + UserId) — not proven usable (stays a LEAD)"),
+            observed={"provider": "aws", "reason": "confirming_call_failed", "access_key_id": akid})
+
+    # -- GCP: an OAuth access token from the compute-metadata service-account token path ---------------
+    gcp_access_token = _imds_text(cred.get("access_token") or cred.get("accessToken")).strip()
+    gcp_token_type = _imds_text(cred.get("token_type") or cred.get("tokenType")).strip()
+    gcp_cred_valid = bool(gcp_access_token) and gcp_token_type == "Bearer"
+    gcp_from_metadata = gcp_cred_valid and all(m in source_lc for m in _IMDS_GCP_SOURCE_MARKERS)
+    if gcp_from_metadata:
+        if not call_present:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=("GCP service-account access token retrieved from the compute metadata token path "
+                          "but NO confirming tokeninfo/userinfo call is retained — retrieved-but-"
+                          "unconfirmed (stays a LEAD)"),
+                observed={"provider": "gcp", "reason": "no_confirming_call"})
+        ok, ident = _imds_gcp_identity(body)
+        if _imds_call_ok(body, status) and ok:
+            who = ident["email"] or ident["sub"]
+            return OracleSignal(
+                kind=kind, fired=True, confidence=0.95,
+                evidence=(f"IMDS credential capture (GCP): a structurally-valid service-account access "
+                          f"token (token_type=Bearer) was retrieved from the compute metadata token "
+                          f"endpoint ({source!r}) AND tokeninfo/userinfo authenticated with it "
+                          f"(identity={who!r}, expiry={ident['expiry']!r}) — the token is proven usable. "
+                          f"SUBJECT = the retained capture the WARDEN-gated runner produced; VIGIL "
+                          f"re-derives the achieved effect over the retained evidence offline (no network)."),
+                observed={"provider": "gcp", "reason": "imds_credential_authenticated",
+                          "identity": who, "email": ident["email"], "sub": ident["sub"],
+                          "expiry": ident["expiry"], "source": source[:_IMDS_OBS_CAP],
+                          "confirming_call": "tokeninfo"})
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("GCP access token retrieved from compute metadata but the confirming "
+                      "tokeninfo/userinfo call FAILED or did not echo an identity (email/sub) + expiry — "
+                      "not proven usable (stays a LEAD)"),
+            observed={"provider": "gcp", "reason": "confirming_call_failed"})
+
+    # -- neither: no structurally-valid credential FROM the metadata endpoint -------------------------
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=("no structurally-valid cloud credential sourced from the instance metadata endpoint in "
+                  "the retained capture (AWS AccessKeyId+SecretAccessKey+Token from "
+                  "169.254.169.254/iam/security-credentials, or a GCP Bearer access_token from "
+                  "computeMetadata/v1/.../service-accounts/.../token) — not an IMDS credential capture "
+                  "(stays a LEAD; a credential not from IMDS, a 401/timeout, or a random blob never fires)"),
+        observed={"reason": "no_imds_credential",
+                  "aws_akid_shape": _IMDS_AWS_AKID.match(akid) is not None,
+                  "source": source[:_IMDS_OBS_CAP]})
