@@ -33,8 +33,10 @@ nothing sovereign.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Optional
 
@@ -160,6 +162,8 @@ def write_package(
     engagement_slug: str = "engagement",
     path_certs: Optional[list[PathCertificate]] = None,
     reverifiable: Optional[dict] = None,
+    artifact_bytes_by_ref: Optional[dict[str, bytes]] = None,
+    replace: bool = False,
 ) -> dict:
     """Write a self-contained external-audit package to ``out_dir`` from ALREADY-SIGNED bundle components.
 
@@ -167,15 +171,43 @@ def write_package(
     standalone verifier re-hashes for BINDING). ``reverifiable`` (optional) is the ``{active_findings:[…]}``
     doc the Step-2 VIGIL reproduction consumes; when omitted it is synthesised from ``contexts``.
 
+    ``artifact_bytes_by_ref`` (optional) ships the RAW PRIMARY ARTIFACT for each certificate that opted into
+    the gating re-check (``artifact_recheck_required`` — posture FACTs whose bytes live in memory, not the
+    on-disk evidence tree). The bytes travel under ``artifacts/`` with an ``artifacts.json`` index so a third
+    party recomputes sha256 + cross-checks the signed ``artifact_sha256`` OFFLINE (a swapped artifact fails).
+
     Returns a summary dict ``{ok, package, fingerprint, verify_cmd, certificates}``."""
+    path_certs = path_certs or []
+    artifact_bytes_by_ref = artifact_bytes_by_ref or {}
+
+    # CONSTRUCTION-TIME INVARIANTS (fail-closed — a missing required artifact must make CREATION fail, never
+    # defer to the auditor). (1) finding_refs are UNIQUE (a duplicate would overwrite a context / collide in
+    # the artifact index and make the package unverifiable after apparent success). (2) EVERY certificate that
+    # opted into the gating re-check (artifact_recheck_required) MUST have non-empty raw bytes supplied here.
+    refs = [sc.certificate.finding_ref for sc in certificates]
+    dup_refs = sorted({r for r in refs if refs.count(r) > 1})
+    if dup_refs:
+        raise ValueError(f"duplicate finding_ref(s) in the certificate set: {dup_refs} — refusing to build")
+    missing = sorted(sc.certificate.finding_ref for sc in certificates
+                     if getattr(sc.certificate, "artifact_recheck_required", False)
+                     and not artifact_bytes_by_ref.get(sc.certificate.finding_ref))
+    if missing:
+        raise ValueError(f"certificate(s) require an artifact re-check but no raw bytes were supplied: "
+                         f"{missing} — refusing to build a package that would fail closed at verify")
+
     out = Path(out_dir)
+    # Refuse a NON-EMPTY destination unless explicitly replacing it — a reused dir could retain another
+    # engagement's certificates / artifacts (cross-engagement leakage). The caller passes a fresh dir.
+    if out.exists() and any(out.iterdir()) and not replace:
+        raise ValueError(f"output dir {out} is not empty (pass replace=True to overwrite) — refusing")
+    if out.exists() and replace:
+        shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(out, 0o700)
     except OSError:
         pass
 
-    path_certs = path_certs or []
     fingerprint = trust_root_fingerprint(trust_root)
 
     bundle = {
@@ -200,14 +232,41 @@ def write_package(
     _secure_write_text(out / "RUNBOOK.md", _runbook_md(engagement_slug, fingerprint))
 
     # ship the standalone verifier VERBATIM (it imports no VIGIL). Made executable for convenience.
-    _secure_write_bytes(out / "verify_offline.py", _VERIFIER_SRC.read_bytes())
+    verifier_bytes = _VERIFIER_SRC.read_bytes()
+    _secure_write_bytes(out / "verify_offline.py", verifier_bytes)
     try:
         os.chmod(out / "verify_offline.py", 0o700)
     except OSError:
         pass
+    # A verifier shipped INSIDE the object it verifies cannot bootstrap its own trust: publish this SHA-256
+    # out-of-band (the VIGIL repo) and have the auditor compare it — or, better, obtain verify_offline.py from
+    # the separately-authenticated VIGIL source. This sidecar makes that comparison concrete + honest.
+    verifier_sha = hashlib.sha256(verifier_bytes).hexdigest()
+    _secure_write_text(out / "VERIFIER-SHA256.txt", verifier_sha + "  verify_offline.py\n")
 
     if evidence_root is not None:
         _copy_evidence_tree(Path(evidence_root), out / "evidence")
+
+    # Ship the raw PRIMARY ARTIFACTS for certs that opted into the gating re-check, under artifacts/ with a
+    # finding_ref -> relpath index. The filename is derived from a hash of the finding_ref (confined, no
+    # attacker-controlled path); the verifier recomputes sha256 over the file and cross-checks the SIGNED
+    # artifact_sha256 — so a swapped artifact fails offline (a re-checkable cert whose artifact is missing
+    # fails CLOSED).
+    art_index: dict[str, str] = {}
+    if artifact_bytes_by_ref:
+        art_dir = out / "artifacts"
+        art_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(art_dir, 0o700)
+        except OSError:
+            pass
+        for ref, raw in sorted(artifact_bytes_by_ref.items()):
+            if not raw:
+                continue
+            fname = hashlib.sha256(str(ref).encode("utf-8")).hexdigest()[:32] + ".bin"
+            _secure_write_bytes(art_dir / fname, bytes(raw))
+            art_index[str(ref)] = f"artifacts/{fname}"
+    _secure_write_text(out / "artifacts.json", json.dumps(art_index, sort_keys=True))
 
     return {
         "ok": True,
@@ -228,6 +287,7 @@ def build_audit_package(
     scope: str = "",
     charter: str = "",
     engagement_slug: str = "engagement",
+    artifact_bytes_by_ref: Optional[dict[str, bytes]] = None,
 ) -> dict:
     """End-to-end: build + sign certificates from oracle-confirmed ``findings`` (each carrying an
     ``oracle_context``), chain + sign a head, and write the external-audit package. Reuses the evidence
@@ -262,4 +322,5 @@ def build_audit_package(
         out_dir, certificates=signed_certs, chain=chain, head=head, contexts=contexts,
         trust_root=trust_root, evidence_root=ev_root, scope=scope, charter=charter,
         engagement_slug=engagement_slug,
-        reverifiable={"active_findings": usable})
+        reverifiable={"active_findings": usable},
+        artifact_bytes_by_ref=artifact_bytes_by_ref)
