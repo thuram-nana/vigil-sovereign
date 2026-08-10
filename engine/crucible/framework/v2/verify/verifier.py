@@ -625,7 +625,15 @@ class OracleVerifier:
                 signals.append(sig)
 
         confirming = [s for s in signals if s.fired and s.confidence >= self.high_confidence]
-        confirmed = len(confirming) > 0
+        # ANTI-HALLUCINATION — unknown-class FAIL-CLOSED (audit A1). A confirmation is valid ONLY for a
+        # bug_class the oracle vocabulary can actually prove. An INVENTED / out-of-vocabulary class must NEVER
+        # become a confirmed FACT, even if a generic side-effect / OOB / reflection oracle fires over the
+        # frozen ``_ALL_ORACLES`` fallback (that fallback runs for DIAGNOSTIC completeness in the rationale —
+        # G1 — not to confirm a class no oracle is mapped to). Without this gate an unknown class rides a
+        # fired fallback oracle to ``confirmed=True`` — a proof-soundness hole. This mirrors the PCF
+        # verifier's step-1 vocabulary rejection, applied to the ORDINARY confirm path too.
+        class_known = is_known_bug_class(bug_class)
+        confirmed = class_known and len(confirming) > 0
 
         # Multi-oracle combine policy: any-high-confidence-fired (safety-monotone).
         # A non-firing oracle cannot veto a fired one, so when the finding is
@@ -639,13 +647,22 @@ class OracleVerifier:
             else []
         )
 
+        rationale = self._rationale(bug_class, kinds, signals, confirming, skipped, dissent)
+        if confirming and not class_known:
+            # A would-be confirmation suppressed by the vocabulary gate — say so, loudly and auditable.
+            rationale = (
+                f"NOT CONFIRMED (fail-closed): bug_class {bug_class!r} is OUT OF the oracle vocabulary, so it "
+                f"cannot be a FACT even though {[s.kind.value for s in confirming]} fired over the fallback "
+                f"(an unknown class is a lead at most, never oracle-confirmed). " + rationale
+            )
+
         return VerificationResult(
             confirmed=confirmed,
             bug_class=bug_class,
             signals=signals,
             combine_policy="any_high_confidence_fired",
             dissent=dissent,
-            rationale=self._rationale(bug_class, kinds, signals, confirming, skipped, dissent),
+            rationale=rationale,
         )
 
     # -- dispatch ----------------------------------------------------------
