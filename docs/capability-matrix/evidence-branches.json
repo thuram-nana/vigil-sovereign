@@ -334,6 +334,27 @@
       ]
     },
     {
+      "id": "cloud_live.cloud_posture.cross_account_principal",
+      "check": "cloud_live_verify",
+      "evidence": "a resource in a VIGIL-OWNED, D5-scope-gated LIVE cloud capture grants a NAMED principal whose PARSED account is NOT in the charter's authorized owner-account set threaded into the retained control (owner_account / owner_accounts) — a cross-account trust re-derived by the deterministic cloud_posture oracle (rule named_cross_account_principal) over the RETAINED capture, never the collector's say-so. SOUNDLY attributable (FACT-capable) principals: an AWS account/role/user/STS ARN or bare 12-digit account (cross-ACCOUNT), and a GCP user/group/domain member (cross-DOMAIN). A GCP serviceAccount member is NOT FACT-capable here (it stays a LEAD) — see limitation.",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed",
+        "owner_account_supplied"
+      ],
+      "limitation": "SOUND ONLY when the owner's own-account id(s) are threaded into the retained control from the charter: distinguishing an INTENDED same-account grant from a risky cross-account one REQUIRES the owner account. With NO owner-account set (unknown owner) the rule stays a LEAD — it NEVER guesses the owner and so never false-FACTs an intended internal grant. A principal whose account cannot be SOUNDLY parsed (a service ARN with an empty account field, a non-12-digit account, ANY GCP serviceAccount member, a bare non-prefixed FQDN principal such as an AWS service principal / OIDC issuer / IP, or an opaque canonical-user id) is un-attributable and never fires. GCP serviceAccount cross-PROJECT is deliberately NOT FACT-capable: a Google-MANAGED service agent (bigquery-encryption, dlp-api, gcp-sa-*, *-robot, etc. — granted CMEK/DLP/log-sink in ~every project) is indistinguishable by email from an external customer SA, and the Google-agent project set CANNOT be enumerated (Google adds agents), so any allow/deny list is fail-OPEN (a benign agent would fire a false FACT). Therefore every serviceAccount grant stays a LEAD. blocking_work: sound GCP-SA-cross-project needs an authoritative Google-service-agent registry OR an owner-supplied trusted-external-project allowlist threaded from the charter. (AWS cross-account: a grant to a benign AWS-service-owned account, e.g. a log-delivery account, is a real-but-low-risk cross-account grant that DOES fire — a documented precision nuance, not a false FACT.) Bounded to the CAPTURED, SCOPED live state at capture time, NOT the whole cloud. NOT CLEAN-capable: the capture is a PARTIAL, scoped enumeration, so a non-firing cannot distinguish 'no cross-account grant' from 'not captured' or 'owner unknown'.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires (a) the live capture to THREAD the charter's authorized own-account id(s) into every retained control's owner_account/owner_accounts (so the comparison is grounded rather than absent), and (b) a COMPLETENESS proof over the capture: prove the scoped enumeration covered EVERY in-scope resource + its full principal/grant surface (every resource-policy/trust-policy/ACL statement resolved), so 'no cross-account grant' becomes a bounded negative rather than an absence of data. Until then a non-firing over a partial capture, or one with no owner-account threaded in, stays INCONCLUSIVE.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:cloud_posture_oracle",
+        "engine/crucible/framework/v2/verify/oracles.py:_canon_account_token",
+        "engine/crucible/framework/v2/verify/oracles.py:_cloud_owner_accounts"
+      ]
+    },
+    {
       "id": "cloud_live.policy_path.iam_grant_path",
       "check": "cloud_live_verify",
       "evidence": "a REAL IAM grant PATH re-derived over the policy graph built from a VIGIL-OWNED, D5-scope-gated LIVE cloud capture lets an anonymous/over-privileged principal reach a resource, judged by the deterministic policy_path oracle over the retained graph",

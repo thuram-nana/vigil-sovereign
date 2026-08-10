@@ -2330,6 +2330,24 @@ _CLOUD_ANON_PRINCIPALS = frozenset({
     "principal:*", "arn:aws:iam::*:root", "**",
 })
 
+# ---- P4: parse the OWNING account/project of a NAMED cloud principal ---------------------------------
+# The cross-account rule (rule 4) compares a named grantee's account to the resource owner's own-account
+# set. These patterns extract that account SOUNDLY; anything not matched -> the principal is treated as
+# un-attributable and the rule NEVER fires on it (near-zero-FP: an unknown account is never guessed
+# cross-account). AWS: a bare 12-digit account principal, or the 12-digit account in an ARN's 5th
+# ':'-delimited field (``arn:<partition>:iam::<ACCOUNT>:…`` / ``arn:<partition>:sts::<ACCOUNT>:…``). GCP:
+# the project id of a ``serviceAccount:name@<PROJECT>.iam.gserviceaccount.com`` member, or the identity
+# domain of a ``user:`` / ``group:`` / ``domain:`` member.
+_AWS_ACCOUNT_RE = re.compile(r"^\d{12}$")
+_GCP_SA_RE = re.compile(
+    r"^serviceaccount:[^@\s]+@(?P<proj>[a-z0-9][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$")
+_GCP_MEMBER_RE = re.compile(
+    r"^(?:user|group|domain):(?:[^@\s]+@)?(?P<domain>[a-z0-9][a-z0-9.-]*\.[a-z]{2,})$")
+# A GCP project id (no dots) vs a dotted identity/DNS domain — used to give every parsed account a NAMESPACE
+# so a project owner is never compared against a user's email domain (the red-pen BLOCK-1 category error).
+_GCP_PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+
 
 def _cloud_tri_bool(value: Any) -> bool | None:
     """Coerce a retained flag to True / False / None (unknown). A bool passes through; a string is
@@ -2355,6 +2373,108 @@ def _cloud_norm_principal(p: Any) -> str:
 def _cloud_is_anon_principal(p: Any) -> bool:
     norm = _cloud_norm_principal(p)
     return norm in {a.replace("-", "").replace("_", "") for a in _CLOUD_ANON_PRINCIPALS}
+
+
+def _canon_account_token(value: Any, *, bare_ok: bool = False) -> str | None:
+    """Canonicalise a cloud principal OR an owner token into a NAMESPACED account token — the sound unit the
+    cross-account rule (P4) compares. Applied to BOTH the grantee principal AND the charter-threaded owner
+    token, so they are always compared in the SAME namespace (the red-pen BLOCK-1 fix: a project owner is
+    never compared against a user's email *domain*) and the owner side is parsed exactly like the principal
+    side (the BLOCK-2 fix: an owner threaded as a full ARN / prefixed / labelled form no longer mismatches a
+    same-account grant).
+
+    Returns one of ``aws:<12-digit>`` / ``project:<gcp-project-id>`` (owner tokens only) / ``domain:<dns-domain>``,
+    or ``None`` when NO account can be SOUNDLY canonicalised (a resource ARN with an empty account field, a
+    non-12-digit account, ANY GCP ``serviceAccount:`` PRINCIPAL — its cross-project status is not soundly
+    distinguishable by email from a benign Google-managed service agent; see blocking_work — a labelled/opaque/
+    leading-zero-dropped token) — so the rule NEVER fires on an un-attributable account (an unknown is never
+    guessed cross-account, near-zero-FP).
+
+    Accepts an EXPLICIT namespace prefix (``aws:`` / ``project:`` / ``domain:``) and the STRUCTURED forms
+    that are soundly attributable: a 12-digit id, an ARN, a GCP ``user:``/``group:``/``domain:`` member.
+    A GCP ``serviceAccount:`` member returns ``None`` (LEAD, not a FACT). ``bare_ok``
+    additionally infers a BARE (unprefixed) ``<fqdn>`` → domain / ``<gcp-id>`` → project — this is enabled
+    ONLY for a TRUSTED owner token, NEVER for a resource-policy PRINCIPAL (attacker-influenced): a bare FQDN
+    on the principal side is an AWS service principal (``cloudtrail.amazonaws.com``), an OIDC issuer
+    (``token.actions.githubusercontent.com``), or an IP — none is a cross-account trust, and a real external
+    GCP domain grant always carries a member-type prefix (handled above), so refusing a bare-FQDN principal
+    loses no true-positive (red-pen BLOCK-3). A token that fits none is ``None`` (unusable, never guessed)."""
+    s = _coerce_text(value).strip()
+    if not s:
+        return None
+    low = s.lower()
+    # Explicit namespace prefix (an owner token may be threaded this way for zero ambiguity).
+    for ns, rex in (("aws:", _AWS_ACCOUNT_RE), ("project:", _GCP_PROJECT_RE), ("domain:", _DOMAIN_RE)):
+        if low.startswith(ns):
+            rest = low[len(ns):].strip()
+            return ns + rest if rex.match(rest) else None
+    # A bare AWS account-id (AWS names a whole-account principal as just the 12-digit id).
+    if _AWS_ACCOUNT_RE.match(low):
+        return "aws:" + low
+    # An AWS ARN — the account is the 5th ':'-delimited field, counted only if it is exactly 12 digits
+    # (a service ARN with an empty account field, e.g. ``arn:aws:s3:::bucket``, is NOT attributable).
+    if low.startswith("arn:"):
+        parts = low.split(":")
+        if len(parts) >= 5 and _AWS_ACCOUNT_RE.match(parts[4]):
+            return "aws:" + parts[4]
+        return None
+    # A GCP serviceAccount member is NOT soundly attributable as CROSS-PROJECT from its email alone -> None
+    # (LEAD, never a FACT). A GOOGLE-MANAGED service agent (bigquery-encryption / dlp-api / gcp-sa-* / *-robot /
+    # …, granted CMEK/DLP/log-sink) is INDISTINGUISHABLE by email from an external CUSTOMER SA, and the
+    # Google-agent project set CANNOT be enumerated completely (Google adds agents), so any allow/deny list is
+    # fail-open — a benign agent WOULD fire a false cross-account FACT (red-pen BLOCK-A/BLOCK-B). So a
+    # serviceAccount grant stays an honest LEAD. blocking_work: sound GCP-SA-cross-project needs an
+    # authoritative Google-service-agent registry OR an owner-supplied trusted-external-project allowlist.
+    # (GCP cross-DOMAIN user/group below, and AWS cross-account above, remain sound FACTs.)
+    if _GCP_SA_RE.match(low):
+        return None
+    # A GCP user/group/domain member -> its DOMAIN namespace.
+    m = _GCP_MEMBER_RE.match(low)
+    if m:
+        return "domain:" + m.group("domain")
+    # A BARE (unprefixed) token is inferred as a domain/project ONLY for a trusted OWNER token — never for an
+    # attacker-influenced principal (red-pen BLOCK-3: a bare FQDN principal is a service principal / OIDC
+    # issuer / IP, not a cross-account trust; a real external domain grant carries a member-type prefix above).
+    if bare_ok:
+        if _DOMAIN_RE.match(low):
+            return "domain:" + low
+        if _GCP_PROJECT_RE.match(low):
+            return "project:" + low
+    return None
+
+
+def _cloud_owner_accounts(control: Mapping[str, Any]) -> set[str]:
+    """The resource OWNER's own-account set the cross-account rule (P4) compares a named grantee against —
+    the engagement's authorized own-account id(s) threaded into the RETAINED control by the capture
+    (charter-supplied). Read from ``owner_account`` (scalar) and ``owner_accounts`` (list), at the control
+    top-level AND inside a nested ``achieved_state``. Each token is run through :func:`_canon_account_token`
+    — the SAME canonicaliser the grantee principal goes through — so an owner threaded as a bare id, a full
+    ARN, a ``project:``/``domain:``/``aws:`` prefix, or a GCP project/domain all reduce to the same namespaced
+    form the principal is compared against (red-pen BLOCK-2). A token that will not canonicalise (a labelled
+    id, a leading-zero-dropped numeric, an opaque string) is DROPPED — never a partial/lossy match.
+
+    Absent (or nothing canonicalises) -> the empty set -> the cross-account rule stays an honest LEAD: the
+    owner is NEVER guessed, so an intended same-account grant can never be mistaken for a cross-account one."""
+    out: set[str] = set()
+    scopes: list[Any] = [control]
+    inner = control.get("achieved_state")
+    if isinstance(inner, Mapping):
+        scopes.append(inner)
+    for src in scopes:
+        if not isinstance(src, Mapping):
+            continue
+        candidates: list[Any] = []
+        one = src.get("owner_account")
+        if one is not None:
+            candidates.append(one)
+        many = src.get("owner_accounts")
+        if isinstance(many, (list, tuple)):
+            candidates.extend(many[:_CLOUD_MAX_PRINCIPALS])
+        for a in candidates:
+            tok = _canon_account_token(a, bare_ok=True)   # owner tokens are TRUSTED (charter-supplied)
+            if tok:
+                out.add(tok)
+    return out
 
 
 def _cloud_achieved_state(control: Mapping[str, Any]) -> dict[str, Any]:
@@ -2392,8 +2512,9 @@ def cloud_posture_oracle(observed_control: Any) -> OracleSignal:
     ``sensors.cloud`` resource record)::
 
         {"control_id": "s3-encryption-at-rest"?, "resource_id": "acme-secrets"?, "status": "FAIL"?,
-         "provider": "aws"?, "achieved_state": {"encrypted": false, "public": false, "sensitive": true,
-                                                "principals": ["arn:aws:iam::123:role/app"]}}
+         "provider": "aws"?, "owner_account": "111122223333"? / "owner_accounts": ["111122223333"]?,
+         "achieved_state": {"encrypted": false, "public": false, "sensitive": true,
+                            "principals": ["arn:aws:iam::123:role/app"]}}
         # or flat: {"id": "acme-secrets", "encrypted": false, "sensitive": true, "public": false,
         #           "grants": [{"principal": "*", "access": "read"}]}
 
@@ -2403,14 +2524,21 @@ def cloud_posture_oracle(observed_control: Any) -> OracleSignal:
          POLICY_PATH oracle STRUCTURALLY cannot prove, now provable as an achieved STATE);
       2. ``public_exposure`` — ``public`` explicitly ``true`` (an achieved public-access state);
       3. ``wildcard_principal`` — a wildcard/anonymous principal (``*`` / ``AllUsers`` / ``anonymous`` / …)
-         literally named in the retained resource policy (``principals`` or ``grants[].principal``).
+         literally named in the retained resource policy (``principals`` or ``grants[].principal``);
+      4. ``named_cross_account_principal`` (P4) — a NAMED principal whose parsed account/project is NOT in
+         the retained ``owner_account`` / ``owner_accounts`` set (the charter's authorized own-account
+         id(s), threaded into the capture). SOUNDNESS: this fires ONLY when that owner set is present AND a
+         named grantee's account parses AND differs. Absent owner set (unknown owner) or an un-parseable
+         principal account -> stays a LEAD (an intended same-account grant is NEVER promoted; the owner is
+         never guessed).
 
     Does NOT fire (stays an honest LEAD) when: the control records an EXPLICIT compliant/pass status; the
-    flags show the SECURE setting (``encrypted`` true, ``public`` false, no wildcard principal); or every
-    relevant flag is ABSENT/unknown (unknown is never an insecure fact). Malformed / non-mapping evidence
-    -> non-fire (never raises). Pure + deterministic, so the same verdict re-verifies offline from the
-    retained context. GROUNDING is procedural exactly as for every oracle: the control MUST be the
-    sensor's RETAINED cloud evidence, never a re-run of a live cloud call laundered as a fact."""
+    flags show the SECURE setting (``encrypted`` true, ``public`` false, no wildcard principal, only
+    same-account named principals); no owner-account set was threaded in; or every relevant flag is
+    ABSENT/unknown (unknown is never an insecure fact). Malformed / non-mapping evidence -> non-fire (never
+    raises). Pure + deterministic, so the same verdict re-verifies offline from the retained context.
+    GROUNDING is procedural exactly as for every oracle: the control MUST be the sensor's RETAINED cloud
+    evidence, never a re-run of a live cloud call laundered as a fact."""
     if not isinstance(observed_control, Mapping):
         return OracleSignal(kind=OracleKind.CLOUD_POSTURE, fired=False, confidence=0.0,
                             evidence="no cloud posture control evidence")
@@ -2462,6 +2590,40 @@ def cloud_posture_oracle(observed_control: Any) -> OracleSignal:
                       f"promoted over the retained achieved state"),
             observed={"resource_id": rid, "control_id": cid, "rule": "wildcard_principal",
                       "reason": "insecure_achieved_state", "principal": who})
+
+    # Rule 4 — a NAMED principal in a DIFFERENT account than the resource owner (P4: cross-account trust).
+    # SOUNDNESS (CLAIM-DISCIPLINE): distinguishing an INTENDED same-account grant from a risky CROSS-account
+    # one REQUIRES the owner's own-account id(s). So this fires ONLY when the retained control threads an
+    # owner-account set AND a named grantee parses to an account NOT in that set. With no owner account
+    # (unknown), or a principal whose account cannot be parsed, it stays an honest LEAD — an intended
+    # internal grant is never promoted, and an un-attributable principal is never guessed cross-account.
+    owner_accounts = _cloud_owner_accounts(ctl)
+    if owner_accounts:
+        owner_namespaces = {t.split(":", 1)[0] for t in owner_accounts}
+        for p in state["principals"]:
+            if _cloud_is_anon_principal(p):
+                continue  # a wildcard/anonymous grantee is rule 3's job, not a named cross-account grant
+            acct = _canon_account_token(p, bare_ok=False)  # a PRINCIPAL is untrusted: no bare-FQDN inference
+            if acct is None:
+                continue  # an un-attributable principal is never guessed cross-account (stays a lead)
+            # NAMESPACE AGREEMENT (red-pen BLOCK-1): only compare within the SAME namespace. If NO owner
+            # token shares this principal's namespace (e.g. a user's DOMAIN vs a project-only owner set), we
+            # cannot tell whether it is the org's own identity -> refuse (stay a LEAD), never fire.
+            if acct.split(":", 1)[0] not in owner_namespaces:
+                continue
+            if acct not in owner_accounts:
+                owners_disp = ", ".join(sorted(owner_accounts))
+                return OracleSignal(
+                    kind=OracleKind.CLOUD_POSTURE, fired=True, confidence=0.9,
+                    evidence=(f"cloud posture fact: resource {label} grants a NAMED principal {p!r} in a "
+                              f"DIFFERENT account ({acct}) than the owner ({owners_disp}) — a cross-account "
+                              f"trust the retained policy names, promoted over the achieved state (the "
+                              f"owner-account set was threaded into the retained control in the SAME "
+                              f"namespace, so this is not a guess)"),
+                    observed={"resource_id": rid, "control_id": cid,
+                              "rule": "named_cross_account_principal", "reason": "insecure_achieved_state",
+                              "principal": p, "principal_account": acct.split(":", 1)[1],
+                              "owner_accounts": sorted(t.split(":", 1)[1] for t in owner_accounts)})
 
     return OracleSignal(
         kind=OracleKind.CLOUD_POSTURE, fired=False, confidence=0.0,

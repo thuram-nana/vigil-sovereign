@@ -164,3 +164,282 @@ def test_builder_gathers_wildcard_principal_from_flat_grants() -> None:
     # the flat grant's principal is gathered into achieved_state.principals for the parse-proof
     assert "*" in emitted["cloud_control"]["achieved_state"]["principals"]
     assert confirm_cloud_posture(_PUBLIC_WILDCARD).confirmed
+
+
+# =====================================================================================================
+# P4 — named cross-account resource principal.
+#
+# A resource policy that grants a NAMED principal in a DIFFERENT account than the owner is a cross-account
+# trust. SOUNDNESS (CLAIM-DISCIPLINE): distinguishing an INTENDED same-account grant from a risky
+# cross-account one REQUIRES the owner's own-account id(s). So rule 4 fires ONLY when the retained control
+# threads an owner-account set AND a named grantee's parsed account differs. No owner set (unknown owner),
+# a same-account principal, or a principal whose account cannot be parsed all stay an honest LEAD — an
+# intended internal grant is never promoted and the owner is never guessed. Every negative control below is
+# MUTATION-VERIFIED: a single targeted change to the same input flips the verdict to fire, proving the test
+# actually exercises rule 4 rather than trivially passing.
+# =====================================================================================================
+
+_OWNER = "111122223333"
+_EXT = "999988887777"
+
+# owner=111122223333, granting arn:aws:iam::999988887777:root — the canonical cross-account trust.
+_XACCT = {
+    "resource_id": "acme-secrets", "provider": "aws", "owner_account": _OWNER,
+    "grants": [{"principal": f"arn:aws:iam::{_EXT}:root", "access": "read"}],
+}
+
+
+# ---- rule 4 FIRES on a proven cross-account named principal ------------------
+
+
+def test_fires_on_named_cross_account_principal() -> None:
+    sig = cloud_posture_oracle(_XACCT)
+    assert sig.fired and sig.kind is OracleKind.CLOUD_POSTURE
+    assert sig.confidence >= 0.7
+    assert sig.observed["rule"] == "named_cross_account_principal"
+    assert sig.observed["principal"] == f"arn:aws:iam::{_EXT}:root"
+    assert sig.observed["principal_account"] == _EXT
+    assert sig.observed["owner_accounts"] == [_OWNER]
+
+
+def test_fires_via_owner_accounts_list_and_nested_achieved_state() -> None:
+    # owner supplied as a list, principal inside a nested achieved_state, via a user ARN
+    ctl = {"resource_id": "r", "owner_accounts": [_OWNER, "444455556666"],
+           "achieved_state": {"principals": [f"arn:aws:iam::{_EXT}:user/mallory"]}}
+    sig = cloud_posture_oracle(ctl)
+    assert sig.fired and sig.observed["rule"] == "named_cross_account_principal"
+    assert sig.observed["principal_account"] == _EXT
+    # a grantee IN the owner-account list does NOT fire (mutation: point at 444455556666)
+    same = {"resource_id": "r", "owner_accounts": [_OWNER, "444455556666"],
+            "achieved_state": {"principals": ["arn:aws:iam::444455556666:user/ops"]}}
+    assert not cloud_posture_oracle(same).fired
+
+
+def test_fires_on_bare_12_digit_account_principal() -> None:
+    # AWS represents a whole-account principal as just the 12-digit id
+    ctl = {"resource_id": "r", "owner_account": _OWNER, "achieved_state": {"principals": [_EXT]}}
+    assert cloud_posture_oracle(ctl).fired
+    # mutation: the bare account IS the owner -> same-account -> no fire
+    assert not cloud_posture_oracle(
+        {"resource_id": "r", "owner_account": _OWNER, "achieved_state": {"principals": [_OWNER]}}).fired
+
+
+def test_fires_on_sts_assumed_role_arn() -> None:
+    ctl = {"resource_id": "r", "owner_account": _OWNER,
+           "grants": [{"principal": f"arn:aws:sts::{_EXT}:assumed-role/Admin/session"}]}
+    sig = cloud_posture_oracle(ctl)
+    assert sig.fired and sig.observed["principal_account"] == _EXT
+
+
+def test_gcp_cross_project_service_account_is_a_lead_not_a_fact() -> None:
+    # GCP: a serviceAccount cross-project grant is NOT soundly distinguishable by email from a benign
+    # Google-managed service agent (bigquery-encryption / dlp-api / gcp-sa-* / …), and that set cannot be
+    # enumerated (Google adds agents), so a serviceAccount grant stays a LEAD (never a FACT) — red-pen
+    # BLOCK-A/BLOCK-B. blocking_work: an authoritative Google-agent registry or an owner-supplied
+    # trusted-external-project allowlist would make it FACT-capable.
+    ctl = {"resource_id": "gcs-bucket", "provider": "gcp", "owner_account": "acme-prod",
+           "grants": [{"principal": "serviceAccount:exfil@evil-corp.iam.gserviceaccount.com"}]}
+    assert not cloud_posture_oracle(ctl).fired
+    same = {"resource_id": "gcs-bucket", "provider": "gcp", "owner_account": "acme-prod",
+            "grants": [{"principal": "serviceAccount:svc@acme-prod.iam.gserviceaccount.com"}]}
+    assert not cloud_posture_oracle(same).fired
+
+
+def test_fires_on_gcp_cross_domain_user_member() -> None:
+    ctl = {"resource_id": "r", "provider": "gcp", "owner_account": "example.com",
+           "grants": [{"principal": "user:attacker@evil.com"}]}
+    sig = cloud_posture_oracle(ctl)
+    assert sig.fired and sig.observed["principal_account"] == "evil.com"
+
+
+# ---- MANDATORY negative controls (mutation-verified) — rule 4 must NOT fire --
+
+
+def test_neg_a_same_account_named_principal_does_not_fire() -> None:
+    # (a) owner_account matches the principal's account -> an INTENDED internal grant -> LEAD, not a fact
+    same = {"resource_id": "acme-secrets", "provider": "aws", "owner_account": _OWNER,
+            "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app", "access": "read"}]}
+    assert not cloud_posture_oracle(same).fired
+    # MUTATION-VERIFIED: change ONLY the owner to a different account -> now cross-account -> fires
+    mutated = {**same, "owner_account": "555566667777"}
+    assert cloud_posture_oracle(mutated).fired
+    assert cloud_posture_oracle(mutated).observed["rule"] == "named_cross_account_principal"
+
+
+def test_neg_b_no_owner_account_stays_lead() -> None:
+    # (b) no owner_account present -> owner unknown -> NEVER fire (must not guess), stays a LEAD
+    no_owner = {"resource_id": "acme-secrets", "provider": "aws",
+                "grants": [{"principal": f"arn:aws:iam::{_EXT}:root", "access": "read"}]}
+    assert not cloud_posture_oracle(no_owner).fired
+    # MUTATION-VERIFIED: add ONLY the owner-account field -> the same external grant now fires
+    assert cloud_posture_oracle({**no_owner, "owner_account": _OWNER}).fired
+
+
+def test_neg_c_unparseable_principal_account_does_not_fire() -> None:
+    # (c) a principal whose account field cannot be soundly parsed -> un-attributable -> never fire
+    for bad in (
+        "arn:aws:s3:::acme-bucket",              # service ARN with an EMPTY account field
+        "arn:aws:iam::12345:role/short",         # account not 12 digits
+        "canonical-user-id-opaque-string",       # opaque non-ARN principal
+        "serviceAccount:svc@developer.gserviceaccount.com",  # Google-managed SA, no project in email
+    ):
+        ctl = {"resource_id": "r", "owner_account": _OWNER, "achieved_state": {"principals": [bad]}}
+        assert not cloud_posture_oracle(ctl).fired, f"un-attributable principal {bad!r} must not fire"
+    # MUTATION-VERIFIED: a well-formed external ARN in the same shape DOES fire
+    ok = {"resource_id": "r", "owner_account": _OWNER,
+          "achieved_state": {"principals": [f"arn:aws:iam::{_EXT}:role/x"]}}
+    assert cloud_posture_oracle(ok).fired
+
+
+def test_neg_d_existing_rules_unchanged_when_owner_present() -> None:
+    # (d) the pre-existing rules keep FIRING EXACTLY as before, even with an owner-account threaded in and a
+    # cross-account principal also present (fixed rule order: enc/public/wildcard win before rule 4).
+    # public wins over a co-present cross-account grant
+    pub = {"resource_id": "r", "owner_account": _OWNER, "public": True,
+           "grants": [{"principal": f"arn:aws:iam::{_EXT}:root"}]}
+    assert cloud_posture_oracle(pub).observed["rule"] == "public_exposure"
+    # a wildcard grantee wins over a co-present named cross-account grantee
+    wild = {"resource_id": "r", "owner_account": _OWNER,
+            "grants": [{"principal": "*"}, {"principal": f"arn:aws:iam::{_EXT}:root"}]}
+    assert cloud_posture_oracle(wild).observed["rule"] == "wildcard_principal"
+    # encryption-off on a sensitive store wins too
+    enc = {"resource_id": "r", "owner_account": _OWNER, "encrypted": False, "sensitive": True,
+           "grants": [{"principal": f"arn:aws:iam::{_EXT}:root"}]}
+    assert cloud_posture_oracle(enc).observed["rule"] == "encryption_at_rest_disabled"
+    # an explicit PASS status still suppresses everything, cross-account included
+    assert not cloud_posture_oracle({**_XACCT, "status": "PASS"}).fired
+
+
+def test_neg_cross_account_but_wildcard_owner_never_masks_anon() -> None:
+    # an anonymous grantee is rule 3's job — rule 4 must SKIP it (never mis-attribute "*" as an account)
+    ctl = {"resource_id": "r", "owner_account": _OWNER, "achieved_state": {"principals": ["*"]}}
+    assert cloud_posture_oracle(ctl).observed["rule"] == "wildcard_principal"
+
+
+# ---- red-pen re-submit: namespace-agreement (BLOCK-1) + owner-token canonicalisation (BLOCK-2) --------
+
+
+def test_neg_gcp_internal_user_with_project_only_owner_stays_lead() -> None:
+    # BLOCK-1: a GCP user/group account is a DOMAIN; a PROJECT-only owner set shares no namespace with it, so
+    # an INTERNAL user/group grant must NOT be mistaken for cross-account (the red-pen's project-vs-domain
+    # category error) -> LEAD, never fire.
+    for member in ("user:employee@acme.com", "group:eng@acme.com"):
+        ctl = {"resource_id": "r", "provider": "gcp", "owner_account": "acme-prod",
+               "grants": [{"principal": member}]}
+        assert not cloud_posture_oracle(ctl).fired, f"internal {member} must not fire with a project-only owner"
+    # MUTATION-VERIFIED: thread the OWNED DOMAIN too — an EXTERNAL domain now fires (same namespace, different)
+    ext = {"resource_id": "r", "provider": "gcp", "owner_accounts": ["acme-prod", "acme.com"],
+           "grants": [{"principal": "user:mallory@evil.com"}]}
+    assert cloud_posture_oracle(ext).fired and cloud_posture_oracle(ext).observed["principal_account"] == "evil.com"
+    # ...and the INTERNAL user WITH the owned domain threaded is same-account -> still no fire
+    internal = {"resource_id": "r", "provider": "gcp", "owner_accounts": ["acme-prod", "acme.com"],
+                "grants": [{"principal": "user:employee@acme.com"}]}
+    assert not cloud_posture_oracle(internal).fired
+
+
+def test_neg_gcp_sa_in_own_project_with_domain_only_owner_stays_lead() -> None:
+    # BLOCK-1 mirror: a serviceAccount's account is a PROJECT; a DOMAIN-only owner shares no namespace -> LEAD.
+    ctl = {"resource_id": "r", "provider": "gcp", "owner_account": "acme.com",
+           "grants": [{"principal": "serviceAccount:runner@acme-prod.iam.gserviceaccount.com"}]}
+    assert not cloud_posture_oracle(ctl).fired
+
+
+def test_neg_owner_as_full_arn_same_account_does_not_fire() -> None:
+    # BLOCK-2: an owner threaded as a full root ARN must canonicalise to the SAME aws:<id> as a same-account
+    # role grant (owner tokens are parsed exactly like principals now) -> no fire.
+    ctl = {"resource_id": "r", "owner_account": f"arn:aws:iam::{_OWNER}:root",
+           "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app"}]}
+    assert not cloud_posture_oracle(ctl).fired
+    # MUTATION-VERIFIED: an owner ARN of a DIFFERENT account makes the same grant cross-account -> fires
+    ctl2 = {"resource_id": "r", "owner_account": f"arn:aws:iam::{_EXT}:root",
+            "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app"}]}
+    assert cloud_posture_oracle(ctl2).fired
+
+
+def test_neg_owner_prefixed_and_bare_forms_canonicalise_identically() -> None:
+    # BLOCK-2: an explicit aws:<id> prefix and a bare 12-digit id reduce to the same token as the principal.
+    for owner in (f"aws:{_OWNER}", _OWNER):
+        ctl = {"resource_id": "r", "owner_account": owner,
+               "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"owner form {owner!r} must read as same-account"
+
+
+def test_neg_bare_fqdn_service_principal_never_fires_even_with_domain_owner() -> None:
+    # BLOCK-3 (fix-of-the-fix): a resource-policy PRINCIPAL is attacker-influenced; a BARE FQDN there is an
+    # AWS service principal / OIDC issuer / IP — NOT a cross-account trust. Bare inference is owner-only, so
+    # these must NOT fire even when a domain-namespace owner token is present (which shares their namespace
+    # were they mis-classified). A real external domain grant carries a user:/group:/domain: prefix.
+    for benign in ("cloudtrail.amazonaws.com", "s3.amazonaws.com", "token.actions.githubusercontent.com",
+                   "accounts.google.com", "cognito-identity.amazonaws.com", "10.0.0.5"):
+        ctl = {"resource_id": "acme-logs", "provider": "aws",
+               "owner_accounts": ["111122223333", "acme.com"],   # a domain owner IS present
+               "grants": [{"principal": benign, "access": "write"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"bare service/OIDC principal {benign!r} must not fire"
+    # MUTATION-VERIFIED: the SAME external domain, but as a PREFIXED GCP member, IS a real cross-domain grant
+    real = {"resource_id": "r", "provider": "gcp", "owner_accounts": ["acme.com"],
+            "grants": [{"principal": "user:mallory@evil.com"}]}
+    assert cloud_posture_oracle(real).fired
+
+
+def test_neg_gcp_service_accounts_are_leads_managed_and_customer() -> None:
+    # BLOCK-A/BLOCK-B: a GCP serviceAccount's cross-project status is not soundly distinguishable by email from
+    # a benign Google-MANAGED service agent, and the Google-agent set cannot be enumerated (an allow/deny list
+    # is fail-open). So EVERY serviceAccount grant — Google-managed AND external-customer alike — stays a LEAD,
+    # never a FACT. This includes the exact benign CMEK/DLP agents the earlier enumerate-exclusion leaked.
+    for sa in (
+        "serviceAccount:service-1@gcp-sa-pubsub.iam.gserviceaccount.com",         # Google CMEK/pubsub agent
+        "serviceAccount:bq-1@bigquery-encryption.iam.gserviceaccount.com",         # BigQuery CMEK agent (BLOCK-A)
+        "serviceAccount:service-1@dlp-api.iam.gserviceaccount.com",                # Cloud DLP agent (BLOCK-A)
+        "serviceAccount:service-1@compute-system.iam.gserviceaccount.com",
+        "serviceAccount:exfil@evil-customer-proj.iam.gserviceaccount.com",         # a real external customer SA
+    ):
+        ctl = {"resource_id": "kms-key", "provider": "gcp", "owner_account": "acme-prod",
+               "grants": [{"principal": sa, "access": "encrypterDecrypter"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"GCP serviceAccount {sa!r} must stay a LEAD"
+    # MUTATION-VERIFIED that rule 4 still fires on the SOUND GCP case (a cross-DOMAIN user) — so this negative
+    # control is load-bearing, not vacuously green.
+    user = {"resource_id": "r", "provider": "gcp", "owner_account": "acme.com",
+            "grants": [{"principal": "user:mallory@evil.com"}]}
+    assert cloud_posture_oracle(user).fired
+
+
+def test_neg_unusable_owner_token_stays_lead() -> None:
+    # BLOCK-2: a labelled or leading-zero-dropped-numeric owner token will NOT canonicalise -> it is dropped
+    # -> empty owner set -> LEAD even for an EXTERNAL grant (never a false FACT off a lossy owner token).
+    for bad_owner in ("111122223333 (prod)", 12345678901):
+        ctl = {"resource_id": "r", "owner_account": bad_owner,
+               "grants": [{"principal": f"arn:aws:iam::{_EXT}:root"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"unusable owner {bad_owner!r} must stay a LEAD"
+
+
+# ---- P4 seam / adapter / offline re-verification ----------------------------
+
+
+def test_cross_account_confirms_via_seam() -> None:
+    assert confirm_cloud_posture(_XACCT).confirmed
+    assert not confirm_cloud_posture(
+        {"resource_id": "r", "owner_account": _OWNER,
+         "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app"}]}).confirmed
+
+
+def test_adapter_retains_owner_accounts_for_offline_reverify() -> None:
+    ctx = FindingContext.from_cloud_control(_XACCT)
+    emitted = ctx.to_verifier_context()
+    # the owner-account set is retained top-level so the cross-account rule re-derives the same verdict
+    assert emitted["cloud_control"]["owner_accounts"] == [_OWNER]
+    assert f"arn:aws:iam::{_EXT}:root" in emitted["cloud_control"]["achieved_state"]["principals"]
+
+
+def test_cross_account_fact_reverifies_offline_from_retained_context() -> None:
+    oracle_context = cloud_posture_context(_XACCT)
+    r = reverify_context(oracle_context, bug_class="cloud_misconfiguration")
+    assert r.reproduced and r.ok
+    assert r.confirmed_by == OracleKind.CLOUD_POSTURE.value
+
+
+def test_adapter_absent_owner_is_not_retained_and_stays_lead() -> None:
+    # with no owner threaded in, the canonical control carries no owner_accounts and the rule stays a LEAD
+    ctl = {"resource_id": "r", "grants": [{"principal": f"arn:aws:iam::{_EXT}:root"}]}
+    emitted = FindingContext.from_cloud_control(ctl).to_verifier_context()
+    assert "owner_accounts" not in emitted["cloud_control"]
+    assert not confirm_cloud_posture(ctl).confirmed
