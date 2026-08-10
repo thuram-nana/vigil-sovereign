@@ -120,7 +120,7 @@
         "container-cve",
         "iac-misconfig"
       ],
-      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT — the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
+      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT — the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false). For IaC misconfig, VIGIL's live.iac_posture parse-proof is the FACT authority (a trivy IaC finding is a LEAD proposer only); fact_capable stays false."
     },
     {
       "name": "grype",
@@ -148,7 +148,7 @@
       "claim_families": [
         "iac-misconfig"
       ],
-      "notes": "near-zero-FP subset maps to CLOUD_POSTURE parse-proof (Phase-1 posture family); opinionated checks stay LEADs."
+      "notes": "VIGIL-DIRECT IaC parse is the FACT authority for IaC posture (live.iac_posture, SHIPPED, no install): VIGIL parses the target's OWN Terraform plan-JSON/tfstate or processed CloudFormation template and the deterministic cloud_posture + policy_path oracles re-derive the insecure achieved state / anon grant path (evidence-branches.json iac.cloud_posture.achieved_state + iac.policy_path.iam_grant_path). checkov is only a LEAD proposer of WHERE to look; its say-so never mints a FACT, so fact_capable stays false. Opinionated/style checks stay LEADs."
     },
     {
       "name": "prowler",
@@ -176,7 +176,7 @@
       "claim_families": [
         "k8s-posture"
       ],
-      "notes": "maps to K8S_POSTURE over a retained control (Phase-1); LEAD-only today."
+      "notes": "kube-bench is only a PROPOSER of where to look; it is NOT fact-capable. VIGIL-DIRECT: integration/vigil_integration/live/k8s_posture.py parses the operator's kube-bench --json ARTIFACT and re-derives the insecure setting over the retained control via the K8S_POSTURE oracle (branch k8s_posture.cis_control), so the FACT rests on VIGIL's own parse, never the scanner's say-so. NOT CLEAN-capable: a partial export cannot prove the cluster is hardened."
     },
     {
       "name": "gdb",

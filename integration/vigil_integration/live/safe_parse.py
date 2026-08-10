@@ -240,6 +240,7 @@ def _counting_safe_loader(max_aliases: int, max_nodes: int):
     Imported types are function-local (FATAL-2: no module-level third-party import). The loader is created
     fresh per call so the caps are captured without shared mutable class state.
     """
+    import re  # noqa: PLC0415
     import yaml  # noqa: PLC0415 - optional third-party dep, imported lazily and function-locally.
     from yaml.events import AliasEvent  # noqa: PLC0415
 
@@ -271,6 +272,22 @@ def _counting_safe_loader(max_aliases: int, max_nodes: int):
                 if key_node is not None and getattr(key_node, "tag", "") == "tag:yaml.org,2002:merge":
                     raise _MergeKeyRefused()
             return super().flatten_mapping(node)
+
+    # GitHub Actions / YAML 1.2 semantics: `on`, `off`, `yes`, `no` are NOT booleans — only `true`/`false`
+    # are. The default (YAML 1.1) SafeLoader turns the GitHub-Actions `on:` trigger KEY into Python ``True``,
+    # so trigger analysis silently fails and a real pull_request_target pwn-request never fires (reviewer
+    # BLOCK #3 — a silent FALSE NEGATIVE). Rebuild THIS one-shot subclass's implicit resolvers so the bool tag
+    # resolves ONLY true/false; on/off/yes/no stay strings. Every other tag (int/float/null/timestamp/...) is
+    # preserved unchanged. Scoped to the subclass — the stdlib SafeLoader is untouched. (K8s/Istio manifests
+    # use true/false, so this is harmless there and strictly more correct.)
+    _true_false_only = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+    _BOOL_TAG = "tag:yaml.org,2002:bool"
+    _CountingSafeLoader.yaml_implicit_resolvers = {
+        ch: [(tag, rx) for (tag, rx) in resolvers if tag != _BOOL_TAG]
+        for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    for ch in "tTfF":
+        _CountingSafeLoader.yaml_implicit_resolvers.setdefault(ch, []).append((_BOOL_TAG, _true_false_only))
 
     return _CountingSafeLoader
 
@@ -321,3 +338,66 @@ def safe_yaml(text: str | bytes, budget: ParseBudget | None = None) -> ParseResu
     if walk_err is not None:
         return walk_err
     return _ok(value)
+
+
+def safe_yaml_all(text: str | bytes, budget: ParseBudget | None = None) -> ParseResult:
+    """Parse a MULTI-document YAML stream (``---``-separated) under ONE shared ``budget``, without ever
+    raising on ``text``. On success ``value`` is a ``list`` of the parsed documents (an empty document —
+    a bare ``---`` or trailing separator — yields a ``None`` member, left in place so the caller can decide;
+    it is not silently dropped here).
+
+    Every defense of :func:`safe_yaml` applies, and the resource bounds are enforced across the WHOLE stream,
+    not per document: the byte cap is measured once on the input; the counting SafeLoader is created ONCE and
+    drives the entire stream (``yaml.load_all`` instantiates a single loader), so the alias-reference and
+    composed-node budgets accumulate over all documents and a stream that is individually-small-but-many
+    cannot bypass them; and the post-parse structural walk runs over the aggregate ``list`` under the same
+    node/depth/cycle budget. A multi-document RBAC export is therefore parsed exactly as safely as one
+    document — a bomb in ANY member (or spread across members) trips the same typed error, never an
+    unbounded hang, an OOM, or a constructed Python object.
+
+    If PyYAML is not importable, returns ``outcome="inconclusive"`` (reason ``"yaml_unavailable"``) — never
+    a hand-rolled split-on-``---`` (which is unsound: ``---`` occurs inside block scalars and strings) and
+    never a CLEAN.
+    """
+    budget = budget or ParseBudget()
+
+    size = _byte_len(text)
+    if size > budget.max_bytes:
+        return _error("oversize")
+
+    try:
+        import yaml  # noqa: PLC0415 - optional; absence is an inconclusive, not a crash.
+    except Exception:  # noqa: BLE001 - ImportError or a broken install both mean "cannot parse YAML here".
+        return _inconclusive("yaml_unavailable")
+
+    try:
+        loader_cls = _counting_safe_loader(budget.max_aliases, budget.max_nodes)
+    except Exception:  # noqa: BLE001 - PyYAML present at import but internals unavailable: stay honest.
+        return _inconclusive("yaml_unavailable")
+
+    docs: list[Any] = []
+    try:
+        # load_all builds ONE loader over the stream, so the alias/node counters span every document.
+        for doc in yaml.load_all(text, Loader=loader_cls):
+            docs.append(doc)
+    except _AliasBudgetExceeded:
+        return _error("alias_bomb")
+    except _NodeBudgetExceeded:
+        return _error("too_many_nodes")
+    except _MergeKeyRefused:
+        return _error("merge_key")
+    except RecursionError:
+        return _error("too_deep")
+    except yaml.constructor.ConstructorError:
+        return _error("unsafe_tag")
+    except yaml.YAMLError:
+        return _error("malformed")
+    except Exception:  # noqa: BLE001 - defensive: never propagate a loader fault on hostile input.
+        return _error("malformed")
+
+    # Walk the aggregate under one budget so an alias-EXPANDED structure (a small compose-time DAG) is fully
+    # re-counted across documents, exactly as the single-document path does.
+    walk_err = _walk_within_budget(docs, budget)
+    if walk_err is not None:
+        return walk_err
+    return _ok(docs)

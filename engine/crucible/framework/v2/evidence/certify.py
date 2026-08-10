@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..entitlement.crypto import sign, verify_threshold
 from ..entitlement.models import Signature, TrustRoot
 from ..verify.reverify import reverify_context
-from .canonical import digest_payload, evidence_signing_bytes
+from .canonical import digest_payload, evidence_signing_bytes, sha256_hex
 from .chain import verify_chain, verify_head
 from .manifest import manifest_dir, verify_manifest
 from .models import (
@@ -68,6 +68,8 @@ def build_certificate(
     returned_scope: str = "",
     completeness: str = "",
     collector_signature: str = "",
+    artifact_recheck_required: bool = False,
+    artifact_encoding: str = "",
 ) -> EvidenceCertificate:
     """Build an (unsigned) certificate from a serialized finding carrying an
     `oracle_context`. If an evidence dir is given, its raw artifacts are manifested by
@@ -116,6 +118,8 @@ def build_certificate(
         returned_scope=returned_scope,
         completeness=completeness,
         collector_signature=collector_signature,
+        artifact_recheck_required=bool(artifact_recheck_required),
+        artifact_encoding=artifact_encoding,
     )
 
 
@@ -194,6 +198,7 @@ class EvidenceVerification(BaseModel):
     authentic: bool = False        # m-of-n signature over the certificate (+ the pinned trust-root, if given)
     bound: bool = False            # oracle_context_digest matches the presented context
     artifacts_ok: bool = True      # every manifested raw file still hashes correctly
+    primary_artifact_ok: bool = True  # BLOCK #3: when the cert requires it, sha256(raw artifact) == artifact_sha256
     reproduced: bool = False       # the pure oracle re-fires and matches the claim
     claims_grounded: bool = True   # every fact-bound report sentence re-admits as a fact
     schema_ok: bool = True         # the certificate schema version is one this verifier models
@@ -210,8 +215,8 @@ class EvidenceVerification(BaseModel):
     def ok(self) -> bool:
         # SOUNDNESS — authenticity/binding/artifacts/reproduction/grounding/known-schema. Deliberately NOT
         # gated on oracle_version_current (reproducibility) or currently_fresh (a separate posture signal).
-        return (self.authentic and self.bound and self.artifacts_ok and self.reproduced
-                and self.claims_grounded and self.schema_ok)
+        return (self.authentic and self.bound and self.artifacts_ok and self.primary_artifact_ok
+                and self.reproduced and self.claims_grounded and self.schema_ok)
 
 
 def _claims_grounded(cert: EvidenceCertificate, oracle_context: dict) -> tuple[bool, str]:
@@ -255,6 +260,7 @@ def verify_certificate(
     expected_trust_root_fingerprint: str | None = None,
     now: int | None = None,
     anchor_gen_time: int | None = None,
+    artifact_bytes: bytes | None = None,
 ) -> EvidenceVerification:
     """Independently verify a signed certificate against the oracle_context it claims to authenticate.
     Checks authenticity + binding + artifact integrity + reproduction + claim grounding + a known schema.
@@ -307,6 +313,29 @@ def verify_certificate(
             if bad:
                 artifact_note = "; artifacts FAILED: " + ", ".join(bad)
 
+    # BLOCK #3 — PRIMARY ARTIFACT RE-CHECK. When the certificate opted into a gating artifact binding
+    # (artifact_recheck_required), verification RECOMPUTES sha256 over the supplied raw artifact bytes and
+    # cross-checks it against the signed artifact_sha256. A signed digest alone only proves the cert CONTAINS a
+    # digest; recomputing from the bytes proves the cert is bound to THOSE bytes — so swapping the artifact (a
+    # 1-byte change) fails. FAIL CLOSED when the bytes are not supplied (a re-checkable artifact that is never
+    # re-checked is not sound) or when artifact_sha256 is absent (nothing to bind to).
+    primary_artifact_ok = True
+    primary_note = ""
+    if cert.artifact_recheck_required:
+        if not cert.artifact_sha256:
+            primary_artifact_ok = False
+            primary_note = "; primary artifact re-check REQUIRED but no artifact_sha256 bound — refusing to pass"
+        elif artifact_bytes is None:
+            primary_artifact_ok = False
+            primary_note = ("; primary artifact re-check REQUIRED but the raw artifact bytes were NOT supplied "
+                            "— refusing to pass (fail-closed)")
+        else:
+            recomputed = sha256_hex(artifact_bytes)
+            if recomputed != cert.artifact_sha256:
+                primary_artifact_ok = False
+                primary_note = (f"; primary artifact MISMATCH — recomputed sha256 {recomputed} != bound "
+                                f"{cert.artifact_sha256} (the artifact bytes were altered or swapped)")
+
     rr = reverify_context(
         oracle_context, bug_class=cert.bug_class,
         claimed_confirmed_by=cert.confirmed_by, claimed_confidence=cert.confidence,
@@ -345,12 +374,13 @@ def verify_certificate(
     reason = (f"signature: {thr.reason}; "
               f"binding: {'oracle_context matches digest' if bound else 'DIGEST MISMATCH — signature is for different evidence'}; "
               f"reproduction: {rr.note}; claims: {claims_note}"
-              f"{artifact_note}{tr_note}{schema_note}{ov_note}{fresh_note}{identity_note}")
+              f"{artifact_note}{primary_note}{tr_note}{schema_note}{ov_note}{fresh_note}{identity_note}")
     return EvidenceVerification(
         finding_ref=cert.finding_ref, authentic=authentic, bound=bound,
-        artifacts_ok=artifacts_ok, reproduced=rr.ok, claims_grounded=claims_grounded,
-        schema_ok=schema_ok, oracle_version_current=oracle_version_current, currently_fresh=currently_fresh,
-        valid_signers=thr.valid_signers, bound_identity=bound_identity, reason=reason)
+        artifacts_ok=artifacts_ok, primary_artifact_ok=primary_artifact_ok, reproduced=rr.ok,
+        claims_grounded=claims_grounded, schema_ok=schema_ok, oracle_version_current=oracle_version_current,
+        currently_fresh=currently_fresh, valid_signers=thr.valid_signers, bound_identity=bound_identity,
+        reason=reason)
 
 
 class PathVerification(BaseModel):
@@ -440,6 +470,7 @@ def verify_bundle(
     expected_trust_root_fingerprint: str | None = None,
     now: int | None = None,
     anchor_gen_times: dict[str, int] | None = None,
+    artifact_bytes_by_ref: dict[str, bytes] | None = None,
 ) -> BundleVerification:
     """Verify a bundle as a WHOLE. Beyond per-certificate soundness, this binds the
     certificate SET to the hash chain (the chain's digests must equal the certificates'
@@ -475,12 +506,17 @@ def verify_bundle(
     engagements.discard("")
     single_engagement = len(engagements) <= 1
 
+    # A posture certificate that opted into the gating artifact re-check (artifact_recheck_required) needs its
+    # raw artifact bytes at verify or it fails CLOSED. The bundle supplies them per finding_ref via
+    # artifact_bytes_by_ref (the bundle carries the raw artifacts); a cert that did not opt in ignores it.
+    _ab = artifact_bytes_by_ref or {}
     results = [
         verify_certificate(
             sc, oracle_context=contexts.get(sc.certificate.finding_ref, {}),
             trust_root=trust_root, evidence_root=evidence_root,
             expected_trust_root_fingerprint=expected_trust_root_fingerprint,
-            now=now, anchor_gen_time=anchor_gen_times.get(sc.certificate.finding_ref))
+            now=now, anchor_gen_time=anchor_gen_times.get(sc.certificate.finding_ref),
+            artifact_bytes=_ab.get(sc.certificate.finding_ref))
         for sc in certificates]
 
     if head is not None:

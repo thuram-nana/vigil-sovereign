@@ -30,7 +30,10 @@ def _binding(name, role, subjects, namespace="", role_kind="ClusterRole",
 
 
 def test_oracle_fires_on_anonymous_dangerous_role():
-    for role in ("cluster-admin", "admin", "edit", "Cluster-Admin"):
+    # k8s RBAC role names are case- AND whitespace-SENSITIVE, so ONLY the exact built-in names fire; a
+    # case/whitespace variant ("Cluster-Admin") is a DISTINCT custom role and stays a lead (see the negative
+    # control below — a red-pen CONFIRMED that folding the name minted a false FACT).
+    for role in ("cluster-admin", "admin", "edit"):
         sig = k8s_workload_posture_oracle(
             {"check_id": "b", "achieved_state": {"subjects": ["system:unauthenticated"], "role": role}})
         assert sig.fired and sig.confidence == 0.9 and sig.observed["rule"] == "anonymous_privileged_binding"
@@ -59,6 +62,13 @@ def test_oracle_does_not_fire_on_benign_or_non_dangerous():
     assert not k8s_workload_posture_oracle(          # a non-RBAC apiGroup is likewise not the built-in
         {"achieved_state": {"subjects": ["system:anonymous"], "role": "admin",
                             "role_kind": "ClusterRole", "role_apigroup": "example.com"}}).fired
+    # RED-PEN (HIGH, CONFIRMED): the role NAME is case- AND whitespace-SENSITIVE in k8s — a binding to a
+    # DISTINCT custom role differing from a built-in only by case or surrounding whitespace must NOT fire
+    # (folding it onto the built-in minted a signed false 'anonymous cluster-admin' FACT).
+    for variant in ("Cluster-Admin", "CLUSTER-ADMIN", "cluster-admin ", " cluster-admin", "cluster_admin"):
+        assert not k8s_workload_posture_oracle(
+            {"achieved_state": {"subjects": ["system:unauthenticated"], "role": variant}}).fired, \
+            f"case/whitespace variant {variant!r} was laundered onto a built-in dangerous role"
     # but the genuine built-in ClusterRole DOES fire
     assert k8s_workload_posture_oracle(
         {"achieved_state": {"subjects": ["system:anonymous"], "role": "cluster-admin",

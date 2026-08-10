@@ -573,7 +573,23 @@ class FindingContext(BaseModel):
         state: dict[str, Any] = {}
         raw_subjects = inner.get("subjects")
         if isinstance(raw_subjects, (list, tuple)):
-            state["subjects"] = [_coerce_text(s) for s in raw_subjects if s is not None]
+            canon_subjects: list[Any] = []
+            for s in raw_subjects:
+                if s is None:
+                    continue
+                if isinstance(s, Mapping):
+                    # RETAIN the TYPED subject {kind, name, api_group} — the oracle decides anon-ness from the
+                    # k8s TYPE, not a flattened string (reviewer BLOCK #3). Coercing a typed subject to text
+                    # here would launder the triple into a stringified dict the oracle can never match (a silent
+                    # false negative — the same canonicalizer-drops-semantics class as the mesh `from` bug).
+                    canon_subjects.append({
+                        "kind": _coerce_text(s.get("kind")),
+                        "name": _coerce_text(s.get("name")),
+                        "api_group": _coerce_text(s.get("api_group") or s.get("apiGroup")),
+                    })
+                else:
+                    canon_subjects.append(_coerce_text(s))   # legacy live-read: a bare reserved-name string
+            state["subjects"] = canon_subjects
         for k in ("role", "role_kind", "role_apigroup"):
             if inner.get(k) not in (None, ""):
                 state[k] = _coerce_text(inner.get(k))
@@ -681,6 +697,17 @@ class FindingContext(BaseModel):
                         else:
                             canon_from.append({})
                     out["from"] = canon_from
+                elif froms:
+                    # A `from` that is present-and-TRUTHY but NOT a canonicalizable non-empty list (a mapping, a
+                    # string, a mis-authored shape) still expresses SOURCE-RESTRICTION intent. The oracle's
+                    # _mesh_authz_allows_all treats a truthy `from` as PRESENT via `not froms` — the rule is NOT
+                    # a catch-all and does not fire. Dropping it here collapsed a source-restricted rule to {}
+                    # which the oracle then re-read as an empty_catch_all_rule and minted a signed "admits EVERY
+                    # caller" FACT (red-pen HIGH — a restrictive AuthorizationPolicy inverted to most-permissive,
+                    # signed + offline-re-verifiable). Mirror the to/when presence-marker exactly. (A FALSY `from`
+                    # — [] / None — is absent to the oracle's truthiness, so it stays a genuine catch-all here
+                    # too; the two sides agree.)
+                    out["from"] = [{}]      # presence marker: a source restriction exists (not catch-all)
                 if rule.get("to"):
                     out["to"] = [{}]      # presence marker: a path/method restriction exists (not catch-all)
                 if rule.get("when"):

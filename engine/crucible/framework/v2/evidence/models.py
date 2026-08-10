@@ -146,13 +146,24 @@ class EvidenceCertificate(BaseModel):
     returned_scope: str = ""           # the scope the collector actually returned
     completeness: str = ""             # "complete" | "partial" | "unknown"  (else "")
     collector_signature: str = ""      # opaque collector-side signature over the raw capture, if any
+    # ---- Artifact RE-CHECK (reviewer BLOCK #3): make the artifact digest GATING, not merely descriptive -----
+    # When True, ``verify_certificate`` REQUIRES the raw artifact bytes and recomputes their sha256, cross-
+    # checking it against ``artifact_sha256`` — so swapping the artifact (even a 1-byte change) FAILS
+    # verification, and a certificate that CLAIMS a re-checkable artifact but is verified without the bytes
+    # fails CLOSED. ``artifact_encoding`` records what ``artifact_sha256`` is over: "bytes" = the exact
+    # original bytes (the authoritative input); "canonical_text" = the UTF-8-normalized text (a str input,
+    # whose original byte encoding/BOM is not its identity). Both drop from the canonical form when false/empty
+    # → an existing certificate that does not opt in serialises BYTE-IDENTICALLY and keeps its non-gating
+    # behaviour + signature.
+    artifact_recheck_required: bool = False
+    artifact_encoding: str = ""         # "" | "bytes" | "canonical_text"
 
     # The additive D2 members whose empty value is dropped for byte-identity (canonical bytes sort keys, so
     # order-independent — listed once here so the serializer and the ``bound_identity`` view agree).
     _D2_FIELDS: ClassVar[tuple[str, ...]] = (
         "artifact_sha256", "collector_id", "collector_version", "resource_scope",
         "capture_time_epoch", "capture_method", "requested_scope", "returned_scope",
-        "completeness", "collector_signature",
+        "completeness", "collector_signature", "artifact_recheck_required", "artifact_encoding",
     )
 
     @field_validator("completeness")
@@ -161,6 +172,14 @@ class EvidenceCertificate(BaseModel):
         allowed = {"", "complete", "partial", "unknown"}
         if v not in allowed:
             raise ValueError(f"completeness must be one of {sorted(allowed - {''})} or empty, got {v!r}")
+        return v
+
+    @field_validator("artifact_encoding")
+    @classmethod
+    def _artifact_encoding_enum(cls, v: str) -> str:
+        allowed = {"", "bytes", "canonical_text"}
+        if v not in allowed:
+            raise ValueError(f"artifact_encoding must be one of {sorted(allowed - {''})} or empty, got {v!r}")
         return v
 
     @field_validator("resource_scope")

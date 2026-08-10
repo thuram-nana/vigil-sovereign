@@ -107,6 +107,29 @@ def test_scoped_allow_policy_does_not_fire() -> None:
     assert not mesh_posture_oracle(scoped).fired
 
 
+def test_from_mesh_control_preserves_a_nonlist_from_restriction() -> None:
+    # RED-PEN (HIGH, CONFIRMED): from_mesh_control DROPPED a truthy-but-non-list `from` (a mapping / string /
+    # mis-authored shape), collapsing a source-restricted AuthorizationPolicy rule to {} which the oracle then
+    # re-read as an empty_catch_all_rule and minted a signed "admits EVERY caller" FACT. The canonicalizer must
+    # mirror the oracle's `not froms` truthiness: a TRUTHY `from` is a source restriction, NOT a catch-all.
+    for raw_from in ({"source": {"principals": ["cluster.local/ns/prod/sa/frontend"]}},
+                     {"source": {"namespaces": ["prod"]}}, "mis-authored-string"):
+        ctl = {"resource_kind": "AuthorizationPolicy", "name": "b", "namespace": "prod", "action": "ALLOW",
+               "rules": [{"from": raw_from}]}
+        canon = FindingContext.from_mesh_control(ctl).mesh_control
+        assert canon["rules"][0].get("from"), f"a non-list from {raw_from!r} was dropped -> false catch-all"
+        assert not mesh_posture_oracle(canon).fired, \
+            f"canonicalized non-list from {raw_from!r} was laundered into an allow-all FACT"
+    # a GENUINE catch-all (no from/to/when) still fires after canonicalization; a wildcard PEER principal too
+    ca = FindingContext.from_mesh_control(
+        {"resource_kind": "AuthorizationPolicy", "name": "c", "action": "ALLOW", "rules": [{}]}).mesh_control
+    assert mesh_posture_oracle(ca).fired
+    wild = FindingContext.from_mesh_control(
+        {"resource_kind": "AuthorizationPolicy", "name": "w", "action": "ALLOW",
+         "rules": [{"from": [{"source": {"principals": ["*"]}}]}]}).mesh_control
+    assert mesh_posture_oracle(wild).fired
+
+
 def test_deny_action_never_fires_even_with_catch_all_rule() -> None:
     deny = {"resource_kind": "AuthorizationPolicy", "name": "a", "action": "DENY", "rules": [{}]}
     assert not mesh_posture_oracle(deny).fired
