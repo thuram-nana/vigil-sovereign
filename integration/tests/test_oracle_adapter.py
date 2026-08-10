@@ -80,6 +80,25 @@ def test_confirmed_but_unmapped_class_stays_a_lead_honesty_invariant():
     assert "no deterministic oracle mapping" in res.reason
 
 
+def test_finding_vs_context_class_mismatch_is_refused_not_a_false_clean():
+    # audit A1 fix-of-the-fix: the oracle adjudicates the retained CONTEXT's class, so a finding whose DECLARED
+    # class differs from its context class could launder a verdict. When they disagree the finding is REFUSED
+    # as an UNSUPPORTED lead — and critically it must NEVER be routed to a false CLEAN ("oracle conclusively
+    # did not fire"), because the oracle in fact FIRED over the context class.
+    firing = {"marker": "canary-zz99xx", "observed_sink": "leaked canary-zz99xx here"}
+    # KNOWN declared 'rce' + UNKNOWN context 'sovereign_rce' (side_effect fires over the context class)
+    res = confirm_and_certify(
+        {"check_id": "x", "bug_class": "rce", "oracle_context": {"bug_class": "sovereign_rce", **firing}},
+        engagement_slug="acme", signers=SIGNERS, provenance="reproduced")
+    assert res.status == "lead" and res.signed is None
+    assert res.outcome == "unsupported" and res.outcome != "clean"   # the false-CLEAN regression is closed
+    # two KNOWN-but-different classes (a relabel) are likewise refused, never minted under the context class
+    res2 = confirm_and_certify(
+        {"check_id": "x", "bug_class": "rce", "oracle_context": {"bug_class": "xss", **firing}},
+        engagement_slug="acme", signers=SIGNERS, provenance="reproduced")
+    assert res2.status == "lead" and res2.signed is None and res2.outcome == "unsupported"
+
+
 def test_empty_signers_is_refused_fail_closed():
     # a confirmed finding with no governance signers must NOT be labelled a fact (0-signature cert).
     with pytest.raises(ValueError, match="signers"):
