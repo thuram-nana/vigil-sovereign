@@ -72,6 +72,9 @@ assert "vigil_integration.live.wiring" not in _m, "warden_gate must not import t
 import vigil_integration.live.approval_broker  # A2: the offense-side per-action approval queue/broker
 assert "framework" not in _m, "approval_broker must not import framework at module scope"
 assert "strix" not in _m, "approval_broker must not import strix at module scope"
+import vigil_integration.live.cloud_live_posture  # Wave #4 Track B: the live cloud-capture FACT minter
+assert "framework" not in _m, "cloud_live_posture must not import framework at module scope"
+assert "strix" not in _m, "cloud_live_posture must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

@@ -244,7 +244,7 @@
     {
       "id": "mesh_posture.declared_configuration",
       "check": "mesh_posture_verify",
-      "evidence": "an Istio/Linkerd manifest VIGIL parsed DECLARES a permissive CONFIGURATION the mesh_posture oracle re-derives over the manifest construct: a PERMISSIVE/DISABLE PeerAuthentication mTLS mode, an ALLOW AuthorizationPolicy whose rule admits every caller AS DECLARED, or an all-unauthenticated Linkerd default-inbound-policy. This is the DECLARED configuration, not proven effective runtime posture — policy precedence, namespace/workload selectors and more-specific policies can change the effective result, which this slice does not evaluate.",
+      "evidence": "an Istio/Linkerd manifest VIGIL parsed DECLARES a permissive CONFIGURATION the mesh_posture oracle re-derives over the manifest construct: a PERMISSIVE/DISABLE PeerAuthentication mTLS mode, an ALLOW AuthorizationPolicy whose rule admits every caller AS DECLARED, or an all-unauthenticated Linkerd default-inbound-policy. This is the DECLARED configuration, not proven effective runtime posture \u2014 policy precedence, namespace/workload selectors and more-specific policies can change the effective result, which this slice does not evaluate.",
       "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
@@ -313,6 +313,42 @@
       "evidence_surface": "artifact",
       "implementation_refs": [
         "integration/vigil_integration/live/iac_posture.py:iac_verify"
+      ]
+    },
+    {
+      "id": "cloud_live.cloud_posture.achieved_state",
+      "check": "cloud_live_verify",
+      "evidence": "a resource in a VIGIL-OWNED, D5-scope-gated LIVE cloud capture carries an UNAMBIGUOUS insecure achieved state (encryption-at-rest explicitly disabled on a sensitive store, an explicit public flag, a LITERAL wildcard principal, an ACL granting AllUsers, or a security-group ingress open to 0.0.0.0/0) re-derived by the deterministic cloud_posture oracle over the RETAINED capture",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to the CAPTURED, SCOPED live state ('in provider/account[/region], resource R is insecure as captured at T'), NOT the whole cloud. NOT CLEAN-capable: the capture is a PARTIAL, scoped enumeration, so a non-firing cannot distinguish 'no insecure state' from 'not captured'. The D5 gate authorises the (provider, account[, region][, resource]) against the signed charter BEFORE any capture is adjudicated (fail-closed); the collector mints only a native-inventory LEAD, and the FACT rests on VIGIL's own oracle re-derivation, never the collector's say-so.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a COMPLETENESS proof over the capture: prove the scoped enumeration covered EVERY in-scope resource + its full achieved policy surface (all bucket-policy/ACL/public-access-block/SSE/security-group state resolved) and record the requested-vs-returned scope as complete, so 'no insecure state' becomes a bounded negative rather than an absence of data. Until then a non-firing over a partial capture stays INCONCLUSIVE.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "integration/vigil_integration/live/cloud_live_posture.py:cloud_live_verify"
+      ]
+    },
+    {
+      "id": "cloud_live.policy_path.iam_grant_path",
+      "check": "cloud_live_verify",
+      "evidence": "a REAL IAM grant PATH re-derived over the policy graph built from a VIGIL-OWNED, D5-scope-gated LIVE cloud capture lets an anonymous/over-privileged principal reach a resource, judged by the deterministic policy_path oracle over the retained graph",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "artifact_parsed"
+      ],
+      "limitation": "Bounded to the policy graph the SCOPED live capture represents, NOT the whole account. NOT CLEAN-capable: a partial scoped capture proves nothing about grants outside its scope. The D5 gate fails closed on an out-of-scope request; the graph is re-derived from the retained capture, never a scanner's say-so.",
+      "target_fact_capable": true,
+      "target_clean_capable": true,
+      "blocking_work": "CLEAN requires a completeness proof that the scoped capture enumerated the account's ENTIRE IAM grant surface in scope (every policy/role/attachment/assume/member edge), so 'no anonymous grant path' becomes a bounded negative. Until then a non-firing stays INCONCLUSIVE.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "integration/vigil_integration/live/cloud_live_posture.py:cloud_live_verify"
       ]
     }
   ]
