@@ -315,6 +315,63 @@ def test_neg_cross_account_but_wildcard_owner_never_masks_anon() -> None:
     assert cloud_posture_oracle(ctl).observed["rule"] == "wildcard_principal"
 
 
+# ---- red-pen re-submit: namespace-agreement (BLOCK-1) + owner-token canonicalisation (BLOCK-2) --------
+
+
+def test_neg_gcp_internal_user_with_project_only_owner_stays_lead() -> None:
+    # BLOCK-1: a GCP user/group account is a DOMAIN; a PROJECT-only owner set shares no namespace with it, so
+    # an INTERNAL user/group grant must NOT be mistaken for cross-account (the red-pen's project-vs-domain
+    # category error) -> LEAD, never fire.
+    for member in ("user:employee@acme.com", "group:eng@acme.com"):
+        ctl = {"resource_id": "r", "provider": "gcp", "owner_account": "acme-prod",
+               "grants": [{"principal": member}]}
+        assert not cloud_posture_oracle(ctl).fired, f"internal {member} must not fire with a project-only owner"
+    # MUTATION-VERIFIED: thread the OWNED DOMAIN too — an EXTERNAL domain now fires (same namespace, different)
+    ext = {"resource_id": "r", "provider": "gcp", "owner_accounts": ["acme-prod", "acme.com"],
+           "grants": [{"principal": "user:mallory@evil.com"}]}
+    assert cloud_posture_oracle(ext).fired and cloud_posture_oracle(ext).observed["principal_account"] == "evil.com"
+    # ...and the INTERNAL user WITH the owned domain threaded is same-account -> still no fire
+    internal = {"resource_id": "r", "provider": "gcp", "owner_accounts": ["acme-prod", "acme.com"],
+                "grants": [{"principal": "user:employee@acme.com"}]}
+    assert not cloud_posture_oracle(internal).fired
+
+
+def test_neg_gcp_sa_in_own_project_with_domain_only_owner_stays_lead() -> None:
+    # BLOCK-1 mirror: a serviceAccount's account is a PROJECT; a DOMAIN-only owner shares no namespace -> LEAD.
+    ctl = {"resource_id": "r", "provider": "gcp", "owner_account": "acme.com",
+           "grants": [{"principal": "serviceAccount:runner@acme-prod.iam.gserviceaccount.com"}]}
+    assert not cloud_posture_oracle(ctl).fired
+
+
+def test_neg_owner_as_full_arn_same_account_does_not_fire() -> None:
+    # BLOCK-2: an owner threaded as a full root ARN must canonicalise to the SAME aws:<id> as a same-account
+    # role grant (owner tokens are parsed exactly like principals now) -> no fire.
+    ctl = {"resource_id": "r", "owner_account": f"arn:aws:iam::{_OWNER}:root",
+           "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app"}]}
+    assert not cloud_posture_oracle(ctl).fired
+    # MUTATION-VERIFIED: an owner ARN of a DIFFERENT account makes the same grant cross-account -> fires
+    ctl2 = {"resource_id": "r", "owner_account": f"arn:aws:iam::{_EXT}:root",
+            "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app"}]}
+    assert cloud_posture_oracle(ctl2).fired
+
+
+def test_neg_owner_prefixed_and_bare_forms_canonicalise_identically() -> None:
+    # BLOCK-2: an explicit aws:<id> prefix and a bare 12-digit id reduce to the same token as the principal.
+    for owner in (f"aws:{_OWNER}", _OWNER):
+        ctl = {"resource_id": "r", "owner_account": owner,
+               "grants": [{"principal": f"arn:aws:iam::{_OWNER}:role/app"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"owner form {owner!r} must read as same-account"
+
+
+def test_neg_unusable_owner_token_stays_lead() -> None:
+    # BLOCK-2: a labelled or leading-zero-dropped-numeric owner token will NOT canonicalise -> it is dropped
+    # -> empty owner set -> LEAD even for an EXTERNAL grant (never a false FACT off a lossy owner token).
+    for bad_owner in ("111122223333 (prod)", 12345678901):
+        ctl = {"resource_id": "r", "owner_account": bad_owner,
+               "grants": [{"principal": f"arn:aws:iam::{_EXT}:root"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"unusable owner {bad_owner!r} must stay a LEAD"
+
+
 # ---- P4 seam / adapter / offline re-verification ----------------------------
 
 

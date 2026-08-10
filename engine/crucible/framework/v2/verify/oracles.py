@@ -2343,6 +2343,10 @@ _GCP_SA_RE = re.compile(
     r"^serviceaccount:[^@\s]+@(?P<proj>[a-z0-9][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$")
 _GCP_MEMBER_RE = re.compile(
     r"^(?:user|group|domain):(?:[^@\s]+@)?(?P<domain>[a-z0-9][a-z0-9.-]*\.[a-z]{2,})$")
+# A GCP project id (no dots) vs a dotted identity/DNS domain — used to give every parsed account a NAMESPACE
+# so a project owner is never compared against a user's email domain (the red-pen BLOCK-1 category error).
+_GCP_PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 
 
 def _cloud_tri_bool(value: Any) -> bool | None:
@@ -2371,40 +2375,54 @@ def _cloud_is_anon_principal(p: Any) -> bool:
     return norm in {a.replace("-", "").replace("_", "") for a in _CLOUD_ANON_PRINCIPALS}
 
 
-def _parse_principal_account(principal: Any) -> str | None:
-    """Parse the owning account/project id out of a NAMED cloud principal, for the cross-account rule (P4).
+def _canon_account_token(value: Any) -> str | None:
+    """Canonicalise a cloud principal OR an owner token into a NAMESPACED account token — the sound unit the
+    cross-account rule (P4) compares. Applied to BOTH the grantee principal AND the charter-threaded owner
+    token, so they are always compared in the SAME namespace (the red-pen BLOCK-1 fix: a project owner is
+    never compared against a user's email *domain*) and the owner side is parsed exactly like the principal
+    side (the BLOCK-2 fix: an owner threaded as a full ARN / prefixed / labelled form no longer mismatches a
+    same-account grant).
 
-    AWS: a bare 12-digit account principal, or the 12-digit account id in an ARN's 5th ':'-delimited field
-    (``arn:<partition>:service:<region>:<ACCOUNT>:<resource>`` — iam/sts leave region empty). GCP: the
-    project id of a ``serviceAccount:name@<PROJECT>.iam.gserviceaccount.com`` member, or the identity
-    domain of a ``user:`` / ``group:`` / ``domain:`` member.
+    Returns one of ``aws:<12-digit>`` / ``project:<gcp-project-id>`` / ``domain:<dns-domain>``, or ``None``
+    when NO account can be SOUNDLY canonicalised (a resource ARN with an empty account field, a non-12-digit
+    account, a Google-managed SA carrying no project, a labelled/opaque/leading-zero-dropped token) — so the
+    rule NEVER fires on an un-attributable account (an unknown is never guessed cross-account, near-zero-FP).
 
-    Returns ``None`` when NO account can be SOUNDLY parsed (a resource ARN with an empty account field, a
-    non-12-digit account, a Google-managed SA whose email carries no project, an opaque string) so the
-    cross-account rule NEVER fires on an un-attributable principal — an unknown account is never guessed
-    cross-account (near-zero-FP)."""
-    s = _coerce_text(principal).strip()
+    Accepts, for owner tokens, an EXPLICIT namespace prefix (``aws:`` / ``project:`` / ``domain:``) so a
+    charter can be unambiguous; a bare token is inferred as AWS (12-digit), a domain (dotted), or a GCP
+    project (the GCP id shape) in that order — a bare token that fits none is ``None`` (unusable, not guessed)."""
+    s = _coerce_text(value).strip()
     if not s:
         return None
     low = s.lower()
-    # A bare AWS account-id principal (AWS represents a whole-account principal as just the 12-digit id).
+    # Explicit namespace prefix (an owner token may be threaded this way for zero ambiguity).
+    for ns, rex in (("aws:", _AWS_ACCOUNT_RE), ("project:", _GCP_PROJECT_RE), ("domain:", _DOMAIN_RE)):
+        if low.startswith(ns):
+            rest = low[len(ns):].strip()
+            return ns + rest if rex.match(rest) else None
+    # A bare AWS account-id (AWS names a whole-account principal as just the 12-digit id).
     if _AWS_ACCOUNT_RE.match(low):
-        return low
-    # An AWS ARN — the account is the 5th ':'-delimited field, and only counts if it is exactly 12 digits
+        return "aws:" + low
+    # An AWS ARN — the account is the 5th ':'-delimited field, counted only if it is exactly 12 digits
     # (a service ARN with an empty account field, e.g. ``arn:aws:s3:::bucket``, is NOT attributable).
     if low.startswith("arn:"):
         parts = low.split(":")
         if len(parts) >= 5 and _AWS_ACCOUNT_RE.match(parts[4]):
-            return parts[4]
+            return "aws:" + parts[4]
         return None
-    # A GCP service-account member -> its project id.
+    # A GCP service-account member -> its PROJECT namespace.
     m = _GCP_SA_RE.match(low)
     if m:
-        return m.group("proj")
-    # A GCP user/group/domain member -> its identity domain.
+        return "project:" + m.group("proj")
+    # A GCP user/group/domain member -> its DOMAIN namespace.
     m = _GCP_MEMBER_RE.match(low)
     if m:
-        return m.group("domain")
+        return "domain:" + m.group("domain")
+    # A bare owner token: a dotted DOMAIN, else a GCP PROJECT id shape, else un-attributable.
+    if _DOMAIN_RE.match(low):
+        return "domain:" + low
+    if _GCP_PROJECT_RE.match(low):
+        return "project:" + low
     return None
 
 
@@ -2412,11 +2430,14 @@ def _cloud_owner_accounts(control: Mapping[str, Any]) -> set[str]:
     """The resource OWNER's own-account set the cross-account rule (P4) compares a named grantee against —
     the engagement's authorized own-account id(s) threaded into the RETAINED control by the capture
     (charter-supplied). Read from ``owner_account`` (scalar) and ``owner_accounts`` (list), at the control
-    top-level AND inside a nested ``achieved_state``. Normalised to stripped-lowercase tokens (so a
-    12-digit AWS id / a GCP project id / a domain compares to a parsed principal account the same way).
+    top-level AND inside a nested ``achieved_state``. Each token is run through :func:`_canon_account_token`
+    — the SAME canonicaliser the grantee principal goes through — so an owner threaded as a bare id, a full
+    ARN, a ``project:``/``domain:``/``aws:`` prefix, or a GCP project/domain all reduce to the same namespaced
+    form the principal is compared against (red-pen BLOCK-2). A token that will not canonicalise (a labelled
+    id, a leading-zero-dropped numeric, an opaque string) is DROPPED — never a partial/lossy match.
 
-    Absent -> the empty set -> the cross-account rule stays an honest LEAD: the owner is NEVER guessed, so
-    an intended same-account grant can never be mistaken for a risky cross-account one."""
+    Absent (or nothing canonicalises) -> the empty set -> the cross-account rule stays an honest LEAD: the
+    owner is NEVER guessed, so an intended same-account grant can never be mistaken for a cross-account one."""
     out: set[str] = set()
     scopes: list[Any] = [control]
     inner = control.get("achieved_state")
@@ -2425,17 +2446,17 @@ def _cloud_owner_accounts(control: Mapping[str, Any]) -> set[str]:
     for src in scopes:
         if not isinstance(src, Mapping):
             continue
+        candidates: list[Any] = []
         one = src.get("owner_account")
         if one is not None:
-            tok = _coerce_text(one).strip().lower()
-            if tok:
-                out.add(tok)
+            candidates.append(one)
         many = src.get("owner_accounts")
         if isinstance(many, (list, tuple)):
-            for a in many[:_CLOUD_MAX_PRINCIPALS]:
-                tok = _coerce_text(a).strip().lower()
-                if tok:
-                    out.add(tok)
+            candidates.extend(many[:_CLOUD_MAX_PRINCIPALS])
+        for a in candidates:
+            tok = _canon_account_token(a)
+            if tok:
+                out.add(tok)
     return out
 
 
@@ -2561,23 +2582,31 @@ def cloud_posture_oracle(observed_control: Any) -> OracleSignal:
     # internal grant is never promoted, and an un-attributable principal is never guessed cross-account.
     owner_accounts = _cloud_owner_accounts(ctl)
     if owner_accounts:
+        owner_namespaces = {t.split(":", 1)[0] for t in owner_accounts}
         for p in state["principals"]:
             if _cloud_is_anon_principal(p):
                 continue  # a wildcard/anonymous grantee is rule 3's job, not a named cross-account grant
-            acct = _parse_principal_account(p)
-            if acct is not None and acct not in owner_accounts:
+            acct = _canon_account_token(p)
+            if acct is None:
+                continue  # an un-attributable principal is never guessed cross-account (stays a lead)
+            # NAMESPACE AGREEMENT (red-pen BLOCK-1): only compare within the SAME namespace. If NO owner
+            # token shares this principal's namespace (e.g. a user's DOMAIN vs a project-only owner set), we
+            # cannot tell whether it is the org's own identity -> refuse (stay a LEAD), never fire.
+            if acct.split(":", 1)[0] not in owner_namespaces:
+                continue
+            if acct not in owner_accounts:
                 owners_disp = ", ".join(sorted(owner_accounts))
                 return OracleSignal(
                     kind=OracleKind.CLOUD_POSTURE, fired=True, confidence=0.9,
                     evidence=(f"cloud posture fact: resource {label} grants a NAMED principal {p!r} in a "
                               f"DIFFERENT account ({acct}) than the owner ({owners_disp}) — a cross-account "
                               f"trust the retained policy names, promoted over the achieved state (the "
-                              f"owner-account set was threaded into the retained control, so this is not a "
-                              f"guess)"),
+                              f"owner-account set was threaded into the retained control in the SAME "
+                              f"namespace, so this is not a guess)"),
                     observed={"resource_id": rid, "control_id": cid,
                               "rule": "named_cross_account_principal", "reason": "insecure_achieved_state",
-                              "principal": p, "principal_account": acct,
-                              "owner_accounts": sorted(owner_accounts)})
+                              "principal": p, "principal_account": acct.split(":", 1)[1],
+                              "owner_accounts": sorted(t.split(":", 1)[1] for t in owner_accounts)})
 
     return OracleSignal(
         kind=OracleKind.CLOUD_POSTURE, fired=False, confidence=0.0,
