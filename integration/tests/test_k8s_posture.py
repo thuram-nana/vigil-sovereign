@@ -301,6 +301,28 @@ def test_whitespace_rolref_never_mints_a_false_workload_fact():
             f"whitespace roleRef (kind={kind!r}, apiGroup={ag!r}) minted a false FACT"
 
 
+def test_truncation_window_rolref_never_mints_a_false_workload_fact():
+    """RED-PEN re-attack of the whitespace fix (CRITICAL, CONFIRMED): the reducer tested emptiness over the
+    FULL string (`str(x).strip()`), but the oracle normalizes with `_coerce_text(x)[:4096].strip().lower()` —
+    it TRUNCATES to 4096 chars BEFORE stripping. So a roleRef.kind/apiGroup of (" "*4096)+"x" is non-empty
+    over the full string (kept verbatim) yet collapses to '' once the oracle truncates to the first 4096
+    all-whitespace chars, re-entering the empty-string tolerance → signed false built-in-ClusterRole FACT
+    (invariant-3: a mint-side normalization gate not mirrored at re-execution). The reducer now mirrors the
+    oracle's truncate-then-strip via `_rolref_field_absent`."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    signers, tr = _signers_and_trust()
+    poison = " " * 4096 + "x"
+    for kind, ag in ((poison, poison), (poison, "rbac.authorization.k8s.io"), ("ClusterRole", poison),
+                     ("\t" * 4096 + "x", "\t" * 4096 + "x"), (" " * 4096 + "clusterrole", " " * 4096 + "x")):
+        m = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                        "roleRef": {"kind": kind, "apiGroup": ag, "name": "cluster-admin"},
+                        "subjects": [{"kind": "User", "name": "system:anonymous",
+                                      "apiGroup": "rbac.authorization.k8s.io"}]})
+        assert ingest_k8s_rbac(m, engagement_slug="a", signers=signers).n_facts == 0, \
+            f"truncation-window roleRef (len(kind)={len(kind)}) minted a signed false FACT"
+
+
 def test_serviceaccount_named_system_anonymous_is_not_the_anonymous_principal():
     """RED-PEN B3: a ServiceAccount NAMED 'system:anonymous' is a different principal from the anonymous USER.
     Matching on name alone laundered it into the real anon principal → false FACT. The reducer now requires

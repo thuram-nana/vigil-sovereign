@@ -63,6 +63,32 @@ _RBAC_BRANCH = "k8s_workload_posture.rbac_binding"
 # ClusterRole definition, a Deployment, a ConfigMap) is not a binding and is skipped — never guessed at.
 _RBAC_BINDING_KINDS = frozenset({"clusterrolebinding", "rolebinding"})
 
+# The workload oracle (verify.oracles._k8s_norm) normalizes a roleRef field with
+# `_coerce_text(value)[:4096].strip().lower()` — it TRUNCATES to 4096 chars BEFORE stripping — and then
+# TOLERATES an empty `role_kind`/`role_apigroup` (its `in ("clusterrole","")` / `in
+# ("rbac.authorization.k8s.io","")` branch) for hand-authored/older evidence. The reducer is therefore the
+# SOLE guard deciding present-vs-absent, and it MUST test emptiness the identical way. Testing over the FULL
+# string (`str(x).strip()`) diverged: a value like (" "*4096)+"x" is non-empty over the full string (kept
+# verbatim) yet collapses to "" once the oracle truncates to the first 4096 (all-whitespace) chars,
+# re-entering the empty-string tolerance → signed FALSE FACT (red-pen truncation-window re-attack of the A1
+# whitespace fix; invariant-3: a mint-side normalization gate not mirrored at re-execution).
+_K8S_WL_STR_CAP = 4096
+
+
+def _rolref_field_absent(value: Any) -> bool:
+    """True iff the workload oracle would normalize ``value`` to the empty string (its ``""`` tolerance
+    branch). Mirrors ``verify.oracles._k8s_norm``'s ``_coerce_text`` coercion and its truncate-THEN-strip
+    order EXACTLY, so the reducer's roleRef present/absent decision can never diverge from the oracle's."""
+    if value is None:
+        text = ""
+    elif isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = str(value)
+    return not text[:_K8S_WL_STR_CAP].strip()
+
 
 @dataclass
 class K8sPostureResult:
@@ -296,14 +322,13 @@ def _reduce_rbac_binding(doc: Any) -> dict | None:
     # manifest (red-pen A1-MEDIUM). Carry an explicit NON-matching sentinel so the built-in check fails →
     # non-fire → INCONCLUSIVE, never a FACT. A well-formed binding (both present) is unaffected and still
     # FACTs correctly; the binding is still adjudicated (not silently dropped).
-    # Treat a WHITESPACE-only kind/apiGroup as ABSENT, not present: the workload oracle normalizes with
-    # `.strip().lower()` and tolerates empty, so a byte-exact `not in (None,"")` guard let "  " / "\t" pass as
-    # "present", collapse to "" at the oracle, and re-enter the empty-string tolerance → signed false FACT
-    # (red-pen re-attack of the A1 fix). Match the oracle's normalization here.
-    reduced["role_kind"] = (str(role_kind) if role_kind is not None and str(role_kind).strip()
-                            else "unspecified")
-    reduced["role_apigroup"] = (str(role_apigroup) if role_apigroup is not None and str(role_apigroup).strip()
-                                else "unspecified")
+    # Treat a kind/apiGroup the oracle would normalize to "" as ABSENT, not present. The oracle tolerates an
+    # empty role_kind/apiGroup, so an empty-normalizing value re-enters that tolerance and mints a false FACT.
+    # `_rolref_field_absent` mirrors the oracle's truncate(4096)-then-strip EXACTLY (a plain `.strip()` over
+    # the full string missed the truncation-window bypass (" "*4096)+"x"). Carry the value verbatim when
+    # present (the oracle re-normalizes it identically); a non-matching "unspecified" sentinel when absent.
+    reduced["role_kind"] = ("unspecified" if _rolref_field_absent(role_kind) else str(role_kind))
+    reduced["role_apigroup"] = ("unspecified" if _rolref_field_absent(role_apigroup) else str(role_apigroup))
     return reduced
 
 
