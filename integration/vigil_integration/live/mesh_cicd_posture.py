@@ -37,6 +37,7 @@ importing this module co-loads no offense engine.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -158,8 +159,17 @@ def _adjudicate(
     res.controls = len(controls)
     for control in controls:
         oracle_context = oracle_context_of(control)
+        # A content digest of the RETAINED oracle context disambiguates controls the identity string cannot
+        # tell apart — two dangerous constructs in ONE job (two unpinned actions / two script-injection sinks)
+        # collapse to the same `cicd:{workflow}:{rule}:{job}`; two same-identity mesh resources collapse to the
+        # same `mesh:{provider}:{kind}:{ns}/{name}`. Without it their finding_refs collide and res.contexts
+        # (last-writer-wins) hands one genuine FACT the other control's context, breaking offline re-verify
+        # (red-pen MEDIUM). The digest is stable across re-parses of the same bytes; identical controls coalesce.
+        _digest = hashlib.sha256(
+            json.dumps(oracle_context, sort_keys=True, default=str, ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:12]
         finding = {
-            "check_id": check_id_of(control),
+            "check_id": f"{check_id_of(control)}#{_digest}",
             "bug_class": bug_class,
             "oracle_context": oracle_context,
         }
@@ -169,8 +179,11 @@ def _adjudicate(
         res.admissions.append((branch, admitted.verdict.value, admitted.reason))
         r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
                              provenance="reproduced", binding=binding)
-        res.contexts[r.finding_ref] = oracle_context
         if r.is_fact:
+            # Only a FACT re-verifies; storing a NON-firing lead's context here let it overwrite a genuine
+            # FACT's retained context on any finding_ref collision (red-pen MEDIUM — aggravated the mesh
+            # collision). Retain context for facts alone.
+            res.contexts[r.finding_ref] = oracle_context
             res.facts.append(r)
         elif r.outcome == "inconclusive":
             res.inconclusive.append(r)   # oracle refuted the control / non-conclusive → NEVER labelled clean

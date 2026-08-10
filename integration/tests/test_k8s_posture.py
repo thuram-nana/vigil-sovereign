@@ -323,6 +323,33 @@ def test_truncation_window_rolref_never_mints_a_false_workload_fact():
             f"truncation-window roleRef (len(kind)={len(kind)}) minted a signed false FACT"
 
 
+def test_rbac_finding_ref_collision_free_offline_reverify():
+    """RED-PEN re-attack (MEDIUM, CONFIRMED): the RBAC finding_ref k8s:rbac:{check_id} collided for two UNNAMED
+    ClusterRoleBindings (both -> 'clusterrolebinding'), and res.contexts (last-writer-wins) handed the first
+    genuine FACT the second's context, so it failed offline re-verify — the SAME class the CIS path closed.
+    A content digest disambiguates + context is retained only for facts."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    two = "\n---\n".join([
+        json.dumps({"kind": "ClusterRoleBinding",
+                    "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
+                                "name": "cluster-admin"},
+                    "subjects": [{"kind": "User", "name": "system:anonymous",
+                                  "apiGroup": "rbac.authorization.k8s.io"}]}),
+        json.dumps({"kind": "ClusterRoleBinding",
+                    "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io", "name": "admin"},
+                    "subjects": [{"kind": "Group", "name": "system:unauthenticated",
+                                  "apiGroup": "rbac.authorization.k8s.io"}]})])
+    r = ingest_k8s_rbac(two, engagement_slug="a", signers=signers)
+    refs = [f.finding_ref for f in r.facts]
+    assert len(refs) == 2 and len(set(refs)) == 2, f"two unnamed bindings collided on one finding_ref: {refs}"
+    for f in r.facts:
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr).ok, \
+            "a genuine RBAC FACT failed offline re-verification (wrong retained context)"
+
+
 def test_dangerous_role_name_is_case_and_whitespace_exact():
     """RED-PEN re-attack (HIGH, CONFIRMED): the oracle normalized the roleRef NAME with _k8s_norm
     (`[:4096].strip().lower()`) before the dangerous-built-in membership test, but k8s RBAC role names are

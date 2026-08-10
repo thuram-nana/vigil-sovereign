@@ -262,7 +262,8 @@ def k8s_posture_verify(
         res.admissions.append((_CIS_BRANCH, admitted.verdict.value, admitted.reason))
         r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
                              provenance="reproduced", binding=binding)
-        res.contexts[r.finding_ref] = oracle_context
+        if r.is_fact:                       # only a FACT re-verifies; storing a lead's context could overwrite
+            res.contexts[r.finding_ref] = oracle_context
         _file_result(res, r)
     return res
 
@@ -386,10 +387,20 @@ def ingest_k8s_rbac(
     for control in bindings:
         from framework.v2.verify.k8s_workload_posture import k8s_workload_posture_context  # noqa: PLC0415
         oracle_context = k8s_workload_posture_context(control)
+        # A content digest disambiguates bindings the check_id cannot tell apart (two UNNAMED
+        # ClusterRoleBindings both collapse to check_id "clusterrolebinding"): without it their finding_refs
+        # collide and res.contexts (last-writer-wins) hands the first genuine FACT the second's context, so it
+        # fails offline re-verify (red-pen MEDIUM — the SAME class the CIS path closed). Identical bindings
+        # still coalesce.
+        _digest = hashlib.sha256("\x00".join((
+            str(control.get("check_id") or ""), str(control.get("role") or ""),
+            str(control.get("role_kind") or ""), str(control.get("role_apigroup") or ""),
+            "\x1f".join(str(s) for s in (control.get("subjects") or [])),
+        )).encode("utf-8")).hexdigest()[:12]
         finding = {
-            "check_id": f"k8s:rbac:{control['check_id']}",
+            "check_id": f"k8s:rbac:{control['check_id']}#{_digest}",
             "bug_class": "k8s_workload_misconfiguration",
-            "insertion_point": f"rbac:{control['check_id']}",
+            "insertion_point": f"rbac:{control['check_id']}#{_digest}",
             "oracle_context": oracle_context,
         }
         fired, conclusive = _posture_signal(oracle_context, "k8s_workload_misconfiguration")
@@ -398,7 +409,8 @@ def ingest_k8s_rbac(
         res.admissions.append((_RBAC_BRANCH, admitted.verdict.value, admitted.reason))
         r = certify_admitted(finding, admitted, engagement_slug=engagement_slug, signers=signers,
                              provenance="reproduced", binding=binding_meta)
-        res.contexts[r.finding_ref] = oracle_context
+        if r.is_fact:                       # only a FACT re-verifies; storing a lead's context could overwrite
+            res.contexts[r.finding_ref] = oracle_context
         _file_result(res, r)
     return res
 

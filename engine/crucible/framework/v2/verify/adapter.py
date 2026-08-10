@@ -681,6 +681,17 @@ class FindingContext(BaseModel):
                         else:
                             canon_from.append({})
                     out["from"] = canon_from
+                elif froms:
+                    # A `from` that is present-and-TRUTHY but NOT a canonicalizable non-empty list (a mapping, a
+                    # string, a mis-authored shape) still expresses SOURCE-RESTRICTION intent. The oracle's
+                    # _mesh_authz_allows_all treats a truthy `from` as PRESENT via `not froms` — the rule is NOT
+                    # a catch-all and does not fire. Dropping it here collapsed a source-restricted rule to {}
+                    # which the oracle then re-read as an empty_catch_all_rule and minted a signed "admits EVERY
+                    # caller" FACT (red-pen HIGH — a restrictive AuthorizationPolicy inverted to most-permissive,
+                    # signed + offline-re-verifiable). Mirror the to/when presence-marker exactly. (A FALSY `from`
+                    # — [] / None — is absent to the oracle's truthiness, so it stays a genuine catch-all here
+                    # too; the two sides agree.)
+                    out["from"] = [{}]      # presence marker: a source restriction exists (not catch-all)
                 if rule.get("to"):
                     out["to"] = [{}]      # presence marker: a path/method restriction exists (not catch-all)
                 if rule.get("when"):

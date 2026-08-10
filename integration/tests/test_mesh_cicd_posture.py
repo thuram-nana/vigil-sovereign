@@ -225,6 +225,78 @@ def test_mesh_malformed_artifact_is_a_typed_error_no_fact():
     assert res.family_verdict() == "INCONCLUSIVE"    # unparseable != CLEAN
 
 
+def test_mesh_source_restricted_authzpolicy_never_minted_as_allow_all():
+    """RED-PEN re-attack (HIGH, CONFIRMED): from_mesh_control dropped a truthy-but-non-list `from`
+    (a mapping/string), collapsing a source-restricted AuthorizationPolicy rule to {} which the oracle re-read
+    as an empty_catch_all_rule -> a signed false 'admits EVERY caller' FACT that re-verified offline. A
+    source-restricted ALLOW policy must NOT fire; a genuine catch-all still does."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    import json as _json
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    for raw_from in ({"source": {"principals": ["cluster.local/ns/prod/sa/frontend"]}},
+                     {"source": {"namespaces": ["prod"]}}):
+        pol = _json.dumps([{"kind": "AuthorizationPolicy", "metadata": {"name": "b", "namespace": "prod"},
+                            "spec": {"action": "ALLOW", "rules": [{"from": raw_from}]}}])
+        res = mesh_posture_verify(pol, engagement_slug="acme", signers=signers)
+        assert res.n_facts == 0, f"a source-restricted from {raw_from!r} was minted as allow-all"
+    # a genuine catch-all ALLOW policy still FACTs + re-verifies
+    ca = _json.dumps([{"kind": "AuthorizationPolicy", "metadata": {"name": "c", "namespace": "prod"},
+                       "spec": {"action": "ALLOW", "rules": [{}]}}])
+    res = mesh_posture_verify(ca, engagement_slug="acme", signers=signers)
+    assert res.n_facts >= 1
+    for f in res.facts:
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+
+
+def test_mesh_finding_ref_collision_free_offline_reverify():
+    """RED-PEN re-attack (MEDIUM, CONFIRMED): two same-identity firing mesh controls collided on one
+    finding_ref, and res.contexts was written for NON-firing controls too, so a genuine FACT could be handed
+    the wrong context and fail offline re-verify. A content digest disambiguates + context is retained only for
+    facts."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    import json as _json
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    lst = _json.dumps([
+        {"kind": "PeerAuthentication", "metadata": {"name": "p", "namespace": "a"},
+         "spec": {"mtls": {"mode": "PERMISSIVE"}}},
+        {"kind": "PeerAuthentication", "metadata": {"name": "p", "namespace": "a"},
+         "spec": {"mtls": {"mode": "DISABLE"}}}])
+    res = mesh_posture_verify(lst, engagement_slug="acme", signers=signers)
+    refs = [f.finding_ref for f in res.facts]
+    assert len(refs) == 2 and len(set(refs)) == 2, f"same-identity mesh controls collided: {refs}"
+    for f in res.facts:
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+    # a firing control sharing ns/name with a benign (non-firing) one still re-verifies (no overwrite)
+    mixed = _json.dumps([
+        {"kind": "AuthorizationPolicy", "metadata": {"name": "x", "namespace": "a"},
+         "spec": {"action": "ALLOW", "rules": [{}]}},
+        {"kind": "PeerAuthentication", "metadata": {"name": "x", "namespace": "a"},
+         "spec": {"mtls": {"mode": "STRICT"}}}])
+    res2 = mesh_posture_verify(mixed, engagement_slug="acme", signers=signers)
+    assert res2.n_facts >= 1
+    for f in res2.facts:
+        assert verify_certificate(f.signed, oracle_context=res2.contexts[f.finding_ref], trust_root=tr).ok
+
+
+def test_cicd_finding_ref_collision_free_offline_reverify():
+    """RED-PEN re-attack (MEDIUM, CONFIRMED): the cicd _cid `cicd:{workflow}:{rule}:{job}` omitted the
+    distinguishing uses/run/step, so two dangerous constructs in ONE job (two unpinned third-party actions)
+    collided on one finding_ref and a genuine FACT failed offline re-verify. A content digest disambiguates."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    import json as _json
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    wf = _json.dumps({"name": "ci", "on": "push", "jobs": {"build": {"runs-on": "ubuntu-latest", "steps": [
+        {"uses": "evilcorp/deploy@v1"}, {"uses": "pwn-tools/scan@main"}]}}})
+    res = cicd_posture_verify(wf, engagement_slug="acme", signers=signers)
+    refs = [f.finding_ref for f in res.facts]
+    assert len(refs) >= 2 and len(refs) == len(set(refs)), f"two unpinned actions in one job collided: {refs}"
+    for f in res.facts:
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+
+
 # ---- CICD: positive → FACT that re-verifies offline ----------------------------------------------
 
 def test_cicd_unpinned_action_mints_a_fact_that_reverifies_offline():
