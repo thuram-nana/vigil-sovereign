@@ -2347,6 +2347,17 @@ _GCP_MEMBER_RE = re.compile(
 # so a project owner is never compared against a user's email domain (the red-pen BLOCK-1 category error).
 _GCP_PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 _DOMAIN_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+# Google-OWNED service-agent projects: a Google-MANAGED service agent (e.g.
+# ``service-<num>@gcp-sa-pubsub.iam.gserviceaccount.com`` — the standard CMEK / log-sink / eventarc grant)
+# lives in one of these, which is never the resource owner's project but is a benign, non-impersonatable
+# provider principal — NOT a cross-account trust (red-pen BLOCK-4). A customer's own external project does not
+# match these Google-reserved patterns; a customer project that coincidentally matches is (fail-safe) a missed
+# LEAD, never a false FACT. Residual: an UNLISTED Google service-agent project pattern is named blocking_work.
+_GCP_MANAGED_SA_PROJECT_RE = re.compile(
+    r"^(?:gcp-sa-[a-z0-9-]+|gs-project-accounts|cloud-[a-z0-9-]+|container[a-z0-9-]*|cloudbuild|"
+    r"cloudservices|cloudcomposer-accounts|dataflow[a-z0-9-]*|dataproc[a-z0-9-]*|firebase[a-z0-9-]*|"
+    r"genomics[a-z0-9-]*|serverless[a-z0-9-]*|sourcerepo[a-z0-9-]*|remotebuildexecution|"
+    r"[a-z0-9-]+-(?:system|robot|prod|accounts))$")
 
 
 def _cloud_tri_bool(value: Any) -> bool | None:
@@ -2385,7 +2396,8 @@ def _canon_account_token(value: Any, *, bare_ok: bool = False) -> str | None:
 
     Returns one of ``aws:<12-digit>`` / ``project:<gcp-project-id>`` / ``domain:<dns-domain>``, or ``None``
     when NO account can be SOUNDLY canonicalised (a resource ARN with an empty account field, a non-12-digit
-    account, a Google-managed SA carrying no project, a labelled/opaque/leading-zero-dropped token) — so the
+    account, a Google-managed SA carrying no project OR one in a Google-owned service-agent project
+    (gcp-sa-*/-system/-robot/…), a labelled/opaque/leading-zero-dropped token) — so the
     rule NEVER fires on an un-attributable account (an unknown is never guessed cross-account, near-zero-FP).
 
     Accepts an EXPLICIT namespace prefix (``aws:`` / ``project:`` / ``domain:``) and every STRUCTURED form
@@ -2415,10 +2427,16 @@ def _canon_account_token(value: Any, *, bare_ok: bool = False) -> str | None:
         if len(parts) >= 5 and _AWS_ACCOUNT_RE.match(parts[4]):
             return "aws:" + parts[4]
         return None
-    # A GCP service-account member -> its PROJECT namespace.
+    # A GCP service-account member -> its PROJECT namespace. A GOOGLE-MANAGED service agent (its project matches
+    # the Google-owned service-agent patterns) is un-attributable -> None (LEAD), never a false cross-account
+    # FACT: it is a benign provider principal (CMEK / log-sink / eventarc), not an impersonatable external
+    # trust (red-pen BLOCK-4).
     m = _GCP_SA_RE.match(low)
     if m:
-        return "project:" + m.group("proj")
+        proj = m.group("proj")
+        if _GCP_MANAGED_SA_PROJECT_RE.match(proj):
+            return None
+        return "project:" + proj
     # A GCP user/group/domain member -> its DOMAIN namespace.
     m = _GCP_MEMBER_RE.match(low)
     if m:

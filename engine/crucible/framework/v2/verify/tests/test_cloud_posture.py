@@ -380,6 +380,29 @@ def test_neg_bare_fqdn_service_principal_never_fires_even_with_domain_owner() ->
     assert cloud_posture_oracle(real).fired
 
 
+def test_neg_gcp_google_managed_service_agent_never_fires() -> None:
+    # BLOCK-4: a Google-MANAGED service agent reaches the STRUCTURED _GCP_SA_RE branch (not the bare path), so
+    # bare_ok does not gate it. It is a benign provider principal (the standard CMEK / log-sink grant present
+    # in ~every GCP project), never an impersonatable cross-account trust — it must be un-attributable -> LEAD
+    # even with a project owner present.
+    for agent in (
+        "serviceAccount:service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com",
+        "serviceAccount:service-123456789012@gcp-sa-cloudkms.iam.gserviceaccount.com",
+        "serviceAccount:service-123456789012@compute-system.iam.gserviceaccount.com",
+        "serviceAccount:service-123456789012@container-engine-robot.iam.gserviceaccount.com",
+        "serviceAccount:project-123456789012@gs-project-accounts.iam.gserviceaccount.com",
+        "serviceAccount:service-123456789012@serverless-robot-prod.iam.gserviceaccount.com",
+    ):
+        ctl = {"resource_id": "kms-key", "provider": "gcp", "owner_account": "acme-prod",
+               "grants": [{"principal": agent, "access": "encrypterDecrypter"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"Google-managed agent {agent!r} must not fire"
+    # MUTATION-VERIFIED: a real EXTERNAL CUSTOMER service account (an ordinary project, not a Google agent) DOES
+    # fire — the exclusion is scoped to Google-owned service-agent projects, not all cross-project SAs.
+    real = {"resource_id": "kms-key", "provider": "gcp", "owner_account": "acme-prod",
+            "grants": [{"principal": "serviceAccount:exfil@evil-customer-proj.iam.gserviceaccount.com"}]}
+    assert cloud_posture_oracle(real).fired
+
+
 def test_neg_unusable_owner_token_stays_lead() -> None:
     # BLOCK-2: a labelled or leading-zero-dropped-numeric owner token will NOT canonicalise -> it is dropped
     # -> empty owner set -> LEAD even for an EXTERNAL grant (never a false FACT off a lossy owner token).

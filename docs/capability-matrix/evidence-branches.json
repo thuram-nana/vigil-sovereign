@@ -343,14 +343,14 @@
         "artifact_parsed",
         "owner_account_supplied"
       ],
-      "limitation": "SOUND ONLY when the owner's own-account id(s) are threaded into the retained control from the charter: distinguishing an INTENDED same-account grant from a risky cross-account one REQUIRES the owner account. With NO owner-account set (unknown owner) the rule stays a LEAD — it NEVER guesses the owner and so never false-FACTs an intended internal grant. A principal whose account cannot be SOUNDLY parsed (a service ARN with an empty account field, a non-12-digit account, a Google-managed SA with no project in its email, an opaque canonical-user id) is un-attributable and never fires. Bounded to the CAPTURED, SCOPED live state at capture time, NOT the whole cloud. NOT CLEAN-capable: the capture is a PARTIAL, scoped enumeration, so a non-firing cannot distinguish 'no cross-account grant' from 'not captured' or 'owner unknown'.",
+      "limitation": "SOUND ONLY when the owner's own-account id(s) are threaded into the retained control from the charter: distinguishing an INTENDED same-account grant from a risky cross-account one REQUIRES the owner account. With NO owner-account set (unknown owner) the rule stays a LEAD — it NEVER guesses the owner and so never false-FACTs an intended internal grant. A principal whose account cannot be SOUNDLY parsed (a service ARN with an empty account field, a non-12-digit account, a Google-managed service agent — one with no project in its email OR one whose project is a Google-owned service-agent project such as gcp-sa-*/-system/-robot/gs-project-accounts, e.g. the benign CMEK / log-sink grant — a bare non-prefixed FQDN principal such as an AWS service principal / OIDC issuer / IP, or an opaque canonical-user id) is un-attributable and never fires. blocking_work: the Google-managed service-agent project set is pattern-based; an UNLISTED Google service-agent project pattern would be missed as a LEAD (fail-safe) until added. Bounded to the CAPTURED, SCOPED live state at capture time, NOT the whole cloud. NOT CLEAN-capable: the capture is a PARTIAL, scoped enumeration, so a non-firing cannot distinguish 'no cross-account grant' from 'not captured' or 'owner unknown'.",
       "target_fact_capable": true,
       "target_clean_capable": true,
       "blocking_work": "CLEAN requires (a) the live capture to THREAD the charter's authorized own-account id(s) into every retained control's owner_account/owner_accounts (so the comparison is grounded rather than absent), and (b) a COMPLETENESS proof over the capture: prove the scoped enumeration covered EVERY in-scope resource + its full principal/grant surface (every resource-policy/trust-policy/ACL statement resolved), so 'no cross-account grant' becomes a bounded negative rather than an absence of data. Until then a non-firing over a partial capture, or one with no owner-account threaded in, stays INCONCLUSIVE.",
       "evidence_surface": "live_capture",
       "implementation_refs": [
         "engine/crucible/framework/v2/verify/oracles.py:cloud_posture_oracle",
-        "engine/crucible/framework/v2/verify/oracles.py:_parse_principal_account",
+        "engine/crucible/framework/v2/verify/oracles.py:_canon_account_token",
         "engine/crucible/framework/v2/verify/oracles.py:_cloud_owner_accounts"
       ]
     },
