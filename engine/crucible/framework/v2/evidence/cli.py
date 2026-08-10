@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from ..common import paths
@@ -41,11 +43,19 @@ def _keygen(_args: argparse.Namespace) -> int:
 
 
 def _parse_signers(specs: list[str]) -> list[tuple[str, str]]:
-    out = []
+    """Parse ``key_id:private_key_b64`` signer specs STRICTLY: a malformed spec is an ERROR (never silently
+    dropped — a governance signer that vanished would produce an unsigned bundle unnoticed), and a duplicate
+    key_id is refused."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for s in specs or []:
-        kid, _, priv = s.partition(":")
-        if kid and priv:
-            out.append((kid, priv))
+        kid, sep, priv = s.partition(":")
+        if not sep or not kid or not priv:
+            raise ValueError(f"malformed --signer {s!r} (expected key_id:private_key_b64)")
+        if kid in seen:
+            raise ValueError(f"duplicate --signer key_id {kid!r}")
+        seen.add(kid)
+        out.append((kid, priv))
     return out
 
 
@@ -83,11 +93,56 @@ def _certify(args: argparse.Namespace) -> int:
     return 0
 
 
+class _HighwaterCorrupt(Exception):
+    """The anti-rollback state file EXISTS but cannot be trusted — verification must REFUSE (fail-closed)."""
+
+
 def _load_highwater(path: Path) -> int | None:
-    try:
-        return int(json.loads(path.read_text(encoding="utf-8"))["last_seq"])
-    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+    """None iff the file is ABSENT (a legitimate first verification). If the file EXISTS but is a symlink,
+    unreadable, malformed, or carries a non-integer last_seq, raise _HighwaterCorrupt so verification REFUSES
+    — anti-rollback state you cannot trust must NEVER silently degrade to 'no previous mark' (that disables
+    rollback protection exactly when its state is compromised)."""
+    # is_symlink() is True for a DANGLING link too (it checks the link, not the target), so it MUST precede
+    # exists() — exists() FOLLOWS the link and returns False for a dangling one, which would wrongly read as
+    # "absent / first run" and silently disable anti-rollback (red-pen: a planted dangling symlink bypass).
+    if path.is_symlink():
+        raise _HighwaterCorrupt(f"{path} is a symlink")
+    if not path.exists():
         return None
+    try:
+        seq = json.loads(path.read_text(encoding="utf-8"))["last_seq"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
+        raise _HighwaterCorrupt(f"{path} unreadable/malformed: {e}") from e
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+        raise _HighwaterCorrupt(f"{path} last_seq is not a non-negative integer: {seq!r}")
+    return seq
+
+
+def _save_highwater(path: Path, seq: int) -> None:
+    """Atomic + owner-only persist: temp file in the same dir → fsync → atomic rename → chmod 0600. Refuses a
+    symlink target. (This is LOCAL rollback detection; a governance-signed or platform-monotonic store would be
+    needed for cryptographically-guaranteed rollback PREVENTION — documented, not claimed here.)"""
+    # Check the UN-resolved path for a symlink BEFORE any resolve — path.resolve() would dereference it and the
+    # is_symlink() check would then always be False (dead code), letting the atomic write follow the link and
+    # overwrite its target (red-pen). os.replace(tmp, path) on a non-symlink path is an atomic in-place rename.
+    if path.is_symlink():
+        raise ValueError(f"high-water path {path} is a symlink (refusing)")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".hw-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"last_seq": int(seq)}))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _verify(args: argparse.Namespace) -> int:
@@ -125,12 +180,17 @@ def _verify(args: argparse.Namespace) -> int:
                   f"governance fingerprint OUT-OF-BAND and re-run with --trust-root-fingerprint {fp}",
                   file=sys.stderr)
 
-    # oracle_contexts indexed by finding_ref (the certify ref rule); per-cert digest
-    # binding catches any mismatch even if refs collide.
+    # oracle_contexts indexed by finding_ref (the certify ref rule). DUPLICATE refs are REFUSED (an overwrite
+    # would silently bind one certificate to another's context; the per-cert digest binding would then flag it,
+    # but we refuse up-front rather than depend on that catch).
     ctx_by_ref: dict[str, dict] = {}
     for f in _findings(report):
         if isinstance(f, dict) and f.get("oracle_context"):
             ref = str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding")
+            if ref in ctx_by_ref:
+                print(f"  [BAD] DUPLICATE finding_ref in report: {ref!r} — refusing", file=sys.stderr)
+                print("bundle NOT SOUND (duplicate finding_ref in the report contexts)")
+                return 2
             ctx_by_ref[ref] = f["oracle_context"]
 
     certificates = [SignedEvidence.model_validate(raw) for raw in bundle.get("certificates", [])]
@@ -140,33 +200,67 @@ def _verify(args: argparse.Namespace) -> int:
     # anti-rollback: read the persisted high-water mark so a stale, validly-signed
     # smaller bundle (a suppressed finding) is refused.
     hw_path = Path(args.highwater) if args.highwater else None
-    prev_hw = _load_highwater(hw_path) if hw_path else None
+    try:
+        prev_hw = _load_highwater(hw_path) if hw_path else None
+    except _HighwaterCorrupt as e:
+        print(f"  [BAD] anti-rollback high-water state is corrupt: {e}", file=sys.stderr)
+        print("bundle NOT SOUND (untrustworthy rollback state — refusing, fail-closed)")
+        return 2
+
+    # PRIMARY ARTIFACTS (posture FACTs that opted into the gating re-check): load the raw bytes the package
+    # shipped under artifacts/ (indexed by finding_ref) so verify_bundle can recompute sha256 + cross-check the
+    # signed artifact_sha256. Paths are CONFINED to the package dir (a hostile index cannot escape). A
+    # re-checkable cert whose artifact is absent fails CLOSED inside verify_bundle.
+    artifact_bytes_by_ref: dict[str, bytes] = {}
+    pkg_root = Path(args.bundle).resolve()
+    art_index_path = pkg_root / "artifacts.json"
+    if art_index_path.is_file():
+        try:
+            art_index = json.loads(art_index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            art_index = {}
+        for ref, rel in (art_index.items() if isinstance(art_index, dict) else []):
+            try:
+                fp_art = (pkg_root / str(rel)).resolve()
+                if fp_art.is_relative_to(pkg_root) and fp_art.is_file():
+                    artifact_bytes_by_ref[str(ref)] = fp_art.read_bytes()
+            except (OSError, ValueError):
+                continue
 
     result = verify_bundle(certificates, chain, head, contexts=ctx_by_ref,
                            trust_root=trust_root, evidence_root=evidence_root,
-                           prev_highwater=prev_hw)
+                           prev_highwater=prev_hw, artifact_bytes_by_ref=artifact_bytes_by_ref)
 
     for v in result.certificate_results:
         mark = "OK " if v.ok else "BAD"
         print(f"  [{mark}] {v.finding_ref}: authentic={v.authentic} bound={v.bound} "
-              f"artifacts_ok={v.artifacts_ok} reproduced={v.reproduced} — {v.reason}")
+              f"artifacts_ok={v.artifacts_ok} primary_artifact_ok={v.primary_artifact_ok} "
+              f"reproduced={v.reproduced} — {v.reason}")
     print(f"  chain: {'OK ' if result.chain_ok and result.cert_set_bound else 'BAD'} — {result.chain_note}")
 
     ok_n = sum(1 for v in result.certificate_results if v.ok)
     print(f"verified {ok_n}/{len(result.certificate_results)} certificate(s) sound; "
           f"bundle {'SOUND' if result.ok else 'NOT SOUND'}")
 
-    # advance the high-water only on a fully-sound bundle
+    # advance the high-water only on a fully-sound bundle (atomic + owner-only + symlink-refusing)
     if result.ok and hw_path is not None and head is not None:
         new_hw = max(prev_hw or 0, head.last_seq)
-        hw_path.write_text(json.dumps({"last_seq": new_hw}), encoding="utf-8")
+        _save_highwater(hw_path, new_hw)
 
     return 0 if result.ok else 2
 
 
 def _ctx_by_ref(report: dict) -> dict[str, dict]:
-    return {str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding"): f["oracle_context"]
-            for f in _findings(report) if isinstance(f, dict) and f.get("oracle_context")}
+    """oracle_contexts by finding_ref for pcf-export. REFUSES a duplicate ref (matching the inline builder in
+    _verify) so one certificate can never be silently bound to another finding's context."""
+    out: dict[str, dict] = {}
+    for f in _findings(report):
+        if isinstance(f, dict) and f.get("oracle_context"):
+            ref = str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding")
+            if ref in out:
+                raise ValueError(f"duplicate finding_ref {ref!r} in report contexts — refusing")
+            out[ref] = f["oracle_context"]
+    return out
 
 
 def _pcf_export(args: argparse.Namespace) -> int:
