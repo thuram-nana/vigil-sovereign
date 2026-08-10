@@ -50,6 +50,15 @@ _INSECURE_CAPTURE = {"format": "native", "export": {"resources": [
 _HARDENED_CAPTURE = {"format": "native", "export": {"resources": [
     {"id": "aws_s3_bucket.priv", "kind": "datastore"}]}}
 
+# A capture that OVER-RETURNS relative to a resource-constrained charter: one in-glob insecure bucket
+# (arn:aws:s3:::acme-*) AND one OUT-OF-GLOB insecure bucket. A correct gate mints a FACT ONLY about the
+# in-glob subject and REFUSES the out-of-glob one (the red-pen BLOCK-1 reproduction, now defended).
+_OVERRETURN_CAPTURE = {"format": "native", "export": {"resources": [
+    {"id": "arn:aws:s3:::acme-public", "kind": "datastore",
+     "grants": [{"principal": "*", "access": "s3:GetObject"}]},
+    {"id": "arn:aws:s3:::victim-prod-secrets", "kind": "datastore",
+     "grants": [{"principal": "*", "access": "s3:GetObject"}]}]}}
+
 
 # ---- scope-gate refusals (sovereign-safe: no framework, no mint) ----------------------------------
 
@@ -87,7 +96,7 @@ def test_region_and_resource_globs_are_enforced():
     signers, _ = _signers_and_trust()
     g = _gate([CloudScopeEntry(provider="aws", account="111122223333", region="us-east-1",
                                resource="arn:aws:s3:::acme-*")])
-    # in-region + matching resource -> allowed (facts may mint)
+    # in-region + matching REQUEST resource -> the capture action is authorised (facts may mint)
     ok = cloud_live_verify(_INSECURE_CAPTURE, provider="aws", account="111122223333", region="us-east-1",
                            resource="arn:aws:s3:::acme-public", scope_gate=g, engagement_slug="acme",
                            signers=signers)
@@ -97,6 +106,41 @@ def test_region_and_resource_globs_are_enforced():
                             resource="arn:aws:s3:::acme-public", scope_gate=g, engagement_slug="acme",
                             signers=signers)
     assert bad.refused is True
+
+
+def test_out_of_glob_captured_resources_are_not_minted():
+    """BLOCK-1 negative control: an authorised capture whose returned resources fall OUTSIDE the charter's
+    resource glob must mint NOTHING about them. On the pre-fix code this minted 3 FACTs about the out-of-glob
+    resources (each falsely bound to the request glob); this asserts the leak is closed."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, _ = _signers_and_trust()
+    g = _gate([CloudScopeEntry(provider="aws", account="111122223333", resource="arn:aws:s3:::acme-*")])
+    # _INSECURE_CAPTURE's subjects (aws_s3_bucket_policy.public / aws_db_instance.sec) do NOT match acme-*.
+    r = cloud_live_verify(_INSECURE_CAPTURE, provider="aws", account="111122223333",
+                          resource="arn:aws:s3:::acme-public", scope_gate=g, engagement_slug="acme",
+                          signers=signers)
+    assert r.refused is False                          # the capture request itself was in scope
+    assert r.n_facts == 0                              # ...but NOTHING out-of-glob was minted
+    assert r.skipped_out_of_scope >= 1                 # the over-returned subjects were refused, not minted
+
+
+def test_over_returning_capture_mints_only_in_glob_subject_with_true_binding():
+    """BLOCK-1 positive+negative control: a capture that returns BOTH an in-glob and an out-of-glob insecure
+    bucket mints a FACT ONLY about the in-glob subject, and every FACT's resource_scope names its ACTUAL
+    subject (never the shared request glob, never the out-of-glob resource)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, _ = _signers_and_trust()
+    g = _gate([CloudScopeEntry(provider="aws", account="111122223333", resource="arn:aws:s3:::acme-*")])
+    r = cloud_live_verify(_OVERRETURN_CAPTURE, provider="aws", account="111122223333",
+                          resource="arn:aws:s3:::acme-public", scope_gate=g, engagement_slug="acme",
+                          signers=signers)
+    assert r.refused is False
+    assert r.n_facts >= 1                              # the in-glob public bucket DID mint
+    assert r.skipped_out_of_scope >= 1                 # the out-of-glob bucket was refused
+    for f in r.facts:
+        subj = f.signed.certificate.bound_identity["resource_scope"]["resource"]
+        assert subj == "arn:aws:s3:::acme-public"      # every FACT's bound subject is the in-glob resource
+        assert subj != "arn:aws:s3:::victim-prod-secrets"
 
 
 # ---- in-scope capture -> signed FACT that re-verifies offline (framework leg) ---------------------
@@ -117,7 +161,10 @@ def test_in_scope_capture_mints_reverifiable_live_facts():
         # the FACT is bound to the SCOPED LIVE capture (not the whole cloud), via a live-read capture method
         assert cert.capture_method == "api:list"
         bid = cert.bound_identity
-        assert bid["resource_scope"] == {"provider": "aws", "account": "111122223333", "region": "us-east-1"}
+        rs = bid["resource_scope"]
+        assert rs["provider"] == "aws" and rs["account"] == "111122223333" and rs["region"] == "us-east-1"
+        # BLOCK-1 / BLOCK #3: the scope names the FACT's ACTUAL subject, not a shared request glob.
+        assert rs.get("resource") in {"aws_s3_bucket_policy.public", "aws_db_instance.sec"}
         assert bid.get("capture_time_epoch") == 1_700_000_000
         assert cert.artifact_recheck_required is True
         # re-verifies offline ONLY with the retained capture bytes

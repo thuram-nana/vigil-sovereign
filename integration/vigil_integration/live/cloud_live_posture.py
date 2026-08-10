@@ -73,6 +73,7 @@ class CloudLivePostureResult:
     contexts: dict = field(default_factory=dict)      # finding_ref -> oracle_context (offline re-verify)
     notes: list = field(default_factory=list)
     artifact_bytes: bytes = b""                       # the canonical captured-inventory bytes the FACTs bind
+    skipped_out_of_scope: int = 0                     # captured subjects refused by the per-resource scope gate
 
     @property
     def n_facts(self) -> int:
@@ -171,38 +172,63 @@ def cloud_live_verify(
     res.resources = len(inv.get("resources") or [])
 
     requested_scope = f"{provider}:{account}:{region or '*'}:{resource or '*'}"
-    scope_map = {"provider": str(provider), "account": str(account)}
-    if region:
-        scope_map["region"] = str(region)
-    if resource:
-        scope_map["resource"] = str(resource)
-    binding: dict = {
+    # Capture-level binding shared by every FACT (the artifact identity + how/when captured). The
+    # per-FACT ``resource_scope`` is added below and names the FACT's ACTUAL subject, never the request glob.
+    # NB there is deliberately NO ``returned_scope`` here: this slice does not measure a requested-vs-returned
+    # identity set, so asserting one (the prior ``returned_scope = requested_scope``) fabricated a
+    # measurement — dropped. ``completeness="partial"`` already states the capture cannot prove absence.
+    base_binding: dict = {
         "artifact_sha256": hashlib.sha256(raw).hexdigest(),
         "collector_id": collector_id,
         "capture_method": "api:list",          # a VIGIL-owned live read (not an artifact file)
         "completeness": completeness,          # "partial" — a scoped capture cannot prove absence
-        "resource_scope": scope_map,
         "requested_scope": requested_scope,
-        "returned_scope": requested_scope,     # the capture is bounded to the requested scope (fixture parity)
         # BLOCK #3: verify recomputes sha256 over the retained capture bytes + cross-checks (a swap fails).
         "artifact_recheck_required": True,
         "artifact_encoding": "canonical_text",
     }
     if capture_time_epoch is not None:
-        binding["capture_time_epoch"] = int(capture_time_epoch)
+        base_binding["capture_time_epoch"] = int(capture_time_epoch)
     observed = {"artifact_parsed": True}
+
+    def _subject_scope(resource_id: str) -> dict:
+        """The authorised scope bound into a FACT, naming its ACTUAL subject (BLOCK #3 subject discipline):
+        the FACT speaks about THIS resource, so ``resource_scope.resource`` is THIS resource's id — never the
+        request glob shared across unrelated subjects."""
+        m = {"provider": str(provider), "account": str(account)}
+        if region:
+            m["region"] = str(region)
+        m["resource"] = str(resource_id)
+        return m
+
+    def _subject_authorized(resource_id: str) -> bool:
+        """BLOCK-1: the D5 gate authorised the CAPTURE REQUEST tuple, but a capture can OVER-RETURN (an
+        ``s3api list-buckets`` yields the whole account even when the charter authorised only ``acme-*``).
+        Every MINTED SUBJECT must therefore independently match the signed charter. We re-use the SAME audited
+        gate (never a parallel matcher that could drift from it — the recurring divergence bug this program
+        keeps re-learning) with the resource's real id; a subject outside the signed scope is SKIPPED, so an
+        over-returning capture can never yield an over-scoped / false-subject FACT."""
+        ok, _why = scope_gate.authorize(provider, account, region, str(resource_id))
+        return ok
 
     # --- CLOUD_POSTURE: per resource, over its CAPTURED achieved state alone ----------------------------
     for r in inv.get("resources") or []:
         if not isinstance(r, dict) or not r.get("id"):
             continue
+        rid = str(r["id"])
+        if not _subject_authorized(rid):
+            res.skipped_out_of_scope += 1
+            res.notes.append(f"skipped out-of-scope captured resource {rid!r} "
+                             "(not in the signed charter cloud scope)")
+            continue
         oracle_context = cloud_posture_context(dict(r))
         finding = {
-            "check_id": f"cloud_live:{provider}:{account}:cloud_posture:{r['id']}",
+            "check_id": f"cloud_live:{provider}:{account}:cloud_posture:{rid}",
             "bug_class": "cloud_misconfiguration",
-            "insertion_point": f"cloud_live:{provider}:{account}:{r['id']}",
+            "insertion_point": f"cloud_live:{provider}:{account}:{rid}",
             "oracle_context": oracle_context,
         }
+        binding = {**base_binding, "resource_scope": _subject_scope(rid)}
         fired, conclusive = _oracle_signal("cloud_misconfiguration", oracle_context)
         admitted = admit(_BRANCH_CLOUD, fired=fired, conclusive=conclusive, observed=observed)
         res.admissions.append((_BRANCH_CLOUD, admitted.verdict.value, admitted.reason))
@@ -220,6 +246,12 @@ def cloud_live_verify(
     graph = build_policy_graph(inv)
     for pf in confirm_cloud_posture_facts(inv):
         principal, resource_id, access = pf.get("principal", ""), pf.get("resource", ""), pf.get("access", "")
+        # The grant PATH's subject is the resource it reaches — scope-check + bind THAT id (BLOCK-1).
+        if not resource_id or not _subject_authorized(resource_id):
+            res.skipped_out_of_scope += 1
+            res.notes.append(f"skipped out-of-scope grant-path subject {resource_id!r} "
+                             "(not in the signed charter cloud scope)")
+            continue
         oracle_context = policy_path_context(graph, principal, resource_id, access)
         claim = hashlib.sha256(f"{principal}\x00{resource_id}\x00{access}".encode()).hexdigest()[:12]
         finding = {
@@ -229,6 +261,7 @@ def cloud_live_verify(
             "insertion_point": f"cloud_live:{provider}:{account}:{resource_id}",
             "oracle_context": oracle_context,
         }
+        binding = {**base_binding, "resource_scope": _subject_scope(resource_id)}
         fired, conclusive = _oracle_signal("privilege_path", oracle_context)
         admitted = admit(_BRANCH_POLICY, fired=fired, conclusive=conclusive, observed=observed)
         res.admissions.append((_BRANCH_POLICY, admitted.verdict.value, admitted.reason))
