@@ -177,4 +177,6 @@ def verify_committed_recall_baseline(
     p = Path(core_path) if core_path is not None else ACCURACY_CORE_PATH
     if sig_env is None:
         sig_env = _json.loads(p.with_suffix(".sig.json").read_bytes())
-    return verify_scorecard(p, sig_env, trust_root_fingerprint=TRUST_ROOT_FINGERPRINT)
+    # expected_threshold pins the governance quorum too (the committed baseline is 1-of-1; the floor already
+    # makes < 1 unsatisfiable, and this rejects any future downgrade should the root become m-of-n).
+    return verify_scorecard(p, sig_env, trust_root_fingerprint=TRUST_ROOT_FINGERPRINT, expected_threshold=1)

@@ -75,6 +75,9 @@ assert "strix" not in _m, "approval_broker must not import strix at module scope
 import vigil_integration.live.cloud_live_posture  # Wave #4 Track B: the live cloud-capture FACT minter
 assert "framework" not in _m, "cloud_live_posture must not import framework at module scope"
 assert "strix" not in _m, "cloud_live_posture must not import strix at module scope"
+import vigil_integration.live.cloud_benchmark  # the signed cloud benchmark harness (scoring/sign LAZY)
+assert "framework" not in _m, "cloud_benchmark must not import framework at module scope"
+assert "strix" not in _m, "cloud_benchmark must not import strix at module scope"
 print(json.dumps({"res": res, "guard": "passed"}))
 """
 

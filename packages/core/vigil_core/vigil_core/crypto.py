@@ -112,7 +112,10 @@ def verify_threshold(message: bytes, signatures: list[Signature], trust_root: Tr
             continue
         if verify_one(authorizer.public_key_b64, message, sig.signature_b64):
             valid.append(sig.key_id)
-    satisfied = len(valid) >= trust_root.threshold
+    # TrustRoot validates threshold >= 1 at construction; this floor is defense-in-depth so that even a
+    # threshold that reached here below 1 (a hand-built/mutated trust root) can never be satisfied by zero
+    # valid signatures — a keyless bundle must never verify.
+    satisfied = trust_root.threshold >= 1 and len(valid) >= trust_root.threshold
     reason = (
         f"{len(valid)} valid distinct signature(s) >= threshold {trust_root.threshold}"
         if satisfied else
