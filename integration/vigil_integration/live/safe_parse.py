@@ -240,6 +240,7 @@ def _counting_safe_loader(max_aliases: int, max_nodes: int):
     Imported types are function-local (FATAL-2: no module-level third-party import). The loader is created
     fresh per call so the caps are captured without shared mutable class state.
     """
+    import re  # noqa: PLC0415
     import yaml  # noqa: PLC0415 - optional third-party dep, imported lazily and function-locally.
     from yaml.events import AliasEvent  # noqa: PLC0415
 
@@ -271,6 +272,22 @@ def _counting_safe_loader(max_aliases: int, max_nodes: int):
                 if key_node is not None and getattr(key_node, "tag", "") == "tag:yaml.org,2002:merge":
                     raise _MergeKeyRefused()
             return super().flatten_mapping(node)
+
+    # GitHub Actions / YAML 1.2 semantics: `on`, `off`, `yes`, `no` are NOT booleans — only `true`/`false`
+    # are. The default (YAML 1.1) SafeLoader turns the GitHub-Actions `on:` trigger KEY into Python ``True``,
+    # so trigger analysis silently fails and a real pull_request_target pwn-request never fires (reviewer
+    # BLOCK #3 — a silent FALSE NEGATIVE). Rebuild THIS one-shot subclass's implicit resolvers so the bool tag
+    # resolves ONLY true/false; on/off/yes/no stay strings. Every other tag (int/float/null/timestamp/...) is
+    # preserved unchanged. Scoped to the subclass — the stdlib SafeLoader is untouched. (K8s/Istio manifests
+    # use true/false, so this is harmless there and strictly more correct.)
+    _true_false_only = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+    _BOOL_TAG = "tag:yaml.org,2002:bool"
+    _CountingSafeLoader.yaml_implicit_resolvers = {
+        ch: [(tag, rx) for (tag, rx) in resolvers if tag != _BOOL_TAG]
+        for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    for ch in "tTfF":
+        _CountingSafeLoader.yaml_implicit_resolvers.setdefault(ch, []).append((_BOOL_TAG, _true_false_only))
 
     return _CountingSafeLoader
 

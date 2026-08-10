@@ -197,7 +197,13 @@ def k8s_posture_verify(
     collector_id: str = "kube-bench",
 ) -> K8sPostureResult:
     """Parse a kube-bench ``--json`` export and — THROUGH ADMISSION — mint a signed FACT for every CIS
-    control the ``k8s_posture`` oracle PROVES carries a concrete insecure setting.
+    control the report DECLARES failed with a concrete insecure setting the ``k8s_posture`` oracle re-derives
+    over the report bytes.
+
+    SUBJECT DISCIPLINE (reviewer BLOCK #3): kube-bench is an EXTERNAL scanner. The signed FACT is bounded to
+    the authenticated report artifact — "this kube-bench report declares control X FAILED with value Y" — and
+    is NEVER an independent VIGIL assertion about the live cluster (the report could be stale, run against a
+    different cluster, or tampered; only VIGIL's own live K8s-API capture, Track B, could assert live state).
 
     Admission decides, minting executes. For each retained control this runs the oracle to get
     ``(fired, conclusive)``, calls ``verdict.admit(_CIS_BRANCH, ...)`` so the branch's declared capabilities
@@ -231,23 +237,22 @@ def k8s_posture_verify(
         "completeness": "partial",       # a kube-bench export is a bounded snapshot — never a CLEAN basis
         "capture_method": "artifact:kube-bench",
     }
-    for control in controls:
+    for idx, control in enumerate(controls):
         from framework.v2.verify.k8s_posture import k8s_posture_context  # noqa: PLC0415
+        from vigil_core.canonical import digest_payload  # noqa: PLC0415 (shared integrity core; FATAL-2-safe)
         oracle_context = k8s_posture_context(control)
-        # Identity = target(node) + section + CIS id, so the same test_number on master vs node vs etcd does
-        # not collide on one finding_ref (red-pen integrity finding). A content digest disambiguates controls
-        # the (target, section, id) tuple STILL cannot tell apart — two firing controls sharing a CIS id but
-        # lacking node_type/text/id (target -> "-"), or a bare-list export where target/section are "": without
-        # it their finding_refs collide and res.contexts (last-writer-wins) hands the first genuine FACT the
-        # SECOND control's context, so it fails offline re-verify (red-pen MEDIUM). Two GENUINELY identical
-        # controls still coalesce (same digest); only DISTINCT controls are split apart.
+        # Identity = target(node) + section + CIS id + a FULL-sha256 canonical digest over the control's
+        # STRUCTURAL LOCATION (parse ordinal `loc`) and its retained oracle context. Full 256-bit (not a 48-bit
+        # prefix — a birthday collision would otherwise be feasible at ~2^24 controls, some attacker-controlled);
+        # the project canonical serializer REJECTS a non-JSON member rather than default=str-collapsing it into
+        # an ambiguous form. `loc` keeps two IDENTICAL controls at DIFFERENT source positions distinct (they are
+        # different findings — reviewer BLOCK #3), while a re-parse of the same bytes is order-stable so the FACT
+        # re-verifies offline. Without this, distinct per-node/per-position controls collide on one finding_ref
+        # and res.contexts (last-writer-wins) hands a genuine FACT the wrong context (red-pen MEDIUM).
         _tgt = control.get("target") or "-"
         _sec = control.get("section") or "-"
-        _digest = hashlib.sha256("\x00".join((
-            str(control.get("check_id") or ""), str(control.get("status") or ""),
-            str(control.get("actual_value") or ""), str(control.get("section") or ""),
-            str(control.get("target") or ""), str(control.get("description") or ""),
-        )).encode("utf-8")).hexdigest()[:12]
+        _digest = digest_payload({"loc": idx, "target": _tgt, "section": _sec,
+                                  "check_id": str(control.get("check_id") or ""), "ctx": oracle_context})
         finding = {
             "check_id": f"k8s:cis:{_tgt}:{_sec}:{control['check_id']}#{_digest}",
             "bug_class": "k8s_misconfiguration",
@@ -384,19 +389,18 @@ def ingest_k8s_rbac(
         "completeness": "partial",       # a manifest export is a bounded snapshot — never a CLEAN basis
         "capture_method": "artifact:k8s-manifest",
     }
-    for control in bindings:
+    for idx, control in enumerate(bindings):
         from framework.v2.verify.k8s_workload_posture import k8s_workload_posture_context  # noqa: PLC0415
+        from vigil_core.canonical import digest_payload  # noqa: PLC0415 (shared integrity core; FATAL-2-safe)
         oracle_context = k8s_workload_posture_context(control)
-        # A content digest disambiguates bindings the check_id cannot tell apart (two UNNAMED
-        # ClusterRoleBindings both collapse to check_id "clusterrolebinding"): without it their finding_refs
-        # collide and res.contexts (last-writer-wins) hands the first genuine FACT the second's context, so it
-        # fails offline re-verify (red-pen MEDIUM — the SAME class the CIS path closed). Identical bindings
-        # still coalesce.
-        _digest = hashlib.sha256("\x00".join((
-            str(control.get("check_id") or ""), str(control.get("role") or ""),
-            str(control.get("role_kind") or ""), str(control.get("role_apigroup") or ""),
-            "\x1f".join(str(s) for s in (control.get("subjects") or [])),
-        )).encode("utf-8")).hexdigest()[:12]
+        # A FULL-sha256 canonical digest over the binding's STRUCTURAL LOCATION (document ordinal `loc`) and its
+        # retained oracle context disambiguates bindings the check_id cannot tell apart (two UNNAMED
+        # ClusterRoleBindings both collapse to check_id "clusterrolebinding"), and keeps two identical bindings
+        # at DIFFERENT document positions distinct (reviewer BLOCK #3). Full 256-bit + canonical (reject-non-JSON,
+        # no default=str). Without it their finding_refs collide and res.contexts (last-writer-wins) hands the
+        # first genuine FACT the second's context, so it fails offline re-verify (red-pen MEDIUM).
+        _digest = digest_payload({"loc": idx, "check_id": str(control.get("check_id") or ""),
+                                  "ctx": oracle_context})
         finding = {
             "check_id": f"k8s:rbac:{control['check_id']}#{_digest}",
             "bug_class": "k8s_workload_misconfiguration",

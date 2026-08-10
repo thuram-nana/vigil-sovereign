@@ -323,6 +323,28 @@ def test_truncation_window_rolref_never_mints_a_false_workload_fact():
             f"truncation-window roleRef (len(kind)={len(kind)}) minted a signed false FACT"
 
 
+def test_kube_bench_fact_subject_is_the_report_not_the_cluster():
+    """REVIEWER BLOCK #3: kube-bench is an EXTERNAL scanner; the signed FACT must be scoped to the
+    authenticated REPORT ('the report declares control X failed'), never an independent assertion about the
+    live cluster. The oracle's evidence/observed must name the report as the subject, AND a genuine end-to-end
+    kube-bench FACT must still mint + re-verify (subject-scoped, not downgraded)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    from framework.v2.verify.oracles import k8s_posture_oracle
+    signers, tr = _signers_and_trust()
+    sig = k8s_posture_oracle({"check_id": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"})
+    assert sig.fired, "a kube-bench control declaring a dangerous flag must still fire"
+    assert sig.observed.get("subject") == "kube_bench_report", f"subject not scoped to the report: {sig.observed}"
+    ev = sig.evidence.lower()
+    assert "report" in ev and "not an independent" in ev and "live cluster" in ev, \
+        f"kube-bench evidence must name the report (not a live-cluster observation): {sig.evidence[:200]!r}"
+    # and the full path still mints a subject-scoped FACT that re-verifies offline
+    kb = json.dumps({"Controls": [{"tests": [{"section": "1.2", "results": [
+        {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"}]}]}]})
+    r = k8s_posture_verify(kb, engagement_slug="a", signers=signers)
+    assert r.n_facts == 1
+
+
 def test_rbac_finding_ref_collision_free_offline_reverify():
     """RED-PEN re-attack (MEDIUM, CONFIRMED): the RBAC finding_ref k8s:rbac:{check_id} collided for two UNNAMED
     ClusterRoleBindings (both -> 'clusterrolebinding'), and res.contexts (last-writer-wins) handed the first
@@ -381,8 +403,10 @@ def test_kube_bench_finding_ref_collision_free_offline_reverify():
     """RED-PEN re-attack (MEDIUM, CONFIRMED): two DISTINCT firing CIS controls sharing a test_number but lacking
     node_type/text/id (target -> '-') collapsed to one finding_ref; res.contexts (last-writer-wins) then handed
     the first genuine FACT the second control's context, so it failed offline re-verification — breaking the
-    module's 'every FACT re-verifies offline' promise. A content digest now disambiguates distinct controls
-    (identical controls still coalesce)."""
+    module's 'every FACT re-verifies offline' promise. The finding_ref now carries a full-sha256 canonical
+    digest over the control's STRUCTURAL LOCATION (parse ordinal) + retained context, so distinct controls —
+    AND two identical controls at DIFFERENT source positions (reviewer BLOCK #3) — get distinct refs, while a
+    re-parse of the same bytes is order-stable."""
     pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
     import json
     from framework.v2.evidence.certify import verify_certificate
@@ -393,15 +417,21 @@ def test_kube_bench_finding_ref_collision_free_offline_reverify():
     r = k8s_posture_verify(kb, engagement_slug="a", signers=signers)
     refs = [f.finding_ref for f in r.facts]
     assert len(refs) == 2 and len(set(refs)) == 2, f"distinct controls collided on one finding_ref: {refs}"
+    # the digest component is a FULL sha256 (>=128 bits), not a short 48-bit prefix
+    assert all(len(ref.rsplit("#", 1)[-1]) == 64 for ref in refs), f"finding_ref digest is not full sha256: {refs}"
     for f in r.facts:
         assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr).ok, \
             "a genuine kube-bench FACT failed offline re-verification (wrong retained context)"
-    # two GENUINELY identical controls still coalesce to one ref (dedup, not a collision bug)
+    # two identical-CONTENT controls at DIFFERENT source positions are DISTINCT findings (reviewer BLOCK #3:
+    # identical controls in different locations must NOT collapse into one finding).
     kb2 = json.dumps({"Controls": [{"tests": [{"section": "1.2", "results": [
         {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"},
         {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"}]}]}]})
     r2 = k8s_posture_verify(kb2, engagement_slug="a", signers=signers)
-    assert len(set(f.finding_ref for f in r2.facts)) == 1
+    assert len(set(f.finding_ref for f in r2.facts)) == 2, "same-content controls at different positions collapsed"
+    # a re-parse of the SAME bytes yields the SAME finding_refs (order-stable -> offline re-verify is stable)
+    r3 = k8s_posture_verify(kb2, engagement_slug="a", signers=signers)
+    assert sorted(f.finding_ref for f in r2.facts) == sorted(f.finding_ref for f in r3.facts)
 
 
 def test_serviceaccount_named_system_anonymous_is_not_the_anonymous_principal():

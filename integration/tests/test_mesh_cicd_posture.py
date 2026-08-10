@@ -178,7 +178,7 @@ def test_mesh_permissive_mints_a_fact_that_reverifies_offline():
     # the FACT re-verifies offline end-to-end (authentic + bound + reproduced)
     assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
     # admission attributed it to the ONE clean_capable:false branch, and the artifact was bound into the cert
-    assert res.admissions and all(a[0] == "mesh_posture.achieved_state" for a in res.admissions)
+    assert res.admissions and all(a[0] == "mesh_posture.declared_configuration" for a in res.admissions)
     assert any(a[1] == "FACT" for a in res.admissions)
     assert res.family_verdict() == "FACT"
     assert res.artifact_sha256 and len(res.artifact_sha256) == 64
@@ -280,6 +280,32 @@ def test_mesh_finding_ref_collision_free_offline_reverify():
         assert verify_certificate(f.signed, oracle_context=res2.contexts[f.finding_ref], trust_root=tr).ok
 
 
+def test_github_actions_on_key_is_not_a_yaml_boolean():
+    """RED-PEN / reviewer BLOCK #3 (silent FALSE NEGATIVE): a YAML-1.1 SafeLoader turns the GitHub-Actions
+    `on:` trigger KEY into Python True, so trigger analysis silently fails and a real pull_request_target
+    pwn-request never fires. safe_parse now uses GitHub/YAML-1.2 semantics: only true/false are booleans;
+    on/off/yes/no stay strings. Differential against the buggy behaviour."""
+    r = _safe_parse_structure("name: ci\non: push\njobs: {}\n")
+    assert r.ok and "on" in r.value and True not in r.value, "the `on:` key was coerced to a YAML-1.1 boolean"
+    # true/false remain booleans; on/off/yes/no are strings
+    v = _safe_parse_structure("a: true\nb: false\nc: yes\nd: on\ne: off\n").value
+    assert v["a"] is True and v["b"] is False, "true/false must still resolve to bool"
+    assert v["c"] == "yes" and v["d"] == "on" and v["e"] == "off", "on/off/yes/no must stay strings"
+
+
+def test_cicd_pull_request_target_pwn_request_fires_through_on_key():
+    """The `on:` fix must let a genuine pwn-request FACT mint (regression for the silent false negative)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    wf = ("name: ci\non: pull_request_target\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n"
+          "        with: {ref: \"${{ github.event.pull_request.head.sha }}\"}\n")
+    res = cicd_posture_verify(wf, engagement_slug="acme", signers=signers)
+    assert res.n_facts >= 1, "a pull_request_target pwn-request must fire (the on: trigger must be readable)"
+    for f in res.facts:
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+
+
 def test_cicd_finding_ref_collision_free_offline_reverify():
     """RED-PEN re-attack (MEDIUM, CONFIRMED): the cicd _cid `cicd:{workflow}:{rule}:{job}` omitted the
     distinguishing uses/run/step, so two dangerous constructs in ONE job (two unpinned third-party actions)
@@ -372,4 +398,4 @@ def test_minting_is_admission_routed_not_a_direct_confirm(monkeypatch):
     signers, _ = _signers_and_trust()
     mesh_posture_verify(_MESH_PERMISSIVE, engagement_slug="acme", signers=signers)
     assert seen and all(isinstance(a, AdmittedVerdict) for a in seen)
-    assert all(a.branch == "mesh_posture.achieved_state" for a in seen)
+    assert all(a.branch == "mesh_posture.declared_configuration" for a in seen)

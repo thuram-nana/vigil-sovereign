@@ -2146,16 +2146,19 @@ def k8s_posture_oracle(observed_control: Any) -> OracleSignal:
         snippet = actual[start:m.end() + 16]
         return OracleSignal(
             kind=OracleKind.K8S_POSTURE, fired=True, confidence=0.9,
-            evidence=(f"kube-bench control {check_id or '?'} FAILED with a concrete insecure setting: "
-                      f"{label} (observed {hit!r}): ...{snippet}..."),
-            observed={"check_id": check_id, "status": status, "rule": rule_id,
-                      "matched": hit, "reason": "insecure_setting_observed"})
+            evidence=(f"kube-bench REPORT declares CIS control {check_id or '?'} FAILED, and the report's "
+                      f"actual_value carries a concrete insecure setting: {label} (reported {hit!r}): "
+                      f"...{snippet}... . SUBJECT = the authenticated kube-bench report, NOT an independent "
+                      f"VIGIL observation of the live cluster — the report attests what its scan found on the "
+                      f"node it ran against; VIGIL re-derives the setting over the retained report bytes"),
+            observed={"check_id": check_id, "status": status, "rule": rule_id, "matched": hit,
+                      "subject": "kube_bench_report", "reason": "report_declares_insecure_setting"})
 
     return OracleSignal(
         kind=OracleKind.K8S_POSTURE, fired=False, confidence=0.0,
-        evidence=(f"control {check_id or '?'} FAILED but its observed value carries no recognised "
-                  f"dangerous flag — not provably an insecure setting (stays a lead)"),
-        observed={"check_id": check_id, "status": status})
+        evidence=(f"kube-bench report declares control {check_id or '?'} FAILED but its reported value "
+                  f"carries no recognised dangerous flag — not provably a declared insecure setting (lead)"),
+        observed={"check_id": check_id, "status": status, "subject": "kube_bench_report"})
 
 
 # ---------------------------------------------------------------------------
@@ -2549,38 +2552,45 @@ def mesh_posture_oracle(observed_control: Any) -> OracleSignal:
                       f"achieved state (stays a lead)"),
             observed={"name": name, "namespace": ns, "status": status})
 
-    # Rule 1 — Istio PeerAuthentication effective mTLS mode is PERMISSIVE / DISABLE (plaintext accepted).
+    # Rule 1 — Istio PeerAuthentication DECLARES mTLS mode PERMISSIVE / DISABLE (plaintext accepted as
+    # configured). This is the DECLARED configuration, not proven effective runtime: mode inheritance,
+    # namespace/workload selectors and more-specific policies can change the effective result (not evaluated).
     mtls_mode = _coerce_text(ctl.get("mtls_mode")).strip().lower()
     if mtls_mode in _MESH_PERMISSIVE_MTLS:
         return OracleSignal(
             kind=OracleKind.MESH_POSTURE, fired=True, confidence=0.9,
-            evidence=(f"service-mesh posture fact: PeerAuthentication {label} (scope {scope or '?'}) sets "
-                      f"mTLS mode {mtls_mode.upper()} — plaintext transport is ACCEPTED (a STRICT-mTLS "
-                      f"mesh cannot), promoted over the retained mesh config"),
+            evidence=(f"service-mesh declared-configuration fact: PeerAuthentication {label} (scope "
+                      f"{scope or '?'}) DECLARES mTLS mode {mtls_mode.upper()} — as configured, plaintext "
+                      f"transport is accepted (a STRICT-mTLS declaration cannot); re-derived over the retained "
+                      f"manifest construct. This is the declared config, not proven effective runtime (policy "
+                      f"precedence/selectors not evaluated)"),
             observed={"name": name, "namespace": ns, "scope": scope, "rule": "permissive_mtls",
-                      "mtls_mode": mtls_mode.upper(), "reason": "insecure_achieved_state"})
+                      "mtls_mode": mtls_mode.upper(), "reason": "permissive_declared_configuration"})
 
-    # Rule 2 — Istio AuthorizationPolicy (action ALLOW / unset) that provably admits every caller.
+    # Rule 2 — Istio AuthorizationPolicy (action ALLOW / unset) whose rule, AS DECLARED, admits every caller.
     allows_all, why = _mesh_authz_allows_all(ctl.get("action"), ctl.get("rules"))
     if allows_all:
         return OracleSignal(
             kind=OracleKind.MESH_POSTURE, fired=True, confidence=0.9,
-            evidence=(f"service-mesh posture fact: AuthorizationPolicy {label} (scope {scope or '?'}) with "
-                      f"action ALLOW admits EVERY caller ({why}) — no principal is required, promoted over "
-                      f"the retained mesh config"),
+            evidence=(f"service-mesh declared-configuration fact: AuthorizationPolicy {label} (scope "
+                      f"{scope or '?'}) with action ALLOW DECLARES a rule that admits every caller ({why}) — "
+                      f"no principal is required as configured; re-derived over the retained manifest construct. "
+                      f"This is the declared config, not proven effective runtime (policy precedence/selectors "
+                      f"not evaluated)"),
             observed={"name": name, "namespace": ns, "scope": scope, "rule": "authz_allow_all",
-                      "detail": why, "reason": "insecure_achieved_state"})
+                      "detail": why, "reason": "permissive_declared_configuration"})
 
-    # Rule 3 — Linkerd server default-inbound-policy is all-unauthenticated (any client may connect).
+    # Rule 3 — Linkerd server DECLARES default-inbound-policy all-unauthenticated (any client, as configured).
     inbound = _coerce_text(ctl.get("default_inbound_policy") or ctl.get("inbound_policy")).strip().lower()
     if inbound in _MESH_UNAUTH_INBOUND:
         return OracleSignal(
             kind=OracleKind.MESH_POSTURE, fired=True, confidence=0.9,
-            evidence=(f"service-mesh posture fact: Linkerd server {label} default-inbound-policy is "
-                      f"'all-unauthenticated' — any client (even unmeshed / unauthenticated) may connect, "
-                      f"promoted over the retained mesh config"),
+            evidence=(f"service-mesh declared-configuration fact: Linkerd server {label} DECLARES "
+                      f"default-inbound-policy 'all-unauthenticated' — as configured, any client (even "
+                      f"unmeshed / unauthenticated) may connect; re-derived over the retained manifest "
+                      f"construct. Declared config, not proven effective runtime"),
             observed={"name": name, "namespace": ns, "rule": "linkerd_unauthenticated",
-                      "inbound_policy": inbound, "reason": "insecure_achieved_state"})
+                      "inbound_policy": inbound, "reason": "permissive_declared_configuration"})
 
     return OracleSignal(
         kind=OracleKind.MESH_POSTURE, fired=False, confidence=0.0,

@@ -14,7 +14,7 @@ The mesh/workflow bytes are the primary artifact; there is no live-infra channel
 
 ADMISSION, not a direct mint (Phase-D BLOCKER-1). This module DOES NOT call ``oracle_adapter.confirm_and_certify``
 — doing so would let a verdict reach a certificate with no capability check ever running, and the
-``mesh_posture.achieved_state`` / ``cicd_posture.workflow_construct`` branches are declared ``clean_capable:
+``mesh_posture.declared_configuration`` / ``cicd_posture.workflow_construct`` branches are declared ``clean_capable:
 false`` in ``docs/capability-matrix/evidence-branches.json`` (an incomplete config export cannot prove ABSENCE),
 so a conclusive non-fire must be demoted to INCONCLUSIVE rather than escape as ``Outcome.CLEAN``. Instead —
 mirroring ``web_redrive`` / ``sbom`` — it runs the oracle to obtain ``(fired, conclusive)``, attributes the
@@ -37,7 +37,6 @@ importing this module co-loads no offense engine.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,7 +45,7 @@ from .safe_parse import ParseBudget, ParseResult, safe_json, safe_yaml
 # The two registered evidence branches this capability produces (docs/capability-matrix/evidence-branches.json).
 # Both fact_capable:true (a proven insecure achieved-state is a FACT), clean_capable:false (an INCOMPLETE config
 # export cannot prove the ABSENCE of a misconfiguration — CLEAN needs a completeness proof = blocking_work).
-_MESH_BRANCH = "mesh_posture.achieved_state"
+_MESH_BRANCH = "mesh_posture.declared_configuration"
 _CICD_BRANCH = "cicd_posture.workflow_construct"
 
 
@@ -157,17 +156,19 @@ def _adjudicate(
     from .verdict import admit  # noqa: PLC0415 (FATAL-2: function-local — pure stdlib module)
 
     res.controls = len(controls)
-    for control in controls:
+    from vigil_core.canonical import digest_payload  # noqa: PLC0415 (shared integrity core; FATAL-2-safe)
+    for idx, control in enumerate(controls):
         oracle_context = oracle_context_of(control)
-        # A content digest of the RETAINED oracle context disambiguates controls the identity string cannot
-        # tell apart — two dangerous constructs in ONE job (two unpinned actions / two script-injection sinks)
-        # collapse to the same `cicd:{workflow}:{rule}:{job}`; two same-identity mesh resources collapse to the
-        # same `mesh:{provider}:{kind}:{ns}/{name}`. Without it their finding_refs collide and res.contexts
-        # (last-writer-wins) hands one genuine FACT the other control's context, breaking offline re-verify
-        # (red-pen MEDIUM). The digest is stable across re-parses of the same bytes; identical controls coalesce.
-        _digest = hashlib.sha256(
-            json.dumps(oracle_context, sort_keys=True, default=str, ensure_ascii=True).encode("utf-8")
-        ).hexdigest()[:12]
+        # A FULL-sha256 canonical digest over the control's STRUCTURAL LOCATION (parse ordinal `loc`) and its
+        # retained oracle context disambiguates controls the identity string cannot tell apart — two dangerous
+        # constructs in ONE job (two unpinned actions / two script-injection sinks) share the same
+        # `cicd:{workflow}:{rule}:{job}`; two same-identity mesh resources share the same
+        # `mesh:{provider}:{kind}:{ns}/{name}`. `loc` also keeps two IDENTICAL controls at DIFFERENT source
+        # positions distinct (reviewer BLOCK #3). Full 256-bit (not a 48-bit prefix) + canonical (reject-non-JSON,
+        # no default=str). Without it their finding_refs collide and res.contexts (last-writer-wins) hands one
+        # genuine FACT the other control's context, breaking offline re-verify (red-pen MEDIUM). Order-stable
+        # across a re-parse of the same bytes so the FACT re-verifies offline.
+        _digest = digest_payload({"loc": idx, "cid": check_id_of(control), "ctx": oracle_context})
         finding = {
             "check_id": f"{check_id_of(control)}#{_digest}",
             "bug_class": bug_class,

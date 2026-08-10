@@ -242,9 +242,9 @@
       ]
     },
     {
-      "id": "mesh_posture.achieved_state",
+      "id": "mesh_posture.declared_configuration",
       "check": "mesh_posture_verify",
-      "evidence": "an Istio/Linkerd manifest VIGIL parsed declares an insecure achieved state the mesh_posture oracle re-derives: PERMISSIVE/DISABLE PeerAuthentication mTLS, an ALLOW AuthorizationPolicy that admits every caller, or an all-unauthenticated Linkerd default-inbound-policy",
+      "evidence": "an Istio/Linkerd manifest VIGIL parsed DECLARES a permissive CONFIGURATION the mesh_posture oracle re-derives over the manifest construct: a PERMISSIVE/DISABLE PeerAuthentication mTLS mode, an ALLOW AuthorizationPolicy whose rule admits every caller AS DECLARED, or an all-unauthenticated Linkerd default-inbound-policy. This is the DECLARED configuration, not proven effective runtime posture — policy precedence, namespace/workload selectors and more-specific policies can change the effective result, which this slice does not evaluate.",
       "fact_capable": true,
       "clean_capable": false,
       "preconditions": [
