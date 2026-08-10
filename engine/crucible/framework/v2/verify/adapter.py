@@ -338,6 +338,14 @@ class FindingContext(BaseModel):
     # crypto branch is DORMANT and the oracle degrades to structural-only, byte-identical. No
     # benchmark/scan/engage finding carries saml_candidate_certs.
     saml_candidate_certs: list[str] | None = None
+    # imds_credential_capture_oracle (BUILD-PLAN §E1: a RETAINED capture proving role/SA credentials were
+    # retrieved from the instance metadata endpoint AND authenticated — the achieved-effect FACT of an
+    # SSRF/foothold -> IMDS chain, judged over the JSON-safe capture ALONE, offline, ZERO network, NO
+    # exploitation). The credential's SECRET material (SecretAccessKey / Token / access_token) is redacted
+    # to a presence marker by ``from_imds_capture`` — the oracle never validates a secret's content, only
+    # its presence, so the certificate carries NO live secret yet re-verifies offline. No benchmark/scan/
+    # engage finding carries imds_capture, so appending this leaves the gate byte-identical.
+    imds_capture: dict[str, Any] | None = None
 
     # -- builders ----------------------------------------------------------
 
@@ -875,6 +883,120 @@ class FindingContext(BaseModel):
                    saml_candidate_certs=certs or None)
 
     @classmethod
+    def from_imds_capture(
+        cls, capture: Mapping[str, Any], *, bug_class: str = "imds_credential_capture"
+    ) -> "FindingContext":
+        """A RETAINED IMDS/metadata credential-capture, for the E1 exploitation-chain oracle (BUILD-PLAN
+        §E1). The retained evidence that turns an SSRF/foothold-reaches-IMDS LEAD into an achieved-effect
+        FACT: the oracle re-derives, over this capture ALONE — offline, ZERO network, NO exploitation —
+        that role/SA credentials were retrieved from the instance metadata endpoint AND authenticated (a
+        confirming sts:GetCallerIdentity / tokeninfo echoed the identity). This builder is NOT a runner; it
+        reduces whatever the WARDEN-gated runner captured into the canonical shape the oracle judges.
+
+        SECRET-SAFE by construction: the credential's secret material (``SecretAccessKey`` / ``Token`` /
+        ``access_token``) is REDACTED to a fixed presence marker — the oracle never validates a secret's
+        content, only that a secret was PRESENT at capture time, so the certificate carries NO live secret
+        yet the same verdict re-verifies offline. The AWS ``AccessKeyId`` and the confirming call's
+        identity echo (``Arn`` / 12-digit ``Account`` / ``UserId`` / ``email`` / ``sub``) are IDENTIFIERS,
+        not secrets (they appear in CloudTrail), so they are retained verbatim — they are load-bearing for
+        the structural + authentication proof. The ``source`` url is retained verbatim (the oracle parses it
+        with ``urllib.parse.urlsplit`` and requires its HOST — not a substring of the raw string — to be the
+        metadata endpoint, so a userinfo-@/query-param/rebind host or a creds-file path is NOT an IMDS
+        reach). A failure marker in the confirming call's body (error/errors/message/code/__type/Fault) is
+        also retained so a FAILED call re-verifies as NON-firing (the mint-side failure gate is mirrored at
+        re-execution). Verbose scanner prose is never laundered in. JSON-safe + deterministic (re-verifies
+        offline)."""
+        src = dict(capture or {})
+        cred_src: Mapping[str, Any] = src
+        for k in ("credential", "creds", "credentials"):
+            if isinstance(src.get(k), Mapping):
+                cred_src = src[k]
+                break
+
+        def _redact_present(value: Any) -> str | None:
+            # A non-empty secret becomes a fixed marker (its PRESENCE is the structural fact the oracle
+            # judges — it never validates a secret's content); an absent/empty secret stays absent.
+            return "[REDACTED]" if _coerce_text(value).strip() else None
+
+        cred: dict[str, Any] = {}
+        akid = cred_src.get("AccessKeyId") or cred_src.get("access_key_id")
+        if akid not in (None, ""):
+            cred["AccessKeyId"] = _coerce_text(akid)               # identifier, not a secret
+        sec = _redact_present(cred_src.get("SecretAccessKey") or cred_src.get("secret_access_key"))
+        if sec is not None:
+            cred["SecretAccessKey"] = sec                          # redacted presence marker
+        tok = _redact_present(cred_src.get("Token") or cred_src.get("SessionToken")
+                              or cred_src.get("session_token"))
+        if tok is not None:
+            cred["Token"] = tok                                    # redacted presence marker
+        at = _redact_present(cred_src.get("access_token") or cred_src.get("accessToken"))
+        if at is not None:
+            cred["access_token"] = at                              # redacted presence marker (GCP)
+        tt = cred_src.get("token_type") or cred_src.get("tokenType")
+        if tt not in (None, ""):
+            cred["token_type"] = _coerce_text(tt)
+        source = ""
+        for obj in (cred_src, src):
+            if not isinstance(obj, Mapping):
+                continue
+            for k in ("source", "url", "metadata_url", "endpoint", "uri"):
+                if obj.get(k) not in (None, ""):
+                    source = _coerce_text(obj.get(k))
+                    break
+            if source:
+                break
+        if source:
+            cred["source"] = source
+
+        retained: dict[str, Any] = {"credential": cred}
+        if src.get("provider") not in (None, ""):
+            retained["provider"] = _coerce_text(src.get("provider"))
+
+        call_src: Mapping[str, Any] | None = None
+        for k in ("confirming_call", "confirmation", "confirm_call", "verify_call", "caller_identity"):
+            if isinstance(src.get(k), Mapping):
+                call_src = src[k]
+                break
+        if call_src is not None:
+            call: dict[str, Any] = {}
+            st = call_src.get("status", call_src.get("status_code"))
+            if st is not None:
+                call["status"] = st
+            for k in ("action", "endpoint", "method"):
+                if call_src.get(k) not in (None, ""):
+                    call[k] = _coerce_text(call_src.get(k))
+            body_src: Mapping[str, Any] = call_src
+            for k in ("response", "body", "identity", "result", "json"):
+                if isinstance(call_src.get(k), Mapping):
+                    body_src = call_src[k]
+                    break
+            resp: dict[str, Any] = {}
+            for out_k, keys in (("Arn", ("Arn", "arn")), ("Account", ("Account", "account")),
+                                ("UserId", ("UserId", "user_id", "userId")),
+                                ("email", ("email", "email_address")), ("sub", ("sub", "subject"))):
+                for kk in keys:
+                    if body_src.get(kk) not in (None, ""):
+                        resp[out_k] = _coerce_text(body_src.get(kk))
+                        break
+            for kk in ("exp", "expires_in", "expires_at", "expiry", "expireTime", "expire_time"):
+                if body_src.get(kk) not in (None, ""):
+                    resp[kk] = body_src.get(kk)
+                    break
+            # Retain a truthy error marker so a FAILED confirming call stays non-firing on re-verify — the
+            # full failure allowlist (AWS JSON __type+message, Error/Code/Message/Fault, generic error(s))
+            # MUST match the oracle's `_IMDS_ERROR_KEYS` so the mint-side gate is mirrored at re-execution.
+            for kk in list(body_src.keys()):
+                if (str(kk).strip().lower() in
+                        {"error", "errors", "errormessage", "error_message", "errorcode",
+                         "error_code", "message", "code", "__type", "fault"}
+                        and body_src.get(kk)):
+                    resp[_coerce_text(kk)] = _coerce_text(body_src.get(kk))
+            if resp:
+                call["response"] = resp
+            retained["confirming_call"] = call
+        return cls(bug_class=bug_class, imds_capture=retained)
+
+    @classmethod
     def from_process_output(
         cls, captured: Any, *, bug_class: str = "crash"
     ) -> "FindingContext":
@@ -1169,6 +1291,8 @@ class FindingContext(BaseModel):
             ctx["saml_xml"] = self.saml_xml
             if self.saml_candidate_certs is not None:
                 ctx["saml_candidate_certs"] = self.saml_candidate_certs
+        if self.imds_capture is not None:
+            ctx["imds_capture"] = self.imds_capture
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary

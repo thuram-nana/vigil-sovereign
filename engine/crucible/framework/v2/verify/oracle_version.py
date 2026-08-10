@@ -66,6 +66,7 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.IDENTITY_POSTURE: (oracles.identity_posture_oracle,),
     OracleKind.SSO_ASSERTION_FORGERY: (oracles.jwt_forgery_oracle,),
     OracleKind.SAML_STRUCTURAL_FORGERY: (oracles.saml_forgery_oracle,),
+    OracleKind.IMDS_CREDENTIAL_CAPTURE: (oracles.imds_credential_capture_oracle,),
 }
 
 

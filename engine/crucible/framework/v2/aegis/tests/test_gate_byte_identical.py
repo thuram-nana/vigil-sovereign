@@ -71,12 +71,18 @@ _C3_CLASSES = {"anonymous_reachable"}
 # finding carries). (K8S_POSTURE above is the earlier WS-3 kind; this is the distinct workload kind.)
 _T4_KINDS = {OracleKind.K8S_WORKLOAD_POSTURE}
 _T4_CLASSES = {"k8s_workload_misconfiguration"}
+# BUILD-PLAN §E1 (IMDS/metadata credential-capture oracle — the flagship exploitation-chain oracle, built
+# as a DEFENSIVE VERIFICATION oracle) additive kind/class: SAME frozen-fallback discipline — a NEW
+# OracleKind kept OUT of _ALL_ORACLES, reachable ONLY via its `imds_credential_capture` BUG_CLASS_ORACLES
+# row (keyed on an `imds_capture` ctx field no benchmark/scan/engage finding carries).
+_E1_KINDS = {OracleKind.IMDS_CREDENTIAL_CAPTURE}
+_E1_CLASSES = {"imds_credential_capture"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
                    | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
-                   | _C3_KINDS | _T4_KINDS)
+                   | _C3_KINDS | _T4_KINDS | _E1_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",
@@ -87,10 +93,11 @@ _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injectio
 
 
 def test_all_oracles_fallback_is_frozen_to_pre_aegis_members():
-    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which now has 28 — the
-    # 4 AEGIS telemetry kinds + the 3 request-side parse-proof kinds (sqli/cmdi/nosql) + the WS-3
+    # G1: the fallback is the 15 pre-AEGIS members, NOT tuple(OracleKind) (which has grown far past 15 —
+    # the 4 AEGIS telemetry kinds + the 3 request-side parse-proof kinds (sqli/cmdi/nosql) + the WS-3
     # k8s-posture kind + the WS-B sso-assertion-forgery kind + the NW-1 saml-structural-forgery kind +
-    # the Wave-F1 cloud-posture kind + the Wave-G3 mesh-posture kind are all excluded).
+    # the Wave-F1 cloud-posture + Wave-G3 mesh-posture + CI/CD + mobile + email-auth + identity + C3
+    # active-exposure + T4 k8s-workload + the BUILD-PLAN §E1 IMDS credential-capture kind are all excluded).
     assert len(V._ALL_ORACLES) == 15
     assert set(V._ALL_ORACLES) == set(OracleKind) - _EXCLUDED_KINDS
     # and it is NOT derived from the enum (that would have grown it past 15).
