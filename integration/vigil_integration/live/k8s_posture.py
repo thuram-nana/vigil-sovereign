@@ -235,13 +235,23 @@ def k8s_posture_verify(
         from framework.v2.verify.k8s_posture import k8s_posture_context  # noqa: PLC0415
         oracle_context = k8s_posture_context(control)
         # Identity = target(node) + section + CIS id, so the same test_number on master vs node vs etcd does
-        # not collide on one finding_ref (red-pen integrity finding).
+        # not collide on one finding_ref (red-pen integrity finding). A content digest disambiguates controls
+        # the (target, section, id) tuple STILL cannot tell apart — two firing controls sharing a CIS id but
+        # lacking node_type/text/id (target -> "-"), or a bare-list export where target/section are "": without
+        # it their finding_refs collide and res.contexts (last-writer-wins) hands the first genuine FACT the
+        # SECOND control's context, so it fails offline re-verify (red-pen MEDIUM). Two GENUINELY identical
+        # controls still coalesce (same digest); only DISTINCT controls are split apart.
         _tgt = control.get("target") or "-"
         _sec = control.get("section") or "-"
+        _digest = hashlib.sha256("\x00".join((
+            str(control.get("check_id") or ""), str(control.get("status") or ""),
+            str(control.get("actual_value") or ""), str(control.get("section") or ""),
+            str(control.get("target") or ""), str(control.get("description") or ""),
+        )).encode("utf-8")).hexdigest()[:12]
         finding = {
-            "check_id": f"k8s:cis:{_tgt}:{_sec}:{control['check_id']}",
+            "check_id": f"k8s:cis:{_tgt}:{_sec}:{control['check_id']}#{_digest}",
             "bug_class": "k8s_misconfiguration",
-            "insertion_point": f"kube-bench:{_tgt}:{control['check_id']}",
+            "insertion_point": f"kube-bench:{_tgt}:{control['check_id']}#{_digest}",
             "oracle_context": oracle_context,
         }
         # ADMISSION DECIDES, MINTING EXECUTES. Reaching here means VIGIL parsed a concrete control from the

@@ -2211,14 +2211,21 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
     state = ctl.get("achieved_state") if isinstance(ctl.get("achieved_state"), Mapping) else ctl
     raw_subjects = state.get("subjects")
     subjects = raw_subjects if isinstance(raw_subjects, (list, tuple)) else []
-    role = _k8s_norm(state.get("role"))
+    # The roleRef NAME identifies a SPECIFIC RBAC object and is case- AND whitespace-SENSITIVE (k8s validates
+    # names with ValidatePathSegmentName; "Cluster-Admin" and "cluster-admin " are DISTINCT objects from the
+    # built-in "cluster-admin"). Folding the NAME with _k8s_norm (lower+strip) laundered a benign CUSTOM role
+    # onto a dangerous built-in and minted a false "anonymous cluster-admin" FACT (red-pen). Match the built-in
+    # role NAME EXACTLY (cap only guards memory; a legit built-in is 13 chars). kind/apiGroup keep their
+    # canonical-spelling + empty tolerance (one valid spelling; empty tolerated for hand-authored evidence).
+    role_name = _coerce_text(state.get("role"))[:_K8S_WL_STR_CAP]
     role_kind = _k8s_norm(state.get("role_kind"))
     role_apigroup = _k8s_norm(state.get("role_apigroup"))
     anon = [s for s in subjects if _k8s_norm(s) in _K8S_ANON_SUBJECTS]
     # dangerous ONLY when the roleRef is the BUILT-IN ClusterRole in the RBAC apiGroup — a custom namespaced
-    # Role merely NAMED "edit"/"admin" is NOT the powerful built-in (an empty kind/apiGroup is tolerated for
-    # hand-authored/older evidence, but a non-ClusterRole kind or a non-RBAC apiGroup is rejected).
-    dangerous = (role in _K8S_DANGEROUS_ROLES
+    # Role merely NAMED "edit"/"admin" (or a case/whitespace variant) is NOT the powerful built-in (an empty
+    # kind/apiGroup is tolerated for hand-authored evidence, but a non-ClusterRole kind or non-RBAC apiGroup
+    # is rejected).
+    dangerous = (role_name in _K8S_DANGEROUS_ROLES
                  and role_kind in ("clusterrole", "")
                  and role_apigroup in ("rbac.authorization.k8s.io", ""))
 
@@ -2226,19 +2233,19 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
         who = _coerce_text(anon[0])[:_K8S_WL_STR_CAP].strip()
         return OracleSignal(
             kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=True, confidence=0.9,
-            evidence=(f"k8s RBAC fact: binding {label} grants the dangerous built-in ClusterRole {role!r} to "
-                      f"an ANONYMOUS subject {who!r} — an unauthenticated caller has write/admin access "
+            evidence=(f"k8s RBAC fact: binding {label} grants the dangerous built-in ClusterRole {role_name!r} "
+                      f"to an ANONYMOUS subject {who!r} — an unauthenticated caller has write/admin access "
                       f"(cluster-wide for a ClusterRoleBinding, namespace-scoped for a RoleBinding); re-derived "
                       f"over the retained binding"),
             observed={"check_id": cid, "rule": "anonymous_privileged_binding",
-                      "reason": "anonymous_dangerous_rbac", "role": role, "subject": who})
+                      "reason": "anonymous_dangerous_rbac", "role": role_name, "subject": who})
 
     return OracleSignal(
         kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=False, confidence=0.0,
         evidence=(f"k8s RBAC control {label} does not bind a dangerous built-in ClusterRole to an anonymous "
-                  f"subject (role {role or '?'!r}; anonymous subjects: {len(anon)}) — not provably critical "
-                  f"(stays a lead)"),
-        observed={"check_id": cid, "role": role})
+                  f"subject (role {role_name or '?'!r}; anonymous subjects: {len(anon)}) — not provably "
+                  f"critical (stays a lead)"),
+        observed={"check_id": cid, "role": role_name})
 
 
 # ---------------------------------------------------------------------------

@@ -323,6 +323,60 @@ def test_truncation_window_rolref_never_mints_a_false_workload_fact():
             f"truncation-window roleRef (len(kind)={len(kind)}) minted a signed false FACT"
 
 
+def test_dangerous_role_name_is_case_and_whitespace_exact():
+    """RED-PEN re-attack (HIGH, CONFIRMED): the oracle normalized the roleRef NAME with _k8s_norm
+    (`[:4096].strip().lower()`) before the dangerous-built-in membership test, but k8s RBAC role names are
+    case- AND whitespace-SENSITIVE (ValidatePathSegmentName). So a binding to a DISTINCT custom role differing
+    from a built-in only by case ('Cluster-Admin', 'CLUSTER-ADMIN') or surrounding whitespace ('cluster-admin ')
+    was folded onto the built-in and minted a signed CRITICAL false 'anonymous cluster-admin' FACT — violating
+    the near-zero-FP contract (a binding to any custom role stays a LEAD). The oracle + the verify_vf L3 port now
+    match the built-in role NAME EXACTLY. Only the exact built-in names still FACT."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    signers, tr = _signers_and_trust()
+
+    def rb(rolename):
+        m = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                        "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
+                                    "name": rolename},
+                        "subjects": [{"kind": "User", "name": "system:anonymous",
+                                      "apiGroup": "rbac.authorization.k8s.io"}]})
+        return ingest_k8s_rbac(m, engagement_slug="a", signers=signers)
+
+    for custom in ("Cluster-Admin", "CLUSTER-ADMIN", "cluster-admin ", " cluster-admin", "cluster_admin",
+                   "clusteradmin", "Admin", "Edit"):
+        assert rb(custom).n_facts == 0, f"custom role {custom!r} was laundered onto a built-in -> false FACT"
+    for builtin in ("cluster-admin", "admin", "edit"):
+        assert rb(builtin).n_facts >= 1, f"a binding to the built-in {builtin!r} must still FACT"
+
+
+def test_kube_bench_finding_ref_collision_free_offline_reverify():
+    """RED-PEN re-attack (MEDIUM, CONFIRMED): two DISTINCT firing CIS controls sharing a test_number but lacking
+    node_type/text/id (target -> '-') collapsed to one finding_ref; res.contexts (last-writer-wins) then handed
+    the first genuine FACT the second control's context, so it failed offline re-verification — breaking the
+    module's 'every FACT re-verifies offline' promise. A content digest now disambiguates distinct controls
+    (identical controls still coalesce)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    kb = json.dumps({"Controls": [{"tests": [{"section": "1.2", "results": [
+        {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"},
+        {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--insecure-port=8080"}]}]}]})
+    r = k8s_posture_verify(kb, engagement_slug="a", signers=signers)
+    refs = [f.finding_ref for f in r.facts]
+    assert len(refs) == 2 and len(set(refs)) == 2, f"distinct controls collided on one finding_ref: {refs}"
+    for f in r.facts:
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr).ok, \
+            "a genuine kube-bench FACT failed offline re-verification (wrong retained context)"
+    # two GENUINELY identical controls still coalesce to one ref (dedup, not a collision bug)
+    kb2 = json.dumps({"Controls": [{"tests": [{"section": "1.2", "results": [
+        {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"},
+        {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"}]}]}]})
+    r2 = k8s_posture_verify(kb2, engagement_slug="a", signers=signers)
+    assert len(set(f.finding_ref for f in r2.facts)) == 1
+
+
 def test_serviceaccount_named_system_anonymous_is_not_the_anonymous_principal():
     """RED-PEN B3: a ServiceAccount NAMED 'system:anonymous' is a different principal from the anonymous USER.
     Matching on name alone laundered it into the real anon principal → false FACT. The reducer now requires

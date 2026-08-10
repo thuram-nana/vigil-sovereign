@@ -1265,11 +1265,14 @@ def posture_k8s_workload_fires(observed_control: Any) -> bool:
     state = ctl.get("achieved_state") if isinstance(ctl.get("achieved_state"), Mapping) else ctl
     raw_subjects = state.get("subjects")
     subjects = raw_subjects if isinstance(raw_subjects, (list, tuple)) else []
-    role = _pp_k8s_norm(state.get("role"))
+    # The roleRef NAME is case- AND whitespace-SENSITIVE in k8s; match the built-in EXACTLY (a case/whitespace
+    # variant like "Cluster-Admin" is a DISTINCT custom role, not the built-in). Mirrors oracles.py exactly so
+    # the L3 re-verifier and the in-tree oracle agree (test_vf_differential pins them together).
+    role_name = _pp_coerce_text(state.get("role"))[:_PP_K8S_WL_STR_CAP]
     role_kind = _pp_k8s_norm(state.get("role_kind"))
     role_apigroup = _pp_k8s_norm(state.get("role_apigroup"))
     anon = any(_pp_k8s_norm(s) in _PP_K8S_ANON_SUBJECTS for s in subjects)
-    dangerous = (role in _PP_K8S_DANGEROUS_ROLES
+    dangerous = (role_name in _PP_K8S_DANGEROUS_ROLES
                  and role_kind in ("clusterrole", "")
                  and role_apigroup in ("rbac.authorization.k8s.io", ""))
     return bool(anon and dangerous)

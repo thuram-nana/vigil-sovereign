@@ -192,6 +192,17 @@ def _wildcard_grants(policy_doc: Any) -> list[dict]:
         effect = st.get("Effect")
         if not (isinstance(effect, str) and effect.strip().lower() == "allow"):
             continue
+        # A restricting CONDITION (aws:SourceVpce / SourceArn / SourceAccount / SecureTransport / PrincipalOrgID
+        # / kms:ViaService, etc.) means a wildcard principal is NOT an unambiguous ANONYMOUS PUBLIC grant — the
+        # access is gated on the caller's network / account / identity. Per this module's near-zero-FP contract
+        # (a signed FACT only for a PROVABLE public grant) a conditioned statement is ambiguous, so it is NOT a
+        # FACT — skip it (it remains a LEAD for Track-B live capture / human review, never a signed public FACT).
+        # An empty/absent Condition ({} / None) does not restrict and is treated as no condition. Determining
+        # whether a specific Condition actually restricts is undecidable in general, so ANY non-empty Condition
+        # is conservatively treated as restricting (red-pen CRITICAL: Condition was dropped, minting false
+        # public_exposure / wildcard_principal / policy_path FACTs on ordinary tool-produced Terraform/CFN).
+        if st.get("Condition"):
+            continue
         if _is_literal_wildcard_principal(st.get("Principal")):
             # Preserve the LITERAL Action faithfully; never fabricate one (red-pen H1: a list/missing/
             # intrinsic Action was invented as "read"). An unknown action -> "" (the wildcard-PRINCIPAL rule

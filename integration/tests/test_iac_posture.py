@@ -267,6 +267,44 @@ def test_tfstate_mints_cloud_posture_and_policy_path_facts_that_reverify():
     assert res.family_verdict() == "FACT"
 
 
+def test_conditioned_wildcard_principal_never_mints_a_public_fact():
+    """RED-PEN re-attack (CRITICAL, CONFIRMED): _wildcard_grants ignored an IAM policy Condition, so a benign
+    Principal:'*' Allow SCOPED by a restricting Condition (SourceVpce / SourceArn / SourceAccount /
+    SecureTransport / PrincipalOrgID / kms:ViaService) minted signed FALSE public_exposure + wildcard_principal
+    (CLOUD_POSTURE) and 'anonymous principal reaches resource' (POLICY_PATH) FACTs on ordinary tool-produced
+    Terraform/CloudFormation. A conditioned wildcard is NOT a provable anonymous public grant -> LEAD, never a
+    signed FACT. An UNconditioned (or empty-Condition) wildcard is still a FACT."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    import json as _json
+    from framework.v2.evidence.certify import verify_certificate
+    from vigil_integration.live.iac_posture import iac_verify
+    signers, tr = _signers_and_trust()
+
+    def run(condition):
+        stmt = {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::acme-private/*"}
+        if condition is not None:
+            stmt["Condition"] = condition
+        pol = _json.dumps({"Version": "2012-10-17", "Statement": [stmt]})
+        doc = _json.dumps({"values": {"root_module": {"resources": [
+            {"address": "aws_s3_bucket_policy.bp", "type": "aws_s3_bucket_policy", "name": "bp",
+             "values": {"policy": pol}}]}}})
+        return iac_verify(doc.encode("utf-8"), fmt="terraform", engagement_slug="acme", signers=signers)
+
+    for cond in ({"StringEquals": {"aws:SourceVpce": "vpce-123"}},
+                 {"StringEquals": {"aws:SourceAccount": "111122223333"}},
+                 {"Bool": {"aws:SecureTransport": "true"}},
+                 {"StringEquals": {"aws:PrincipalOrgID": "o-abc"}}):
+        assert run(cond).n_facts == 0, f"a Condition-scoped wildcard ({cond}) minted a false public FACT"
+    # an unconditioned wildcard is a genuine public grant and still FACTs + re-verifies
+    r = run(None)
+    assert r.n_facts >= 1, "an unconditioned Principal:'*' public grant must still FACT"
+    for f in r.facts:
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr).ok
+    # an EMPTY Condition ({}) does not restrict -> still a FACT
+    assert run({}).n_facts >= 1, "an empty Condition ({}) does not restrict and must still FACT"
+
+
 def test_cloudformation_yaml_public_resource_mints_a_fact():
     """Proves a processed CloudFormation template feeds the SAME oracle as Terraform."""
     pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
