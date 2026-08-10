@@ -255,11 +255,12 @@ def cloud_live_verify(
     # ``confirm_cloud_posture_facts`` returns resource ids CANONICALISED (lowercased/stripped) to the graph
     # keys, but the D5 gate matches resource ids CASE-SENSITIVELY. Scope-checking/binding the canonical form
     # would launder an out-of-scope raw id ('…:ACME-evil') into an in-scope match ('…:acme-evil') — an
-    # over-scope + false-subject leak (the red-pen fix-of-the-fix). Recover the RAW captured id so the
-    # invariant {gate-authorised id == bound subject == the id the oracle judged} holds with the case-exact
-    # id, matching the cloud_posture loop. A canonical id that maps to NO raw id, or to MULTIPLE distinct raw
-    # ids (a case-collision we cannot attribute to one case-exact subject nor prove wholly in-scope), is
-    # SKIPPED fail-closed.
+    # over-scope + false-subject leak (the red-pen fix-of-the-fix). Recover the RAW captured id and use it as
+    # the scope-check subject and the bound subject, matching the cloud_posture loop: the gate authorises its
+    # stripped form and the oracle additionally case-folds it for the graph match, so the SAME resource is
+    # gated, judged, and bound as the faithful captured id — no out-of-scope id can enter. A canonical id that
+    # maps to NO raw id, or to MULTIPLE distinct raw ids (a case-collision we cannot attribute to one
+    # case-exact subject nor prove wholly in-scope), is SKIPPED fail-closed.
     raw_by_canonical: "dict[str, list[str]]" = {}
     for r in inv.get("resources") or []:
         if isinstance(r, dict) and r.get("id"):

@@ -169,6 +169,47 @@ def test_case_only_out_of_glob_resource_is_skipped_in_both_branches():
         assert f.signed.certificate.bound_identity["resource_scope"]["resource"] != "arn:aws:s3:::acme-evil"
 
 
+def test_mixed_case_in_scope_subject_mints_with_raw_case_exact_binding():
+    """Locks the fix-of-the-fix (the load-bearing positive property): a MIXED-CASE in-scope subject DOES
+    mint, and EVERY branch binds the RAW case-exact id — not the oracle's lowercased canonical. A revert to
+    binding the canonical id would fail this in the policy_path branch (it would bind '…:acme-data')."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, _ = _signers_and_trust()
+    g = _gate([CloudScopeEntry(provider="aws", account="111122223333", resource="arn:aws:s3:::Acme-*")])
+    cap = {"format": "native", "export": {"resources": [
+        {"id": "arn:aws:s3:::Acme-Data", "kind": "datastore",
+         "grants": [{"principal": "*", "access": "s3:GetObject"}]}]}}
+    r = cloud_live_verify(cap, provider="aws", account="111122223333", resource="arn:aws:s3:::Acme-Data",
+                          scope_gate=g, engagement_slug="acme", signers=signers)
+    assert r.refused is False and r.n_facts >= 1
+    subs = {f.signed.certificate.bound_identity["resource_scope"]["resource"] for f in r.facts}
+    assert subs == {"arn:aws:s3:::Acme-Data"}          # raw case-exact in BOTH branches, never lowercased
+    assert {f.bug_class for f in r.facts} >= {"cloud_misconfiguration", "privilege_path"}
+
+
+def test_case_collision_policy_path_subject_is_skipped_fail_closed():
+    """The policy_path branch cannot attribute a canonical id that maps to MULTIPLE case-distinct raw captured
+    ids to a single case-exact subject, so it SKIPS fail-closed (recall loss, never a wrong-subject mint).
+    The cloud_posture branch — which scope-checks each raw id independently — still mints both distinct raw
+    subjects."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, _ = _signers_and_trust()
+    g = _gate([CloudScopeEntry(provider="aws", account="111122223333")])   # account-only: both raws in scope
+    cap = {"format": "native", "export": {"resources": [
+        {"id": "arn:aws:s3:::acme-x", "kind": "datastore",
+         "grants": [{"principal": "*", "access": "s3:GetObject"}]},
+        {"id": "arn:aws:s3:::ACME-x", "kind": "datastore",
+         "grants": [{"principal": "*", "access": "s3:GetObject"}]}]}}
+    r = cloud_live_verify(cap, provider="aws", account="111122223333", scope_gate=g, engagement_slug="acme",
+                          signers=signers)
+    assert r.refused is False
+    assert [f for f in r.facts if f.bug_class == "privilege_path"] == []   # collision -> fail-closed skip
+    assert r.skipped_out_of_scope >= 1
+    cp = {f.signed.certificate.bound_identity["resource_scope"]["resource"]
+          for f in r.facts if f.bug_class == "cloud_misconfiguration"}
+    assert cp == {"arn:aws:s3:::acme-x", "arn:aws:s3:::ACME-x"}            # both distinct raw subjects mint
+
+
 # ---- in-scope capture -> signed FACT that re-verifies offline (framework leg) ---------------------
 
 def test_in_scope_capture_mints_reverifiable_live_facts():
