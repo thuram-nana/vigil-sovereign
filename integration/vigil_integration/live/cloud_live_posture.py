@@ -19,18 +19,24 @@ D5 SCOPE GATE (fail-closed, the load-bearing pre-flight). Every capture is autho
 — ``(provider, account[, region][, resource])`` matched EXACTLY against the signed charter's cloud scope via
 :class:`~vigil_integration.live.cloud_scope.CloudScopeGate` — BEFORE any adjudication. A URL-host gate is
 insufficient for a cloud API (one endpoint fronts every tenant); the gate refuses an out-of-scope /
-wildcard / kill-switched request and mints NOTHING. The requested and returned scope are bound into the
-signed certificate (bounded honesty).
+wildcard / kill-switched request and mints NOTHING. And because a live capture can OVER-RETURN (an
+account-wide list even when the charter authorised only ``acme-*``), EACH captured subject is
+independently re-authorised through the SAME gate — with its RAW case-exact id — before it is minted;
+an out-of-scope subject is skipped, never certified. The requested scope and each FACT's own subject
+scope are bound into the signed certificate (bounded honesty).
 
 ADMISSION, not a direct mint (Phase-D BLOCKER-1). Both branches are ``clean_capable:false`` in
 ``docs/capability-matrix/evidence-branches.json``; a conclusive non-fire is demoted to INCONCLUSIVE, never
 escapes as CLEAN. The oracle yields ``(fired, conclusive)`` → ``verdict.admit(...)`` → ``certify_admitted``
 mints ONLY a FACT. provenance="reproduced" (VIGIL re-derives the evidence over the retained capture bytes).
 
-D2 BINDING. The captured evidence sha256, ``capture_method="api:list"``, the ``resource_scope`` (provider/
-account/region/resource), requested-vs-returned scope, ``completeness="partial"``, collector id and (optional)
-capture time are bound into the signed certificate; ``artifact_recheck_required`` makes verification recompute
-sha256 over the retained capture and fail closed if it was swapped (BLOCK #3).
+D2 BINDING. The captured evidence sha256, ``capture_method="api:list"``, the per-FACT ``resource_scope``
+(provider/account/region/resource) naming the FACT's ACTUAL subject, the requested scope,
+``completeness="partial"``, collector id and (optional) capture time are bound into the signed certificate;
+``artifact_recheck_required`` makes verification recompute sha256 over the retained capture and fail closed
+if it was swapped (BLOCK #3). NB there is deliberately no ``returned_scope`` — this slice measures no
+requested-vs-returned identity set, so asserting one would fabricate a measurement (``completeness="partial"``
+already states the capture cannot prove absence).
 
 FATAL-2: every framework import is FUNCTION-LOCAL; the module is pure stdlib + the ``safe_parse`` sibling +
 ``vigil_core`` only, so importing it co-loads no offense engine. LIVE-FIRE (running the real collector against
@@ -201,25 +207,27 @@ def cloud_live_verify(
         m["resource"] = str(resource_id)
         return m
 
-    def _subject_authorized(resource_id: str) -> bool:
+    def _subject_authorized(resource_id: str) -> "tuple[bool, str]":
         """BLOCK-1: the D5 gate authorised the CAPTURE REQUEST tuple, but a capture can OVER-RETURN (an
         ``s3api list-buckets`` yields the whole account even when the charter authorised only ``acme-*``).
         Every MINTED SUBJECT must therefore independently match the signed charter. We re-use the SAME audited
         gate (never a parallel matcher that could drift from it — the recurring divergence bug this program
-        keeps re-learning) with the resource's real id; a subject outside the signed scope is SKIPPED, so an
-        over-returning capture can never yield an over-scoped / false-subject FACT."""
-        ok, _why = scope_gate.authorize(provider, account, region, str(resource_id))
-        return ok
+        keeps re-learning) with the resource's RAW, case-exact id — the id the gate matches CASE-SENSITIVELY;
+        a lowercased/normalised id would launder an out-of-scope raw id ('…:ACME-evil') into an in-scope match
+        ('…:acme-evil'). A subject outside the signed scope is SKIPPED, so an over-returning capture can never
+        yield an over-scoped / false-subject FACT. Returns the gate's ``(allowed, reason)`` so a refusal is
+        logged accurately (a mid-loop kill-switch trip reads as a kill-switch refusal, not a scope miss)."""
+        return scope_gate.authorize(provider, account, region, str(resource_id))
 
     # --- CLOUD_POSTURE: per resource, over its CAPTURED achieved state alone ----------------------------
     for r in inv.get("resources") or []:
         if not isinstance(r, dict) or not r.get("id"):
             continue
-        rid = str(r["id"])
-        if not _subject_authorized(rid):
+        rid = str(r["id"])                          # the RAW captured id (what the gate matches, what we bind)
+        allowed, why = _subject_authorized(rid)
+        if not allowed:
             res.skipped_out_of_scope += 1
-            res.notes.append(f"skipped out-of-scope captured resource {rid!r} "
-                             "(not in the signed charter cloud scope)")
+            res.notes.append(f"skipped captured resource {rid!r}: {why}")
             continue
         oracle_context = cloud_posture_context(dict(r))
         finding = {
@@ -244,14 +252,38 @@ def cloud_live_verify(
 
     # --- POLICY_PATH: per firing anonymous / over-privileged IAM grant path ----------------------------
     graph = build_policy_graph(inv)
+    # ``confirm_cloud_posture_facts`` returns resource ids CANONICALISED (lowercased/stripped) to the graph
+    # keys, but the D5 gate matches resource ids CASE-SENSITIVELY. Scope-checking/binding the canonical form
+    # would launder an out-of-scope raw id ('…:ACME-evil') into an in-scope match ('…:acme-evil') — an
+    # over-scope + false-subject leak (the red-pen fix-of-the-fix). Recover the RAW captured id so the
+    # invariant {gate-authorised id == bound subject == the id the oracle judged} holds with the case-exact
+    # id, matching the cloud_posture loop. A canonical id that maps to NO raw id, or to MULTIPLE distinct raw
+    # ids (a case-collision we cannot attribute to one case-exact subject nor prove wholly in-scope), is
+    # SKIPPED fail-closed.
+    raw_by_canonical: "dict[str, list[str]]" = {}
+    for r in inv.get("resources") or []:
+        if isinstance(r, dict) and r.get("id"):
+            rid = str(r["id"])
+            raw_by_canonical.setdefault(rid.strip().lower(), []).append(rid)
     for pf in confirm_cloud_posture_facts(inv):
-        principal, resource_id, access = pf.get("principal", ""), pf.get("resource", ""), pf.get("access", "")
-        # The grant PATH's subject is the resource it reaches — scope-check + bind THAT id (BLOCK-1).
-        if not resource_id or not _subject_authorized(resource_id):
+        principal, canon_resource, access = pf.get("principal", ""), pf.get("resource", ""), pf.get("access", "")
+        raws = raw_by_canonical.get(str(canon_resource).strip().lower(), [])
+        if len(raws) != 1:
             res.skipped_out_of_scope += 1
-            res.notes.append(f"skipped out-of-scope grant-path subject {resource_id!r} "
-                             "(not in the signed charter cloud scope)")
+            res.notes.append(
+                f"skipped grant-path subject {canon_resource!r}: "
+                + ("no case-exact captured resource" if not raws
+                   else f"ambiguous case-collision across {sorted(set(raws))!r} "
+                        "— cannot bind a single case-exact subject (fail-closed)"))
             continue
+        resource_id = raws[0]                        # the RAW, case-exact captured id (what the gate matches)
+        allowed, why = _subject_authorized(resource_id)
+        if not allowed:
+            res.skipped_out_of_scope += 1
+            res.notes.append(f"skipped grant-path subject {resource_id!r}: {why}")
+            continue
+        # The oracle canonicalises internally (``policy_path_context`` -> ``_nid``), so passing the RAW id
+        # re-fires identically over the lowercased graph while keeping the bound subject case-exact.
         oracle_context = policy_path_context(graph, principal, resource_id, access)
         claim = hashlib.sha256(f"{principal}\x00{resource_id}\x00{access}".encode()).hexdigest()[:12]
         finding = {

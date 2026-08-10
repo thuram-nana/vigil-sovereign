@@ -59,6 +59,14 @@ _OVERRETURN_CAPTURE = {"format": "native", "export": {"resources": [
     {"id": "arn:aws:s3:::victim-prod-secrets", "kind": "datastore",
      "grants": [{"principal": "*", "access": "s3:GetObject"}]}]}}
 
+# A capture whose ONLY resource differs from an in-scope glob by CASE alone (uppercase 'ACME'). The D5 gate
+# matches resource ids CASE-SENSITIVELY, so this resource is OUT of scope. A correct gate must skip it in BOTH
+# the cloud_posture AND policy_path branches — the policy_path branch must NOT launder the lowercased id
+# 'arn:aws:s3:::acme-evil' into an in-scope match (the red-pen fix-of-the-fix over-scope + false-subject leak).
+_CASE_MISMATCH_CAPTURE = {"format": "native", "export": {"resources": [
+    {"id": "arn:aws:s3:::ACME-evil", "kind": "datastore",
+     "grants": [{"principal": "*", "access": "s3:GetObject"}]}]}}
+
 
 # ---- scope-gate refusals (sovereign-safe: no framework, no mint) ----------------------------------
 
@@ -141,6 +149,24 @@ def test_over_returning_capture_mints_only_in_glob_subject_with_true_binding():
         subj = f.signed.certificate.bound_identity["resource_scope"]["resource"]
         assert subj == "arn:aws:s3:::acme-public"      # every FACT's bound subject is the in-glob resource
         assert subj != "arn:aws:s3:::victim-prod-secrets"
+
+
+def test_case_only_out_of_glob_resource_is_skipped_in_both_branches():
+    """Red-pen fix-of-the-fix: a captured id that differs from an in-scope glob by CASE alone must be refused
+    in BOTH the cloud_posture and policy_path branches (the gate matches case-sensitively). Pre-fix, the
+    policy_path branch lowercased 'ACME-evil' -> 'acme-evil' and minted an over-scoped FACT under the
+    relabeled subject; this asserts neither branch mints it and no FACT names the laundered id."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    signers, _ = _signers_and_trust()
+    g = _gate([CloudScopeEntry(provider="aws", account="111122223333", resource="arn:aws:s3:::acme-*")])
+    r = cloud_live_verify(_CASE_MISMATCH_CAPTURE, provider="aws", account="111122223333",
+                          resource="arn:aws:s3:::acme-public", scope_gate=g, engagement_slug="acme",
+                          signers=signers)
+    assert r.refused is False                          # the capture request itself was in scope
+    assert r.n_facts == 0                              # neither branch minted the case-mismatched subject
+    assert r.skipped_out_of_scope >= 1
+    for f in r.facts:                                  # belt-and-suspenders: no laundered/relabeled subject
+        assert f.signed.certificate.bound_identity["resource_scope"]["resource"] != "arn:aws:s3:::acme-evil"
 
 
 # ---- in-scope capture -> signed FACT that re-verifies offline (framework leg) ---------------------
