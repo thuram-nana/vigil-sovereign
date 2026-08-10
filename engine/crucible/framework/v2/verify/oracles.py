@@ -2195,19 +2195,23 @@ def _k8s_subject_is_anon(s: Any) -> bool:
     TYPED subject ``{kind, name, api_group}`` (the declared-manifest reducer, reviewer BLOCK #3): only a
     ``User`` named ``system:anonymous`` or a ``Group`` named ``system:unauthenticated`` — and the RBAC
     apiGroup is REQUIRED (an unapplied manifest that omits it is not API-validated, so it cannot mint a FACT;
-    a ServiceAccount, or any other kind, merely NAMED "system:anonymous" is a DIFFERENT principal). The name
-    is compared case-sensitively (k8s subject names are case-sensitive).
+    a ServiceAccount, or any other kind, merely NAMED "system:anonymous" is a DIFFERENT principal). Kind, name
+    AND apiGroup are compared EXACTLY (case- and whitespace-sensitive, as k8s validates them).
 
     Legacy STRING subject (a live-read RBAC sensor reads the cluster and emits the reserved name directly, so
     the cluster itself is authority): the bare reserved name IS the anonymous principal.
     """
     if isinstance(s, Mapping):
-        if _k8s_norm(s.get("api_group") or s.get("apiGroup")) != _K8S_RBAC_APIGROUP:
+        # k8s subject kind / name / apiGroup are case- AND whitespace-SENSITIVE — a padded or case-variant
+        # value is a DIFFERENT principal (red-pen: a "system:anonymous\n" name, or a "USER"/" User " kind, must
+        # NOT match the reserved principal). Compare EXACTLY against the canonical k8s spellings; the RBAC
+        # apiGroup is required (an unapplied manifest that omits it is not API-validated).
+        if _coerce_text(s.get("api_group") or s.get("apiGroup")) != _K8S_RBAC_APIGROUP:
             return False
-        kind = _k8s_norm(s.get("kind"))
-        name = _coerce_text(s.get("name"))[:_K8S_WL_STR_CAP].strip()
-        return (kind == "user" and name == "system:anonymous") or \
-               (kind == "group" and name == "system:unauthenticated")
+        kind = _coerce_text(s.get("kind"))
+        name = _coerce_text(s.get("name"))
+        return (kind == "User" and name == "system:anonymous") or \
+               (kind == "Group" and name == "system:unauthenticated")
     return _k8s_norm(s) in _K8S_ANON_SUBJECTS
 
 
@@ -2268,12 +2272,15 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
         who = _k8s_subject_display(anon[0])
         return OracleSignal(
             kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=True, confidence=0.9,
-            evidence=(f"k8s RBAC fact: binding {label} grants the dangerous built-in ClusterRole {role_name!r} "
-                      f"to an ANONYMOUS subject {who!r} — an unauthenticated caller has write/admin access "
-                      f"(cluster-wide for a ClusterRoleBinding, namespace-scoped for a RoleBinding); re-derived "
-                      f"over the retained binding"),
+            evidence=(f"k8s RBAC fact: binding {label} BINDS the dangerous built-in ClusterRole {role_name!r} "
+                      f"to an ANONYMOUS subject {who!r} — this binding grants an unauthenticated principal "
+                      f"cluster-wide write/admin (namespace-scoped for a RoleBinding) WHERE IN EFFECT; "
+                      f"re-derived over the retained binding. SUBJECT = the binding (the retained RBAC "
+                      f"evidence), not proof of the live cluster's runtime state (a declared manifest may not "
+                      f"be applied; a live-read binding is present-tense)"),
             observed={"check_id": cid, "rule": "anonymous_privileged_binding",
-                      "reason": "anonymous_dangerous_rbac", "role": role_name, "subject": who})
+                      "reason": "anonymous_dangerous_rbac", "role": role_name, "subject": who,
+                      "claim_scope": "binding"})
 
     return OracleSignal(
         kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=False, confidence=0.0,

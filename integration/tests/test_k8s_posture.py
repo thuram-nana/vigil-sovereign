@@ -328,6 +328,50 @@ def test_truncation_window_rolref_never_mints_a_false_workload_fact():
             f"truncation-window roleRef (len(kind)={len(kind)}) minted a signed false FACT"
 
 
+def test_rbac_subject_name_kind_apigroup_are_exact_not_folded():
+    """RED-PEN BLOCK #3 re-attack (HIGH, CONFIRMED): _k8s_subject_is_anon .strip()+case-folded the subject —
+    so a whitespace-padded name ('system:anonymous\\n'), a case-variant name ('System:Anonymous'), or a
+    case-variant kind ('USER') matched the reserved principal (a DIFFERENT k8s object → false FACT). Kind,
+    name AND apiGroup are now compared EXACTLY."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    signers, tr = _signers_and_trust()
+    G = "rbac.authorization.k8s.io"
+
+    def rb(subject):
+        m = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                        "roleRef": {"kind": "ClusterRole", "apiGroup": G, "name": "cluster-admin"},
+                        "subjects": [subject]})
+        return ingest_k8s_rbac(m, engagement_slug="a", signers=signers).n_facts
+
+    # padded / case-variant name or kind or apiGroup must NOT mint (a different principal)
+    for nm in ("system:anonymous\n", "system:anonymous ", " system:anonymous", "System:Anonymous", "SYSTEM:ANONYMOUS"):
+        assert rb({"kind": "User", "name": nm, "apiGroup": G}) == 0, f"padded/case name {nm!r} minted a false FACT"
+    for kd in ("USER", "user", " User ", "user "):
+        assert rb({"kind": kd, "name": "system:anonymous", "apiGroup": G}) == 0, f"case/padded kind {kd!r} minted"
+    assert rb({"kind": "User", "name": "system:anonymous", "apiGroup": "RBAC.Authorization.K8s.io"}) == 0
+    # the exact canonical spellings still FACT
+    assert rb({"kind": "User", "name": "system:anonymous", "apiGroup": G}) == 1
+    assert rb({"kind": "Group", "name": "system:unauthenticated", "apiGroup": G}) == 1
+
+
+def test_rbac_fact_evidence_is_scoped_to_the_binding_not_live_access():
+    """RED-PEN BLOCK #3 re-attack (MEDIUM, CONFIRMED): the RBAC oracle evidence asserted present-tense LIVE
+    access ('an unauthenticated caller HAS write/admin access') from a DECLARED, possibly-unapplied manifest —
+    the same overclaim the kube-bench oracle was scoped away from. Evidence now names the BINDING (source-
+    neutral: 'WHERE IN EFFECT'), and observed.claim_scope == 'binding'."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    from framework.v2.verify.oracles import k8s_workload_posture_oracle
+    G = "rbac.authorization.k8s.io"
+    sig = k8s_workload_posture_oracle({"achieved_state": {
+        "subjects": [{"kind": "User", "name": "system:anonymous", "api_group": G}],
+        "role": "cluster-admin", "role_kind": "ClusterRole", "role_apigroup": G}})
+    assert sig.fired
+    assert "has write/admin access" not in sig.evidence, f"present-tense live overclaim remains: {sig.evidence!r}"
+    assert sig.observed.get("claim_scope") == "binding"
+    assert "binds" in sig.evidence.lower() and "where in effect" in sig.evidence.lower()
+
+
 def test_primary_artifact_recheck_one_byte_mutation_fails_verification():
     """REVIEWER BLOCK #3 (the MAIN shared blocker): a signed digest alone only proves the cert CONTAINS a
     digest; verification must RECOMPUTE sha256 over the raw artifact bytes and cross-check it, so swapping the

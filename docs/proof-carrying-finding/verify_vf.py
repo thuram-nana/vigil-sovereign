@@ -1260,12 +1260,14 @@ def _pp_k8s_subject_is_anon(s: Any) -> bool:
     named system:anonymous / a Group named system:unauthenticated AND the RBAC apiGroup is present (required
     for an unapplied manifest); a legacy STRING subject (live-read) matches by the bare reserved name."""
     if isinstance(s, Mapping):
-        if _pp_k8s_norm(s.get("api_group") or s.get("apiGroup")) != _PP_K8S_RBAC_APIGROUP:
+        # kind/name/apiGroup are compared EXACTLY (case- and whitespace-sensitive); mirrors oracles.py so the
+        # L3 re-verifier and the in-tree oracle agree (a padded/case-variant subject is a DIFFERENT principal).
+        if _pp_coerce_text(s.get("api_group") or s.get("apiGroup")) != _PP_K8S_RBAC_APIGROUP:
             return False
-        kind = _pp_k8s_norm(s.get("kind"))
-        name = _pp_coerce_text(s.get("name"))[:_PP_K8S_WL_STR_CAP].strip()
-        return (kind == "user" and name == "system:anonymous") or \
-               (kind == "group" and name == "system:unauthenticated")
+        kind = _pp_coerce_text(s.get("kind"))
+        name = _pp_coerce_text(s.get("name"))
+        return (kind == "User" and name == "system:anonymous") or \
+               (kind == "Group" and name == "system:unauthenticated")
     return _pp_k8s_norm(s) in _PP_K8S_ANON_SUBJECTS
 
 

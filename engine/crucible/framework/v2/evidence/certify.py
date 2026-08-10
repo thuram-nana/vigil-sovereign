@@ -470,6 +470,7 @@ def verify_bundle(
     expected_trust_root_fingerprint: str | None = None,
     now: int | None = None,
     anchor_gen_times: dict[str, int] | None = None,
+    artifact_bytes_by_ref: dict[str, bytes] | None = None,
 ) -> BundleVerification:
     """Verify a bundle as a WHOLE. Beyond per-certificate soundness, this binds the
     certificate SET to the hash chain (the chain's digests must equal the certificates'
@@ -505,12 +506,17 @@ def verify_bundle(
     engagements.discard("")
     single_engagement = len(engagements) <= 1
 
+    # A posture certificate that opted into the gating artifact re-check (artifact_recheck_required) needs its
+    # raw artifact bytes at verify or it fails CLOSED. The bundle supplies them per finding_ref via
+    # artifact_bytes_by_ref (the bundle carries the raw artifacts); a cert that did not opt in ignores it.
+    _ab = artifact_bytes_by_ref or {}
     results = [
         verify_certificate(
             sc, oracle_context=contexts.get(sc.certificate.finding_ref, {}),
             trust_root=trust_root, evidence_root=evidence_root,
             expected_trust_root_fingerprint=expected_trust_root_fingerprint,
-            now=now, anchor_gen_time=anchor_gen_times.get(sc.certificate.finding_ref))
+            now=now, anchor_gen_time=anchor_gen_times.get(sc.certificate.finding_ref),
+            artifact_bytes=_ab.get(sc.certificate.finding_ref))
         for sc in certificates]
 
     if head is not None:
