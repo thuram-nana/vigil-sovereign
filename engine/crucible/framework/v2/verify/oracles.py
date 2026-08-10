@@ -4356,6 +4356,12 @@ def _imds_host_to_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
         host = host[1:-1]
     if not host:
         return None
+    if not host.isascii():
+        # A non-ASCII host denotes no real IP: str.isdigit()/int() parse Unicode decimal digits
+        # (e.g. Arabic-Indic ``٢٨٥٢٠٣٩١٦٦``) to the metadata IP, but no OS resolver / inet_aton / IDNA path
+        # does — so accepting it would fire on a host that reaches nothing (red-pen BLOCK-A). ASCII decimal
+        # (``2852039166``) and hex (``0xA9FEA9FE``) are ``.isascii()`` and still accepted (S1 recall).
+        return None
     try:
         return ipaddress.ip_address(host)               # textual IPv4 / IPv6 literal
     except ValueError:

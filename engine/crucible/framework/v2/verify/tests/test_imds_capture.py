@@ -248,6 +248,11 @@ _BLOCK_SOURCES = (
     "/home/user/.aws/169.254.169.254-iam/security-credentials.txt",
     # a bare string, not a URL — no host at all.
     "169.254.169.254 iam/security-credentials",
+    # Unicode-digit host (Arabic-Indic ٢٨٥٢٠٣٩١٦٦ == 2852039166): str.isdigit()/int() would parse it to the
+    # metadata IP, but no resolver/inet_aton/IDNA does — it denotes no real reach (red-pen BLOCK-A).
+    "http://٢٨٥٢٠٣٩١٦٦/latest/meta-data/iam/security-credentials/role",
+    # Fullwidth-digit host (２８５２０３９１６６) — same class.
+    "http://２８５２０３９１６６/iam/security-credentials",
 )
 
 
