@@ -258,6 +258,14 @@ _BLOCK_SOURCES = (
     "http://0xa9_fe_a9_fe/latest/meta-data/iam/security-credentials/role",
     # decimal host with underscores / a leading sign — likewise no real reach.
     "http://2_852_039_166/iam/security-credentials",
+    # LEADING-ZERO decimal host: int('02852039166') is decimal to Python but OCTAL to every resolver (invalid
+    # octal here -> no reach). Must not canonicalize to the metadata IP (red-pen octal/leading-zero vector).
+    "http://02852039166/latest/meta-data/iam/security-credentials/role",
+    "http://000000002852039166/iam/security-credentials",
+    # whitespace/form-feed in the host: a client-dependent reach (glibc inet_aton trims, getaddrinfo rejects);
+    # not stripped before parsing, so it must not fire.
+    "http://169.254.169.254 /latest/meta-data/iam/security-credentials/role",
+    "http://169.254.169.254\x0c/iam/security-credentials",
 )
 
 

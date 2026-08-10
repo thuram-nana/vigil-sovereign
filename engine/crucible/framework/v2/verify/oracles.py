@@ -4351,7 +4351,10 @@ def _imds_host_to_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
     (``::ffff:a9fe:a9fe``) — else None. These SSRF IP encodings all denote the same host, so an IMDS reach
     via any of them is still a reach (S1 recall). A DNS name (``metadata.google.internal``,
     ``169.254.169.254.attacker.com``) is NOT an IP -> None. Never raises."""
-    host = host.strip()
+    # Do NOT strip whitespace: urlsplit already yields a clean hostname, and stripping would let a crafted
+    # trailing/leading-whitespace host (``169.254.169.254 ``) — which glibc inet_aton accepts but getaddrinfo
+    # rejects, a client-dependent reach — canonicalize to the metadata IP (red-pen whitespace vector). A host
+    # with whitespace now falls through ipaddress + the strict numeric regex to None.
     if host.startswith("[") and host.endswith("]"):     # a bracketed IPv6 literal
         host = host[1:-1]
     if not host:
@@ -4372,7 +4375,11 @@ def _imds_host_to_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
     # resolver / inet_aton would accept must not canonicalize to the metadata IP (red-pen BLOCK-A + the
     # hex-underscore vector). ``isascii()`` above already rejects Unicode-digit hosts.
     low = host.lower()
-    if re.fullmatch(r"[0-9]+", host):
+    # Decimal: NO leading zero. Python's int() reads ``02852039166`` as decimal (== the metadata IP), but
+    # every resolver / inet_aton reads a leading-zero token as OCTAL (``02852039166`` is invalid octal -> no
+    # reach) — so a leading-zero decimal denotes nothing and must not canonicalize to the metadata IP
+    # (red-pen octal/leading-zero vector). ``[1-9][0-9]*`` also rejects a bare ``0`` (== 0.0.0.0, not metadata).
+    if re.fullmatch(r"[1-9][0-9]*", host):
         n = int(host)
     elif re.fullmatch(r"0x[0-9a-f]+", low):
         n = int(low, 16)
