@@ -231,14 +231,15 @@ def test_fires_on_sts_assumed_role_arn() -> None:
     assert sig.fired and sig.observed["principal_account"] == _EXT
 
 
-def test_fires_on_gcp_cross_project_service_account() -> None:
-    # GCP: the owner is a project id; a serviceAccount member in a DIFFERENT project fires
+def test_gcp_cross_project_service_account_is_a_lead_not_a_fact() -> None:
+    # GCP: a serviceAccount cross-project grant is NOT soundly distinguishable by email from a benign
+    # Google-managed service agent (bigquery-encryption / dlp-api / gcp-sa-* / …), and that set cannot be
+    # enumerated (Google adds agents), so a serviceAccount grant stays a LEAD (never a FACT) — red-pen
+    # BLOCK-A/BLOCK-B. blocking_work: an authoritative Google-agent registry or an owner-supplied
+    # trusted-external-project allowlist would make it FACT-capable.
     ctl = {"resource_id": "gcs-bucket", "provider": "gcp", "owner_account": "acme-prod",
            "grants": [{"principal": "serviceAccount:exfil@evil-corp.iam.gserviceaccount.com"}]}
-    sig = cloud_posture_oracle(ctl)
-    assert sig.fired and sig.observed["rule"] == "named_cross_account_principal"
-    assert sig.observed["principal_account"] == "evil-corp"
-    # mutation: same project -> no fire
+    assert not cloud_posture_oracle(ctl).fired
     same = {"resource_id": "gcs-bucket", "provider": "gcp", "owner_account": "acme-prod",
             "grants": [{"principal": "serviceAccount:svc@acme-prod.iam.gserviceaccount.com"}]}
     assert not cloud_posture_oracle(same).fired
@@ -380,27 +381,26 @@ def test_neg_bare_fqdn_service_principal_never_fires_even_with_domain_owner() ->
     assert cloud_posture_oracle(real).fired
 
 
-def test_neg_gcp_google_managed_service_agent_never_fires() -> None:
-    # BLOCK-4: a Google-MANAGED service agent reaches the STRUCTURED _GCP_SA_RE branch (not the bare path), so
-    # bare_ok does not gate it. It is a benign provider principal (the standard CMEK / log-sink grant present
-    # in ~every GCP project), never an impersonatable cross-account trust — it must be un-attributable -> LEAD
-    # even with a project owner present.
-    for agent in (
-        "serviceAccount:service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com",
-        "serviceAccount:service-123456789012@gcp-sa-cloudkms.iam.gserviceaccount.com",
-        "serviceAccount:service-123456789012@compute-system.iam.gserviceaccount.com",
-        "serviceAccount:service-123456789012@container-engine-robot.iam.gserviceaccount.com",
-        "serviceAccount:project-123456789012@gs-project-accounts.iam.gserviceaccount.com",
-        "serviceAccount:service-123456789012@serverless-robot-prod.iam.gserviceaccount.com",
+def test_neg_gcp_service_accounts_are_leads_managed_and_customer() -> None:
+    # BLOCK-A/BLOCK-B: a GCP serviceAccount's cross-project status is not soundly distinguishable by email from
+    # a benign Google-MANAGED service agent, and the Google-agent set cannot be enumerated (an allow/deny list
+    # is fail-open). So EVERY serviceAccount grant — Google-managed AND external-customer alike — stays a LEAD,
+    # never a FACT. This includes the exact benign CMEK/DLP agents the earlier enumerate-exclusion leaked.
+    for sa in (
+        "serviceAccount:service-1@gcp-sa-pubsub.iam.gserviceaccount.com",         # Google CMEK/pubsub agent
+        "serviceAccount:bq-1@bigquery-encryption.iam.gserviceaccount.com",         # BigQuery CMEK agent (BLOCK-A)
+        "serviceAccount:service-1@dlp-api.iam.gserviceaccount.com",                # Cloud DLP agent (BLOCK-A)
+        "serviceAccount:service-1@compute-system.iam.gserviceaccount.com",
+        "serviceAccount:exfil@evil-customer-proj.iam.gserviceaccount.com",         # a real external customer SA
     ):
         ctl = {"resource_id": "kms-key", "provider": "gcp", "owner_account": "acme-prod",
-               "grants": [{"principal": agent, "access": "encrypterDecrypter"}]}
-        assert not cloud_posture_oracle(ctl).fired, f"Google-managed agent {agent!r} must not fire"
-    # MUTATION-VERIFIED: a real EXTERNAL CUSTOMER service account (an ordinary project, not a Google agent) DOES
-    # fire — the exclusion is scoped to Google-owned service-agent projects, not all cross-project SAs.
-    real = {"resource_id": "kms-key", "provider": "gcp", "owner_account": "acme-prod",
-            "grants": [{"principal": "serviceAccount:exfil@evil-customer-proj.iam.gserviceaccount.com"}]}
-    assert cloud_posture_oracle(real).fired
+               "grants": [{"principal": sa, "access": "encrypterDecrypter"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"GCP serviceAccount {sa!r} must stay a LEAD"
+    # MUTATION-VERIFIED that rule 4 still fires on the SOUND GCP case (a cross-DOMAIN user) — so this negative
+    # control is load-bearing, not vacuously green.
+    user = {"resource_id": "r", "provider": "gcp", "owner_account": "acme.com",
+            "grants": [{"principal": "user:mallory@evil.com"}]}
+    assert cloud_posture_oracle(user).fired
 
 
 def test_neg_unusable_owner_token_stays_lead() -> None:
