@@ -111,7 +111,14 @@ def test_signed_scorecard_reverifies_offline_and_fails_on_tamper(tmp_path):
     doc = json.loads(out.read_text())
     doc["results"][0]["tp"] += 1
     out.write_text(json.dumps(doc))
-    assert verify_cloud_scorecard(out, sig, trust_root_fingerprint=pin) is False
+    assert verify_cloud_scorecard(out, sig, trust_root_fingerprint=pin) is False   # rejected at the digest check
+    # digest-UPDATED tamper: passes the digest check, so verification reaches the SIGNATURE step — the
+    # signature (made over the ORIGINAL bytes) no longer matches the tampered body and is rejected there.
+    import hashlib as _h
+
+    from vigil_core import canonical_json
+    sig2 = {**sig, "scorecard_digest": "sha256:" + _h.sha256(canonical_json(json.loads(out.read_text()))).hexdigest()}
+    assert verify_cloud_scorecard(out, sig2, trust_root_fingerprint=pin) is False   # rejected at the signature step
 
 
 def test_keyless_forgery_with_zero_threshold_is_rejected_even_with_correct_pin(tmp_path):

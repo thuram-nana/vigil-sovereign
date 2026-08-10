@@ -23,9 +23,16 @@ def test_signed_scorecard_verifies_and_rejects_a_flipped_number(tmp_path):
     assert verify_scorecard(sc, sig) is True
     assert sc.with_suffix(".sig.json").exists() and sc.with_suffix(".fingerprint.txt").exists()
 
-    # flip a reported number → canonical digest changes → the signature no longer verifies.
+    # flip a reported number → canonical digest changes → rejected at the digest check.
     d = json.loads(sc.read_text()); d["results"][0]["fp"] = 5; _write(sc, d)
     assert verify_scorecard(sc, sig) is False
+    # digest-UPDATED tamper: passes the digest check, so verification reaches the SIGNATURE step — the
+    # signature (over the ORIGINAL bytes) no longer matches the tampered body and is rejected there.
+    import hashlib
+
+    from vigil_core import canonical_json
+    sig2 = {**sig, "scorecard_digest": "sha256:" + hashlib.sha256(canonical_json(json.loads(sc.read_text()))).hexdigest()}
+    assert verify_scorecard(sc, sig2) is False
 
 
 def test_a_non_authorized_signer_does_not_satisfy_the_threshold(tmp_path):
