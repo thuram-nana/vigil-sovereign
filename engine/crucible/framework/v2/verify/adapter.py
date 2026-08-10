@@ -623,8 +623,11 @@ class FindingContext(BaseModel):
         (``{id, public?, sensitive?, encrypted?, grants?}``). Only the structural fields the oracle judges
         are retained into a canonical shape — a caller-supplied control that also carries verbose scanner
         prose or full grant objects is reduced to {resource_id, control_id, status, provider,
-        achieved_state:{encrypted, public, sensitive, principals}}, so nothing else is laundered into the
-        certificate. JSON-safe + deterministic (re-verifies offline)."""
+        owner_accounts, achieved_state:{encrypted, public, sensitive, principals}}, so nothing else is
+        laundered into the certificate. The optional ``owner_account`` / ``owner_accounts`` (the charter's
+        authorized own-account id(s), threaded in by the capture) is retained so the cross-account rule (P4)
+        can re-derive a NAMED cross-account grant offline; when absent the rule stays a LEAD (never guessed).
+        JSON-safe + deterministic (re-verifies offline)."""
         src = dict(control or {})
         inner = src.get("achieved_state") if isinstance(src.get("achieved_state"), Mapping) else src
         state: dict[str, Any] = {}
@@ -652,6 +655,24 @@ class FindingContext(BaseModel):
         for k in ("status", "provider"):
             if src.get(k) not in (None, ""):
                 retained[k] = _coerce_text(src.get(k))
+        # The OWNER's own-account set (P4) — the charter's authorized own-account id(s) the capture threads
+        # in. Gathered from ``owner_account`` (scalar) + ``owner_accounts`` (list), at the control top-level
+        # AND inside a nested achieved_state, de-duped (order-preserving). Retained top-level so the
+        # cross-account rule re-derives the same verdict offline; absent -> not retained -> the rule stays a
+        # LEAD (the owner is never guessed).
+        owner: list[str] = []
+        for scope in (src, inner):
+            if not isinstance(scope, Mapping):
+                continue
+            one = scope.get("owner_account")
+            if one not in (None, ""):
+                owner.append(_coerce_text(one))
+            many = scope.get("owner_accounts")
+            if isinstance(many, (list, tuple)):
+                owner.extend(_coerce_text(a) for a in many if a not in (None, ""))
+        if owner:
+            seen: set[str] = set()
+            retained["owner_accounts"] = [a for a in owner if not (a in seen or seen.add(a))]
         return cls(bug_class=bug_class, cloud_control=retained)
 
     @classmethod
