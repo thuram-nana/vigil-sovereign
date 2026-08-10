@@ -1,7 +1,7 @@
 {
   "schema": "vigil-capability-matrix/1",
-  "upstream": "hexstrike-ai (0x4m4), pinned d689933 — vendored NON-runnable; 79 distinct external tools",
-  "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count. Two FACT families are VIGIL-DIRECT (no tool is the authority): VERSION_RANGE via live.sbom (SBOM/dependency-CVE) and ACHIEVED_STATE via live.web_redrive — HEADER-DERIVED evidence only (3xx Location, CORS headers, OIDC via Location). Body-derived branches are not CLEAN-capable until the capture decodes Content-Encoding and the declared charset, and the JS-redirect branch is LEAD-only; no-channel is INCONCLUSIVE not CLEAN. Their proposer tools (trivy/grype, httpx) keep fact_capable=false by design.",
+  "upstream": "hexstrike-ai (0x4m4), pinned d689933 \u2014 vendored NON-runnable; 79 distinct external tools",
+  "note": "fact_capable is set ONLY when a runner-owned oracle re-drive exists AND the ToolSpec passes the conformance battery (live.conformance). Everything else is LEAD-only or excluded. The count that matters is fact_capable, not the upstream tool count. Two FACT families are VIGIL-DIRECT (no tool is the authority): VERSION_RANGE via live.sbom (SBOM/dependency-CVE) and ACHIEVED_STATE via live.web_redrive \u2014 HEADER-DERIVED evidence only (3xx Location, CORS headers, OIDC via Location). Body-derived branches are not CLEAN-capable until the capture decodes Content-Encoding and the declared charset, and the JS-redirect branch is LEAD-only; no-channel is INCONCLUSIVE not CLEAN. Their proposer tools (trivy/grype, httpx) keep fact_capable=false by design.",
   "tools": [
     {
       "name": "nmap",
@@ -48,7 +48,7 @@
         "cors",
         "host-header-injection"
       ],
-      "notes": "HTTP exposure is re-derived by VIGIL's live.web_redrive ACHIEVED_STATE path (no install): VIGIL issues its OWN gated, no-redirect capture and the deterministic predicate_oracle adjudicates — the tool is only a URL proposer, never the fact authority (fact_capable stays false). CAPABILITY BOUNDARY (honest, narrower than the family name): only HEADER-DERIVED evidence is FACT-capable today — a 3xx Location host, CORS reflected-origin-with-credentials, and an OIDC redirect proven through Location. BODY-DERIVED branches (meta-refresh / body redirect, host-header reflected into HTML) are NOT CLEAN-capable yet: the capture does not process Content-Encoding or the declared charset, so a gzip/Brotli or UTF-16 response decodes to replacement characters while the request still counts as an established channel — a body-dependent predicate could then return CLEAN over a document VIGIL never actually read. That is a realistic false-CLEAN on ordinary CDN infrastructure, not an exotic residual. The JS-redirect branch is LEAD-only (its regex still matches sinks inside JS comments and string literals, which needs a real JS tokenizer). Tracked as the next BLOCKING slice."
+      "notes": "HTTP exposure is re-derived by VIGIL's live.web_redrive ACHIEVED_STATE path (no install): VIGIL issues its OWN gated, no-redirect capture and the deterministic predicate_oracle adjudicates \u2014 the tool is only a URL proposer, never the fact authority (fact_capable stays false). CAPABILITY BOUNDARY (honest, narrower than the family name): only HEADER-DERIVED evidence is FACT-capable today \u2014 a 3xx Location host, CORS reflected-origin-with-credentials, and an OIDC redirect proven through Location. BODY-DERIVED branches (meta-refresh / body redirect, host-header reflected into HTML) are NOT CLEAN-capable yet: the capture does not process Content-Encoding or the declared charset, so a gzip/Brotli or UTF-16 response decodes to replacement characters while the request still counts as an established channel \u2014 a body-dependent predicate could then return CLEAN over a document VIGIL never actually read. That is a realistic false-CLEAN on ordinary CDN infrastructure, not an exotic residual. The JS-redirect branch is LEAD-only (its regex still matches sinks inside JS comments and string literals, which needs a real JS tokenizer). Tracked as the next BLOCKING slice."
     },
     {
       "name": "katana",
@@ -90,7 +90,7 @@
       "claim_families": [
         "vuln-template-match"
       ],
-      "notes": "template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor — queues on live)."
+      "notes": "template matches are LEADs until each class gets a runner-owned oracle re-drive; ACTIVE (A2 floor \u2014 queues on live)."
     },
     {
       "name": "gobuster",
@@ -120,7 +120,7 @@
         "container-cve",
         "iac-misconfig"
       ],
-      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT — the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false). For IaC misconfig, VIGIL's live.iac_posture parse-proof is the FACT authority (a trivy IaC finding is a LEAD proposer only); fact_capable stays false."
+      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT \u2014 the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false). For IaC misconfig, VIGIL's live.iac_posture parse-proof is the FACT authority (a trivy IaC finding is a LEAD proposer only); fact_capable stays false."
     },
     {
       "name": "grype",
@@ -134,7 +134,7 @@
       "claim_families": [
         "dependency-cve"
       ],
-      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT — the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
+      "notes": "SBOM output is re-derived by VIGIL's live.sbom VERSION_RANGE path (SHIPPED, no install): VIGIL parses the manifest/lockfile + a pinned OSV snapshot itself and version_in_affected mints the FACT \u2014 the tool is only a proposer, so the tool itself is NOT the fact authority (fact_capable stays false)."
     },
     {
       "name": "checkov",
@@ -162,7 +162,7 @@
       "claim_families": [
         "cloud-misconfig"
       ],
-      "notes": "subset maps to CLOUD_POSTURE/POLICY_PATH (Phase-1); LEAD-only today."
+      "notes": "Cloud posture scanner (AWS/GCP/Azure). LEAD-only: VIGIL's OWN live cloud capture (Track B, D5 scope-gated) is the FACT authority for CLOUD_POSTURE/POLICY_PATH; prowler's say-so only points at WHERE to look and never mints a FACT. fact_capable stays false."
     },
     {
       "name": "kube-bench",
@@ -202,7 +202,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — SQLi exploitation/DB dump. VIGIL owns SQLi confirmation via its own gated payload re-drive + oracle, never sqlmap."
+      "notes": "EXCLUDED \u2014 SQLi exploitation/DB dump. VIGIL owns SQLi confirmation via its own gated payload re-drive + oracle, never sqlmap."
     },
     {
       "name": "xsser",
@@ -214,7 +214,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — XSS exploitation."
+      "notes": "EXCLUDED \u2014 XSS exploitation."
     },
     {
       "name": "metasploit",
@@ -226,7 +226,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — exploit + payload framework."
+      "notes": "EXCLUDED \u2014 exploit + payload framework."
     },
     {
       "name": "pacu",
@@ -238,7 +238,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — AWS exploitation."
+      "notes": "EXCLUDED \u2014 AWS exploitation."
     },
     {
       "name": "pwntools",
@@ -250,7 +250,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — exploit-dev; also does not install offline."
+      "notes": "EXCLUDED \u2014 exploit-dev; also does not install offline."
     },
     {
       "name": "angr",
@@ -262,7 +262,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — symbolic auto-exploit; does not install offline."
+      "notes": "EXCLUDED \u2014 symbolic auto-exploit; does not install offline."
     },
     {
       "name": "ropgadget",
@@ -274,7 +274,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — ROP gadget finder."
+      "notes": "EXCLUDED \u2014 ROP gadget finder."
     },
     {
       "name": "ropper",
@@ -286,7 +286,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — ROP gadget finder."
+      "notes": "EXCLUDED \u2014 ROP gadget finder."
     },
     {
       "name": "one-gadget",
@@ -298,7 +298,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — one-shot RCE gadget finder."
+      "notes": "EXCLUDED \u2014 one-shot RCE gadget finder."
     },
     {
       "name": "libc-database",
@@ -310,7 +310,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — libc offset lookup for exploits."
+      "notes": "EXCLUDED \u2014 libc offset lookup for exploits."
     },
     {
       "name": "pwninit",
@@ -322,7 +322,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — CTF exploit-env setup."
+      "notes": "EXCLUDED \u2014 CTF exploit-env setup."
     },
     {
       "name": "hashpump",
@@ -334,7 +334,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — hash length-extension attack."
+      "notes": "EXCLUDED \u2014 hash length-extension attack."
     },
     {
       "name": "hydra",
@@ -346,7 +346,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — online brute-force."
+      "notes": "EXCLUDED \u2014 online brute-force."
     },
     {
       "name": "netexec",
@@ -358,7 +358,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — network credential spray + post-ex."
+      "notes": "EXCLUDED \u2014 network credential spray + post-ex."
     },
     {
       "name": "responder",
@@ -370,7 +370,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED — LLMNR/NBT-NS poisoning; also LAN-destructive."
+      "notes": "EXCLUDED \u2014 LLMNR/NBT-NS poisoning; also LAN-destructive."
     },
     {
       "name": "john",
@@ -382,7 +382,7 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED (exceptional authorization only) — offline password cracker; handles credential material."
+      "notes": "EXCLUDED (exceptional authorization only) \u2014 offline password cracker; handles credential material."
     },
     {
       "name": "hashcat",
@@ -394,7 +394,49 @@
       "oracle_family": "",
       "fact_capable": false,
       "excluded": true,
-      "notes": "EXCLUDED (exceptional authorization only) — GPU offline cracker."
+      "notes": "EXCLUDED (exceptional authorization only) \u2014 GPU offline cracker."
+    },
+    {
+      "name": "scout-suite",
+      "category": "cloud-analysis",
+      "license": "GPL-2.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "connects-out",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "cloud-misconfig"
+      ],
+      "notes": "Multi-cloud posture scanner. LEAD-only: VIGIL's OWN live cloud capture (Track B, D5 scope-gated) is the FACT authority; scout-suite only points at where to look and never mints a FACT. fact_capable stays false."
+    },
+    {
+      "name": "terrascan",
+      "category": "local-analysis",
+      "license": "Apache-2.0",
+      "install": "binary",
+      "privileges": "none",
+      "network_effect": "none",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "iac-misconfig"
+      ],
+      "notes": "IaC static policy scanner. LEAD-only: VIGIL-DIRECT live.iac_posture parses the target's OWN Terraform/CloudFormation and the cloud_posture + policy_path oracles re-derive the achieved state; terrascan is a proposer of where to look, never the FACT authority. fact_capable stays false."
+    },
+    {
+      "name": "kube-hunter",
+      "category": "active-assessment",
+      "license": "Apache-2.0",
+      "install": "pip",
+      "privileges": "none",
+      "network_effect": "scans-target",
+      "oracle_family": "",
+      "fact_capable": false,
+      "claim_families": [
+        "k8s-posture"
+      ],
+      "notes": "ACTIVE Kubernetes hunter (runs only under the WARDEN A2 floor on a live in-scope target). LEAD-only: its active-probe findings point at K8s posture but VIGIL does not trust the scanner's verdict; a FACT requires VIGIL's own live K8s-API capture (Track B) or a parsed primary artifact (RBAC manifest / kube-bench report). fact_capable stays false."
     }
   ]
 }

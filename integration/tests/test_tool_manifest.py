@@ -42,6 +42,21 @@ def test_the_only_fact_capable_tools_are_the_ones_with_a_shipped_re_drive():
     assert fact == {"nmap", "sslscan"}, f"unexpected fact_capable set: {fact}"
 
 
+def test_track_c_scanner_reports_stay_lead_only():
+    """Track C (evidence-authority doctrine): a config/posture SCANNER's report is a LEAD, never a FACT — its
+    say-so cannot confirm itself; a FACT comes only from VIGIL parsing the primary artifact (Track A) or a
+    VIGIL-owned live capture (Track B). This is the NAMED guard: each of these tools must be present,
+    fact_capable=false, and not excluded — so a future edit cannot quietly wire an oracle re-drive onto a
+    scanner (the aggregate {nmap,sslscan} pin also catches it; this names the doctrine tool-by-tool)."""
+    track_c = {"prowler", "scout-suite", "checkov", "terrascan", "trivy", "kube-bench", "kube-hunter"}
+    by = {m.name: m for m in load_manifests(_MATRIX)}
+    for name in track_c:
+        assert name in by, f"Track-C scanner {name!r} missing from the capability matrix"
+        m = by[name]
+        assert m.fact_capable is False, f"{name}: a scanner report must stay LEAD-only (fact_capable=false)"
+        assert m.excluded is False, f"{name}: a Track-C scanner is a LEAD proposer, not excluded"
+
+
 def test_offense_categories_must_be_excluded():
     for m in load_manifests(_MATRIX):
         if m.category in ("exploitation", "credential-access", "persistence", "destructive"):
