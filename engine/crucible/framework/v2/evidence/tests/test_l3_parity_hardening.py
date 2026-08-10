@@ -223,3 +223,50 @@ def test_highwater_symlink_is_refused(tmp_path):
     os.symlink(str(real), str(link))
     with pytest.raises(_HighwaterCorrupt):
         _load_highwater(link)
+
+
+def test_highwater_dangling_symlink_is_refused_not_first_run(tmp_path):
+    """RED-PEN (MEDIUM): a DANGLING symlink at the high-water path must REFUSE, not read as first-run — the
+    is_symlink() guard must precede exists() (exists() follows the link and is False for a dangling one, which
+    would silently disable anti-rollback)."""
+    from framework.v2.evidence.cli import _HighwaterCorrupt, _load_highwater
+    link = tmp_path / "hw.json"
+    os.symlink(str(tmp_path / "does-not-exist.json"), str(link))
+    with pytest.raises(_HighwaterCorrupt):
+        _load_highwater(link)
+
+
+def test_save_highwater_refuses_symlink_target(tmp_path):
+    """RED-PEN (MEDIUM): _save_highwater must refuse a symlink at the high-water path (checked on the
+    UN-resolved path) — it must never follow the link and overwrite the target."""
+    from framework.v2.evidence.cli import _save_highwater
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL")
+    link = tmp_path / "hw.json"
+    os.symlink(str(victim), str(link))
+    with pytest.raises(ValueError, match="symlink"):
+        _save_highwater(link, 42)
+    assert victim.read_text() == "ORIGINAL"          # target untouched
+
+
+def test_ctx_by_ref_refuses_duplicate_finding_ref():
+    """RED-PEN (LOW): the pcf-export _ctx_by_ref must refuse a duplicate finding_ref (last-writer-wins would
+    silently bind one certificate to another finding's context)."""
+    from framework.v2.evidence.cli import _ctx_by_ref
+    with pytest.raises(ValueError, match="duplicate finding_ref"):
+        _ctx_by_ref({"active_findings": [
+            {"check_id": "dup", "oracle_context": {"a": 1}},
+            {"check_id": "dup", "oracle_context": {"b": 2}}]})
+
+
+def test_default_reverifiable_carries_check_id_for_step2_cli(tmp_path):
+    """RED-PEN (LOW): the default synthesized reverifiable.json must carry check_id == finding_ref so the
+    documented step-2 `evidence verify` CLI (which derives its ref from check_id) matches a posture FACT's
+    composite finding_ref — otherwise a package verify_offline.py reports SOUND is reported NOT SOUND by the CLI."""
+    res, signers, tr = _mint_posture_fact()
+    pkg = tmp_path / "rv"
+    ref = _build_pkg(pkg, res, signers, tr)
+    rv = json.loads((pkg / "reverifiable.json").read_text())
+    entries = rv["active_findings"]
+    assert entries and all(e.get("check_id") == e.get("finding_ref") for e in entries)
+    assert any(e["check_id"] == ref for e in entries)

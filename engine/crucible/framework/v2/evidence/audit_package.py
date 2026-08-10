@@ -223,8 +223,12 @@ def write_package(
     _secure_write_text(out / "TRUST-ROOT-FINGERPRINT.txt", fingerprint + "\n")
 
     if reverifiable is None:
+        # Carry check_id == finding_ref: the documented step-2 `evidence verify` CLI derives its context ref
+        # from check_id/finding_slug/bug_class, so an entry with only finding_ref would map to the fallback
+        # "finding" and MISS a posture FACT's composite ref (k8s:cis:...#digest) — reporting NOT SOUND a package
+        # verify_offline.py reports SOUND (red-pen). Setting check_id keeps step-1 and step-2 consistent.
         reverifiable = {"active_findings": [
-            {"finding_ref": ref, "oracle_context": ctx} for ref, ctx in sorted(contexts.items())]}
+            {"finding_ref": ref, "check_id": ref, "oracle_context": ctx} for ref, ctx in sorted(contexts.items())]}
     _secure_write_text(out / "reverifiable.json", json.dumps(reverifiable, sort_keys=True))
 
     _secure_write_text(out / "SCOPE.md", scope or f"# Scope — {engagement_slug}\n\n(no scope text supplied)\n")

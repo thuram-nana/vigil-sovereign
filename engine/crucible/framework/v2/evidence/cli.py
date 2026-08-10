@@ -102,10 +102,13 @@ def _load_highwater(path: Path) -> int | None:
     unreadable, malformed, or carries a non-integer last_seq, raise _HighwaterCorrupt so verification REFUSES
     — anti-rollback state you cannot trust must NEVER silently degrade to 'no previous mark' (that disables
     rollback protection exactly when its state is compromised)."""
-    if not path.exists():
-        return None
+    # is_symlink() is True for a DANGLING link too (it checks the link, not the target), so it MUST precede
+    # exists() — exists() FOLLOWS the link and returns False for a dangling one, which would wrongly read as
+    # "absent / first run" and silently disable anti-rollback (red-pen: a planted dangling symlink bypass).
     if path.is_symlink():
         raise _HighwaterCorrupt(f"{path} is a symlink")
+    if not path.exists():
+        return None
     try:
         seq = json.loads(path.read_text(encoding="utf-8"))["last_seq"]
     except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
@@ -119,7 +122,9 @@ def _save_highwater(path: Path, seq: int) -> None:
     """Atomic + owner-only persist: temp file in the same dir → fsync → atomic rename → chmod 0600. Refuses a
     symlink target. (This is LOCAL rollback detection; a governance-signed or platform-monotonic store would be
     needed for cryptographically-guaranteed rollback PREVENTION — documented, not claimed here.)"""
-    path = path.resolve()
+    # Check the UN-resolved path for a symlink BEFORE any resolve — path.resolve() would dereference it and the
+    # is_symlink() check would then always be False (dead code), letting the atomic write follow the link and
+    # overwrite its target (red-pen). os.replace(tmp, path) on a non-symlink path is an atomic in-place rename.
     if path.is_symlink():
         raise ValueError(f"high-water path {path} is a symlink (refusing)")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,8 +251,16 @@ def _verify(args: argparse.Namespace) -> int:
 
 
 def _ctx_by_ref(report: dict) -> dict[str, dict]:
-    return {str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding"): f["oracle_context"]
-            for f in _findings(report) if isinstance(f, dict) and f.get("oracle_context")}
+    """oracle_contexts by finding_ref for pcf-export. REFUSES a duplicate ref (matching the inline builder in
+    _verify) so one certificate can never be silently bound to another finding's context."""
+    out: dict[str, dict] = {}
+    for f in _findings(report):
+        if isinstance(f, dict) and f.get("oracle_context"):
+            ref = str(f.get("check_id") or f.get("finding_slug") or f.get("bug_class") or "finding")
+            if ref in out:
+                raise ValueError(f"duplicate finding_ref {ref!r} in report contexts — refusing")
+            out[ref] = f["oracle_context"]
+    return out
 
 
 def _pcf_export(args: argparse.Namespace) -> int:
