@@ -165,6 +165,7 @@ def certify_admitted(
 _D2_BINDING_KEYS = frozenset({
     "artifact_sha256", "collector_id", "collector_version", "resource_scope", "capture_time_epoch",
     "capture_method", "requested_scope", "returned_scope", "completeness", "collector_signature",
+    "artifact_recheck_required", "artifact_encoding",
 })
 
 

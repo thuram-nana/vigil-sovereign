@@ -176,7 +176,7 @@ def test_mesh_permissive_mints_a_fact_that_reverifies_offline():
     f = res.facts[0]
     ctx = res.contexts[f.finding_ref]
     # the FACT re-verifies offline end-to-end (authentic + bound + reproduced)
-    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=res.artifact_bytes).ok is True
     # admission attributed it to the ONE clean_capable:false branch, and the artifact was bound into the cert
     assert res.admissions and all(a[0] == "mesh_posture.declared_configuration" for a in res.admissions)
     assert any(a[1] == "FACT" for a in res.admissions)
@@ -246,7 +246,7 @@ def test_mesh_source_restricted_authzpolicy_never_minted_as_allow_all():
     res = mesh_posture_verify(ca, engagement_slug="acme", signers=signers)
     assert res.n_facts >= 1
     for f in res.facts:
-        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr, artifact_bytes=res.artifact_bytes).ok
 
 
 def test_mesh_finding_ref_collision_free_offline_reverify():
@@ -267,7 +267,7 @@ def test_mesh_finding_ref_collision_free_offline_reverify():
     refs = [f.finding_ref for f in res.facts]
     assert len(refs) == 2 and len(set(refs)) == 2, f"same-identity mesh controls collided: {refs}"
     for f in res.facts:
-        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr, artifact_bytes=res.artifact_bytes).ok
     # a firing control sharing ns/name with a benign (non-firing) one still re-verifies (no overwrite)
     mixed = _json.dumps([
         {"kind": "AuthorizationPolicy", "metadata": {"name": "x", "namespace": "a"},
@@ -277,7 +277,7 @@ def test_mesh_finding_ref_collision_free_offline_reverify():
     res2 = mesh_posture_verify(mixed, engagement_slug="acme", signers=signers)
     assert res2.n_facts >= 1
     for f in res2.facts:
-        assert verify_certificate(f.signed, oracle_context=res2.contexts[f.finding_ref], trust_root=tr).ok
+        assert verify_certificate(f.signed, oracle_context=res2.contexts[f.finding_ref], trust_root=tr, artifact_bytes=res2.artifact_bytes).ok
 
 
 def test_github_actions_on_key_is_not_a_yaml_boolean():
@@ -303,7 +303,7 @@ def test_cicd_pull_request_target_pwn_request_fires_through_on_key():
     res = cicd_posture_verify(wf, engagement_slug="acme", signers=signers)
     assert res.n_facts >= 1, "a pull_request_target pwn-request must fire (the on: trigger must be readable)"
     for f in res.facts:
-        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr, artifact_bytes=res.artifact_bytes).ok
 
 
 def test_cicd_finding_ref_collision_free_offline_reverify():
@@ -320,7 +320,7 @@ def test_cicd_finding_ref_collision_free_offline_reverify():
     refs = [f.finding_ref for f in res.facts]
     assert len(refs) >= 2 and len(refs) == len(set(refs)), f"two unpinned actions in one job collided: {refs}"
     for f in res.facts:
-        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr).ok
+        assert verify_certificate(f.signed, oracle_context=res.contexts[f.finding_ref], trust_root=tr, artifact_bytes=res.artifact_bytes).ok
 
 
 # ---- CICD: positive → FACT that re-verifies offline ----------------------------------------------
@@ -335,7 +335,7 @@ def test_cicd_unpinned_action_mints_a_fact_that_reverifies_offline():
     assert res.n_facts >= 1, f"expected a cicd FACT; leads={res.leads} inconclusive={res.inconclusive}"
     f = next(x for x in res.facts)
     ctx = res.contexts[f.finding_ref]
-    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=res.artifact_bytes).ok is True
     assert res.admissions and all(a[0] == "cicd_posture.workflow_construct" for a in res.admissions)
     assert any(a[1] == "FACT" for a in res.admissions)
     assert res.family_verdict() == "FACT"

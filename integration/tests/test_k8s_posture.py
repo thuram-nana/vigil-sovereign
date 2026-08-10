@@ -130,7 +130,7 @@ def test_kube_bench_fail_anonymous_auth_mints_a_reverifiable_fact():
     f = res.facts[0]
     ctx = res.contexts[f.finding_ref]
     # the FACT re-verifies offline end-to-end (authentic + bound + reproduced)
-    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=res.artifact_bytes).ok is True
     # admission attributed the FACT to the ONE clean_capable:false branch, and the audit trail shows FACT
     assert res.admissions and all(a[0] == "k8s_posture.cis_control" for a in res.admissions)
     assert any(a[1] == "FACT" for a in res.admissions)
@@ -190,7 +190,7 @@ def test_rbac_anonymous_cluster_admin_mints_a_reverifiable_fact():
     assert res.n_facts == 1, f"expected a FACT; leads={res.leads} inconclusive={res.inconclusive}"
     f = res.facts[0]
     ctx = res.contexts[f.finding_ref]
-    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+    assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=res.artifact_bytes).ok is True
     assert res.admissions and all(a[0] == "k8s_workload_posture.rbac_binding" for a in res.admissions)
     assert any(a[1] == "FACT" for a in res.admissions)
     assert res.family_verdict() == "FACT"
@@ -328,6 +328,63 @@ def test_truncation_window_rolref_never_mints_a_false_workload_fact():
             f"truncation-window roleRef (len(kind)={len(kind)}) minted a signed false FACT"
 
 
+def test_primary_artifact_recheck_one_byte_mutation_fails_verification():
+    """REVIEWER BLOCK #3 (the MAIN shared blocker): a signed digest alone only proves the cert CONTAINS a
+    digest; verification must RECOMPUTE sha256 over the raw artifact bytes and cross-check it, so swapping the
+    artifact fails. The posture cert opts in (artifact_recheck_required); verify recomputes + gates .ok. A
+    correct-bytes verify passes; a 1-byte mutation fails; and a verify WITHOUT the bytes fails CLOSED."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    kb = json.dumps({"Controls": [{"tests": [{"section": "1.2", "results": [
+        {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"}]}]}]})
+    r = k8s_posture_verify(kb, engagement_slug="a", signers=signers)
+    f = r.facts[0]
+    ctx = r.contexts[f.finding_ref]
+    cert = f.signed.certificate
+    assert cert.artifact_recheck_required is True and cert.artifact_encoding == "canonical_text"
+    # correct bytes -> ok
+    good = verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=r.artifact_bytes)
+    assert good.ok and good.primary_artifact_ok
+    # a re-checkable cert verified WITHOUT the bytes fails CLOSED (never silently passes)
+    noargs = verify_certificate(f.signed, oracle_context=ctx, trust_root=tr)
+    assert noargs.ok is False and noargs.primary_artifact_ok is False
+    # a 1-byte mutation of the artifact fails (the recomputed sha256 no longer matches the bound one)
+    mutated = bytearray(r.artifact_bytes)
+    mutated[len(mutated) // 2] ^= 0x01
+    bad = verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=bytes(mutated))
+    assert bad.ok is False and bad.primary_artifact_ok is False
+    # even a byte APPENDED (same prefix) fails — length/content are both covered by the digest
+    appended = verify_certificate(f.signed, oracle_context=ctx, trust_root=tr,
+                                  artifact_bytes=r.artifact_bytes + b" ")
+    assert appended.ok is False
+
+
+def test_primary_artifact_bytes_vs_canonical_text_encoding_is_explicit():
+    """REVIEWER BLOCK #3: bytes are authoritative; a str input is UTF-8 canonical text (its original
+    byte-encoding/BOM is not its identity). The cert records which, and the two digests differ for the same
+    logical document, so a verifier knows what it recomputed over."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    from framework.v2.evidence.certify import verify_certificate
+    signers, tr = _signers_and_trust()
+    doc = {"Controls": [{"tests": [{"section": "1.2", "results": [
+        {"test_number": "1.2.1", "status": "FAIL", "actual_value": "--anonymous-auth=true"}]}]}]}
+    text = json.dumps(doc)
+    r_text = k8s_posture_verify(text, engagement_slug="a", signers=signers)
+    r_bytes = k8s_posture_verify(text.encode("utf-16"), engagement_slug="a", signers=signers)
+    assert r_text.facts[0].signed.certificate.artifact_encoding == "canonical_text"
+    assert r_bytes.facts[0].signed.certificate.artifact_encoding == "bytes"
+    # a UTF-16 byte input has a DIFFERENT digest than the UTF-8 canonical text of the same logical doc
+    assert r_text.facts[0].signed.certificate.artifact_sha256 != r_bytes.facts[0].signed.certificate.artifact_sha256
+    # each re-verifies only against ITS OWN retained bytes
+    for r in (r_text, r_bytes):
+        f = r.facts[0]
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr,
+                                  artifact_bytes=r.artifact_bytes).ok
+
+
 def test_rbac_typed_subjects_require_the_rbac_apigroup_before_minting():
     """REVIEWER BLOCK #3: subjects are TYPED {kind,name,api_group}; anon-ness is decided from the k8s TYPE and
     the RBAC apiGroup is REQUIRED before minting (an unapplied manifest that omits it is not API-validated, so
@@ -403,7 +460,7 @@ def test_rbac_finding_ref_collision_free_offline_reverify():
     refs = [f.finding_ref for f in r.facts]
     assert len(refs) == 2 and len(set(refs)) == 2, f"two unnamed bindings collided on one finding_ref: {refs}"
     for f in r.facts:
-        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr).ok, \
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr, artifact_bytes=r.artifact_bytes).ok, \
             "a genuine RBAC FACT failed offline re-verification (wrong retained context)"
 
 
@@ -455,7 +512,7 @@ def test_kube_bench_finding_ref_collision_free_offline_reverify():
     # the digest component is a FULL sha256 (>=128 bits), not a short 48-bit prefix
     assert all(len(ref.rsplit("#", 1)[-1]) == 64 for ref in refs), f"finding_ref digest is not full sha256: {refs}"
     for f in r.facts:
-        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr).ok, \
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr, artifact_bytes=r.artifact_bytes).ok, \
             "a genuine kube-bench FACT failed offline re-verification (wrong retained context)"
     # two identical-CONTENT controls at DIFFERENT source positions are DISTINCT findings (reviewer BLOCK #3:
     # identical controls in different locations must NOT collapse into one finding).

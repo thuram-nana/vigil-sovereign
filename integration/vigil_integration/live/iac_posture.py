@@ -117,6 +117,7 @@ class IacPostureResult:
     admissions: list = field(default_factory=list)    # (branch_id, verdict, reason) — the admission trail
     contexts: dict = field(default_factory=dict)      # finding_ref -> oracle_context (offline re-verify)
     notes: list = field(default_factory=list)
+    artifact_bytes: bytes = b""                        # raw artifact bytes the FACTs bind (BLOCK #3 re-check)
 
     @property
     def n_facts(self) -> int:
@@ -541,6 +542,7 @@ def iac_verify(
 
     inv = normalize_cloud_export(native, "native")
     res = IacPostureResult(fmt=fmt, resources=len(inv.get("resources") or []))
+    res.artifact_bytes = bytes(raw)
 
     artifact_sha256 = hashlib.sha256(raw).hexdigest()   # B2: digest of the ORIGINAL bytes
     binding = {
@@ -548,6 +550,9 @@ def iac_verify(
         "collector_id": collector_id,
         "capture_method": f"artifact:{fmt}",
         "completeness": "partial",   # an IaC export is a PARTIAL, represented state — never proves absence
+        # BLOCK #3: verify recomputes sha256 over the raw artifact bytes + cross-checks (1-byte change fails).
+        "artifact_recheck_required": True,
+        "artifact_encoding": "canonical_text" if isinstance(artifact, str) else "bytes",
     }
     observed = {"artifact_parsed": True}
 

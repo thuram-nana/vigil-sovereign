@@ -68,6 +68,7 @@ class PostureResult:
     admissions: list = field(default_factory=list)    # (branch_id, verdict, reason) — the admission audit trail
     contexts: dict = field(default_factory=dict)      # finding_ref -> oracle_context (offline re-verify)
     notes: list = field(default_factory=list)
+    artifact_bytes: bytes = b""                        # raw artifact bytes the FACTs bind (BLOCK #3 re-check)
 
     @property
     def n_facts(self) -> int:
@@ -105,9 +106,20 @@ def _safe_parse_structure(raw: str | bytes, budget: ParseBudget | None = None) -
     return y
 
 
+def _raw_bytes(raw: str | bytes) -> bytes:
+    """The exact bytes the artifact_sha256 is computed over — so verify can recompute them (BLOCK #3). A str
+    input is UTF-8 canonical text; bytes are the exact input."""
+    return raw.encode("utf-8", "surrogatepass") if isinstance(raw, str) else bytes(raw or b"")
+
+
 def _sha256_hex(raw: str | bytes) -> str:
-    data = raw.encode("utf-8", "surrogatepass") if isinstance(raw, str) else bytes(raw)
-    return hashlib.sha256(data).hexdigest()
+    return hashlib.sha256(_raw_bytes(raw)).hexdigest()
+
+
+def _artifact_binding(raw: str | bytes) -> dict:
+    """The BLOCK #3 artifact re-check binding fields shared by the mesh + cicd mint paths."""
+    return {"artifact_recheck_required": True,
+            "artifact_encoding": "canonical_text" if isinstance(raw, str) else "bytes"}
 
 
 def _oracle_signal(oracle_context: dict, bug_class: str) -> "tuple[bool, bool]":
@@ -213,6 +225,7 @@ def mesh_posture_verify(
 
     sha = _sha256_hex(config)
     res = PostureResult(family="mesh_posture", artifact_sha256=sha)
+    res.artifact_bytes = _raw_bytes(config)
     parsed = _safe_parse_structure(config, budget)
     res.parse_outcome, res.parse_reason = parsed.outcome, parsed.reason
     if not parsed.ok:
@@ -223,6 +236,7 @@ def mesh_posture_verify(
     binding = {
         "artifact_sha256": sha, "collector_id": collector_id,
         "capture_method": "artifact:istio-linkerd", "completeness": "partial",
+        **_artifact_binding(config),
     }
 
     def _ctx(control):
@@ -261,6 +275,7 @@ def cicd_posture_verify(
 
     sha = _sha256_hex(workflow)
     res = PostureResult(family="cicd_posture", artifact_sha256=sha)
+    res.artifact_bytes = _raw_bytes(workflow)
     parsed = _safe_parse_structure(workflow, budget)
     res.parse_outcome, res.parse_reason = parsed.outcome, parsed.reason
     if not parsed.ok:
@@ -274,6 +289,7 @@ def cicd_posture_verify(
     binding = {
         "artifact_sha256": sha, "collector_id": collector_id,
         "capture_method": "artifact:github-actions", "completeness": "partial",
+        **_artifact_binding(workflow),
     }
 
     def _ctx(control):

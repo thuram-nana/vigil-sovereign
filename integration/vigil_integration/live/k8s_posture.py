@@ -105,6 +105,8 @@ class K8sPostureResult:
     contexts: dict = field(default_factory=dict)  # finding_ref -> oracle_context (offline re-verify)
     parse_error: str = ""                         # a safe_parse error/inconclusive reason ("" when parse ok)
     notes: list = field(default_factory=list)
+    artifact_bytes: bytes = b""                   # the RAW artifact bytes the FACTs bind (BLOCK #3: verify
+    #                                             # recomputes sha256 over these — a 1-byte change fails)
 
     @property
     def n_facts(self) -> int:
@@ -230,12 +232,19 @@ def k8s_posture_verify(
         res.notes.append("no kube-bench controls found in the export")
         return res
 
-    artifact_sha = _sha256(kube_bench_text)
+    raw_artifact = kube_bench_text.encode("utf-8") if isinstance(kube_bench_text, str) else bytes(kube_bench_text or b"")
+    artifact_sha = hashlib.sha256(raw_artifact).hexdigest()
+    res.artifact_bytes = raw_artifact
     binding = {
         "artifact_sha256": artifact_sha,
         "collector_id": collector_id,
         "completeness": "partial",       # a kube-bench export is a bounded snapshot — never a CLEAN basis
         "capture_method": "artifact:kube-bench",
+        # BLOCK #3: verification RECOMPUTES sha256 over the raw report bytes and cross-checks artifact_sha256
+        # (a 1-byte change fails; fail-closed if the bytes are not supplied). A str input is UTF-8 canonical
+        # text; raw bytes are the exact input.
+        "artifact_recheck_required": True,
+        "artifact_encoding": "canonical_text" if isinstance(kube_bench_text, str) else "bytes",
     }
     for idx, control in enumerate(controls):
         from framework.v2.verify.k8s_posture import k8s_posture_context  # noqa: PLC0415
@@ -381,12 +390,16 @@ def ingest_k8s_rbac(
         res.notes.append("no ClusterRoleBinding/RoleBinding documents found in the manifest stream")
         return res
 
-    artifact_sha = _sha256(manifests_text)
+    raw_artifact = manifests_text.encode("utf-8") if isinstance(manifests_text, str) else bytes(manifests_text or b"")
+    artifact_sha = hashlib.sha256(raw_artifact).hexdigest()
+    res.artifact_bytes = raw_artifact
     binding_meta = {
         "artifact_sha256": artifact_sha,
         "collector_id": collector_id,
         "completeness": "partial",       # a manifest export is a bounded snapshot — never a CLEAN basis
         "capture_method": "artifact:k8s-manifest",
+        "artifact_recheck_required": True,   # BLOCK #3: verify recomputes sha256 over the raw manifest bytes
+        "artifact_encoding": "canonical_text" if isinstance(manifests_text, str) else "bytes",
     }
     for idx, control in enumerate(bindings):
         from framework.v2.verify.k8s_workload_posture import k8s_workload_posture_context  # noqa: PLC0415

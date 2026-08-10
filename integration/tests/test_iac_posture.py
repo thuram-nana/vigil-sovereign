@@ -259,7 +259,7 @@ def test_tfstate_mints_cloud_posture_and_policy_path_facts_that_reverify():
     # every fact re-verifies offline end-to-end (authentic + bound + reproduced) from its retained context
     for f in res.facts:
         ctx = res.contexts[f.finding_ref]
-        assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+        assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=res.artifact_bytes).ok is True
         # the artifact identity is bound into the signed certificate (D2)
         d2 = f.signed.certificate.bound_identity
         assert d2.get("capture_method") == "artifact:terraform"
@@ -300,7 +300,7 @@ def test_conditioned_wildcard_principal_never_mints_a_public_fact():
     r = run(None)
     assert r.n_facts >= 1, "an unconditioned Principal:'*' public grant must still FACT"
     for f in r.facts:
-        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr).ok
+        assert verify_certificate(f.signed, oracle_context=r.contexts[f.finding_ref], trust_root=tr, artifact_bytes=r.artifact_bytes).ok
     # an EMPTY Condition ({}) does not restrict -> still a FACT
     assert run({}).n_facts >= 1, "an empty Condition ({}) does not restrict and must still FACT"
 
@@ -318,7 +318,7 @@ def test_cloudformation_yaml_public_resource_mints_a_fact():
     assert res.n_facts >= 1, f"expected a FACT from the public CFN resource; admissions={res.admissions}"
     for f in res.facts:
         ctx = res.contexts[f.finding_ref]
-        assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr).ok is True
+        assert verify_certificate(f.signed, oracle_context=ctx, trust_root=tr, artifact_bytes=res.artifact_bytes).ok is True
         d2 = f.signed.certificate.bound_identity
         assert d2.get("capture_method") == "artifact:cloudformation"
 
