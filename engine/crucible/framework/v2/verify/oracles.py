@@ -2182,8 +2182,40 @@ _K8S_ANON_SUBJECTS = frozenset({"system:anonymous", "system:unauthenticated"})
 _K8S_DANGEROUS_ROLES = frozenset({"cluster-admin", "admin", "edit"})
 
 
+_K8S_RBAC_APIGROUP = "rbac.authorization.k8s.io"
+
+
 def _k8s_norm(value: Any) -> str:
     return _coerce_text(value)[:_K8S_WL_STR_CAP].strip().lower()
+
+
+def _k8s_subject_is_anon(s: Any) -> bool:
+    """A subject is an ANONYMOUS principal when its k8s TYPE matches, not merely its name.
+
+    TYPED subject ``{kind, name, api_group}`` (the declared-manifest reducer, reviewer BLOCK #3): only a
+    ``User`` named ``system:anonymous`` or a ``Group`` named ``system:unauthenticated`` — and the RBAC
+    apiGroup is REQUIRED (an unapplied manifest that omits it is not API-validated, so it cannot mint a FACT;
+    a ServiceAccount, or any other kind, merely NAMED "system:anonymous" is a DIFFERENT principal). The name
+    is compared case-sensitively (k8s subject names are case-sensitive).
+
+    Legacy STRING subject (a live-read RBAC sensor reads the cluster and emits the reserved name directly, so
+    the cluster itself is authority): the bare reserved name IS the anonymous principal.
+    """
+    if isinstance(s, Mapping):
+        if _k8s_norm(s.get("api_group") or s.get("apiGroup")) != _K8S_RBAC_APIGROUP:
+            return False
+        kind = _k8s_norm(s.get("kind"))
+        name = _coerce_text(s.get("name"))[:_K8S_WL_STR_CAP].strip()
+        return (kind == "user" and name == "system:anonymous") or \
+               (kind == "group" and name == "system:unauthenticated")
+    return _k8s_norm(s) in _K8S_ANON_SUBJECTS
+
+
+def _k8s_subject_display(s: Any) -> str:
+    """A human name for a subject (typed or string) for the evidence string."""
+    if isinstance(s, Mapping):
+        return _coerce_text(s.get("name"))[:_K8S_WL_STR_CAP].strip()
+    return _coerce_text(s)[:_K8S_WL_STR_CAP].strip()
 
 
 def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
@@ -2223,7 +2255,7 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
     role_name = _coerce_text(state.get("role"))[:_K8S_WL_STR_CAP]
     role_kind = _k8s_norm(state.get("role_kind"))
     role_apigroup = _k8s_norm(state.get("role_apigroup"))
-    anon = [s for s in subjects if _k8s_norm(s) in _K8S_ANON_SUBJECTS]
+    anon = [s for s in subjects if _k8s_subject_is_anon(s)]
     # dangerous ONLY when the roleRef is the BUILT-IN ClusterRole in the RBAC apiGroup — a custom namespaced
     # Role merely NAMED "edit"/"admin" (or a case/whitespace variant) is NOT the powerful built-in (an empty
     # kind/apiGroup is tolerated for hand-authored evidence, but a non-ClusterRole kind or non-RBAC apiGroup
@@ -2233,7 +2265,7 @@ def k8s_workload_posture_oracle(observed_control: Any) -> OracleSignal:
                  and role_apigroup in ("rbac.authorization.k8s.io", ""))
 
     if anon and dangerous:
-        who = _coerce_text(anon[0])[:_K8S_WL_STR_CAP].strip()
+        who = _k8s_subject_display(anon[0])
         return OracleSignal(
             kind=OracleKind.K8S_WORKLOAD_POSTURE, fired=True, confidence=0.9,
             evidence=(f"k8s RBAC fact: binding {label} grants the dangerous built-in ClusterRole {role_name!r} "

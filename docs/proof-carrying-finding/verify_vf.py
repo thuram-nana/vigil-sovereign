@@ -1248,10 +1248,25 @@ def posture_k8s_fires(observed_control: Any) -> bool:
 _PP_K8S_WL_STR_CAP = 4096
 _PP_K8S_ANON_SUBJECTS = frozenset({"system:anonymous", "system:unauthenticated"})
 _PP_K8S_DANGEROUS_ROLES = frozenset({"cluster-admin", "admin", "edit"})
+_PP_K8S_RBAC_APIGROUP = "rbac.authorization.k8s.io"
 
 
 def _pp_k8s_norm(value: Any) -> str:
     return _pp_coerce_text(value)[:_PP_K8S_WL_STR_CAP].strip().lower()
+
+
+def _pp_k8s_subject_is_anon(s: Any) -> bool:
+    """Port of oracles._k8s_subject_is_anon: a TYPED subject {kind,name,api_group} is anon only when a User is
+    named system:anonymous / a Group named system:unauthenticated AND the RBAC apiGroup is present (required
+    for an unapplied manifest); a legacy STRING subject (live-read) matches by the bare reserved name."""
+    if isinstance(s, Mapping):
+        if _pp_k8s_norm(s.get("api_group") or s.get("apiGroup")) != _PP_K8S_RBAC_APIGROUP:
+            return False
+        kind = _pp_k8s_norm(s.get("kind"))
+        name = _pp_coerce_text(s.get("name"))[:_PP_K8S_WL_STR_CAP].strip()
+        return (kind == "user" and name == "system:anonymous") or \
+               (kind == "group" and name == "system:unauthenticated")
+    return _pp_k8s_norm(s) in _PP_K8S_ANON_SUBJECTS
 
 
 def posture_k8s_workload_fires(observed_control: Any) -> bool:
@@ -1271,7 +1286,7 @@ def posture_k8s_workload_fires(observed_control: Any) -> bool:
     role_name = _pp_coerce_text(state.get("role"))[:_PP_K8S_WL_STR_CAP]
     role_kind = _pp_k8s_norm(state.get("role_kind"))
     role_apigroup = _pp_k8s_norm(state.get("role_apigroup"))
-    anon = any(_pp_k8s_norm(s) in _PP_K8S_ANON_SUBJECTS for s in subjects)
+    anon = any(_pp_k8s_subject_is_anon(s) for s in subjects)
     dangerous = (role_name in _PP_K8S_DANGEROUS_ROLES
                  and role_kind in ("clusterrole", "")
                  and role_apigroup in ("rbac.authorization.k8s.io", ""))

@@ -103,10 +103,12 @@ def test_rbac_reduction_carries_rolekind_and_apigroup_faithfully():
     r = _reduce_rbac_binding(json.loads(_RBAC_ANON_CLUSTER_ADMIN))
     assert r["role"] == "cluster-admin" and r["role_kind"] == "ClusterRole"
     assert r["role_apigroup"] == "rbac.authorization.k8s.io"
-    # B3: a Group subject named system:unauthenticated stays BARE (it is the real anon principal, so the
-    # oracle's anon-name check can fire); a non-anon User (alice) is KIND-QUALIFIED so a name-only match can
-    # never launder it (or a same-named impostor of a different kind) into the anonymous principal.
-    assert r["subjects"] == ["system:unauthenticated", "user::alice"]
+    # BLOCK #3: subjects are TYPED {kind, name, namespace, api_group} — the oracle decides anon-ness from the
+    # k8s TYPE (not a flattened/kind-qualified string), and requires the RBAC apiGroup before minting.
+    assert r["subjects"] == [
+        {"kind": "Group", "name": "system:unauthenticated", "namespace": "",
+         "api_group": "rbac.authorization.k8s.io"},
+        {"kind": "User", "name": "alice", "namespace": "", "api_group": "rbac.authorization.k8s.io"}]
     assert r["resource_kind"] == "clusterrolebinding"
     # a namespaced Role named "edit" is carried as role_kind=Role — NOT defaulted to ClusterRole
     d = _reduce_rbac_binding(json.loads(_RBAC_DECEPTIVE_NS_EDIT))
@@ -274,13 +276,15 @@ def test_incomplete_rolref_never_mints_a_false_workload_fact():
     signers, tr = _signers_and_trust()
     bad = json.dumps({"kind": "RoleBinding", "metadata": {"name": "x", "namespace": "dev"},
                       "roleRef": {"name": "edit"},
-                      "subjects": [{"kind": "User", "name": "system:anonymous"}]})
+                      "subjects": [{"kind": "User", "name": "system:anonymous",
+                                    "apiGroup": "rbac.authorization.k8s.io"}]})
     r = ingest_k8s_rbac(bad, engagement_slug="acme", signers=signers)
     assert r.n_facts == 0, "incomplete-roleRef anonymous binding minted a false built-in-ClusterRole FACT"
     good = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
                        "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
                                    "name": "cluster-admin"},
-                       "subjects": [{"kind": "User", "name": "system:anonymous"}]})
+                       "subjects": [{"kind": "User", "name": "system:anonymous",
+                                    "apiGroup": "rbac.authorization.k8s.io"}]})
     r2 = ingest_k8s_rbac(good, engagement_slug="acme", signers=signers)
     assert r2.n_facts >= 1, "a complete anon->cluster-admin binding must still FACT"
 
@@ -296,7 +300,8 @@ def test_whitespace_rolref_never_mints_a_false_workload_fact():
     for kind, ag in (("  ", "  "), ("ClusterRole", "  "), ("  ", "rbac.authorization.k8s.io"), ("\t", "\t")):
         m = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
                         "roleRef": {"kind": kind, "apiGroup": ag, "name": "cluster-admin"},
-                        "subjects": [{"kind": "User", "name": "system:anonymous"}]})
+                        "subjects": [{"kind": "User", "name": "system:anonymous",
+                                    "apiGroup": "rbac.authorization.k8s.io"}]})
         assert ingest_k8s_rbac(m, engagement_slug="a", signers=signers).n_facts == 0, \
             f"whitespace roleRef (kind={kind!r}, apiGroup={ag!r}) minted a false FACT"
 
@@ -321,6 +326,36 @@ def test_truncation_window_rolref_never_mints_a_false_workload_fact():
                                       "apiGroup": "rbac.authorization.k8s.io"}]})
         assert ingest_k8s_rbac(m, engagement_slug="a", signers=signers).n_facts == 0, \
             f"truncation-window roleRef (len(kind)={len(kind)}) minted a signed false FACT"
+
+
+def test_rbac_typed_subjects_require_the_rbac_apigroup_before_minting():
+    """REVIEWER BLOCK #3: subjects are TYPED {kind,name,api_group}; anon-ness is decided from the k8s TYPE and
+    the RBAC apiGroup is REQUIRED before minting (an unapplied manifest that omits it is not API-validated, so
+    it stays a lead — near-zero-FP for declared manifests). A well-formed subject fires; missing/empty/wrong
+    apiGroup does not; and a name-collision impostor of the wrong kind never fires."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    import json
+    signers, tr = _signers_and_trust()
+
+    def rb(subject):
+        m = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
+                        "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
+                                    "name": "cluster-admin"},
+                        "subjects": [subject]})
+        return ingest_k8s_rbac(m, engagement_slug="a", signers=signers).n_facts
+
+    G = "rbac.authorization.k8s.io"
+    # well-formed anon User / Group -> FACT
+    assert rb({"kind": "User", "name": "system:anonymous", "apiGroup": G}) == 1
+    assert rb({"kind": "Group", "name": "system:unauthenticated", "apiGroup": G}) == 1
+    # apiGroup REQUIRED: missing / empty / wrong -> no FACT (stays a lead)
+    assert rb({"kind": "User", "name": "system:anonymous"}) == 0
+    assert rb({"kind": "User", "name": "system:anonymous", "apiGroup": ""}) == 0
+    assert rb({"kind": "User", "name": "system:anonymous", "apiGroup": "example.com"}) == 0
+    # typed-kind discipline: name collisions of the WRONG kind never fire
+    assert rb({"kind": "ServiceAccount", "name": "system:anonymous", "apiGroup": ""}) == 0
+    assert rb({"kind": "User", "name": "system:unauthenticated", "apiGroup": G}) == 0   # Group's name on a User
+    assert rb({"kind": "Group", "name": "system:anonymous", "apiGroup": G}) == 0        # User's name on a Group
 
 
 def test_kube_bench_fact_subject_is_the_report_not_the_cluster():
@@ -450,5 +485,6 @@ def test_serviceaccount_named_system_anonymous_is_not_the_anonymous_principal():
     real = json.dumps({"kind": "ClusterRoleBinding", "metadata": {"name": "y"},
                        "roleRef": {"kind": "ClusterRole", "apiGroup": "rbac.authorization.k8s.io",
                                    "name": "cluster-admin"},
-                       "subjects": [{"kind": "Group", "name": "system:unauthenticated"}]})
+                       "subjects": [{"kind": "Group", "name": "system:unauthenticated",
+                                     "apiGroup": "rbac.authorization.k8s.io"}]})
     assert ingest_k8s_rbac(real, engagement_slug="a", signers=signers).n_facts >= 1  # real Group anon FACTs

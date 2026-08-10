@@ -300,25 +300,24 @@ def _reduce_rbac_binding(doc: Any) -> dict | None:
     role_kind = role_ref.get("kind")
     role_apigroup = role_ref.get("apiGroup")
 
-    subjects: list[str] = []
+    subjects: list = []
     raw_subjects = doc.get("subjects")
     if isinstance(raw_subjects, (list, tuple)):
         for s in raw_subjects:
             if not isinstance(s, dict) or s.get("name") in (None, ""):
                 continue
-            nm = str(s.get("name"))
-            skind = str(s.get("kind") or "").strip().lower()
-            sgroup = str(s.get("apiGroup") or "").strip().lower()
-            # A subject is an ANONYMOUS PRINCIPAL only when its k8s KIND matches the principal, not merely its
-            # name: `system:anonymous` is the anonymous USER, `system:unauthenticated` the unauthenticated
-            # GROUP (both in the rbac.authorization.k8s.io apiGroup, or empty). A ServiceAccount — or any
-            # other kind — merely NAMED "system:anonymous" is a DIFFERENT principal (red-pen B3), so it is
-            # carried KIND-QUALIFIED and can never match the oracle's bare anon-name set. A genuine anon
-            # subject is emitted verbatim so the oracle fires correctly.
-            group_ok = sgroup in ("rbac.authorization.k8s.io", "")
-            is_anon = group_ok and ((skind == "user" and nm == "system:anonymous")
-                                    or (skind == "group" and nm == "system:unauthenticated"))
-            subjects.append(nm if is_anon else f"{skind or 'unknownkind'}:{s.get('namespace') or ''}:{nm}")
+            # Emit a TYPED subject {kind, name, api_group} (reviewer BLOCK #3 — no more kind-qualified-string
+            # ENCODING WORKAROUND). The oracle decides anon-ness from the TYPED triple: a ServiceAccount — or any
+            # kind other than the User/Group the reserved principal actually is — merely NAMED "system:anonymous"
+            # is a DIFFERENT principal and cannot match; the name is compared case-sensitively; and the RBAC
+            # apiGroup is REQUIRED before minting (an unapplied manifest that omits it is not API-validated, so
+            # it stays a lead — the reviewer's near-zero-FP requirement for declared manifests).
+            subjects.append({
+                "kind": str(s.get("kind") or ""),
+                "name": str(s.get("name")),
+                "namespace": str(s.get("namespace") or ""),
+                "api_group": str(s.get("apiGroup") or ""),
+            })
 
     reduced: dict[str, Any] = {
         "check_id": f"{kind.lower()}:{namespace + '/' if namespace else ''}{name}" if name else kind.lower(),
