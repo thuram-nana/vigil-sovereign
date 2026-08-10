@@ -1,0 +1,1880 @@
+[
+  {
+    "id": "authenticated-iam-situational-awareness",
+    "provider": "aws",
+    "name": "Post-compromise IAM/account enumeration (situational awareness)",
+    "kill_chain_phase": "enum",
+    "primitive": "Overly-broad iam:List*/iam:Get*/*:Describe* on obtained credentials enables full account inventory (cloudfox/pacu/enumerate-iam)",
+    "class": "exploitation",
+    "achieved_effect": "Full inventory of principals, policies, and reachable services mapped; over-permissioned paths identified",
+    "detectable_by": [
+      "cloudsplaining",
+      "pmapper"
+    ],
+    "prevalence": "high",
+    "severity": "low",
+    "notes": "Pwned Labs 'Get Situational Awareness in AWS with Cloudfox', 'Intro to AWS IAM Enumeration'; GetAccountAuthorizationDetails"
+  },
+  {
+    "id": "cloudtrail-logging-gap-posture",
+    "provider": "aws",
+    "name": "CloudTrail coverage gap (disabled / single-region / no validation)",
+    "kill_chain_phase": "enum",
+    "primitive": "No multi-region trail, log-file validation off, not encrypted, or management events not captured",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov",
+      "cloudsploit"
+    ],
+    "prevalence": "medium",
+    "severity": "medium",
+    "notes": "Static blind spot; CIS-benchmark checks; region gaps enable unmonitored activity (ATT&CK T1535)"
+  },
+  {
+    "id": "imdsv1-enabled-posture",
+    "provider": "aws",
+    "name": "IMDSv1 enabled (HttpTokens optional) on EC2",
+    "kill_chain_phase": "enum",
+    "primitive": "Instance metadata options allow IMDSv1 (HttpTokens=optional), making 169.254.169.254 reachable without a session token",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov",
+      "cloudsploit"
+    ],
+    "prevalence": "high",
+    "severity": "medium",
+    "notes": "Static precursor to SSRF/RCE credential theft; remediate with HttpTokens=required + hop limit 1"
+  },
+  {
+    "id": "ebs-public-snapshot-loot",
+    "provider": "aws",
+    "name": "Loot data from a publicly-shared EBS snapshot",
+    "kill_chain_phase": "exfil",
+    "primitive": "EBS snapshot with public CreateVolumePermission; attacker in any account creates a volume from it and mounts it",
+    "class": "exploitation",
+    "achieved_effect": "Filesystem data (secrets, keys, source) recovered from a public EBS snapshot mounted in the attacker's account",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "cloudsploit"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Loot Public EBS Snapshots'; also achievable via ec2:ModifySnapshotAttribute to self-share a victim snapshot"
+  },
+  {
+    "id": "lambda-env-var-secrets-disclosure",
+    "provider": "aws",
+    "name": "Lambda environment-variable secret disclosure",
+    "kill_chain_phase": "exfil",
+    "primitive": "lambda:GetFunction/GetFunctionConfiguration returns plaintext environment variables containing secrets",
+    "class": "exploitation",
+    "achieved_effect": "Secrets recovered from a Lambda function's environment variables",
+    "detectable_by": [
+      "prowler",
+      "checkov",
+      "cloudsplaining"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "Posture precursor = unencrypted secrets in env; readable with only function-config read perms"
+  },
+  {
+    "id": "rds-public-instance-access",
+    "provider": "aws",
+    "name": "Access a publicly-reachable RDS instance",
+    "kill_chain_phase": "exfil",
+    "primitive": "RDS instance PubliclyAccessible=true with a permissive security group + weak/known/leaked DB creds",
+    "class": "exploitation",
+    "achieved_effect": "Direct DB connection established to a public RDS endpoint and data read",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "cloudsploit"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Pillage Exposed RDS Instances'; posture precursor = public + open SG"
+  },
+  {
+    "id": "rds-public-snapshot-loot",
+    "provider": "aws",
+    "name": "Restore and loot a publicly-shared RDS snapshot",
+    "kill_chain_phase": "exfil",
+    "primitive": "RDS/Aurora snapshot shared public (or to attacker account); restored as a new instance in the attacker account",
+    "class": "exploitation",
+    "achieved_effect": "Database contents read from an instance restored from a public RDS snapshot",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "cloudsploit"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Plunder Public RDS Snapshots'"
+  },
+  {
+    "id": "s3-replication-batchops-exfil",
+    "provider": "aws",
+    "name": "S3 replication / Batch Operations data exfiltration",
+    "kill_chain_phase": "exfil",
+    "primitive": "s3:PutReplicationConfiguration or s3:CreateJob (+iam:PassRole to a replication role) redirects/copies objects to an attacker bucket",
+    "class": "exploitation",
+    "achieved_effect": "Bucket objects replicated/copied to an attacker-controlled bucket",
+    "detectable_by": [
+      "cloudsplaining"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Pwned Labs 'Abuse S3 Replication and Batch Ops to Exfiltrate Data'"
+  },
+  {
+    "id": "s3-versioning-secret-recovery",
+    "provider": "aws",
+    "name": "Secret recovery from prior S3 object versions",
+    "kill_chain_phase": "exfil",
+    "primitive": "Bucket versioning enabled + s3:GetObjectVersion/ListObjectVersions; a secret 'removed' in the current object survives in an old version",
+    "class": "exploitation",
+    "achieved_effect": "Live secret retrieved from a previous object version via GetObjectVersion",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Access Secrets with S3 Bucket Versioning'"
+  },
+  {
+    "id": "secretsmanager-getsecretvalue-exfil",
+    "provider": "aws",
+    "name": "Secrets Manager mass secret exfiltration",
+    "kill_chain_phase": "exfil",
+    "primitive": "Over-broad secretsmanager:GetSecretValue/ListSecrets (+kms:Decrypt) on obtained credentials",
+    "class": "exploitation",
+    "achieved_effect": "Plaintext secrets retrieved from Secrets Manager and used for further access",
+    "detectable_by": [
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "Pwned Labs 'Leverage Leaked Credentials for Pwnage', 'Understand Authentication Mechanisms Using Boto3'"
+  },
+  {
+    "id": "sns-topic-exfil-abuse",
+    "provider": "aws",
+    "name": "SNS abuse for data exfiltration",
+    "kill_chain_phase": "exfil",
+    "primitive": "sns:Subscribe an attacker endpoint to a topic, or sns:Publish, over an over-permissive topic policy",
+    "class": "exploitation",
+    "achieved_effect": "Sensitive messages exfiltrated by subscribing an attacker-controlled endpoint to (or publishing on) an SNS topic",
+    "detectable_by": [
+      "prowler",
+      "cloudsplaining"
+    ],
+    "prevalence": "low",
+    "severity": "medium",
+    "notes": "Pwned Labs 'Exfiltrate Secrets via Amazon SNS Abuse'"
+  },
+  {
+    "id": "ssm-parameter-store-exfil",
+    "provider": "aws",
+    "name": "SSM Parameter Store SecureString exfiltration",
+    "kill_chain_phase": "exfil",
+    "primitive": "ssm:GetParameter(s)/GetParametersByPath with WithDecryption on SecureString parameters holding credentials",
+    "class": "exploitation",
+    "achieved_effect": "Decrypted SecureString parameters (credentials/tokens) exfiltrated",
+    "detectable_by": [
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "Common secret store alongside Secrets Manager"
+  },
+  {
+    "id": "kms-ransomware-key-denial",
+    "provider": "aws",
+    "name": "KMS-backed ransomware / data denial",
+    "kill_chain_phase": "impact",
+    "primitive": "kms:ScheduleKeyDeletion / kms:DisableKey / re-encrypt with an attacker-imported CMK removes the org's ability to decrypt its data",
+    "class": "exploitation",
+    "achieved_effect": "Encrypted data (S3/EBS/RDS) rendered inaccessible by disabling/scheduling deletion of the protecting KMS key",
+    "detectable_by": [],
+    "prevalence": "low",
+    "severity": "critical",
+    "notes": "Pwned Labs 'Investigate a Ransomware Attack in AWS' (KMS+IAM)"
+  },
+  {
+    "id": "apigw-authorization-bypass",
+    "provider": "aws",
+    "name": "API Gateway authorization/restriction bypass",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Missing/misconfigured authorizer, permissive resource policy, or stage/route reachable without the intended IAM/Cognito auth",
+    "class": "exploitation",
+    "achieved_effect": "A protected API Gateway route reached / its authorization control bypassed",
+    "detectable_by": [
+      "prowler"
+    ],
+    "prevalence": "low",
+    "severity": "medium",
+    "notes": "Pwned Labs 'Bypass Restrictions in API Gateway'"
+  },
+  {
+    "id": "ci-server-compromise-to-aws-creds",
+    "provider": "aws",
+    "name": "CI/build-server compromise pivoting to AWS credentials",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Exposed/misconfigured Jenkins/TeamCity/Splunk on EC2 with stored AWS creds or an instance role reachable from the app",
+    "class": "exploitation",
+    "achieved_effect": "AWS credentials extracted from a compromised CI/admin server and used against the account",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Exploit Jenkins in the Cloud', 'Pwn TeamCity in the Cloud', 'Compromise Splunk for AWS Privilege Escalation'"
+  },
+  {
+    "id": "cognito-unauth-identity-pool-creds",
+    "provider": "aws",
+    "name": "Cognito unauthenticated identity pool AWS credential issuance",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Cognito Identity Pool allows unauthenticated identities and its guest IAM role has over-broad permissions",
+    "class": "exploitation",
+    "achieved_effect": "AWS credentials for the identity-pool unauth role obtained via cognito-identity:GetId + GetCredentialsForIdentity",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Abuse Cognito User and Identity Pools'; also user-pool self-signup/writable-attribute abuse"
+  },
+  {
+    "id": "exposed-aws-keys-in-git-and-images",
+    "provider": "aws",
+    "name": "Long-lived AWS keys leaked in source repos / container images",
+    "kill_chain_phase": "initial-access",
+    "primitive": "AKIA/ASIA credentials committed to git history, CodeCommit, or baked into Docker image layers",
+    "class": "exploitation",
+    "achieved_effect": "Valid AWS access keys recovered and authenticated (sts:GetCallerIdentity succeeds)",
+    "detectable_by": [
+      "trufflehog",
+      "gitleaks",
+      "trivy"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "Pwned Labs 'Hunt for Secrets in Git Repos', 'Uncover Secrets in CodeCommit and Docker'"
+  },
+  {
+    "id": "oidc-federation-overly-permissive-trust",
+    "provider": "aws",
+    "name": "Over-permissive OIDC federation role (CI to AWS)",
+    "kill_chain_phase": "initial-access",
+    "primitive": "IAM OIDC role trust condition on sub/aud is too loose (e.g. wildcards any repo/branch), letting an untrusted CI workload assume the role",
+    "class": "exploitation",
+    "achieved_effect": "AWS role assumed via an OIDC web-identity token from an attacker-controlled/other CI project (GitLab/GitHub Actions)",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Abuse OpenID Connect and GitLab for AWS Access'; check StringLike vs StringEquals on token:sub"
+  },
+  {
+    "id": "path-traversal-to-aws-credentials",
+    "provider": "aws",
+    "name": "Path traversal / LFI to AWS credential file",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Directory traversal reads credential/config files on an EC2/container host (e.g. ~/.aws/credentials, task role env)",
+    "class": "exploitation",
+    "achieved_effect": "AWS credential material read via path traversal, then used to reach S3/other services",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Path Traversal to AWS credentials to S3'"
+  },
+  {
+    "id": "s3-orphaned-bucket-takeover",
+    "provider": "aws",
+    "name": "Orphaned/dangling S3 bucket name takeover",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Application/site references a deleted bucket name; attacker re-registers the globally-unique name",
+    "class": "exploitation",
+    "achieved_effect": "Attacker-controlled bucket now serves content trusted by the victim app (reference/subdomain takeover)",
+    "detectable_by": [],
+    "prevalence": "low",
+    "severity": "medium",
+    "notes": "Pwned Labs 'Hijack Orphaned S3 Buckets for Data Access'"
+  },
+  {
+    "id": "s3-public-anonymous-read",
+    "provider": "aws",
+    "name": "Publicly readable S3 bucket (ACL/policy grants AllUsers)",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Bucket ACL or bucket policy grants s3:GetObject/ListBucket to AllUsers/AuthenticatedUsers",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov",
+      "cloudsploit",
+      "trivy"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "Classic static misconfig; Block Public Access off + public grant"
+  },
+  {
+    "id": "s3-public-anonymous-write",
+    "provider": "aws",
+    "name": "Publicly writable S3 bucket (ACL/policy grants PutObject to AllUsers)",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Bucket ACL/policy grants s3:PutObject to AllUsers/AuthenticatedUsers",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov",
+      "cloudsploit"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Enables defacement/malware seeding and the writable-bucket-to-XSS chain"
+  },
+  {
+    "id": "xxe-to-aws-credentials",
+    "provider": "aws",
+    "name": "XXE file read / SSRF to AWS credentials",
+    "kill_chain_phase": "initial-access",
+    "primitive": "XML external entity injection reads local credential files (~/.aws/credentials) or performs SSRF to IMDS",
+    "class": "exploitation",
+    "achieved_effect": "AWS credentials read from the host (local file or IMDS via XXE-driven SSRF)",
+    "detectable_by": [],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Pwned Labs 'File Upload XXE to Initial Access' (Lambda/SQLite)"
+  },
+  {
+    "id": "s3-writable-bucket-stored-xss-cookie-theft",
+    "provider": "aws",
+    "name": "Writable S3 bucket serving a site -> stored XSS -> admin session theft",
+    "kill_chain_phase": "lateral",
+    "primitive": "Web-served S3 bucket is writable (public or leaked creds); attacker uploads content executed in victim browser context",
+    "class": "exploitation",
+    "achieved_effect": "Admin session cookie/token captured via content injected into a writable, browser-served bucket",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Pwned Labs 'Leverage Writable S3 Bucket to Steal Admin Cookie' (Macie appears defensively)"
+  },
+  {
+    "id": "ssm-send-command-rce",
+    "provider": "aws",
+    "name": "SSM RCE on managed EC2 instances",
+    "kill_chain_phase": "lateral",
+    "primitive": "ssm:SendCommand / ssm:StartSession / ssm:CreateAssociation against SSM-managed instances running the agent",
+    "class": "exploitation",
+    "achieved_effect": "Arbitrary command execution (typically root/SYSTEM) on a managed EC2 instance, then instance-role credential theft",
+    "detectable_by": [
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "HackTricks AWS SSM privesc; CreateAssociation persists without interactive session"
+  },
+  {
+    "id": "sts-external-id-confused-deputy",
+    "provider": "aws",
+    "name": "Cross-account role assumption via leaked ExternalId",
+    "kill_chain_phase": "lateral",
+    "primitive": "Third-party-integration role trusts an external account guarded only by an ExternalId that is leaked in an exposed config file",
+    "class": "exploitation",
+    "achieved_effect": "Privileged cross-account role assumed by supplying the leaked ExternalId to sts:AssumeRole",
+    "detectable_by": [
+      "iam-access-analyzer",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Assume Privileged Role with External ID'; confused-deputy pattern"
+  },
+  {
+    "id": "cloudtrail-stop-logging-evasion",
+    "provider": "aws",
+    "name": "CloudTrail tampering to evade detection",
+    "kill_chain_phase": "persistence",
+    "primitive": "cloudtrail:StopLogging / DeleteTrail / PutEventSelectors (or deleting the log bucket) blinds audit logging",
+    "class": "exploitation",
+    "achieved_effect": "CloudTrail logging stopped/scoped-down so subsequent attacker actions are not recorded",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Defense-evasion; GuardDuty has a Stealth:IAMUser/CloudTrailLoggingDisabled finding"
+  },
+  {
+    "id": "ecr-image-poisoning",
+    "provider": "aws",
+    "name": "ECR image poisoning / supply-chain persistence",
+    "kill_chain_phase": "persistence",
+    "primitive": "ecr:PutImage (or push over the task role) into a repo with mutable tags; poisoned image is pulled and run by ECS/EKS",
+    "class": "exploitation",
+    "achieved_effect": "Attacker-controlled image pushed to ECR is pulled and executed by a production workload",
+    "detectable_by": [
+      "prowler",
+      "trivy"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Posture precursor = mutable tags / no image-scan; Pwned Labs Inspector lab touches ECR scanning defensively"
+  },
+  {
+    "id": "iam-lambda-eventbridge-persistence-backdoor",
+    "provider": "aws",
+    "name": "Event-driven IAM persistence backdoor",
+    "kill_chain_phase": "persistence",
+    "primitive": "Attacker-created Lambda + EventBridge rule (or role trust to an external account) that re-mints access keys / re-attaches admin after cleanup",
+    "class": "exploitation",
+    "achieved_effect": "Durable re-entry: credentials or admin policy automatically re-created after defenders revoke them",
+    "detectable_by": [
+      "cloudsplaining",
+      "iam-access-analyzer"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "AWSDoor-style; complements the create-access-key / update-assume-role-policy primitives"
+  },
+  {
+    "id": "ec2-command-injection-userdata-privesc",
+    "provider": "aws",
+    "name": "OS command injection on EC2 -> IMDS creds / user-data privesc",
+    "kill_chain_phase": "privesc",
+    "primitive": "Command injection/RCE in an app on EC2; attacker queries IMDS or reads/rewrites user-data (ec2:ModifyInstanceAttribute) for boot-time code exec",
+    "class": "exploitation",
+    "achieved_effect": "Code execution on the instance yields instance-role credentials from IMDS (and/or persisted user-data payload)",
+    "detectable_by": [
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Command Injection to EC2 User Data Privilege Escalation'; also reads secrets baked into ec2:DescribeInstanceAttribute userData"
+  },
+  {
+    "id": "ecs-task-metadata-cred-theft",
+    "provider": "aws",
+    "name": "ECS task-role credential theft via task metadata endpoint",
+    "kill_chain_phase": "privesc",
+    "primitive": "SSRF/RCE in a container reads $AWS_CONTAINER_CREDENTIALS_RELATIVE_URI at 169.254.170.2 to fetch the task role",
+    "class": "exploitation",
+    "achieved_effect": "ECS task role credentials retrieved from the task metadata endpoint and usable against the AWS API",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "On ECS-on-EC2, a container reaching 169.254.169.254 can also steal the more-privileged container-instance role (ECScape)"
+  },
+  {
+    "id": "eks-pod-credential-theft",
+    "provider": "aws",
+    "name": "EKS pod-to-AWS credential theft (node role / IRSA)",
+    "kill_chain_phase": "privesc",
+    "primitive": "Compromised pod without IMDS restriction steals the node instance role, or an over-broad IRSA service-account role via the projected web-identity token",
+    "class": "exploitation",
+    "achieved_effect": "Node IAM role or IRSA role credentials obtained from inside a pod and used against AWS",
+    "detectable_by": [
+      "prowler",
+      "kube-bench"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Pwned Labs 'Escalate from Prototype Pollution to EKS Takeover'; token at /var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+  },
+  {
+    "id": "iam-privesc-add-user-to-group",
+    "provider": "aws",
+    "name": "IAM privesc: add self to a privileged group",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:AddUserToGroup adds the attacker user to a group carrying admin policies",
+    "class": "exploitation",
+    "achieved_effect": "Attacker user inherits the privileged group's permissions",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "PACU method 13"
+  },
+  {
+    "id": "iam-privesc-attach-managed-policy",
+    "provider": "aws",
+    "name": "IAM privesc: attach a managed admin policy to a controlled principal",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:AttachUserPolicy / iam:AttachGroupPolicy / iam:AttachRolePolicy attaches AdministratorAccess",
+    "class": "exploitation",
+    "achieved_effect": "AdministratorAccess (or equivalent) attached to an attacker-controlled user/group/role",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "PACU methods 7-9"
+  },
+  {
+    "id": "iam-privesc-create-access-key",
+    "provider": "aws",
+    "name": "IAM privesc/persistence: mint access keys for a privileged user",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:CreateAccessKey on another (higher-privileged) IAM user",
+    "class": "exploitation",
+    "achieved_effect": "Working long-lived access key pair obtained for a more-privileged user",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "PACU method 4; doubles as persistence (survives password/MFA controls)"
+  },
+  {
+    "id": "iam-privesc-create-policy-version",
+    "provider": "aws",
+    "name": "IAM privesc: create a new default policy version",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:CreatePolicyVersion on an attached customer-managed policy with --set-as-default granting Action:* Resource:*",
+    "class": "exploitation",
+    "achieved_effect": "Attacker principal gains administrator permissions via a new default policy version",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "PACU iam__privesc_scan method 1"
+  },
+  {
+    "id": "iam-privesc-lambda-layer-poisoning",
+    "provider": "aws",
+    "name": "IAM privesc: Lambda layer import-priority poisoning",
+    "kill_chain_phase": "privesc",
+    "primitive": "lambda:UpdateFunctionConfiguration + lambda:AddLayerVersionPermission injects a layer that shadows boto3/deps in the import path",
+    "class": "exploitation",
+    "achieved_effect": "Malicious layer executes inside the function and exfiltrates the execution-role credentials",
+    "detectable_by": [
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Rhino part 2 method; stealthy (code not visible in main function body)"
+  },
+  {
+    "id": "iam-privesc-login-profile",
+    "provider": "aws",
+    "name": "IAM privesc: create/overwrite a console login profile",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:CreateLoginProfile (set console password where none exists) or iam:UpdateLoginProfile (reset another user's password)",
+    "class": "exploitation",
+    "achieved_effect": "Console access obtained as a targeted privileged user",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "PACU methods 5-6"
+  },
+  {
+    "id": "iam-privesc-passrole-cloudformation",
+    "provider": "aws",
+    "name": "IAM privesc: PassRole to a CloudFormation stack",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:PassRole + cloudformation:CreateStack deploys a template that acts with a privileged service role",
+    "class": "exploitation",
+    "achieved_effect": "Stack created with a passed admin role provisions attacker-chosen privileged resources",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "PACU method 20"
+  },
+  {
+    "id": "iam-privesc-passrole-datapipeline",
+    "provider": "aws",
+    "name": "IAM privesc: PassRole to AWS Data Pipeline",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:PassRole + datapipeline:CreatePipeline + datapipeline:PutPipelineDefinition runs commands via the pipeline's EC2 resource role",
+    "class": "exploitation",
+    "achieved_effect": "Command execution under the passed pipeline role, exposing its credentials",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "PACU method 21 (legacy service, still present in older accounts)"
+  },
+  {
+    "id": "iam-privesc-passrole-ec2",
+    "provider": "aws",
+    "name": "IAM privesc: PassRole to a new EC2 instance",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:PassRole + ec2:RunInstances launches an instance with a privileged instance profile; creds read from IMDS",
+    "class": "exploitation",
+    "achieved_effect": "Privileged instance-profile credentials obtained from an EC2 instance the attacker launched",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "PACU method 3; the canonical PassRole path"
+  },
+  {
+    "id": "iam-privesc-passrole-glue-devendpoint",
+    "provider": "aws",
+    "name": "IAM privesc: PassRole to a Glue development endpoint",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:PassRole + glue:CreateDevEndpoint (or glue:UpdateDevEndpoint on an existing one) gives SSH access running as the passed role",
+    "class": "exploitation",
+    "achieved_effect": "Shell on a Glue dev endpoint yields the privileged role's credentials",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "PACU methods 18-19"
+  },
+  {
+    "id": "iam-privesc-passrole-lambda",
+    "provider": "aws",
+    "name": "IAM privesc: PassRole to a new Lambda function",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:PassRole + lambda:CreateFunction (+ lambda:InvokeFunction or lambda:CreateEventSourceMapping) runs attacker code under a privileged execution role",
+    "class": "exploitation",
+    "achieved_effect": "Privileged Lambda execution-role credentials exfiltrated from attacker-supplied function code",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "PACU methods 15-16 (direct invoke or DynamoDB/event trigger)"
+  },
+  {
+    "id": "iam-privesc-passrole-sagemaker-notebook",
+    "provider": "aws",
+    "name": "IAM privesc: SageMaker notebook role theft (with or without PassRole)",
+    "kill_chain_phase": "privesc",
+    "primitive": "sagemaker:CreateNotebookInstance+CreatePresignedNotebookInstanceUrl+iam:PassRole (new notebook), OR sagemaker:ListNotebookInstances+CreatePresignedNotebookInstanceUrl (hijack an existing one, no PassRole)",
+    "class": "exploitation",
+    "achieved_effect": "Terminal on a Jupyter notebook yields the attached SageMaker role's credentials",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Rhino part 2 methods 2-3"
+  },
+  {
+    "id": "iam-privesc-put-inline-policy",
+    "provider": "aws",
+    "name": "IAM privesc: add an inline admin policy",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:PutUserPolicy / iam:PutGroupPolicy / iam:PutRolePolicy writes an inline policy granting *:*",
+    "class": "exploitation",
+    "achieved_effect": "Inline allow-all policy embedded on an attacker-controlled principal",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "PACU methods 10-12"
+  },
+  {
+    "id": "iam-privesc-set-default-policy-version-rollback",
+    "provider": "aws",
+    "name": "IAM privesc: roll back to a prior permissive policy version",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:SetDefaultPolicyVersion reverts a policy to an older, more-permissive stored version",
+    "class": "exploitation",
+    "achieved_effect": "Principal regains elevated permissions by activating a previously-created permissive policy version",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "Pwned Labs 'Escalate Privileges by IAM Policy Rollback'; PACU method 2"
+  },
+  {
+    "id": "iam-privesc-update-assume-role-policy",
+    "provider": "aws",
+    "name": "IAM privesc/persistence: backdoor a role's trust policy",
+    "kill_chain_phase": "privesc",
+    "primitive": "iam:UpdateAssumeRolePolicy rewrites a privileged role's trust to allow the attacker principal, then sts:AssumeRole",
+    "class": "exploitation",
+    "achieved_effect": "Attacker assumes a privileged role after injecting itself into that role's trust document",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler",
+      "iam-access-analyzer"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "PACU method 14; also a durable persistence primitive (external-account trust)"
+  },
+  {
+    "id": "iam-privesc-update-lambda-function-code",
+    "provider": "aws",
+    "name": "IAM privesc: overwrite existing Lambda code",
+    "kill_chain_phase": "privesc",
+    "primitive": "lambda:UpdateFunctionCode replaces the code of a function that already has a privileged execution role",
+    "class": "exploitation",
+    "achieved_effect": "Attacker code executes under the existing function's privileged role and leaks its credentials",
+    "detectable_by": [
+      "pmapper",
+      "cloudsplaining",
+      "prowler"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "PACU method 17; no iam:PassRole required"
+  },
+  {
+    "id": "kms-key-policy-overly-permissive",
+    "provider": "aws",
+    "name": "KMS key policy grants broad/external decrypt",
+    "kill_chain_phase": "privesc",
+    "primitive": "KMS key policy allows kms:Decrypt/kms:* to Principal:* or an untrusted account",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "cloudsploit"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Undermines every secret/volume/snapshot encrypted under the key"
+  },
+  {
+    "id": "s3-overly-permissive-bucket-policy",
+    "provider": "aws",
+    "name": "Over-permissive S3 bucket policy grants cross-account/wildcard access",
+    "kill_chain_phase": "privesc",
+    "primitive": "Bucket policy Principal:* or an untrusted account with broad s3:* and no condition guard",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "iam-access-analyzer",
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Pwned Labs 'Exploit Weak Bucket Policies for Privileged Access'"
+  },
+  {
+    "id": "ssrf-imdsv1-cred-theft",
+    "provider": "aws",
+    "name": "SSRF to IMDS instance-role credential theft",
+    "kill_chain_phase": "privesc",
+    "primitive": "SSRF-able app on an EC2 instance where IMDSv1 is reachable and an instance role is attached",
+    "class": "exploitation",
+    "achieved_effect": "Instance role credentials actually retrieved from 169.254.169.254/latest/meta-data/iam/security-credentials and usable against the AWS API",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "Pwned Labs 'SSRF to Pwned'; impact = privileges of the instance role"
+  },
+  {
+    "id": "sts-role-trust-wildcard",
+    "provider": "aws",
+    "name": "Role trust policy allows Principal:* / arbitrary account",
+    "kill_chain_phase": "privesc",
+    "primitive": "AssumeRole trust document allows Principal AWS:* or any account with no ExternalId/condition guard",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "iam-access-analyzer",
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Static precursor to cross-account takeover; IAM Access Analyzer flags external-assumable roles"
+  },
+  {
+    "id": "aws-account-id-from-public-s3",
+    "provider": "aws",
+    "name": "AWS account ID disclosure via public S3 bucket / access point ARN",
+    "kill_chain_phase": "recon",
+    "primitive": "Anonymously-readable S3 bucket or an s3:ResourceAccount/GetBucketPolicyStatus oracle that leaks the owning 12-digit account ID",
+    "class": "exploitation",
+    "achieved_effect": "Target AWS account ID recovered from an unauthenticated position (seeds role-ARN enumeration)",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "high",
+    "severity": "low",
+    "notes": "Pwned Labs 'Identify the AWS Account ID from a Public S3 Bucket'; bucket ownership/policy-condition side channel"
+  },
+  {
+    "id": "aws-unauth-iam-principal-enum",
+    "provider": "aws",
+    "name": "Unauthenticated cross-account IAM principal enumeration",
+    "kill_chain_phase": "recon",
+    "primitive": "sts:AssumeRole / role-trust-policy update error differential reveals whether a principal ARN exists in another account (no creds needed)",
+    "class": "exploitation",
+    "achieved_effect": "Valid IAM users/roles in the target account confirmed to exist without authenticating",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "low",
+    "notes": "Pwned Labs 'Unauthenticated AWS IAM Principals Enumeration' (PACU); probing happens in attacker account, not logged in target CloudTrail"
+  },
+  {
+    "id": "public-ami-or-snapshot-exposure",
+    "provider": "aws",
+    "name": "AMI / EBS / RDS snapshot shared publicly or with unknown accounts",
+    "kill_chain_phase": "recon",
+    "primitive": "CreateVolumePermission/ModifyImageAttribute/ModifyDBSnapshotAttribute set to 'all' or an untrusted account",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "cloudsploit",
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "Static precursor to snapshot/AMI looting; scanners flag public share attributes"
+  },
+  {
+    "id": "s3-bucket-name-brute-force",
+    "provider": "aws",
+    "name": "S3 bucket name brute-force discovery",
+    "kill_chain_phase": "recon",
+    "primitive": "Predictable/global S3 bucket namespace enumerated by wordlist against s3.amazonaws.com",
+    "class": "exploitation",
+    "achieved_effect": "Existing bucket names discovered and their read/list access probed",
+    "detectable_by": [],
+    "prevalence": "high",
+    "severity": "low",
+    "notes": "Pwned Labs 'S3 Bucket Brute Force to Breach', 'AWS S3 Enumeration Basics'"
+  },
+  {
+    "id": "gcp-testiampermissions-enum",
+    "provider": "gcp",
+    "name": "Stealth IAM permission enumeration via testIamPermissions",
+    "kill_chain_phase": "enum",
+    "primitive": "testIamPermissions returns only the caller's held permissions without producing admin-activity logs",
+    "class": "exploitation",
+    "achieved_effect": "enumerated the caller identity's effective permissions on a project/resource by submitting a permission array to testIamPermissions and receiving the held subset",
+    "detectable_by": [],
+    "prevalence": "high",
+    "severity": "low",
+    "notes": "*.testIamPermissions (e.g. resourcemanager.projects.testIamPermissions); basis of Pwned Labs IAM-fuzzing lab"
+  },
+  {
+    "id": "gcp-bigquery-exfil",
+    "provider": "gcp",
+    "name": "BigQuery dataset exfiltration",
+    "kill_chain_phase": "exfil",
+    "primitive": "bigquery.tables.getData + bigquery.jobs.create allow bulk read/export of datasets",
+    "class": "exploitation",
+    "achieved_effect": "ran a query/extract job (jobs.insert) reading a table's rows or exported it to a bucket, obtaining the dataset contents",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "bigquery.tables.getData + bigquery.jobs.create; export adds bigquery.tables.export + storage.objects.create"
+  },
+  {
+    "id": "gcp-gcs-object-exfil",
+    "provider": "gcp",
+    "name": "Cloud Storage object exfiltration",
+    "kill_chain_phase": "exfil",
+    "primitive": "Broad storage.objects.get/list over sensitive buckets",
+    "class": "exploitation",
+    "achieved_effect": "listed and downloaded sensitive objects (backups, keys, PII) from a bucket using storage.objects.list/get",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "storage.objects.list / storage.objects.get; frequent state/backup/keyfile leakage"
+  },
+  {
+    "id": "gcp-secretmanager-access",
+    "provider": "gcp",
+    "name": "Secret Manager secret exfiltration",
+    "kill_chain_phase": "exfil",
+    "primitive": "Over-broad secretmanager.versions.access on Secret Manager secrets",
+    "class": "exploitation",
+    "achieved_effect": "accessed a secret version via secretmanager.versions.access and retrieved cleartext (DB creds / API keys) for further compromise",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "secretmanager.versions.access (roles/secretmanager.secretAccessor); often over-granted at project scope"
+  },
+  {
+    "id": "gcp-serverless-env-secrets",
+    "provider": "gcp",
+    "name": "Serverless env-var secret harvest",
+    "kill_chain_phase": "exfil",
+    "primitive": "Secrets embedded in Cloud Function / Cloud Run environment variables, readable via describe",
+    "class": "exploitation",
+    "achieved_effect": "read a function/service configuration (functions.get / run.services.get) and extracted plaintext secrets from its environment variables",
+    "detectable_by": [
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "medium",
+    "notes": "cloudfunctions.functions.get / run.services.get exposes env vars; secrets should use Secret Manager refs"
+  },
+  {
+    "id": "gcp-exposed-sa-key-scm",
+    "provider": "gcp",
+    "name": "Exposed service-account key (repo / .git / commit)",
+    "kill_chain_phase": "initial-access",
+    "primitive": "SA key JSON committed to a public repo, exposed .git directory, or file leak",
+    "class": "exploitation",
+    "achieved_effect": "authenticated with a leaked SA key JSON (gcloud auth activate-service-account) and confirmed access by calling an API as that SA",
+    "detectable_by": [
+      "gitleaks",
+      "trufflehog"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "private_key in key.json; Pwned Labs 'GitLab Commit' and exposed-.git labs"
+  },
+  {
+    "id": "gcp-metadata-sa-token",
+    "provider": "gcp",
+    "name": "Metadata server SA token theft from a foothold",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Attached instance/workload service account token readable from the link-local metadata endpoint after RCE/webshell/container access",
+    "class": "exploitation",
+    "achieved_effect": "retrieved an OAuth access token for the attached SA from 169.254.169.254 and used it to authenticate a googleapis call (e.g. list a bucket / whoami)",
+    "detectable_by": [],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "GET metadata/computeMetadata/v1/instance/service-accounts/default/token with Metadata-Flavor: Google; not SSRF-specific"
+  },
+  {
+    "id": "gcp-ssrf-gopher-metadata",
+    "provider": "gcp",
+    "name": "SSRF to metadata server (gopher header injection)",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Server-side request forgery reaching the metadata endpoint; gopher:// injects the required Metadata-Flavor header",
+    "class": "exploitation",
+    "achieved_effect": "coerced the app to fetch the metadata token endpoint (adding Metadata-Flavor via gopher) and exfiltrated the SA access token",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "gopher:// forges Metadata-Flavor: Google; Pwned Labs 'Exploit SSRF with Gopher' lab"
+  },
+  {
+    "id": "gcp-gke-node-metadata-cluster",
+    "provider": "gcp",
+    "name": "GKE pod to node/cluster via metadata",
+    "kill_chain_phase": "lateral",
+    "primitive": "Compromised pod reaches the node metadata server (Workload Identity/concealment off), stealing node SA token and kubelet bootstrap creds",
+    "class": "exploitation",
+    "achieved_effect": "from a pod, pulled the node SA token (and/or kubelet TLS bootstrap creds via CSR) from the metadata endpoint and used it to read cluster secrets / reach cluster-admin",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "node metadata computeMetadata/v1/instance/service-accounts; kubelet TLS bootstrap CSR to cluster-admin"
+  },
+  {
+    "id": "gcp-apikeys-create",
+    "provider": "gcp",
+    "name": "API key creation / harvest",
+    "kill_chain_phase": "persistence",
+    "primitive": "serviceusage.apiKeys.create/list yields API keys that may bypass some restrictions",
+    "class": "exploitation",
+    "achieved_effect": "created (or listed and reused) an API key and confirmed it authorized a restricted API call",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "low",
+    "severity": "medium",
+    "notes": "serviceusage.apiKeys.create / serviceusage.apiKeys.list"
+  },
+  {
+    "id": "gcp-storage-hmac-create",
+    "provider": "gcp",
+    "name": "GCS HMAC key creation for persistence",
+    "kill_chain_phase": "persistence",
+    "primitive": "storage.hmacKeys.create mints long-lived S3-style HMAC credentials for an SA",
+    "class": "exploitation",
+    "achieved_effect": "created an HMAC key for an SA and used the access-id/secret to reach Cloud Storage via the XML/S3 API, surviving token rotation",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "low",
+    "severity": "medium",
+    "notes": "storage.hmacKeys.create; Pwned Labs 'create HMAC' labs; interop XML API creds"
+  },
+  {
+    "id": "gcp-user-managed-sa-keys",
+    "provider": "gcp",
+    "name": "User-managed service-account keys present",
+    "kill_chain_phase": "persistence",
+    "primitive": "Long-lived user-managed SA keys exist instead of short-lived credentials/Workload Identity",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "medium",
+    "notes": "keyType USER_MANAGED on SAs; enforce constraints/iam.disableServiceAccountKeyCreation"
+  },
+  {
+    "id": "gcp-cloudbuild-create",
+    "provider": "gcp",
+    "name": "Cloud Build job SA abuse",
+    "kill_chain_phase": "privesc",
+    "primitive": "cloudbuild.builds.create runs build steps as the Cloud Build SA (historically Editor)",
+    "class": "exploitation",
+    "achieved_effect": "ran a build whose step read the Cloud Build SA's metadata token / performed a privileged action, yielding that SA's credentials",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "cloudbuild.builds.create; @cloudbuild.gserviceaccount.com; Pwned Labs 'Cloud Build for Privilege Escalation'"
+  },
+  {
+    "id": "gcp-cloudfunctions-create-actas",
+    "provider": "gcp",
+    "name": "Cloud Function deploy with privileged runtime SA",
+    "kill_chain_phase": "privesc",
+    "primitive": "cloudfunctions.functions.create + iam.serviceAccounts.actAs on a privileged runtime SA",
+    "class": "exploitation",
+    "achieved_effect": "deployed a function bound to a more-privileged runtime SA and invoked it to steal that SA's metadata token",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "cloudfunctions.functions.create + cloudfunctions.functions.setIamPolicy/actAs on runtime SA"
+  },
+  {
+    "id": "gcp-cloudfunctions-update",
+    "provider": "gcp",
+    "name": "Cloud Function code overwrite",
+    "kill_chain_phase": "privesc",
+    "primitive": "cloudfunctions.functions.update lets an attacker inject code into an existing function",
+    "class": "exploitation",
+    "achieved_effect": "overwrote an existing function's code and, on invocation, exfiltrated the function's runtime SA token",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "cloudfunctions.functions.update; inherits the existing (often privileged) runtime SA"
+  },
+  {
+    "id": "gcp-cloudrun-deploy-actas",
+    "provider": "gcp",
+    "name": "Cloud Run service deploy with privileged SA",
+    "kill_chain_phase": "privesc",
+    "primitive": "run.services.create + iam.serviceAccounts.actAs on a privileged runtime SA",
+    "class": "exploitation",
+    "achieved_effect": "deployed a Cloud Run service running as a more-privileged SA and pulled that SA's token from the container metadata endpoint",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "run.services.create + actAs; container reads metadata token of the assigned SA"
+  },
+  {
+    "id": "gcp-cloudscheduler-jobs-create",
+    "provider": "gcp",
+    "name": "Cloud Scheduler job as privileged SA",
+    "kill_chain_phase": "privesc",
+    "primitive": "cloudscheduler.jobs.create with an OAuth/OIDC target using a privileged SA",
+    "class": "exploitation",
+    "achieved_effect": "created a scheduler job that invoked an attacker endpoint with a privileged SA's OAuth/OIDC token, capturing the token",
+    "detectable_by": [],
+    "prevalence": "low",
+    "severity": "medium",
+    "notes": "cloudscheduler.jobs.create + actAs on target SA; oauthToken/oidcToken added to the request"
+  },
+  {
+    "id": "gcp-compute-instance-create-actas",
+    "provider": "gcp",
+    "name": "Compute instance create with privileged SA attached",
+    "kill_chain_phase": "privesc",
+    "primitive": "compute.instances.create + iam.serviceAccounts.actAs to attach a privileged SA to a new VM",
+    "class": "exploitation",
+    "achieved_effect": "launched a VM with a privileged SA attached and startup-script/SSH access, then read that SA's token from the VM metadata endpoint",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "compute.instances.create + actAs (+ setMetadata/osLogin for shell); token from instance metadata"
+  },
+  {
+    "id": "gcp-compute-setmetadata-ssh",
+    "provider": "gcp",
+    "name": "Add SSH key via instance setMetadata",
+    "kill_chain_phase": "privesc",
+    "primitive": "compute.instances.setMetadata (or project-level) injects an authorized SSH key the guest agent honors",
+    "class": "exploitation",
+    "achieved_effect": "added an ssh-keys metadata entry for a sudo user and logged into the VM, gaining a shell (and thus the instance SA token)",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "compute.instances.setMetadata ssh-keys; guest agent auto-creates sudo user; Pwned Labs 'SET metadata' lab"
+  },
+  {
+    "id": "gcp-default-sa-editor",
+    "provider": "gcp",
+    "name": "Default service account with Editor attached to workloads",
+    "kill_chain_phase": "privesc",
+    "primitive": "Compute/App Engine default SA retains roles/editor and is attached to VMs/functions",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "PROJECTNUM-compute@developer.gserviceaccount.com with Editor; any workload compromise inherits Editor"
+  },
+  {
+    "id": "gcp-deploymentmanager-create",
+    "provider": "gcp",
+    "name": "Deployment Manager runs as Google APIs SA",
+    "kill_chain_phase": "privesc",
+    "primitive": "deploymentmanager.deployments.create executes as the Google APIs SA (Editor) without needing actAs",
+    "class": "exploitation",
+    "achieved_effect": "submitted a Deployment Manager config that performed a privileged action (e.g. IAM binding / SA key) as the Editor-roled Google APIs SA",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "deploymentmanager.deployments.create; runs as PROJECTNUM@cloudservices.gserviceaccount.com, actAs not required"
+  },
+  {
+    "id": "gcp-gke-legacy-metadata",
+    "provider": "gcp",
+    "name": "GKE legacy metadata / Workload Identity disabled",
+    "kill_chain_phase": "privesc",
+    "primitive": "Legacy metadata endpoints enabled or metadata concealment / Workload Identity not configured",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "node config metadata.disable-legacy-endpoints / workloadMetadataConfig=GKE_METADATA; enable Workload Identity"
+  },
+  {
+    "id": "gcp-iam-roles-update",
+    "provider": "gcp",
+    "name": "Custom role permission injection",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal can edit a custom role they are already granted (iam.roles.update)",
+    "class": "exploitation",
+    "achieved_effect": "added a high-value permission to a custom role bound to the attacker and confirmed the new permission became usable",
+    "detectable_by": [],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "iam.roles.update on an assigned custom role; silent expansion of own grants"
+  },
+  {
+    "id": "gcp-orgpolicy-set",
+    "provider": "gcp",
+    "name": "Org policy constraint disable",
+    "kill_chain_phase": "privesc",
+    "primitive": "orgpolicy.policy.set lets an attacker relax security constraints (e.g. disableServiceAccountKeyCreation)",
+    "class": "exploitation",
+    "achieved_effect": "modified an org policy constraint (e.g. lifted SA-key-creation or public-IAM restriction) and confirmed the previously blocked action now succeeds",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "orgpolicy.policy.set on constraints/iam.* ; enables downstream privesc/persistence"
+  },
+  {
+    "id": "gcp-oslogin-osadminlogin-ssh",
+    "provider": "gcp",
+    "name": "OS Login SSH via osAdminLogin + actAs",
+    "kill_chain_phase": "privesc",
+    "primitive": "roles/compute.osAdminLogin plus iam.serviceAccounts.actAs on the VM's SA grants sudo SSH",
+    "class": "exploitation",
+    "achieved_effect": "SSH'd into an OS Login VM with sudo (osAdminLogin) and obtained a root shell plus the attached SA's metadata token",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "compute.instances.osAdminLogin + actAs on instance SA (checked on every connect)"
+  },
+  {
+    "id": "gcp-project-setiampolicy",
+    "provider": "gcp",
+    "name": "Project IAM policy self-grant",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal can set the project IAM policy (resourcemanager.projects.setIamPolicy)",
+    "class": "exploitation",
+    "achieved_effect": "added a binding granting the attacker identity roles/owner (or editor) on the project and confirmed the elevated role took effect",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "resourcemanager.projects.setIamPolicy; folder/org setIamPolicy variants are equivalent higher up"
+  },
+  {
+    "id": "gcp-sa-getopenidtoken",
+    "provider": "gcp",
+    "name": "OIDC identity token minting via getOpenIdToken",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal can mint OIDC ID tokens for a target SA (iam.serviceAccounts.getOpenIdToken)",
+    "class": "exploitation",
+    "achieved_effect": "minted an OIDC ID token for the target SA and used it to invoke an OIDC-gated resource (IAP-protected app, authenticated Cloud Run/Function)",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "iam.serviceAccounts.getOpenIdToken; audience-scoped ID token for IAP/Run/Functions auth"
+  },
+  {
+    "id": "gcp-sa-impersonation-getaccesstoken",
+    "provider": "gcp",
+    "name": "Service account impersonation via getAccessToken",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal holds Token Creator (iam.serviceAccounts.getAccessToken) over a more-privileged SA",
+    "class": "exploitation",
+    "achieved_effect": "generated an OAuth access token for the target SA via iam.serviceAccounts.getAccessToken and used it to perform an action the caller could not (e.g. list a bucket / read a secret)",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "iam.serviceAccounts.getAccessToken (roles/iam.serviceAccountTokenCreator); gcloud --impersonate-service-account"
+  },
+  {
+    "id": "gcp-sa-implicit-delegation",
+    "provider": "gcp",
+    "name": "Implicit delegation token chaining",
+    "kill_chain_phase": "privesc",
+    "primitive": "Token Creator on an intermediary SA that itself holds Token Creator on a privileged SA (delegation chain)",
+    "class": "exploitation",
+    "achieved_effect": "chained iam.serviceAccounts.implicitDelegation through an intermediary SA to generate an access token for the final privileged SA",
+    "detectable_by": [],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "iam.serviceAccounts.implicitDelegation via delegates[] in generateAccessToken; Pwned Labs 'Implicit Delegation' lab"
+  },
+  {
+    "id": "gcp-sa-key-create",
+    "provider": "gcp",
+    "name": "Service-account user-managed key creation",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal can create long-lived keys for a target SA (iam.serviceAccountKeys.create)",
+    "class": "exploitation",
+    "achieved_effect": "created a new user-managed key for the target SA and authenticated with it to act as that SA (also a persistence primitive)",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "iam.serviceAccountKeys.create (roles/iam.serviceAccountKeyAdmin); non-expiring credential"
+  },
+  {
+    "id": "gcp-sa-setiampolicy",
+    "provider": "gcp",
+    "name": "Service-account IAM policy self-grant",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal can set the IAM policy on a target SA (iam.serviceAccounts.setIamPolicy)",
+    "class": "exploitation",
+    "achieved_effect": "granted the attacker Token Creator on the target SA via setIamPolicy, then impersonated it to obtain an access token",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "iam.serviceAccounts.setIamPolicy; two-step self-grant then getAccessToken"
+  },
+  {
+    "id": "gcp-sa-signblob",
+    "provider": "gcp",
+    "name": "Blob signing to forge credentials via signBlob",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal can sign arbitrary bytes with a target SA's key (iam.serviceAccounts.signBlob)",
+    "class": "exploitation",
+    "achieved_effect": "used iam.serviceAccounts.signBlob to sign a hand-built JWT/assertion for the target SA and exchanged it for that SA's access token",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "iam.serviceAccounts.signBlob; also enables signed-URL forgery for GCS objects"
+  },
+  {
+    "id": "gcp-sa-signjwt",
+    "provider": "gcp",
+    "name": "JWT forgery via signJwt",
+    "kill_chain_phase": "privesc",
+    "primitive": "Principal can sign JWTs with a target SA's Google-managed key (iam.serviceAccounts.signJwt)",
+    "class": "exploitation",
+    "achieved_effect": "signed a self-crafted JWT assertion as the target SA and exchanged it at the OAuth token endpoint for that SA's access token",
+    "detectable_by": [
+      "prowler",
+      "scout-suite"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "iam.serviceAccounts.signJwt; Pwned Labs 'Pivot Through Service Accounts' (signJWT) lab"
+  },
+  {
+    "id": "gcp-bucket-name-bruteforce",
+    "provider": "gcp",
+    "name": "Unauthenticated GCS bucket name brute-force",
+    "kill_chain_phase": "recon",
+    "primitive": "Predictable/enumerable Cloud Storage bucket names in the global namespace",
+    "class": "exploitation",
+    "achieved_effect": "resolved an existing GCS bucket by name and confirmed anonymous list/read (or a permission oracle) against it without credentials",
+    "detectable_by": [],
+    "prevalence": "high",
+    "severity": "medium",
+    "notes": "GCPBucketBrute/ffuf against storage.googleapis.com; probes storage.objects.list / storage.buckets.get as allUsers"
+  },
+  {
+    "id": "gcp-gcs-public-access",
+    "provider": "gcp",
+    "name": "Publicly accessible GCS bucket (allUsers/allAuthenticatedUsers)",
+    "kill_chain_phase": "recon",
+    "primitive": "Bucket IAM/ACL grants allUsers or allAuthenticatedUsers read/list/write",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "prowler",
+      "scout-suite",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "IAM member allUsers/allAuthenticatedUsers on roles/storage.objectViewer; enforce uniform bucket-level access + public-access-prevention"
+  },
+  {
+    "id": "k8s-anonymous-api-access",
+    "provider": "k8s",
+    "name": "Anonymous / unauthenticated API server access",
+    "kill_chain_phase": "enum",
+    "primitive": "kube-apiserver --anonymous-auth=true and/or a (Cluster)RoleBinding granting a real Role to system:anonymous or the system:unauthenticated group",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "kube-bench",
+      "kube-hunter",
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "CIS 1.2.1; subjects kind=Group name=system:unauthenticated / user system:anonymous"
+  },
+  {
+    "id": "k8s-etcd-unencrypted-secrets-posture",
+    "provider": "k8s",
+    "name": "Secrets not encrypted at rest",
+    "kill_chain_phase": "enum",
+    "primitive": "No EncryptionConfiguration (--encryption-provider-config) on the API server",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "kube-bench"
+    ],
+    "prevalence": "medium",
+    "severity": "medium",
+    "notes": "CIS 3.1.1; Secrets stored base64-only in etcd"
+  },
+  {
+    "id": "k8s-secrets-in-env-configmap-posture",
+    "provider": "k8s",
+    "name": "Secrets in env vars / plaintext ConfigMaps",
+    "kill_chain_phase": "enum",
+    "primitive": "Credentials in container env values or plaintext ConfigMap data instead of Secrets",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "checkov",
+      "kubescape"
+    ],
+    "prevalence": "high",
+    "severity": "medium",
+    "notes": "readable via get on pods/configmaps; env value exposes secret in spec"
+  },
+  {
+    "id": "k8s-etcd-unauthenticated",
+    "provider": "k8s",
+    "name": "Unauthenticated etcd exposure (2379)",
+    "kill_chain_phase": "exfil",
+    "primitive": "etcd on 2379 without --client-cert-auth (no mutual TLS)",
+    "class": "exploitation",
+    "achieved_effect": "read every cluster Secret and ServiceAccount token straight from etcd on 2379 with no client cert (read == fast cluster-admin escalation)",
+    "detectable_by": [
+      "kube-bench",
+      "kube-hunter"
+    ],
+    "prevalence": "low",
+    "severity": "critical",
+    "notes": "etcdctl get / --prefix; --client-cert-auth=false (CIS 2.x)"
+  },
+  {
+    "id": "k8s-anonymous-api-abuse",
+    "provider": "k8s",
+    "name": "Anonymous API read/write abuse",
+    "kill_chain_phase": "initial-access",
+    "primitive": "Unauthenticated request to the API server (system:anonymous) against an over-permissive anonymous binding",
+    "class": "exploitation",
+    "achieved_effect": "as system:anonymous, listed/read Secrets or namespaces or created a workload via the API server without any credential",
+    "detectable_by": [
+      "kube-hunter"
+    ],
+    "prevalence": "low",
+    "severity": "critical",
+    "notes": "e.g. curl -k https://api:6443/api/v1/secrets with no bearer token"
+  },
+  {
+    "id": "k8s-gke-metadata-kubeenv",
+    "provider": "k8s",
+    "name": "GKE metadata -> kube-env kubelet creds",
+    "kill_chain_phase": "lateral",
+    "primitive": "GCE metadata reachable from pod without Workload Identity / metadata concealment",
+    "class": "exploitation",
+    "achieved_effect": "queried GCE metadata from a pod to read kube-env and bootstrap the kubelet's TLS credentials, then escalated in the cluster",
+    "detectable_by": [],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "GKE Workload Identity / Metadata concealment disabled; also AKS IMDS analogue"
+  },
+  {
+    "id": "k8s-kubelet-anonymous-exec",
+    "provider": "k8s",
+    "name": "Kubelet 10250 anonymous exec",
+    "kill_chain_phase": "lateral",
+    "primitive": "Kubelet secure port 10250 with --anonymous-auth=true or --authorization-mode=AlwaysAllow",
+    "class": "exploitation",
+    "achieved_effect": "used the anonymous kubelet API (/run/*, /exec) on 10250 to run arbitrary commands inside a pod's container on the node",
+    "detectable_by": [
+      "kube-bench",
+      "kube-hunter"
+    ],
+    "prevalence": "low",
+    "severity": "critical",
+    "notes": "CIS 4.2.1/4.2.2; kube-hunter KHV052; 10250 is HTTPS, AlwaysAllow = RCE"
+  },
+  {
+    "id": "k8s-nodes-proxy-kubelet",
+    "provider": "k8s",
+    "name": "nodes/proxy to reach kubelet via API",
+    "kill_chain_phase": "lateral",
+    "primitive": "get/create on nodes/proxy subresource",
+    "class": "exploitation",
+    "achieved_effect": "proxied through the API server's nodes/proxy to the kubelet and executed commands in a pod",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "low",
+    "severity": "high",
+    "notes": "verb on nodes/proxy; API-mediated kubelet exec"
+  },
+  {
+    "id": "k8s-pod-imds-node-role",
+    "provider": "k8s",
+    "name": "Pod -> cloud IMDS -> node IAM role (EKS)",
+    "kill_chain_phase": "lateral",
+    "primitive": "Pod egress to 169.254.169.254 not blocked; IMDSv2 hop-limit not enforced",
+    "class": "exploitation",
+    "achieved_effect": "reached the cloud IMDS from a pod, retrieved the node instance/IAM role credentials, and called cloud APIs as the node role",
+    "detectable_by": [
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "EKS node IAM role; IMDSv2 hop-limit=1 / NetworkPolicy on 169.254.169.254 mitigates"
+  },
+  {
+    "id": "k8s-pods-exec-token-steal",
+    "provider": "k8s",
+    "name": "pods/exec into higher-privilege pod",
+    "kill_chain_phase": "lateral",
+    "primitive": "create on pods/exec subresource",
+    "class": "exploitation",
+    "achieved_effect": "exec'd into a pod running a more privileged SA and read its mounted token at /var/run/secrets/kubernetes.io/serviceaccount/token",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "verb create on pods/exec (also pods/attach)"
+  },
+  {
+    "id": "k8s-persistence-clusterrolebinding-backdoor",
+    "provider": "k8s",
+    "name": "ClusterRoleBinding cluster-admin backdoor",
+    "kill_chain_phase": "persistence",
+    "primitive": "create on clusterrolebindings (rbac.authorization.k8s.io)",
+    "class": "exploitation",
+    "achieved_effect": "created a ClusterRoleBinding binding cluster-admin to an attacker-controlled ServiceAccount/user for durable cluster access",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "ClusterRoleBinding -> cluster-admin; also malicious mutating webhook as an alternative persistence primitive"
+  },
+  {
+    "id": "k8s-added-capabilities-posture",
+    "provider": "k8s",
+    "name": "Dangerous added Linux capabilities",
+    "kill_chain_phase": "privesc",
+    "primitive": "securityContext.capabilities.add includes SYS_ADMIN / SYS_PTRACE / NET_ADMIN / DAC_READ_SEARCH",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "checkov",
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "CAP_SYS_ADMIN enables cgroup/mount-based escape primitives"
+  },
+  {
+    "id": "k8s-create-hostpath-pod-node-read",
+    "provider": "k8s",
+    "name": "Create hostPath pod -> read node filesystem",
+    "kill_chain_phase": "privesc",
+    "primitive": "create on pods with hostPath volume of / or /var/lib/kubelet",
+    "class": "exploitation",
+    "achieved_effect": "created a pod mounting hostPath / and read the node filesystem, incl. kubelet kubeconfig and other pods' mounted secrets",
+    "detectable_by": [
+      "kubescape",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "volumes.hostPath.path: / ; harvests /var/lib/kubelet/pods/*/volumes/*/token"
+  },
+  {
+    "id": "k8s-create-hostpid-pod-escape",
+    "provider": "k8s",
+    "name": "Create hostPID pod -> nsenter host escape",
+    "kill_chain_phase": "privesc",
+    "primitive": "create on pods with hostPID:true (+ privileged)",
+    "class": "exploitation",
+    "achieved_effect": "ran a hostPID+privileged pod and used nsenter against host PID 1 to obtain a root shell on the node",
+    "detectable_by": [
+      "kubescape",
+      "checkov"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "hostPID:true + nsenter -t 1 -m -u -i -n"
+  },
+  {
+    "id": "k8s-create-privileged-pod-escape",
+    "provider": "k8s",
+    "name": "Create privileged pod -> node escape",
+    "kill_chain_phase": "privesc",
+    "primitive": "create on pods with securityContext.privileged=true allowed",
+    "class": "exploitation",
+    "achieved_effect": "scheduled a privileged:true pod and broke out to the node root filesystem / host runtime",
+    "detectable_by": [
+      "kubescape",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "privileged container == root on node; blocked by PSA restricted"
+  },
+  {
+    "id": "k8s-docker-sock-mount-escape",
+    "provider": "k8s",
+    "name": "Container runtime socket mount escape",
+    "kill_chain_phase": "privesc",
+    "primitive": "Mounted /var/run/docker.sock or containerd socket inside a container",
+    "class": "exploitation",
+    "achieved_effect": "used the mounted docker/containerd socket to launch a new privileged container on the host and escape to the node",
+    "detectable_by": [
+      "checkov",
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "docker -H unix:///var/run/docker.sock run --privileged -v /:/host"
+  },
+  {
+    "id": "k8s-host-namespaces-posture",
+    "provider": "k8s",
+    "name": "Host namespace sharing (hostNetwork/PID/IPC)",
+    "kill_chain_phase": "privesc",
+    "primitive": "Pod spec sets hostNetwork:true / hostPID:true / hostIPC:true",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "checkov",
+      "kubescape",
+      "kube-bench"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "hostNetwork also exposes node-local services incl. IMDS"
+  },
+  {
+    "id": "k8s-hostpath-sensitive-mount-posture",
+    "provider": "k8s",
+    "name": "Sensitive hostPath mount",
+    "kill_chain_phase": "privesc",
+    "primitive": "Pod mounts a sensitive hostPath (/, /var/run/docker.sock, /run/containerd, /var/lib/kubelet, /etc)",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "checkov",
+      "kubescape"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "static volumes.hostPath of node-sensitive paths"
+  },
+  {
+    "id": "k8s-no-admission-control-posture",
+    "provider": "k8s",
+    "name": "Missing Pod Security admission / policy engine",
+    "kill_chain_phase": "privesc",
+    "primitive": "No Pod Security Admission (baseline/restricted), no PSP, no OPA-Gatekeeper/Kyverno restricting privileged/hostPath/hostNamespace pods",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "kubescape",
+      "checkov",
+      "kube-bench"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "nothing blocks the create-privileged/hostPath/hostPID escapes above"
+  },
+  {
+    "id": "k8s-privileged-container-posture",
+    "provider": "k8s",
+    "name": "Privileged container running",
+    "kill_chain_phase": "privesc",
+    "primitive": "Workload with securityContext.privileged=true or allowPrivilegeEscalation=true",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "checkov",
+      "kubescape",
+      "kube-bench"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "static manifest flag; PSA restricted / OPA would deny"
+  },
+  {
+    "id": "k8s-proc-cgroup-escape",
+    "provider": "k8s",
+    "name": "cgroup release_agent / proc host escape",
+    "kill_chain_phase": "privesc",
+    "primitive": "Privileged or CAP_SYS_ADMIN container with writable host cgroup / /proc",
+    "class": "exploitation",
+    "achieved_effect": "abused the cgroup v1 release_agent (or /proc/sys/kernel/core_pattern) to execute a payload as root on the host",
+    "detectable_by": [
+      "checkov",
+      "kubescape"
+    ],
+    "prevalence": "low",
+    "severity": "critical",
+    "notes": "requires privileged/CAP_SYS_ADMIN + host cgroupfs write"
+  },
+  {
+    "id": "k8s-rbac-bind-verb",
+    "provider": "k8s",
+    "name": "RBAC 'bind' verb + create rolebindings",
+    "kill_chain_phase": "privesc",
+    "primitive": "bind verb on roles/clusterroles plus create on (cluster)rolebindings",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "lets subject bind cluster-admin to itself (rbac.authorization.k8s.io)"
+  },
+  {
+    "id": "k8s-rbac-escalate-verb",
+    "provider": "k8s",
+    "name": "RBAC 'escalate' verb on roles",
+    "kill_chain_phase": "privesc",
+    "primitive": "escalate verb on roles/clusterroles (rbac.authorization.k8s.io)",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "bypasses the built-in privilege-escalation guard; subject can grant itself any permission"
+  },
+  {
+    "id": "k8s-rbac-impersonate",
+    "provider": "k8s",
+    "name": "RBAC 'impersonate' to system:masters",
+    "kill_chain_phase": "privesc",
+    "primitive": "impersonate verb on users/groups/serviceaccounts",
+    "class": "exploitation",
+    "achieved_effect": "sent Impersonate-User/Impersonate-Group headers to act as a privileged user or the system:masters group and performed a cluster-admin action",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "critical",
+    "notes": "kubectl --as / --as-group=system:masters"
+  },
+  {
+    "id": "k8s-rbac-secrets-read-token-theft",
+    "provider": "k8s",
+    "name": "Secrets get/list -> SA token theft",
+    "kill_chain_phase": "privesc",
+    "primitive": "get/list on secrets (core apiGroup \"\")",
+    "class": "exploitation",
+    "achieved_effect": "read another ServiceAccount's token from a Secret and re-authenticated to the API as that higher-privileged SA",
+    "detectable_by": [
+      "kubescape",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "high",
+    "notes": "verb get/list on secrets; legacy SA-token Secrets are readable plaintext-base64"
+  },
+  {
+    "id": "k8s-rbac-wildcard-permissions",
+    "provider": "k8s",
+    "name": "Wildcard / cluster-admin RBAC on low-trust identity",
+    "kill_chain_phase": "privesc",
+    "primitive": "Role/ClusterRole with apiGroups:['*'] resources:['*'] verbs:['*'] (or cluster-admin) bound to a low-trust SA/user",
+    "class": "posture",
+    "achieved_effect": "",
+    "detectable_by": [
+      "kubescape",
+      "checkov"
+    ],
+    "prevalence": "high",
+    "severity": "critical",
+    "notes": "kubectl-who-can / rbac scanners flag wildcard rules and cluster-admin bindings"
+  },
+  {
+    "id": "k8s-sa-tokenrequest-mint",
+    "provider": "k8s",
+    "name": "TokenRequest minting for a privileged SA",
+    "kill_chain_phase": "privesc",
+    "primitive": "create on serviceaccounts/token subresource",
+    "class": "exploitation",
+    "achieved_effect": "used the TokenRequest API to mint a valid bearer token for a privileged ServiceAccount and authenticated as it",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "kubectl create token <sa>; create on serviceaccounts/token"
+  },
+  {
+    "id": "k8s-workload-controller-privesc",
+    "provider": "k8s",
+    "name": "Workload-controller pod-spec privesc",
+    "kill_chain_phase": "privesc",
+    "primitive": "create on deployments/daemonsets/statefulsets/jobs/cronjobs (apps/batch) without pods create",
+    "class": "exploitation",
+    "achieved_effect": "lacking pods-create, created a controller whose pod template runs a privileged/hostPath pod, letting the controller spawn it on nodes",
+    "detectable_by": [
+      "kubescape"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "bypasses a pods-only RBAC restriction via apps/batch controllers"
+  },
+  {
+    "id": "k8s-kubelet-read-only-port",
+    "provider": "k8s",
+    "name": "Kubelet read-only port (10255) information disclosure",
+    "kill_chain_phase": "recon",
+    "primitive": "Kubelet --read-only-port=10255 reachable, no auth on /pods",
+    "class": "exploitation",
+    "achieved_effect": "pulled running pod specs and container env from kubelet 10255 /pods, harvesting embedded credentials/config",
+    "detectable_by": [
+      "kube-bench",
+      "kube-hunter"
+    ],
+    "prevalence": "medium",
+    "severity": "high",
+    "notes": "CIS 4.2.4; set --read-only-port=0"
+  }
+]
