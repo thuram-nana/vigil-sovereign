@@ -2375,7 +2375,7 @@ def _cloud_is_anon_principal(p: Any) -> bool:
     return norm in {a.replace("-", "").replace("_", "") for a in _CLOUD_ANON_PRINCIPALS}
 
 
-def _canon_account_token(value: Any) -> str | None:
+def _canon_account_token(value: Any, *, bare_ok: bool = False) -> str | None:
     """Canonicalise a cloud principal OR an owner token into a NAMESPACED account token — the sound unit the
     cross-account rule (P4) compares. Applied to BOTH the grantee principal AND the charter-threaded owner
     token, so they are always compared in the SAME namespace (the red-pen BLOCK-1 fix: a project owner is
@@ -2388,9 +2388,14 @@ def _canon_account_token(value: Any) -> str | None:
     account, a Google-managed SA carrying no project, a labelled/opaque/leading-zero-dropped token) — so the
     rule NEVER fires on an un-attributable account (an unknown is never guessed cross-account, near-zero-FP).
 
-    Accepts, for owner tokens, an EXPLICIT namespace prefix (``aws:`` / ``project:`` / ``domain:``) so a
-    charter can be unambiguous; a bare token is inferred as AWS (12-digit), a domain (dotted), or a GCP
-    project (the GCP id shape) in that order — a bare token that fits none is ``None`` (unusable, not guessed)."""
+    Accepts an EXPLICIT namespace prefix (``aws:`` / ``project:`` / ``domain:``) and every STRUCTURED form
+    (a 12-digit id, an ARN, a GCP ``serviceAccount:``/``user:``/``group:``/``domain:`` member). ``bare_ok``
+    additionally infers a BARE (unprefixed) ``<fqdn>`` → domain / ``<gcp-id>`` → project — this is enabled
+    ONLY for a TRUSTED owner token, NEVER for a resource-policy PRINCIPAL (attacker-influenced): a bare FQDN
+    on the principal side is an AWS service principal (``cloudtrail.amazonaws.com``), an OIDC issuer
+    (``token.actions.githubusercontent.com``), or an IP — none is a cross-account trust, and a real external
+    GCP domain grant always carries a member-type prefix (handled above), so refusing a bare-FQDN principal
+    loses no true-positive (red-pen BLOCK-3). A token that fits none is ``None`` (unusable, never guessed)."""
     s = _coerce_text(value).strip()
     if not s:
         return None
@@ -2418,11 +2423,14 @@ def _canon_account_token(value: Any) -> str | None:
     m = _GCP_MEMBER_RE.match(low)
     if m:
         return "domain:" + m.group("domain")
-    # A bare owner token: a dotted DOMAIN, else a GCP PROJECT id shape, else un-attributable.
-    if _DOMAIN_RE.match(low):
-        return "domain:" + low
-    if _GCP_PROJECT_RE.match(low):
-        return "project:" + low
+    # A BARE (unprefixed) token is inferred as a domain/project ONLY for a trusted OWNER token — never for an
+    # attacker-influenced principal (red-pen BLOCK-3: a bare FQDN principal is a service principal / OIDC
+    # issuer / IP, not a cross-account trust; a real external domain grant carries a member-type prefix above).
+    if bare_ok:
+        if _DOMAIN_RE.match(low):
+            return "domain:" + low
+        if _GCP_PROJECT_RE.match(low):
+            return "project:" + low
     return None
 
 
@@ -2454,7 +2462,7 @@ def _cloud_owner_accounts(control: Mapping[str, Any]) -> set[str]:
         if isinstance(many, (list, tuple)):
             candidates.extend(many[:_CLOUD_MAX_PRINCIPALS])
         for a in candidates:
-            tok = _canon_account_token(a)
+            tok = _canon_account_token(a, bare_ok=True)   # owner tokens are TRUSTED (charter-supplied)
             if tok:
                 out.add(tok)
     return out
@@ -2586,7 +2594,7 @@ def cloud_posture_oracle(observed_control: Any) -> OracleSignal:
         for p in state["principals"]:
             if _cloud_is_anon_principal(p):
                 continue  # a wildcard/anonymous grantee is rule 3's job, not a named cross-account grant
-            acct = _canon_account_token(p)
+            acct = _canon_account_token(p, bare_ok=False)  # a PRINCIPAL is untrusted: no bare-FQDN inference
             if acct is None:
                 continue  # an un-attributable principal is never guessed cross-account (stays a lead)
             # NAMESPACE AGREEMENT (red-pen BLOCK-1): only compare within the SAME namespace. If NO owner

@@ -363,6 +363,23 @@ def test_neg_owner_prefixed_and_bare_forms_canonicalise_identically() -> None:
         assert not cloud_posture_oracle(ctl).fired, f"owner form {owner!r} must read as same-account"
 
 
+def test_neg_bare_fqdn_service_principal_never_fires_even_with_domain_owner() -> None:
+    # BLOCK-3 (fix-of-the-fix): a resource-policy PRINCIPAL is attacker-influenced; a BARE FQDN there is an
+    # AWS service principal / OIDC issuer / IP — NOT a cross-account trust. Bare inference is owner-only, so
+    # these must NOT fire even when a domain-namespace owner token is present (which shares their namespace
+    # were they mis-classified). A real external domain grant carries a user:/group:/domain: prefix.
+    for benign in ("cloudtrail.amazonaws.com", "s3.amazonaws.com", "token.actions.githubusercontent.com",
+                   "accounts.google.com", "cognito-identity.amazonaws.com", "10.0.0.5"):
+        ctl = {"resource_id": "acme-logs", "provider": "aws",
+               "owner_accounts": ["111122223333", "acme.com"],   # a domain owner IS present
+               "grants": [{"principal": benign, "access": "write"}]}
+        assert not cloud_posture_oracle(ctl).fired, f"bare service/OIDC principal {benign!r} must not fire"
+    # MUTATION-VERIFIED: the SAME external domain, but as a PREFIXED GCP member, IS a real cross-domain grant
+    real = {"resource_id": "r", "provider": "gcp", "owner_accounts": ["acme.com"],
+            "grants": [{"principal": "user:mallory@evil.com"}]}
+    assert cloud_posture_oracle(real).fired
+
+
 def test_neg_unusable_owner_token_stays_lead() -> None:
     # BLOCK-2: a labelled or leading-zero-dropped-numeric owner token will NOT canonicalise -> it is dropped
     # -> empty owner set -> LEAD even for an EXTERNAL grant (never a false FACT off a lossy owner token).
