@@ -899,9 +899,13 @@ class FindingContext(BaseModel):
         yet the same verdict re-verifies offline. The AWS ``AccessKeyId`` and the confirming call's
         identity echo (``Arn`` / 12-digit ``Account`` / ``UserId`` / ``email`` / ``sub``) are IDENTIFIERS,
         not secrets (they appear in CloudTrail), so they are retained verbatim — they are load-bearing for
-        the structural + authentication proof. The ``source`` url is retained (the discriminator that a
-        credential came from the metadata endpoint, not an env var). Verbose scanner prose is never
-        laundered in. JSON-safe + deterministic (re-verifies offline)."""
+        the structural + authentication proof. The ``source`` url is retained verbatim (the oracle parses it
+        with ``urllib.parse.urlsplit`` and requires its HOST — not a substring of the raw string — to be the
+        metadata endpoint, so a userinfo-@/query-param/rebind host or a creds-file path is NOT an IMDS
+        reach). A failure marker in the confirming call's body (error/errors/message/code/__type/Fault) is
+        also retained so a FAILED call re-verifies as NON-firing (the mint-side failure gate is mirrored at
+        re-execution). Verbose scanner prose is never laundered in. JSON-safe + deterministic (re-verifies
+        offline)."""
         src = dict(capture or {})
         cred_src: Mapping[str, Any] = src
         for k in ("credential", "creds", "credentials"):
@@ -978,10 +982,13 @@ class FindingContext(BaseModel):
                 if body_src.get(kk) not in (None, ""):
                     resp[kk] = body_src.get(kk)
                     break
-            # Retain a truthy error marker so a FAILED confirming call stays non-firing on re-verify.
+            # Retain a truthy error marker so a FAILED confirming call stays non-firing on re-verify — the
+            # full failure allowlist (AWS JSON __type+message, Error/Code/Message/Fault, generic error(s))
+            # MUST match the oracle's `_IMDS_ERROR_KEYS` so the mint-side gate is mirrored at re-execution.
             for kk in list(body_src.keys()):
                 if (str(kk).strip().lower() in
-                        {"error", "errormessage", "error_message", "errorcode", "error_code"}
+                        {"error", "errors", "errormessage", "error_message", "errorcode",
+                         "error_code", "message", "code", "__type", "fault"}
                         and body_src.get(kk)):
                     resp[_coerce_text(kk)] = _coerce_text(body_src.get(kk))
             if resp:

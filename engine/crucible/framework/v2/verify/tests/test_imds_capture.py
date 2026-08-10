@@ -102,6 +102,48 @@ def test_akia_long_term_key_also_matches_the_shape_when_from_imds() -> None:
     assert imds_credential_capture_oracle(cap).fired
 
 
+# ---- S1 RECALL: SSRF IP encodings of the metadata host are a GENUINE IMDS reach and MUST fire ----
+
+# 169.254.169.254 == 0xA9FEA9FE == 2852039166; ::ffff:a9fe:a9fe is its IPv4-mapped IPv6 form. An
+# attacker reaches IMDS via any of these to dodge naive string filters — the reach is still real.
+_IMDS_IP_ENCODINGS = (
+    "http://2852039166/latest/meta-data/iam/security-credentials/role",           # 32-bit decimal
+    "http://0xA9FEA9FE/latest/meta-data/iam/security-credentials/role",           # hex literal
+    "http://[::ffff:a9fe:a9fe]/latest/meta-data/iam/security-credentials/role",   # IPv6-mapped
+)
+
+
+def test_fires_on_ssrf_ip_encodings_of_the_metadata_host() -> None:
+    for src in _IMDS_IP_ENCODINGS:
+        cap = copy.deepcopy(_AWS_CAP)
+        cap["credential"]["source"] = src
+        sig = imds_credential_capture_oracle(cap)
+        assert sig.fired, f"IP-encoding must fire (genuine IMDS reach): {src!r}"
+        assert sig.observed["reason"] == "imds_credential_authenticated"
+        # MUTATION-VERIFIED the other way: a host that merely CONTAINS the encoded IP does NOT fire.
+        rebind = copy.deepcopy(cap)
+        rebind["credential"]["source"] = "http://2852039166.attacker.com/iam/security-credentials/role"
+        assert not imds_credential_capture_oracle(rebind).fired
+
+
+def test_fires_on_gcp_bare_metadata_host_and_userinfo_without_expiry() -> None:
+    # the bare `metadata` host is the compute-metadata endpoint too (host-equality, not substring).
+    bare = copy.deepcopy(_GCP_CAP)
+    bare["credential"]["source"] = \
+        "http://metadata/computeMetadata/v1/instance/service-accounts/default/token"
+    assert imds_credential_capture_oracle(bare).fired
+    # S3: a userinfo echo (email/sub, NO expiry) + lowercase token_type "bearer" still fires — the
+    # docstring already claims userinfo, whose response omits an expiry.
+    userinfo = copy.deepcopy(_GCP_CAP)
+    userinfo["credential"]["token_type"] = "bearer"
+    userinfo["confirming_call"]["action"] = "userinfo"
+    userinfo["confirming_call"]["response"] = {"email": "app-sa@my-project.iam.gserviceaccount.com",
+                                               "sub": "104567890123456789012"}
+    sig = imds_credential_capture_oracle(userinfo)
+    assert sig.fired and sig.observed["reason"] == "imds_credential_authenticated"
+    assert sig.observed["identity"] == "app-sa@my-project.iam.gserviceaccount.com"
+
+
 # ---- MANDATORY negative controls (each mutation-verified) --------------------
 
 
@@ -166,9 +208,10 @@ def test_negative_control_d_random_json_blob() -> None:
 
 
 def test_negative_control_e_credential_not_from_the_metadata_endpoint() -> None:
-    # (e) a normal, fully-VALID, authenticating AWS key whose source is an env var — NOT IMDS. Even with
-    # a successful GetCallerIdentity it must NOT be mistaken for an IMDS capture: the metadata-endpoint
-    # source is the load-bearing discriminator.
+    # (e) a normal, fully-VALID, authenticating AWS key whose source is an env var — NOT a URL, so it has
+    # no HOST that identifies the metadata endpoint. Even with a successful GetCallerIdentity it must NOT be
+    # mistaken for an IMDS capture: the load-bearing discriminator is that the source URL's HOST resolves to
+    # the metadata endpoint (169.254.169.254) — an env var / creds file / non-IMDS host never qualifies.
     control = {
         "provider": "aws",
         "credential": {
@@ -189,6 +232,70 @@ def test_negative_control_e_credential_not_from_the_metadata_endpoint() -> None:
     assert imds_credential_capture_oracle(fired).fired
 
 
+# ---- the RED-PEN BLOCK: substring containment falsely fired these; a HOST check must reject them -----
+
+# Each is a full, valid, authenticating AWS credential+call whose ONLY defect is a forged source that a
+# naive `"169.254.169.254" in source and "iam/security-credentials" in source` check accepts but whose
+# real host is NOT the metadata endpoint (or which is not a URL at all).
+_BLOCK_SOURCES = (
+    # userinfo-@ bypass: urlsplit host is evil.com, the IP is only the username.
+    "http://169.254.169.254@evil.com/latest/meta-data/iam/security-credentials/role",
+    # SSRF-proxy: host is evil.com, the IP + marker live only in the QUERY.
+    "http://evil.com/proxy?u=http://169.254.169.254/iam/security-credentials",
+    # rebind: the host merely CONTAINS the IP as a label under an attacker domain.
+    "http://169.254.169.254.attacker.com/iam/security-credentials/role",
+    # a CREDS FILE on disk, not a URL — no host at all.
+    "/home/user/.aws/169.254.169.254-iam/security-credentials.txt",
+    # a bare string, not a URL — no host at all.
+    "169.254.169.254 iam/security-credentials",
+)
+
+
+def test_block_source_forgeries_do_not_fire_but_the_real_host_does() -> None:
+    real = "http://169.254.169.254/latest/meta-data/iam/security-credentials/role"
+    for bad in _BLOCK_SOURCES:
+        cap = copy.deepcopy(_AWS_CAP)
+        cap["credential"]["source"] = bad
+        sig = imds_credential_capture_oracle(cap)
+        assert not sig.fired, f"BLOCK source falsely fired (substring bypass): {bad!r}"
+        assert sig.observed["reason"] == "no_imds_credential"
+        # MUTATION-VERIFIED: the SAME full credential+call with a genuine IMDS URL host -> fires. Proves the
+        # control was rejected purely on the forged source, not on any other missing element.
+        cap["credential"]["source"] = real
+        assert imds_credential_capture_oracle(cap).fired, f"real host must fire (mutation of {bad!r})"
+
+
+def test_negative_control_f_200_body_with_error_keys_is_not_a_success() -> None:
+    # (f) a 200 confirming call whose body carries a FAILURE marker is NOT a success — including the AWS
+    # JSON error shape (__type + message) and the AWS query/XML shape (Error/Code/Message/Fault). Load-
+    # bearing: each body ALSO carries a full, valid identity echo, so ONLY the error marker can reject it.
+    identity = dict(_AWS_CAP["confirming_call"]["response"])
+    for err_key, err_val in (("__type", "com.amazon.coral.service#InvalidClientTokenId"),
+                             ("message", "The security token included in the request is invalid."),
+                             ("errors", ["denied"]), ("code", "AccessDenied"), ("Fault", "Server")):
+        control = copy.deepcopy(_AWS_CAP)
+        body = dict(identity)
+        body[err_key] = err_val
+        control["confirming_call"] = {"action": "sts:GetCallerIdentity", "status": 200, "response": body}
+        sig = imds_credential_capture_oracle(control)
+        assert not sig.fired, f"200 body with {err_key!r} must not be a success"
+        assert sig.observed["reason"] == "confirming_call_failed"
+    # MUTATION: remove the failure marker (the clean identity echo) -> fires.
+    assert imds_credential_capture_oracle(copy.deepcopy(_AWS_CAP)).fired
+
+
+def test_builder_retains_error_markers_so_a_failed_200_reverifies_non_firing() -> None:
+    # the mint-side failure gate MUST be mirrored at re-execution: a certificate built from a 200 whose body
+    # is the AWS JSON error shape must retain the __type/message markers and re-verify as NON-firing.
+    cap = copy.deepcopy(_AWS_CAP)
+    cap["confirming_call"] = {"action": "sts:GetCallerIdentity", "status": 200,
+                              "response": {"__type": "InvalidClientTokenId", "message": "invalid"}}
+    emitted = FindingContext.from_imds_capture(cap).to_verifier_context()
+    resp = emitted["imds_capture"]["confirming_call"]["response"]
+    assert resp.get("__type") and resp.get("message")           # failure markers retained
+    assert not OracleVerifier().confirm(emitted).confirmed      # ...so re-verify does not confirm
+
+
 def test_gcp_negative_controls_mirror_the_aws_ones() -> None:
     # a GCP token NOT from the metadata endpoint does not fire...
     off_source = copy.deepcopy(_GCP_CAP)
@@ -201,10 +308,14 @@ def test_gcp_negative_controls_mirror_the_aws_ones() -> None:
     # a GCP token from metadata but with NO confirming call is a LEAD, not a FACT...
     no_call = {"provider": "gcp", "credential": copy.deepcopy(_GCP_CAP["credential"])}
     assert not imds_credential_capture_oracle(no_call).fired
-    # a GCP confirming call with an identity but NO expiry does not fire (both are required).
-    no_expiry = copy.deepcopy(_GCP_CAP)
-    no_expiry["confirming_call"]["response"] = {"email": "app-sa@p.iam.gserviceaccount.com"}
-    assert not imds_credential_capture_oracle(no_expiry).fired
+    # a GCP confirming call whose body carries a FAILURE marker (an OAuth error) does not fire — a genuine
+    # failure is the negative control (an identity echo WITHOUT an expiry now FIRES; see the S3 test).
+    failed = copy.deepcopy(_GCP_CAP)
+    failed["confirming_call"]["response"] = {"error": "invalid_token",
+                                             "error_description": "Invalid Value"}
+    sig_failed = imds_credential_capture_oracle(failed)
+    assert not sig_failed.fired
+    assert sig_failed.observed["reason"] == "confirming_call_failed"
 
 
 def test_aws_missing_any_credential_component_does_not_fire() -> None:

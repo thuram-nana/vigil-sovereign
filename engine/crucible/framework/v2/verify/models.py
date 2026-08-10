@@ -236,17 +236,23 @@ class OracleKind(str, enum.Enum):
     # (keyed on the `imds_capture` ctx field NO benchmark/scan/engage finding carries), never via the
     # frozen unknown-class fallback (verifier._ALL_ORACLES stays EXACTLY 15) — so appending it leaves
     # `make gate` byte-identical. IMDS_CREDENTIAL_CAPTURE fires (0.95) ONLY when the retained capture
-    # carries BOTH halves (near-zero-FP by construction): (a) a STRUCTURALLY-VALID credential sourced
-    # from the metadata endpoint — AWS: AccessKeyId matching ^A[SK]IA[0-9A-Z]{16,}$ + a non-empty
-    # SecretAccessKey + a non-empty Token, whose retained source contains BOTH 169.254.169.254 and
-    # iam/security-credentials; OR GCP: a non-empty access_token + token_type=="Bearer", whose source
-    # contains metadata + computeMetadata/v1 + service-accounts + token; AND (b) a retained
-    # CONFIRMING-CALL response proving the credential AUTHENTICATED — AWS: an sts:GetCallerIdentity
-    # response carrying an Arn + a 12-digit Account + a UserId; OR GCP: a tokeninfo/userinfo success
-    # carrying an email/sub + an expiry — with NO failure signal (no 4xx/5xx, no error field), and the
-    # credential's provider and the confirming call's provider agree. A retrieved-but-unconfirmed
-    # credential is a LEAD; a 401/timeout, a FAILED confirming call, a credential NOT from the metadata
-    # endpoint (a normal env-var key), a random blob, or malformed/absent evidence do NOT fire.
+    # carries BOTH halves (near-zero-FP by construction): (a) a STRUCTURALLY-VALID credential whose source
+    # is a URL that HOST-IDENTIFIES the metadata endpoint — the source is parsed with urllib.parse.urlsplit
+    # and its HOST (never a substring of the raw string) must be the metadata endpoint, with the credential
+    # marker in the URL PATH — AWS: AccessKeyId matching ^A[SK]IA[0-9A-Z]{16,}$ + a non-empty
+    # SecretAccessKey + a non-empty Token, whose source URL's HOST canonicalizes to 169.254.169.254 (incl.
+    # the decimal/hex/IPv6-mapped SSRF IP encodings) and whose PATH carries iam/security-credentials; OR
+    # GCP: a non-empty access_token + token_type==bearer (case-insensitive), whose source URL's HOST is
+    # metadata.google.internal/metadata (or the same link-local IP) and whose PATH carries
+    # computeMetadata/v1 + service-accounts + token; AND (b) a retained CONFIRMING-CALL response proving the
+    # credential AUTHENTICATED — AWS: an sts:GetCallerIdentity response carrying an Arn + a 12-digit Account
+    # + a UserId; OR GCP: a tokeninfo/userinfo success carrying an email/sub (expiry optional — userinfo
+    # omits it) — with NO failure signal (no 4xx/5xx, no error/errors/message/code/__type/Fault field), and
+    # the credential's provider and the confirming call's provider agree. Because the source is HOST-checked
+    # with a real URL parser (not substring containment), a userinfo-@ host, a query-param IP, a rebind host
+    # that merely CONTAINS the IP, and a creds-file path are all NOT an IMDS reach. A retrieved-but-
+    # unconfirmed credential is a LEAD; a 401/timeout, a FAILED confirming call, a credential whose source
+    # does not host-identify the metadata endpoint, a random blob, or malformed/absent evidence do NOT fire.
     IMDS_CREDENTIAL_CAPTURE = "imds_credential_capture"
 
 
