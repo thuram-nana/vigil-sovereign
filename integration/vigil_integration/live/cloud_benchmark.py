@@ -221,9 +221,12 @@ def normalize_checkov(report: Any) -> "set[tuple[str, str]]":
 
 
 def normalize_scout_suite(report: Any) -> "set[tuple[str, str]]":
+    # id_keys and check_keys are DISJOINT: a shared "id" would map a resource id to the check id (or vice
+    # versa), silently mis-crediting scout — so the resource uses arn/resource_id and the check uses
+    # finding_id/check only.
     return _norm_incumbent(report, _SCOUT_CLASS,
-                           id_keys=("resource_id", "id", "arn"),
-                           check_keys=("finding_id", "check", "id"))
+                           id_keys=("resource_id", "arn", "resource"),
+                           check_keys=("finding_id", "check"))
 
 
 _INCUMBENT_NORMALIZERS = {
@@ -310,11 +313,23 @@ def sign_cloud_scorecard(scorecard: "dict[str, Any]", out_path: "str | Path", *,
 
 
 def verify_cloud_scorecard(scorecard_path: "str | Path", sig_env: dict, *,
-                           trust_root_fingerprint: "str | None" = None) -> bool:
+                           trust_root_fingerprint: "str | None" = None,
+                           expected_threshold: "int | None" = None) -> bool:
     """Re-verify a signed cloud scorecard OFFLINE: re-derive the canonical digest from the JSON on disk and
     check an m-of-n threshold of DISTINCT authorizer signatures over those bytes. Fail-closed on any mismatch.
-    Pass ``trust_root_fingerprint`` (held out-of-band) to reject a forged/attacker-substituted trust root
-    before any signature is checked (same pinning contract as the web scorecard verifier)."""
+
+    SOUNDNESS (the red-pen keyless-forgery fix). The m-of-n ``threshold`` is embedded in the attacker-supplied
+    ``sig_env`` and is therefore NOT trusted:
+      * a ``threshold < 1`` (or ``> len(authorizers)``) is rejected fail-closed — a keyless bundle
+        (``threshold=0``, empty ``signatures``) can never "verify", because the count of valid DISTINCT
+        signatures is required to be ``>= threshold >= 1`` (at least one real signature);
+      * pass ``expected_threshold`` (held OUT OF BAND, e.g. a pinned constant) to reject a threshold
+        DOWNGRADE — an insider holding fewer than the governance quorum cannot re-sign with a lowered
+        ``threshold`` and pass;
+      * pass ``trust_root_fingerprint`` (held out-of-band) to reject a forged/attacker-substituted authorizer
+        SET before any signature is checked.
+    Without ``expected_threshold``/``trust_root_fingerprint`` the check proves only internal self-consistency
+    over the embedded (still ``>= 1``) threshold — the weak mode; supply the pins for real tamper-evidence."""
     from vigil_core import canonical_json, verify_one  # noqa: PLC0415
 
     try:
@@ -324,6 +339,13 @@ def verify_cloud_scorecard(scorecard_path: "str | Path", sig_env: dict, *,
             return False
         tr = sig_env.get("trust_root", {})
         authorizers = tr.get("authorizers", [])
+        threshold = int(tr.get("threshold", 1))
+        # a threshold below 1 is never satisfiable without a real signature; above n is impossible.
+        if threshold < 1 or threshold > len(authorizers):
+            return False
+        # reject a threshold DOWNGRADE below the caller's out-of-band governance expectation.
+        if expected_threshold is not None and threshold < int(expected_threshold):
+            return False
         if trust_root_fingerprint is not None and _trust_root_fingerprint(authorizers) != trust_root_fingerprint:
             return False
         pub = {a["key_id"]: a["public_key_b64"] for a in authorizers}
@@ -332,7 +354,8 @@ def verify_cloud_scorecard(scorecard_path: "str | Path", sig_env: dict, *,
             kid = s.get("key_id")
             if kid in pub and kid not in good and verify_one(pub[kid], body, s.get("signature_b64", "")):
                 good.add(kid)
-        return len(good) >= int(tr.get("threshold", 1))
+        # threshold >= 1 (checked above), so this requires at least one valid DISTINCT signature.
+        return len(good) >= threshold
     except Exception:  # noqa: BLE001 — any error is fail-closed (not verified)
         return False
 

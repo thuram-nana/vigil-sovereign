@@ -343,10 +343,18 @@ def verify_scorecard(
     sig_env: dict,
     *,
     trust_root_fingerprint: str | None = None,
+    expected_threshold: int | None = None,
 ) -> bool:
     """Re-verify a signed scorecard offline: re-derive the canonical digest from the JSON on disk and check
     an m-of-n threshold of DISTINCT authorizers' Ed25519 signatures over those bytes. Fail-closed on any
     mismatch (a flipped number → digest changes → every signature fails).
+
+    THRESHOLD SOUNDNESS (red-pen keyless-forgery fix). The ``threshold`` is embedded in the attacker-supplied
+    ``sig_env`` and is NOT trusted: a ``threshold < 1`` (or ``> n``) is rejected fail-closed, and the count of
+    valid DISTINCT signatures must be ``>= threshold >= 1`` — so a keyless bundle (``threshold=0``, empty
+    ``signatures``) can never verify, even with the correct pin. Pass ``expected_threshold`` (held out of band)
+    to also reject a threshold DOWNGRADE — an insider holding fewer than the governance quorum cannot re-sign
+    with a lowered threshold and pass.
 
     TRUST ROOT PINNING (the property this call's tamper-evidence actually depends on).
     The authorizer set lives INSIDE ``sig_env``. Without an out-of-band pin, verification proves only that
@@ -371,6 +379,17 @@ def verify_scorecard(
             return False
         tr = sig_env.get("trust_root", {})
         authorizers = tr.get("authorizers", [])
+        threshold = int(tr.get("threshold", 1))
+        # SOUNDNESS (red-pen keyless-forgery fix): the threshold is embedded in the attacker-supplied sig_env,
+        # so it is NOT trusted. A threshold < 1 (or > n) is never satisfiable — a keyless bundle
+        # (threshold=0, empty signatures) must NOT verify, because below we require the count of valid
+        # DISTINCT signatures to be >= threshold >= 1 (at least one real signature). Fail-closed.
+        if threshold < 1 or threshold > len(authorizers):
+            return False
+        # Reject a threshold DOWNGRADE below the caller's out-of-band governance quorum (an insider holding
+        # fewer than m keys must not re-sign with a lowered threshold and pass).
+        if expected_threshold is not None and threshold < int(expected_threshold):
+            return False
         # Out-of-band pin enforcement: the embedded authorizer set must match the pin the caller holds
         # independently. This is what makes the trust root NOT attacker-supplied — checked before any
         # signature so a forged root is rejected outright.
@@ -383,7 +402,8 @@ def verify_scorecard(
             kid = s.get("key_id")
             if kid in pub and kid not in good and verify_one(pub[kid], body, s.get("signature_b64", "")):
                 good.add(kid)
-        return len(good) >= int(tr.get("threshold", 1))
+        # threshold >= 1 (checked above), so this requires at least one valid DISTINCT signature.
+        return len(good) >= threshold
     except Exception:  # noqa: BLE001 — any error is fail-closed (not verified)
         return False
 

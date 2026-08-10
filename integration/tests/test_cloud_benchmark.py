@@ -114,6 +114,53 @@ def test_signed_scorecard_reverifies_offline_and_fails_on_tamper(tmp_path):
     assert verify_cloud_scorecard(out, sig, trust_root_fingerprint=pin) is False
 
 
+def test_keyless_forgery_with_zero_threshold_is_rejected_even_with_correct_pin(tmp_path):
+    """BLOCK-1 regression: an attacker holding NO key recomputes the digest over a tampered body and supplies
+    threshold=0 + zero signatures, keeping the pinned authorizer set. Pre-fix this verified TRUE even with the
+    correct out-of-band pin (total defeat of tamper-evidence). It must now fail closed."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    import hashlib as _h
+
+    from vigil_core import canonical_json
+    signers, authorizers = _signers_and_authorizers()
+    card = run_cloud_benchmark(_CAPTURE, _TRUTH, provider="aws", account="111122223333", signers=signers)
+    out = tmp_path / "cloud-scorecard.json"
+    sign_cloud_scorecard(card, out, signers=signers, authorizers=authorizers, threshold=1)
+    pin = _trust_root_fingerprint(authorizers)
+    # tamper the body, then RECOMPUTE the digest over it (so the digest check passes) and forge a keyless
+    # zero-threshold sig envelope, keeping the pinned authorizer set unchanged.
+    doc = json.loads(out.read_text())
+    doc["results"][0]["tp"] = 999
+    out.write_text(json.dumps(doc))
+    digest = "sha256:" + _h.sha256(canonical_json(json.loads(out.read_text()))).hexdigest()
+    forged = {"scorecard_digest": digest,
+              "trust_root": {"threshold": 0, "authorizers": authorizers}, "signatures": []}
+    assert verify_cloud_scorecard(out, forged, trust_root_fingerprint=pin) is False   # keyless -> rejected
+    forged["trust_root"]["threshold"] = -1                                            # negative too
+    assert verify_cloud_scorecard(out, forged, trust_root_fingerprint=pin) is False
+
+
+def test_threshold_downgrade_is_rejected_by_expected_threshold(tmp_path):
+    """BLOCK-2 regression: a 2-of-2 scorecard, re-signed by an insider holding ONE key with threshold lowered
+    to 1, is rejected when the caller pins expected_threshold=2 (the governance quorum)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
+    from vigil_core import generate_keypair
+    k0, k1 = generate_keypair(), generate_keypair()
+    signers = [("g0", k0.private_key_b64), ("g1", k1.private_key_b64)]
+    authz = [{"key_id": "g0", "public_key_b64": k0.public_key_b64},
+             {"key_id": "g1", "public_key_b64": k1.public_key_b64}]
+    card = run_cloud_benchmark(_CAPTURE, _TRUTH, provider="aws", account="111122223333", signers=signers)
+    out = tmp_path / "cloud-scorecard.json"
+    sig = sign_cloud_scorecard(card, out, signers=signers, authorizers=authz, threshold=2)
+    # honest 2-of-2 verifies when the caller pins expected_threshold=2
+    assert verify_cloud_scorecard(out, sig, expected_threshold=2) is True
+    # insider with only g0 lowers threshold to 1 and signs alone
+    downgraded = sign_cloud_scorecard(card, out, signers=[("g0", k0.private_key_b64)], authorizers=authz,
+                                     threshold=1)
+    assert verify_cloud_scorecard(out, downgraded, expected_threshold=None) is True   # weak mode accepts thr=1
+    assert verify_cloud_scorecard(out, downgraded, expected_threshold=2) is False     # pinned quorum rejects it
+
+
 def test_forged_trust_root_is_rejected_by_the_pin(tmp_path):
     pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable here")
     from vigil_core import generate_keypair
