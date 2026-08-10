@@ -62,6 +62,8 @@ class DirectVerdictConstruction(RuntimeError):
 _EVIDENCE_SURFACES = frozenset({
     "response_headers", "response_body", "transport", "tls_handshake", "service_response",
     "artifact", "composite",
+    "live_capture",   # a VIGIL-OWNED, scope-gated live cloud/K8s API read (Track B) — distinct from a parsed
+    #                 # artifact: the claim may speak about scoped LIVE state, bounded by capture completeness.
 })
 
 _REGISTRY = Path(__file__).resolve().parents[3] / "docs" / "capability-matrix" / "evidence-branches.json"
