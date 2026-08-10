@@ -69,6 +69,12 @@ def load_highwater(path: _PathLike) -> Optional[dict]:
     never read as absent. Returns the normalised ``{"entry_count": N, "last_seq": M}`` (both non-negative
     ints); extra persisted fields (schema_version) are dropped from the returned view."""
     p = Path(path)
+    # A SYMLINK at the durable-floor path is suspicious (tamper), and is_symlink() must be checked BEFORE
+    # exists(): exists() FOLLOWS the link and returns False for a DANGLING one, which would wrongly read as
+    # "absent / pre-floor" and silently skip the rollback check — the exact "read as absent" the contract
+    # forbids (twin of evidence/cli.py::_load_highwater; fix the class at both sites).
+    if p.is_symlink():
+        raise HighWaterError(f"durable high-water at {p} is a symlink (possible tamper) — refusing")
     if not p.exists():
         return None
     try:
