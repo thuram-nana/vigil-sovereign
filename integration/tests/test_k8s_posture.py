@@ -355,6 +355,22 @@ def test_rbac_subject_name_kind_apigroup_are_exact_not_folded():
     assert rb({"kind": "Group", "name": "system:unauthenticated", "apiGroup": G}) == 1
 
 
+def test_rbac_legacy_string_subject_path_is_also_exact():
+    """RED-PEN fix-of-fix (MEDIUM, CONFIRMED): the exact-match fix was applied to the TYPED subject path, but
+    the legacy live-read STRING path still fell through to _k8s_norm(s) (.strip().lower()), so a case/whitespace
+    variant string ('System:Anonymous', 'system:anonymous ') matched the reserved principal. The string path
+    now matches EXACTLY too (the reserved names are always lowercase; the live cluster emits them exactly)."""
+    pytest.importorskip("framework.v2.verify", reason="CRUCIBLE not importable in the sovereign env")
+    from framework.v2.verify.oracles import _k8s_subject_is_anon
+    # exact reserved names still match (the live-read path relies on this)
+    assert _k8s_subject_is_anon("system:anonymous") is True
+    assert _k8s_subject_is_anon("system:unauthenticated") is True
+    # case / whitespace variants are DIFFERENT principals and must NOT match
+    for bad in ("System:Anonymous", "SYSTEM:ANONYMOUS", "system:anonymous ", " system:unauthenticated",
+                "System:Unauthenticated"):
+        assert _k8s_subject_is_anon(bad) is False, f"string variant {bad!r} matched the reserved principal"
+
+
 def test_rbac_fact_evidence_is_scoped_to_the_binding_not_live_access():
     """RED-PEN BLOCK #3 re-attack (MEDIUM, CONFIRMED): the RBAC oracle evidence asserted present-tense LIVE
     access ('an unauthenticated caller HAS write/admin access') from a DECLARED, possibly-unapplied manifest —

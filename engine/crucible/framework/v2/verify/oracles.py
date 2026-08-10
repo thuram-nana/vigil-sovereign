@@ -2212,7 +2212,11 @@ def _k8s_subject_is_anon(s: Any) -> bool:
         name = _coerce_text(s.get("name"))
         return (kind == "User" and name == "system:anonymous") or \
                (kind == "Group" and name == "system:unauthenticated")
-    return _k8s_norm(s) in _K8S_ANON_SUBJECTS
+    # Legacy STRING subject (a live-read RBAC sensor emits the reserved name directly). Match EXACTLY too — the
+    # reserved principals are always lowercase "system:anonymous" / "system:unauthenticated"; a case/whitespace
+    # variant ("System:Anonymous", "system:anonymous ") is a DIFFERENT principal and must NOT match (red-pen
+    # re-attack: the typed path was made exact but the string path still .strip().lower()'d via _k8s_norm).
+    return _coerce_text(s) in _K8S_ANON_SUBJECTS
 
 
 def _k8s_subject_display(s: Any) -> str:

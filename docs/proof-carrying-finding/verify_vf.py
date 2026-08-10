@@ -1268,7 +1268,9 @@ def _pp_k8s_subject_is_anon(s: Any) -> bool:
         name = _pp_coerce_text(s.get("name"))
         return (kind == "User" and name == "system:anonymous") or \
                (kind == "Group" and name == "system:unauthenticated")
-    return _pp_k8s_norm(s) in _PP_K8S_ANON_SUBJECTS
+    # Legacy STRING subject (live-read): match EXACTLY (mirrors oracles.py — the reserved names are always
+    # lowercase; a case/whitespace variant is a different principal).
+    return _pp_coerce_text(s) in _PP_K8S_ANON_SUBJECTS
 
 
 def posture_k8s_workload_fires(observed_control: Any) -> bool:
