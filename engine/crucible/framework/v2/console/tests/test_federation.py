@@ -52,6 +52,30 @@ def _get(url):
         return r.status, dict(r.headers)
 
 
+def _get_hdr(url, *, headers=None):
+    req = urllib.request.Request(url, method="GET")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
+            return r.status, dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers)
+
+
+def test_a9_read_routes_refuse_a_dns_rebinding_host():
+    # A9: a GET/SSE read from a DNS-rebinding page (which sends its OWN Host) is refused BEFORE any data is
+    # read — the rebinding defense now covers reads (status/runs/findings/streams/dossiers), not just POST
+    # mutations. The guard runs first, so even an SSE route returns 403 without opening a stream.
+    with _running() as (base, _port):
+        for route in ("/api/status", "/api/blackboard?slug=x", "/api/events"):
+            st, _ = _get_hdr(base + route, headers={"Host": "attacker.example.com"})
+            assert st == 403, f"rebinding Host on {route} must be refused, got {st}"
+        # the same read with the correct loopback Host passes (the legit SPA; urllib sets Host=127.0.0.1:port)
+        st, _ = _get(base + "/api/status")
+        assert st == 200
+
+
 def test_csp_on_reads_and_actions():
     with _running() as (base, _port):
         _st, hdrs = _get(base + "/api/status")
