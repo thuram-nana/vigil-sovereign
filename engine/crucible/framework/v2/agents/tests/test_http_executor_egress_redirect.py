@@ -295,3 +295,28 @@ def test_auto_load_authority_absent_document_is_noop(
     out = ex.execute(_hyp("/probe"), _PLAN)
     ex.close()
     assert out.status_code == 200
+
+
+def test_auto_load_authority_required_but_absent_fails_closed(
+    isolated_engagement, httpserver: HTTPServer, monkeypatch,
+):
+    """A2 (audit): with a PINNED trust root, SIGNED authority is REQUIRED (constructor contract). An
+    absent/unverifiable authority document must fail CLOSED — the gate refuses BEFORE any network I/O rather
+    than silently proceeding with the whole authority chain (time bounds, action limits, destructive
+    constraints, crypto verification) disabled. Contrast with the no-trust-root noop above."""
+    td = isolated_engagement("alpha", httpserver.host)
+    httpserver.expect_request("/probe").respond_with_data("ok")
+    monkeypatch.setattr(_paths, "authority_path", lambda s: td / "authority.json")
+
+    ex = HttpExecutor(
+        engagement_slug="alpha",
+        base_url=httpserver.url_for("/"),
+        prompt_callback=_deny,
+        auto_load_authority=True,
+        trust_root=object(),          # signed authority REQUIRED, but no doc on disk -> load/verify fails
+    )
+    assert ex.authority is None       # the load failed -> authority never hydrated
+    out = ex.execute(_hyp("/probe"), _PLAN)
+    ex.close()
+    assert "failing closed" in out.note
+    assert len(httpserver.log) == 0   # fail-closed BEFORE any request
