@@ -17,6 +17,32 @@ This repository incorporates or adapts code and design ideas from third-party
 open-source projects. Their licenses are retained and reproduced below.
 
 --------------------------------------------------------------------------------
+Strix — https://github.com/usestrix/strix  (Apache License 2.0)
+--------------------------------------------------------------------------------
+
+VIGIL vendors Strix (an AI-agent security-testing framework) under vendor/strix/.
+The complete Apache License 2.0 is retained verbatim in vendor/strix/LICENSE, and the
+upstream + VIGIL attribution NOTICE is retained in vendor/strix/NOTICE — both are
+redistributed unmodified alongside the vendored code (satisfying Apache-2.0 §4(a) "give
+recipients a copy of the License" and §4(d) "retain the NOTICE attributions").
+
+Per Apache-2.0 §4(b) ("carry prominent notices stating that You changed the files"), the
+significant modifications made for VIGIL are:
+
+  * Telemetry removed — the upstream phone-home modules strix/telemetry/{posthog,scarf}.py
+    (which POSTed scan/finding/skill events to us.i.posthog.com and strix.gateway.scarf.sh)
+    are DELETED and replaced by strix/telemetry/sink.py, a local-only sink with no network
+    transport; default telemetry is OFF.
+  * The OpenRouter attribution headers (HTTP-Referer / X-Title) were removed from
+    strix/config/models.py.
+  * The default model was set to anthropic/claude-opus-4-8 (Claude-everywhere migration).
+  * Further VIGIL changes (governance gates, oracle-confirmation, Claude-native runtime) are
+    tracked in the monorepo git history under vendor/strix/ and summarized in vendor/strix/NOTICE.
+
+The Apache-2.0 license, copyright, and NOTICE of Strix are unaffected by VIGIL's dual
+license; the Apache-2.0 terms continue to govern the vendored Strix code.
+
+--------------------------------------------------------------------------------
 redamon — https://github.com/samugit83/redamon  (MIT License)
 --------------------------------------------------------------------------------
 
