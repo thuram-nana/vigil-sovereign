@@ -21,6 +21,9 @@ from urllib.parse import parse_qs, urlsplit
 
 # X6 — a custom request header the same-origin SPA fetch sets and a cross-site HTML form cannot.
 _CSRF_HEADER = "X-Requested-With"
+# A9: bound the POST body — the console's actions take small JSON; a huge/negative Content-Length must not be
+# read into memory. A body above the cap is refused (treated as empty → the action gets no valid params).
+_MAX_CONSOLE_BODY = 1 << 20   # 1 MiB
 
 # Strict Content-Security-Policy (mirrors the sovereign cockpit). Self-contained assets only; no inline
 # script/style trust, no external origins, un-framable. Sent on EVERY response (reads + SSE + actions).
@@ -219,6 +222,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
         parts = urlsplit(self.path)
         path = parts.path
+        # A9: DNS-rebinding defense for READ routes — a rebinding page (attacker.com re-resolving to
+        # 127.0.0.1) sends its OWN Host, so a Host that does not name the loopback console (or an allowlisted
+        # proxy domain) is refused before ANY status/runs/findings/event-stream/terminal/dossier data is read.
+        ok, why = self._host_is_console()
+        if not ok:
+            self._json({"error": f"cross-origin read refused ({why})"}, status=403)
+            return
         try:
             if path.startswith("/api/events"):
                 q = parse_qs(parts.query)
@@ -300,34 +310,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _read_body(self) -> dict:
         try:
             n = int(self.headers.get("Content-Length", 0) or 0)
+            if n < 0 or n > _MAX_CONSOLE_BODY:   # A9: refuse a huge/negative body (never read it into memory)
+                return {}
             raw = self.rfile.read(n) if n else b""
             return json.loads(raw or b"{}")
         except Exception:
             return {}
 
-    def _same_origin_as_console(self) -> tuple[bool, str]:
-        """X6: refuse a cross-site POST. The console binds to loopback, but a malicious web page
-        the operator visits (or a DNS-rebinding domain that resolves to 127.0.0.1) could POST to
-        127.0.0.1:<port> and drive the console's actions from the operator's browser. Accept a POST
-        only when it is same-origin to the loopback console:
-          * the Host header MUST be present and name the loopback console with the exact port (an
-            HTTP/1.1 request always carries Host; a missing/rebinding/wrong-port Host is refused);
-          * an Origin, when present, MUST likewise be the loopback console with the exact port (a
-            modern browser sends Origin on EVERY cross-origin POST, so this catches the CSRF page);
-          * a cross-site Sec-Fetch-Site is refused.
-        Read-only GET/SSE are unaffected. Port comparison is exact — a portless or wrong-port
-        loopback Origin (e.g. another local service on :80) is NOT treated as same-origin."""
+    def _host_is_console(self) -> tuple[bool, str]:
+        """A9: the DNS-rebinding defense for READ routes (GET/SSE) — and the Host/Origin half of the POST
+        guard. The console binds loopback, but a page the operator visits on a DNS-rebinding domain
+        (attacker.com that re-resolves to 127.0.0.1) sends its OWN Host, so requiring the Host to name the
+        loopback console with the EXACT port (or an operator-allowlisted proxy domain) refuses it — closing
+        read access to status/runs/findings/event-streams/terminal-history/dossiers. An Origin, when
+        present, must likewise match. UNLIKE the POST guard this does NOT require the SPA custom header,
+        because a legitimate EventSource / navigation GET cannot set one; the Host check is the rebinding
+        defense that does not depend on a header the read client can't send."""
         port = self.server.server_address[1]
-        # POSITIVE proof of same-origin, not merely absence-of-signal: require a CUSTOM header the
-        # SPA's fetch sets and a cross-site HTML <form> physically CANNOT (a custom header forces a
-        # CORS preflight the console never answers). This is the load-bearing check — it closes the
-        # gap where a cross-site form POST omits BOTH Origin and Sec-Fetch-Site (Safari <16.4,
-        # in-app WebViews), which a deny-by-signal guard would let through.
-        if not self.headers.get(_CSRF_HEADER):
-            return False, f"missing {_CSRF_HEADER} (cross-site form / non-SPA client)"
-        sfs = self.headers.get("Sec-Fetch-Site", "").strip().lower()
-        if sfs and sfs not in ("same-origin", "none"):        # cross-site / same-site → refuse
-            return False, f"Sec-Fetch-Site={sfs}"
 
         def _port_ok(parsed, scheme_default: int) -> bool:
             # a missing port means the scheme default (so a legit SPA on a default port — where the
@@ -350,15 +349,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
         # Federation allowlist (default EMPTY → loopback-only, byte-identical to before). When VIGIL runs
         # behind the unified reverse proxy, the operator adds the proxy's exact domain Host/Origin here so
-        # a same-origin request forwarded by the proxy is accepted; every other Host/Origin is still refused
-        # (the custom-header + Sec-Fetch-Site checks above still apply). The console still BINDS loopback —
-        # the proxy is the only public listener.
+        # a same-origin request forwarded by the proxy is accepted; every other Host/Origin is still refused.
+        # The console still BINDS loopback — the proxy is the only public listener.
         allow_hosts = getattr(self.server, "allowed_hosts", frozenset())
         allow_origins = getattr(self.server, "allowed_origins", frozenset())
 
-        # Host is mandatory (an HTTP/1.1 request always carries it) + strict (loopback + matching port, OR
-        # an exact operator-allowlisted domain) — this refuses a DNS-rebinding domain even if it forged the
-        # custom header.
         host_hdr = self.headers.get("Host", "").strip()
         if not host_hdr:
             return False, "Host missing"
@@ -370,6 +365,21 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if not (_authority_ok(origin, scheme_default) or origin.rstrip("/") in allow_origins):
                 return False, f"Origin={origin}"
         return True, ""
+
+    def _same_origin_as_console(self) -> tuple[bool, str]:
+        """X6: refuse a cross-site POST. A malicious web page the operator visits (or a DNS-rebinding domain
+        that resolves to 127.0.0.1) could POST to 127.0.0.1:<port> and drive the console's actions from the
+        operator's browser. Accept a POST only when it is same-origin to the loopback console: a CUSTOM
+        header the SPA's fetch sets and a cross-site HTML <form> physically CANNOT (forcing a CORS preflight
+        the console never answers) — the load-bearing check that closes the gap where a cross-site form POST
+        omits BOTH Origin and Sec-Fetch-Site (Safari <16.4, in-app WebViews); a cross-site Sec-Fetch-Site is
+        refused; PLUS the strict Host/Origin rebinding check (``_host_is_console``)."""
+        if not self.headers.get(_CSRF_HEADER):
+            return False, f"missing {_CSRF_HEADER} (cross-site form / non-SPA client)"
+        sfs = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        if sfs and sfs not in ("same-origin", "none"):        # cross-site / same-site → refuse
+            return False, f"Sec-Fetch-Site={sfs}"
+        return self._host_is_console()
 
     def do_POST(self) -> None:  # noqa: N802
         """The SAFE actions — the only mutations the console makes. Each is non-destructive and
