@@ -135,6 +135,66 @@ def test_malformed_target_yields_a_response_not_a_dropped_connection(upstream):
         gw.shutdown()
 
 
+# --------------------------------------------------------------------------- A11: XFF + response bound
+
+class _XffEcho(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_a):
+        return
+
+    def do_GET(self):
+        xff = self.headers.get("X-Forwarded-For", "<none>")
+        n = sum(1 for k in self.headers.keys() if k.lower() == "x-forwarded-for")
+        body = f"XFF={xff} N={n}".encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture()
+def xff_upstream() -> Iterator[int]:
+    srv = socketserver.TCPServer(("127.0.0.1", 0), _XffEcho)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv.server_address[1]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_a11_client_supplied_xff_is_stripped_gateway_sets_its_own(xff_upstream):
+    # A11: a forged client X-Forwarded-For must NOT survive; the gateway strips it and sets its OWN (the real
+    # client IP), so exactly ONE XFF (the true one) reaches the upstream — no identity-spoofing ambiguity.
+    gw = serve_gateway(f"http://127.0.0.1:{xff_upstream}",
+                       config=AegisConfig(deployment_secret="k"), host="127.0.0.1", port=0)
+    threading.Thread(target=gw.serve_forever, daemon=True).start()
+    port = gw.server_address[1]
+    try:
+        resp = _raw(port, b"GET /x HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n")
+        body = resp.split(b"\r\n\r\n", 1)[-1]
+        assert b"9.9.9.9" not in body, "a forged client X-Forwarded-For must be stripped"
+        assert b"XFF=127.0.0.1" in body and b"N=1" in body   # exactly one XFF, the gateway's own
+    finally:
+        gw.shutdown()
+
+
+def test_a11_oversized_upstream_response_is_refused_not_silently_truncated(upstream, monkeypatch):
+    # A11: an upstream response larger than the relay bound must be REFUSED (502), never silently truncated
+    # with a rewritten Content-Length (which would corrupt the body while claiming success).
+    from framework.v2.aegis import gateway as gw_mod
+    monkeypatch.setattr(gw_mod, "_MAX_RESPONSE_BYTES", 8)   # tiny cap; the _Echo body is longer
+    gw = serve_gateway(f"http://127.0.0.1:{upstream}",
+                       config=AegisConfig(deployment_secret="k"), host="127.0.0.1", port=0)
+    threading.Thread(target=gw.serve_forever, daemon=True).start()
+    port = gw.server_address[1]
+    try:
+        resp = _raw(port, b"GET /averylongpathwellover8bytes HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert b"502" in resp.split(b"\r\n", 1)[0], f"oversized response must 502, got {resp[:40]!r}"
+    finally:
+        gw.shutdown()
+
+
 # --------------------------------------------------------------------------- response-side FP fixes
 
 def test_error_sqli_is_off_the_inline_block_path():
