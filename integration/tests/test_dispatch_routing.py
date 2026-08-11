@@ -79,6 +79,32 @@ def test_dispatch_forwards_argv_and_returns_child_code(monkeypatch, tmp_path):
         "PYTHONPATH + PYTHONHOME are scrubbed for the cross-venv child"
 
 
+def test_dispatch_strips_owner_key_for_offense_children_only(monkeypatch, tmp_path):
+    # A4: the auto-patch owner SIGNING key must NEVER reach an OFFENSE child (the keyless-offense boundary —
+    # else an offense process could self-authorize a destructive PR), yet is preserved for a sovereign child
+    # (same trust domain as the operator).
+    for env_dir, name in ((".venv-offense", "crucible"), (".venv-sovereign", "sigil")):
+        s = tmp_path / env_dir / "bin" / name
+        s.parent.mkdir(parents=True, exist_ok=True)
+        s.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("VIGIL_ROOT", str(tmp_path))
+    monkeypatch.setenv("VIGIL_DESTRUCTION_OWNER_KEY", "ed25519-owner-secret")
+    seen = {}
+
+    class _Done:
+        returncode = 0
+
+    def _fake_run(cmd, *a, **k):
+        seen["env"] = k.get("env")
+        return _Done()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    D.dispatch("crucible", ["scan"])            # OFFENSE verb
+    assert "VIGIL_DESTRUCTION_OWNER_KEY" not in (seen["env"] or {}), "offense child must not inherit owner key"
+    D.dispatch("sigil", ["status"])             # SOVEREIGN verb
+    assert (seen["env"] or {}).get("VIGIL_DESTRUCTION_OWNER_KEY") == "ed25519-owner-secret"
+
+
 def test_dispatch_corrupt_venv_fails_clean(monkeypatch, tmp_path):
     """A present console-script whose shebang interpreter is missing (a half-built venv) fails CLEAN +
     non-zero — never a raw traceback out of the dispatcher."""
