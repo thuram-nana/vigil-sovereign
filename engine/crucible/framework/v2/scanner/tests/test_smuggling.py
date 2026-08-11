@@ -91,6 +91,9 @@ def test_smuggling_timing_desync_detected() -> None:
         assert hits, f"desync not detected: {[r.model_dump() for r in results]}"
         assert hits[0].probe_ms - hits[0].control_ms >= 1200.0
         assert hits[0].confidence > 0.0
+        # A12: a timing delta is a LEAD, not a confirmed desync (a normal origin awaiting an incomplete body
+        # delays identically) — the rationale must say so, never claim a confirmed "High desync".
+        assert "TIMING LEAD" in hits[0].rationale
 
 
 def test_no_false_positive_on_fast_server() -> None:

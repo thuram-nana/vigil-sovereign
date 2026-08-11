@@ -301,9 +301,16 @@ def detect(
             # knob governs both the raw delta gate and the oracle's firing.
             discriminator={"dimensions": ["latency"], "latency_threshold_ms": delay_threshold_ms},
         )
+        # A12: the latency oracle confirms a TIMING ANOMALY, not request smuggling. Timing alone is a LEAD —
+        # a normal origin awaiting an incomplete declared body produces the same delay — so this is reported
+        # as a low-severity, explicitly-UNCONFIRMED hypothesis, never a "High desync" confirmed exploit.
         confirmed = confirm_finding(
-            {"bug_class": "request_smuggling", "title": f"{technique} desync",
-             "severity": "High", "surface": technique, "summary": f"{technique} timing probe"},
+            {"bug_class": "request_smuggling",
+             "title": f"{technique} timing anomaly (possible desync — UNCONFIRMED)",
+             "severity": "Low", "surface": technique,
+             "summary": (f"{technique} probe delayed vs the control — a TIMING LEAD, not proof of smuggling. "
+                         f"A normal origin waiting for an incomplete declared body produces the same delay; "
+                         f"manual confirmation over a real desync is required before this is an exploit.")},
             ctx,
         )
         detected = delta >= delay_threshold_ms and confirmed is not None
@@ -314,7 +321,8 @@ def detect(
             probe_ms=round(probe_ms, 1),
             confidence=confirmed.confidence if confirmed else 0.0,
             rationale=(
-                f"{technique} probe hung {delta:.0f}ms beyond the control"
+                f"{technique} probe hung {delta:.0f}ms beyond the control — a TIMING LEAD (timing alone does "
+                f"not prove smuggling; a server awaiting an incomplete body delays identically)"
                 if detected else f"no significant delay ({delta:.0f}ms)"
             ),
         ))
