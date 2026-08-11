@@ -56,9 +56,11 @@ def _server() -> Iterator[str]:
 
 
 def test_allowed_hosts_blocks_off_scope_but_keeps_in_scope_dom_xss() -> None:
-    # allowlist has only a placeholder in-scope host; loopback is auto-allowed,
-    # off-scope.example is NOT — its fetch must be refused at the resolver.
-    with CdpBrowser(allowed_hosts={"in-scope.test"}) as br:
+    # A6: the loopback fixture IS the in-scope target, so loopback is on the allowlist (a loopback target
+    # allowlists loopback); off-scope.example is NOT — its fetch must be refused at the resolver. Loopback is
+    # no longer auto-allowed, so scanning a loopback target now requires allowlisting it (which the operator
+    # does when the target itself is loopback).
+    with CdpBrowser(allowed_hosts={"127.0.0.1"}) as br:
         sess = br.session()
         sess.add_binding("__r")
         with _server() as base:
