@@ -44,6 +44,14 @@ _HOP_BY_HOP = frozenset({
     "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
 })
 
+# A11: client-supplied forwarding headers are STRIPPED before forwarding — the gateway is the trust boundary
+# and sets its OWN X-Forwarded-For (the real client IP). Retaining a caller-forged forwarding header and
+# appending another lets a downstream parser that disagrees pick the forged value (identity spoofing).
+_CLIENT_FWD_HEADERS = frozenset({
+    "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
+    "x-real-ip", "forwarded",
+})
+
 _MAX_REQUEST_BODY = 10 * 1024 * 1024   # hard cap: a larger body is REFUSED (413), never truncated
 _MAX_INSPECT_BYTES = 2 * 1024 * 1024    # only the first N bytes of the body are inspected (the whole body is forwarded)
 _MAX_RESPONSE_BYTES = 25 * 1024 * 1024  # bounded upstream response we buffer
@@ -401,16 +409,29 @@ class AegisGatewayHandler(BaseHTTPRequestHandler):
         except Exception:
             return None
         url = self._forward_url(self.path)
-        fwd_headers = [(k, v) for k, v in self._request_headers() if k.lower() not in _HOP_BY_HOP]
+        # A11: strip client-supplied forwarding headers (the gateway sets its OWN X-Forwarded-For) so a
+        # caller cannot inject a forged forwarding chain a downstream parser might trust.
+        fwd_headers = [(k, v) for k, v in self._request_headers()
+                       if k.lower() not in _HOP_BY_HOP and k.lower() not in _CLIENT_FWD_HEADERS]
         fwd_headers.append(("Host", self.settings.upstream_netloc))
         fwd_headers.append(("X-Forwarded-For", self.client_address[0] if self.client_address else ""))
         try:
             with httpx.Client(follow_redirects=False, timeout=_FORWARD_TIMEOUT_S) as client:
-                resp = client.request(method, url, headers=fwd_headers, content=body or None)
-                content = resp.content[:_MAX_RESPONSE_BYTES]
+                # A11: STREAM the response and bound PEAK memory (read at most _MAX_RESPONSE_BYTES); an
+                # upstream response that EXCEEDS the bound is REFUSED (caller -> 502), never SILENTLY
+                # truncated with a rewritten Content-Length (which would corrupt the body and mislead the
+                # client into thinking it received a complete response).
+                with client.stream(method, url, headers=fwd_headers, content=body or None) as resp:
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in resp.iter_bytes():
+                        total += len(chunk)
+                        if total > _MAX_RESPONSE_BYTES:
+                            return None
+                        chunks.append(chunk)
+                    return resp.status_code, list(resp.headers.items()), b"".join(chunks)
         except Exception:
             return None
-        return resp.status_code, list(resp.headers.items()), content
 
     def _relay(self, status: int, headers: list[tuple[str, str]], content: bytes) -> None:
         """Send a captured upstream response to the client, stripping hop-by-hop headers."""
