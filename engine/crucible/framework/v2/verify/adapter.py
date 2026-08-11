@@ -25,8 +25,40 @@ misjudge.
 from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# The IMDS capture builder (from_imds_capture) caps every retained string so a hostile/oversized capture
+# cannot bloat the certificate (audit B5).
+_IMDS_CAPTURE_STR_CAP = 2048
+
+
+def _imds_json_scalar(v: Any) -> Any:
+    """Keep JSON-native scalars; coerce anything else (a ``datetime``, an arbitrary object) to a capped
+    string so the retained IMDS context is ALWAYS JSON-serializable (audit B5)."""
+    if v is None or isinstance(v, bool) or isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        return v[:_IMDS_CAPTURE_STR_CAP]
+    return _coerce_text(v)[:_IMDS_CAPTURE_STR_CAP]
+
+
+def _imds_scrub_source(value: Any) -> str:
+    """Retain ``scheme://host[:port]/path`` ONLY for an http(s) URL — DROP userinfo, query, and fragment so
+    a secret carried in the URL query (``?token=…``) or userinfo (``user:pass@``) is never laundered into
+    the certificate (audit B5). A non-URL source (``env:…``, a file path) is kept verbatim. IPv6 hosts are
+    re-bracketed. Everything is length-capped."""
+    raw = _coerce_text(value)
+    try:
+        p = urlsplit(raw)
+        if p.scheme in ("http", "https") and p.hostname:
+            host = f"[{p.hostname}]" if ":" in p.hostname else p.hostname
+            netloc = f"{host}:{p.port}" if p.port else host
+            return urlunsplit((p.scheme, netloc, p.path, "", ""))[:_IMDS_CAPTURE_STR_CAP]
+    except ValueError:
+        pass
+    return raw[:_IMDS_CAPTURE_STR_CAP]
 
 
 # ---------------------------------------------------------------------------
@@ -942,7 +974,7 @@ class FindingContext(BaseModel):
         cred: dict[str, Any] = {}
         akid = cred_src.get("AccessKeyId") or cred_src.get("access_key_id")
         if akid not in (None, ""):
-            cred["AccessKeyId"] = _coerce_text(akid)               # identifier, not a secret
+            cred["AccessKeyId"] = _coerce_text(akid)[:_IMDS_CAPTURE_STR_CAP]   # identifier, not a secret
         sec = _redact_present(cred_src.get("SecretAccessKey") or cred_src.get("secret_access_key"))
         if sec is not None:
             cred["SecretAccessKey"] = sec                          # redacted presence marker
@@ -962,7 +994,7 @@ class FindingContext(BaseModel):
                 continue
             for k in ("source", "url", "metadata_url", "endpoint", "uri"):
                 if obj.get(k) not in (None, ""):
-                    source = _coerce_text(obj.get(k))
+                    source = _imds_scrub_source(obj.get(k))    # drop userinfo/query/fragment secrets (B5)
                     break
             if source:
                 break
@@ -982,10 +1014,12 @@ class FindingContext(BaseModel):
             call: dict[str, Any] = {}
             st = call_src.get("status", call_src.get("status_code"))
             if st is not None:
-                call["status"] = st
-            for k in ("action", "endpoint", "method"):
+                call["status"] = _imds_json_scalar(st)              # JSON-safe (a datetime/object won't break) (B5)
+            for k in ("action", "method"):
                 if call_src.get(k) not in (None, ""):
-                    call[k] = _coerce_text(call_src.get(k))
+                    call[k] = _coerce_text(call_src.get(k))[:_IMDS_CAPTURE_STR_CAP]
+            if call_src.get("endpoint") not in (None, ""):
+                call["endpoint"] = _imds_scrub_source(call_src.get("endpoint"))   # drop query secrets (B5)
             body_src: Mapping[str, Any] = call_src
             for k in ("response", "body", "identity", "result", "json"):
                 if isinstance(call_src.get(k), Mapping):
@@ -997,11 +1031,11 @@ class FindingContext(BaseModel):
                                 ("email", ("email", "email_address")), ("sub", ("sub", "subject"))):
                 for kk in keys:
                     if body_src.get(kk) not in (None, ""):
-                        resp[out_k] = _coerce_text(body_src.get(kk))
+                        resp[out_k] = _coerce_text(body_src.get(kk))[:_IMDS_CAPTURE_STR_CAP]
                         break
             for kk in ("exp", "expires_in", "expires_at", "expiry", "expireTime", "expire_time"):
                 if body_src.get(kk) not in (None, ""):
-                    resp[kk] = body_src.get(kk)
+                    resp[kk] = _imds_json_scalar(body_src.get(kk))    # JSON-safe expiry (B5)
                     break
             # Retain a truthy error marker so a FAILED confirming call stays non-firing on re-verify — the
             # full failure allowlist (AWS JSON __type+message, Error/Code/Message/Fault, generic error(s))
@@ -1011,7 +1045,8 @@ class FindingContext(BaseModel):
                         {"error", "errors", "errormessage", "error_message", "errorcode",
                          "error_code", "message", "code", "__type", "fault"}
                         and body_src.get(kk)):
-                    resp[_coerce_text(kk)] = _coerce_text(body_src.get(kk))
+                    resp[_coerce_text(kk)[:_IMDS_CAPTURE_STR_CAP]] = \
+                        _coerce_text(body_src.get(kk))[:_IMDS_CAPTURE_STR_CAP]
             if resp:
                 call["response"] = resp
             retained["confirming_call"] = call

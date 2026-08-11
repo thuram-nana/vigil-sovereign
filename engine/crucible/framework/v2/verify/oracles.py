@@ -4455,32 +4455,68 @@ def saml_forgery_oracle(xml: Any, *, candidate_certs: Sequence[str] = ()) -> Ora
 # call / a credential NOT from the metadata endpoint / a random blob / malformed evidence never fire.
 _IMDS_STR_CAP = 8192
 _IMDS_OBS_CAP = 512
-# An AWS access-key id: ASIA… (STS temporary, the shape IMDS returns) or AKIA… (long-term). The spec's
-# regex matches both; an IMDS capture also requires a Token, which a long-term AKIA key never carries.
-_IMDS_AWS_AKID = re.compile(r"^A[SK]IA[0-9A-Z]{16,}$")
+# An AWS INSTANCE-ROLE access-key id: ONLY ``ASIA…`` — the STS TEMPORARY shape IMDS issues (it always ships
+# with a session Token). A long-term ``AKIA…`` key NEVER comes from IMDS (it carries no session token), so
+# accepting it as an "IMDS capture" is a false attribution (audit B4). The strict prefix + the mandatory
+# Token together bind the credential to the instance-metadata role-credential shape.
+_IMDS_AWS_AKID = re.compile(r"^ASIA[0-9A-Z]{16,}$")
 _IMDS_AWS_ACCOUNT = re.compile(r"^[0-9]{12}$")
-# The link-local IMDS endpoint. A captured AWS role credential's source must be a URL whose HOST resolves
-# (canonically, incl. the SSRF IP encodings) to this IP, with the credential-path marker in the URL PATH —
-# NOT a substring anywhere in the raw string. A userinfo-@ host, a query-param IP, a host that merely
-# CONTAINS the IP as a substring (169.254.169.254.attacker.com), or a creds file are NOT an IMDS reach.
+# The link-local IMDS endpoints. A captured AWS role credential's source must be a URL whose HOST resolves
+# (canonically, incl. the SSRF IP encodings) to one of these IPs, with the credential-path marker as a
+# bounded PATH SEGMENT — NOT a substring anywhere in the raw string. A userinfo-@ host, a query-param IP, a
+# host that merely CONTAINS the IP (169.254.169.254.attacker.com), a creds file, a non-http(s) scheme, or a
+# ``…/security-credentials-evil`` sibling path are NOT an IMDS reach.
 _IMDS_AWS_IP = "169.254.169.254"
 _IMDS_METADATA_IP = ipaddress.ip_address(_IMDS_AWS_IP)
+# Native IPv6 metadata endpoints (documented, audit B6): AWS fd00:ec2::254, GCP fd20:ce::254. Provider-
+# specific so an AWS source using GCP's IPv6 (or vice-versa) is not cross-validated.
+_IMDS_AWS_METADATA_IPS = frozenset({_IMDS_METADATA_IP, ipaddress.ip_address("fd00:ec2::254")})
+_IMDS_GCP_METADATA_IPS = frozenset({_IMDS_METADATA_IP, ipaddress.ip_address("fd20:ce::254")})
 _IMDS_AWS_CRED_PATH = "iam/security-credentials"
-# GCP: the compute-metadata host (or the same link-local IP) with all three token-path markers in the URL
-# PATH. Real endpoint: metadata.google.internal/computeMetadata/v1/instance/service-accounts/<sa>/token.
+# Only http/https denote a network reach; a captured metadata credential's source must use one (a ``file://``
+# / scheme-relative / opaque source is not an IMDS reach, audit B4). Only the default IMDS ports are a reach.
+_IMDS_URL_SCHEMES = frozenset({"http", "https"})
+_IMDS_OK_PORTS = frozenset({None, 80, 443})
+# GCP: the compute-metadata host (or the same link-local IP) with all three token-path markers as bounded
+# PATH SEGMENTS. Real endpoint: metadata.google.internal/computeMetadata/v1/instance/service-accounts/<sa>/token.
 _IMDS_GCP_HOSTS = frozenset({"metadata.google.internal", "metadata"})
 _IMDS_GCP_PATH_MARKERS = ("computemetadata/v1", "service-accounts", "token")
+# The confirming call's declared ACTION must match the branch's provider (audit B1) — a GCP action on an AWS
+# identity body (or vice-versa) is a mismatched/laundered confirmation and must NOT confirm. Compared
+# case-insensitively; an ABSENT action falls back to the identity-body shape (which already distinguishes
+# AWS Arn/Account from GCP email/sub).
+_IMDS_AWS_ACTIONS = frozenset({"sts:getcalleridentity", "getcalleridentity"})
+_IMDS_GCP_ACTIONS = frozenset({"tokeninfo", "userinfo", "oauth2/v3/tokeninfo", "oauth2/v1/tokeninfo"})
+# Declared provider aliases (audit B1): when a capture declares a ``provider`` it must AGREE with the
+# credential shape the branch matched — a ``provider=gcp`` label on an AWS-shaped credential is a
+# mismatched/fabricated capture and must NOT confirm.
+_IMDS_AWS_PROVIDERS = frozenset({"aws", "amazon", "ec2", "amazon web services"})
+_IMDS_GCP_PROVIDERS = frozenset({"gcp", "google", "gce", "google cloud", "googlecloud"})
 # Keys whose presence-with-a-truthy-value is POSITIVE proof the confirming call FAILED (did not auth).
 # Covers the AWS JSON error shape (__type + message), the AWS query/XML error shape (Error/Code/Message/
-# Fault), and generic error(s) payloads — a 200 body carrying ANY of these is NOT a success.
+# Fault), and generic error(s) payloads — a body carrying ANY of these (at ANY depth, audit B4) is NOT a
+# success.
 _IMDS_ERROR_KEYS = frozenset({
     "error", "errors", "errormessage", "error_message", "errorcode", "error_code",
-    "message", "code", "__type", "fault",
+    "message", "code", "__type", "fault", "error_description",
+})
+# Explicit failure status tokens (audit B1): a timeout / connection error is a FAILURE, not an
+# absent/ambiguous status — it must never fall back to identity-presence as if the call succeeded.
+_IMDS_FAIL_STATUS = frozenset({
+    "error", "fail", "failed", "failure", "forbidden", "unauthorized", "denied", "timeout", "timed out",
+    "timed_out", "timedout", "connection refused", "connrefused", "conn refused", "refused", "reset",
+    "connreset", "unreachable", "no route to host", "econnrefused", "etimedout",
 })
 
 
 def _imds_text(value: Any) -> str:
     return _coerce_text(value)[:_IMDS_STR_CAP]
+
+
+def _imds_obs_source(source: str) -> str:
+    """The source shown in the oracle's ``observed`` evidence: query + fragment STRIPPED (they carry no part
+    of the metadata-endpoint discriminator and could hold a secret, audit B5) and length-capped."""
+    return source.split("?", 1)[0].split("#", 1)[0][:_IMDS_OBS_CAP]
 
 
 def _imds_credential_obj(capture: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -4552,13 +4588,24 @@ def _imds_host_to_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
     return ipaddress.ip_address(n)                       # a 32-bit integer denotes an IPv4 address
 
 
-def _imds_ip_is_metadata(ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None) -> bool:
-    """True iff ``ip`` is the link-local metadata IP (unwrapping an IPv4-mapped IPv6 address first)."""
+def _imds_ip_in(ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None,
+                allowed: frozenset) -> bool:
+    """True iff ``ip`` is one of the ``allowed`` metadata IPs (unwrapping an IPv4-mapped IPv6 address first,
+    so ``::ffff:a9fe:a9fe`` matches the IPv4 metadata IP). Native IPv6 endpoints (fd00:ec2::254 /
+    fd20:ce::254) are matched directly (audit B6)."""
     if ip is None:
         return False
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return ip == _IMDS_METADATA_IP
+    return ip in allowed
+
+
+def _imds_path_has(path: str, marker: str) -> bool:
+    """True iff ``marker`` (which may itself contain ``/``) appears in ``path`` as a bounded run of whole
+    PATH SEGMENTS — i.e. delimited by ``/`` or a path boundary — never as a mid-segment substring. So
+    ``iam/security-credentials`` matches ``/latest/meta-data/iam/security-credentials/role`` but NOT the
+    forged sibling ``/iam/security-credentials-evil/x`` (audit B4). Both are already lower-cased."""
+    return re.search(r"(^|/)" + re.escape(marker) + r"(/|$)", path) is not None
 
 
 def _imds_url_host_path(source: str) -> tuple[str, str] | None:
@@ -4569,42 +4616,48 @@ def _imds_url_host_path(source: str) -> tuple[str, str] | None:
     fragment, or the host's own text (CLAIM-DISCIPLINE rule 4). Never raises."""
     try:
         parts = urlsplit(source)
+        if parts.scheme not in _IMDS_URL_SCHEMES:       # file:// / scheme-relative / opaque -> not a reach
+            return None
         if parts.username or parts.password:            # userinfo present -> the host is not IMDS
             return None
         host = parts.hostname
         path = parts.path or ""
+        port = parts.port                               # ValueError here (bad port) -> not a URL we accept
     except ValueError:
         return None
-    if not host:
+    if not host or port not in _IMDS_OK_PORTS:          # an unexpected/invalid port is not an IMDS reach
         return None
     return host.lower(), path.lower()
 
 
 def _imds_source_is_aws_metadata(source: str) -> bool:
-    """The AWS discriminator: ``source`` is a URL whose HOST canonicalizes to 169.254.169.254 (incl. the
-    decimal/hex/IPv6-mapped SSRF encodings) AND whose PATH carries ``iam/security-credentials``."""
+    """The AWS discriminator: ``source`` is an http(s) URL on a default port whose HOST canonicalizes to an
+    AWS metadata IP (169.254.169.254 incl. the decimal/hex/IPv6-mapped SSRF encodings, or native
+    fd00:ec2::254) AND whose PATH carries ``iam/security-credentials`` as a bounded segment."""
     parsed = _imds_url_host_path(source)
     if parsed is None:
         return False
     host, path = parsed
-    return _imds_ip_is_metadata(_imds_host_to_ip(host)) and _IMDS_AWS_CRED_PATH in path
+    return _imds_ip_in(_imds_host_to_ip(host), _IMDS_AWS_METADATA_IPS) and _imds_path_has(path, _IMDS_AWS_CRED_PATH)
 
 
 def _imds_source_is_gcp_metadata(source: str) -> bool:
-    """The GCP discriminator: ``source`` is a URL whose HOST is the compute-metadata host (or the same
-    link-local IP) AND whose PATH carries ``computeMetadata/v1`` + ``service-accounts`` + ``token``."""
+    """The GCP discriminator: ``source`` is an http(s) URL on a default port whose HOST is the compute-
+    metadata host (or a GCP metadata IP incl. native fd20:ce::254) AND whose PATH carries
+    ``computeMetadata/v1`` + ``service-accounts`` + ``token`` as bounded segments."""
     parsed = _imds_url_host_path(source)
     if parsed is None:
         return False
     host, path = parsed
-    host_ok = host in _IMDS_GCP_HOSTS or _imds_ip_is_metadata(_imds_host_to_ip(host))
-    return host_ok and all(m in path for m in _IMDS_GCP_PATH_MARKERS)
+    host_ok = host in _IMDS_GCP_HOSTS or _imds_ip_in(_imds_host_to_ip(host), _IMDS_GCP_METADATA_IPS)
+    return host_ok and all(_imds_path_has(path, m) for m in _IMDS_GCP_PATH_MARKERS)
 
 
-def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any, bool]:
-    """Return (identity_body, raw_status, present). The confirming call is a nested
+def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any, Any, bool]:
+    """Return (identity_body, raw_status, action, present). The confirming call is a nested
     ``confirming_call``/``confirmation``/… mapping; its identity payload is a nested
-    ``response``/``body``/``identity``/``result``/``json`` mapping, or the call mapping itself."""
+    ``response``/``body``/``identity``/``result``/``json`` mapping, or the call mapping itself. The declared
+    ``action`` is surfaced so the oracle can require it agree with the branch's provider (audit B1)."""
     call: Mapping[str, Any] | None = None
     for k in ("confirming_call", "confirmation", "confirm_call", "verify_call", "caller_identity"):
         v = capture.get(k)
@@ -4612,18 +4665,20 @@ def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any]
             call = v
             break
     if call is None:
-        return {}, None, False
+        return {}, None, None, False
     status = call.get("status", call.get("status_code"))
+    action = call.get("action", call.get("method"))
     for k in ("response", "body", "identity", "result", "json"):
         v = call.get(k)
         if isinstance(v, Mapping):
-            return v, status, True
-    return call, status, True   # the call mapping itself carries the identity fields
+            return v, status, action, True
+    return call, status, action, True   # the call mapping itself carries the identity fields
 
 
 def _imds_status_ok(status: Any) -> bool | None:
-    """True = an explicit 2xx success, False = an explicit failure, None = absent/unparseable (fall back
-    to identity-field presence). Positive-evidence-only: an ambiguous status never asserts success."""
+    """True = an explicit 2xx / ok success, False = an explicit failure (incl. a timeout / connection
+    error, audit B1), None = absent/unparseable. Positive-evidence-only: an ambiguous status never asserts
+    success, and a FAILURE token never masquerades as absent."""
     if status is None:
         return None
     try:
@@ -4631,24 +4686,41 @@ def _imds_status_ok(status: Any) -> bool | None:
         return 200 <= code < 300
     except (TypeError, ValueError):
         s = _coerce_text(status).strip().lower()
-        if s in ("ok", "success", "succeeded"):
+        if s in ("ok", "success", "succeeded", "200"):
             return True
-        if s in ("error", "fail", "failed", "forbidden", "unauthorized", "denied"):
+        if s in _IMDS_FAIL_STATUS:
             return False
         return None
 
 
-def _imds_call_ok(body: Mapping[str, Any], status: Any) -> bool:
-    """No FAILURE signal in the confirming call: the status (if present) is a 2xx AND no error marker
-    carries a truthy value. This is the positive-evidence gate that a FAILED (4xx / error) call must not
-    pass — the identity-field checks below prove the SUCCESS."""
-    if _imds_status_ok(status) is False:
+def _imds_body_has_error(obj: Any, depth: int = 0) -> bool:
+    """True iff a FAILURE marker (an ``_IMDS_ERROR_KEYS`` key with a truthy value) appears at ANY bounded
+    depth of ``obj`` — a nested error the top-level scan would miss (audit B4). Bounded to avoid pathological
+    recursion; scans mapping values and lists/tuples of mappings only."""
+    if depth > 4 or not isinstance(obj, Mapping):
         return False
-    if isinstance(body, Mapping):
-        for k, val in body.items():
-            if _coerce_text(k).strip().lower() in _IMDS_ERROR_KEYS and val:
-                return False
-    return True
+    for k, val in obj.items():
+        if not val:
+            continue
+        if _coerce_text(k).strip().lower() in _IMDS_ERROR_KEYS:
+            return True
+        if isinstance(val, Mapping) and _imds_body_has_error(val, depth + 1):
+            return True
+        if isinstance(val, (list, tuple)):
+            for item in val:
+                if isinstance(item, Mapping) and _imds_body_has_error(item, depth + 1):
+                    return True
+    return False
+
+
+def _imds_call_ok(body: Mapping[str, Any], status: Any) -> bool:
+    """POSITIVE proof the confirming call SUCCEEDED: an EXPLICIT 2xx/ok status (audit B1 — a
+    missing/ambiguous/timeout status is NOT a success and must not fall back to identity-presence) AND no
+    failure marker at ANY depth of the body (audit B4). The identity-field checks in the caller then prove
+    WHICH identity authenticated."""
+    if _imds_status_ok(status) is not True:
+        return False
+    return not _imds_body_has_error(body)
 
 
 def _imds_aws_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
@@ -4684,7 +4756,11 @@ def _imds_gcp_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
         if body.get(k) not in (None, ""):
             expiry = body.get(k)
             break
-    ok = bool(email or sub)
+    # A real tokeninfo/userinfo identity is an email (an SA address) OR a long numeric subject id — never a
+    # 1-character ``sub`` (audit B4). A malformed/degenerate identity does not prove the token authenticated.
+    email_ok = "@" in email and "." in email.rsplit("@", 1)[-1]
+    sub_ok = sub.isdigit() and len(sub) >= 6
+    ok = email_ok or sub_ok
     return ok, {"email": email, "sub": sub, "expiry": _imds_text(expiry)}
 
 
@@ -4696,6 +4772,13 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
     performs the attack — the live reach-IMDS/use-token action is a separate WARDEN-A2-gated runner; this
     pure oracle judges what that runner captured, so a confirmed FACT re-verifies offline from its
     certificate.
+
+    STATUS (audit B3) — **EXPERIMENTAL / OFFLINE-VERIFICATION ONLY.** This is the sound offline
+    verifier for an IMDS capture; it is NOT a completed end-to-end E1 exploitation proof. The live
+    WARDEN-A2-gated IMDS runner, the ``cloud_exploit.imds.credential_capture`` evidence branch, the
+    admission/verdict route, the D2 certificate binding, the attack-path/world-model projection, the
+    veracity-firewall wiring, and a live fixture are BLOCKING WORK (not yet built). Until they land, this
+    oracle only adjudicates a capture the operator supplies — it never itself reaches a metadata endpoint.
 
     ``observed`` is the JSON-safe retained capture::
 
@@ -4753,7 +4836,11 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
     capture = observed
     cred = _imds_credential_obj(capture)
     source = _imds_source(capture, cred)
-    body, status, call_present = _imds_confirming_call(capture)
+    body, status, action, call_present = _imds_confirming_call(capture)
+    # B1: a DECLARED provider must agree with the matched credential shape, and the confirming call's action
+    # must be the provider's identity check — a mismatch is a fabricated/laundered capture, not a FACT.
+    declared_provider = _imds_text(capture.get("provider")).strip().lower()
+    action_norm = _imds_text(action).strip().lower()
 
     # -- AWS: an STS-temporary instance-role credential from the IMDS security-credentials path --------
     akid = _imds_text(cred.get("AccessKeyId") or cred.get("access_key_id")).strip()
@@ -4772,6 +4859,22 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                           "but NO confirming sts:GetCallerIdentity call is retained — retrieved-but-"
                           "unconfirmed (stays a LEAD; a credential alone does not prove it is usable)"),
                 observed={"provider": "aws", "reason": "no_confirming_call", "access_key_id": akid})
+        if declared_provider and declared_provider not in _IMDS_AWS_PROVIDERS:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=(f"AWS-shaped instance-role credential from the IMDS path, but the capture DECLARES "
+                          f"provider={declared_provider!r} — the declared provider disagrees with the "
+                          f"credential shape; a mismatched/fabricated capture is NOT confirmed (stays a LEAD)"),
+                observed={"provider": "aws", "reason": "provider_mismatch",
+                          "declared_provider": declared_provider, "access_key_id": akid})
+        if action_norm and action_norm not in _IMDS_AWS_ACTIONS:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=(f"AWS instance-role credential from IMDS, but the confirming call's action "
+                          f"({action_norm!r}) is not the AWS identity check (sts:GetCallerIdentity) — a "
+                          f"mismatched confirmation does NOT prove the AWS credential usable (stays a LEAD)"),
+                observed={"provider": "aws", "reason": "confirming_action_mismatch",
+                          "action": action_norm, "access_key_id": akid})
         ok, ident = _imds_aws_identity(body)
         if _imds_call_ok(body, status) and ok:
             return OracleSignal(
@@ -4785,7 +4888,7 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                           f"network, no re-exploitation)."),
                 observed={"provider": "aws", "reason": "imds_credential_authenticated",
                           "access_key_id": akid, "account": ident["account"], "arn": ident["arn"],
-                          "user_id": ident["user_id"], "source": source[:_IMDS_OBS_CAP],
+                          "user_id": ident["user_id"], "source": _imds_obs_source(source),
                           "confirming_call": "sts:GetCallerIdentity"})
         return OracleSignal(
             kind=kind, fired=False, confidence=0.0,
@@ -4807,6 +4910,21 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                           "but NO confirming tokeninfo/userinfo call is retained — retrieved-but-"
                           "unconfirmed (stays a LEAD)"),
                 observed={"provider": "gcp", "reason": "no_confirming_call"})
+        if declared_provider and declared_provider not in _IMDS_GCP_PROVIDERS:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=(f"GCP-shaped service-account token from the compute-metadata path, but the capture "
+                          f"DECLARES provider={declared_provider!r} — the declared provider disagrees with "
+                          f"the credential shape; a mismatched/fabricated capture is NOT confirmed (LEAD)"),
+                observed={"provider": "gcp", "reason": "provider_mismatch",
+                          "declared_provider": declared_provider})
+        if action_norm and action_norm not in _IMDS_GCP_ACTIONS:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=(f"GCP access token from compute metadata, but the confirming call's action "
+                          f"({action_norm!r}) is not a GCP token introspection (tokeninfo/userinfo) — a "
+                          f"mismatched confirmation does NOT prove the token usable (stays a LEAD)"),
+                observed={"provider": "gcp", "reason": "confirming_action_mismatch", "action": action_norm})
         ok, ident = _imds_gcp_identity(body)
         if _imds_call_ok(body, status) and ok:
             who = ident["email"] or ident["sub"]
@@ -4820,7 +4938,7 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                           f"re-derives the achieved effect over the retained evidence offline (no network)."),
                 observed={"provider": "gcp", "reason": "imds_credential_authenticated",
                           "identity": who, "email": ident["email"], "sub": ident["sub"],
-                          "expiry": ident["expiry"], "source": source[:_IMDS_OBS_CAP],
+                          "expiry": ident["expiry"], "source": _imds_obs_source(source),
                           "confirming_call": "tokeninfo"})
         return OracleSignal(
             kind=kind, fired=False, confidence=0.0,
@@ -4839,4 +4957,4 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                   "(stays a LEAD; a credential not from IMDS, a 401/timeout, or a random blob never fires)"),
         observed={"reason": "no_imds_credential",
                   "aws_akid_shape": _IMDS_AWS_AKID.match(akid) is not None,
-                  "source": source[:_IMDS_OBS_CAP]})
+                  "source": _imds_obs_source(source)})
