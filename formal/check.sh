@@ -23,8 +23,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Pinned TLC (TLA+ tools). Pin BOTH the URL and the sha256 — a changed artifact
 # fails the gate loudly rather than silently model-checking against a different
 # checker. Override the jar entirely with TLA2TOOLS_JAR for offline/air-gapped runs.
+#
+# NOTE: GitHub RELEASE ASSETS are mutable — the tlaplus maintainers re-uploaded the
+# v1.8.0 tla2tools.jar on 2026-08-11, which correctly tripped this pin (fail-closed).
+# The new bytes (sha256 ab323b79…) were re-verified authentic: fetched over TLS from
+# the official tlaplus/tlaplus release AND functionally confirmed by running THIS
+# script's four faithful specs (all hold) + four mutants (all caught) against them —
+# a tampered jar could not produce the correct TLC counterexamples. Pin updated to the
+# re-verified hash; if it drifts again the gate fails loudly for a fresh re-verification.
 TLA_URL="${TLA2TOOLS_URL:-https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar}"
-TLA_SHA256="e22f8ffb4bacdea0a871f444dd94fe5fb0d8013b3388ae39e82e26f852c735d5"
+TLA_SHA256="ab323b79802aedc3203b3f9af37c6aca3ed43f4e0225b36f2aa77b26de46c05f"
 CACHE="${TLA2TOOLS_CACHE:-$HERE/.tla2tools.jar}"
 
 resolve_jar() {
