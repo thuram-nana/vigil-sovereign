@@ -283,17 +283,36 @@ def race_check(
         {"gt": [{"var": "successes"}, {"var": "max_allowed"}]},
         bug_class="request_race",
     )
-    finding = {
-        "title": f"Limit-overrun race on {action_path}",
-        "bug_class": "request_race",
-        "severity": "High",
-        "surface": f"POST {action_path}",
-        "summary": (
-            f"A should-be-atomic action succeeded {result.successes} times under a "
-            f"{count}-request single-packet burst, exceeding its limit of "
-            f"{max_allowed}. The check-then-act window is not guarded, so "
-            f"concurrent requests all pass the check before any commits — a "
-            f"TOCTOU limit-overrun (double-spend / reuse) race."
-        ),
-    }
+    # A12: a status-code count ("any 2xx") does not prove a should-be-atomic resource was over-CONSUMED — a
+    # benignly-idempotent endpoint returns 2xx to every concurrent POST, indistinguishable (from the response
+    # side) from a real limit-overrun. So the naive verdict is a LEAD; only a caller-supplied SEMANTIC success
+    # predicate (proving the action actually committed, e.g. the body echoes a one-time redemption) earns the
+    # high-severity limit-overrun claim.
+    if success_predicate is not None:
+        finding = {
+            "title": f"Limit-overrun race on {action_path}",
+            "bug_class": "request_race",
+            "severity": "High",
+            "surface": f"POST {action_path}",
+            "summary": (
+                f"A should-be-atomic action succeeded {result.successes} of {count} times in a single-packet "
+                f"burst, exceeding its limit of {max_allowed} (a SEMANTIC success predicate proved each "
+                f"commit). The check-then-act window is not guarded, so concurrent requests all pass the "
+                f"check before any commits — a TOCTOU limit-overrun (double-spend / reuse) race."
+            ),
+        }
+    else:
+        finding = {
+            "title": f"Concurrent-success observation on {action_path} (possible race — UNCONFIRMED)",
+            "bug_class": "request_race",
+            "severity": "Low",
+            "surface": f"POST {action_path}",
+            "summary": (
+                f"{result.successes} of {count} concurrent requests returned 2xx under the DEFAULT any-2xx "
+                f"predicate, over the limit of {max_allowed}. This is a LEAD, not proof: a 2xx count does not "
+                f"prove a should-be-atomic resource was over-consumed (a benignly-idempotent endpoint returns "
+                f"2xx to every concurrent request). Supply a semantic success predicate proving the action "
+                f"actually committed more than {max_allowed} times to confirm the race."
+            ),
+        }
     return confirm_finding(finding, context)

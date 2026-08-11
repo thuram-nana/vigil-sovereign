@@ -235,11 +235,28 @@ class CswshCheck:
             {"cross_origin_ws_accepted": hijackable},
             bug_class=self.bug_class,
         )
-        return confirm_finding(
-            {"bug_class": self.bug_class, "title": "Cross-Site WebSocket Hijacking",
-             "severity": "High", "surface": self.url, "summary": "authenticated WS handshake accepted cross-origin"},
-            ctx,
-        )
+        # A12: an authenticated HIJACK requires the victim's SESSION (cookies). Without cookies the probe
+        # proves only that the endpoint accepts a foreign-Origin handshake (Origin not validated) — a LEAD,
+        # not a confirmed authenticated hijack. Over TLS the peer is unverified (CERT_NONE), so note that the
+        # channel identity is not validated. Only a real authenticated session (cookies) earns "High hijack".
+        tls_note = " (over an UNVERIFIED TLS channel — the peer identity is not validated)" if tls else ""
+        if self.cookies:
+            finding = {
+                "bug_class": self.bug_class, "title": "Cross-Site WebSocket Hijacking",
+                "severity": "High", "surface": self.url,
+                "summary": f"authenticated WS handshake (victim session cookies) accepted cross-origin{tls_note}",
+            }
+        else:
+            finding = {
+                "bug_class": self.bug_class,
+                "title": "Cross-origin WebSocket handshake accepted (possible CSWSH — UNCONFIRMED)",
+                "severity": "Medium", "surface": self.url,
+                "summary": (f"the endpoint accepted a foreign-Origin handshake, so it does not validate the "
+                            f"Origin — a LEAD{tls_note}. NO authenticated session was supplied (no cookies), "
+                            f"so an authenticated hijack is NOT proven; supply the victim's cookies to confirm "
+                            f"a real cross-site WebSocket hijack."),
+            }
+        return confirm_finding(finding, ctx)
 
 
 @dataclass(frozen=True)

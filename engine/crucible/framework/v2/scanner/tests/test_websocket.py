@@ -162,6 +162,18 @@ def test_cswsh_confirmed_when_origin_not_validated() -> None:
         assert finding is not None, "cross-site WS hijacking not confirmed"
         assert finding.bug_class == "cross_site_websocket_hijacking"
         assert finding.confirmed_by.value == "achieved_state"
+        # A12: a real authenticated session (victim cookies) was supplied -> a High authenticated hijack.
+        assert finding.severity == "High"
+
+
+def test_a12_cswsh_without_cookies_is_a_lead_not_an_authenticated_hijack() -> None:
+    # A12: without the victim's session (cookies), the probe proves only that the endpoint accepts a
+    # foreign-Origin handshake (Origin not validated) — a LEAD, not a confirmed AUTHENTICATED hijack.
+    with _server(check_origin=False) as url:
+        finding = ws.CswshCheck(url=url).probe()          # no cookies
+        assert finding is not None                        # cross-origin acceptance still fires the oracle
+        assert finding.severity == "Medium"               # ...but capped: not a High authenticated hijack
+        assert "UNCONFIRMED" in finding.title and "authenticated" not in finding.title.lower()
 
 
 def test_cswsh_not_confirmed_when_origin_validated() -> None:

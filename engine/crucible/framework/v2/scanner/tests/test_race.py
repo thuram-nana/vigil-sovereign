@@ -125,6 +125,11 @@ def test_naive_coupon_is_over_redeemed_and_confirmed() -> None:
     assert confirmed.bug_class == "request_race"
     assert confirmed.confirmed_by.value == "achieved_state"
     assert confirmed.confidence >= 0.7
+    # A12: the count-invariant oracle fired (successes > max_allowed), but WITHOUT a semantic success
+    # predicate a 2xx count cannot prove a real over-consumption vs a benignly-idempotent endpoint — so it is
+    # an honest LEAD (Low / UNCONFIRMED), not a High confirmed exploit.
+    assert confirmed.severity == "Low"
+    assert "UNCONFIRMED" in confirmed.title
 
 
 def test_locked_coupon_is_not_flagged() -> None:
@@ -186,3 +191,35 @@ def test_success_predicate_is_honoured() -> None:
         )
     assert confirmed is not None
     assert confirmed.bug_class == "request_race"
+    assert confirmed.severity == "High"   # A12: a semantic success predicate earns the confirmed claim
+
+
+def test_a12_all_2xx_no_predicate_is_a_lead_not_a_confirmed_race() -> None:
+    # A12: when EVERY concurrent request returns 2xx (no losers) under the DEFAULT any-2xx predicate, the
+    # verdict cannot distinguish a real over-consumption from a benignly-idempotent endpoint — it is a LEAD.
+    import http.server
+    import socketserver
+    import threading
+
+    class _AllOk(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_a):
+            return
+
+        def do_POST(self):   # every concurrent POST "succeeds" — no atomic resource, no losers
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _AllOk)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        confirmed = race_check(base, "/redeem", count=6, max_allowed=1)   # naive: no success_predicate
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert confirmed is not None                       # the oracle still fires (over-run count > max_allowed)
+    assert confirmed.severity == "Low"                 # ...but it is a LEAD, not a High confirmed race
+    assert "UNCONFIRMED" in confirmed.title
