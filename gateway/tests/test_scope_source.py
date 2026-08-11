@@ -54,13 +54,42 @@ def test_resolved_allowed_ips_skips_wildcards_and_failures():
 
 
 def test_charter_source_wraps_parse_scope(monkeypatch):
-    # Exercise CharterScopeSource without a charter on disk by injecting the gate tuple.
+    # Exercise CharterScopeSource without a charter on disk by injecting the gate tuple. A3: the signing
+    # check runs first, so stub it to a noop here (its enforcement is tested separately below).
     _parse, hms, eh = scope_source._gate()
     monkeypatch.setattr(scope_source, "_GATE", (lambda slug: ["acme.example"], hms, eh))
+    monkeypatch.setattr(scope_source, "_require_charter_signed", lambda slug: None)
     src = scope_source.CharterScopeSource("acme")
     assert src.hosts() == ["acme.example"]
     assert src.matches("acme.example")
     assert not src.matches("other.example")
+
+
+def _write_charter(tmp_path, slug, signer):
+    cp = tmp_path / f"{slug}.md"
+    cp.write_text(
+        f"# Engagement charter — {slug}\n\n"
+        f"Signed: `{signer}`     Date: `2026-05-04`\n\n"
+        "## 2. In-scope systems\n\n"
+        "| Host |\n|---|\n| `acme.example` |\n",
+        encoding="utf-8",
+    )
+    return cp
+
+
+def test_charter_source_refuses_unsigned_charter(monkeypatch, tmp_path):
+    # A3: the gateway must NOT authorize destinations from an UNSIGNED charter. An unsigned charter (the
+    # placeholder `<name>` on the Signed: line) makes hosts() raise, fail-closed; a signed one returns scope.
+    from framework.v2.common import paths as _paths
+    from framework.v2.common.ethics import CharterNotSigned
+
+    monkeypatch.setattr(_paths, "charter_path", lambda s: tmp_path / f"{s}.md")
+    _write_charter(tmp_path, "unsigned", "<name>")     # placeholder => NOT signed
+    with pytest.raises(CharterNotSigned):
+        scope_source.CharterScopeSource("unsigned").hosts()
+    # a genuinely signed charter is accepted and its scope is read.
+    _write_charter(tmp_path, "signed", "tester")
+    assert scope_source.CharterScopeSource("signed").hosts() == ["acme.example"]
 
 
 def test_empty_host_never_matches():
