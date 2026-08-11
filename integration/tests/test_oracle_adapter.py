@@ -99,6 +99,29 @@ def test_finding_vs_context_class_mismatch_is_refused_not_a_false_clean():
     assert res2.status == "lead" and res2.signed is None and res2.outcome == "unsupported"
 
 
+def test_unknown_class_conclusive_nonfiring_is_unsupported_not_a_false_clean():
+    # audit A1 fix-of-the-fix #3 (independent red-pen BLOCK-1): the unknown-class gate must be SYMMETRIC.
+    # The earlier fix closed only the FIRING half (unknown + a fired oracle -> UNSUPPORTED). A conclusive
+    # NON-firing context for an out-of-vocabulary class fell through to probe_verdict and was reported as a
+    # channel-confirmed CLEAN negative — unsound, because no oracle is MAPPED to the class ("an applicable
+    # oracle conclusively did not fire" is false when none is applicable). VIGIL's flagship signed negative is
+    # a Certificate of Non-Exploitability, so a false CLEAN is a soundness violation in the headline claim.
+    same = {"status": 200, "body": "identical body"}   # byte-identical SPRT arms => conclusive non-firing
+    nonfiring = {"probe_rounds": [{"true": same, "false_a": same, "false_b": same} for _ in range(24)]}
+    res = confirm_and_certify(
+        {"check_id": "x", "bug_class": "sovereign_rce", "oracle_context": dict(nonfiring)},
+        engagement_slug="acme", signers=SIGNERS, provenance="reproduced")
+    assert res.status == "lead" and res.signed is None
+    assert res.outcome == "unsupported" and res.outcome != "clean"   # the non-firing false-CLEAN half is CLOSED
+    # POSITIVE CONTROL (non-vacuous + no over-correction): the SAME conclusive non-firing context with a KNOWN
+    # class IS a legitimate channel-confirmed CLEAN negative — only the unknown class is suppressed, so the gate
+    # is the sole thing changing the verdict and it does not demote a real clean negative.
+    res_known = confirm_and_certify(
+        {"check_id": "x", "bug_class": "sqli", "oracle_context": dict(nonfiring)},
+        engagement_slug="acme", signers=SIGNERS, provenance="reproduced")
+    assert res_known.status == "lead" and res_known.outcome == "clean"
+
+
 def test_empty_signers_is_refused_fail_closed():
     # a confirmed finding with no governance signers must NOT be labelled a fact (0-signature cert).
     with pytest.raises(ValueError, match="signers"):
