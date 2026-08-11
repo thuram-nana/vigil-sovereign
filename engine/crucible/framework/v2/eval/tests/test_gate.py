@@ -63,14 +63,28 @@ def test_more_tps_is_improvement_not_failure() -> None:
     assert v.improvements
 
 
-def test_missing_app_is_warning_not_failure() -> None:
-    v = gate({}, _baseline())  # candidate ran nothing (e.g. Docker down)
-    assert v.passed  # environment gap, not a code regression
-    assert v.warnings
+def _baseline2() -> Baseline:
+    return Baseline(scores={"app": {"crucible": ToolScore(tp=9, fp=0, fn=0)},
+                            "app2": {"crucible": ToolScore(tp=5, fp=0, fn=0)}})
 
 
-def test_missing_tool_is_warning_not_failure() -> None:
-    v = gate({"app": [_mb("wapiti", 3, 5, 0)]}, _baseline())  # crucible didn't run
+def test_all_targets_skipped_fails_closed() -> None:
+    # A13: a candidate that ran NOTHING (every target skipped, e.g. Docker absent) measured ZERO coverage —
+    # the gate must NOT pass. A green gate must mean coverage was actually measured, not that there was none.
+    v = gate({}, _baseline())
+    assert not v.passed
+    assert any("0 gated targets" in r for r in v.regressions)
+
+
+def test_missing_app_is_warning_when_coverage_exists() -> None:
+    # a missing app is a warning (environment gap), NOT a failure — as long as at least one gated target ran.
+    v = gate({"app": [_mb("crucible", 9, 0, 0)]}, _baseline2())   # app measured; app2 skipped
+    assert v.passed and v.warnings
+
+
+def test_missing_tool_is_warning_when_coverage_exists() -> None:
+    # a gated tool that didn't run for one app is a warning, provided it ran for another (coverage exists).
+    v = gate({"app": [_mb("crucible", 9, 0, 0)], "app2": [_mb("wapiti", 3, 5, 0)]}, _baseline2())
     assert v.passed
     assert any("crucible" in w for w in v.warnings)
 

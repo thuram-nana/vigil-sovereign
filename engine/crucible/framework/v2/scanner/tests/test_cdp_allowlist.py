@@ -18,19 +18,31 @@ from framework.v2.scanner.cdp import CdpBrowser, CdpSession, _cdp_host_allowed
 
 def test_host_allow_decision_is_fail_closed() -> None:
     allow = {"in-scope.test"}
-    # allowlisted + loopback pass
+    # allowlisted host passes
     assert _cdp_host_allowed("http://in-scope.test/api", allow) is True
-    assert _cdp_host_allowed("http://127.0.0.1:8080/x", allow) is True
-    assert _cdp_host_allowed("http://localhost/x", allow) is True
+    # A6: loopback is NOT unconditionally allowed — with a REMOTE-only allowlist, a page-initiated request to
+    # the operator's own 127.0.0.1 services is REFUSED (closes the browser SSRF-to-local-services hole).
+    assert _cdp_host_allowed("http://127.0.0.1:8080/x", allow) is False
+    assert _cdp_host_allowed("http://localhost/x", allow) is False
     # a NAMED off-allowlist host — and an IP-literal off-allowlist host — are refused
     assert _cdp_host_allowed("http://evil.example/x", allow) is False
     assert _cdp_host_allowed("http://10.0.0.5/x", allow) is False
     # same-document / non-network schemes carry no host → allowed (not egress)
     assert _cdp_host_allowed("data:text/html,<b>x</b>", allow) is True
     assert _cdp_host_allowed("about:blank", allow) is True
-    # empty allowlist still admits loopback, refuses everything named
+    # empty allowlist refuses EVERYTHING named, INCLUDING loopback (A6)
     assert _cdp_host_allowed("http://in-scope.test/x", set()) is False
-    assert _cdp_host_allowed("http://127.0.0.1/x", set()) is True
+    assert _cdp_host_allowed("http://127.0.0.1/x", set()) is False
+
+
+def test_loopback_allowed_only_when_the_scan_targets_loopback() -> None:
+    # A6: when the scan's OWN allowlist targets loopback (a loopback target), loopback page requests are
+    # allowed — and any loopback alias unlocks all of them (they denote the same host).
+    allow = {"127.0.0.1"}
+    assert _cdp_host_allowed("http://127.0.0.1:9000/x", allow) is True
+    assert _cdp_host_allowed("http://localhost/x", allow) is True     # alias of the allowlisted loopback
+    assert _cdp_host_allowed("http://[::1]/x", allow) is True
+    assert _cdp_host_allowed("http://evil.example/x", allow) is False  # a remote host is still refused
 
 
 class _FakeConn:
@@ -78,10 +90,21 @@ def test_paused_request_to_in_scope_host_is_continued() -> None:
     assert cmd["params"]["requestId"] == "r2"
 
 
-def test_paused_loopback_request_is_continued() -> None:
+def test_paused_loopback_request_is_refused_with_a_remote_allowlist() -> None:
+    # A6: a page-initiated loopback request under a REMOTE-only allowlist is REFUSED (failRequest) — a remote
+    # target's page cannot drive the operator browser toward the operator's own 127.0.0.1 services.
     conn = _FakeConn()
     sess = CdpSession(conn)
     sess._allow_hosts = {"in-scope.test"}
+    sess._ingest(_paused_event("r3", "http://127.0.0.1:9000/app.js"))
+    assert conn.sent[0]["method"] == "Fetch.failRequest"
+
+
+def test_paused_loopback_request_is_continued_when_scan_targets_loopback() -> None:
+    # ...but when the scan itself targets loopback (a loopback host on the allowlist), loopback is continued.
+    conn = _FakeConn()
+    sess = CdpSession(conn)
+    sess._allow_hosts = {"127.0.0.1"}
     sess._ingest(_paused_event("r3", "http://127.0.0.1:9000/app.js"))
     assert conn.sent[0]["method"] == "Fetch.continueRequest"
 

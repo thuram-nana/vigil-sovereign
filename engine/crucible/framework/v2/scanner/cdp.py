@@ -47,18 +47,24 @@ def _cdp_host_allowed(url: str, allowed_hosts) -> bool:
     """Whether a page-initiated request URL may leave the browser under the CDP
     request allowlist. Fail-closed: a named host must be on ``allowed_hosts``.
 
-    Loopback is always allowed. A URL with no network host (``data:``, ``about:``,
-    ``blob:``) is same-document, not egress, so it is allowed — refusing those would
-    break the page without gating any network traffic. Every other named host is
-    refused unless allowlisted, so a remote target's page cannot pull the browser
-    off-scope (this catches the IP-literal references the resolver-rules egress gate
-    documents as its own blind spot)."""
+    A URL with no network host (``data:``, ``about:``, ``blob:``) is same-document, not
+    egress, so it is allowed — refusing those would break the page without gating any
+    network traffic. Every other named host is refused unless allowlisted, so a remote
+    target's page cannot pull the browser off-scope (this catches the IP-literal
+    references the resolver-rules egress gate documents as its own blind spot).
+
+    A6: loopback is NOT unconditionally allowed. When the allowlist is active it is
+    allowed ONLY if the scan's own allowlist targets loopback (a loopback TARGET puts a
+    loopback host on the allowlist) — so a REMOTE target's page cannot drive the operator
+    browser toward the operator's own 127.0.0.1 services. Any loopback alias in the
+    allowlist unlocks all of them (they denote the same host)."""
     host = (urlsplit(url).hostname or "").lower()
     if not host:
         return True
+    allowed = {str(h).lower() for h in (allowed_hosts or ())}
     if host in _LOOPBACK:
-        return True
-    return host in {str(h).lower() for h in (allowed_hosts or ())}
+        return bool(_LOOPBACK & allowed)   # only when the scan itself targets loopback
+    return host in allowed
 
 # Flags that make Chromium headless, debuggable, and sandbox-tolerant. `port=0`
 # lets the OS assign a port; Chromium writes the chosen one to DevToolsActivePort.
