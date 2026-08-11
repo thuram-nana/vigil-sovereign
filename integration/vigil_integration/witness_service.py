@@ -216,7 +216,8 @@ class WitnessService:
 
     def __init__(self, key_id: str, keypair: KeyPair, *,
                  producer_pubkeys: "list[str] | tuple[str, ...]",
-                 clock: Optional[Callable[[], int]] = None):
+                 clock: Optional[Callable[[], int]] = None,
+                 tip_path: "Optional[str | os.PathLike]" = None):
         self.key_id = key_id
         self._keypair = keypair
         # PRODUCER PIN (fail-closed): the witness is configured with the trusted producer identity — the
@@ -238,6 +239,49 @@ class WitnessService:
         self._lock = threading.Lock()
         self._last_hash: str = ""
         self._last_sig: Optional[TimedWitnessSignature] = None
+        # A8: PERSIST the witnessed tip so anti-equivocation survives a restart. Without this, a restarted
+        # witness has an EMPTY tip and would co-sign a COMPETING first branch (equivocation) even though its
+        # key is the same. With it, the last SIGNED tip + its cached co-signature are restored on start.
+        self._tip_path = Path(tip_path) if tip_path else None
+        self._load_tip()
+
+    def _load_tip(self) -> None:
+        """Restore the last-witnessed tip (checkpoint + cached co-signature) from ``self._tip_path`` on start,
+        so the witness resumes from where it left off and refuses a fork of that tip after a restart. Fail-
+        closed on a corrupt tip file (never silently start with an empty tip an operator believes is pinned)."""
+        if self._tip_path is None or not self._tip_path.exists():
+            return
+        try:
+            obj = json.loads(self._tip_path.read_text(encoding="utf-8"))
+            cp = _checkpoint_from_obj(obj["checkpoint"])
+            sig_obj = obj["last_sig"]
+            sig = TimedWitnessSignature(key_id=str(sig_obj["key_id"]),
+                                        observed_time=int(sig_obj["observed_time"]),
+                                        signature_b64=str(sig_obj["signature_b64"]))
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise ValueError(f"corrupt witness tip file {self._tip_path}: {e}") from e
+        self._witness._last = cp                 # restore the tracked tip (would_accept extends THIS)
+        self._last_hash = checkpoint_hash(cp)
+        self._last_sig = sig
+
+    def _persist_tip(self, cp: Checkpoint, sig: TimedWitnessSignature) -> None:
+        """Durably (atomically, 0600) record the just-signed tip + its cached co-signature. Called INSIDE the
+        cosign lock BEFORE the co-signature is returned, so a delivered signature always corresponds to a
+        persisted tip — a crash after signing cannot lose the advance and let a competing branch through."""
+        if self._tip_path is None:
+            return
+        payload = json.dumps({"checkpoint": cp.to_dict(), "last_hash": checkpoint_hash(cp),
+                              "last_sig": {"key_id": sig.key_id, "observed_time": sig.observed_time,
+                                           "signature_b64": sig.signature_b64}},
+                             sort_keys=True).encode("utf-8")
+        self._tip_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._tip_path.with_suffix(self._tip_path.suffix + ".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())            # the bytes must hit disk before the atomic rename
+        os.replace(str(tmp), str(self._tip_path))   # atomic: the tip file is never half-written
 
     @property
     def public_key_b64(self) -> str:
@@ -269,10 +313,19 @@ class WitnessService:
                 return self._last_sig                     # idempotent replay of the last-signed head
             # Delegate the anti-equivocation check + tip advance to the merged honest-witness contract.
             # Raises ConsistencyError (and advances NOTHING) on a fork / non-append-only / split-view.
+            prev_tip = self._witness._last                # A8: for rollback if the durable record fails
             self._witness.cosign(cp)                      # timeless Signature discarded — used only for its guard
             observed_time = int(self._clock())            # caller/injected input — never inside the signed math
             sig = timed_cosign(cp, witness_keypair=self._keypair, key_id=self.key_id,
                                observed_time=observed_time)
+            # A8: record the advanced tip DURABLY before returning the co-signature. On a persist failure, roll
+            # the in-memory advance back and fail closed — never emit a signature the witness did not durably
+            # record, since that is exactly what would let a restarted witness co-sign a competing branch.
+            try:
+                self._persist_tip(cp, sig)
+            except OSError as e:
+                self._witness._last = prev_tip
+                raise RuntimeError(f"witness {self.key_id} could not durably record the tip: {e}") from e
             self._last_hash = checkpoint_hash(cp)
             self._last_sig = sig
             return sig
@@ -636,11 +689,19 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     # base64 Ed25519 public key per line; blank lines / #comments ignored). Fail-closed if none are given.
     pins: "list[str]" = list(args.producer_pubkey or [])
     if args.producer_roster:
-        for line in Path(args.producer_roster).read_text(encoding="utf-8").splitlines():
-            s = line.strip()
-            if s and not s.startswith("#"):
-                pins.append(s)
-    service = WitnessService(key_id, kp, producer_pubkeys=pins, clock=clock)
+        rp = Path(args.producer_roster)
+        if rp.exists():
+            for line in rp.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    pins.append(s)
+        # A MISSING roster file contributes no pins (rather than a FileNotFoundError traceback); if that
+        # leaves `pins` empty, WitnessService raises the clear "requires at least one pinned producer public
+        # key" error, telling the operator to populate the roster before enabling the unit (A8 fail-closed).
+    # A8: the persisted tip file (anti-equivocation survives restart). Defaults next to the key file so a
+    # standard deploy is durable without extra flags; an operator may relocate it with --tip.
+    tip_path = args.tip or (str(args.key) + ".tip")
+    service = WitnessService(key_id, kp, producer_pubkeys=pins, clock=clock, tip_path=tip_path)
     return run_witness_forever(args.host, int(args.port), service)
 
 
@@ -680,6 +741,10 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--port", type=int, required=True, help="TCP port (0 = ephemeral)")
     ps.add_argument("--key", required=True,
                     help="path to this witness's persistent key file (minted 0600 on first run)")
+    ps.add_argument("--tip", default="",
+                    help="path to this witness's persistent TIP file (default: <key>.tip) — records the last "
+                         "witnessed checkpoint so anti-equivocation survives a restart (a restarted witness "
+                         "refuses a competing branch of its last-signed tip). 0600, atomically written.")
     ps.add_argument("--key-id", default="", help="override the witness key id (default: derived from pubkey)")
     ps.add_argument("--producer-pubkey", action="append", default=[], metavar="B64",
                     help="a trusted PRODUCER's base64 Ed25519 public key to PIN — the witness co-signs ONLY "
