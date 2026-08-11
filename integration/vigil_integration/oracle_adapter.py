@@ -208,6 +208,22 @@ def confirm_and_certify(
     oracle_context = finding.get("oracle_context") or {}
     bug_class = normalize_bug_class(str(finding.get("bug_class", "")))
 
+    # 0. RELABEL REFUSAL (A1 fix-of-the-fix). The oracle adjudicates over the retained oracle_context's OWN
+    #    bug_class (verify.confirmation._build_verifier_ctx: the context class wins when present), so a KNOWN
+    #    declared class could otherwise launder an UNKNOWN — or simply different — firing context class into a
+    #    verdict/certificate. When BOTH the declared class and the context's embedded class are present and
+    #    disagree, that is the hallmark of a relabelled/hallucinated finding — refuse it here, mirroring
+    #    verify.reverify's relabel refusal at the re-execution boundary, so the declared class is load-bearing.
+    #    (A context with no class inherits the finding's, so matching/empty contexts are unaffected.)
+    ctx_class = normalize_bug_class(str((oracle_context or {}).get("bug_class", "")))
+    if ctx_class and bug_class and ctx_class != bug_class:
+        return AdapterResult(
+            "lead",
+            f"declared bug_class {bug_class!r} does not match the retained evidence's own {ctx_class!r} — the "
+            f"context adjudicates a different class; retained as a labelled lead, not a signed fact",
+            bug_class, _finding_ref(finding), outcome=Outcome.UNSUPPORTED.value,
+        )
+
     # 1. deterministic adjudication. adjudicate_finding + confirmed_from_result is EXACTLY confirm_finding
     #    (same FACT decision, verified in confirmation.py), but it also retains the full VerificationResult
     #    so we can classify the NON-fired outcome as CLEAN (conclusive channel, did not fire) vs
@@ -216,7 +232,40 @@ def confirm_and_certify(
     result = adjudicate_finding(finding, oracle_context, verifier)
     confirmed = confirmed_from_result(result, finding, verifier)
     if confirmed is None:
-        verdict, _kinds = probe_verdict(result)   # "clean" | "inconclusive" (never "finding" here)
+        # A1 downstream honesty — SYMMETRIC unknown-class fail-closed (both the fired and the non-fired half).
+        # confirm() suppresses a would-be confirmation when the adjudicated class is out-of-vocabulary. For an
+        # unknown class there is NO oracle *mapped* to that class — the frozen _ALL_ORACLES fallback ran only
+        # for DIAGNOSTIC completeness (G1), not as an authority for the class. Therefore an unknown adjudicated
+        # class can be neither a signed FACT nor a channel-confirmed CLEAN negative: whether a generic oracle
+        # happened to FIRE (a fired-but-suppressed result) OR conclusively did-NOT-fire, there is no *applicable*
+        # oracle for the class, so CLEAN ("an applicable oracle conclusively did not fire") would be unsound.
+        # It is ALWAYS an UNSUPPORTED lead here — never CLEAN, never a FACT. Only a KNOWN class may reach
+        # probe_verdict and be labelled CLEAN. (Closes the non-firing half of the false-CLEAN regression that
+        # the earlier fix left open; the firing half was already covered.)
+        # Key on result.bug_class — the class the oracle ACTUALLY adjudicated (the context class) — not the
+        # finding's declared class, so a fired/non-fired unknown CONTEXT class is caught even if the declared
+        # and context classes agreed (or the context omitted its class and inherited the declared one).
+        adjudicated = normalize_bug_class(result.bug_class or bug_class)
+        fired_hi = [s for s in result.signals if s.fired and s.confidence >= verifier.high_confidence]
+        if not is_known_bug_class(adjudicated):
+            if fired_hi:
+                k = _kind_str(fired_hi[0].kind)
+                return AdapterResult(
+                    "lead",
+                    f"confirmed by {k} but {adjudicated!r} has no deterministic oracle "
+                    f"mapping — retained as a labelled lead, not a signed fact (unknown-class fail-closed)",
+                    adjudicated, _finding_ref(finding),
+                    confirmed_by=k, confidence=float(fired_hi[0].confidence),
+                    outcome=Outcome.UNSUPPORTED.value,
+                )
+            return AdapterResult(
+                "lead",
+                f"{adjudicated!r} has no deterministic oracle mapping — no applicable oracle can establish a "
+                f"channel-confirmed negative for an out-of-vocabulary class; retained as a labelled lead, NOT "
+                f"a clean negative (unknown-class fail-closed)",
+                adjudicated, _finding_ref(finding), outcome=Outcome.UNSUPPORTED.value,
+            )
+        verdict, _kinds = probe_verdict(result)   # "clean" | "inconclusive" (never "finding") — KNOWN class only
         oc = Outcome.CLEAN if verdict == "clean" else Outcome.INCONCLUSIVE
         reason = ("oracle CONCLUSIVELY did not fire over the retained context (channel-confirmed negative)"
                   if oc is Outcome.CLEAN else

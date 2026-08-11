@@ -172,21 +172,27 @@ def test_no_confirm_on_low_confidence_signal() -> None:
     assert "below the" in result.rationale
 
 
-def test_unknown_bug_class_runs_only_available_inputs() -> None:
+def test_unknown_bug_class_fails_closed_even_when_a_fallback_oracle_fires() -> None:
+    # audit A1 (unknown-class fail-closed): an INVENTED / out-of-vocabulary class must NEVER be oracle-
+    # confirmed, even though the frozen _ALL_ORACLES fallback still RUNS its input-matching oracles for
+    # diagnostic completeness (G1). Here side_effect fires on the echoed marker, but the class is unknown ->
+    # NOT confirmed. Before the fix this returned confirmed=True (a proof-soundness hole).
     marker = "canary-zz99xx"
     result = OracleVerifier().confirm({
         "bug_class": "brand-new-thing",
         "marker": marker,
         "observed_sink": f"leaked {marker} here",
     })
-    # Falls back to all oracles; both marker-based oracles (side_effect and the
-    # context-aware reflection oracle) have inputs and run. side_effect fires on
-    # the substring; reflection_context correctly does NOT (inert text). The
-    # finding still confirms via side_effect.
-    assert result.confirmed
+    assert not result.confirmed                                   # fail-closed on unknown vocabulary
     kinds = {s.kind for s in result.signals}
-    assert kinds == {OracleKind.SIDE_EFFECT, OracleKind.REFLECTION_CONTEXT}
-    assert {s.kind for s in result.confirming_signals} == {OracleKind.SIDE_EFFECT}
+    assert kinds == {OracleKind.SIDE_EFFECT, OracleKind.REFLECTION_CONTEXT}   # fallback still RAN (diagnostic)
+    assert {s.kind for s in result.confirming_signals} == {OracleKind.SIDE_EFFECT}  # side_effect DID fire...
+    assert "vocabulary" in result.rationale.lower()              # ...and the rationale says why it didn't confirm
+    # MUTATION-VERIFIED: the SAME evidence with a KNOWN side_effect class (rce) DOES confirm — the vocabulary
+    # gate is the ONLY thing suppressing the unknown one, so the negative is not vacuous.
+    known = OracleVerifier().confirm({
+        "bug_class": "rce", "marker": marker, "observed_sink": f"leaked {marker} here"})
+    assert known.confirmed
 
 
 def test_custom_threshold_is_respected() -> None:
