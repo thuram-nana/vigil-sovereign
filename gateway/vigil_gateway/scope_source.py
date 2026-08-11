@@ -66,6 +66,20 @@ def _gate():
     return _GATE
 
 
+def _require_charter_signed(slug: str) -> None:
+    """A3: refuse to trust a charter's scope unless the charter is SIGNED. Previously ``CharterScopeSource``
+    read scope via ``parse_scope`` WITHOUT ever calling ``require_charter_signed``, so the gateway would
+    authorize destinations from an UNSIGNED charter despite advertising signed-charter authorization. This
+    enforces it (fail-closed: an unsigned/missing charter raises, exactly like the missing-charter path).
+    Lazily imports CRUCIBLE's ethics gate with the same bootstrap as ``_gate``."""
+    try:
+        from framework.v2.common.ethics import require_charter_signed  # type: ignore
+    except ImportError:
+        _gate()   # ensures engine/crucible is on sys.path, then retry
+        from framework.v2.common.ethics import require_charter_signed  # type: ignore
+    require_charter_signed(slug)
+
+
 class ScopeSource(ABC):
     """The gateway's view of the active charter scope."""
 
@@ -133,5 +147,6 @@ class CharterScopeSource(ScopeSource):
         self.slug = slug
 
     def hosts(self) -> list[str]:
+        _require_charter_signed(self.slug)   # A3: an UNSIGNED/missing charter is refused (fail-closed)
         parse_scope, _, _ = _gate()
         return parse_scope(self.slug)

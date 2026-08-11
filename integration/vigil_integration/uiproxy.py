@@ -407,14 +407,26 @@ _LIVE_UI_SUBDIR = ("ui",)
 _PIDS_NAME = "pids"
 
 
+# The auto-patch owner SIGNING key must NEVER be inherited by a spawned child from the ambient parent env
+# (A4). The sovereign settings-plane allowlist (`_OFFENSE_ENV_ALLOWLIST`) only governs settings INJECTED
+# afterward — it does not govern the ambient env `_child_env` starts from — so a value already exported in the
+# parent `vigil up` shell would otherwise reach offense console/API/Strix children and let one self-authorize a
+# destructive PR. Strip it here at the source. The owner key is only ever used by the operator's OWN shell
+# for `vigil authorize-destruction`, never by a spawned child.
+_CHILD_ENV_HARD_EXCLUDE = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY"})
+
+
 def _child_env() -> dict:
     """A clean env for cross-venv children — strip PYTHONPATH/PYTHONHOME so the parent's offense-side
-    path can never inject a module into a child (mirrors dispatch's discipline), and strip the BASE64
+    path can never inject a module into a child (mirrors dispatch's discipline), strip the BASE64
     file-content credential vars so a value that happens to be in the PARENT `vigil up` env can never leak
-    into a child's environment (the child only ever gets the materialised file PATH, never the content)."""
+    into a child's environment (the child only ever gets the materialised file PATH, never the content), and
+    HARD-EXCLUDE the owner signing key (A4) so it can never be inherited from the ambient parent env."""
     _content_vars = {cv for cv, _p, _f in _FILE_SECRET_MATERIALISE}
     return {k: v for k, v in os.environ.items()
-            if k not in ("PYTHONPATH", "PYTHONHOME") and k not in _content_vars}
+            if k not in ("PYTHONPATH", "PYTHONHOME")
+            and k not in _content_vars
+            and k not in _CHILD_ENV_HARD_EXCLUDE}
 
 
 def _secure_log(log_path: Path):

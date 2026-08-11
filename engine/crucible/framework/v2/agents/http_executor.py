@@ -323,6 +323,21 @@ class HttpExecutor:
                 status_code=0,
             )
 
+        # A2 fail-closed: if SIGNED authority was EXPECTED — auto-load requested AND a trust root pinned —
+        # but none is active, the load/verify FAILED (tampered / expired / absent / bad signature). Refuse,
+        # never silently proceed with the whole authority chain (time bounds, action limits, destructive
+        # constraints, live-ack, crypto verification) disabled. The unsigned/opt-out mode (no trust_root) is
+        # unchanged: it keeps the documented kill-switch-only behaviour for backward compatibility.
+        if (self.authority is None and self.auto_load_authority
+                and self.trust_root is not None
+                and not self.engagement_slug.startswith("<")):
+            self._log_event("authority.required_but_absent", action_id=action_id)
+            return self._refused(
+                "signed engagement authority was required (auto-load + a pinned trust root) but could not be "
+                "loaded or verified — failing closed; the authority chain must not silently disable",
+                status_code=0,
+            )
+
         if self.authority is not None:
             destructive = is_destructive(method, url)
             decision = authorize_action(

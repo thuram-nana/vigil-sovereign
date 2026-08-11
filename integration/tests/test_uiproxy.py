@@ -244,6 +244,17 @@ def test_public_bind_is_refused(tmp_path):
             uiproxy.make_proxy_server(bad, 8770, serve)
 
 
+def test_child_env_never_leaks_owner_signing_key(monkeypatch):
+    # A4: a VIGIL_DESTRUCTION_OWNER_KEY exported in the PARENT `vigil up` env must NEVER be inherited by a
+    # spawned child. The sovereign settings-plane allowlist only governs settings INJECTED afterward, not the
+    # ambient env `_child_env` starts from, so the key is hard-excluded at the source.
+    monkeypatch.setenv("VIGIL_DESTRUCTION_OWNER_KEY", "ed25519-owner-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-legit-offense-key")
+    env = uiproxy._child_env()
+    assert "VIGIL_DESTRUCTION_OWNER_KEY" not in env
+    assert env.get("ANTHROPIC_API_KEY") == "sk-legit-offense-key"   # a legitimate key is not over-stripped
+
+
 # ==================================================================================================
 # SSE — the response must stream through live, not be buffered
 # ==================================================================================================

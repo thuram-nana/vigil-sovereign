@@ -84,6 +84,12 @@ def dispatch(verb: str, argv: list[str]) -> int:
     # is installed in that venv, so PYTHONPATH is never needed for the child; the residual env vectors are
     # neutralised by the venv itself — no system/user site, so framework/strix stay unimportable.)
     child_env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    # A4: the auto-patch owner SIGNING key (VIGIL_DESTRUCTION_OWNER_KEY) is a SOVEREIGN secret — an OFFENSE
+    # child must NEVER inherit it from the ambient parent env, or it could self-authorize a destructive PR
+    # (the keyless-offense boundary). No dispatched offense verb needs it (authorize-destruction is an inline
+    # sovereign command, never dispatched here), so strip it for offense-bound children.
+    if env_name == "offense":
+        child_env.pop("VIGIL_DESTRUCTION_OWNER_KEY", None)
     # inherit stdin/stdout/stderr so interactive/long-running sub-CLIs (sigil serve, sigil voice --mic,
     # crucible …) work; the child runs in its own venv → no co-loading of the two trust domains. `argv` is
     # a LIST (no shell), so subsystem args pass through verbatim with no shell-injection surface.
