@@ -31,8 +31,15 @@ from framework.v2.verify.oracle_version import oracle_version
 from framework.v2.verify.reverify import reverify_context
 from framework.v2.verify.verifier import _ALL_ORACLES, OracleVerifier
 
-# A full AWS capture: an STS-temporary instance-role credential retrieved from the IMDS
-# security-credentials path, AND a successful sts:GetCallerIdentity that authenticated with it.
+# The runner-computed domain-separated credential fingerprint — present in BOTH the credential and the
+# confirming call, and EQUAL, so the oracle can prove (offline, without the plaintext secret) that the same
+# credential was used for capture and confirmation (E1-complete binding).
+_AWS_FP = "sha256:" + "a" * 64
+_GCP_FP = "sha256:" + "c" * 64
+
+# A full FACT-capable AWS capture: an STS-temporary instance-role credential retrieved from the IMDS
+# security-credentials path, AND a successful sts:GetCallerIdentity that authenticated with it, PLUS the
+# runner-produced exact credential->call binding + trusted-transport provenance (E1-complete).
 _AWS_CAP = {
     "provider": "aws",
     "credential": {
@@ -40,9 +47,15 @@ _AWS_CAP = {
         "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         "Token": "IQoJb3JpZ2luX2VjEXAMPLEsessiontoken==",
         "source": "http://169.254.169.254/latest/meta-data/iam/security-credentials/app-role",
+        "credential_fingerprint": _AWS_FP,
+        "resolved_peer": "169.254.169.254", "no_proxy": True, "no_redirect": True,
     },
     "confirming_call": {
         "action": "sts:GetCallerIdentity", "status": 200,
+        "credential_fingerprint": _AWS_FP,
+        "endpoint": "https://sts.amazonaws.com/", "resolved_peer": "72.21.206.80",
+        "tls_verified": True, "no_proxy": True, "no_redirect": True,
+        "response_digest": "sha256:" + "b" * 64,
         "response": {
             "Arn": "arn:aws:sts::123456789012:assumed-role/app-role/i-0abc123def",
             "Account": "123456789012",
@@ -51,8 +64,8 @@ _AWS_CAP = {
     },
 }
 
-# A full GCP capture: a service-account access token from the compute-metadata token path, AND a
-# successful tokeninfo that authenticated with it.
+# A full FACT-capable GCP capture: a service-account access token from the compute-metadata token path, AND
+# a successful tokeninfo that authenticated with it, PLUS the runner-produced binding + provenance.
 _GCP_CAP = {
     "provider": "gcp",
     "credential": {
@@ -60,9 +73,15 @@ _GCP_CAP = {
         "token_type": "Bearer",
         "source": ("http://metadata.google.internal/computeMetadata/v1/instance/"
                    "service-accounts/default/token"),
+        "credential_fingerprint": _GCP_FP,
+        "resolved_peer": "169.254.169.254", "no_proxy": True, "no_redirect": True,
     },
     "confirming_call": {
         "action": "tokeninfo", "status": 200,
+        "credential_fingerprint": _GCP_FP,
+        "endpoint": "https://oauth2.googleapis.com/tokeninfo", "resolved_peer": "142.250.80.10",
+        "tls_verified": True, "no_proxy": True, "no_redirect": True,
+        "response_digest": "sha256:" + "d" * 64,
         "response": {
             "email": "app-sa@my-project.iam.gserviceaccount.com",
             "sub": "104567890123456789012",
@@ -225,6 +244,8 @@ def test_negative_control_e_credential_not_from_the_metadata_endpoint() -> None:
             "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
             "Token": "session-token-value",
             "source": "env:AWS_ACCESS_KEY_ID",
+            "credential_fingerprint": _AWS_FP, "resolved_peer": "169.254.169.254",
+            "no_proxy": True, "no_redirect": True,
         },
         "confirming_call": copy.deepcopy(_AWS_CAP["confirming_call"]),
     }
@@ -582,3 +603,52 @@ def test_round2_aws_access_key_id_is_exact_length() -> None:
     toolong = copy.deepcopy(_AWS_CAP)
     toolong["credential"]["AccessKeyId"] = "ASIAZZ7EXAMPLE0KEY0123"   # ASIA + 18 = 22 chars
     assert not imds_credential_capture_oracle(toolong).fired
+
+
+# ---- E1-complete: FACT-capability REQUIRES the exact binding + trusted-transport provenance -----------
+
+
+def test_e1_structural_only_capture_is_a_lead_not_a_fact() -> None:
+    # E1-complete (operator #1 blocker): a structurally-consistent capture WITHOUT the runner-produced exact
+    # credential->call binding is a LEAD, never a FACT — even with a valid credential + successful call.
+    unbound = copy.deepcopy(_AWS_CAP)
+    unbound["credential"].pop("credential_fingerprint")     # no binding fingerprint on the credential
+    sig = imds_credential_capture_oracle(unbound)
+    assert not sig.fired and sig.observed["reason"] == "structural_only_not_bound"
+    # a MISMATCHED fingerprint (the confirming call used a DIFFERENT credential) does not fire.
+    mism = copy.deepcopy(_AWS_CAP)
+    mism["confirming_call"]["credential_fingerprint"] = "sha256:" + "e" * 64
+    sig = imds_credential_capture_oracle(mism)
+    assert not sig.fired and sig.observed["detail"] == "credential_not_bound_to_confirming_call"
+
+
+def test_e1_untrusted_transport_is_a_lead() -> None:
+    # each trusted-transport element is load-bearing: dropping/spoofing any one keeps the capture a LEAD.
+    for mutate, detail in (
+        (lambda c: c["confirming_call"].update(tls_verified=False), "confirming_call_tls_unverified"),
+        (lambda c: c["confirming_call"].update(no_proxy=False), "confirming_call_transport_not_direct"),
+        (lambda c: c["confirming_call"].update(endpoint="https://evil.example.com/x"),
+         "confirming_endpoint_not_allowlisted"),
+        (lambda c: c["confirming_call"].pop("resolved_peer"), "confirming_call_peer_unrecorded"),
+        (lambda c: c["confirming_call"].pop("response_digest"), "confirming_call_response_undigested"),
+        (lambda c: c["credential"].update(resolved_peer="8.8.8.8"), "imds_resolved_peer_not_metadata"),
+        (lambda c: c["credential"].update(no_proxy=False), "imds_transport_not_direct"),
+    ):
+        cap = copy.deepcopy(_AWS_CAP)
+        mutate(cap)
+        sig = imds_credential_capture_oracle(cap)
+        assert not sig.fired, f"must be a LEAD ({detail})"
+        assert sig.observed.get("detail") == detail, f"got {sig.observed.get('detail')!r} != {detail!r}"
+
+
+def test_e1_bound_capture_fires_is_flagged_and_reverifies_through_the_seam() -> None:
+    # the FACT-capable (bound + trusted) capture fires, is flagged `bound`, confirms through the SEAM (the
+    # adapter retains the binding/provenance), and re-verifies offline from the retained context.
+    sig = imds_credential_capture_oracle(_AWS_CAP)
+    assert sig.fired and sig.observed.get("bound") is True
+    assert confirm_imds_capture(_AWS_CAP).confirmed and confirm_imds_capture(_GCP_CAP).confirmed
+    emitted = FindingContext.from_imds_capture(_AWS_CAP).to_verifier_context()
+    assert emitted["imds_capture"]["credential"]["credential_fingerprint"] == _AWS_FP
+    assert emitted["imds_capture"]["confirming_call"]["credential_fingerprint"] == _AWS_FP
+    r = reverify_context(imds_capture_context(_AWS_CAP), bug_class="imds_credential_capture")
+    assert r.reproduced and r.ok

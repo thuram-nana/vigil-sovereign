@@ -4511,6 +4511,16 @@ _IMDS_FAIL_STATUS = frozenset({
     "timed_out", "timedout", "connection refused", "connrefused", "conn refused", "refused", "reset",
     "connreset", "unreachable", "no route to host", "econnrefused", "etimedout",
 })
+# E1-complete FACT-capability contract (the WARDEN-gated runner produces these; the oracle REQUIRES them to
+# fire — a structurally-consistent capture WITHOUT them is a LEAD, never a confirmed FACT). The binding
+# proves the confirming call used the EXACT captured credential; the transport provenance proves BOTH network
+# calls went to a trusted peer with no proxy/redirect. The oracle never sees plaintext — it checks that the
+# runner-computed domain-separated credential fingerprint is present in BOTH the credential and the
+# confirming call and is EQUAL. Approved confirmation endpoints (HTTPS, validated TLS peer):
+_IMDS_AWS_CONFIRM_HOST_RE = re.compile(r"^sts(\.[a-z0-9-]+)?\.amazonaws\.com$")
+_IMDS_GCP_CONFIRM_HOSTS = frozenset({
+    "oauth2.googleapis.com", "www.googleapis.com", "openidconnect.googleapis.com", "accounts.google.com",
+})
 
 
 def _imds_text(value: Any) -> str:
@@ -4657,11 +4667,12 @@ def _imds_source_is_gcp_metadata(source: str) -> bool:
     return host_ok and _IMDS_GCP_PATH_RE.search(path) is not None
 
 
-def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any, Any, bool]:
-    """Return (identity_body, raw_status, action, present). The confirming call is a nested
+def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any, Any, Mapping[str, Any], bool]:
+    """Return (identity_body, raw_status, action, raw_call, present). The confirming call is a nested
     ``confirming_call``/``confirmation``/… mapping; its identity payload is a nested
     ``response``/``body``/``identity``/``result``/``json`` mapping, or the call mapping itself. The declared
-    ``action`` is surfaced so the oracle can require it agree with the branch's provider (audit B1)."""
+    ``action`` is surfaced so the oracle can require it agree with the branch's provider (audit B1); the raw
+    call is surfaced so the oracle can check the binding/transport-provenance fields (E1-complete)."""
     call: Mapping[str, Any] | None = None
     for k in ("confirming_call", "confirmation", "confirm_call", "verify_call", "caller_identity"):
         v = capture.get(k)
@@ -4669,14 +4680,14 @@ def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any]
             call = v
             break
     if call is None:
-        return {}, None, None, False
+        return {}, None, None, {}, False
     status = call.get("status", call.get("status_code"))
     action = call.get("action", call.get("method"))
     for k in ("response", "body", "identity", "result", "json"):
         v = call.get(k)
         if isinstance(v, Mapping):
-            return v, status, action, True
-    return call, status, action, True   # the call mapping itself carries the identity fields
+            return v, status, action, call, True
+    return call, status, action, call, True   # the call mapping itself carries the identity fields
 
 
 def _imds_status_ok(status: Any) -> bool | None:
@@ -4773,6 +4784,64 @@ def _imds_gcp_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
     return ok, {"email": email, "sub": sub, "expiry": _imds_text(expiry)}
 
 
+def _imds_truthy(value: Any) -> bool:
+    """A runner-set boolean provenance flag: Python ``True``, ``1``, or a truthy token
+    ('true'/'yes'/'1'/'verified'/'ok'). A missing or false-y flag is NOT trusted (fail-closed)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return _coerce_text(value).strip().lower() in ("true", "yes", "1", "verified", "ok")
+
+
+def _imds_confirm_host(endpoint: str) -> str | None:
+    """The lower-cased HOST of a confirming-call endpoint, ONLY when it is an https URL (a validated TLS peer
+    requires https). None otherwise (fail-closed)."""
+    try:
+        p = urlsplit(endpoint)
+        if p.scheme != "https" or not p.hostname:
+            return None
+        return p.hostname.lower()
+    except ValueError:
+        return None
+
+
+def _imds_binding_provenance_ok(cred: Mapping[str, Any], call: Mapping[str, Any],
+                                provider: str) -> tuple[bool, str]:
+    """E1-complete FACT-capability gate (operator round-2 requirement). True ONLY when the retained capture
+    carries the runner-produced proof that (a) the confirming call used the EXACT captured credential — a
+    domain-separated credential fingerprint present in BOTH the credential and the confirming call, and EQUAL
+    — AND (b) BOTH network calls used a trusted transport: the IMDS GET resolved to a metadata peer with no
+    proxy/redirect, and the confirming call used https to an ALLOW-LISTED endpoint with a validated TLS peer,
+    no proxy/redirect, a recorded resolved peer, and a bounded response digest. The oracle never sees
+    plaintext — it checks fingerprint EQUALITY. A structurally-consistent capture WITHOUT this proof is a
+    LEAD, not a FACT. Returns (ok, reason)."""
+    cred_fp = _imds_text(cred.get("credential_fingerprint")).strip()
+    call_fp = _imds_text(call.get("credential_fingerprint")).strip()
+    if not cred_fp or not call_fp or cred_fp != call_fp:
+        return False, "credential_not_bound_to_confirming_call"
+    imds_peer = _imds_text(cred.get("resolved_peer")).strip().lower()
+    if not _imds_ip_in(_imds_host_to_ip(imds_peer), _IMDS_AWS_METADATA_IPS | _IMDS_GCP_METADATA_IPS):
+        return False, "imds_resolved_peer_not_metadata"
+    if not (_imds_truthy(cred.get("no_proxy")) and _imds_truthy(cred.get("no_redirect"))):
+        return False, "imds_transport_not_direct"
+    if not _imds_truthy(call.get("tls_verified")):
+        return False, "confirming_call_tls_unverified"
+    if not (_imds_truthy(call.get("no_proxy")) and _imds_truthy(call.get("no_redirect"))):
+        return False, "confirming_call_transport_not_direct"
+    host = _imds_confirm_host(_imds_text(call.get("endpoint")))
+    allowed = host is not None and (
+        _IMDS_AWS_CONFIRM_HOST_RE.match(host) is not None if provider == "aws"
+        else host in _IMDS_GCP_CONFIRM_HOSTS)
+    if not allowed:
+        return False, "confirming_endpoint_not_allowlisted"
+    if not _imds_text(call.get("resolved_peer")).strip():
+        return False, "confirming_call_peer_unrecorded"
+    if not _imds_text(call.get("response_digest")).strip():
+        return False, "confirming_call_response_undigested"
+    return True, "bound_and_trusted"
+
+
 def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
     """Fire when a RETAINED capture PROVES an IMDS/metadata credential-capture achieved effect — the E1
     (BUILD-PLAN §E1) exploitation-chain confirmation. The DEFENSIVE dual of an attack: it re-derives,
@@ -4851,7 +4920,7 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
     capture = observed
     cred = _imds_credential_obj(capture)
     source = _imds_source(capture, cred)
-    body, status, action, call_present = _imds_confirming_call(capture)
+    body, status, action, call, call_present = _imds_confirming_call(capture)
     # B1: a DECLARED provider must agree with the matched credential shape, and the confirming call's action
     # must be the provider's identity check — a mismatch is a fabricated/laundered capture, not a FACT.
     declared_provider = _imds_text(capture.get("provider")).strip().lower()
@@ -4893,19 +4962,32 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                           "action": action_norm, "access_key_id": akid})
         ok, ident = _imds_aws_identity(body)
         if _imds_call_ok(body, status) and ok:
+            bound_ok, bound_reason = _imds_binding_provenance_ok(cred, call, "aws")
+            if not bound_ok:
+                return OracleSignal(
+                    kind=kind, fired=False, confidence=0.0,
+                    evidence=(f"AWS IMDS credential + a structurally-valid sts:GetCallerIdentity, but the "
+                              f"capture is NOT FACT-capable ({bound_reason}): the runner-produced exact "
+                              f"credential->call binding + trusted-transport provenance is REQUIRED to prove "
+                              f"the SAME credential authenticated over a trusted path — retained as a "
+                              f"structural LEAD, not a signed FACT."),
+                    observed={"provider": "aws", "reason": "structural_only_not_bound",
+                              "detail": bound_reason, "access_key_id": akid,
+                              "source": _imds_obs_source(source)})
             return OracleSignal(
                 kind=kind, fired=True, confidence=0.95,
                 evidence=(f"IMDS credential capture (AWS): a structurally-valid instance-role credential "
                           f"(AccessKeyId {akid!r}) was retrieved from the metadata endpoint ({source!r}) "
                           f"AND sts:GetCallerIdentity authenticated with it (Arn={ident['arn']!r}, "
-                          f"Account={ident['account']!r}, UserId={ident['user_id']!r}) — the credential is "
-                          f"proven usable. SUBJECT = the retained capture the WARDEN-gated runner produced; "
-                          f"VIGIL re-derives the achieved effect over the retained evidence offline (no "
-                          f"network, no re-exploitation)."),
+                          f"Account={ident['account']!r}, UserId={ident['user_id']!r}), and the runner bound "
+                          f"the exact credential to that call over a trusted transport (fingerprint match + "
+                          f"metadata/STS peers, no proxy/redirect, validated TLS) — the credential is proven "
+                          f"usable. SUBJECT = the retained capture the WARDEN-gated runner produced; VIGIL "
+                          f"re-derives the achieved effect over the retained evidence offline (no network)."),
                 observed={"provider": "aws", "reason": "imds_credential_authenticated",
                           "access_key_id": akid, "account": ident["account"], "arn": ident["arn"],
                           "user_id": ident["user_id"], "source": _imds_obs_source(source),
-                          "confirming_call": "sts:GetCallerIdentity"})
+                          "bound": True, "confirming_call": "sts:GetCallerIdentity"})
         return OracleSignal(
             kind=kind, fired=False, confidence=0.0,
             evidence=("AWS instance-role credential retrieved from IMDS but the confirming "
@@ -4945,18 +5027,31 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
         ok, ident = _imds_gcp_identity(body)
         if _imds_call_ok(body, status) and ok:
             who = ident["email"] or ident["sub"]
+            bound_ok, bound_reason = _imds_binding_provenance_ok(cred, call, "gcp")
+            if not bound_ok:
+                return OracleSignal(
+                    kind=kind, fired=False, confidence=0.0,
+                    evidence=(f"GCP metadata token + a structurally-valid tokeninfo/userinfo, but the capture "
+                              f"is NOT FACT-capable ({bound_reason}): the runner-produced exact "
+                              f"credential->call binding + trusted-transport provenance is REQUIRED to prove "
+                              f"the SAME token authenticated over a trusted path — retained as a structural "
+                              f"LEAD, not a signed FACT."),
+                    observed={"provider": "gcp", "reason": "structural_only_not_bound",
+                              "detail": bound_reason, "source": _imds_obs_source(source)})
             return OracleSignal(
                 kind=kind, fired=True, confidence=0.95,
                 evidence=(f"IMDS credential capture (GCP): a structurally-valid service-account access "
                           f"token (token_type=Bearer) was retrieved from the compute metadata token "
                           f"endpoint ({source!r}) AND tokeninfo/userinfo authenticated with it "
-                          f"(identity={who!r}, expiry={ident['expiry']!r}) — the token is proven usable. "
+                          f"(identity={who!r}, expiry={ident['expiry']!r}), and the runner bound the exact "
+                          f"token to that call over a trusted transport (fingerprint match + metadata/"
+                          f"googleapis peers, no proxy/redirect, validated TLS) — the token is proven usable. "
                           f"SUBJECT = the retained capture the WARDEN-gated runner produced; VIGIL "
                           f"re-derives the achieved effect over the retained evidence offline (no network)."),
                 observed={"provider": "gcp", "reason": "imds_credential_authenticated",
                           "identity": who, "email": ident["email"], "sub": ident["sub"],
                           "expiry": ident["expiry"], "source": _imds_obs_source(source),
-                          "confirming_call": "tokeninfo"})
+                          "bound": True, "confirming_call": "tokeninfo"})
         return OracleSignal(
             kind=kind, fired=False, confidence=0.0,
             evidence=("GCP access token retrieved from compute metadata but the confirming "

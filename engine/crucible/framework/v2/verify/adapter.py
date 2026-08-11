@@ -1027,6 +1027,14 @@ class FindingContext(BaseModel):
                 break
         if source:
             cred["source"] = source
+        # E1-complete: retain the runner-produced binding fingerprint + IMDS-GET transport provenance (all
+        # non-secret: a hash, an IP, booleans) so the oracle's FACT-capability check re-verifies offline.
+        for k in ("credential_fingerprint", "resolved_peer"):
+            if cred_src.get(k) not in (None, ""):
+                cred[k] = _coerce_text(cred_src.get(k))[:_IMDS_CAPTURE_STR_CAP]
+        for k in ("no_proxy", "no_redirect"):
+            if cred_src.get(k) is not None:
+                cred[k] = _imds_json_scalar(cred_src.get(k))
 
         retained: dict[str, Any] = {"credential": cred}
         if src.get("provider") not in (None, ""):
@@ -1047,6 +1055,13 @@ class FindingContext(BaseModel):
                     call[k] = _coerce_text(call_src.get(k))[:_IMDS_CAPTURE_STR_CAP]
             if call_src.get("endpoint") not in (None, ""):
                 call["endpoint"] = _imds_scrub_source(call_src.get("endpoint"))   # drop query secrets (B5)
+            # E1-complete: retain the confirming-call binding fingerprint + trusted-transport provenance.
+            for k in ("credential_fingerprint", "resolved_peer", "response_digest"):
+                if call_src.get(k) not in (None, ""):
+                    call[k] = _coerce_text(call_src.get(k))[:_IMDS_CAPTURE_STR_CAP]
+            for k in ("tls_verified", "no_proxy", "no_redirect"):
+                if call_src.get(k) is not None:
+                    call[k] = _imds_json_scalar(call_src.get(k))
             body_src: Mapping[str, Any] = call_src
             for k in ("response", "body", "identity", "result", "json"):
                 if isinstance(call_src.get(k), Mapping):
