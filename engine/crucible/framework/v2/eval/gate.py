@@ -137,6 +137,7 @@ def gate(
     regressions: list[str] = []
     warnings: list[str] = []
     improvements: list[str] = []
+    evaluated = 0   # A13: count gated comparisons ACTUALLY made — a gate that measured nothing must not pass
 
     for app, base_tools in baseline.scores.items():
         cand = results.get(app)
@@ -151,6 +152,7 @@ def gate(
             if c is None:
                 warnings.append(f"{app}/{tool}: in baseline but tool did not run")
                 continue
+            evaluated += 1
             if c.false_positives > base.fp:
                 regressions.append(
                     f"{app}/{tool}: false positives {base.fp} -> {c.false_positives} (NEW FP)")
@@ -172,6 +174,14 @@ def gate(
                 improvements.append(
                     f"{app}/{tool}: tp {base.tp}->{c.true_positives}, fp {base.fp}->{c.false_positives}, "
                     f"recall {base.recall:.3f}->{c.recall:.3f}")
+
+    # A13 fail-closed: a gate that evaluated ZERO gated comparisons tested nothing — every baselined app/tool
+    # was skipped/unavailable (e.g. Docker absent). A green gate must mean coverage was actually MEASURED, not
+    # that there was nothing to measure, so this is a hard regression, not a warning.
+    if evaluated == 0:
+        regressions.append(
+            "gate evaluated 0 gated targets — NO coverage was measured (every baselined app/tool was "
+            "skipped/unavailable); a gate that tested nothing cannot pass")
 
     return GateVerdict(
         passed=not regressions,
