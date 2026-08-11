@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import types
 from functools import lru_cache
 from typing import Any, Callable
 
@@ -80,22 +81,97 @@ def _coerce_kind(kind: Any) -> OracleKind | None:
         return None
 
 
+class _SourceUnavailable(Exception):
+    """A reachable function's source could not be read (a frozen/zipped deployment)."""
+
+
+def _canon(obj: Any) -> str:
+    """A canonical, hash-stable repr of a module-level constant — ORDER-INDEPENDENT for sets/frozensets/
+    dicts so the version does not depend on PYTHONHASHSEED (the version must be identical across processes
+    and machines). Falls back to ``repr`` for scalars, compiled regexes, ip_address objects, etc."""
+    if isinstance(obj, (set, frozenset)):
+        return "{" + ",".join(sorted(_canon(x) for x in obj)) + "}"
+    if isinstance(obj, dict):
+        return "{" + ",".join(f"{_canon(k)}:{_canon(v)}"
+                              for k, v in sorted(obj.items(), key=lambda kv: repr(kv[0]))) + "}"
+    if isinstance(obj, (list, tuple)):
+        return "[" + ",".join(_canon(x) for x in obj) + "]"
+    return repr(obj)
+
+
+def _is_hashable_constant(val: Any) -> bool:
+    """A module-level VALUE that is a constant (not a module, not a callable function/class): strings,
+    numbers, frozensets/tuples, compiled regexes, ip_address objects, etc. — the validation constants an
+    oracle's decision procedure depends on."""
+    return not isinstance(val, types.ModuleType) and not callable(val)
+
+
+def _reachable_source_blob(fns: tuple[Callable[..., Any], ...]) -> bytes:
+    """The canonical source of the TRANSITIVE closure the oracle's decision procedure actually depends on
+    (audit B2): every module-level helper FUNCTION and constant reachable from ``fns`` via global-name
+    references (including names used inside nested comprehensions/closures). So editing a helper body OR a
+    validation constant (an IP set, a regex, a path marker) changes the version — the entry function alone
+    no longer hides a changed procedure. Raises ``_SourceUnavailable`` if any function's source is missing."""
+    module_ns = vars(oracles)
+    module_name = oracles.__name__
+    seen_fns: set[int] = set()
+    seen_consts: set[str] = set()
+    func_srcs: list[str] = []
+    const_reprs: list[str] = []
+
+    def _names(fn: Callable[..., Any]) -> set[str]:
+        code = getattr(fn, "__code__", None)
+        if code is None:
+            return set()
+        names: set[str] = set()
+        stack = [code]
+        while stack:
+            c = stack.pop()
+            names.update(c.co_names)
+            for const in c.co_consts:
+                if isinstance(const, types.CodeType):
+                    stack.append(const)
+        return names
+
+    def visit(fn: Callable[..., Any]) -> None:
+        if id(fn) in seen_fns:
+            return
+        seen_fns.add(id(fn))
+        try:
+            func_srcs.append(inspect.getsource(fn))
+        except (OSError, TypeError) as exc:
+            raise _SourceUnavailable() from exc
+        for name in _names(fn):
+            val = module_ns.get(name)
+            if val is None:
+                continue
+            if isinstance(val, types.FunctionType) and getattr(val, "__module__", None) == module_name:
+                visit(val)
+            elif name not in seen_consts and _is_hashable_constant(val):
+                seen_consts.add(name)
+                const_reprs.append(f"{name}={_canon(val)}")
+
+    for fn in fns:
+        visit(fn)
+    # Sorted so the blob is independent of traversal order → stable across runs/machines.
+    parts = sorted(func_srcs) + sorted(const_reprs)
+    return "\x00".join(parts).encode("utf-8")
+
+
 @lru_cache(maxsize=None)
 def oracle_version(kind: Any) -> str:
     """The version identity for ``kind`` — ``"sha256:<hex>"`` over the canonical source of its oracle
-    function(s), or ``""`` when the kind is unknown or its source is unavailable (a frozen deployment).
-    Pure + deterministic. Accepts an ``OracleKind`` or its string value."""
+    function(s) AND the transitive closure of module-level helpers + constants its decision procedure
+    depends on (audit B2), or ``""`` when the kind is unknown or its source is unavailable (a frozen
+    deployment). Pure + deterministic. Accepts an ``OracleKind`` or its string value."""
     ok = _coerce_kind(kind)
     if ok is None:
         return ""
     fns = _ORACLE_FNS.get(ok)
     if not fns:
         return ""
-    parts: list[str] = []
-    for fn in fns:
-        try:
-            parts.append(inspect.getsource(fn))
-        except (OSError, TypeError):
-            return ""   # source unavailable → cannot derive a version (verifier reports, never guesses)
-    blob = "\x00".join(parts).encode("utf-8")
+    try:
+        blob = _reachable_source_blob(fns)
+    except _SourceUnavailable:
+        return ""   # source unavailable → cannot derive a version (verifier reports, never guesses)
     return "sha256:" + hashlib.sha256(blob).hexdigest()
