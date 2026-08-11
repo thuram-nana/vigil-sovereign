@@ -37,7 +37,7 @@ import pytest
 
 from vigil_core import AuthorizerKey, TrustRoot, generate_keypair, sign
 from vigil_integration.remediation.attestation_witness import verify_timed_witnessed
-from vigil_integration.transparency import Checkpoint, checkpoint_hash
+from vigil_integration.transparency import Checkpoint, ConsistencyError, checkpoint_hash
 from vigil_integration.witness_service import (
     WitnessService,
     fetch_pubkey,
@@ -59,6 +59,54 @@ _PRODUCER = generate_keypair()
 def _mk_cp(prev: Checkpoint | None, *, seq: int, count: int, head: str) -> Checkpoint:
     return Checkpoint(last_seq=seq, entry_count=count, head_hash=head, merkle_root=f"m-{head}",
                       prev_checkpoint_hash="" if prev is None else checkpoint_hash(prev))
+
+
+# ---- A8: the witnessed tip is PERSISTED so anti-equivocation survives a restart ----
+
+
+def _svc(kp, tip, *, clock):
+    return WitnessService("w", kp, producer_pubkeys=[_PRODUCER.public_key_b64],
+                          clock=(lambda: clock), tip_path=str(tip))
+
+
+def test_a8_witnessed_tip_survives_restart_and_refuses_a_fork(tmp_path):
+    kp = generate_keypair()
+    tip = tmp_path / "w.tip"
+    genesis = _mk_cp(None, seq=0, count=0, head="g")
+    a1 = _mk_cp(genesis, seq=1, count=1, head="a1")         # extends genesis
+    svc1 = _svc(kp, tip, clock=100)
+    svc1.cosign(a1)                                          # tip advances to a1 and is PERSISTED
+    assert tip.exists()
+
+    # RESTART: a fresh service with the SAME key + tip file — its tip must be restored to a1.
+    svc2 = _svc(kp, tip, clock=200)
+    fork = _mk_cp(genesis, seq=1, count=1, head="b1")        # a SIBLING of a1 (same parent) = a competing branch
+    with pytest.raises(ConsistencyError):
+        svc2.cosign(fork)                                   # ...refused: without persistence it would be signed
+    a2 = _mk_cp(a1, seq=2, count=2, head="a2")               # a genuine append-only extension of a1
+    svc2.cosign(a2)                                          # ...accepted: the restored tip extends cleanly
+
+
+def test_a8_cached_cosignature_survives_restart_idempotent_replay(tmp_path):
+    kp = generate_keypair()
+    tip = tmp_path / "w.tip"
+    a1 = _mk_cp(None, seq=1, count=1, head="a1")
+    sig1 = _svc(kp, tip, clock=100).cosign(a1)
+    # RESTART, DIFFERENT clock: an exact replay of the last-signed tip returns the CACHED co-signature (same
+    # signature + observed_time), not a re-sign — a re-submit is not equivocation and stays deterministic.
+    sig2 = _svc(kp, tip, clock=999).cosign(a1)
+    assert sig2.signature_b64 == sig1.signature_b64
+    assert sig2.observed_time == sig1.observed_time == 100   # the cached time, NOT 999
+
+
+def test_a8_no_tip_path_is_memory_only_backward_compatible(tmp_path):
+    # Without a tip_path the service is unchanged (memory-only) — a fresh instance has an empty tip.
+    kp = generate_keypair()
+    a1 = _mk_cp(None, seq=1, count=1, head="a1")
+    WitnessService("w", kp, producer_pubkeys=[_PRODUCER.public_key_b64], clock=lambda: 1).cosign(a1)
+    fresh = WitnessService("w", kp, producer_pubkeys=[_PRODUCER.public_key_b64], clock=lambda: 1)
+    fork = _mk_cp(None, seq=1, count=1, head="b1")
+    fresh.cosign(fork)                                       # no persistence -> fresh tip -> would sign anything
 
 
 @pytest.fixture

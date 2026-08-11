@@ -57,12 +57,19 @@ EnvironmentFile=-%h/.config/vigil/witness.env
 Environment=PYTHONUNBUFFERED=1
 Environment=VIGIL_WITNESS_HOST=127.0.0.1
 Environment=VIGIL_WITNESS_KEY=%h/.config/vigil/witness-%i.key
+# REQUIRED (A8): the witness co-signs ONLY submissions signed by a PINNED producer key, so it must be given
+# the trusted producer roster — a file of base64 Ed25519 public keys (one per line; #comments/blanks ignored).
+# An unpinned witness is refused at construction (it would let its tip be poisoned), so the unit will NOT
+# start until this roster exists and lists at least one producer key. Create it before enabling the unit.
+Environment=VIGIL_WITNESS_PRODUCER_ROSTER=%h/.config/vigil/producers.roster
+# The persistent TIP file (A8): the last witnessed checkpoint, so anti-equivocation survives a restart.
+Environment=VIGIL_WITNESS_TIP=%h/.config/vigil/witness-%i.tip
 
 WorkingDirectory=%h/vigil
 # The offense venv's console script (vigil = vigil_integration.cli:main). Adjust the path if your checkout or
 # venv lives elsewhere; or use the module form if the console script is not installed:
 #   ExecStart=%h/vigil/.venv-offense/bin/python -m vigil_integration.witness_service serve …
-ExecStart=%h/vigil/.venv-offense/bin/vigil witness serve --host ${VIGIL_WITNESS_HOST} --port %i --key ${VIGIL_WITNESS_KEY}
+ExecStart=%h/vigil/.venv-offense/bin/vigil witness serve --host ${VIGIL_WITNESS_HOST} --port %i --key ${VIGIL_WITNESS_KEY} --producer-roster ${VIGIL_WITNESS_PRODUCER_ROSTER} --tip ${VIGIL_WITNESS_TIP}
 
 # --- lifecycle -------------------------------------------------------------
 Restart=on-failure
