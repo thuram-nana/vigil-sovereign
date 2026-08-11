@@ -131,14 +131,15 @@ def test_fires_on_ssrf_ip_encodings_of_the_metadata_host() -> None:
         assert not imds_credential_capture_oracle(rebind).fired
 
 
-def test_fires_on_gcp_bare_metadata_host_and_userinfo_without_expiry() -> None:
-    # the bare `metadata` host is the compute-metadata endpoint too (host-equality, not substring).
+def test_gcp_bare_metadata_host_no_longer_fires_but_fqdn_userinfo_does() -> None:
+    # round-2: the bare shorthost `metadata` is REMOVED (it resolves only via a DNS search domain and can
+    # point elsewhere), so offline it is no longer accepted as the compute-metadata endpoint.
     bare = copy.deepcopy(_GCP_CAP)
     bare["credential"]["source"] = \
         "http://metadata/computeMetadata/v1/instance/service-accounts/default/token"
-    assert imds_credential_capture_oracle(bare).fired
-    # S3: a userinfo echo (email/sub, NO expiry) + lowercase token_type "bearer" still fires — the
-    # docstring already claims userinfo, whose response omits an expiry.
+    assert not imds_credential_capture_oracle(bare).fired
+    # S3: a userinfo echo (email/sub, NO expiry) + lowercase token_type "bearer" on the FQDN host still
+    # fires — the docstring already claims userinfo, whose response omits an expiry.
     userinfo = copy.deepcopy(_GCP_CAP)
     userinfo["credential"]["token_type"] = "bearer"
     userinfo["confirming_call"]["action"] = "userinfo"
@@ -532,3 +533,52 @@ def test_oracle_makes_no_network_call_even_with_sockets_blocked(monkeypatch) -> 
     assert imds_credential_capture_oracle(_GCP_CAP).fired
     assert not imds_credential_capture_oracle(
         {"provider": "aws", "credential": _AWS_CAP["credential"]}).fired  # a lead is still a lead, offline
+
+
+# ---- round-2 hardening (operator audit + red-pen): binding-adjacent soundness -------------------------
+
+
+def test_round2_seam_mirrors_nested_error_as_non_firing() -> None:
+    # round-2 (red-pen catch): the confirmation SEAM judges the adapter-SCRUBBED context, which flattens the
+    # body. A NESTED failure marker must be retained so the seam re-verifies as NON-firing — otherwise a
+    # failed call whose error is nested confirms through the seam even though the raw oracle rejects it.
+    nested = copy.deepcopy(_AWS_CAP)
+    nested["confirming_call"]["response"] = {**_AWS_CAP["confirming_call"]["response"],
+                                             "meta": {"deep": {"error": "AccessDenied"}}}
+    assert not imds_credential_capture_oracle(nested).fired          # raw oracle (mint side)
+    assert not confirm_imds_capture(nested).confirmed                # ...and the SEAM mirrors it
+    emitted = FindingContext.from_imds_capture(nested).to_verifier_context()
+    assert emitted["imds_capture"]["confirming_call"]["response"].get("error")   # marker retained
+
+
+def test_round2_confirming_action_is_required() -> None:
+    # round-2 (operator): an ABSENT confirming action is no longer accepted on response-shape alone.
+    no_action = copy.deepcopy(_AWS_CAP)
+    no_action["confirming_call"].pop("action")
+    sig = imds_credential_capture_oracle(no_action)
+    assert not sig.fired and sig.observed["reason"] == "confirming_action_mismatch"
+
+
+def test_round2_arn_account_must_match_returned_account() -> None:
+    # round-2 (operator): an internally-inconsistent identity (ARN account != returned Account) is fabricated.
+    mism = copy.deepcopy(_AWS_CAP)
+    mism["confirming_call"]["response"]["Arn"] = \
+        "arn:aws:sts::999999999999:assumed-role/app-role/i-0abc123def"
+    assert not imds_credential_capture_oracle(mism).fired           # 999… != Account 123456789012
+    mism["confirming_call"]["response"]["Account"] = "999999999999"  # MUTATION: align -> fires
+    assert imds_credential_capture_oracle(mism).fired
+
+
+def test_round2_gcp_path_must_be_ordered() -> None:
+    # round-2 (operator): the token-path markers must appear in the documented ORDER, not any order.
+    unordered = copy.deepcopy(_GCP_CAP)
+    unordered["credential"]["source"] = \
+        "http://metadata.google.internal/token/service-accounts/default/computeMetadata/v1"
+    assert not imds_credential_capture_oracle(unordered).fired
+
+
+def test_round2_aws_access_key_id_is_exact_length() -> None:
+    # round-2 (operator): an ASIA id that is not the exact 20-char shape (ASIA + 16) is not a real IMDS id.
+    toolong = copy.deepcopy(_AWS_CAP)
+    toolong["credential"]["AccessKeyId"] = "ASIAZZ7EXAMPLE0KEY0123"   # ASIA + 18 = 22 chars
+    assert not imds_credential_capture_oracle(toolong).fired

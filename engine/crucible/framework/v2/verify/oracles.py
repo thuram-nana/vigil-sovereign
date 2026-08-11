@@ -4455,11 +4455,12 @@ def saml_forgery_oracle(xml: Any, *, candidate_certs: Sequence[str] = ()) -> Ora
 # call / a credential NOT from the metadata endpoint / a random blob / malformed evidence never fire.
 _IMDS_STR_CAP = 8192
 _IMDS_OBS_CAP = 512
-# An AWS INSTANCE-ROLE access-key id: ONLY ``ASIA…`` — the STS TEMPORARY shape IMDS issues (it always ships
-# with a session Token). A long-term ``AKIA…`` key NEVER comes from IMDS (it carries no session token), so
-# accepting it as an "IMDS capture" is a false attribution (audit B4). The strict prefix + the mandatory
-# Token together bind the credential to the instance-metadata role-credential shape.
-_IMDS_AWS_AKID = re.compile(r"^ASIA[0-9A-Z]{16,}$")
+# An AWS INSTANCE-ROLE access-key id: ONLY ``ASIA…`` at the EXACT documented length (ASIA + 16 = 20 chars)
+# — the STS TEMPORARY shape IMDS issues (it always ships with a session Token). A long-term ``AKIA…`` key
+# NEVER comes from IMDS (it carries no session token), so accepting it as an "IMDS capture" is a false
+# attribution (audit B4 + round-2). The strict prefix+length + the mandatory Token bind the credential to
+# the instance-metadata role-credential shape.
+_IMDS_AWS_AKID = re.compile(r"^ASIA[0-9A-Z]{16}$")
 _IMDS_AWS_ACCOUNT = re.compile(r"^[0-9]{12}$")
 # The link-local IMDS endpoints. A captured AWS role credential's source must be a URL whose HOST resolves
 # (canonically, incl. the SSRF IP encodings) to one of these IPs, with the credential-path marker as a
@@ -4477,14 +4478,17 @@ _IMDS_AWS_CRED_PATH = "iam/security-credentials"
 # / scheme-relative / opaque source is not an IMDS reach, audit B4). Only the default IMDS ports are a reach.
 _IMDS_URL_SCHEMES = frozenset({"http", "https"})
 _IMDS_OK_PORTS = frozenset({None, 80, 443})
-# GCP: the compute-metadata host (or the same link-local IP) with all three token-path markers as bounded
-# PATH SEGMENTS. Real endpoint: metadata.google.internal/computeMetadata/v1/instance/service-accounts/<sa>/token.
-_IMDS_GCP_HOSTS = frozenset({"metadata.google.internal", "metadata"})
-_IMDS_GCP_PATH_MARKERS = ("computemetadata/v1", "service-accounts", "token")
-# The confirming call's declared ACTION must match the branch's provider (audit B1) — a GCP action on an AWS
-# identity body (or vice-versa) is a mismatched/laundered confirmation and must NOT confirm. Compared
-# case-insensitively; an ABSENT action falls back to the identity-body shape (which already distinguishes
-# AWS Arn/Account from GCP email/sub).
+# GCP: ONLY the fully-qualified compute-metadata host (or a GCP metadata IP). The bare shorthost ``metadata``
+# is REMOVED (round-2): it resolves only via a DNS search domain and can point elsewhere, so offline it is
+# not proof of the metadata endpoint. Real endpoint:
+# metadata.google.internal/computeMetadata/v1/instance/service-accounts/<sa>/token.
+_IMDS_GCP_HOSTS = frozenset({"metadata.google.internal"})
+# The token path must match the ORDERED grammar (round-2) — computeMetadata/v1 BEFORE service-accounts BEFORE
+# a bounded single-segment SA identity BEFORE token — never the three markers in any order.
+_IMDS_GCP_PATH_RE = re.compile(r"(^|/)computemetadata/v1/(?:[^/]+/)*service-accounts/[^/]+/token(/|$)")
+# The confirming call's declared ACTION is REQUIRED and must match the branch's provider (audit B1 +
+# round-2) — a GCP action on an AWS identity body (or vice-versa), OR an ABSENT action, is a mismatched/
+# unverified confirmation and must NOT confirm. Compared case-insensitively.
 _IMDS_AWS_ACTIONS = frozenset({"sts:getcalleridentity", "getcalleridentity"})
 _IMDS_GCP_ACTIONS = frozenset({"tokeninfo", "userinfo", "oauth2/v3/tokeninfo", "oauth2/v1/tokeninfo"})
 # Declared provider aliases (audit B1): when a capture declares a ``provider`` it must AGREE with the
@@ -4650,7 +4654,7 @@ def _imds_source_is_gcp_metadata(source: str) -> bool:
         return False
     host, path = parsed
     host_ok = host in _IMDS_GCP_HOSTS or _imds_ip_in(_imds_host_to_ip(host), _IMDS_GCP_METADATA_IPS)
-    return host_ok and all(_imds_path_has(path, m) for m in _IMDS_GCP_PATH_MARKERS)
+    return host_ok and _IMDS_GCP_PATH_RE.search(path) is not None
 
 
 def _imds_confirming_call(capture: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any, Any, bool]:
@@ -4724,12 +4728,17 @@ def _imds_call_ok(body: Mapping[str, Any], status: Any) -> bool:
 
 
 def _imds_aws_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
-    """Whether an sts:GetCallerIdentity response echoes a valid identity: an Arn (``arn:``…), a 12-digit
-    Account, and a non-empty UserId — the fields only a SUCCESSFUL, AUTHENTICATED call carries."""
+    """Whether an sts:GetCallerIdentity response echoes a CONSISTENT, valid identity: an Arn (``arn:``…), a
+    12-digit Account, a non-empty UserId, AND the Arn's embedded account component EQUALS the returned
+    Account (round-2 — an internally-inconsistent identity, e.g. a fabricated Arn/Account pair, does not
+    prove a real authenticated call)."""
     arn = _imds_text(body.get("Arn") or body.get("arn")).strip()
     account = _imds_text(body.get("Account") or body.get("account")).strip()
     user_id = _imds_text(body.get("UserId") or body.get("user_id") or body.get("userId")).strip()
-    ok = arn.startswith("arn:") and _IMDS_AWS_ACCOUNT.match(account) is not None and bool(user_id)
+    arn_parts = arn.split(":")                       # arn:aws:sts::<account>:<resource>
+    arn_account = arn_parts[4] if len(arn_parts) >= 5 else ""
+    ok = (arn.startswith("arn:") and _IMDS_AWS_ACCOUNT.match(account) is not None and bool(user_id)
+          and arn_account == account)
     return ok, {"arn": arn, "account": account, "user_id": user_id}
 
 
@@ -4795,17 +4804,23 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
          "confirming_call": {"action": "tokeninfo", "status": 200,
                              "response": {"email": "svc@p.iam.gserviceaccount.com", "expires_in": 3599}}}
 
-    Fires (0.95) ONLY when BOTH halves hold (near-zero-FP by construction):
+    Fires (0.95) ONLY when BOTH halves hold (near-zero-FP by construction). NOTE (round-2): firing proves
+    the capture is STRUCTURALLY CONSISTENT (a real metadata-endpoint credential + a matching successful
+    identity echo); it does NOT prove the exact captured credential produced the confirming call — that
+    binding + a trusted-endpoint/transport provenance are the WARDEN-gated runner's job (blocking work),
+    which is what makes E1 FACT-capable.
       (a) a STRUCTURALLY-VALID credential whose source is a URL that HOST-IDENTIFIES the metadata endpoint
           — the source is parsed with ``urllib.parse.urlsplit`` and its HOST (not a substring of the raw
-          string) must be the metadata endpoint, with the credential-path marker in the URL PATH —
-          AWS: ``AccessKeyId`` matches ``^A[SK]IA[0-9A-Z]{16,}$`` AND a non-empty ``SecretAccessKey`` AND
-               a non-empty ``Token``, AND the source URL's HOST canonicalizes to 169.254.169.254 (incl. the
-               decimal/hex/IPv6-mapped SSRF IP encodings) AND its PATH carries ``iam/security-credentials``;
-               OR
+          string) must be the metadata endpoint on an http(s) default port, with the credential-path marker
+          as a bounded PATH SEGMENT —
+          AWS: ``AccessKeyId`` matches ``^ASIA[0-9A-Z]{16}$`` (temporary STS shape only) AND a non-empty
+               ``SecretAccessKey`` AND a non-empty ``Token``, AND the source URL's HOST canonicalizes to an
+               AWS metadata IP (169.254.169.254 incl. the decimal/hex/IPv6-mapped SSRF encodings, or native
+               fd00:ec2::254) AND its PATH carries ``iam/security-credentials`` as a segment; OR
           GCP: a non-empty ``access_token`` AND ``token_type`` == ``bearer`` (case-insensitive), AND the
-               source URL's HOST is ``metadata.google.internal`` / ``metadata`` (or the same link-local IP)
-               AND its PATH carries ``computeMetadata/v1`` + ``service-accounts`` + ``token``; AND
+               source URL's HOST is ``metadata.google.internal`` (or a GCP metadata IP incl. native
+               fd20:ce::254) AND its PATH matches the ordered ``computeMetadata/v1/…/service-accounts/<sa>/
+               token`` grammar; AND
       (b) a retained CONFIRMING-CALL response proving the credential AUTHENTICATED, with NO failure signal
           (no 4xx/5xx status, no truthy error/errors/message/code/__type/Fault field) —
           AWS: an sts:GetCallerIdentity response echoing an Arn (``arn:``…) + a 12-digit Account + a
@@ -4867,12 +4882,13 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                           f"credential shape; a mismatched/fabricated capture is NOT confirmed (stays a LEAD)"),
                 observed={"provider": "aws", "reason": "provider_mismatch",
                           "declared_provider": declared_provider, "access_key_id": akid})
-        if action_norm and action_norm not in _IMDS_AWS_ACTIONS:
+        if action_norm not in _IMDS_AWS_ACTIONS:
             return OracleSignal(
                 kind=kind, fired=False, confidence=0.0,
                 evidence=(f"AWS instance-role credential from IMDS, but the confirming call's action "
-                          f"({action_norm!r}) is not the AWS identity check (sts:GetCallerIdentity) — a "
-                          f"mismatched confirmation does NOT prove the AWS credential usable (stays a LEAD)"),
+                          f"({action_norm or 'ABSENT'!r}) is not the required AWS identity check "
+                          f"(sts:GetCallerIdentity) — an absent/mismatched confirming action does NOT prove "
+                          f"the AWS credential usable (stays a LEAD)"),
                 observed={"provider": "aws", "reason": "confirming_action_mismatch",
                           "action": action_norm, "access_key_id": akid})
         ok, ident = _imds_aws_identity(body)
@@ -4918,12 +4934,13 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
                           f"the credential shape; a mismatched/fabricated capture is NOT confirmed (LEAD)"),
                 observed={"provider": "gcp", "reason": "provider_mismatch",
                           "declared_provider": declared_provider})
-        if action_norm and action_norm not in _IMDS_GCP_ACTIONS:
+        if action_norm not in _IMDS_GCP_ACTIONS:
             return OracleSignal(
                 kind=kind, fired=False, confidence=0.0,
                 evidence=(f"GCP access token from compute metadata, but the confirming call's action "
-                          f"({action_norm!r}) is not a GCP token introspection (tokeninfo/userinfo) — a "
-                          f"mismatched confirmation does NOT prove the token usable (stays a LEAD)"),
+                          f"({action_norm or 'ABSENT'!r}) is not a required GCP token introspection "
+                          f"(tokeninfo/userinfo) — an absent/mismatched action does NOT prove the token "
+                          f"usable (stays a LEAD)"),
                 observed={"provider": "gcp", "reason": "confirming_action_mismatch", "action": action_norm})
         ok, ident = _imds_gcp_identity(body)
         if _imds_call_ok(body, status) and ok:

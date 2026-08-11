@@ -44,6 +44,33 @@ def _imds_json_scalar(v: Any) -> Any:
     return _coerce_text(v)[:_IMDS_CAPTURE_STR_CAP]
 
 
+_IMDS_ADAPTER_ERROR_KEYS = frozenset({
+    "error", "errors", "errormessage", "error_message", "errorcode", "error_code",
+    "message", "code", "__type", "fault", "error_description",
+})
+
+
+def _imds_body_has_error(obj: Any, depth: int = 0) -> bool:
+    """Mirror of the oracle's recursive failure-marker scan: True iff an ``_IMDS_ADAPTER_ERROR_KEYS`` key
+    with a truthy value appears at ANY bounded depth (round-2). The adapter flattens the confirming body, so
+    without this a NESTED error would be dropped and the scrubbed context would re-verify as FIRING even
+    though the raw capture is a failed call — breaking the mint↔re-execution mirror."""
+    if depth > 4 or not isinstance(obj, Mapping):
+        return False
+    for k, val in obj.items():
+        if not val:
+            continue
+        if _coerce_text(k).strip().lower() in _IMDS_ADAPTER_ERROR_KEYS:
+            return True
+        if isinstance(val, Mapping) and _imds_body_has_error(val, depth + 1):
+            return True
+        if isinstance(val, (list, tuple)):
+            for item in val:
+                if isinstance(item, Mapping) and _imds_body_has_error(item, depth + 1):
+                    return True
+    return False
+
+
 def _imds_scrub_source(value: Any) -> str:
     """Retain ``scheme://host[:port]/path`` ONLY for an http(s) URL — DROP userinfo, query, and fragment so
     a secret carried in the URL query (``?token=…``) or userinfo (``user:pass@``) is never laundered into
@@ -1038,15 +1065,19 @@ class FindingContext(BaseModel):
                     resp[kk] = _imds_json_scalar(body_src.get(kk))    # JSON-safe expiry (B5)
                     break
             # Retain a truthy error marker so a FAILED confirming call stays non-firing on re-verify — the
-            # full failure allowlist (AWS JSON __type+message, Error/Code/Message/Fault, generic error(s))
-            # MUST match the oracle's `_IMDS_ERROR_KEYS` so the mint-side gate is mirrored at re-execution.
+            # full failure allowlist MUST match the oracle's `_IMDS_ERROR_KEYS` so the mint-side gate is
+            # mirrored at re-execution.
             for kk in list(body_src.keys()):
-                if (str(kk).strip().lower() in
-                        {"error", "errors", "errormessage", "error_message", "errorcode",
-                         "error_code", "message", "code", "__type", "fault"}
-                        and body_src.get(kk)):
+                if (str(kk).strip().lower() in _IMDS_ADAPTER_ERROR_KEYS and body_src.get(kk)):
                     resp[_coerce_text(kk)[:_IMDS_CAPTURE_STR_CAP]] = \
                         _coerce_text(body_src.get(kk))[:_IMDS_CAPTURE_STR_CAP]
+            # round-2 (seam mirror): the adapter FLATTENS the body, so a NESTED failure marker would be
+            # dropped and the scrubbed context would wrongly re-verify as firing. If the raw body carries an
+            # error at ANY depth but none was retained above, add a top-level marker so re-execution sees the
+            # failure (the mint-side recursive gate is now mirrored at re-execution).
+            if _imds_body_has_error(body_src) and not any(
+                    _coerce_text(k).strip().lower() in _IMDS_ADAPTER_ERROR_KEYS for k in resp):
+                resp["error"] = "[failure marker retained from nested confirming-call metadata]"
             if resp:
                 call["response"] = resp
             retained["confirming_call"] = call
