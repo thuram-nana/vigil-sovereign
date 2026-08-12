@@ -1269,6 +1269,8 @@ class FindingContext(BaseModel):
         if call:
             retained["confirming_call"] = call
         return cls(bug_class=bug_class, gcp_impersonation_capture=retained)
+
+    @classmethod
     def from_iam_escalation_capture(
         cls, capture: Mapping[str, Any], *, bug_class: str = "iam_escalation_primitive"
     ) -> "FindingContext":

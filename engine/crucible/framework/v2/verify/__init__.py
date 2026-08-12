@@ -72,6 +72,7 @@ from .secret_capture import confirm_secret_capture, secret_capture_context
 from .gcp_impersonation_capture import (
     confirm_gcp_impersonation_capture,
     gcp_impersonation_capture_context,
+)
 from .iam_escalation_capture import (
     confirm_iam_escalation_capture,
     iam_escalation_capture_context,
