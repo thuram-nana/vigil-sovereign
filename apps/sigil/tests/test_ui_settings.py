@@ -417,3 +417,26 @@ def test_every_config_meta_var_is_a_real_env_read(env):
         assert meta.get("type") in ("int", "number", "bool", "enum", "url", "cidr", "host", "bind_host", "ports", "str")
         assert meta.get("plane") in ("offense", "sovereign", "gateway", "system")
         assert name == name.upper() and " " not in name
+
+
+# --- the two independent allowlists must AGREE (the real-gate guard for the red-pen BLOCK-1 placebo) ---
+# uiproxy is pure-stdlib (imports no offense framework), so importing it here is boundary-safe; this file
+# runs in the P7 SIGIL leg with `integration` on the path. (It must NOT live in an integration test — that
+# process asserts sigil is never loaded, and importing sigil there trips the two-env boundary.)
+
+def test_config_plane_allowlists_agree():
+    # An offense-plane config knob reaches the engine only if the sovereign EMITTER set
+    # (CONFIG_OFFENSE_VARS, emitted by export_runtime_env) is a subset of the uiproxy CONSUMER allowlist
+    # (_OFFENSE_ENV_ALLOWLIST) — two independent allowlists (defense-in-depth) that MUST agree, or the knob
+    # is a placebo (emitted then silently dropped at the child boundary). Red-pen BLOCK-1 caught the divergence.
+    from vigil_integration import uiproxy
+    missing = set(smod.CONFIG_OFFENSE_VARS) - uiproxy._OFFENSE_ENV_ALLOWLIST
+    assert not missing, f"offense config vars dropped by the uiproxy consumer allowlist (placebo knobs): {sorted(missing)}"
+
+
+def test_non_offense_config_never_in_offense_allowlist():
+    # FATAL-2 / least-privilege: a sovereign/gateway/system config var must NEVER be offense-delivered.
+    from vigil_integration import uiproxy
+    non_offense = [e for e in smod.CONFIG_VARS if smod.CONFIG_META[e].get("plane") != "offense"]
+    leaked = [e for e in non_offense if e in uiproxy._OFFENSE_ENV_ALLOWLIST]
+    assert not leaked, f"non-offense config vars present in the offense allowlist: {leaked}"
