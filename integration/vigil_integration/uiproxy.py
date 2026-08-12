@@ -494,7 +494,7 @@ def _spawn_tracked(procs: list, name: str, argv: list[str], log_path: Path, clea
     try:
         procs.append((name, _spawn(argv, log_path, extra_env=extra_env)))
         return False
-    except OSError as exc:
+    except (OSError, ValueError) as exc:   # ValueError too, for uniformity with assemble/proxy guards
         print(f"vigil up: backend {name!r} failed to start ({exc}) — cleaned up, nothing orphaned.",
               file=sys.stderr)
         cleanup()
@@ -677,7 +677,21 @@ def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "
             log.close()
             q.put("")  # sentinel — the stream ended
 
-    threading.Thread(target=_pump, daemon=True).start()
+    # If the pump thread can't start (thread/RLIMIT_NPROC exhaustion) AFTER the child already forked, the
+    # child would be left running but never returned — an orphan. Tear it down + close the log fd and
+    # re-raise, so the caller's spawn-failure path applies (nothing is left running).
+    try:
+        threading.Thread(target=_pump, daemon=True).start()
+    except (RuntimeError, OSError):
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            os.close(_fd)
+        except OSError:
+            pass
+        raise
     return proc, q
 
 
