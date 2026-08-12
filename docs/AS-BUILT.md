@@ -4,7 +4,7 @@ The authoritative map of what is **merged and green** on `main`, the security pr
 piece actually enforces (stated honestly — conditional where the guarantee is conditional), and
 what remains blocked on infrastructure. Companion to [PLAN.md](PLAN.md) (the design),
 [CONTINUATION.md](CONTINUATION.md) (resume-here), and **[FEATURES.md](FEATURES.md) — the exhaustive
-per-feature catalog (260 features, every one with its `file:line` and how it works)**. This doc is the
+per-feature catalog (260+ features, every one with its `file:line` and how it works; the count is a pre-2026-08 lower bound — the audit-hardening A-series, the UI-completeness program, and the E1 IMDS wiring add more, catalogued in `docs/FEATURES.md` §7 and the README status table)**. This doc is the
 *status map*; FEATURES.md is the *complete inventory*. When this doc and the code disagree, the code and
 its tests win — update this doc.
 
