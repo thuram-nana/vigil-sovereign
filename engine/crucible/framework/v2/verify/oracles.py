@@ -5699,18 +5699,44 @@ def _iam_stmt_denies(stmt: Any, action: str, target: str) -> bool:
     return any(_iam_action_matches(a, action) for a in actions)
 
 
+def _iam_stmt_denies_anywhere(stmt: Any, action: str) -> bool:
+    """A Deny that could block ``action`` over SOME resource — the fail-closed dual of the ``anywhere`` ALLOW
+    leg (the PassRole run-action's compute resource, e.g. an instance/function, is NOT the passed role, so its
+    id is unknown to the capture). Since the specific resource cannot be known, ANY Deny on the action is
+    treated as potentially blocking: over-approximating denies is the SAFE direction (fewer escalation FACTs).
+    A ``Deny NotAction=[X]`` denies everything except X; a plain ``Deny Action=…`` denies on an action match.
+    Resource is IGNORED here (a resource-scoped run-action Deny — e.g. ``Deny ec2:RunInstances
+    Resource=instance/*`` — really does block the launch, so it must suppress the FACT even though it does not
+    cover the passed role)."""
+    if not isinstance(stmt, Mapping):
+        return False
+    if _imds_text(stmt.get("effect") or stmt.get("Effect")).strip().lower() != "deny":
+        return False
+    not_action = _iam_as_list(stmt.get("not_action") or stmt.get("NotAction"))
+    if not_action:
+        return not any(_iam_action_matches(na, action) for na in not_action)
+    actions = _iam_as_list(stmt.get("action") or stmt.get("Action"))
+    return any(_iam_action_matches(a, action) for a in actions)
+
+
 def _iam_effective_allow(action: str, target: str, id_stmts: "list", boundary_stmts: "list | None",
                          scp_stmts: "list | None", *, anywhere: bool = False) -> bool:
     """UNCONDITIONAL effective allow of ``action`` over ``target`` (or, with ``anywhere``, over ANY resource):
     allowed by the IDENTITY policy AND — when present — by the permissions BOUNDARY AND by the SCP, with NO
     Deny at ANY layer. A permissions boundary / SCP that is PRESENT but does NOT allow the action RESTRICTS
     it -> not allowed (the boundary/SCP FP trap, fail-closed). ``boundary_stmts``/``scp_stmts`` are None when
-    ABSENT (no restriction) and a (possibly empty) list when present (empty -> denies all)."""
+    ABSENT (no restriction) and a (possibly empty) list when present (empty -> denies all). With ``anywhere``
+    the DENY check is resource-agnostic too (``_iam_stmt_denies_anywhere``): a Deny on the run action at ANY
+    scope suppresses the FACT, because the run leg's compute resource is unknown and a resource-scoped Deny
+    (e.g. ``Deny ec2:RunInstances Resource=instance/*``) genuinely blocks the launch."""
     def allows(s: Any) -> bool:
         return _iam_stmt_allows_somewhere(s, action) if anywhere else _iam_stmt_allows(s, action, target)
 
+    def denies(s: Any) -> bool:
+        return _iam_stmt_denies_anywhere(s, action) if anywhere else _iam_stmt_denies(s, action, target)
+
     for layer in (id_stmts, boundary_stmts or [], scp_stmts or []):
-        if any(_iam_stmt_denies(s, action, target) for s in layer):
+        if any(denies(s) for s in layer):
             return False
     if not any(allows(s) for s in id_stmts):
         return False

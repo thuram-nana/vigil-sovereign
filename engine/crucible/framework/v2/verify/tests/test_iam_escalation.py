@@ -170,6 +170,30 @@ def test_pass_role_without_a_compute_run_action_does_not_fire():
     assert iam_escalation_oracle(cap).fired is True
 
 
+def test_pass_role_run_action_denied_by_a_resource_scoped_deny_stays_a_lead():
+    # In-loop red-pen fix: the PassRole run-action leg is checked "anywhere" (its compute resource — an
+    # instance/function — is unknown), so its DENY check must be resource-agnostic too. A Deny on the run
+    # action SCOPED to instances (`Deny ec2:RunInstances Resource=instance/*`) genuinely blocks the launch,
+    # so it must SUPPRESS the FACT even though it does not cover the passed role. Before the fix this minted
+    # a false FACT (the deny was checked only over `via`, which an instance-scoped deny does not cover).
+    cap = {
+        "base_principal": "user/dev", "target_resource": "s3/crown", "target_access": "admin",
+        "graph": {"grants": [{"principal": "role/ec2", "resource": "s3/crown", "access": "admin"}]},
+        "escalation": {"primitive": "pass_role_to_compute", "via": "role/ec2", "statements": [
+            {"effect": "Allow", "action": ["iam:PassRole"], "resource": ["role/ec2"]},
+            {"effect": "Allow", "action": ["ec2:RunInstances"], "resource": ["*"]},
+            {"effect": "Deny", "action": ["ec2:RunInstances"],
+             "resource": ["arn:aws:ec2:*:*:instance/*"]}]}}
+    assert iam_escalation_oracle(cap).fired is False   # the launch is denied -> not an achievable escalation
+    # remove the run-action Deny -> the escalation is unblocked -> FACT (the Deny was load-bearing)
+    cap["escalation"]["statements"] = cap["escalation"]["statements"][:2]
+    assert iam_escalation_oracle(cap).fired is True
+    # a Deny on a DIFFERENT action must NOT over-suppress (the fix is precise, not a blanket any-deny gate)
+    cap["escalation"]["statements"].append(
+        {"effect": "Deny", "action": ["ec2:TerminateInstances"], "resource": ["*"]})
+    assert iam_escalation_oracle(cap).fired is True
+
+
 # ---------------------------------------------------------------------------
 # The FP-trap battery: Condition, NotAction (Allow), explicit Deny, Deny-via-NotAction guardrail (#3),
 # permissions boundary, SCP, resource-wildcard-excludes-target. Each -> LEAD, then repaired -> FACT.
