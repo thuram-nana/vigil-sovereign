@@ -237,6 +237,11 @@ _STANDARDS: dict[str, ControlMapping] = {
     # (Unsecured Credentials: Credentials In Files) + T1078.004 (Valid Accounts).
     "secret_credential_validity": _m("A01:2021", ("CWE-522", "CWE-798"), pci=_AC_PCI, soc2=_AC_SOC2,
                                      iso=("A.8.2", "A.5.15"), attack=("T1552.001", "T1078.004")),
+    # E3 GCP service-account impersonation: a principal minted a short-lived token AS a target SA, confirmed by
+    # an identity echo. CWE-269 (Improper Privilege Management) + CWE-287 (Improper Authentication) for the
+    # assumed-identity effect. ATT&CK T1134 (Access Token Manipulation) + T1078.004 (Valid Accounts: Cloud).
+    "gcp_sa_impersonation": _m("A01:2021", ("CWE-269", "CWE-287"), pci=_AC_PCI, soc2=_AC_SOC2,
+                               iso=("A.8.2", "A.5.15"), attack=("T1134", "T1078.004")),
     # ---- Authentication / identity failures (A07) ----
     "auth_bypass": _m("A07:2021", ("CWE-287", "CWE-288"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                       attack=("T1190", "T1078")),

@@ -40,15 +40,16 @@ _FROZEN_15 = frozenset({
 # k8s-posture + 1 TRUTHENOVATION-T4 k8s-WORKLOAD-posture + 1 WS-B sso-assertion-forgery + 1 NW-1 saml-structural-forgery + 1 Wave-F1 cloud/CSPM
 # achieved-state posture + 1 Wave-G3 service-mesh posture + 1 Phase-2 CI/CD posture + 1 Phase-2 mobile
 # static-posture + 1 FORGE Domain 10 email-auth posture + 1 FORGE Domain 7 identity posture + 1 Slice-C3
-# active-exposure + 1 BUILD-PLAN §E1 IMDS/metadata credential-capture) that MUST stay OUT of the frozen
-# fallback — reachable only via their explicit BUG_CLASS_ORACLES rows.
+# active-exposure + 1 BUILD-PLAN §E1 IMDS/metadata credential-capture + 1 §E5 exposed-secret validity + 1 §E3
+# GCP SA impersonation) that MUST stay OUT of the frozen fallback — reachable only via their explicit
+# BUG_CLASS_ORACLES rows.
 _ADDITIVE = frozenset({
     "PROMPT_INJECTION", "SYSTEM_PROMPT_DISCLOSURE", "AUTOMATED_ACCESS", "CREDENTIAL_STUFFING",
     "SQL_INJECTION_BREAKOUT", "COMMAND_INJECTION_BREAKOUT", "NOSQL_INJECTION_BREAKOUT", "K8S_POSTURE",
     "K8S_WORKLOAD_POSTURE",
     "SSO_ASSERTION_FORGERY", "SAML_STRUCTURAL_FORGERY", "CLOUD_POSTURE", "MESH_POSTURE",
     "CICD_POSTURE", "MOBILE_POSTURE", "EMAIL_AUTH_POSTURE", "IDENTITY_POSTURE", "ACTIVE_EXPOSURE",
-    "IMDS_CREDENTIAL_CAPTURE", "SECRET_CREDENTIAL_VALIDITY",
+    "IMDS_CREDENTIAL_CAPTURE", "SECRET_CREDENTIAL_VALIDITY", "GCP_SA_IMPERSONATION",
 })
 
 
@@ -68,9 +69,9 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 20 additive = 35; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 21 additive = 36; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
-    assert len(OracleKind) == 35
+    assert len(OracleKind) == 36
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 

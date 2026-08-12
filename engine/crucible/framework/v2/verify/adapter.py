@@ -413,6 +413,15 @@ class FindingContext(BaseModel):
     # scan/engage finding carries secret_capture, so appending this leaves the gate byte-identical.
     secret_capture: dict[str, Any] | None = None
 
+    # E3 (BUILD-PLAN §E3) GCP service-account IMPERSONATION — a RETAINED, secret-safe capture proving a
+    # principal minted a short-lived token AS a named target SA B, confirmed by a tokeninfo/userinfo identity
+    # echo of B at a TRUSTED, allow-listed Google endpoint bound to the mint by a shared token fingerprint. The
+    # minted TOKEN is redacted to a presence marker by ``from_gcp_impersonation_capture`` (the oracle proves
+    # impersonation via the confirming echo + binding, never the token's content). Like E1/E5 it is reachable
+    # ONLY via its bug_class row keyed on this ctx field, which no benchmark/scan/engage finding carries, so
+    # appending this leaves the gate byte-identical.
+    gcp_impersonation_capture: dict[str, Any] | None = None
+
     # -- builders ----------------------------------------------------------
 
     @classmethod
@@ -1166,6 +1175,95 @@ class FindingContext(BaseModel):
         return cls(bug_class=bug_class, secret_capture=retained)
 
     @classmethod
+    def from_gcp_impersonation_capture(
+        cls, capture: Mapping[str, Any], *, bug_class: str = "gcp_sa_impersonation"
+    ) -> "FindingContext":
+        """A RETAINED, SECRET-SAFE GCP service-account impersonation capture, for the E3 oracle (BUILD-PLAN
+        §E3). Reduces whatever the WARDEN-gated impersonation runner captured into the canonical shape the
+        oracle judges.
+
+        SECRET-SAFE by construction: the minted impersonation TOKEN (``token`` / ``access_token`` /
+        ``id_token`` / ``signed_jwt`` …) is REDACTED to a fixed presence marker — the oracle proves
+        impersonation via the confirming identity echo + the fingerprint binding, never the token's content,
+        so the certificate carries NO live token yet the same verdict re-verifies offline. The named target SA
+        (``mint.target``), the mint method, the fingerprints, and the confirming call's identity echo (email /
+        numeric sub) are IDENTIFIERS, not secrets, retained verbatim (load-bearing for the impersonation
+        proof). A failure marker in the confirming call's body is retained so a FAILED call re-verifies as
+        NON-firing. JSON-safe + deterministic (re-verifies offline)."""
+        src = dict(capture or {})
+        cap = _IMDS_CAPTURE_STR_CAP
+        mint_src: Mapping[str, Any] = src
+        for k in ("mint", "impersonation", "token_mint", "mint_call"):
+            if isinstance(src.get(k), Mapping):
+                mint_src = src[k]
+                break
+        call_src: Mapping[str, Any] = (src.get("confirming_call")
+                                       if isinstance(src.get("confirming_call"), Mapping) else {})
+
+        mint: dict[str, Any] = {}
+        for out_k, keys in (("method", ("method", "action")),
+                            ("target", ("target_service_account", "target", "target_sa", "target_email",
+                                        "target_principal", "service_account", "sa"))):
+            for kk in keys:
+                if mint_src.get(kk) not in (None, ""):
+                    mint[out_k] = _coerce_text(mint_src.get(kk))[:cap]   # identifier, not a secret
+                    break
+        if any(_coerce_text(mint_src.get(k)).strip() for k in
+               ("token", "access_token", "accessToken", "id_token", "idToken",
+                "signed_jwt", "signedJwt", "signed_blob", "signedBlob")):
+            mint["token"] = "[REDACTED]"                                  # PRESENCE marker only
+        if mint_src.get("credential_fingerprint") not in (None, ""):
+            mint["credential_fingerprint"] = _coerce_text(mint_src.get("credential_fingerprint"))[:cap]
+        if mint_src.get("endpoint") not in (None, ""):
+            mint["endpoint"] = _imds_scrub_source(mint_src.get("endpoint"))   # drop query secrets (B5)
+        if mint_src.get("status") not in (None, ""):
+            mint["status"] = _imds_json_scalar(mint_src.get("status"))
+
+        call: dict[str, Any] = {}
+        if call_src:
+            for k in ("action", "endpoint", "credential_fingerprint", "resolved_peer", "response_digest"):
+                if call_src.get(k) not in (None, ""):
+                    call[k] = (_imds_scrub_source(call_src.get(k)) if k == "endpoint"
+                               else _coerce_text(call_src.get(k))[:cap])
+            if call_src.get("status") not in (None, ""):
+                call["status"] = _imds_json_scalar(call_src.get("status"))
+            for k in ("tls_verified", "no_proxy", "no_redirect"):
+                if k in call_src:
+                    call[k] = bool(call_src.get(k))
+            resp_src = call_src.get("response")
+            if isinstance(resp_src, Mapping):
+                resp: dict[str, Any] = {}
+                for out_k, keys in (("email", ("email", "email_address")), ("sub", ("sub", "subject"))):
+                    for kk in keys:
+                        if resp_src.get(kk) not in (None, ""):
+                            resp[out_k] = _coerce_text(resp_src.get(kk))[:cap]
+                            break
+                for kk in ("exp", "expires_in", "expires_at", "expiry", "expireTime", "expire_time"):
+                    if resp_src.get(kk) not in (None, ""):
+                        resp[kk] = _imds_json_scalar(resp_src.get(kk))
+                        break
+                for kk in list(resp_src.keys()):
+                    if str(kk).strip().lower() in _IMDS_ADAPTER_ERROR_KEYS and resp_src.get(kk):
+                        resp[_coerce_text(kk)[:cap]] = _coerce_text(resp_src.get(kk))[:cap]
+                # a NESTED failure marker the flat scan above would miss (mirrors from_imds_capture round-2).
+                if _imds_body_has_error(resp_src) and not any(
+                        _coerce_text(k).strip().lower() in _IMDS_ADAPTER_ERROR_KEYS for k in resp):
+                    resp["error"] = "[failure marker retained from nested confirming-call metadata]"
+                if resp:
+                    call["response"] = resp
+
+        retained: dict[str, Any] = {}
+        for k in ("target_service_account", "target"):
+            if src.get(k) not in (None, ""):
+                retained["target_service_account"] = _coerce_text(src.get(k))[:cap]
+                break
+        if mint:
+            retained["mint"] = mint
+        if call:
+            retained["confirming_call"] = call
+        return cls(bug_class=bug_class, gcp_impersonation_capture=retained)
+
+    @classmethod
     def from_process_output(
         cls, captured: Any, *, bug_class: str = "crash"
     ) -> "FindingContext":
@@ -1464,6 +1562,8 @@ class FindingContext(BaseModel):
             ctx["imds_capture"] = self.imds_capture
         if self.secret_capture is not None:
             ctx["secret_capture"] = self.secret_capture
+        if self.gcp_impersonation_capture is not None:
+            ctx["gcp_impersonation_capture"] = self.gcp_impersonation_capture
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary
