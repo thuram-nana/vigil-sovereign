@@ -215,6 +215,10 @@ class AutonomousCampaign:
                 # E1 achieved effect: a confirmed metadata credential capture — the attacker HOLDS a valid
                 # cloud credential, which chains (OWN_VIA_HELD_CREDENTIAL) to account takeover.
                 self._establish_imds_capture(world, attacker, ep_id, f.confidence, seq)
+            if f.bug_class == "secret_credential_validity":
+                # E5 achieved effect: an exposed secret proven VALID — the attacker HOLDS a confirmed-valid
+                # leaked credential, which chains (OWN_VIA_HELD_CREDENTIAL) to account takeover.
+                self._establish_secret_validity(world, attacker, ep_id, f.confidence, seq)
 
         # passive findings feed chains too: a disclosed private key IS a credential
         # the attacker can capture, which the extended operators turn into account
@@ -290,6 +294,23 @@ class AutonomousCampaign:
         cred, principal = f"credential:imds:{ep_id}", f"principal:imds:{ep_id}"
         world.add_node(Node(id=cred, kind=NodeKind.CREDENTIAL,
                             attrs={"source": "instance-metadata", "confirmed": True},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        world.add_node(Node(id=principal, kind=NodeKind.PRINCIPAL, attrs={},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        _edge(world, cred, principal, EdgeKind.VALID_ON, prov, conf, seq)
+        attacker.hold(cred, seq=seq.next(), provenance=prov, confidence=conf)
+
+    def _establish_secret_validity(self, world: WorldModel, attacker: "AttackerState", ep_id: str,
+                                   conf: float, seq: "_Seq") -> None:
+        """A confirmed exposed-secret VALIDITY (E5 achieved effect): the attacker HOLDS a leaked credential
+        proven VALID by a confirming call. Mint the credential + its principal + a VALID_ON edge and record
+        the attacker's HOLD, so the graph chains via OWN_VIA_HELD_CREDENTIAL (HOLDS(cred) +
+        VALID_ON(cred->principal) => OWNS(principal)) to account takeover — the same achieved-effect topology
+        as an IMDS capture, seeded by a confirmed-valid leaked secret rather than a metadata credential."""
+        prov = "finding:secret_credential_validity"
+        cred, principal = f"credential:secret:{ep_id}", f"principal:secret:{ep_id}"
+        world.add_node(Node(id=cred, kind=NodeKind.CREDENTIAL,
+                            attrs={"source": "exposed-secret", "confirmed": True},
                             provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
         world.add_node(Node(id=principal, kind=NodeKind.PRINCIPAL, attrs={},
                             provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
