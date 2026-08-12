@@ -259,6 +259,10 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # carries `imds_capture`, which no benchmark/scan/engage finding does. So appending it leaves the
     # unknown-class fallback and `make gate` byte-identical.
     "imds_credential_capture": (OracleKind.IMDS_CREDENTIAL_CAPTURE,),
+    # E5 exposed-secret validity — SAME convention: NOT in the frozen _ALL_ORACLES fallback, fires ONLY when
+    # the ctx carries `secret_capture` (no benchmark/scan/engage finding does), so appending it leaves the
+    # unknown-class fallback and `make gate` byte-identical.
+    "secret_credential_validity": (OracleKind.SECRET_CREDENTIAL_VALIDITY,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -472,6 +476,11 @@ _ALIASES: dict[str, str] = {
     "ssrf_to_imds": "imds_credential_capture",
     "imds_ssrf": "imds_credential_capture",
     "cloud_metadata_credential_capture": "imds_credential_capture",
+    # E5 exposed-secret validity spellings.
+    "exposed_secret_validity": "secret_credential_validity",
+    "leaked_credential_validity": "secret_credential_validity",
+    "secret_validity": "secret_credential_validity",
+    "valid_exposed_secret": "secret_credential_validity",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -869,6 +878,13 @@ class OracleVerifier:
         if kind is OracleKind.IMDS_CREDENTIAL_CAPTURE:
             if "imds_capture" in ctx:
                 return oracles.imds_credential_capture_oracle(ctx["imds_capture"])
+            return None
+        # -- BUILD-PLAN §E5 exposed-secret validity — fire ONLY when the ctx carries `secret_capture` (the
+        #    WARDEN-gated secret-validation runner's retained evidence); no benchmark/scan/engage finding
+        #    carries it, so it is inert on the gate path. DEFENSIVE VERIFICATION, never a validation runner.
+        if kind is OracleKind.SECRET_CREDENTIAL_VALIDITY:
+            if "secret_capture" in ctx:
+                return oracles.exposed_secret_validity_oracle(ctx["secret_capture"])
             return None
         return None
 

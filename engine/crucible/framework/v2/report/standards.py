@@ -233,6 +233,10 @@ _STANDARDS: dict[str, ControlMapping] = {
     # Accounts: Cloud Accounts) for the usable-credential achieved effect.
     "imds_credential_capture": _m("A01:2021", ("CWE-522", "CWE-668"), pci=_AC_PCI, soc2=_AC_SOC2,
                                   iso=("A.8.2", "A.5.15"), attack=("T1552.005", "T1078.004")),
+    # E5 exposed-secret validity: a leaked credential proven usable via a confirming call. ATT&CK T1552.001
+    # (Unsecured Credentials: Credentials In Files) + T1078.004 (Valid Accounts).
+    "secret_credential_validity": _m("A01:2021", ("CWE-522", "CWE-798"), pci=_AC_PCI, soc2=_AC_SOC2,
+                                     iso=("A.8.2", "A.5.15"), attack=("T1552.001", "T1078.004")),
     # ---- Authentication / identity failures (A07) ----
     "auth_bypass": _m("A07:2021", ("CWE-287", "CWE-288"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                       attack=("T1190", "T1078")),

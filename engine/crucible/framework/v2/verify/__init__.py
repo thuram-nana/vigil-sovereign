@@ -68,10 +68,12 @@ from .mesh_posture import (
 from .jwt_forgery import confirm_jwt_forgery, jwt_forgery_context
 from .saml_forgery import confirm_saml_forgery, saml_forgery_context
 from .imds_capture import confirm_imds_capture, imds_capture_context
+from .secret_capture import confirm_secret_capture, secret_capture_context
 from .oracles import (
     achieved_state_oracle,
     anonymous_reachable_oracle,
     differential_response_oracle,
+    exposed_secret_validity_oracle,
     honeypot_hit_oracle,
     imds_credential_capture_oracle,
     jwt_forgery_oracle,
@@ -153,6 +155,7 @@ __all__ = [
     "jwt_forgery_oracle",
     "saml_forgery_oracle",
     "imds_credential_capture_oracle",
+    "exposed_secret_validity_oracle",
     # AEGIS (defensive dual) oracles
     "system_prompt_disclosure_oracle",
     "prompt_injection_oracle",
@@ -208,6 +211,9 @@ __all__ = [
     # E1 IMDS/metadata credential-capture (exploitation-chain achieved-effect confirmation; BUILD-PLAN §E1)
     "confirm_imds_capture",
     "imds_capture_context",
+    # E5 exposed-secret validity (achieved-effect confirmation; BUILD-PLAN §E5)
+    "confirm_secret_capture",
+    "secret_capture_context",
     # oob
     "OOBReceiver",
     "OOBHit",

@@ -4825,15 +4825,27 @@ def _imds_binding_provenance_ok(cred: Mapping[str, Any], call: Mapping[str, Any]
         return False, "imds_resolved_peer_not_metadata"
     if not (_imds_truthy(cred.get("no_proxy")) and _imds_truthy(cred.get("no_redirect"))):
         return False, "imds_transport_not_direct"
+
+    def _host_allowed(host: str) -> bool:
+        return (_IMDS_AWS_CONFIRM_HOST_RE.match(host) is not None if provider == "aws"
+                else host in _IMDS_GCP_CONFIRM_HOSTS)
+
+    return _confirming_call_trusted(call, _host_allowed)
+
+
+def _confirming_call_trusted(call: Mapping[str, Any], host_allowed) -> tuple[bool, str]:
+    """The SHARED confirming-side trust gate (E1 IMDS + E5 exposed-secret validity). True ONLY when the
+    confirming call used a TRUSTED transport: a validated TLS peer, no proxy, no redirect, an https endpoint
+    whose host passes ``host_allowed`` (the per-provider / per-secret-type ANTI-LAUNDERING allow-list — an
+    attacker-controlled 'confirming' endpoint can never mint a FACT), a recorded resolved peer, and a bounded
+    response digest. The credential<->call fingerprint binding is checked by each CALLER, because it differs:
+    E1 binds the metadata-endpoint credential; E5 binds the exposed secret. Returns (ok, reason)."""
     if not _imds_truthy(call.get("tls_verified")):
         return False, "confirming_call_tls_unverified"
     if not (_imds_truthy(call.get("no_proxy")) and _imds_truthy(call.get("no_redirect"))):
         return False, "confirming_call_transport_not_direct"
     host = _imds_confirm_host(_imds_text(call.get("endpoint")))
-    allowed = host is not None and (
-        _IMDS_AWS_CONFIRM_HOST_RE.match(host) is not None if provider == "aws"
-        else host in _IMDS_GCP_CONFIRM_HOSTS)
-    if not allowed:
+    if host is None or not host_allowed(host):
         return False, "confirming_endpoint_not_allowlisted"
     if not _imds_text(call.get("resolved_peer")).strip():
         return False, "confirming_call_peer_unrecorded"
@@ -5079,3 +5091,174 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
         observed={"reason": "no_imds_credential",
                   "aws_akid_shape": _IMDS_AWS_AKID.match(akid) is not None,
                   "source": _imds_obs_source(source)})
+
+
+# ==================================================================================================
+# E5 (BUILD-PLAN §E5) — exposed-secret VALIDITY. See OracleKind.SECRET_CREDENTIAL_VALIDITY. Shares the
+# confirming-side trust gate (`_confirming_call_trusted`) + the AWS identity extractor with the IMDS oracle.
+# ==================================================================================================
+
+# The non-secret IDENTIFIER shape per recognized type (the SECRET value is never seen — it is a [REDACTED]
+# presence marker). AWS: the AccessKeyId (an identifier, not the secret). GitHub: the token PREFIX (the token
+# itself is the secret; only its prefix is retained, and it is structurally recognizable).
+_SECRET_AWS_KEY_ID_RE = re.compile(r"^(AKIA|ASIA)[0-9A-Z]{16}$")
+_SECRET_GITHUB_PREFIX_RE = re.compile(r"^(gh[posru]_|github_pat_)")
+# The per-TYPE confirming-endpoint host ALLOW-LIST (the anti-laundering gate). AWS STS regional/global only.
+_SECRET_AWS_STS_HOST_RE = re.compile(r"^sts(\.[a-z0-9-]+)?\.amazonaws\.com$")
+
+
+def _github_identity(body: Mapping[str, Any]) -> tuple[bool, dict[str, str]]:
+    """Whether a GitHub ``GET /user`` response proves the token authenticated: a non-empty ``login`` AND a
+    positive numeric ``id`` — the fields only an authenticated /user carries. A degenerate / absent identity
+    does not prove authentication (positive-evidence-only)."""
+    login = _imds_text(body.get("login")).strip()
+    raw_id = body.get("id")
+    if isinstance(raw_id, bool):
+        id_ok = False
+    elif isinstance(raw_id, (int, float)):
+        id_ok = raw_id > 0
+    else:
+        t = _imds_text(raw_id).strip()
+        id_ok = t.isdigit() and int(t) > 0
+    return (bool(login) and id_ok), {"login": login, "id": _imds_text(raw_id).strip()}
+
+
+# The CLOSED recognizer set: secret_type -> {identifier shape, expected confirming action, identity
+# extractor, confirming-host allow-list}. Adding a type is an auditable, one-row extension (slice-1 =
+# AWS access key + GitHub PAT; GCP-SA / Slack / SecretsManager-value are follow-on rows).
+_SECRET_RECOGNIZERS: "dict[str, dict[str, Any]]" = {
+    "aws_access_key": {
+        "id_ok": lambda s: _SECRET_AWS_KEY_ID_RE.match(s) is not None,
+        "action": "sts:getcalleridentity",
+        "identity": _imds_aws_identity,
+        "host_ok": lambda h: _SECRET_AWS_STS_HOST_RE.match(h) is not None,
+    },
+    "github_pat": {
+        "id_ok": lambda s: _SECRET_GITHUB_PREFIX_RE.match(s) is not None,
+        "action": "github:get /user",
+        "identity": _github_identity,
+        "host_ok": lambda h: h == "api.github.com",
+    },
+}
+
+
+def exposed_secret_validity_oracle(observed: Any) -> OracleSignal:
+    """Fire when a RETAINED, secret-safe capture PROVES an EXPOSED secret is VALID — the E5 achieved-effect
+    confirmation. The DEFENSIVE dual of an attack: it re-derives, over the retained evidence ALONE (offline,
+    no network, no attack), that a structurally-recognized leaked credential AUTHENTICATED as a real identity
+    via a confirming call BOUND to it over a trusted, allow-listed transport. It never validates the secret's
+    content (the secret is a ``[REDACTED]`` presence marker); it proves VALIDITY via the confirming call.
+
+    SOURCE-SEMANTICS INVERSION vs the IMDS oracle: the exposure ``source`` (a JS literal, a git blob, a config
+    path, a SecretsManager ARN) is RETAINED as evidence but is NOT a firing gate — E5 asserts VALIDITY, not
+    provenance. The ANTI-LAUNDERING gate is on the CONFIRMING-CALL side: the confirming endpoint must be on
+    the per-TYPE host allow-list (an AWS key confirmed ONLY against ``sts:GetCallerIdentity`` at
+    ``sts[.<region>].amazonaws.com``; a GitHub PAT ONLY against ``api.github.com`` ``GET /user``), and the
+    secret must be fingerprint-BOUND to that call over a validated-TLS, no-proxy, no-redirect transport — so
+    an attacker-controlled 'confirming' endpoint can never launder an arbitrary string into a FACT.
+
+    ``observed`` is the JSON-safe, SECRET-SAFE retained capture::
+
+        {"secret_type": "aws_access_key" | "github_pat",
+         "credential": {"identifier": "AKIA…" | "ghp_…" (non-secret id/prefix), "secret": "[REDACTED]",
+                        "credential_fingerprint": "…", "source": "js:app.min.js:1024" (evidence only)},
+         "confirming_call": {"action": "sts:GetCallerIdentity" | "github:GET /user", "status": 200,
+                             "credential_fingerprint": "…" (== credential's), "endpoint": "https://sts…/",
+                             "tls_verified": true, "no_proxy": true, "no_redirect": true,
+                             "resolved_peer": "…", "response_digest": "…", "response": {…identity echo…}}}
+
+    Fires (0.95) ONLY when ALL hold (near-zero-FP by construction). Does NOT fire (stays an honest LEAD): an
+    unrecognized secret type; a recognized-but-unconfirmed secret (no confirming call); a failed / 4xx /
+    error-shaped-200 confirming call; a confirming action that does not match the type; an identity echo the
+    type's extractor rejects; a fingerprint that does not bind the secret to the call; a confirming endpoint
+    NOT on the type's allow-list (a laundering attempt); an unverified / proxied / redirected transport;
+    malformed / absent evidence (never raises). Pure + deterministic, so the same verdict re-verifies offline
+    from the retained context."""
+    kind = OracleKind.SECRET_CREDENTIAL_VALIDITY
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no exposed-secret validity evidence",
+                            observed={"reason": "malformed_capture"})
+    secret_type = _imds_text(observed.get("secret_type")).strip().lower()
+    cred = observed.get("credential") if isinstance(observed.get("credential"), Mapping) else {}
+    call = observed.get("confirming_call") if isinstance(observed.get("confirming_call"), Mapping) else {}
+    resp = call.get("response") if isinstance(call.get("response"), Mapping) else {}
+
+    recog = _SECRET_RECOGNIZERS.get(secret_type)
+    if recog is None:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"secret_type {secret_type!r} is not in the closed recognizer set "
+                                      f"{sorted(_SECRET_RECOGNIZERS)} — cannot structurally recognize it "
+                                      f"(stays a LEAD)"),
+                            observed={"reason": "unrecognized_secret_type", "secret_type": secret_type})
+
+    identifier = _imds_text(cred.get("identifier")).strip()
+    if not recog["id_ok"](identifier):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"the retained {secret_type} identifier {identifier!r} does not match "
+                                      f"the recognized non-secret shape — not a structurally-valid secret of "
+                                      f"this type (stays a LEAD)"),
+                            observed={"reason": "secret_identifier_malformed", "secret_type": secret_type})
+
+    if not call:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"a structurally-recognized {secret_type} secret but NO confirming call "
+                                      f"is retained — recognized-but-unconfirmed (a regex match is not proof "
+                                      f"the secret is VALID; stays a LEAD)"),
+                            observed={"reason": "no_confirming_call", "secret_type": secret_type})
+
+    if not _imds_call_ok(resp, call.get("status")):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"the confirming call for the {secret_type} secret did NOT succeed (no "
+                                      f"explicit 2xx, or a failure marker in the body) — the secret is not "
+                                      f"proven usable (stays a LEAD)"),
+                            observed={"reason": "confirming_call_failed", "secret_type": secret_type})
+
+    action = _imds_text(call.get("action")).strip().lower()
+    if action != recog["action"]:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"the confirming call's action {action!r} is not the expected "
+                                      f"{recog['action']!r} for a {secret_type} secret — a mismatched / "
+                                      f"wrong-endpoint confirmation is NOT accepted (stays a LEAD)"),
+                            observed={"reason": "confirming_action_mismatch", "secret_type": secret_type,
+                                      "action": action})
+
+    id_ok, identity = recog["identity"](resp)
+    if not id_ok:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"the confirming call for the {secret_type} secret returned no valid "
+                                      f"identity echo — cannot prove WHICH identity authenticated (stays a "
+                                      f"LEAD)"),
+                            observed={"reason": "identity_echo_absent", "secret_type": secret_type})
+
+    secret_fp = _imds_text(cred.get("credential_fingerprint")).strip()
+    call_fp = _imds_text(call.get("credential_fingerprint")).strip()
+    if not secret_fp or not call_fp or secret_fp != call_fp:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"the confirming call is not fingerprint-BOUND to the captured "
+                                      f"{secret_type} secret (a domain-separated fingerprint present in BOTH "
+                                      f"and EQUAL) — the call may have used a DIFFERENT secret; not a bound "
+                                      f"FACT (stays a LEAD)"),
+                            observed={"reason": "secret_not_bound_to_confirming_call",
+                                      "secret_type": secret_type})
+
+    ok, reason = _confirming_call_trusted(call, recog["host_ok"])
+    if not ok:
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence=(f"the confirming call for the {secret_type} secret is not over a "
+                                      f"trusted, allow-listed transport ({reason}) — an un-allow-listed / "
+                                      f"proxied / redirected / TLS-unverified confirmation cannot mint a FACT "
+                                      f"(anti-laundering; stays a LEAD)"),
+                            observed={"reason": reason, "secret_type": secret_type})
+
+    return OracleSignal(
+        kind=kind, fired=True, confidence=0.95,
+        evidence=(f"Exposed-secret validity ({secret_type}): a structurally-recognized secret (identifier "
+                  f"{identifier!r}, exposed at {_imds_text(cred.get('source'))!r}) AUTHENTICATED via "
+                  f"{recog['action']} as identity {identity!r}, and the runner bound the exact secret to that "
+                  f"call over a trusted, allow-listed transport (fingerprint match + per-type endpoint "
+                  f"allow-list, no proxy/redirect, validated TLS) — the exposed secret is PROVEN valid. "
+                  f"SUBJECT = the retained capture the WARDEN-gated runner produced; VIGIL re-derives the "
+                  f"achieved effect over the retained evidence offline (no network)."),
+        observed={"reason": "exposed_secret_validated", "secret_type": secret_type,
+                  "identity": identity, "source": _imds_text(cred.get("source"))})
