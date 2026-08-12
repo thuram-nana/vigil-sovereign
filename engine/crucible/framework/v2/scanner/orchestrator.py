@@ -229,6 +229,12 @@ class AutonomousCampaign:
                 # subject is bound to cluster-admin, so merely REACHING the kube-apiserver hands over the
                 # cluster control-plane and, through it, every secret (no credential held — see the method).
                 self._establish_k8s_rbac_capture(world, ep_id, f.confidence, seq)
+            if f.bug_class == "iam_escalation_primitive":
+                # E2 achieved effect: the retained IAM config PERMITS the base principal an unconditional
+                # strict-gain escalation primitive. A credential MINTED for the target (create_access_key)
+                # uses the HELD-credential chain; a role/permission gain uses HAS_GRANT + OWNS over the
+                # escalated resource (see the method — the primitive family is read from the finding).
+                self._establish_iam_escalation(world, attacker, ep_id, f, seq)
 
         # passive findings feed chains too: a disclosed private key IS a credential
         # the attacker can capture, which the extended operators turn into account
@@ -364,6 +370,53 @@ class AutonomousCampaign:
         # reaching the anonymous-bound API server IS cluster-admin (no credential); cluster-admin reads all secrets
         _edge(world, ep_id, cluster, EdgeKind.TRUSTS_FOR, prov, conf, seq)
         _edge(world, cluster, secrets, EdgeKind.TRUSTS_FOR, prov, conf, seq)
+
+    def _establish_iam_escalation(self, world: WorldModel, attacker: "AttackerState", ep_id: str,
+                                  finding: Any, seq: "_Seq") -> None:
+        """A confirmed IAM privilege-escalation PRIMITIVE (E2 achieved effect): the RETAINED IAM config PERMITS
+        the base principal (which the attacker reached at ep_id) an UNCONDITIONAL strict-gain escalation
+        primitive. The projection branches on the primitive FAMILY (read from the finding's retained capture):
+
+          * credential_mint (iam:CreateAccessKey / iam:CreateLoginProfile) — the attacker MINTS a credential
+            FOR the escalated principal, so use the HELD-credential chain (mirrors _establish_secret_validity):
+            CREDENTIAL + PRINCIPAL + VALID_ON + attacker.HOLDS(cred) => OWN_VIA_HELD_CREDENTIAL => OWNS.
+
+          * grant_gain (trust-rewrite / PassRole / attach-policy / add-to-group) — the base principal GAINS a
+            grant over / control of the escalated RESOURCE, so mint the base PRINCIPAL + the escalated
+            CLOUD_RESOURCE, a HAS_GRANT(base->resource) strict-gain edge, and record the attacker's OWNS over
+            the resource (reaching the escalation-capable base principal + the unconditional primitive = the
+            achieved gain). A capture with no readable primitive falls back to grant_gain (the general case)."""
+        from ..verify.oracles import _IAM_CREDENTIAL_MINT_PRIMITIVES  # authoritative primitive-family set
+
+        conf = float(getattr(finding, "confidence", 0.9) or 0.9)
+        octx = getattr(finding, "oracle_context", None) or {}
+        cap = octx.get("iam_escalation_capture") if isinstance(octx, dict) else None
+        esc = cap.get("escalation") if isinstance(cap, dict) and isinstance(cap.get("escalation"), dict) else {}
+        primitive = str(esc.get("primitive", "") or "").strip().lower()
+        prov = "finding:iam_escalation_primitive"
+
+        # credential_mint family — a credential minted FOR the target (the HELD-credential chain).
+        if primitive in _IAM_CREDENTIAL_MINT_PRIMITIVES:
+            cred, principal = f"credential:iam-escalation:{ep_id}", f"principal:iam-escalation:{ep_id}"
+            world.add_node(Node(id=cred, kind=NodeKind.CREDENTIAL,
+                                attrs={"source": "iam-escalation-mint", "confirmed": True},
+                                provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+            world.add_node(Node(id=principal, kind=NodeKind.PRINCIPAL, attrs={"escalated": True},
+                                provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+            _edge(world, cred, principal, EdgeKind.VALID_ON, prov, conf, seq)
+            attacker.hold(cred, seq=seq.next(), provenance=prov, confidence=conf)
+            return
+
+        # grant_gain family (or an unreadable primitive — the general case): a HAS_GRANT strict-gain edge over
+        # the escalated resource, and the attacker OWNS it (reaching the base principal + the primitive = the
+        # achieved gain).
+        base, resource = f"principal:iam-esc-base:{ep_id}", f"resource:iam-esc-target:{ep_id}"
+        world.add_node(Node(id=base, kind=NodeKind.PRINCIPAL, attrs={"escalation_capable": True},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        world.add_node(Node(id=resource, kind=NodeKind.CLOUD_RESOURCE, attrs={"escalated": True},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        _edge(world, base, resource, EdgeKind.HAS_GRANT, prov, conf, seq)   # the strict-gain edge
+        attacker.own(resource, seq=seq.next(), provenance=prov, confidence=conf)
 
     def _extract_paths(self, world: WorldModel) -> list[AttackPath]:
         if world.get_node(ATTACKER_ID) is None:

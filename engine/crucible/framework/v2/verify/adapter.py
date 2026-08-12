@@ -412,6 +412,13 @@ class FindingContext(BaseModel):
     # secret's content), so the certificate carries NO live secret yet re-verifies offline. No benchmark/
     # scan/engage finding carries secret_capture, so appending this leaves the gate byte-identical.
     secret_capture: dict[str, Any] | None = None
+    # E2 IAM privilege-escalation PRIMITIVE (BUILD-PLAN §E2): a RETAINED IAM-policy capture — the base
+    # principal, the target resource, the base policy GRAPH, and the escalation statements — the
+    # iam_escalation_oracle re-derives an UNCONDITIONAL escalation primitive that STRICTLY increases what the
+    # base principal reaches (a differential of the base vs escalation-closed closures). Carries NO secret —
+    # only IAM ids/actions/resources (identifiers), so a confirmed FACT re-verifies offline. No benchmark/
+    # scan/engage finding carries iam_escalation_capture, so appending this leaves the gate byte-identical.
+    iam_escalation_capture: dict[str, Any] | None = None
 
     # E3 (BUILD-PLAN §E3) GCP service-account IMPERSONATION — a RETAINED, secret-safe capture proving a
     # principal minted a short-lived token AS a named target SA B, confirmed by a tokeninfo/userinfo identity
@@ -1262,6 +1269,75 @@ class FindingContext(BaseModel):
         if call:
             retained["confirming_call"] = call
         return cls(bug_class=bug_class, gcp_impersonation_capture=retained)
+    def from_iam_escalation_capture(
+        cls, capture: Mapping[str, Any], *, bug_class: str = "iam_escalation_primitive"
+    ) -> "FindingContext":
+        """A RETAINED IAM-policy capture for the E2 escalation-primitive oracle (BUILD-PLAN §E2). Reduces the
+        capture into the canonical shape ``iam_escalation_oracle`` judges — {base_principal, target_resource,
+        target_access, graph:{grants,assume,member_of}, escalation:{primitive, via, statements[], boundary?,
+        scp?}} — retaining ONLY the structural fields the differential re-derivation reads, so verbose export
+        prose is not laundered into the certificate. Carries NO secret — only IAM ids / actions / resources
+        (identifiers), retained verbatim (capped) because they are load-bearing. A Condition is reduced to a
+        presence marker (the oracle only checks its PRESENCE, never its content). JSON-safe + deterministic
+        (re-verifies offline)."""
+        cap = _IMDS_CAPTURE_STR_CAP
+        src = dict(capture or {})
+
+        def _t(v: Any) -> str:
+            return _coerce_text(v)[:cap]
+
+        def _lst(v: Any) -> list[str]:
+            items = [v] if isinstance(v, str) else (list(v) if isinstance(v, Sequence) else [])
+            return [_t(x) for x in items[:256] if isinstance(x, str)]
+
+        def _graph(g: Any) -> dict[str, Any]:
+            g = g if isinstance(g, Mapping) else {}
+            grants = [{"principal": _t(x.get("principal")), "resource": _t(x.get("resource")),
+                       "access": _t(x.get("access"))}
+                      for x in (g.get("grants") or [])[:1024] if isinstance(x, Mapping)]
+            edges = {rel: [{"src": _t(x.get("src")), "dst": _t(x.get("dst"))}
+                           for x in (g.get(rel) or [])[:1024] if isinstance(x, Mapping)]
+                     for rel in ("assume", "member_of")}
+            return {"grants": grants, **edges}
+
+        def _stmt(s: Any) -> dict[str, Any]:
+            s = s if isinstance(s, Mapping) else {}
+            out: dict[str, Any] = {}
+            eff = _t(s.get("effect") or s.get("Effect"))
+            if eff:
+                out["effect"] = eff
+            actions = _lst(s.get("action") or s.get("Action"))
+            if actions:
+                out["action"] = actions
+            not_action = _lst(s.get("not_action") or s.get("NotAction"))
+            if not_action:
+                out["not_action"] = not_action
+            resources = _lst(s.get("resource") or s.get("Resource"))
+            if resources:
+                out["resource"] = resources
+            if s.get("condition") or s.get("Condition"):
+                out["condition"] = {"present": True}   # presence marker only (the oracle checks presence)
+            return out
+
+        esc_src = src.get("escalation") if isinstance(src.get("escalation"), Mapping) else {}
+        esc: dict[str, Any] = {
+            "primitive": _t(esc_src.get("primitive")), "via": _t(esc_src.get("via")),
+            "statements": [_stmt(x) for x in (esc_src.get("statements") or [])[:256] if isinstance(x, Mapping)],
+        }
+        for layer in ("boundary", "scp"):
+            lv = esc_src.get(layer)
+            if isinstance(lv, Mapping):
+                esc[layer] = {"statements": [_stmt(x) for x in (lv.get("statements") or [])[:256]
+                                             if isinstance(x, Mapping)]}
+
+        retained: dict[str, Any] = {
+            "base_principal": _t(src.get("base_principal")),
+            "target_resource": _t(src.get("target_resource")),
+            "target_access": _t(src.get("target_access")),
+            "graph": _graph(src.get("graph")),
+            "escalation": esc,
+        }
+        return cls(bug_class=bug_class, iam_escalation_capture=retained)
 
     @classmethod
     def from_process_output(
@@ -1564,6 +1640,8 @@ class FindingContext(BaseModel):
             ctx["secret_capture"] = self.secret_capture
         if self.gcp_impersonation_capture is not None:
             ctx["gcp_impersonation_capture"] = self.gcp_impersonation_capture
+        if self.iam_escalation_capture is not None:
+            ctx["iam_escalation_capture"] = self.iam_escalation_capture
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary

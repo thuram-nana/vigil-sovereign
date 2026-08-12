@@ -70,6 +70,7 @@ _ORACLE_FNS: dict[OracleKind, tuple[Callable[..., Any], ...]] = {
     OracleKind.IMDS_CREDENTIAL_CAPTURE: (oracles.imds_credential_capture_oracle,),
     OracleKind.SECRET_CREDENTIAL_VALIDITY: (oracles.exposed_secret_validity_oracle,),
     OracleKind.GCP_SA_IMPERSONATION: (oracles.gcp_sa_impersonation_oracle,),
+    OracleKind.IAM_ESCALATION_PRIMITIVE: (oracles.iam_escalation_oracle,),
 }
 
 

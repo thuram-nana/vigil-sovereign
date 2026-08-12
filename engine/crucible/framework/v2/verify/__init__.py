@@ -72,6 +72,9 @@ from .secret_capture import confirm_secret_capture, secret_capture_context
 from .gcp_impersonation_capture import (
     confirm_gcp_impersonation_capture,
     gcp_impersonation_capture_context,
+from .iam_escalation_capture import (
+    confirm_iam_escalation_capture,
+    iam_escalation_capture_context,
 )
 from .oracles import (
     achieved_state_oracle,
@@ -80,6 +83,7 @@ from .oracles import (
     exposed_secret_validity_oracle,
     gcp_sa_impersonation_oracle,
     honeypot_hit_oracle,
+    iam_escalation_oracle,
     imds_credential_capture_oracle,
     jwt_forgery_oracle,
     cloud_posture_oracle,
@@ -162,6 +166,7 @@ __all__ = [
     "imds_credential_capture_oracle",
     "exposed_secret_validity_oracle",
     "gcp_sa_impersonation_oracle",
+    "iam_escalation_oracle",
     # AEGIS (defensive dual) oracles
     "system_prompt_disclosure_oracle",
     "prompt_injection_oracle",
@@ -223,6 +228,9 @@ __all__ = [
     # E3 GCP service-account impersonation (achieved-effect confirmation; BUILD-PLAN §E3)
     "confirm_gcp_impersonation_capture",
     "gcp_impersonation_capture_context",
+    # E2 IAM privilege-escalation PRIMITIVE (achieved-escalation confirmation; BUILD-PLAN §E2)
+    "confirm_iam_escalation_capture",
+    "iam_escalation_capture_context",
     # oob
     "OOBReceiver",
     "OOBHit",

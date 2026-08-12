@@ -293,6 +293,25 @@ class OracleKind(str, enum.Enum):
     # DIFFERENT SA, a fingerprint mismatch, an un-allow-listed confirming host, an unverified/proxied/redirected
     # transport, or malformed evidence do NOT fire (stay an honest LEAD).
     GCP_SA_IMPERSONATION = "gcp_sa_impersonation"
+    # E2 (BUILD-PLAN §E2) IAM privilege-escalation PRIMITIVE. Like IMDS/E5, kept OUT of the frozen
+    # _ALL_ORACLES fallback (verifier._ALL_ORACLES stays EXACTLY 15) and fired ONLY via its bug_class row
+    # keyed on the `iam_escalation_capture` ctx field that NO benchmark/scan/engage finding carries — so
+    # appending it leaves `make gate` byte-identical and it never auto-fires on a scan. The ACHIEVED-
+    # ESCALATION dual of POLICY_PATH (which proves mere REACHABILITY): IAM_ESCALATION_PRIMITIVE fires (0.95)
+    # ONLY when retained IAM statements grant a base principal an UNCONDITIONAL escalation primitive from a
+    # FIXED, auditable set (trust-policy rewrite = sts:AssumeRole + iam:UpdateAssumeRolePolicy; iam:PassRole
+    # to a compute service; self policy-attach = iam:AttachUserPolicy / iam:PutUserPolicy; add-to-privileged-
+    # group = iam:AddUserToGroup; create-credential-for-target = iam:CreateAccessKey / iam:CreateLoginProfile)
+    # that STRICTLY increases what it can reach — the target is reachable in the escalation-CLOSED closure but
+    # NOT in the base closure (an EXPLICIT differential of two BFS closures, the central anti-overclaim
+    # guard). Fail-closed on every FP trap: a Condition, a NotAction, an explicit Deny (deny-precedence across
+    # identity policy + permissions boundary + SCP), a restricting boundary/SCP, or a Resource wildcard that
+    # does NOT cover the target contributes NO edge; an ambiguous/unparseable statement contributes NO edge.
+    # A target a plain reachability path already reaches is NOT escalation (stays a LEAD). Pure + deterministic
+    # (re-verifies offline from the retained statements). Distinct from the `iam_privilege_escalation` bug
+    # class (which maps to POLICY_PATH reachability): the escalation-primitive bug class is
+    # `iam_escalation_primitive`, so the two never collide in oracle_version / reverify.
+    IAM_ESCALATION_PRIMITIVE = "iam_escalation_primitive"
 
 
 class OracleProbe(BaseModel):

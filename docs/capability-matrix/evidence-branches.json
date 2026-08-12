@@ -451,6 +451,26 @@
         "engine/crucible/framework/v2/verify/k8s_workload_posture.py:confirm_k8s_workload_posture",
         "integration/vigil_integration/live/k8s_rbac_verify.py:rbac_verify"
       ]
+    },
+    {
+      "id": "cloud_exploit.iam.privilege_escalation",
+      "check": "iam_escalation_verify",
+      "evidence": "a RETAINED IAM-policy capture (the base principal, the target resource, the base policy graph, and the base principal's identity statements + any permissions boundary / SCP) PROVED the retained configuration UNCONDITIONALLY PERMITS the base principal an escalation PRIMITIVE from a FIXED, auditable set (trust-policy rewrite = sts:AssumeRole + iam:UpdateAssumeRolePolicy; iam:PassRole to a compute service; self policy-attach = iam:AttachUserPolicy / iam:PutUserPolicy; add-to-privileged-group = iam:AddUserToGroup; create-credential-for-target = iam:CreateAccessKey / iam:CreateLoginProfile) that STRICTLY increases what it can reach (the target is reachable in the escalation-CLOSED closure but NOT in the base closure), all re-derived as an achieved-escalation FACT by the deterministic iam_escalation_primitive oracle over the RETAINED policy — an EXPLICIT differential of two BFS closures, the ACHIEVED-ESCALATION (strict-gain) dual of the policy_path reachability half",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "capture_wellformed"
+      ],
+      "limitation": "This is a CAPABILITY over the RETAINED CONFIGURATION: the identity policy + permissions boundary + SCP PERMIT the base principal an unconditional strict-gain escalation primitive ('this configuration permits base B to escalate to reach target T'), NOT a claim that the attacker EXECUTED the escalation or that every principal is escalation-capable. IAM effective permission is identity INTERSECT SCP INTERSECT boundary INTERSECT resource-policy: a resource-based policy (a KMS key policy, an S3 bucket policy, the target role's trust-policy Deny) that the capture does NOT include could still NULLIFY the identity-side Allow, so the FACT is bounded to the retained evidence. NOT CLEAN-capable: one capture over one base principal cannot prove the ABSENCE of any escalation path account-wide. Strict-gain is fail-closed by construction: a Condition, a NotAction, an explicit Deny (deny-precedence across identity policy + boundary + SCP, including a Deny carrying NotAction), a restricting boundary/SCP, or a Resource wildcard that does not cover the target contributes NO edge, and a target already reachable in the base closure is NOT escalation (stays a LEAD). No cloud call is made and no attack is performed — a pure offline re-derivation over the operator's own retained policy, so the FACT re-verifies offline with no cloud and no secret. Real-transport LIVE-FIRE (running the escalation primitive against a real account) is deliberately NOT part of this branch — a defensive verification oracle never executes the escalation.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "This branch is an ACHIEVED-ESCALATION strict-gain capability over a single base principal's retained configuration; proving the ABSENCE of any escalation path is a different capability (a full-account IAM escalation-POSTURE enumeration across every principal, with a completeness proof AND every resource-based policy in scope), not this branch's target, so clean-capability is deliberately not pursued here.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:iam_escalation_oracle",
+        "engine/crucible/framework/v2/verify/iam_escalation_capture.py:confirm_iam_escalation_capture",
+        "integration/vigil_integration/live/iam_escalation_verify.py:iam_escalation_verify"
+      ]
     }
   ]
 }

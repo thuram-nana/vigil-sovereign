@@ -226,6 +226,12 @@ _STANDARDS: dict[str, ControlMapping] = {
                          attack=("T1548", "T1098")),
     "iam_privilege_escalation": _m("A01:2021", ("CWE-269", "CWE-266"), pci=_AC_PCI, soc2=_AC_SOC2,
                                    iso=("A.8.2", "A.5.15"), attack=("T1548", "T1098")),
+    # E2 achieved-escalation PRIMITIVE (strict-gain, distinct from the reachability class above): the retained
+    # IAM config PERMITS an unconditional escalation primitive that strictly increases reach. CWE-269
+    # (Improper Privilege Management) + CWE-266 (Incorrect Privilege Assignment); ATT&CK T1548 (Abuse
+    # Elevation Control Mechanism) + T1078.004 (Valid Accounts: Cloud Accounts).
+    "iam_escalation_primitive": _m("A01:2021", ("CWE-269", "CWE-266"), pci=_AC_PCI, soc2=_AC_SOC2,
+                                   iso=("A.8.2", "A.5.15"), attack=("T1548", "T1078.004")),
     "excessive_privilege": _m("A01:2021", ("CWE-250", "CWE-269"), pci=_AC_PCI, soc2=_AC_SOC2,
                               iso=("A.8.2", "A.5.15"), attack=("T1078.004",)),
     # IMDS/metadata credential capture (E1): role/SA creds retrieved from the instance metadata API and proven

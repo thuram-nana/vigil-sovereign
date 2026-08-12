@@ -5527,3 +5527,474 @@ def gcp_sa_impersonation_oracle(observed: Any) -> OracleSignal:
                   f"evidence offline (no network)."),
         observed={"reason": "gcp_sa_impersonation_confirmed", "impersonated_sa": who, "method": method.strip(),
                   "confirming_call": action, "echo_email": ident["email"], "echo_sub": ident["sub"]})
+# E2 (BUILD-PLAN §E2) — IAM PRIVILEGE-ESCALATION PRIMITIVE. See OracleKind.IAM_ESCALATION_PRIMITIVE.
+#
+# The ACHIEVED-ESCALATION dual of the REACHABILITY oracle (``policy_path_oracle``). That oracle proves a
+# principal ALREADY reaches a resource over the retained grant graph; THIS oracle proves the retained IAM
+# statements grant the principal an UNCONDITIONAL escalation PRIMITIVE that STRICTLY INCREASES what it can
+# reach — a stronger claim on its own evidence branch. The soundness core is an explicit DIFFERENTIAL of two
+# closures: the BASE closure (what the principal reaches without escalating) and the ESCALATION-CLOSED
+# closure (base + the ONE synthesized edge the primitive grants). The oracle fires ONLY when the target is
+# reachable in the escalation-closed closure but NOT in the base closure — that "strict gain" is the central
+# anti-overclaim guard (a target a plain reachability path already reaches is NOT escalation, stays a LEAD).
+#
+# The escalation PRIMITIVE comes from a FIXED, auditable set (nothing outside it can synthesize an edge):
+# trust-policy rewrite (sts:AssumeRole + iam:UpdateAssumeRolePolicy), iam:PassRole to a compute service,
+# self policy-attach (iam:AttachUserPolicy / iam:PutUserPolicy), add-to-privileged-group (iam:AddUserToGroup),
+# and create-credential-for-target (iam:CreateAccessKey / iam:CreateLoginProfile). A statement only grants a
+# primitive when it does so UNCONDITIONALLY — fail-closed on every FP trap: a Condition, a NotAction, an
+# explicit Deny (deny-precedence across identity policy + permissions boundary + SCP), a restricting boundary
+# or SCP, or a Resource wildcard that does NOT actually cover the target contributes NO edge; an ambiguous /
+# unparseable statement contributes NO edge. Pure + deterministic — re-verifies OFFLINE from the certificate
+# exactly like ``policy_path_oracle``: re-run the two BFS closures over the retained statements, get the same
+# verdict, byte-for-byte, with no cloud and no trust in the sensor that ingested the export.
+# ==================================================================================================
+
+# The compute-run actions that make an iam:PassRole a usable escalation (the run/create action that hands the
+# passed role's credentials to a service the base principal controls). A CLOSED, auditable list.
+_IAM_COMPUTE_RUN_ACTIONS: "tuple[str, ...]" = (
+    "cloudformation:createstack", "datapipeline:activatepipeline", "datapipeline:createpipeline",
+    "ec2:runinstances", "ecs:runtask", "glue:createdevendpoint", "lambda:createfunction",
+    "lambda:invokefunction", "sagemaker:createnotebookinstance",
+)
+
+# The FIXED, auditable escalation-primitive set (BUILD-PLAN §E2), encoded explicitly. Each row names the IAM
+# action(s) an UNCONDITIONAL Allow must grant and the ONE capability EDGE the primitive synthesizes into the
+# policy graph. `all` = every action must be effective-allowed over `cover`; `any` = at least one, checked
+# over `cover` (any_scope "cover") or over ANY resource (any_scope "anywhere" — the PassRole run-action leg,
+# whose resource is a compute instance/function, not the role). `edge`: "assume"/"member_of" adds a
+# base->via adjacency (base inherits via's grants); "grant_admin" adds a direct base->target admin grant
+# (self-attach). `cover`: "via" (the principal escalated to) or "base" (self-escalation). `family` drives the
+# world-model projection (a credential MINTED for the target uses the HELD-credential chain; a role/permission
+# gain uses HAS_GRANT/OWNS). Nothing outside this table can ever synthesize an edge.
+_IAM_ESCALATION_PRIMITIVES: "dict[str, dict[str, Any]]" = {
+    "assume_role_trust_rewrite": {
+        "all": ("sts:assumerole", "iam:updateassumerolepolicy"), "any": (), "any_scope": "cover",
+        "edge": "assume", "cover": "via", "family": "grant_gain",
+        "label": "trust-policy rewrite (sts:AssumeRole + iam:UpdateAssumeRolePolicy)",
+    },
+    "pass_role_to_compute": {
+        "all": ("iam:passrole",), "any": _IAM_COMPUTE_RUN_ACTIONS, "any_scope": "anywhere",
+        "edge": "assume", "cover": "via", "family": "grant_gain",
+        "label": "iam:PassRole to a compute service (a run/create action)",
+    },
+    "attach_user_policy": {
+        "all": (), "any": ("iam:attachuserpolicy", "iam:putuserpolicy"), "any_scope": "cover",
+        "edge": "grant_admin", "cover": "base", "family": "grant_gain",
+        "label": "self policy-attach (iam:AttachUserPolicy / iam:PutUserPolicy)",
+    },
+    "add_user_to_group": {
+        "all": ("iam:addusertogroup",), "any": (), "any_scope": "cover",
+        "edge": "member_of", "cover": "via", "family": "grant_gain",
+        "label": "add-to-privileged-group (iam:AddUserToGroup)",
+    },
+    "create_access_key": {
+        "all": (), "any": ("iam:createaccesskey", "iam:createloginprofile"), "any_scope": "cover",
+        "edge": "assume", "cover": "via", "family": "credential_mint",
+        "label": "create-credential-for-target (iam:CreateAccessKey / iam:CreateLoginProfile)",
+    },
+}
+
+# The credential-mint primitives — the projection uses the HELD-credential chain for these (a credential
+# minted FOR the target), and HAS_GRANT/OWNS for everything else (a role/permission gain).
+_IAM_CREDENTIAL_MINT_PRIMITIVES: "frozenset[str]" = frozenset(
+    k for k, v in _IAM_ESCALATION_PRIMITIVES.items() if v["family"] == "credential_mint")
+
+
+def _iam_norm_action(value: Any) -> str:
+    """Canonical (lower-cased, stripped) IAM action token."""
+    return _imds_text(value).strip().lower()
+
+
+def _iam_as_list(value: Any) -> "list[str]":
+    """Normalize an IAM Action/Resource field (a single string OR a list of strings) to a list of strings.
+    A string is a single-element list (NOT iterated char-by-char); anything else is dropped. Never raises."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Sequence):
+        return [x for x in value if isinstance(x, str)]
+    return []
+
+
+def _iam_glob_matches(pattern: str, target: str) -> bool:
+    """True iff an IAM glob ``pattern`` (``*`` any run, ``?`` one char — the only wildcards IAM uses) matches
+    the whole lower-cased ``target``. ``*`` alone matches everything; a wildcard that EXCLUDES the target
+    (``role/dev-*`` vs ``role/admin``) does NOT match. Both are already lower-cased. Anchored, non-backtracking
+    over fixed alternations, ReDoS-safe."""
+    if not pattern or not target:
+        return False
+    if pattern == "*":
+        return True
+    rx = "^" + re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+    return re.match(rx, target) is not None
+
+
+def _iam_action_matches(action_pattern: Any, required: str) -> bool:
+    """True iff an IAM action PATTERN (which may wildcard: ``*``, ``iam:*``, ``iam:Attach*``) matches the
+    lower-cased ``required`` action."""
+    return _iam_glob_matches(_iam_norm_action(action_pattern), required)
+
+
+def _iam_resource_covers(resource_pattern: Any, target: str) -> bool:
+    """True iff an IAM resource PATTERN covers the lower-cased ``target`` id (the graph/via/base id space —
+    the capture uses CONSISTENT ids exactly like ``policy_path``). ``*`` covers everything; a wildcard that
+    excludes the target does NOT cover it (the FP trap)."""
+    return _iam_glob_matches(_imds_text(resource_pattern).strip().lower(), _norm_id(target))
+
+
+def _iam_stmt_allows(stmt: Any, action: str, target: str) -> bool:
+    """A single statement UNCONDITIONALLY Allows ``action`` over ``target``: Effect==Allow, NO Condition (a
+    conditional grant is not unconditional), NO NotAction (an inverted action set is ambiguous), some Action
+    pattern matches, some Resource pattern covers the target. Condition / NotAction / a non-covering resource
+    all return False — the fail-closed FP traps."""
+    if not isinstance(stmt, Mapping):
+        return False
+    if _imds_text(stmt.get("effect") or stmt.get("Effect")).strip().lower() != "allow":
+        return False
+    if stmt.get("condition") or stmt.get("Condition"):
+        return False
+    if stmt.get("not_action") or stmt.get("NotAction"):
+        return False
+    actions = _iam_as_list(stmt.get("action") or stmt.get("Action"))
+    resources = _iam_as_list(stmt.get("resource") or stmt.get("Resource"))
+    if not any(_iam_action_matches(a, action) for a in actions):
+        return False
+    return any(_iam_resource_covers(r, target) for r in resources)
+
+
+def _iam_stmt_allows_somewhere(stmt: Any, action: str) -> bool:
+    """A statement UNCONDITIONALLY Allows ``action`` over SOME (any) resource — the PassRole run-action leg,
+    whose compute resource (an instance/function) is not the passed role. Same unconditional guards
+    (Effect==Allow, no Condition, no NotAction, an action match, at least one Resource present)."""
+    if not isinstance(stmt, Mapping):
+        return False
+    if _imds_text(stmt.get("effect") or stmt.get("Effect")).strip().lower() != "allow":
+        return False
+    if stmt.get("condition") or stmt.get("Condition"):
+        return False
+    if stmt.get("not_action") or stmt.get("NotAction"):
+        return False
+    actions = _iam_as_list(stmt.get("action") or stmt.get("Action"))
+    resources = _iam_as_list(stmt.get("resource") or stmt.get("Resource"))
+    return bool(resources) and any(_iam_action_matches(a, action) for a in actions)
+
+
+def _iam_stmt_denies(stmt: Any, action: str, target: str) -> bool:
+    """A statement DENIES ``action`` over ``target`` (deny-precedence, fail-closed). A ``Deny NotAction=[X]``
+    denies everything EXCEPT X, so it denies ``action`` UNLESS ``action`` matches a NotAction pattern. A plain
+    ``Deny Action=… Resource=…`` denies on an action+resource match. A Deny with no Resource is treated as
+    covering the target (IAM requires a Resource; absent -> fail-closed to blocking)."""
+    if not isinstance(stmt, Mapping):
+        return False
+    if _imds_text(stmt.get("effect") or stmt.get("Effect")).strip().lower() != "deny":
+        return False
+    resources = _iam_as_list(stmt.get("resource") or stmt.get("Resource"))
+    covers = (not resources) or any(_iam_resource_covers(r, target) for r in resources)
+    if not covers:
+        return False
+    not_action = _iam_as_list(stmt.get("not_action") or stmt.get("NotAction"))
+    if not_action:
+        return not any(_iam_action_matches(na, action) for na in not_action)
+    actions = _iam_as_list(stmt.get("action") or stmt.get("Action"))
+    return any(_iam_action_matches(a, action) for a in actions)
+
+
+def _iam_effective_allow(action: str, target: str, id_stmts: "list", boundary_stmts: "list | None",
+                         scp_stmts: "list | None", *, anywhere: bool = False) -> bool:
+    """UNCONDITIONAL effective allow of ``action`` over ``target`` (or, with ``anywhere``, over ANY resource):
+    allowed by the IDENTITY policy AND — when present — by the permissions BOUNDARY AND by the SCP, with NO
+    Deny at ANY layer. A permissions boundary / SCP that is PRESENT but does NOT allow the action RESTRICTS
+    it -> not allowed (the boundary/SCP FP trap, fail-closed). ``boundary_stmts``/``scp_stmts`` are None when
+    ABSENT (no restriction) and a (possibly empty) list when present (empty -> denies all)."""
+    def allows(s: Any) -> bool:
+        return _iam_stmt_allows_somewhere(s, action) if anywhere else _iam_stmt_allows(s, action, target)
+
+    for layer in (id_stmts, boundary_stmts or [], scp_stmts or []):
+        if any(_iam_stmt_denies(s, action, target) for s in layer):
+            return False
+    if not any(allows(s) for s in id_stmts):
+        return False
+    if boundary_stmts is not None and not any(allows(s) for s in boundary_stmts):
+        return False
+    if scp_stmts is not None and not any(allows(s) for s in scp_stmts):
+        return False
+    return True
+
+
+def _iam_build_adj_grants(graph: Mapping[str, Any]) -> "tuple[dict, dict]":
+    """Build the principal->principal adjacency (assume/member closure) and principal->[(resource, access)]
+    grants from a retained policy graph — the SAME model ``policy_path_oracle`` searches. Deterministic;
+    malformed entries are skipped, never raised."""
+    adj: "dict[str, list[str]]" = {}
+    for rel_key in ("assume", "member_of"):
+        for e in graph.get(rel_key) or []:
+            if not isinstance(e, Mapping):
+                continue
+            src, dst = _norm_id(e.get("src")), _norm_id(e.get("dst"))
+            if src and dst:
+                adj.setdefault(src, []).append(dst)
+    grants: "dict[str, list[tuple[str, str]]]" = {}
+    for g in graph.get("grants") or []:
+        if not isinstance(g, Mapping):
+            continue
+        p, r = _norm_id(g.get("principal")), _norm_id(g.get("resource"))
+        if p and r:
+            grants.setdefault(p, []).append((r, str(g.get("access") or "")))
+    return adj, grants
+
+
+def _iam_reaches(adj: Mapping[str, "list[str]"], grants: Mapping[str, "list[tuple[str, str]]"],
+                 start: str, target: str, requested: str) -> bool:
+    """BFS: does ``start`` reach the resource ``target`` with ``requested`` access over the assume/member
+    closure? Mirrors ``policy_path_oracle``'s search (sorted adjacency -> deterministic)."""
+    order, seen = [start], {start}
+    i = 0
+    while i < len(order):
+        cur = order[i]
+        i += 1
+        for res, acc in grants.get(cur, ()):
+            if res == target and _access_grants(acc, requested):
+                return True
+        for nxt in sorted(adj.get(cur, ())):
+            if nxt not in seen:
+                seen.add(nxt)
+                order.append(nxt)
+    return False
+
+
+# IAM action verb classification for the SYMMETRIC base fold (defect: strict-gain base asymmetry). A verb
+# prefix set, checked write-before-read; an unknown named action grants at least read-tier (conservative).
+_IAM_WRITE_VERB_PREFIXES: "tuple[str, ...]" = (
+    "create", "put", "delete", "update", "modify", "write", "attach", "detach", "add", "remove", "set",
+    "replace", "assume", "pass", "enable", "disable", "authorize", "revoke", "associate", "disassociate",
+    "start", "stop", "run", "invoke", "import", "restore", "reset",
+)
+_IAM_READ_VERB_PREFIXES: "tuple[str, ...]" = (
+    "get", "list", "describe", "read", "view", "lookup", "head", "select", "query", "scan", "batchget",
+    "generate", "decrypt", "search",
+)
+_IAM_ACCESS_RANK: "dict[str, int]" = {"read": 2, "write": 3, "admin": 4}
+
+
+def _iam_action_service(action: Any) -> str:
+    """The AWS service prefix of an IAM action (``s3:GetObject`` -> ``s3``); ``*`` -> ``*`` (any service)."""
+    a = _iam_norm_action(action)
+    if a == "*":
+        return "*"
+    return a.split(":", 1)[0] if ":" in a else a
+
+
+def _iam_target_service(target: Any) -> str:
+    """The service of a target resource id (``s3/crown-jewels`` -> ``s3``, ``arn:aws:kms:…`` -> ``arn`` —
+    keep capture ids in the ``service/name`` space, exactly as ``policy_path`` uses canonical ids)."""
+    t = _norm_id(target)
+    if "/" in t:
+        return t.split("/", 1)[0]
+    if ":" in t:
+        return t.split(":", 1)[0]
+    return t
+
+
+def _iam_action_access_token(action: Any) -> str:
+    """The access-lattice token an IAM action grants: ``*`` / ``svc:*`` -> admin; a write-verb -> write; a
+    read-verb (or an unknown named action, conservatively) -> read."""
+    a = _iam_norm_action(action)
+    if a == "*":
+        return "admin"
+    verb = a.split(":", 1)[1] if ":" in a else a
+    if verb in ("", "*"):
+        return "admin"
+    for p in _IAM_WRITE_VERB_PREFIXES:
+        if verb.startswith(p):
+            return "write"
+    for p in _IAM_READ_VERB_PREFIXES:
+        if verb.startswith(p):
+            return "read"
+    return "read"
+
+
+def _iam_identity_target_access(target: str, id_stmts: "list") -> "str | None":
+    """The access token at which the base principal's OWN identity policy DIRECTLY reaches ``target`` — the
+    SYMMETRIC base fold that makes the base closure see the SAME action-level evidence the escalation side
+    does (defect #1: base asymmetry). Considers only UNCONDITIONAL Allows (no Condition, no NotAction) whose
+    Resource covers ``target`` AND whose action's SERVICE matches the target's service (or ``*``), so an
+    ``iam:*`` grant does NOT fold as reach over an ``s3`` target. Returns the HIGHEST such access token, or
+    None. Over-approximating base reach is the FAIL-CLOSED direction (a larger base closure = fewer escalation
+    FACTs); denies are deliberately NOT subtracted here (subtracting them would SHRINK the base closure and
+    make escalation EASIER to claim — the unsafe direction)."""
+    tsvc = _iam_target_service(target)
+    best: "str | None" = None
+    for s in id_stmts:
+        if not isinstance(s, Mapping):
+            continue
+        if _imds_text(s.get("effect") or s.get("Effect")).strip().lower() != "allow":
+            continue
+        if s.get("condition") or s.get("Condition") or s.get("not_action") or s.get("NotAction"):
+            continue
+        resources = _iam_as_list(s.get("resource") or s.get("Resource"))
+        if not any(_iam_resource_covers(r, target) for r in resources):
+            continue
+        for a in _iam_as_list(s.get("action") or s.get("Action")):
+            asvc = _iam_action_service(a)
+            if asvc != "*" and asvc != tsvc:
+                continue   # a cross-service action does not grant reach over this target
+            tok = _iam_action_access_token(a)
+            if best is None or _IAM_ACCESS_RANK[tok] > _IAM_ACCESS_RANK[best]:
+                best = tok
+    return best
+
+
+def iam_escalation_oracle(observed: Any) -> OracleSignal:
+    """Fire when RETAINED IAM statements grant a principal an UNCONDITIONAL escalation PRIMITIVE that
+    STRICTLY increases what it can reach — the E2 (BUILD-PLAN §E2) achieved-escalation confirmation, the
+    stronger dual of ``policy_path_oracle`` (mere reachability). Pure + deterministic, re-verifies OFFLINE.
+
+    ``observed`` is the JSON-safe retained capture::
+
+        {"base_principal": "role/dev",
+         "target_resource": "s3/crown-jewels", "target_access": "admin"?,   # "" = any grant path
+         "graph": { "grants":[{principal,resource,access}], "assume":[{src,dst}], "member_of":[{src,dst}] },
+         "escalation": {
+             "primitive": "assume_role_trust_rewrite" | "pass_role_to_compute" | "attach_user_policy"
+                        | "add_user_to_group" | "create_access_key",
+             "via": "role/admin",                       # the principal the primitive lets base ACT AS
+             "statements": [ {effect, action, resource, condition?, not_action?} ],   # base identity policy
+             "boundary": {"statements":[…]}?,           # optional permissions boundary (restrictive)
+             "scp":      {"statements":[…]}? } }        # optional SCP (restrictive)
+
+    Fires (0.95) ONLY when ALL hold (near-zero-FP by construction):
+      (1) STRICT-GAIN precondition — ``base_principal`` does NOT already reach ``target_resource`` in the
+          BASE closure (else it is plain reachability, not escalation — the central anti-overclaim guard);
+      (2) some primitive from the FIXED set is UNCONDITIONALLY granted (every FP trap fail-closed: a
+          Condition, NotAction, explicit Deny / deny-precedence, restricting boundary/SCP, or a Resource
+          wildcard that does not cover the target contributes NO edge);
+      (3) the ONE edge the primitive synthesizes makes ``base_principal`` reach ``target_resource`` in the
+          ESCALATION-CLOSED closure. (2)+(3) over (1) = a strict differential gain.
+
+    Does NOT fire (stays an honest LEAD): a target already reachable in the base closure; an unknown /
+    unparseable primitive; a primitive whose required actions are not unconditionally allowed; a synthesized
+    edge that still does not reach the target; malformed / absent evidence (never raises)."""
+    kind = OracleKind.IAM_ESCALATION_PRIMITIVE
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no IAM escalation evidence", observed={"reason": "malformed_capture"})
+
+    base = _norm_id(observed.get("base_principal"))
+    target = _norm_id(observed.get("target_resource"))
+    requested = str(observed.get("target_access") or "").strip()
+    graph = observed.get("graph") if isinstance(observed.get("graph"), Mapping) else {}
+    esc = observed.get("escalation") if isinstance(observed.get("escalation"), Mapping) else {}
+    if not base or not target:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence="escalation query needs both a base_principal and a target_resource",
+            observed={"reason": "incomplete_query", "base_principal": base, "target": target})
+
+    # Parse the escalation statements EARLY — the base fold (defect #1) needs them BEFORE the strict-gain
+    # differential, so the base and escalation closures are computed over the SAME action-level evidence.
+    id_stmts = [s for s in (esc.get("statements") or []) if isinstance(s, Mapping)]
+    boundary = esc.get("boundary")
+    scp = esc.get("scp")
+    boundary_stmts = ([s for s in (boundary.get("statements") or []) if isinstance(s, Mapping)]
+                      if isinstance(boundary, Mapping) else None)
+    scp_stmts = ([s for s in (scp.get("statements") or []) if isinstance(s, Mapping)]
+                 if isinstance(scp, Mapping) else None)
+
+    adj, grants = _iam_build_adj_grants(graph)
+    # SYMMETRIC BASE FOLD (defect #1: base asymmetry). Fold the base principal's OWN unconditional identity-
+    # policy Allows that DIRECTLY reach `target` (same service, resource covers target) into base_grants, so
+    # the base closure sees the SAME action-level evidence the escalation side does — an attacker who already
+    # reaches the target via a direct Allow (not represented as a coarse resource-grant edge) is NOT counted
+    # as a strict gain. base_grants is the SHARED base for BOTH closures; the ONLY delta is the ONE
+    # synthesized primitive edge, so strict-gain is an honest differential (esc_closure \ base_closure).
+    base_grants = {k: list(v) for k, v in grants.items()}
+    folded = _iam_identity_target_access(target, id_stmts)
+    if folded is not None:
+        base_grants.setdefault(base, []).append((target, folded))
+
+    # (1) STRICT-GAIN precondition — base must NOT already reach the target over the FOLDED base closure
+    #     (else it is plain reachability, not escalation). The central anti-overclaim guard.
+    if _iam_reaches(adj, base_grants, base, target, requested):
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"{base!r} ALREADY reaches {target!r} in the base closure (a direct identity-policy Allow "
+                      f"or an existing grant path) without escalating — this is reachability (policy_path), "
+                      f"NOT a strict escalation gain (stays a LEAD)"),
+            observed={"reason": "no_strict_gain_already_reachable", "base_principal": base, "target": target})
+
+    primitive = _imds_text(esc.get("primitive")).strip().lower()
+    spec = _IAM_ESCALATION_PRIMITIVES.get(primitive)
+    if spec is None:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"escalation primitive {primitive!r} is not in the fixed auditable set "
+                      f"{sorted(_IAM_ESCALATION_PRIMITIVES)} — no edge is synthesized (stays a LEAD)"),
+            observed={"reason": "unknown_primitive", "primitive": primitive})
+
+    via = _norm_id(esc.get("via"))
+    cover = via if spec["cover"] == "via" else base
+    if spec["cover"] == "via" and not via:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"the {primitive!r} primitive names no `via` principal to escalate to — no edge can be "
+                      f"synthesized (stays a LEAD)"),
+            observed={"reason": "no_via_principal", "primitive": primitive})
+
+    # (2) every REQUIRED action UNCONDITIONALLY allowed over `cover`; and, when the primitive has an
+    #     alternative set, at least ONE of it (over `cover`, or over ANY resource for the PassRole run leg).
+    for action in spec["all"]:
+        if not _iam_effective_allow(action, cover, id_stmts, boundary_stmts, scp_stmts):
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=(f"the {primitive!r} primitive requires an UNCONDITIONAL Allow of {action!r} over "
+                          f"{cover!r}, but the retained statements do not grant it (a Condition, NotAction, "
+                          f"Deny, restricting boundary/SCP, or a resource wildcard that excludes the target "
+                          f"— stays a LEAD)"),
+                observed={"reason": "action_not_unconditionally_allowed", "primitive": primitive,
+                          "action": action, "cover": cover})
+    if spec["any"]:
+        anywhere = spec["any_scope"] == "anywhere"
+        matched = [a for a in spec["any"]
+                   if _iam_effective_allow(a, cover, id_stmts, boundary_stmts, scp_stmts, anywhere=anywhere)]
+        if not matched:
+            return OracleSignal(
+                kind=kind, fired=False, confidence=0.0,
+                evidence=(f"the {primitive!r} primitive requires at least one of {list(spec['any'])} "
+                          f"{'over any resource' if anywhere else f'over {cover!r}'}, but none is "
+                          f"unconditionally allowed (stays a LEAD)"),
+                observed={"reason": "no_alternative_action_allowed", "primitive": primitive, "cover": cover})
+
+    # (3) synthesize the ONE new capability edge and re-run the differential over the escalation-closed graph
+    #     (a COPY of the FOLDED base closure — base_grants — plus the ONE new edge, so the ONLY delta vs the
+    #     base closure is the primitive edge).
+    esc_adj = {k: list(v) for k, v in adj.items()}
+    esc_grants = {k: list(v) for k, v in base_grants.items()}
+    if spec["edge"] in ("assume", "member_of"):
+        esc_adj.setdefault(base, []).append(via)
+        new_edge = f"{base} -[{spec['edge']}]-> {via}"
+    else:   # grant_admin — self policy-attach grants base a direct admin grant over the target resource
+        esc_grants.setdefault(base, []).append((target, "admin"))
+        new_edge = f"{base} -[has_grant admin]-> {target}"
+
+    if not _iam_reaches(esc_adj, esc_grants, base, target, requested):
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"the {primitive!r} primitive synthesizes {new_edge}, but {base!r} STILL does not reach "
+                      f"{target!r} in the escalation-closed closure — no strict gain (stays a LEAD)"),
+            observed={"reason": "edge_does_not_reach_target", "primitive": primitive,
+                      "synthesized_edge": new_edge, "target": target})
+
+    return OracleSignal(
+        kind=kind, fired=True, confidence=0.95,
+        evidence=(f"IAM privilege-escalation PRIMITIVE ({spec['label']}): the RETAINED IAM configuration "
+                  f"PERMITS {base!r} this escalation primitive UNCONDITIONALLY, synthesizing {new_edge}, which "
+                  f"lets {base!r} reach {target!r}{(' with access '+requested) if requested else ''} — a STRICT "
+                  f"gain (unreachable in the base closure, reachable in the escalation-closed closure). This is "
+                  f"a CAPABILITY over the retained config: the identity policy + boundary + SCP permit it, but "
+                  f"a resource-based policy (a KMS key policy, an S3 bucket policy, the target role's trust "
+                  f"Deny) NOT present in the capture could still nullify it. SUBJECT = the retained IAM policy "
+                  f"statements; VIGIL re-derives the permitted escalation over the retained evidence offline "
+                  f"(no cloud, no attack)."),
+        observed={"reason": "iam_escalation_permitted", "primitive": primitive, "family": spec["family"],
+                  "base_principal": base, "via": via, "target": target, "requested_access": requested,
+                  "synthesized_edge": new_edge})
