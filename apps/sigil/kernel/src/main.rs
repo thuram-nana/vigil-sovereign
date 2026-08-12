@@ -184,15 +184,42 @@ fn finish(w: &Warden, agent: &str, tool: &str, args: &str, v: &Verdict, output: 
                 v.tier, v.decision.as_str(), rec.seq, &rec.entry_hash[..16]
             );
         }
-        Err(e) => eprintln!("action-log write failed: {e}"),
+        Err(e) => {
+            // FAIL-CLOSED (A10): the action executed but its audit record could NOT be written — an
+            // integrity gap the operator must not miss. Print the output (it ran; hiding it does not
+            // un-run it), emit a LOUD failure, and exit non-zero so no wrapper reads this as success.
+            println!("\n{output}\n");
+            eprintln!(
+                "[WARDEN FAIL-CLOSED — action-log write failed: {e}. The action executed but is NOT \
+                 audited on the spine; treat as an integrity incident.]"
+            );
+            std::process::exit(4);
+        }
     }
 }
 
 fn block(w: &Warden, agent: &str, tool: &str, args: &str, v: &Verdict) {
     let need = if v.tier == Tier::A3 { "explicit per-action approval (no promotion)" } else { "one-tap approval" };
-    let _ = w.record(agent, tool, &args_hash(args), v, "none", "blocked:awaiting-approval", now());
-    println!("[BLOCKED — {} requires {}; not executed. Logged as awaiting-approval.]", v.tier, need);
-    anchor_head(w); // protect the evidence that a dangerous action was attempted (anti-rollback)
+    // FAIL-CLOSED (A10, red-pen): the record of a BLOCKED dangerous (A2/A3) attempt is the HIGHEST-value
+    // evidence this kernel holds — losing it silently is worse than losing a safe-tier record. If the audit
+    // write fails we must NOT print a false "Logged as awaiting-approval" and exit 0 (which the Python caller
+    // reads as a clean refusal): report the failure loudly and exit non-zero. (The action was NOT executed,
+    // so there is no world-effect — but the attempt is now UNRECORDED, an integrity incident.)
+    match w.record(agent, tool, &args_hash(args), v, "none", "blocked:awaiting-approval", now()) {
+        Ok(_) => {
+            println!("[BLOCKED — {} requires {}; not executed. Logged as awaiting-approval.]", v.tier, need);
+            anchor_head(w); // protect the evidence that a dangerous action was attempted (anti-rollback)
+        }
+        Err(e) => {
+            eprintln!(
+                "[WARDEN FAIL-CLOSED — {} was BLOCKED (requires {}; NOT executed) but its awaiting-approval \
+                 audit record could NOT be written: {e}. The dangerous-action attempt is UNRECORDED; treat \
+                 as an integrity incident.]",
+                v.tier, need
+            );
+            std::process::exit(4);
+        }
+    }
 }
 
 fn cmd_audit(w: &Warden) {

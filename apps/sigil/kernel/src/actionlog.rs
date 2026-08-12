@@ -20,6 +20,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,35 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::{sha256_hex, verify_hex, WardenKey};
 
 const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// An exclusive advisory file lock (A10 — unlocked-sequence-counter fix). Held for the whole
+/// read-seq → append → write-head critical section so two concurrent `append()`s (separate
+/// processes OR threads — each `acquire` opens a fresh file description) can never both read the
+/// same last seq and mint a DUPLICATE seq / a torn head. `flock(LOCK_EX)` is auto-released by the
+/// kernel if the holder dies (no stale lock, unlike an O_EXCL lockfile). Advisory: it only
+/// serialises callers that also take the lock — which is every writer here (`append`).
+struct FileLock {
+    file: std::fs::File,
+}
+
+impl FileLock {
+    fn acquire(lock_path: &Path) -> io::Result<FileLock> {
+        let file = OpenOptions::new().create(true).write(true).truncate(false).open(lock_path)?;
+        // SAFETY: fd is valid for the lifetime of `file`; LOCK_EX blocks until the lock is ours.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(FileLock { file })
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Explicit unlock (closing the fd would release it too, but be explicit + robust).
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
 
 /// The digested content of an action — everything the signature must commit to. `ts` IS
 /// included (an audit log's "when" must be tamper-evident). Fixed field order ⇒ deterministic.
@@ -113,6 +143,10 @@ impl ActionLog {
         self.path.with_extension("head.json")
     }
 
+    fn lock_path(&self) -> PathBuf {
+        self.path.with_extension("lock")
+    }
+
     pub fn records(&self) -> io::Result<Vec<ActionRecord>> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(t) => t,
@@ -140,7 +174,19 @@ impl ActionLog {
             count, last_seq, head_hash: head_hash.to_string(),
             sig: key.sign_hex(digest.as_bytes()),
         };
-        std::fs::write(self.head_path(), serde_json::to_string(&hr).expect("head serializes"))
+        let body = serde_json::to_string(&hr).expect("head serializes");
+        // ATOMIC head write (A10 — non-atomic-head fix): write a temp beside the head, fsync it, then
+        // rename over the head. rename(2) within a dir is atomic on POSIX, so a crash mid-write can never
+        // leave a torn/empty head that verify() would read as a rollback. The temp is per-dir (same
+        // filesystem, so rename is a metadata op, never a cross-device copy).
+        let head = self.head_path();
+        let tmp = head.with_extension("json.tmp");
+        {
+            let mut f = OpenOptions::new().create(true).write(true).truncate(true).open(&tmp)?;
+            f.write_all(body.as_bytes())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &head)
     }
 
     /// The on-disk signed head as (count, head_hash), or None if no head file. For the
@@ -174,6 +220,13 @@ impl ActionLog {
         result_hash: &str,
         ts_epoch: u64,
     ) -> io::Result<ActionRecord> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        // Hold the exclusive lock across read-seq → append → write-head so two concurrent appends can
+        // never both read the same last seq and mint a DUPLICATE seq (A10). Released when `_lock` drops.
+        let _lock = FileLock::acquire(&self.lock_path())?;
+
         let existing = self.records()?;
         let (seq, prev_hash) = match existing.last() {
             Some(last) => (last.seq + 1, last.entry_hash.clone()),
@@ -198,9 +251,6 @@ impl ActionLog {
         rec.entry_hash = rec.compute_entry_hash();
         rec.sig = key.sign_hex(rec.entry_hash.as_bytes());
 
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
         writeln!(f, "{}", serde_json::to_string(&rec).expect("record serializes"))?;
         f.sync_all()?;
@@ -377,5 +427,60 @@ mod tests {
         let other = WardenKey::generate();
         let err = log.verify(&other.public_hex()).unwrap_err();
         assert!(err.contains("signature invalid"), "{err}");
+    }
+
+    #[test]
+    fn concurrent_appends_get_unique_contiguous_seqs() {
+        // A10 regression: WITHOUT the flock, two threads read the same last seq and mint a DUPLICATE
+        // seq (a chain break). With the exclusive lock, N concurrent appenders serialise, so the seqs
+        // are exactly 0..N with no gap/dup and verify() passes.
+        use std::sync::Arc;
+        let mut p = std::env::temp_dir();
+        p.push(format!("sigil-al-concurrent-{}.jsonl",
+            sha256_hex(format!("{:?}", std::thread::current().id()).as_bytes())));
+        let log = ActionLog::new(&p);
+        let _ = std::fs::remove_file(log.path());
+        let _ = std::fs::remove_file(log.head_path());
+        let _ = std::fs::remove_file(log.lock_path());
+        let key = Arc::new(WardenKey::generate());
+
+        let threads = 8u64;
+        let per = 6u64;
+        let handles: Vec<_> = (0..threads).map(|t| {
+            let path = p.clone();
+            let key = Arc::clone(&key);
+            std::thread::spawn(move || {
+                let log = ActionLog::new(&path);
+                for i in 0..per {
+                    log.append(&key, "KERNEL", "memory.search", "b3:a", "A0", "auto", "auto", "b3:r",
+                               t * 1000 + i).unwrap();
+                }
+            })
+        }).collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let recs = log.records().unwrap();
+        assert_eq!(recs.len() as u64, threads * per, "every append must have landed");
+        let mut seqs: Vec<u64> = recs.iter().map(|r| r.seq).collect();
+        seqs.sort_unstable();
+        let expected: Vec<u64> = (0..threads * per).collect();
+        assert_eq!(seqs, expected, "seqs must be unique + contiguous — a duplicate proves the lock failed");
+        assert_eq!(log.verify(&key.public_hex()).unwrap() as u64, threads * per,
+                   "the concurrently-built chain must verify (chain + signatures + head anchor)");
+    }
+
+    #[test]
+    fn head_write_is_atomic_and_leaves_no_tmp() {
+        // A10: the head is written temp+rename. After an append the head verifies and NO stale
+        // `.head.json.tmp` is left behind (a torn temp must never be mistaken for the head).
+        let (log, key) = tmp_log();
+        add(&log, &key, "memory.search", "A0", 1000);
+        add(&log, &key, "email.send", "A2", 1001);
+        assert_eq!(log.verify(&key.public_hex()).unwrap(), 2);
+        let tmp = log.head_path().with_extension("json.tmp");
+        assert!(!tmp.exists(), "the atomic head write must not leave a temp file: {tmp:?}");
+        assert!(log.head_path().exists(), "the head must exist after append");
     }
 }
