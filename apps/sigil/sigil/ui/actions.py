@@ -46,7 +46,14 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         pp = PromotionPolicy(store, owner_key=owner)
         agent, scope = str(params["agent"]), str(params.get("scope", "*"))
         out = pp.grant(agent, scope) if action == "promote" else pp.revoke(agent, scope)
-        return {"ok": out is not None, "action": action, "agent": agent, "scope": scope, "recorded_seq": out}
+        result = {"ok": out is not None, "action": action, "agent": agent, "scope": scope, "recorded_seq": out}
+        if out is None:
+            # A refused grant (a NO_PROMOTION agent like ENVOY/DELEGATE) must NOT read as success: surface an
+            # explicit error so the UI shows the refusal instead of a false "Promoted" confirmation. `revoke`
+            # always records (out is never None), so this only fires for a refused promote.
+            result["error"] = (f"{agent} cannot be promoted — outbound/account agents (ENVOY, DELEGATE) stay "
+                               f"human-gated forever (SIGIL §4.6); the grant was refused and nothing was recorded.")
+        return result
     if action == "queue_learn":
         # K2b: enqueue an offense-drafted learn-proposal for the owner's approval. FAIL-CLOSED and gated:
         # refused if the kill-switch is engaged OR autolearn is disabled. Enqueuing grants nothing — the

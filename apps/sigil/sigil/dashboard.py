@@ -14,7 +14,7 @@ from .spine.store import SpineStore
 
 def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int = 300) -> dict:
     from .agents.approvals import pending
-    from .governor import CapabilityGate, KillSwitch
+    from .governor import CapabilityGate, KillSwitch, PromotionPolicy
     from .governor.identity import owner_pubkey
     head = store.next_seq - 1
     day = day_iso or datetime.now(timezone.utc).date().isoformat()
@@ -42,6 +42,10 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
             decisions[str(r.payload.get("decision"))] += 1
 
     pend = pending(store, owner_pubkey())
+    try:                       # read-only agent-promotion state (verified fold; fail-soft so it never sinks the snapshot)
+        promotions = PromotionPolicy(store).state_all()
+    except Exception:          # noqa: BLE001 — a promotion-read hiccup must not break the whole dashboard
+        promotions = []
     from .knowledge import LEARN_SIGNAL
     learn_proposals = [{"seq": r.seq, "vuln_id": r.payload.get("vuln_id"), "rank": r.payload.get("rank"),
                         "exploit_known": bool(r.payload.get("exploit_known")),
@@ -51,6 +55,7 @@ def snapshot(store: SpineStore, *, day_iso: Optional[str] = None, lookback: int 
         "head_seq": head,
         "kill_switch": "ENGAGED" if KillSwitch(store).is_engaged() else "released",
         "capabilities": CapabilityGate(store).state_all(),   # {"gesture": enabled|disabled, "voice": ...}
+        "promotions": promotions,   # [{agent, scope}] currently granted (verified) — owner may revoke from the UI
         "recent_by_agent": dict(per_agent.most_common()),
         "recent_decisions": dict(decisions),
         "pending_approvals": [{"seq": r.seq, "tier": r.payload.get("tier"), "kind": r.kind,

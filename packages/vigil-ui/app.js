@@ -3185,6 +3185,7 @@
         h("div.stack", null, [
           V.card("Waiting for your approval", "OWNER", h("div#safety-approvals", null, h("div.empty", null, "Loading…")), true),
           V.card("Capabilities", "OWNER", h("div#safety-caps", null, h("div.empty", null, "Loading…")), true),
+          V.card("Agent promotions", "OWNER", h("div#safety-promos", null, h("div.empty", null, "Loading…")), true),
         ]),
         h("div.stack", null, [
           V.card("Kill-switch", "OWNER", h("div#safety-kill", null, h("div.empty", null, "Loading…")), true),
@@ -3258,6 +3259,9 @@
       capRow("gesture", caps.gesture),
       capRow("voice", caps.voice),
     ]);
+    // agent promotions (trust-widening — owner-signed grant/revoke)
+    var pb = V.$("#safety-promos");
+    if (pb) V.mount(pb, safetyPromotions(snap.promotions || []));
     // kill-switch
     var kb = V.$("#safety-kill");
     if (kb) V.mount(kb, [
@@ -3355,6 +3359,38 @@
         : h("button.btn.sm.owner", { onClick: function () {
             settingsAct({ action: "enable_" + name, reason: "enable from Safety" }, label + " enabled.", loadSafety); } }, "Enable"),
     ]);
+  }
+
+  // Agent promotions: an owner may promote a specific (agent, record-kind scope) so that agent's A2
+  // proposals of that kind AUTO-APPROVE instead of queuing — a deliberate TRUST WIDENING. Every grant/
+  // revoke here is signed with the owner key ON THE SERVER (the browser holds no key); ENVOY + DELEGATE
+  // have no promotion path (the broker refuses). The list is the verified fold — a forged grant is not shown.
+  function safetyPromotions(promos) {
+    var rows = (promos || []).length
+      ? h("div.stack", { style: { gap: "6px" } }, promos.map(function (p) {
+          return h("div.cap-row", null, [
+            h("div.cap-l", null, [h("b.mono", null, String(p.agent || "?")),
+              h("span.pill.sm", null, "scope " + String(p.scope || "*"))]),
+            h("button.btn.sm.danger", { onClick: function () {
+              settingsAct({ action: "revoke", agent: p.agent, scope: p.scope, reason: "revoke from Safety" },
+                "Promotion revoked for " + p.agent + ".", loadSafety); } }, "Revoke"),
+          ]);
+        }))
+      : h("div.empty", null, "No agents are promoted — every A2 proposal queues for your sign-off.");
+    var agentIn = h("input", { type: "text", placeholder: "agent (e.g. ARCHIVIST)", style: { maxWidth: "180px" } });
+    var scopeIn = h("input", { type: "text", placeholder: "scope (record kind, or * )", value: "*", style: { maxWidth: "180px" } });
+    var grant = h("button.btn.sm.owner", { onClick: function () {
+      var a = (agentIn.value || "").trim(); var s = (scopeIn.value || "").trim() || "*";
+      if (!a) { V.toast("Enter an agent to promote."); return; }
+      settingsAct({ action: "promote", agent: a, scope: s, reason: "promote from Safety" },
+        "Promoted " + a + " for scope " + s + ".", function () { agentIn.value = ""; loadSafety(); });
+    } }, "Grant promotion");
+    return [
+      rows,
+      h("div.hint", { style: { margin: "10px 0 8px" } },
+        "Promoting an (agent, scope) lets that agent's A2 proposals of that kind auto-approve instead of queuing — a trust widening. A scope of * covers every kind; a per-kind revoke does NOT reduce a * grant — revoke the * row to fully un-promote. ENVOY and DELEGATE can never be promoted. The grant is signed with your owner key on the server."),
+      h("div.row-flex", { style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } }, [agentIn, scopeIn, grant]),
+    ];
   }
 
   // ---- Defense (AEGIS) screen ------------------------------------------------
