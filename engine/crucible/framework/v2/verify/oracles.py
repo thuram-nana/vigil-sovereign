@@ -6024,3 +6024,285 @@ def iam_escalation_oracle(observed: Any) -> OracleSignal:
         observed={"reason": "iam_escalation_permitted", "primitive": primitive, "family": spec["family"],
                   "base_principal": base, "via": via, "target": target, "requested_access": requested,
                   "synthesized_edge": new_edge})
+
+
+# ---------------------------------------------------------------------------
+# E4 TIER-2 (BUILD-PLAN §E4·TIER-2) — K8s dangerous-VERB / default-ServiceAccount RBAC verb-GRANT.
+# See OracleKind.K8S_RBAC_VERB_GRANT. A STRONGER, SEPARATE oracle than TIER-1 (k8s_workload_posture_oracle):
+# TIER-1 fires only for an ANONYMOUS subject bound to a dangerous BUILT-IN ClusterRole matched by exact NAME
+# (cluster-admin / admin / edit) — it NEVER parses the role's rules. TIER-2 PARSES the referenced
+# Role/ClusterRole's ``rules`` (a SEPARATELY-retained object — a roleRef is only a NAME) to prove a dangerous
+# (verb,resource) GRANT, and extends the attacker-occupiable subject set to the namespace-``default``
+# ServiceAccount and system:authenticated — GATED by a MANDATORY near-zero-FP fix (an independent adversarial
+# review found the naive design mints CRITICAL false FACTs on the SINGLE MOST COMMON legitimate RBAC
+# delegation). The two oracles COEXIST as distinct OracleKinds (like K8S_POSTURE / K8S_WORKLOAD_POSTURE).
+#
+# The capture retains a ``binding`` (subjects + roleRef {name,kind,apiGroup} + binding kind/namespace) AND a
+# SEPARATELY-retained ``role_object`` ({name,kind,apiGroup,namespace, rules, rules_source, aggregationRule?}).
+# The oracle RE-CHECKS the roleRef->role_object JOIN (never trusts the runner), judges the rules over the
+# retained set ALONE (offline, ZERO cluster calls), and applies the SUBJECT-GATED FACT eligibility below.
+# ---------------------------------------------------------------------------
+_K8S_RBAC_GRANT_STR_CAP = 4096
+# RBAC verbs/resources/apiGroups are NORMALIZED (lower+strip) then matched EXACTLY against these token sets;
+# an UNKNOWN token can only SUPPRESS a match, never cause a fire.
+_K8S_CORE_OR_WILDCARD_GROUPS = frozenset({"", "*"})              # core (or wildcard) apiGroup — shapes (a)/(b)
+_K8S_PRIVESC_GROUPS = frozenset({"", "*", "rbac.authorization.k8s.io"})   # RBAC/core apiGroups — shape (c)
+_K8S_SECRET_READ_VERBS = frozenset({"get", "list", "watch", "*"})
+_K8S_LIST_WATCH_STAR = frozenset({"list", "watch", "*"})        # verbs that IGNORE a resourceNames constraint
+_K8S_SECRET_RESOURCES = frozenset({"secrets", "*"})
+_K8S_ESCALATE_RESOURCES = frozenset({"roles", "clusterroles", "*"})
+_K8S_BIND_RESOURCES = frozenset({"rolebindings", "clusterrolebindings", "*"})
+_K8S_IMPERSONATE_RESOURCES = frozenset({"users", "groups", "serviceaccounts", "*"})
+# rules are AUTHORITATIVE only from a live API GET (the effective set the API returns); a static manifest is
+# FACT-eligible ONLY when the role carries NO aggregationRule (an aggregated role's effective rules are NOT
+# in the static manifest — the controller fills them in).
+_K8S_LIVE_RULE_SOURCES = frozenset({"live_clusterrole_get", "live_role_get"})
+# The honest EFFECT phrase per dangerous shape (worded for the FACT sentence).
+_K8S_GRANT_SHAPE_EFFECT = {
+    "full_wildcard": "exercise ALL verbs on ALL resources (cluster-admin-equivalent)",
+    "secret_read": "read (get/list/watch) Secrets",
+    "priv_esc": "escalate privilege via escalate/bind/impersonate on RBAC objects",
+}
+
+
+def _k8s_grant_token_set(values: Any) -> "frozenset[str]":
+    """A NORMALIZED (lower+strip, capped) token SET from a PolicyRule field (verbs/resources/apiGroups). A
+    non-list yields the empty set; unknown tokens are retained but only ever SUPPRESS a match."""
+    if not isinstance(values, (list, tuple)):
+        return frozenset()
+    return frozenset(_k8s_norm(v) for v in values)
+
+
+def _k8s_rule_has_resource_names(rule: Mapping[str, Any]) -> bool:
+    """True IFF the rule carries a NON-EMPTY ``resourceNames`` constraint (a per-object scoping that limits
+    get/delete/update to named objects; list/watch/* ignore it, so a wildcard/list rule is NOT so constrained)."""
+    rn = rule.get("resourceNames")
+    if rn is None:
+        rn = rule.get("resource_names")
+    return isinstance(rn, (list, tuple)) and any(_coerce_text(x).strip() for x in rn)
+
+
+def _k8s_rule_shapes(rule: Any) -> "set[str]":
+    """The set of dangerous shapes a SINGLE PolicyRule exhibits — a subset of {full_wildcard, secret_read,
+    priv_esc}. All over NORMALIZED tokens with EXACT membership; an unknown token can only suppress."""
+    if not isinstance(rule, Mapping):
+        return set()
+    verbs = _k8s_grant_token_set(rule.get("verbs"))
+    resources = _k8s_grant_token_set(rule.get("resources") if rule.get("resources") is not None
+                                     else rule.get("resource"))
+    groups = _k8s_grant_token_set(rule.get("apiGroups") if rule.get("apiGroups") is not None
+                                  else rule.get("api_groups"))
+    shapes: set[str] = set()
+    # (a) FULL WILDCARD — cluster-admin-equivalent: * verbs AND * resources in the core/wildcard apiGroup.
+    if "*" in verbs and "*" in resources and (groups & _K8S_CORE_OR_WILDCARD_GROUPS):
+        shapes.add("full_wildcard")
+    # (b) SECRET READ — get/list/watch/* on secrets in the core/wildcard apiGroup. A get-only rule constrained
+    #     by a NON-EMPTY resourceNames is EXCLUDED (a single named secret); list/watch/* IGNORE resourceNames.
+    if (verbs & _K8S_SECRET_READ_VERBS) and (resources & _K8S_SECRET_RESOURCES) \
+            and (groups & _K8S_CORE_OR_WILDCARD_GROUPS):
+        if not (_k8s_rule_has_resource_names(rule) and not (verbs & _K8S_LIST_WATCH_STAR)):
+            shapes.add("secret_read")
+    # (c) PRIV-ESC verbs in the RBAC/core apiGroups: escalate on roles/clusterroles/*, bind on
+    #     rolebindings/clusterrolebindings/*, impersonate on users/groups/serviceaccounts/*.
+    if groups & _K8S_PRIVESC_GROUPS:
+        if ("escalate" in verbs and (resources & _K8S_ESCALATE_RESOURCES)) \
+                or ("bind" in verbs and (resources & _K8S_BIND_RESOURCES)) \
+                or ("impersonate" in verbs and (resources & _K8S_IMPERSONATE_RESOURCES)):
+            shapes.add("priv_esc")
+    return shapes
+
+
+def _k8s_subject_class(s: Any) -> str:
+    """Classify a binding subject into the FIXED attacker-occupiable set S, or ``""`` (a NAMED subject, not in
+    S). Comparisons are EXACT (case- and whitespace-sensitive), like ``_k8s_subject_is_anon``.
+      ``anon``       — User system:anonymous / Group system:unauthenticated (reuse ``_k8s_subject_is_anon``);
+      ``default_sa`` — the typed namespace-``default`` ServiceAccount ``default`` (kind/namespace/name EXACT,
+                       core/empty apiGroup — a ServiceAccount is not in the RBAC apiGroup);
+      ``all_auth``   — the Group ``system:authenticated`` (Groups carry the RBAC apiGroup, like anon).
+    Any NAMED user/group/SA (including ``default/<named-app>``) returns ``""`` and is NOT in S."""
+    if _k8s_subject_is_anon(s):
+        return "anon"
+    if isinstance(s, Mapping):
+        kind = _coerce_text(s.get("kind"))
+        name = _coerce_text(s.get("name"))
+        ns = _coerce_text(s.get("namespace") if s.get("namespace") is not None else s.get("ns"))
+        api_group = _coerce_text(s.get("api_group") or s.get("apiGroup"))
+        if kind == "ServiceAccount" and ns == "default" and name == "default" and api_group == "":
+            return "default_sa"
+        if kind == "Group" and name == "system:authenticated" and api_group == _K8S_RBAC_APIGROUP:
+            return "all_auth"
+        return ""
+    # legacy STRING subject (a live-read RBAC sensor may emit a reserved name directly): only the
+    # all-authenticated pseudo-group is representable as a bare string here (anon is handled above).
+    return "all_auth" if _coerce_text(s) == "system:authenticated" else ""
+
+
+def _k8s_roleref_role_object_linked(binding: Mapping[str, Any],
+                                    role_obj: Mapping[str, Any]) -> "tuple[bool, str]":
+    """(I) IDENTITY LINKAGE — re-check the roleRef->role_object JOIN over the retained evidence, NEVER trust
+    the runner's say-so. ALL comparisons EXACT (case/whitespace-sensitive). roleRef.name==role_object.name;
+    roleRef.kind==role_object.kind∈{ClusterRole,Role}; roleRef.apiGroup==role_object.apiGroup==the RBAC group
+    (NO empty-string tolerance — a stronger claim than TIER-1). Role => the binding is a RoleBinding AND the
+    role_object.namespace==binding.namespace; ClusterRole => role_object.namespace is empty. Returns
+    ``(linked, reason)``."""
+    ref = binding.get("role_ref")
+    if not isinstance(ref, Mapping):
+        ref = binding.get("roleRef") if isinstance(binding.get("roleRef"), Mapping) else {}
+    cap = _K8S_RBAC_GRANT_STR_CAP
+    ref_name = _coerce_text(ref.get("name"))[:cap]
+    ref_kind = _coerce_text(ref.get("kind"))[:cap]
+    ref_group = _coerce_text(ref.get("api_group") or ref.get("apiGroup"))[:cap]
+    ro_name = _coerce_text(role_obj.get("name"))[:cap]
+    ro_kind = _coerce_text(role_obj.get("kind"))[:cap]
+    ro_group = _coerce_text(role_obj.get("api_group") or role_obj.get("apiGroup"))[:cap]
+    ro_ns = _coerce_text(role_obj.get("namespace") if role_obj.get("namespace") is not None
+                         else role_obj.get("ns"))[:cap]
+    if not ref_name or ref_name != ro_name:
+        return False, "roleRef.name != role_object.name"
+    if ref_kind not in ("ClusterRole", "Role") or ref_kind != ro_kind:
+        return False, "roleRef.kind != role_object.kind (or not exactly ClusterRole|Role)"
+    if not (ref_group == ro_group == _K8S_RBAC_APIGROUP):
+        return False, "roleRef.apiGroup/role_object.apiGroup not exactly rbac.authorization.k8s.io"
+    bind_kind = _coerce_text(binding.get("kind"))[:cap]
+    bind_ns = _coerce_text(binding.get("namespace") if binding.get("namespace") is not None
+                           else binding.get("ns"))[:cap]
+    if ref_kind == "Role":
+        if bind_kind != "RoleBinding":
+            return False, "a namespaced Role roleRef requires a RoleBinding"
+        if not ro_ns or ro_ns != bind_ns:
+            return False, "the namespaced Role's namespace must equal the RoleBinding's namespace"
+    else:  # ClusterRole
+        if ro_ns != "":
+            return False, "a ClusterRole role_object must have an empty namespace"
+    return True, "linked"
+
+
+def _k8s_grant_lead(kind: "OracleKind", label: str, reason: str, claim_scope: str) -> OracleSignal:
+    return OracleSignal(
+        kind=kind, fired=False, confidence=0.0,
+        evidence=(f"k8s RBAC verb-grant control {label} is not a provable dangerous (verb,resource) grant to "
+                  f"an attacker-occupiable subject: {reason} — not provably critical (stays a lead)"),
+        observed={"check_id": label, "reason": "no_dangerous_verb_grant", "claim_scope": claim_scope})
+
+
+def _k8s_grant_fact(kind: "OracleKind", label: str, subj_class: str, who: str, shapes: "set[str]",
+                    claim_scope: str, role_obj: Mapping[str, Any]) -> OracleSignal:
+    ro_name = _coerce_text(role_obj.get("name"))[:_K8S_RBAC_GRANT_STR_CAP]
+    ro_kind = _coerce_text(role_obj.get("kind"))[:_K8S_RBAC_GRANT_STR_CAP]
+    effects = "; ".join(_K8S_GRANT_SHAPE_EFFECT[s] for s in sorted(shapes) if s in _K8S_GRANT_SHAPE_EFFECT)
+    subj_desc = {
+        "anon": "an UNAUTHENTICATED principal",
+        "default_sa": "the namespace-default ServiceAccount (default:default)",
+        "all_auth": "ANY authenticated principal (the system:authenticated group)",
+    }.get(subj_class, subj_class)
+    occ = ""
+    if subj_class == "default_sa":
+        occ = (" NOTE: this asserts the BINDING GRANT (any principal that IS default:default is so authorized); "
+               "the binding's existence is NOT proof a pod runs as that ServiceAccount — occupancy of the "
+               "default SA is an ASSUMPTION stated here, not proven by the binding.")
+    return OracleSignal(
+        kind=kind, fired=True, confidence=0.9,
+        evidence=(f"k8s RBAC verb-grant FACT: binding {label} binds {subj_desc} ({who!r}) to {ro_kind} "
+                  f"{ro_name!r}, whose PARSED rules authorize {effects} ({claim_scope} scope). Any principal "
+                  f"that IS {who!r} is authorized to {effects}. Re-derived over the retained binding + "
+                  f"role_object rules (offline, ZERO cluster calls), the roleRef->role join re-checked, not "
+                  f"trusted." + occ),
+        observed={"check_id": label, "rule": "dangerous_verb_grant", "subject_class": subj_class,
+                  "subject": who, "role": ro_name, "role_kind": ro_kind,
+                  "dangerous_shapes": sorted(shapes), "claim_scope": claim_scope})
+
+
+def k8s_rbac_verb_grant_oracle(observed_control: Any) -> OracleSignal:
+    """Fire (0.9) when a RETAINED RBAC ``binding`` + its SEPARATELY-retained ``role_object`` PROVABLY grant a
+    DANGEROUS (verb,resource) capability to an ATTACKER-OCCUPIABLE subject — the E4 TIER-2 achieved-effect
+    confirmation. The oracle PARSES the role's ``rules`` (TIER-1 only name-matched a built-in role) and
+    re-derives the judgment over the retained set ALONE (offline, ZERO cluster calls), so a confirmed FACT
+    re-verifies offline from its certificate.
+
+    ``observed_control`` is the JSON-safe retained control::
+
+        {"check_id": "binding:ns/name"?,
+         "binding": {"kind": "ClusterRoleBinding"|"RoleBinding", "namespace": str?, "name": str?,
+                     "subjects": [{"kind","name","namespace","api_group"} | "system:…"],
+                     "role_ref": {"name", "kind": "ClusterRole"|"Role", "api_group": "rbac.authorization.k8s.io"}},
+         "role_object": {"name", "kind", "api_group", "namespace",
+                         "rules": [{"verbs":[…],"resources":[…],"apiGroups":[…],"resourceNames":[…]?}, …],
+                         "rules_source": "live_clusterrole_get"|"live_role_get"|"static_manifest",
+                         "aggregationRule": {...}?}}
+
+    Fires iff ALL hold — (I) identity linkage re-checked; (IV) rules AUTHORITATIVE (a live API GET, or a
+    static manifest with NO aggregationRule); (III) the role's rules contain a dangerous shape; (II) an
+    attacker-occupiable subject is bound — under the SUBJECT-GATED eligibility that is the near-zero-FP fix:
+      * an ANONYMOUS subject MAY FACT on ANY dangerous shape — full-wildcard, secret-read, OR priv-esc;
+      * the DEFAULT ServiceAccount / system:authenticated MAY FACT ONLY on a FULL-WILDCARD (*/*/*) grant AND
+        ONLY via a ClusterRoleBinding — NEVER secret-read, NEVER priv-esc, NEVER a namespaced RoleBinding
+        (the built-in ``admin`` legitimately grants Secrets get/list/watch, and cluster-read backup/monitoring
+        roles legitimately grant */* get/list/watch, so those MOST-COMMON legitimate delegations stay LEAD).
+    Everything else — a NAMED subject; a resourceNames-scoped single-secret get; default-SA×secret-read;
+    authenticated×broad-read; a linkage break; non-authoritative (aggregated static) rules; malformed/absent
+    evidence — stays an honest LEAD (never raises). Pure + deterministic (re-verifies offline)."""
+    kind = OracleKind.K8S_RBAC_VERB_GRANT
+    if not isinstance(observed_control, Mapping):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no k8s RBAC verb-grant control evidence",
+                            observed={"reason": "malformed_capture", "claim_scope": "?"})
+    ctl = observed_control
+    binding = ctl.get("binding") if isinstance(ctl.get("binding"), Mapping) else {}
+    role_obj = ctl.get("role_object") if isinstance(ctl.get("role_object"), Mapping) else {}
+    cap = _K8S_RBAC_GRANT_STR_CAP
+    cid = _coerce_text(ctl.get("check_id") or binding.get("name") or ctl.get("name"))[:cap].strip()
+    label = cid or "?"
+
+    bind_kind = _coerce_text(binding.get("kind"))[:cap]
+    bind_ns = _coerce_text(binding.get("namespace") if binding.get("namespace") is not None
+                           else binding.get("ns"))[:cap]
+    is_crb = bind_kind == "ClusterRoleBinding"
+    claim_scope = "cluster" if is_crb else (f"namespace:{bind_ns}" if bind_ns else "namespace:?")
+
+    # (I) identity linkage — re-derived over the retained roleRef + role_object, never trusted.
+    linked, link_reason = _k8s_roleref_role_object_linked(binding, role_obj)
+    if not linked:
+        return _k8s_grant_lead(kind, label, f"identity linkage not proven ({link_reason})", claim_scope)
+
+    # (IV) rules AUTHORITATIVE: a live API GET, or a static manifest with NO aggregationRule.
+    rules_source = _k8s_norm(role_obj.get("rules_source") or role_obj.get("rulesSource"))
+    has_agg = bool(role_obj.get("aggregationRule")) or bool(role_obj.get("aggregation_rule"))
+    authoritative = (rules_source in _K8S_LIVE_RULE_SOURCES) or (rules_source == "static_manifest" and not has_agg)
+    if not authoritative:
+        why = (", aggregationRule present" if has_agg and rules_source == "static_manifest" else "")
+        return _k8s_grant_lead(kind, label,
+                               f"role rules are not authoritative (rules_source={rules_source or 'ABSENT'!r}{why})",
+                               claim_scope)
+
+    # (III) dangerous shapes over the role's PARSED rules.
+    raw_rules = role_obj.get("rules")
+    rules = raw_rules if isinstance(raw_rules, (list, tuple)) else []
+    shapes: set[str] = set()
+    for r in rules:
+        shapes |= _k8s_rule_shapes(r)
+
+    # (II) attacker-occupiable subjects, classified.
+    raw_subjects = binding.get("subjects")
+    subjects = raw_subjects if isinstance(raw_subjects, (list, tuple)) else []
+    classified = [(_k8s_subject_class(s), s) for s in subjects]
+    anon_subj = next((s for c, s in classified if c == "anon"), None)
+    priv_subj = next(((c, s) for c, s in classified if c in ("default_sa", "all_auth")), None)
+
+    # SUBJECT-GATED FACT ELIGIBILITY (the mandatory near-zero-FP fix) --------------------------------------
+    # ANON is inherently attacker-occupiable: MAY FACT on (a) OR (b) OR (c) — TIER-2's genuine anon delta is a
+    # CUSTOM role whose RULES are dangerous (which TIER-1's built-in-name match missed).
+    if anon_subj is not None and shapes:
+        return _k8s_grant_fact(kind, label, "anon", _k8s_subject_display(anon_subj), shapes, claim_scope, role_obj)
+    # DEFAULT_SA / ALL_AUTH: ONLY a genuine */*/* full-wildcard grant via a ClusterRoleBinding is an
+    # unambiguous FACT — NOT secret-read (built-in admin), NOT a namespaced RoleBinding, NOT priv-esc.
+    if priv_subj is not None and "full_wildcard" in shapes and is_crb:
+        return _k8s_grant_fact(kind, label, priv_subj[0], _k8s_subject_display(priv_subj[1]),
+                               {"full_wildcard"}, claim_scope, role_obj)
+
+    in_s = sum(1 for c, _ in classified if c)
+    return _k8s_grant_lead(
+        kind, label,
+        (f"no attacker-occupiable subject is bound to a FACT-eligible dangerous grant (subjects in S: {in_s}; "
+         f"dangerous rule shapes: {sorted(shapes) or 'none'}; scope: {claim_scope}) — a default/authenticated "
+         f"subject may FACT only on a */*/* ClusterRoleBinding"),
+        claim_scope)

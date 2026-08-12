@@ -351,6 +351,14 @@ class FindingContext(BaseModel):
     # RBAC/achieved-state sibling of k8s_control; no benchmark/scan/engage finding carries k8s_workload_control,
     # so appending this leaves the gate byte-identical.
     k8s_workload_control: dict[str, Any] | None = None
+    # k8s_rbac_verb_grant_oracle (E4 TIER-2: a retained RBAC binding + its SEPARATELY-retained role_object
+    # whose PARSED rules provably grant a dangerous verb on a resource to an attacker-occupiable subject —
+    # an anonymous subject, the namespace-default ServiceAccount, or system:authenticated). The STRONGER
+    # rule-parsing sibling of k8s_workload_control (which only name-matches a built-in role). The RETAINED
+    # binding + role_object (subjects + roleRef; role rules + rules_source) the membership/parse-proof judges
+    # ALONE, offline, ZERO cluster calls. No benchmark/scan/engage finding carries k8s_rbac_grant_control, so
+    # appending this leaves the gate byte-identical.
+    k8s_rbac_grant_control: dict[str, Any] | None = None
     # cloud_posture_oracle (Wave-F1: a retained cloud/CSPM posture control whose ACHIEVED STATE literally
     # carries an insecure fact — encryption-at-rest disabled / public exposure / a wildcard principal) —
     # the RETAINED control evidence (sensors.cloud) the membership/parse-proof judges over its
@@ -688,6 +696,107 @@ class FindingContext(BaseModel):
             if src.get(k) not in (None, ""):
                 retained[k] = _coerce_text(src.get(k))
         return cls(bug_class=bug_class, k8s_workload_control=retained)
+
+    @classmethod
+    def from_k8s_rbac_grant_control(
+        cls, control: Mapping[str, Any], *, bug_class: str = "k8s_rbac_privilege_grant"
+    ) -> "FindingContext":
+        """A RETAINED RBAC ``binding`` + its SEPARATELY-retained ``role_object``, for the E4 TIER-2
+        k8s_rbac_verb_grant oracle — the STRONGER, rule-PARSING sibling of ``from_k8s_workload_control``
+        (which only name-matches a built-in role). The oracle re-derives the weakness (an attacker-occupiable
+        subject bound to a dangerous (verb,resource) grant, under the subject-gated near-zero-FP rule) over
+        the RETAINED binding + role_object ALONE — offline, ZERO cluster calls — so a live RBAC read is
+        confirmed a FACT only by the actual dangerous grant, never the collector's say-so.
+
+        Only the structural fields the oracle judges are retained into a canonical shape (subjects keep their
+        TYPED {kind,name,namespace,api_group} — the namespace is LOAD-BEARING for the default-SA check, unlike
+        the workload reducer which drops it; the roleRef and the role's rules + rules_source + aggregationRule
+        presence). Nothing else is laundered into the certificate. The RBAC metadata carries no secret (the
+        kubeconfig bearer token is fingerprinted-and-discarded by the runner and never reaches the capture).
+        JSON-safe + deterministic (re-verifies offline)."""
+        cap = _IMDS_CAPTURE_STR_CAP
+        src = dict(control or {}) if isinstance(control, Mapping) else {}
+        b_src = src.get("binding") if isinstance(src.get("binding"), Mapping) else {}
+        r_src = src.get("role_object") if isinstance(src.get("role_object"), Mapping) else {}
+
+        # -- binding: kind, namespace, name, subjects (typed/string), roleRef ------------------------------
+        binding: dict[str, Any] = {}
+        for out_k, keys in (("kind", ("kind",)), ("namespace", ("namespace", "ns")), ("name", ("name",))):
+            for kk in keys:
+                if b_src.get(kk) not in (None, ""):
+                    binding[out_k] = _coerce_text(b_src.get(kk))[:cap]
+                    break
+        raw_subjects = b_src.get("subjects")
+        if isinstance(raw_subjects, (list, tuple)):
+            canon_subjects: list[Any] = []
+            for s in raw_subjects:
+                if s is None:
+                    continue
+                if isinstance(s, Mapping):
+                    canon_subjects.append({
+                        "kind": _coerce_text(s.get("kind"))[:cap],
+                        "name": _coerce_text(s.get("name"))[:cap],
+                        # RETAIN namespace — load-bearing for the default-SA (default:default) discrimination.
+                        "namespace": _coerce_text(s.get("namespace")
+                                                  if s.get("namespace") is not None else s.get("ns"))[:cap],
+                        "api_group": _coerce_text(s.get("api_group") or s.get("apiGroup"))[:cap],
+                    })
+                else:
+                    canon_subjects.append(_coerce_text(s)[:cap])   # legacy live-read reserved-name string
+            binding["subjects"] = canon_subjects
+        ref_src = b_src.get("role_ref")
+        if not isinstance(ref_src, Mapping):
+            ref_src = b_src.get("roleRef") if isinstance(b_src.get("roleRef"), Mapping) else {}
+        ref: dict[str, Any] = {}
+        for out_k, keys in (("name", ("name",)), ("kind", ("kind",)),
+                            ("api_group", ("api_group", "apiGroup"))):
+            for kk in keys:
+                if ref_src.get(kk) not in (None, ""):
+                    ref[out_k] = _coerce_text(ref_src.get(kk))[:cap]
+                    break
+        if ref:
+            binding["role_ref"] = ref
+
+        # -- role_object: identity + PARSED rules + provenance ---------------------------------------------
+        role_object: dict[str, Any] = {}
+        for out_k, keys in (("name", ("name",)), ("kind", ("kind",)),
+                            ("api_group", ("api_group", "apiGroup")),
+                            ("namespace", ("namespace", "ns")),
+                            ("rules_source", ("rules_source", "rulesSource"))):
+            for kk in keys:
+                if r_src.get(kk) not in (None, ""):
+                    role_object[out_k] = _coerce_text(r_src.get(kk))[:cap]
+                    break
+        # aggregationRule PRESENCE is retained as a boolean marker (its selectors are not judged) — a truthy
+        # aggregationRule makes a static_manifest source non-authoritative.
+        if bool(r_src.get("aggregationRule")) or bool(r_src.get("aggregation_rule")):
+            role_object["aggregation_rule"] = True
+        raw_rules = r_src.get("rules")
+        if isinstance(raw_rules, (list, tuple)):
+            canon_rules: list[dict[str, Any]] = []
+            for rule in raw_rules:
+                if not isinstance(rule, Mapping):
+                    continue
+                cr: dict[str, Any] = {}
+                for out_k, keys in (("verbs", ("verbs",)),
+                                    ("resources", ("resources", "resource")),
+                                    ("apiGroups", ("apiGroups", "api_groups")),
+                                    ("resourceNames", ("resourceNames", "resource_names"))):
+                    for kk in keys:
+                        v = rule.get(kk)
+                        if isinstance(v, (list, tuple)):
+                            cr[out_k] = [_coerce_text(x)[:cap] for x in v]
+                            break
+                if cr:
+                    canon_rules.append(cr)
+            role_object["rules"] = canon_rules
+
+        retained: dict[str, Any] = {"binding": binding, "role_object": role_object}
+        for k in ("check_id", "name"):
+            if src.get(k) not in (None, ""):
+                retained[k] = _coerce_text(src.get(k))[:cap]
+                break
+        return cls(bug_class=bug_class, k8s_rbac_grant_control=retained)
 
     @classmethod
     def from_cloud_control(
@@ -1616,6 +1725,8 @@ class FindingContext(BaseModel):
             ctx["k8s_control"] = self.k8s_control
         if self.k8s_workload_control is not None:
             ctx["k8s_workload_control"] = self.k8s_workload_control
+        if self.k8s_rbac_grant_control is not None:
+            ctx["k8s_rbac_grant_control"] = self.k8s_rbac_grant_control
         if self.cloud_control is not None:
             ctx["cloud_control"] = self.cloud_control
         if self.mesh_control is not None:
