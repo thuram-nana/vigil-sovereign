@@ -108,3 +108,10 @@ def test_services_up_fail_soft_per_leg(no_real_docker, monkeypatch) -> None:
     monkeypatch.setattr(svc, "RootServices", _Boom)   # gateway leg stays the fast fake from the fixture
     r = actions.services_up({"all": False})
     assert r["ok"] is True and "services_error" in r["result"]
+
+
+def test_services_up_tolerates_a_non_dict_body(no_real_docker) -> None:
+    # _read_body can return ANY JSON value; a non-dict body must NOT raise (the "never raises" contract).
+    for bad in ([], None, "x", 123, True):
+        r = actions.services_up(bad)
+        assert isinstance(r, dict) and r["ok"] is True

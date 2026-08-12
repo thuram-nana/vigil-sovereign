@@ -39,6 +39,11 @@ SANDBOX_NETWORK = "vigil_sandbox"
 EGRESS_NETWORK = "vigil_egress"
 STRIX_NETWORK_ENV = "STRIX_DOCKER_SANDBOX_NETWORK"
 DEFAULT_IMAGE = "vigil-gateway:latest"
+# Every docker call is timeout-bounded so a wedged daemon / pull / build can't pin the caller forever
+# (esp. the console request thread on `vigil services up` from the UI). Reads are quick; build/compose-up
+# may pull, so they get a generous bound.
+READ_TIMEOUT = 30.0
+BUILD_TIMEOUT = 600.0
 
 
 @dataclass(frozen=True)
@@ -129,7 +134,7 @@ services:
     def _network_exists(self, name: str) -> bool:
         proc = subprocess.run(
             [self._docker_bin(), "network", "inspect", name],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=READ_TIMEOUT,
         )
         return proc.returncode == 0
 
@@ -140,12 +145,12 @@ services:
             subprocess.run(
                 [d, "network", "create", "--internal",
                  "--subnet", self.sandbox_subnet, self.sandbox_network],
-                check=True, capture_output=True, text=True,
+                check=True, capture_output=True, text=True, timeout=READ_TIMEOUT,
             )
         if not self._network_exists(self.egress_network):
             subprocess.run(
                 [d, "network", "create", self.egress_network],
-                check=True, capture_output=True, text=True,
+                check=True, capture_output=True, text=True, timeout=READ_TIMEOUT,
             )
 
     # -- image + container lifecycle (create-if-absent bring-up) ------------------------
@@ -153,8 +158,11 @@ services:
     # is missing, then `docker compose up -d` — which itself creates ONLY what is absent (the two
     # networks + the gateway container), so the whole thing is idempotent and re-runnable.
 
-    def _run(self, args: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run([self._docker_bin(), *args], capture_output=True, text=True)
+    def _run(self, args: list[str], timeout: float = READ_TIMEOUT) -> subprocess.CompletedProcess:
+        # Timeout-bounded (see services.py): a wedged daemon / synchronous pull / long build must never pin
+        # the caller (e.g. the console request thread) forever. subprocess kills the client + raises
+        # TimeoutExpired on overrun, which the caller / `_safe` layer turns into a fail-soft error.
+        return subprocess.run([self._docker_bin(), *args], capture_output=True, text=True, timeout=timeout)
 
     def image_exists(self, image: str = DEFAULT_IMAGE) -> bool:
         return self._run(["image", "inspect", image]).returncode == 0
@@ -163,7 +171,7 @@ services:
         """Build the gateway image if it is absent (idempotent). Returns True iff a build actually ran."""
         if self.image_exists(image):
             return False
-        proc = self._run(["build", "-t", image, str(context_dir)])
+        proc = self._run(["build", "-t", image, str(context_dir)], timeout=BUILD_TIMEOUT)   # long, but bounded
         if proc.returncode != 0:
             raise RuntimeError(f"docker build of {image} failed: {proc.stderr.strip()[-800:]}")
         return True
@@ -181,7 +189,7 @@ services:
         networks/containers that do not already exist. Builds the image first if it is absent (and a
         context dir is given). Returns a small status dict."""
         built = self.ensure_image(context_dir, image) if (build and context_dir is not None) else False
-        proc = self._run(["compose", "-f", str(compose_file), "up", "-d"])
+        proc = self._run(["compose", "-f", str(compose_file), "up", "-d"], timeout=BUILD_TIMEOUT)   # may pull
         if proc.returncode != 0:
             raise RuntimeError(f"docker compose up failed: {proc.stderr.strip()[-800:]}")
         return {"image_built": built, "gateway": self.container_state()}

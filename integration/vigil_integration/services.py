@@ -24,6 +24,12 @@ ROOT_SERVICES = {
 # their flags — they are heavier and off by default, matching bootstrap.sh).
 DEFAULT_SERVICES = ("qdrant",)
 
+# Every docker call is timeout-bounded so a wedged daemon / a synchronous image pull can never pin the
+# caller (esp. the console request thread on `vigil services up` from the UI). Reads are quick; a `compose
+# up` may pull an image, so it gets a generous bound.
+READ_TIMEOUT = 30.0
+UP_TIMEOUT = 600.0
+
 
 class RootServices:
     def __init__(self, repo_root, compose: Optional[Path] = None):
@@ -46,8 +52,11 @@ class RootServices:
             cmd += ["--profile", p]
         return cmd + list(args)
 
-    def _run(self, cmd) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, capture_output=True, text=True)
+    def _run(self, cmd, timeout: float = READ_TIMEOUT) -> subprocess.CompletedProcess:
+        # Every docker call is TIMEOUT-BOUNDED: a wedged daemon / a synchronous image pull must never pin
+        # the caller (e.g. the console request thread) indefinitely. On timeout, subprocess kills the client
+        # and raises TimeoutExpired, which the caller/`_safe` layer turns into a fail-soft error.
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
     @staticmethod
     def _profiles_for(services) -> list[str]:
@@ -97,7 +106,8 @@ class RootServices:
         services = [s for s in services if s in ROOT_SERVICES]
         if not services:
             return {}
-        proc = self._run(self._compose("up", "-d", *services, profiles=self._profiles_for(services)))
+        proc = self._run(self._compose("up", "-d", *services, profiles=self._profiles_for(services)),
+                         timeout=UP_TIMEOUT)   # may pull an image → generous, but bounded
         if proc.returncode != 0:
             raise RuntimeError(f"docker compose up failed: {proc.stderr.strip()[-800:]}")
         snap = self.status()
@@ -107,5 +117,5 @@ class RootServices:
         """Stop + remove the given services (idempotent)."""
         services = [s for s in services if s in ROOT_SERVICES]
         if services:
-            self._run(self._compose("stop", *services, profiles=self._profiles_for(services)))
-            self._run(self._compose("rm", "-f", *services, profiles=self._profiles_for(services)))
+            self._run(self._compose("stop", *services, profiles=self._profiles_for(services)), timeout=UP_TIMEOUT)
+            self._run(self._compose("rm", "-f", *services, profiles=self._profiles_for(services)), timeout=UP_TIMEOUT)

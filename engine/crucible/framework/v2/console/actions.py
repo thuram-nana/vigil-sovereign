@@ -2093,6 +2093,7 @@ def services_up(body: dict) -> dict:
     flag selects from a CLOSED service set, so it can never run an arbitrary service / image / command. This
     is the SAME create-if-absent path as `vigil services up` (already red-penned). Fail-soft per leg: it
     reports each leg's result or error and never raises. Same-origin/rebind-gated by do_POST."""
+    body = body if isinstance(body, dict) else {}     # a non-dict POST body must not raise (never-raises)
     want_all = bool(body.get("all"))
     try:
         from vigil_integration import doctor
