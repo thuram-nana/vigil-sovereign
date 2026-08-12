@@ -2139,7 +2139,10 @@ def benchmark_run(body: dict) -> dict:
     # Anchor on THIS running module (…/framework/v2/console/actions.py) so `-m framework.v2` imports the same
     # code the console runs — NOT paths.crucible_root(), which CRUCIBLE_ROOT can redirect to a vendored copy.
     root = Path(__file__).resolve().parents[3]     # …/framework/v2/console/actions.py → the dir holding framework/
-    tmp = Path(tempfile.mkdtemp(prefix="vigil-bench-"))
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="vigil-bench-"))
+    except OSError as e:     # a full/unwritable temp FS must not 500 the console either (honour "never raises")
+        return {"ok": False, "error": f"could not create a temp dir for the benchmark: {e}"}
     # --no-incumbents = CRUCIBLE only (no external tool); --json/--report write to the private tmp dir so the
     # action never litters the repo. FIXED argv — nothing from the request reaches it.
     cmd = [sys.executable, "-m", "framework.v2", "benchmark", "--no-incumbents",

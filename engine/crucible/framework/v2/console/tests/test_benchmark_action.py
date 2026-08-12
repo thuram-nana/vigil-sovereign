@@ -109,3 +109,15 @@ def test_benchmark_run_reports_missing_crucible_row(monkeypatch) -> None:
     monkeypatch.setattr(actions.subprocess, "run", run)
     r = actions.benchmark_run({})
     assert r["ok"] is False and "no CRUCIBLE result" in r["error"]
+
+
+def test_benchmark_run_fail_soft_on_unwritable_tempdir(monkeypatch) -> None:
+    # An OSError from mkdtemp (full/unwritable temp FS) must NOT raise — it happens BEFORE the subprocess, so
+    # the "never a 500" contract has to cover it too. Also proves no spawn is attempted when there is no tmp.
+    def _boom(*a, **k):
+        raise OSError("No space left on device")
+    monkeypatch.setattr(actions.tempfile, "mkdtemp", _boom)
+    monkeypatch.setattr(actions.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn without a tmp dir")))
+    r = actions.benchmark_run({})
+    assert r["ok"] is False and "temp dir" in r["error"]
