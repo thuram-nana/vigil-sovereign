@@ -47,3 +47,21 @@ def test_whitespace_and_case_normalised(monkeypatch):
     dc = _docker_client()
     monkeypatch.setenv("STRIX_SANDBOX_NET_CAPS", " net_raw , net_admin ")
     assert dc._sandbox_net_caps() == ["NET_RAW", "NET_ADMIN"]
+
+
+# --------------------------------- A7 compose topology ---------------------------------
+
+def test_render_compose_binds_sandbox_ip_not_all_interfaces():
+    # A7: the shipped compose must bind the proxy to the sandbox-net IP (not 0.0.0.0, which
+    # bind_ok now refuses and which would expose the proxy on the world-facing egress net),
+    # and wire the client-auth token into the topology.
+    from vigil_gateway.docker import SandboxNetworking
+
+    net = SandboxNetworking()
+    bind_ip = net.sandbox_gateway_ip()
+    assert bind_ip == "172.31.240.2"
+    frag = net.render_compose()
+    assert "0.0.0.0" not in frag
+    assert f'"--host", "{bind_ip}"' in frag
+    assert f"ipv4_address: {bind_ip}" in frag
+    assert "VIGIL_GATEWAY_PROXY_TOKEN" in frag

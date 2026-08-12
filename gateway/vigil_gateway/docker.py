@@ -29,6 +29,7 @@ primary control for the alternative topology where the proxy runs on the host br
 
 from __future__ import annotations
 
+import ipaddress
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -49,15 +50,31 @@ class SandboxNetworking:
         """The env a caller must set so Strix pins the sandbox onto the locked-down net."""
         return {STRIX_NETWORK_ENV: self.sandbox_network}
 
+    def sandbox_gateway_ip(self) -> str:
+        """The static sandbox-net address the gateway binds to (A7). The proxy binds ONLY this
+        interface, not 0.0.0.0, so it is reachable from the sandbox but never from the
+        world-facing egress network. Docker's bridge takes the first host address (.1); the
+        gateway container takes the second (.2)."""
+        hosts = ipaddress.ip_network(self.sandbox_subnet, strict=False).hosts()
+        next(hosts)             # .1 — Docker's own bridge gateway
+        return str(next(hosts)) # .2 — the vigil-gateway container
+
     def render_compose(self, *, gateway_image: str = "vigil-gateway:latest", charter_slug: str = "") -> str:
         """A docker-compose fragment for the gateway + the two networks.
 
         The Strix sandbox is NOT declared here — Strix launches it itself; it only needs
         STRIX_DOCKER_SANDBOX_NETWORK set to ``sandbox_network``.
         """
+        bind_ip = self.sandbox_gateway_ip()
         return f"""\
 # vigil-gateway egress topology. The Strix sandbox is launched by Strix with
 # {STRIX_NETWORK_ENV}={self.sandbox_network}; it is not defined here.
+#
+# A7 client authentication: set VIGIL_GATEWAY_PROXY_TOKEN in your shell before `docker compose
+# up` (compose interpolates ${{VIGIL_GATEWAY_PROXY_TOKEN}} below), and point the sandbox's
+# proxy at http://vigil:$VIGIL_GATEWAY_PROXY_TOKEN@{bind_ip}:{self.proxy_port} so it presents
+# the Basic credential. Unset = no client auth (the bind address + internal:true network are
+# then the only thing keeping the proxy sandbox-only).
 networks:
   {self.sandbox_network}:
     name: {self.sandbox_network}
@@ -72,8 +89,9 @@ services:
   vigil-gateway:
     image: {gateway_image}
     networks:
-      - {self.sandbox_network}  # sandbox-facing: receives the proxied egress
-      - {self.egress_network}   # world-facing: the only interface with a default route
+      {self.sandbox_network}:
+        ipv4_address: {bind_ip}   # pinned so the proxy can bind ONLY the sandbox interface
+      {self.egress_network}: {{}}   # world-facing: the only interface with a default route
     cap_drop:
       - ALL
     security_opt:
@@ -81,8 +99,10 @@ services:
     read_only: true
     environment:
       VIGIL_GATEWAY_PROXY_PORT: "{self.proxy_port}"
+      VIGIL_GATEWAY_PROXY_HOST: "{bind_ip}"
+      VIGIL_GATEWAY_PROXY_TOKEN: "${{VIGIL_GATEWAY_PROXY_TOKEN:-}}"
       VIGIL_GATEWAY_CHARTER_SLUG: "{charter_slug}"
-    command: ["vigil-gateway", "serve-proxy", "--host", "0.0.0.0", "--port", "{self.proxy_port}"]
+    command: ["vigil-gateway", "serve-proxy", "--host", "{bind_ip}", "--port", "{self.proxy_port}"]
 """
 
     # -- imperative network creation (alternative to compose) --------------------------

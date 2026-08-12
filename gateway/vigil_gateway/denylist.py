@@ -113,9 +113,36 @@ _V6_UNSPEC = IPv6Address("::")
 _V6_LOOPBACK = IPv6Address("::1")
 
 
+# ---------------------------------------------------------------------------
+# The HOST BACKSTOP subset (A7). The nftables `forward`/`output` hooks are global — they see
+# the gateway host's OWN traffic and co-tenant containers' forwarded traffic, not only the
+# sandbox. Dropping the FULL Tier-1 set there breaks the host and co-tenants: 127.0.0.0/8 on
+# `output` kills host loopback; fe80::/10 kills IPv6 NDP; multicast/broadcast/RFC1918 hit
+# co-tenants. So the GLOBAL hooks drop only this narrow set — the cloud instance-metadata AND
+# container-credential endpoints, which no legitimate host or co-tenant reaches THROUGH this
+# gateway. (Red-pen BLOCK-3: the earlier set covered only IMDS and silently left the ECS/EKS
+# credential endpoints reachable at these hooks.) The sandbox chains keep the full
+# `hard_deny_cidrs()` (the whole 169.254.0.0/16 + loopback etc.), so the sandbox itself — the
+# real threat — is unaffected; this only re-closes the host/co-tenant defense-in-depth backstop.
+_HOST_BACKSTOP_V4: tuple[str, ...] = (
+    "169.254.169.254/32",  # cloud instance metadata — IMDS (AWS/GCP/Azure/OpenStack/DigitalOcean)
+    "169.254.170.2/32",    # AWS ECS task-role credential endpoint
+    "169.254.170.23/32",   # AWS EKS Pod Identity credential endpoint
+)
+_HOST_BACKSTOP_V6: tuple[str, ...] = (
+    "fd00:ec2::/32",       # AWS IMDS-over-IPv6 ULA (fd00:ec2::254) — cloud-specific, no host use
+)
+
+
 def hard_deny_cidrs() -> list[str]:
     """The Tier-1 always-denied CIDRs, for rendering into a static firewall drop set."""
     return [*_ALWAYS_DENY_V4, *_ALWAYS_DENY_V6]
+
+
+def host_backstop_cidrs() -> list[str]:
+    """The narrow always-drop set for the GLOBAL nftables hooks (`forward`/`output`): only the
+    cloud instance-metadata endpoints. See the block above for why the full set is unsafe here."""
+    return [*_HOST_BACKSTOP_V4, *_HOST_BACKSTOP_V6]
 
 
 def private_cidrs() -> list[str]:

@@ -47,3 +47,42 @@ def test_default_subnet_when_env_absent(monkeypatch):
     assert cfg.sandbox_subnet == "172.31.240.0/24"
     assert cfg.extra_subnets == []
     assert cfg.sandbox_iface is None
+
+
+# --------------------------------- A7 proxy-hardening wiring ---------------------------
+
+def test_proxy_host_defaults_to_loopback(monkeypatch):
+    monkeypatch.delenv("VIGIL_GATEWAY_PROXY_HOST", raising=False)
+    cfg = GatewayConfig.from_env(scope=StaticScopeSource(["example.com"]))
+    assert cfg.proxy_host == "127.0.0.1"   # never 0.0.0.0 (A7)
+
+
+def test_a7_proxy_env_is_threaded_into_the_proxy(monkeypatch):
+    cfg = _cfg_from_env(
+        monkeypatch,
+        VIGIL_GATEWAY_PROXY_TOKEN="s3cr3t",
+        VIGIL_GATEWAY_ALLOWED_PORTS="443, 8443, 9443",
+        VIGIL_GATEWAY_HEADER_TIMEOUT="4.5",
+        VIGIL_GATEWAY_MAX_CONNS="32",
+    )
+    assert cfg.proxy_token == "s3cr3t"
+    assert cfg.allowed_ports == frozenset({443, 8443, 9443})
+    assert cfg.header_timeout == 4.5
+    assert cfg.max_connections == 32
+    # the values actually reach the EgressProxy the config builds
+    p = cfg.proxy()
+    assert p._proxy_secret == "s3cr3t"
+    assert p._allowed_ports == frozenset({443, 8443, 9443})
+    assert p._header_timeout == 4.5
+    assert p._max_connections == 32
+
+
+def test_a7_proxy_env_defaults(monkeypatch):
+    for k in ("VIGIL_GATEWAY_PROXY_TOKEN", "VIGIL_GATEWAY_ALLOWED_PORTS",
+              "VIGIL_GATEWAY_HEADER_TIMEOUT", "VIGIL_GATEWAY_MAX_CONNS"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = GatewayConfig.from_env(scope=StaticScopeSource(["example.com"]))
+    assert cfg.proxy_token is None          # no auth unless a token is set
+    assert cfg.allowed_ports is None        # proxy applies its {80, 443, 8080, 8443} default
+    p = cfg.proxy()
+    assert p._allowed_ports == frozenset({80, 443, 8080, 8443})

@@ -6,8 +6,16 @@ forward proxy (L7), and the firewall (L3/L4). Env vars:
 
   VIGIL_GATEWAY_CHARTER_SLUG   the target slug whose signed charter defines scope (required
                                for live use; tests inject a StaticScopeSource instead)
-  VIGIL_GATEWAY_PROXY_HOST     proxy bind address           (default 0.0.0.0)
+  VIGIL_GATEWAY_PROXY_HOST     proxy bind address           (default 127.0.0.1; a public /
+                               unspecified bind is refused by proxy.bind_ok)
   VIGIL_GATEWAY_PROXY_PORT     proxy bind port              (default 48081)
+  VIGIL_GATEWAY_PROXY_TOKEN    Basic proxy-auth secret; when set, clients must present
+                               Proxy-Authorization: Basic base64(vigil:<token>). Unset =
+                               no client auth (rely on the bind address + nftables).
+  VIGIL_GATEWAY_ALLOWED_PORTS  comma-separated destination port allowlist for BOTH CONNECT and
+                               absolute-form HTTP (default 80,443,8080,8443)
+  VIGIL_GATEWAY_HEADER_TIMEOUT seconds to read the request head, slow-loris cap (default 10)
+  VIGIL_GATEWAY_MAX_CONNS      concurrent client connection cap; refuse 503 beyond (default 256)
   VIGIL_GATEWAY_SANDBOX_SUBNET sandbox docker subnet(s), comma-separated for dual-stack
                                (default 172.31.240.0/24). ALL listed families are governed —
                                omitting the v6 subnet on a dual-stack net would leave v6 egress
@@ -35,11 +43,21 @@ def _parse_subnets(raw: str) -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _parse_ports(raw: str) -> frozenset[int] | None:
+    """Parse a comma-separated destination-port allowlist. Empty/unset → None (proxy default)."""
+    ports = {int(p) for p in raw.split(",") if p.strip().isdigit()}
+    return frozenset(ports) or None
+
+
 @dataclass
 class GatewayConfig:
     scope: ScopeSource
-    proxy_host: str = "0.0.0.0"
+    proxy_host: str = "127.0.0.1"
     proxy_port: int = 48081
+    proxy_token: str | None = None
+    allowed_ports: frozenset[int] | None = None  # None → proxy default {80, 443, 8080, 8443}
+    header_timeout: float = 10.0
+    max_connections: int = 256
     sandbox_subnet: str = "172.31.240.0/24"     # primary (used for docker network creation)
     extra_subnets: list[str] = field(default_factory=list)  # additional families (e.g. the v6 subnet)
     sandbox_iface: str | None = None            # bridge iface — spoof-proof matching when set
@@ -60,8 +78,12 @@ class GatewayConfig:
         primary = subnets[0] if subnets else "172.31.240.0/24"
         return cls(
             scope=scope,
-            proxy_host=os.environ.get("VIGIL_GATEWAY_PROXY_HOST", "0.0.0.0"),
+            proxy_host=os.environ.get("VIGIL_GATEWAY_PROXY_HOST", "127.0.0.1"),
             proxy_port=int(os.environ.get("VIGIL_GATEWAY_PROXY_PORT", "48081")),
+            proxy_token=os.environ.get("VIGIL_GATEWAY_PROXY_TOKEN", "").strip() or None,
+            allowed_ports=_parse_ports(os.environ.get("VIGIL_GATEWAY_ALLOWED_PORTS", "")),
+            header_timeout=float(os.environ.get("VIGIL_GATEWAY_HEADER_TIMEOUT", "10")),
+            max_connections=int(os.environ.get("VIGIL_GATEWAY_MAX_CONNS", "256")),
             sandbox_subnet=primary,
             extra_subnets=subnets[1:],
             sandbox_iface=os.environ.get("VIGIL_GATEWAY_SANDBOX_IFACE", "").strip() or None,
@@ -73,7 +95,13 @@ class GatewayConfig:
         return [self.sandbox_subnet, *self.extra_subnets]
 
     def proxy(self) -> EgressProxy:
-        return EgressProxy(self.scope)
+        return EgressProxy(
+            self.scope,
+            proxy_secret=self.proxy_token,
+            allowed_ports=self.allowed_ports,
+            header_timeout=self.header_timeout,
+            max_connections=self.max_connections,
+        )
 
     def firewall(self) -> GatewayFirewall:
         if not self.gateway_ip:
