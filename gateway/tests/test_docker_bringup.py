@@ -161,3 +161,20 @@ def test_real_docker_build_and_fail_closed():
         assert "VIGIL_GATEWAY_CHARTER_SLUG is required" in (run.stdout + run.stderr)
     finally:
         subprocess.run(["docker", "image", "rm", "-f", tag], capture_output=True, text=True)
+
+
+def test_docker_calls_are_timeout_bounded(monkeypatch):
+    # BLOCK-1 (red-pen): every docker subprocess must carry a timeout so a wedged pull/build can never
+    # hang the caller (e.g. the console request thread on a UI bring-up). Assert build/compose are bounded.
+    from types import SimpleNamespace
+    seen = []
+
+    def _run(cmd, capture_output=True, text=True, **kw):
+        seen.append(kw.get("timeout"))
+        rc = 1 if cmd[1:3] == ["image", "inspect"] else 0     # image absent → build runs; build/compose ok
+        return SimpleNamespace(returncode=rc, stdout="", stderr="")
+    monkeypatch.setattr(dmod.shutil, "which", lambda n: "/usr/bin/docker")
+    monkeypatch.setattr(dmod.subprocess, "run", _run)
+    SandboxNetworking().compose_up("compose.yml", context_dir="gateway")
+    assert seen and all(t is not None and t > 0 for t in seen)   # NO unbounded docker call
+    assert max(seen) >= 300                                       # build/compose gets a generous bound

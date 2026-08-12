@@ -127,3 +127,20 @@ def test_doctor_port_free_and_writable_helpers(tmp_path):
         assert dmod._port_free(port) is False
     finally:
         s.close()
+
+
+def test_root_services_up_is_timeout_bounded(monkeypatch, tmp_path):
+    # BLOCK-1: `compose up` (may pull an image) must be timeout-bounded so it can't hang the caller.
+    from types import SimpleNamespace
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    seen = []
+
+    def _run(cmd, capture_output=True, text=True, **kw):
+        seen.append(kw.get("timeout"))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(smod.shutil, "which", lambda n: "/usr/bin/docker")
+    monkeypatch.setattr(smod.subprocess, "run", _run)
+    RootServices(tmp_path).up(["qdrant"])
+    up_timeouts = [seen[i] for i, _ in enumerate(seen)]
+    assert up_timeouts and all(t is not None and t > 0 for t in up_timeouts)   # no unbounded call
+    assert max(up_timeouts) >= 300                                             # `up` gets a generous bound
