@@ -1,0 +1,37 @@
+# vigil-gateway egress topology. The Strix sandbox is launched by Strix with
+# STRIX_DOCKER_SANDBOX_NETWORK=vigil_sandbox; it is not defined here.
+#
+# A7 client authentication: set VIGIL_GATEWAY_PROXY_TOKEN in your shell before `docker compose
+# up` (compose interpolates ${VIGIL_GATEWAY_PROXY_TOKEN} below), and point the sandbox's
+# proxy at http://vigil:$VIGIL_GATEWAY_PROXY_TOKEN@172.31.240.2:48081 so it presents
+# the Basic credential. Unset = no client auth (the bind address + internal:true network are
+# then the only thing keeping the proxy sandbox-only).
+networks:
+  vigil_sandbox:
+    name: vigil_sandbox
+    internal: true              # Docker installs no route out — the deny-default boundary
+    ipam:
+      config:
+        - subnet: 172.31.240.0/24
+  vigil_egress:
+    name: vigil_egress
+
+services:
+  vigil-gateway:
+    image: vigil-gateway:latest
+    container_name: vigil-gateway   # a deterministic name so `vigil services status/down` can find it
+    networks:
+      vigil_sandbox:
+        ipv4_address: 172.31.240.2   # pinned so the proxy can bind ONLY the sandbox interface
+      vigil_egress: {}   # world-facing: the only interface with a default route
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      VIGIL_GATEWAY_PROXY_PORT: "48081"
+      VIGIL_GATEWAY_PROXY_HOST: "172.31.240.2"
+      VIGIL_GATEWAY_PROXY_TOKEN: "${VIGIL_GATEWAY_PROXY_TOKEN:-}"
+      VIGIL_GATEWAY_CHARTER_SLUG: ""
+    command: ["vigil-gateway", "serve-proxy", "--host", "172.31.240.2", "--port", "48081"]

@@ -30,6 +30,7 @@ primary control for the alternative topology where the proxy runs on the host br
 from __future__ import annotations
 
 import ipaddress
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from dataclasses import dataclass
 SANDBOX_NETWORK = "vigil_sandbox"
 EGRESS_NETWORK = "vigil_egress"
 STRIX_NETWORK_ENV = "STRIX_DOCKER_SANDBOX_NETWORK"
+DEFAULT_IMAGE = "vigil-gateway:latest"
 
 
 @dataclass(frozen=True)
@@ -59,12 +61,21 @@ class SandboxNetworking:
         next(hosts)             # .1 — Docker's own bridge gateway
         return str(next(hosts)) # .2 — the vigil-gateway container
 
-    def render_compose(self, *, gateway_image: str = "vigil-gateway:latest", charter_slug: str = "") -> str:
+    def render_compose(self, *, gateway_image: str = DEFAULT_IMAGE, charter_slug: str = "") -> str:
         """A docker-compose fragment for the gateway + the two networks.
 
         The Strix sandbox is NOT declared here — Strix launches it itself; it only needs
         STRIX_DOCKER_SANDBOX_NETWORK set to ``sandbox_network``.
         """
+        # BOTH templated values are guarded — a quote / newline in either would let it break out of its
+        # YAML scalar and inject compose directives (e.g. privileged: true). charter_slug: a simple slug;
+        # gateway_image: a valid docker image reference. (Red-pen: guard the sibling too, not just one.)
+        if charter_slug and not re.fullmatch(r"[A-Za-z0-9._-]+", charter_slug):
+            raise ValueError("charter_slug must be a simple slug ([A-Za-z0-9._-]); refusing to template "
+                             "an unsafe value into the compose file")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", gateway_image):
+            raise ValueError("gateway_image must be a valid docker image reference; refusing to template "
+                             "an unsafe value into the compose file")
         bind_ip = self.sandbox_gateway_ip()
         return f"""\
 # vigil-gateway egress topology. The Strix sandbox is launched by Strix with
@@ -88,6 +99,7 @@ networks:
 services:
   vigil-gateway:
     image: {gateway_image}
+    container_name: vigil-gateway   # a deterministic name so `vigil services status/down` can find it
     networks:
       {self.sandbox_network}:
         ipv4_address: {bind_ip}   # pinned so the proxy can bind ONLY the sandbox interface
@@ -135,3 +147,54 @@ services:
                 [d, "network", "create", self.egress_network],
                 check=True, capture_output=True, text=True,
             )
+
+    # -- image + container lifecycle (create-if-absent bring-up) ------------------------
+    # These make `vigil services up` bring the gateway topology up from nothing: build the image if it
+    # is missing, then `docker compose up -d` — which itself creates ONLY what is absent (the two
+    # networks + the gateway container), so the whole thing is idempotent and re-runnable.
+
+    def _run(self, args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run([self._docker_bin(), *args], capture_output=True, text=True)
+
+    def image_exists(self, image: str = DEFAULT_IMAGE) -> bool:
+        return self._run(["image", "inspect", image]).returncode == 0
+
+    def ensure_image(self, context_dir, image: str = DEFAULT_IMAGE) -> bool:
+        """Build the gateway image if it is absent (idempotent). Returns True iff a build actually ran."""
+        if self.image_exists(image):
+            return False
+        proc = self._run(["build", "-t", image, str(context_dir)])
+        if proc.returncode != 0:
+            raise RuntimeError(f"docker build of {image} failed: {proc.stderr.strip()[-800:]}")
+        return True
+
+    def container_state(self, name: str = "vigil-gateway") -> str:
+        """"running" | "exited" | … (docker's own state string) | "absent" if there is no such container."""
+        proc = self._run(["inspect", "-f", "{{.State.Status}}", name])
+        if proc.returncode != 0:
+            return "absent"
+        return proc.stdout.strip() or "unknown"
+
+    def compose_up(self, compose_file, *, build: bool = True, context_dir=None,
+                   image: str = DEFAULT_IMAGE) -> dict:
+        """Bring the gateway topology up via `docker compose up -d` — idempotent: it creates ONLY the
+        networks/containers that do not already exist. Builds the image first if it is absent (and a
+        context dir is given). Returns a small status dict."""
+        built = self.ensure_image(context_dir, image) if (build and context_dir is not None) else False
+        proc = self._run(["compose", "-f", str(compose_file), "up", "-d"])
+        if proc.returncode != 0:
+            raise RuntimeError(f"docker compose up failed: {proc.stderr.strip()[-800:]}")
+        return {"image_built": built, "gateway": self.container_state()}
+
+    def compose_down(self, compose_file) -> None:
+        """Stop + remove the gateway container (idempotent; the networks are left in place)."""
+        self._run(["compose", "-f", str(compose_file), "down"])
+
+    def status(self, image: str = DEFAULT_IMAGE) -> dict:
+        """A create-if-absent readiness snapshot: which networks/image/container already exist."""
+        return {
+            "networks": {self.sandbox_network: self._network_exists(self.sandbox_network),
+                         self.egress_network: self._network_exists(self.egress_network)},
+            "image": self.image_exists(image),
+            "gateway": self.container_state(),
+        }

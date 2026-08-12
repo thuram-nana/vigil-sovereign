@@ -1215,6 +1215,19 @@ def _cmd_up(args: argparse.Namespace) -> int:
     crucible console, crucible api) as separate OS processes in their OWN venvs (via dispatch) and
     serves the bundle itself — it imports NO framework/strix/sigil, so the two trust domains are never
     co-loaded in one interpreter. Binds loopback (or a private/tunnel IP); refuses a public bind."""
+    if getattr(args, "services", False):
+        # Optional docker preflight: create the egress-gateway networks + container if none exist
+        # (idempotent). vigil_gateway.docker is pure-stdlib, so this stays on the boundary-safe path.
+        try:
+            import json as _json
+            import pathlib as _pl
+            from vigil_gateway.docker import SandboxNetworking
+            _repo = _pl.Path(__file__).resolve().parents[2]
+            _res = SandboxNetworking().compose_up(
+                _repo / "infra" / "docker" / "docker-compose.yml", build=True, context_dir=_repo / "gateway")
+            print(f"vigil up: gateway topology up ({_json.dumps(_res)})")
+        except Exception as _e:  # best-effort — a docker issue must never block the UI bring-up
+            print(f"vigil up: gateway services preflight skipped — {_e}", file=sys.stderr)
     from .uiproxy import run_up
     return run_up(host=args.host, port=args.port, domain=args.domain, base_dir=args.base_dir,
                   no_browser=args.no_browser,
@@ -1226,6 +1239,49 @@ def _cmd_up(args: argparse.Namespace) -> int:
                   with_gesture=getattr(args, "with_gesture", False),
                   with_telemetry=getattr(args, "with_telemetry", False),
                   telemetry_interval=getattr(args, "telemetry_interval", 15))
+
+
+def _cmd_services(args: argparse.Namespace) -> int:
+    """`vigil services {up,status,down,render}` — the docker bring-up for the egress-gateway topology:
+    create the sandbox+egress networks and the gateway container IF NONE EXIST (idempotent, re-runnable).
+    EXEC-ONLY: imports vigil_gateway.docker (pure-stdlib), never framework/strix/sigil, so it stays on the
+    same boundary-safe path `vigil up` uses."""
+    import json
+    import pathlib
+    try:
+        from vigil_gateway.docker import SandboxNetworking
+    except ImportError:
+        print("vigil services needs the gateway package importable (add gateway/ to PYTHONPATH, or "
+              "`pip install vigil-gateway`).", file=sys.stderr)
+        return 2
+    net = SandboxNetworking()
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    gw_dir = repo / "gateway"
+    compose = (pathlib.Path(args.compose).expanduser() if getattr(args, "compose", "")
+               else repo / "infra" / "docker" / "docker-compose.yml")
+
+    action = args.services_action
+    if action == "render":
+        out = pathlib.Path(args.out).expanduser() if getattr(args, "out", "") else compose
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(net.render_compose(charter_slug=getattr(args, "charter_slug", "") or ""), encoding="utf-8")
+        print(f"wrote {out}")
+        return 0
+    try:
+        if action == "status":
+            print(json.dumps(net.status(), indent=2))
+            return 0
+        if action == "down":
+            net.compose_down(compose)
+            print("gateway services stopped (networks left in place)")
+            return 0
+        # up — build the image if absent, then `docker compose up -d` (creates only what is missing)
+        res = net.compose_up(compose, build=not getattr(args, "no_build", False), context_dir=gw_dir)
+        print(json.dumps(res, indent=2))
+        return 0
+    except (RuntimeError, OSError) as e:
+        print(f"vigil services {action}: {e}", file=sys.stderr)
+        return 1
 
 
 def _cmd_telemetry(args: argparse.Namespace) -> int:
@@ -1811,7 +1867,26 @@ def build_parser() -> argparse.ArgumentParser:
                          "OFF by default. Read-only, loopback, no egress — a pure projection of the spine.")
     pu.add_argument("--telemetry-interval", type=int, default=15,
                     help="with --with-telemetry: seconds between spine snapshots (default 15)")
+    pu.add_argument("--services", action="store_true",
+                    help="also bring up the docker egress-gateway topology (create the networks + gateway "
+                         "container if none exist; idempotent). Best-effort — a docker issue never blocks the UI.")
     pu.set_defaults(func=_cmd_up)
+
+    psvc = sub.add_parser("services",
+                          help="docker bring-up for the egress gateway: create the networks + gateway "
+                               "container IF NONE EXIST (idempotent, re-runnable)")
+    psvc_sub = psvc.add_subparsers(dest="services_action", required=True)
+    psu = psvc_sub.add_parser("up", help="build the image if absent, then `docker compose up -d` (idempotent)")
+    psu.add_argument("--compose", default="", help="compose file (default infra/docker/docker-compose.yml)")
+    psu.add_argument("--no-build", action="store_true", help="do not build the image (assume it already exists)")
+    pssg = psvc_sub.add_parser("status", help="show which networks / image / container already exist")
+    pssg.add_argument("--compose", default="")
+    psdn = psvc_sub.add_parser("down", help="stop + remove the gateway container (networks are left in place)")
+    psdn.add_argument("--compose", default="")
+    psr = psvc_sub.add_parser("render", help="(re)write the docker-compose file for the gateway topology")
+    psr.add_argument("--out", default="", help="output path (default infra/docker/docker-compose.yml)")
+    psr.add_argument("--charter-slug", default="", help="charter slug to bake into the compose scope")
+    psvc.set_defaults(func=_cmd_services)
 
     ptel = sub.add_parser("telemetry",
                           help="live assurance/metrics collector over the signed spine (G2): write a "
