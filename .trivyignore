@@ -1,0 +1,29 @@
+# A14 — vulnerability suppressions for the "A14 supply-chain gate" job.
+#
+# THRESHOLD (docs/SUPPLY-CHAIN.md §4):
+#   CRITICAL blocks the pull request. HIGH is reported in full but does not block.
+#
+# THE ONE RULE: every id below MUST be immediately preceded by a comment block that names
+# the id and gives a reason. `integration/tests/test_supply_chain.py` enforces it, and carries
+# a negative control proving it rejects a bare id. The point of a scan gate is that ignoring a
+# finding costs a sentence of explanation; entries with no reason are how a gate quietly
+# becomes a no-op, and an allow-list nobody reads launders findings instead of recording them.
+#
+# Accepted reasons (one of these words must appear in the justification):
+#   no-fix              upstream has published no fixed version
+#   not-reachable       the vulnerable path is not reachable in how this repo uses the package
+#   vendored-test-only  present only in vendored or fixture material, never in a shipped path
+#   disputed            the advisory is disputed upstream
+#   false-positive      the scanner misidentified the component or version
+#
+# Format, exactly:
+#
+#   # CVE-2025-12345 — <package>: <what it is>. <reason keyword>: <why it is accepted here>.
+#   # Revisit when: <the concrete condition that should end this suppression>.
+#   CVE-2025-12345
+#
+# Prefer fixing over suppressing. A suppression is a decision with an owner, not paperwork.
+# ---------------------------------------------------------------------------------------
+#
+# Currently suppressed: nothing. The gate below is unconditioned — every CRITICAL trivy finds
+# fails the build. Keep it that way for as long as it is honest to.

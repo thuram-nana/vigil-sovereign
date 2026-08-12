@@ -109,7 +109,7 @@ fi
 # ----------------------------------------------------------------------
 
 yellow "[1/3] Resolving ${REQ_IN} (dry-run)..."
-if ! pip-compile --quiet --dry-run "${REQ_IN}" >/dev/null; then
+if ! pip-compile --quiet --dry-run --strip-extras "${REQ_IN}" >/dev/null; then
     red "FAIL: ${REQ_IN} does not resolve. See pip-compile output above."
     exit 4
 fi
