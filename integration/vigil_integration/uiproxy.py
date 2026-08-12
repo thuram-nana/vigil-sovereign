@@ -443,11 +443,16 @@ def _secure_log(log_path: Path):
 
 
 def _port_free(host: str, port: int) -> bool:
-    """True if (host, port) is bindable right now (no active listener). The bring-up preflight uses this
-    so a port collision REFUSES before any backend is spawned — never orphaning children (B1)."""
+    """True if (host, port) is bindable right now (no ACTIVE listener). The bring-up preflight uses this so
+    a port collision REFUSES before any backend is spawned — never orphaning children (B1). We set
+    SO_REUSEADDR to MIRROR the real proxy's ``allow_reuse_address`` (B1-1): otherwise the preflight would be
+    stricter than the actual bind and falsely refuse a quick restart whose port still holds TIME_WAIT
+    sockets — a bind the proxy itself would accept. (SO_REUSEADDR relaxes TIME_WAIT, NOT an active listener,
+    so a genuinely-in-use port is still correctly detected.)"""
     import socket as _socket
     fam = _socket.AF_INET6 if ":" in host else _socket.AF_INET
     s = _socket.socket(fam, _socket.SOCK_STREAM)
+    s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
     try:
         s.bind((host, port))
         return True
@@ -478,6 +483,22 @@ def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None)
     if extra_env:
         env.update(extra_env)
     return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
+
+
+def _spawn_tracked(procs: list, name: str, argv: list[str], log_path: Path, cleanup,
+                   *, extra_env: Optional[dict] = None) -> bool:
+    """Spawn + append a backend to ``procs``; on a spawn failure (OSError: EMFILE/ENOMEM/fork pressure, a
+    full or read-only .vigil-live, a bin TOCTOU) run ``cleanup()`` on everything already started and return
+    True (the caller then returns cleanly). A failed spawn must NEVER orphan the running backends (B?-2).
+    Module-scoped so this cleanup-on-failure path is unit-testable, not buried in a run_up closure."""
+    try:
+        procs.append((name, _spawn(argv, log_path, extra_env=extra_env)))
+        return False
+    except OSError as exc:
+        print(f"vigil up: backend {name!r} failed to start ({exc}) — cleaned up, nothing orphaned.",
+              file=sys.stderr)
+        cleanup()
+        return True
 
 
 # The runtime vars the offense engine may receive from the sovereign settings plane. The ONE hard exclusion
@@ -662,11 +683,16 @@ def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "
 
 def _cockpit_timeout() -> float:
     """The cockpit cold-start budget in seconds (embedding model + spine/graph rebuild can exceed 20s).
-    Parsed HERE, not as a default arg (B6): a bad VIGIL_UP_COCKPIT_TIMEOUT must not raise at import."""
+    Parsed HERE, not as a default arg (B6): a bad VIGIL_UP_COCKPIT_TIMEOUT must not raise at import. And
+    clamp degenerate-but-float-valid values (B6-4): inf/1e999 would make _await_token hang FOREVER (worse
+    than the bug this fixed), nan aborts instantly, ≤0 aborts instantly — all fall back to 120."""
     try:
-        return float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))
+        t = float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))
     except (TypeError, ValueError):
         return 120.0
+    if t != t or t == float("inf") or t <= 0:   # nan / +inf / non-positive → the sane default
+        return 120.0
+    return t
 
 
 def _await_token(q: "Queue[str]", proc: subprocess.Popen,
@@ -801,6 +827,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                 except ProcessLookupError:
                     pass
 
+    def _track(name: str, argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> bool:
+        return _spawn_tracked(procs, name, argv, log_path, _cleanup, extra_env=extra_env)
+
     # 1) cockpit — capture its printed session token.
     cockpit_argv = [str(sigil_bin), "serve", "--host", "127.0.0.1", "--port", str(SOVEREIGN_PORT),
                     "--allow-host", authority, "--allow-origin", origin]
@@ -830,10 +859,10 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     vigil_bin = _console_vigil_bin(crucible_bin)
     if vigil_bin:
         console_env["VIGIL_BIN"] = vigil_bin
-    procs.append(("offense-console", _spawn(console_argv, logs / "offense-console.log",
-                                            extra_env=console_env)))
-    procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log",
-                                        extra_env=offense_llm_env)))
+    if _track("offense-console", console_argv, logs / "offense-console.log", extra_env=console_env):
+        return 1
+    if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=offense_llm_env):
+        return 1
 
     # Readiness (B4): the cockpit's startup is verified via its token, but the offense console/api are
     # spawned fire-and-forget — if one fails to bind (an import error, a port race), the proxy would still
@@ -856,8 +885,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         else:
             feed_argv = [str(crucible_bin), "intel", "feed-daemon", "--live",
                          "--slug", feed_slug.strip(), "--interval", str(max(1, feed_interval))]
-            procs.append(("offense-feed", _spawn(feed_argv, logs / "offense-feed.log",
-                                                 extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+            if _track("offense-feed", feed_argv, logs / "offense-feed.log",
+                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+                return 1
 
     # 3b') OPTIONAL live assurance/metrics collector (G2). OFF by default. A READ-ONLY, one-way projection of
     # the signed spine (no egress, mints nothing) — it tails the blackboard and writes a continuous
@@ -867,8 +897,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         if vigil_bin:
             tel_out = base.resolve() / "live-ui" / "telemetry.json"
             tel_argv = [vigil_bin, "telemetry", "--out", str(tel_out), "--interval", str(max(1, telemetry_interval))]
-            procs.append(("offense-telemetry", _spawn(tel_argv, logs / "offense-telemetry.log",
-                                                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+            if _track("offense-telemetry", tel_argv, logs / "offense-telemetry.log",
+                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+                return 1
         else:
             print("vigil up: --with-telemetry skipped (`vigil` bin unresolved) — the console still computes "
                   "assurance metrics on demand.", file=sys.stderr)
@@ -880,13 +911,15 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # identity exists, the producer still runs but the consumer is skipped (never started without its pin).
     learn_spool = base.resolve() / "learn-spool"
     grant_argv = [str(sigil_bin), "knowledge", "export-learn-grants", "--spool", str(learn_spool), "--watch"]
-    procs.append(("sovereign-learn-grants", _spawn(grant_argv, logs / "sovereign-learn-grants.log")))
+    if _track("sovereign-learn-grants", grant_argv, logs / "sovereign-learn-grants.log"):
+        return 1
     owner_pub = _resolve_owner_pubkey(sigil_bin)
     if owner_pub and vigil_bin:
         drain_argv = [vigil_bin, "learn-drain", "--spool", str(learn_spool),
                       "--owner-pubkey", owner_pub, "--watch"]
-        procs.append(("offense-learn-drain", _spawn(drain_argv, logs / "offense-learn-drain.log",
-                                                    extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+        if _track("offense-learn-drain", drain_argv, logs / "offense-learn-drain.log",
+                  extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+            return 1
     else:
         print("vigil up: learn-drain skipped (no owner pubkey resolvable or `vigil` bin unresolved) — the "
               "sovereign producer runs, but grants won't be consumed until both are available.", file=sys.stderr)
@@ -898,8 +931,8 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # flips the nav-mode latch ON (one-shot) so an owner-armed PHONE gesture session navigates (local camera
     # gesture is not functional — gesture input is the phone companion).
     if with_voice:
-        procs.append(("sovereign-voice", _spawn([str(sigil_bin), "voice", "--mic"],
-                                                logs / "sovereign-voice.log")))
+        if _track("sovereign-voice", [str(sigil_bin), "voice", "--mic"], logs / "sovereign-voice.log"):
+            return 1
     if with_gesture:
         try:
             subprocess.run([str(sigil_bin), "gesture-nav", "on"], env=_child_env(),
@@ -908,10 +941,12 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
             print("vigil up: could not enable gesture nav-mode (`sigil gesture-nav on` failed) — enable it "
                   "later from the sovereign CLI.", file=sys.stderr)
 
-    # 4) assemble the runtime serve dir with the token + federated mount bases.
+    # 4) assemble the runtime serve dir with the token + federated mount bases. Catch ValueError too
+    # (B?-3): read_text on a non-UTF-8 bundle asset raises UnicodeDecodeError (a ValueError, NOT an
+    # OSError), which would otherwise escape past _cleanup() and orphan every backend.
     try:
         assemble_serve_dir(src, ui_dir, token=token)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"vigil up: could not assemble the UI serve dir from {src}: {exc}", file=sys.stderr)
         _cleanup()
         return 1
