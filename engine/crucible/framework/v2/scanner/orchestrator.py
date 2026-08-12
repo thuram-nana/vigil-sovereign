@@ -219,6 +219,11 @@ class AutonomousCampaign:
                 # E5 achieved effect: an exposed secret proven VALID — the attacker HOLDS a confirmed-valid
                 # leaked credential, which chains (OWN_VIA_HELD_CREDENTIAL) to account takeover.
                 self._establish_secret_validity(world, attacker, ep_id, f.confidence, seq)
+            if f.bug_class == "k8s_workload_misconfiguration":
+                # E4 achieved effect: a confirmed anonymous-privileged RBAC binding — an UNAUTHENTICATED
+                # subject is bound to cluster-admin, so merely REACHING the kube-apiserver hands over the
+                # cluster control-plane and, through it, every secret (no credential held — see the method).
+                self._establish_k8s_rbac_capture(world, ep_id, f.confidence, seq)
 
         # passive findings feed chains too: a disclosed private key IS a credential
         # the attacker can capture, which the extended operators turn into account
@@ -316,6 +321,26 @@ class AutonomousCampaign:
                             provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
         _edge(world, cred, principal, EdgeKind.VALID_ON, prov, conf, seq)
         attacker.hold(cred, seq=seq.next(), provenance=prov, confidence=conf)
+
+    def _establish_k8s_rbac_capture(self, world: WorldModel, ep_id: str, conf: float, seq: "_Seq") -> None:
+        """A confirmed anonymous-privileged K8s-RBAC binding (E4 achieved effect): system:anonymous /
+        system:unauthenticated is bound to a dangerous BUILT-IN ClusterRole (cluster-admin / admin / edit).
+        Unlike an IMDS/secret capture, NO credential is HELD — the binding grants privilege to an
+        UNAUTHENTICATED subject, so an attacker who merely REACHES the kube-apiserver (ep_id, already reached
+        above) IS cluster-admin. Mint the cluster control-plane (a crown CLOUD_RESOURCE) + the secret store
+        (a crown DATASTORE) and TRUSTS_FOR edges ep->cluster->secrets, so best_paths yields the crown-jewel
+        route the achieved effect proves — the idor/bola datastore topology (reaching the surface hands over
+        the resource behind it), NOT the credential-HOLD chain of E1/E5."""
+        prov = "finding:k8s_workload_misconfiguration"
+        cluster, secrets = f"cluster:{ep_id}", f"secrets:{ep_id}"
+        world.add_node(Node(id=cluster, kind=NodeKind.CLOUD_RESOURCE,
+                            attrs={"detail": "kube-apiserver control-plane", "anonymous_cluster_admin": True},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        world.add_node(Node(id=secrets, kind=NodeKind.DATASTORE, attrs={"detail": "cluster secret store"},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        # reaching the anonymous-bound API server IS cluster-admin (no credential); cluster-admin reads all secrets
+        _edge(world, ep_id, cluster, EdgeKind.TRUSTS_FOR, prov, conf, seq)
+        _edge(world, cluster, secrets, EdgeKind.TRUSTS_FOR, prov, conf, seq)
 
     def _extract_paths(self, world: WorldModel) -> list[AttackPath]:
         if world.get_node(ATTACKER_ID) is None:
