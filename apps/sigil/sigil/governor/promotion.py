@@ -61,9 +61,13 @@ class PromotionPolicy:
             if not verify_signed(p, _CORE, self.trusted_pubkey):
                 continue                          # fail-closed: an unsigned/forged grant is not counted
             state[(p.get("agent"), p.get("scope"))] = p["state"]
+        # Mirror is_promoted's structural denylist early-return (NO_PROMOTION_AGENTS): if such an agent ever
+        # carried an owner-signed grant (e.g. a currently-promotable agent later ADDED to the denylist), it is
+        # NOT enforced — so it must not be LISTED either, or the card would show a phantom promotion. This is
+        # the "a mint-side gate must be mirrored at the read surface" invariant applied to the read.
         return [{"agent": a, "scope": s}
                 for (a, s), v in sorted(state.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1])))
-                if v == "granted"]
+                if v == "granted" and a not in NO_PROMOTION_AGENTS]
 
     def is_promoted(self, agent: str, scope: str = "*") -> bool:
         if agent in NO_PROMOTION_AGENTS:

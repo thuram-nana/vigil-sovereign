@@ -99,3 +99,39 @@ def test_snapshot_promotions_shape_on_a_fresh_home():
     from sigil.dashboard import snapshot
     snap = snapshot(_store())
     assert isinstance(snap.get("promotions"), list)
+
+
+def test_a_signed_denylisted_grant_is_not_listed_and_not_enforced():
+    # The REAL negative control for the NO_PROMOTION denylist (red-pen #1): craft a genuinely OWNER-SIGNED
+    # grant for a denylisted agent DIRECTLY (bypassing grant()'s mint-time refusal), then assert state_all
+    # mirrors is_promoted — the grant verifies, but neither lists nor enforces it. This is the "mint gate must
+    # be mirrored at the read surface" invariant: a currently-promotable agent later ADDED to the denylist
+    # must not become a phantom card row.
+    from sigil.governor.authn import signed_payload
+    from sigil.governor.promotion import NO_PROMOTION_AGENTS, SIGNAL
+    store = _store()
+    for agent in sorted(NO_PROMOTION_AGENTS):
+        core = {"signal": SIGNAL, "state": "granted", "agent": agent, "scope": "*"}
+        payload = {**signed_payload(core, OWNER), "by": "owner", "tier": "A0", "decision": "auto"}
+        store.append(kind="event", source="governor", actor="WARDEN", payload=payload)   # a REAL signed grant
+    pol = PromotionPolicy(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+    listed = {r["agent"] for r in pol.state_all()}
+    for agent in NO_PROMOTION_AGENTS:
+        assert agent not in listed, f"{agent} is denylisted — state_all must not list its signed grant"
+        assert pol.is_promoted(agent, "*") is False       # and it is not enforced either (consistency)
+    assert pol.state_all() == []                          # nothing but denylisted grants -> empty
+
+
+def test_broker_reports_error_on_a_refused_promote():
+    # red-pen #2: a refused promote must NOT read as success. The broker returns ok:False WITH an explicit
+    # error (so the UI's r.error path shows the refusal, not a false "Promoted" toast). A legit promote has
+    # no error; revoke always records.
+    from sigil.governor.identity import ensure_owner_keypair
+    from sigil.ui.actions import do_action
+    ensure_owner_keypair()
+    store = _store()
+    refused = do_action("promote", {"agent": "ENVOY", "scope": "*"}, store=store)
+    assert refused["ok"] is False and refused.get("recorded_seq") is None
+    assert "error" in refused and "ENVOY" in refused["error"]
+    ok = do_action("promote", {"agent": "ARCHIVIST", "scope": "draft"}, store=store)
+    assert ok["ok"] is True and "error" not in ok

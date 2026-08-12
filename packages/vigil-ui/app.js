@@ -3388,7 +3388,7 @@
     return [
       rows,
       h("div.hint", { style: { margin: "10px 0 8px" } },
-        "Promoting an (agent, scope) lets that agent's A2 proposals of that kind auto-approve instead of queuing — a trust widening. ENVOY and DELEGATE can never be promoted. The grant is signed with your owner key on the server."),
+        "Promoting an (agent, scope) lets that agent's A2 proposals of that kind auto-approve instead of queuing — a trust widening. A scope of * covers every kind; a per-kind revoke does NOT reduce a * grant — revoke the * row to fully un-promote. ENVOY and DELEGATE can never be promoted. The grant is signed with your owner key on the server."),
       h("div.row-flex", { style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } }, [agentIn, scopeIn, grant]),
     ];
   }
