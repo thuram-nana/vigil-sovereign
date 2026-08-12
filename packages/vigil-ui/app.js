@@ -39,6 +39,7 @@
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", ready: true },
       { id: "mcp", label: "MCP Servers", icon: "bolt", ready: true },
+      { id: "system", label: "System & Services", icon: "gear", ready: true },
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
@@ -4002,6 +4003,60 @@
     ]);
   }
 
+  // System & Services — the whole system's readiness at a glance (the `vigil doctor` report surfaced in the
+  // UI): prerequisites (binaries + both venvs + writable dirs), the four UI ports, and every docker
+  // service's live state. READ-ONLY; bring up the absent services with `vigil services up`.
+  function renderSystem(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "System & Services"),
+        h("span.sub", null, "Everything the system needs, at a glance — prerequisites, the UI ports, and every docker service's state.")]),
+      h("div#system-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Checking system readiness…")),
+    ]);
+    V.getJSON(OFF("/api/services")).then(drawSystem).catch(function () {
+      V.mount(V.$("#system-body"), h("div.empty", null, [
+        h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not reach the offense console for the readiness report. Start it (`vigil up`) and reload."),
+      ]));
+    });
+  }
+
+  function drawSystem(d) {
+    var body = V.$("#system-body"); if (!body) return;
+    function row(label, ok, detail, cls) {
+      return h("div.kv", null, [
+        h("div.k", null, [V.pill(ok ? "OK" : "—", cls || (ok ? "up" : "idle"), null), " " + label]),
+        h("div.v", null, detail || ""),
+      ]);
+    }
+    var bins = d.binaries || {}, venvs = d.venvs || {}, dirs = d.dirs || {}, ports = d.ui_ports || {}, svcs = d.docker_services || {};
+    var prereq = V.card("Prerequisites", d.ok ? "READY" : "ACTION NEEDED", [
+      h("div", null, Object.keys(bins).map(function (b) { return row(b, bins[b], bins[b] ? "installed" : "missing"); })),
+      h("div", null, Object.keys(venvs).map(function (v) { return row(v + " venv", venvs[v], venvs[v] ? "built" : "not built — run ./bootstrap.sh"); })),
+      h("div", null, Object.keys(dirs).map(function (k) { var x = dirs[k] || {}; return row(k, !!x.writable, (x.path || "") + (x.writable ? " (writable)" : " (NOT writable)")); })),
+    ], false);
+    var portCard = V.card("UI ports (127.0.0.1)", "", h("div", null,
+      Object.keys(ports).map(function (p) { return row(p, ports[p] === "free", ports[p], ports[p] === "free" ? "up" : "idle"); })), false);
+    var svcCard = V.card("Docker services", "", [
+      h("div.hint", { style: { marginBottom: "8px" } }, "Create the absent ones with `vigil services up` (add `--all` for Neo4j + otel)."),
+      h("div", null, Object.keys(svcs).map(function (name) {
+        var s = svcs[name] || {}; var st = (typeof s === "string") ? s : (s.state || (s.error ? "error" : "?"));
+        var running = st === "running", absent = st === "absent";
+        return h("div.kv", null, [
+          h("div.k", null, [V.pill(running ? "running" : st, running ? "up" : (absent ? "idle" : "danger"), null), " " + name]),
+          h("div.v", null, (typeof s === "object" && s.purpose) ? s.purpose : ""),
+        ]);
+      })),
+    ], false);
+    var issues = d.issues || [];
+    var issuesCard = issues.length ? V.card("Action needed", "!", h("ul", { style: { margin: "0", paddingLeft: "18px" } }, issues.map(function (m) { return h("li", null, m); })), false) : null;
+    var notes = d.notes || [];
+    V.mount(body, [
+      h("div.grid.cols-2", { style: { alignItems: "start" } }, [prereq, portCard]),
+      h("div.grid.cols-2", { style: { alignItems: "start", marginTop: "16px" } }, [svcCard, issuesCard].filter(Boolean)),
+      notes.length ? h("div.legend", { style: { marginTop: "12px" } }, [V.icon("info"), notes.join("  ·  ")]) : null,
+    ]);
+  }
+
   function renderBrain(screen) {
     var B = { tab: (hashQuery().tab) || "decide", runs: [], run: null, catalogQ: "" };
     V.mount(screen, [
@@ -5436,6 +5491,7 @@
     if (id === "fixes") { renderFixes(screen); return; }
     if (id === "brain") { renderBrain(screen); return; }
     if (id === "mcp") { renderMcp(screen); return; }
+    if (id === "system") { renderSystem(screen); return; }
     if (id === "compliance") { renderCompliance(screen); return; }
     if (id === "assurance") { renderAssurance(screen); return; }
     if (id === "report") { renderReport(screen); return; }

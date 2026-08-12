@@ -414,6 +414,30 @@
       ]
     },
     {
+      "description": "The whole system's readiness at a glance (the `vigil doctor` report surfaced in the UI) — prerequisites (binaries + both venvs + writable dirs), the four UI ports (free / in-use), and every docker service's live state (gateway + qdrant / neo4j / otel). Read-only; create the absent services with `vigil services up`.",
+      "group": "MANAGE",
+      "id": "system",
+      "label": "System & Services",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "system",
+        "services",
+        "doctor",
+        "readiness",
+        "health",
+        "prerequisites",
+        "docker services",
+        "qdrant",
+        "neo4j",
+        "otel",
+        "gateway status",
+        "ports",
+        "venvs",
+        "bring up"
+      ]
+    },
+    {
       "description": "A governed local terminal — ask in English or type a command; the AI proposes, the allowlist and gate decide, you approve, and only local read-only commands run (every run signed).",
       "group": "DO",
       "id": "terminal",
@@ -466,5 +490,5 @@
       ]
     }
   ],
-  "source_sha": "4fd34d95ede63b8a747ea000d999fbd16b3f477bbfd57f16e27a31c09907f485"
+  "source_sha": "8686da7aeb9ecf80433621ee21042437f684f1d193ce2817e832ffcf16951936"
 }
