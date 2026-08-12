@@ -255,6 +255,24 @@ class OracleKind(str, enum.Enum):
     # does not host-identify the metadata endpoint, a random blob, or malformed/absent evidence do NOT fire.
     IMDS_CREDENTIAL_CAPTURE = "imds_credential_capture"
 
+    # E5 (BUILD-PLAN §E5) exposed-secret VALIDITY. Like IMDS, kept OUT of the frozen _ALL_ORACLES fallback
+    # (verifier._ALL_ORACLES stays EXACTLY 15) and fired ONLY via its bug_class row keyed on the
+    # `secret_capture` ctx field that NO benchmark/scan/engage finding carries — so appending it leaves
+    # `make gate` byte-identical and it never auto-fires on a scan. SECRET_CREDENTIAL_VALIDITY fires (0.95)
+    # ONLY when a RETAINED, secret-safe capture proves an EXPOSED secret is VALID: (a) a structurally-
+    # recognized secret TYPE (aws_access_key / github_pat …) whose non-secret IDENTIFIER shape checks pass
+    # (the secret value itself is a [REDACTED] presence marker, never validated for content); AND (b) a
+    # retained CONFIRMING-CALL response proving the secret AUTHENTICATED as a real identity (AWS
+    # sts:GetCallerIdentity Arn/Account/UserId; GitHub GET /user login+numeric-id) with NO failure marker,
+    # the confirming call's action matching the type, the confirming endpoint on the per-TYPE allow-list (the
+    # ANTI-LAUNDERING gate — an attacker-controlled 'confirming' endpoint can never mint a FACT), and the
+    # secret fingerprint-BOUND to that call over a trusted transport. SOURCE-SEMANTICS INVERSION vs IMDS: the
+    # exposure `source` (a JS literal, a git blob, a config path, an ARN) is RETAINED as evidence but is NOT
+    # a firing gate — E5 asserts VALIDITY, not provenance. A recognized-but-unconfirmed secret is a LEAD; a
+    # failed/4xx/error-shaped confirming call, a fingerprint mismatch, an un-allow-listed confirming host, an
+    # unverified/proxied/redirected transport, an unrecognized type, or malformed evidence do NOT fire.
+    SECRET_CREDENTIAL_VALIDITY = "secret_credential_validity"
+
 
 class OracleProbe(BaseModel):
     """A passive, abstract description of what an oracle must compare.

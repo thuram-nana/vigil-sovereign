@@ -405,6 +405,13 @@ class FindingContext(BaseModel):
     # its presence, so the certificate carries NO live secret yet re-verifies offline. No benchmark/scan/
     # engage finding carries imds_capture, so appending this leaves the gate byte-identical.
     imds_capture: dict[str, Any] | None = None
+    # E5 exposed-secret validity (BUILD-PLAN §E5): a RETAINED, secret-safe capture proving an EXPOSED secret
+    # is VALID — a structurally-recognized leaked credential that AUTHENTICATED via a confirming call bound
+    # to it over a trusted, per-TYPE-allow-listed transport. The secret VALUE is redacted to a presence
+    # marker by ``from_secret_capture`` (the oracle judges validity via the confirming call, never the
+    # secret's content), so the certificate carries NO live secret yet re-verifies offline. No benchmark/
+    # scan/engage finding carries secret_capture, so appending this leaves the gate byte-identical.
+    secret_capture: dict[str, Any] | None = None
 
     # -- builders ----------------------------------------------------------
 
@@ -1099,6 +1106,66 @@ class FindingContext(BaseModel):
         return cls(bug_class=bug_class, imds_capture=retained)
 
     @classmethod
+    def from_secret_capture(
+        cls, capture: Mapping[str, Any], *, bug_class: str = "secret_credential_validity"
+    ) -> "FindingContext":
+        """A RETAINED, SECRET-SAFE exposed-secret capture, for the E5 validity oracle (BUILD-PLAN §E5). Reduces
+        whatever the WARDEN-gated secret-validation runner captured into the canonical shape the oracle judges.
+
+        SECRET-SAFE by construction: the secret VALUE is REDACTED to a fixed presence marker — the oracle
+        proves VALIDITY via the confirming call, never the secret's content, so the certificate carries NO
+        live secret yet the same verdict re-verifies offline. The non-secret IDENTIFIER (an AWS AccessKeyId, a
+        token prefix), the exposure ``source``, the fingerprints, and the confirming call's identity echo are
+        IDENTIFIERS, not secrets, retained verbatim (load-bearing for the structural + authentication proof).
+        A failure marker in the confirming call's body is retained so a FAILED call re-verifies as NON-firing.
+        JSON-safe + deterministic (re-verifies offline)."""
+        src = dict(capture or {})
+        cred_src: Mapping[str, Any] = src.get("credential") if isinstance(src.get("credential"), Mapping) else {}
+        call_src: Mapping[str, Any] = (src.get("confirming_call")
+                                       if isinstance(src.get("confirming_call"), Mapping) else {})
+        cap = _IMDS_CAPTURE_STR_CAP
+
+        cred: dict[str, Any] = {}
+        ident = cred_src.get("identifier") or cred_src.get("id") or cred_src.get("prefix")
+        if ident not in (None, ""):
+            cred["identifier"] = _coerce_text(ident)[:cap]                 # non-secret id / prefix
+        if _coerce_text(cred_src.get("secret")).strip():
+            cred["secret"] = "[REDACTED]"                                  # PRESENCE marker only
+        for k in ("credential_fingerprint", "source"):
+            if cred_src.get(k) not in (None, ""):
+                cred[k] = _coerce_text(cred_src.get(k))[:cap]
+
+        call: dict[str, Any] = {}
+        if call_src:
+            for k in ("action", "endpoint", "credential_fingerprint", "resolved_peer", "response_digest"):
+                if call_src.get(k) not in (None, ""):
+                    call[k] = _coerce_text(call_src.get(k))[:cap]
+            if call_src.get("status") not in (None, ""):
+                call["status"] = call_src.get("status")
+            for k in ("tls_verified", "no_proxy", "no_redirect"):
+                if k in call_src:
+                    call[k] = bool(call_src.get(k))
+            resp_src = call_src.get("response")
+            if isinstance(resp_src, Mapping):
+                # identity echo (Arn/Account/UserId/login/id/…) + any failure marker — numbers/bools kept
+                # verbatim (a GitHub numeric id is load-bearing), everything else capped text.
+                resp = {_coerce_text(rk)[:cap]: (rv if isinstance(rv, (int, float, bool))
+                                                 else _coerce_text(rv)[:cap])
+                        for rk, rv in list(resp_src.items())[:32]}
+                if _imds_body_has_error(resp_src) and not any(
+                        _coerce_text(k).strip().lower() in _IMDS_ADAPTER_ERROR_KEYS for k in resp):
+                    resp["error"] = "[failure marker retained from nested confirming-call metadata]"
+                if resp:
+                    call["response"] = resp
+
+        retained: dict[str, Any] = {"secret_type": _coerce_text(src.get("secret_type"))[:cap].lower()}
+        if cred:
+            retained["credential"] = cred
+        if call:
+            retained["confirming_call"] = call
+        return cls(bug_class=bug_class, secret_capture=retained)
+
+    @classmethod
     def from_process_output(
         cls, captured: Any, *, bug_class: str = "crash"
     ) -> "FindingContext":
@@ -1395,6 +1462,8 @@ class FindingContext(BaseModel):
                 ctx["saml_candidate_certs"] = self.saml_candidate_certs
         if self.imds_capture is not None:
             ctx["imds_capture"] = self.imds_capture
+        if self.secret_capture is not None:
+            ctx["secret_capture"] = self.secret_capture
         # AEGIS (defensive dual) — only wired when both halves of a paired oracle are present.
         if self.canary is not None and self.llm_output is not None:
             ctx["canary"] = self.canary
