@@ -145,6 +145,14 @@ screens:
     description: The reasoning brain — the propose-only decision engine (an ordered attack chain of gated LEADs), intelligence, memory, priors, and the capability catalog.
     synonyms: [brain, intelligence, reasoning, memory, catalog, capabilities, decision engine, attack chain, propose, hexstrike, agent body]
 
+  - id: mcp
+    label: MCP Servers
+    group: MANAGE
+    owner: false
+    plane: unified
+    description: The gated CRUCIBLE capabilities this engine EXPOSES to an external MCP (Model Context Protocol) client over an on-host stdio server — a fixed, fail-closed allowlist, each shown with its gate posture (tier / gated / observation / read-only). Read-only listing; the stdio server is started from the CLI.
+    synonyms: [mcp, model context protocol, mcp servers, exposed tools, mcp seam, stdio server, reverify_finding, declared_service, tool server]
+
   - id: compliance
     label: Compliance
     group: MANAGE

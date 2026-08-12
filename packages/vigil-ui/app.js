@@ -38,6 +38,7 @@
       { id: "apikeys", label: "API Keys", icon: "key", owner: true, ready: true },
       { id: "tools", label: "Tools", icon: "bolt", ready: true },
       { id: "brain", label: "Brain", icon: "brain", ready: true },
+      { id: "mcp", label: "MCP Servers", icon: "bolt", ready: true },
       { id: "compliance", label: "Compliance", icon: "shield", ready: true },
       { id: "assurance", label: "Assurance", icon: "find", ready: true },
       { id: "settings", label: "Settings", icon: "gear", owner: true, ready: true },
@@ -3956,6 +3957,51 @@
     { id: "memory", label: "Memory" }, { id: "benchmark", label: "Benchmark" },
     { id: "catalog", label: "Catalog" }, { id: "intel", label: "Intel" }, { id: "planner", label: "Planner" },
   ];
+
+  // MCP Servers — the gated CRUCIBLE capabilities this engine EXPOSES to an external MCP (Model Context
+  // Protocol) client over an on-host stdio server. READ-ONLY: it lists the fixed, fail-closed allowlist of
+  // exposable tools + their gate posture (tier / gated / observation / read-only). Starting the stdio server
+  // (`crucible mcp serve --slug <engagement>`) is a CLI act; a UI start/stop toggle is a later slice.
+  function renderMcp(screen) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "MCP Servers"),
+        h("span.sub", null, "The gated capabilities this engine exposes to an external MCP (Model Context Protocol) client over an on-host stdio server.")]),
+      h("div#mcp-body", { style: { marginTop: "16px" } }, h("div.empty", null, "Loading MCP capabilities…")),
+    ]);
+    V.getJSON(OFF("/api/mcp")).then(drawMcp).catch(function () {
+      V.mount(V.$("#mcp-body"), h("div.empty", null, [
+        h("div.big", null, "Offense engine offline"),
+        h("p", null, "Could not reach the offense console to list MCP capabilities. Start it (`vigil up`) and reload."),
+      ]));
+    });
+  }
+
+  function drawMcp(d) {
+    var body = V.$("#mcp-body"); if (!body) return;
+    var tools = (d && d.exposed_tools) || [];
+    function toolCard(t) {
+      var m = (t._meta && t._meta.crucible) || {};
+      var ann = t.annotations || {};
+      return V.card(t.name, "GATED", [
+        h("p", { style: { marginTop: "0", color: "var(--text-1)" } }, t.description || ""),
+        h("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "8px" } }, [
+          V.pill("tier " + (m.tier || "T1"), "", null),
+          m.gated ? V.pill("gated", "", null) : null,
+          V.pill(m.provenance || "observation", "idle", null),
+          ann.readOnlyHint ? V.pill("read-only", "up", null) : null,
+        ]),
+      ], false);
+    }
+    V.mount(body, [
+      h("div.legend", { style: { marginBottom: "12px" } }, [V.icon("info"), d.note || ""]),
+      tools.length
+        ? h("div.grid.cols-2", { style: { alignItems: "start" } }, tools.map(toolCard))
+        : h("div.empty", null, "No MCP capabilities are exposed in this build."),
+      h("div.legend", { style: { marginTop: "12px" } }, [V.icon("info"),
+        "Transport: " + (d.transport || "stdio") + " — on-host, no network surface. Start the server with `crucible mcp serve --slug <engagement>`."]),
+    ]);
+  }
+
   function renderBrain(screen) {
     var B = { tab: (hashQuery().tab) || "decide", runs: [], run: null, catalogQ: "" };
     V.mount(screen, [
@@ -5389,6 +5435,7 @@
     if (id === "defense") { renderDefense(screen); return; }
     if (id === "fixes") { renderFixes(screen); return; }
     if (id === "brain") { renderBrain(screen); return; }
+    if (id === "mcp") { renderMcp(screen); return; }
     if (id === "compliance") { renderCompliance(screen); return; }
     if (id === "assurance") { renderAssurance(screen); return; }
     if (id === "report") { renderReport(screen); return; }
