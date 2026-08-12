@@ -1,0 +1,235 @@
+# A14 — supply-chain / packaging hardening gate.
+#
+# WHY A SEPARATE WORKFLOW. The jobs in ci.yml prove the SYSTEM behaves. This one proves the
+# INPUTS to that system are the ones we chose: the base images, the third-party wheels, and
+# the transitive tree underneath them. Those are the parts an attacker can change without
+# touching this repository at all.
+#
+# WHAT RUNS WHERE. Everything that needs egress runs here, because it has to: hash-locking
+# resolves against PyPI, the vulnerability DB is downloaded, base-image digests are resolved
+# from a registry. The STATIC half — "is the result of that work committed, complete, and
+# still meaningful?" — is in integration/tests/test_supply_chain.py, so it also runs in the
+# ordinary `integration` job and holds even on a runner with no network.
+#
+# THRESHOLD (see docs/SUPPLY-CHAIN.md for the full policy):
+#   CRITICAL  -> BLOCKS the pull request.
+#   HIGH      -> reported in full, advisory.
+# A gate whose allow-list has to grow without limit to stay green is theatre; a gate that
+# blocks on CRITICAL and reports HIGH keeps meaning something. Every suppression in
+# .trivyignore carries a written justification, and a test enforces that.
+#
+# ADVISORY-BY-DESIGN steps: base-image drift and the HIGH report. Upstream retagging or
+# publishing an advisory is not a defect in the change under review, and a gate that goes red
+# for reasons the author cannot fix is a gate that gets switched off.
+
+name: a14-supply-chain
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Build-time tooling, version-pinned. Deliberately NOT in either requirements.in: adding a
+  # locker and an SBOM generator to a RUNTIME spec expands the deployed attack surface
+  # without expanding the runtime feature set.
+  PIP_TOOLS_VERSION: "7.6.1"
+  CYCLONEDX_VERSION: "7.3.1"
+  # Scanner, pinned by version AND by the sha256 of the release tarball. Installing a
+  # security scanner via `curl | sh` from an unpinned URL would be its own supply-chain hole.
+  TRIVY_VERSION: "0.73.0"
+  TRIVY_SHA256: "2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b"
+
+jobs:
+  supply-chain:
+    name: A14 supply-chain gate
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are themselves third-party code executing with this workflow's token, so they
+      # are pinned to full commit SHAs, not to mutable tags. A test asserts this stays true.
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: set up Python 3.13
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          # The locks are Python-minor specific (markers and the resolved set both depend on
+          # it), so this MUST match the PIN_PY in bin/verify-supply-chain.sh.
+          python-version: "3.13"
+
+      - name: install pinned build-time tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "pip-tools==${PIP_TOOLS_VERSION}" \
+            "cyclonedx-bom==${CYCLONEDX_VERSION}" \
+            "pytest>=8"
+          pip-compile --version
+          cyclonedx-py --version
+
+      # ------------------------------------------------------------------------------
+      # 1. Base images — a tag is a mutable pointer.
+      # ------------------------------------------------------------------------------
+
+      - name: base images are digest-pinned (offline)
+        run: python3 infra/supply-chain/image_pins.py --check
+
+      - name: base-image drift report (network, ADVISORY)
+        # Advisory on purpose: a tag moving upstream is not a defect in this PR, and re-pinning
+        # should be a deliberate act after reading a changelog — not something done under the
+        # pressure of a red build.
+        if: always()
+        continue-on-error: true
+        run: python3 infra/supply-chain/image_pins.py --drift
+
+      # ------------------------------------------------------------------------------
+      # 2. Dependency locks. Regeneration comes FIRST and its output is uploaded
+      #    unconditionally, so that when the drift check fails the very next step, the
+      #    correct file to commit is already an artifact of the failing run.
+      # ------------------------------------------------------------------------------
+
+      - name: regenerate both locks (harvestable artifact)
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p _a14_locks
+          regen() {  # regen <in> <committed-lock> <out>
+            local src="$1" committed="$2" out="$3"
+            # Seed from the committed lock when one exists: without --upgrade, pip-compile
+            # keeps pins that still satisfy the input, so a later diff means "the .in file
+            # changed", not "someone published to PyPI today".
+            if [ -f "$committed" ]; then cp "$committed" "$out"; fi
+            pip-compile --quiet --generate-hashes --no-header --strip-extras \
+                        --output-file="$out" "$src"
+            echo "::group::$out ($(grep -cE '^[A-Za-z0-9._-]+==' "$out") pinned requirements)"
+            cat "$out"
+            echo "::endgroup::"
+          }
+          regen engine/crucible/framework/v2/requirements.in \
+                engine/crucible/framework/v2/requirements.lock.txt \
+                _a14_locks/requirements.lock.txt
+          regen infra/supply-chain/sovereign.in \
+                infra/supply-chain/sovereign.lock.txt \
+                _a14_locks/sovereign.lock.txt
+
+      - name: upload regenerated locks
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: a14-regenerated-locks
+          path: _a14_locks/
+          if-no-files-found: warn
+
+      # bin/verify-supply-chain.sh had ZERO callers before A14 — a verification script nothing
+      # runs verifies nothing. This is its caller of record. It checks: the .in resolves; the
+      # lock is present, hash-pinned and not a placeholder; the lock is current w.r.t. the .in;
+      # and a CycloneDX SBOM regenerated from the lock agrees with it component-for-component.
+      - name: verify OFFENSE lock (engine/crucible) + SBOM cross-check
+        working-directory: engine/crucible
+        run: |
+          bash bin/verify-supply-chain.sh \
+            --report-upgrades \
+            --sbom-out=../../_a14_sbom/sbom-offense.cdx.json
+
+      # Same implementation, different pair. env-sovereign and env-offense must never share an
+      # interpreter (FATAL-2), so they cannot share a resolution either — hence two locks.
+      - name: verify SOVEREIGN lock (vigil_core + apps/sigil) + SBOM cross-check
+        env:
+          REQ_IN: infra/supply-chain/sovereign.in
+          REQ_LOCK: infra/supply-chain/sovereign.lock.txt
+        run: |
+          bash engine/crucible/bin/verify-supply-chain.sh \
+            --report-upgrades \
+            --sbom-out=_a14_sbom/sbom-sovereign.cdx.json
+
+      # ------------------------------------------------------------------------------
+      # 3. The hashes have to actually WORK. A lock full of hashes that pip rejects is a
+      #    document, not a control. `--require-hashes` makes pip refuse the entire file if
+      #    any requirement is unpinned or any artifact's digest does not match.
+      # ------------------------------------------------------------------------------
+
+      - name: prove `pip install --require-hashes` succeeds (offense lock)
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/a14-offense
+          /tmp/a14-offense/bin/pip install --require-hashes \
+            -r engine/crucible/framework/v2/requirements.lock.txt
+          /tmp/a14-offense/bin/python -c "import pydantic, httpx, cryptography, packaging; print('offense lock installs under --require-hashes')"
+
+      - name: prove `pip install --require-hashes` succeeds (sovereign lock)
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/a14-sovereign
+          /tmp/a14-sovereign/bin/pip install --require-hashes \
+            -r infra/supply-chain/sovereign.lock.txt
+          /tmp/a14-sovereign/bin/python -c "import cryptography, pydantic, qdrant_client; print('sovereign lock installs under --require-hashes')"
+
+      - name: upload SBOMs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: a14-sbom-cyclonedx
+          path: _a14_sbom/
+          if-no-files-found: warn
+
+      # ------------------------------------------------------------------------------
+      # 4. Vulnerability scan.
+      # ------------------------------------------------------------------------------
+
+      - name: install trivy (version- and sha256-pinned)
+        if: always()
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+          trivy --version
+
+      - name: cache the trivy vulnerability DB
+        if: always()
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ env.TRIVY_VERSION }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ env.TRIVY_VERSION }}-
+
+      # Full picture first, always, so the log shows what is being accepted as well as what
+      # is being blocked. HIGH is reported, not enforced (see the threshold note above).
+      - name: vulnerability report — HIGH + CRITICAL (ADVISORY, never blocks)
+        if: always()
+        continue-on-error: true
+        run: |
+          trivy fs --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore \
+            --exit-code 0 \
+            --no-progress \
+            .
+
+      # THE GATE. Non-zero exit here fails the job and blocks the PR.
+      - name: vulnerability GATE — CRITICAL blocks
+        if: always()
+        run: |
+          trivy fs --scanners vuln \
+            --severity CRITICAL \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            --no-progress \
+            .
+
+      # ------------------------------------------------------------------------------
+      # 5. The static assertions, run here too so this one job is a self-contained
+      #    statement of the A14 posture. `if: always()` so a failure earlier still tells
+      #    the author everything that is wrong, not just the first thing.
+      # ------------------------------------------------------------------------------
+
+      - name: static A14 assertions
+        if: always()
+        run: python -m pytest integration/tests/test_supply_chain.py -q

@@ -5,12 +5,16 @@
 # deployments install from the lock file; development can install
 # from this file directly.
 #
-# Regenerate the lock with:
-#   pip-compile --generate-hashes --output-file=requirements.lock.txt \
+# Regenerate the lock with (Python 3.13 — the lock is Python-minor
+# specific; --no-header keeps the output byte-comparable):
+#   pip install pip-tools==7.6.1
+#   pip-compile --generate-hashes --no-header --strip-extras \
+#               --output-file=framework/v2/requirements.lock.txt \
 #               framework/v2/requirements.in
 #
 # The verification script `bin/verify-supply-chain.sh` re-runs this
-# command and exits non-zero on drift. CI must run that script.
+# command and exits non-zero on drift. It is run by the "A14
+# supply-chain gate" CI job (.github/workflows/supply-chain.yml).
 #
 # Optional extras (pick what you actually use, then add to a separate
 # requirements file — never expand this base spec without review):
@@ -35,6 +39,12 @@ Jinja2>=3.1,<4
 # signed evidence certificates (entitlement/, authority/, evidence/). pyca; we do
 # not roll our own crypto. Runtime verifies; signing is provisioning-side.
 cryptography>=42,<50
+
+# Version parsing/comparison (VERSION_RANGE fact family, SBOM/CVE range predicates).
+# Declared a runtime dependency by BOTH engine/crucible/pyproject.toml and
+# framework/v2/pyproject.toml, and installed by every CI job — but it was absent from
+# this spec, so it was the one runtime dep the lock could never pin. (A14)
+packaging>=23
 
 # Test-only: HttpExecutor unit tests run against a local mock HTTP
 # server fixture so they never hit a real network. Sovereign-strict

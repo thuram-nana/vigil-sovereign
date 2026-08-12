@@ -22,8 +22,15 @@
 # =============================================================================
 
 services:
+  # A14 (supply chain) — every third-party image below is DIGEST-PINNED, and the previous
+  # ${QDRANT_VERSION:-latest} / ${OTEL_VERSION:-latest} indirections are deliberately GONE.
+  # A floating `latest` behind an env var is the exact drift this pinning exists to stop: it
+  # made `docker compose up` non-reproducible, and nothing in the repo ever set those vars.
+  # The pinned versions below are byte-identical to what `:latest` resolved to on 2026-08-12,
+  # so this is a no-op for behaviour and a strict gain in reproducibility.
+  # Re-pin with: bash infra/supply-chain/resolve-image-digests.sh  (see docs/SUPPLY-CHAIN.md)
   qdrant:
-    image: qdrant/qdrant:${QDRANT_VERSION:-latest}
+    image: qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
     restart: unless-stopped
     ports:
       - "127.0.0.1:6333:6333"          # REST/readyz
@@ -34,7 +41,7 @@ services:
     # — the Qdrant image ships no shell/curl for an in-container HEALTHCHECK.
 
   neo4j:
-    image: neo4j:5-community
+    image: neo4j:5-community@sha256:d9dd3dc7d1c78fa959191ff02dbdcbefadceaf83eee23428fb92a58cac8ad3fe
     profiles: ["graph"]
     restart: unless-stopped
     environment:
@@ -48,7 +55,7 @@ services:
       - neo4j-data:/data
 
   otel-collector:
-    image: otel/opentelemetry-collector:${OTEL_VERSION:-latest}
+    image: otel/opentelemetry-collector:0.158.0@sha256:5b97e6e3550ec6e48a71dba6f6304d349a293af8df4ee1f51da67be94fce2ecd
     profiles: ["observability"]
     restart: unless-stopped
     command: ["--config", "/etc/otelcol/config.yaml"]

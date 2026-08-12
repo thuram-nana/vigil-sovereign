@@ -1,0 +1,37 @@
+# env-sovereign — direct runtime dependencies (source spec for pip-compile).
+#
+# This is the INPUT. The hash-pinned, fully-resolved output lives beside it at
+# sovereign.lock.txt and is what a sovereign deployment installs:
+#
+#     pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
+#
+# Regenerate (Python 3.13 — the lock is Python-minor specific):
+#
+#     pip install pip-tools==7.6.1
+#     pip-compile --generate-hashes --no-header --strip-extras \
+#                 --output-file=infra/supply-chain/sovereign.lock.txt \
+#                 infra/supply-chain/sovereign.in
+#
+# The "A14 supply-chain gate" CI job re-runs that command against the committed lock and
+# fails on drift. See docs/SUPPLY-CHAIN.md.
+#
+# SCOPE. env-sovereign is the offense-free personal core: vigil_core + apps/sigil +
+# integration (envs/sovereign.txt). Only THIRD-PARTY deps are locked here — the three
+# first-party members are installed `-e` from the tree and carry no registry hash.
+# INVARIANT: nothing here may drag in framework.* (CRUCIBLE) or strix.*; that absence is
+# what makes sigil.reuse.assert_no_offense() hold by construction (FATAL-2).
+#
+# NOT locked here (deliberate): apps/sigil's optional extras (voice / secrets / capture /
+# dev). They are lazy-imported, degrade gracefully, and are not part of the default
+# deployed surface. Locking them would pin a large optional tree that no default install
+# pulls. `dev` extras are CI tooling, pinned in the workflow itself.
+
+# --- apps/sigil runtime (single source of truth: apps/sigil/requirements.txt, which is
+# --- kept in sync with the `dependencies` table of apps/sigil/pyproject.toml) ---
+-r ../../apps/sigil/requirements.txt
+
+# --- packages/core/vigil_core (the shared integrity substrate) ---
+# Both are already constrained tighter by apps/sigil above; they are restated because
+# vigil_core is independently installable and these are ITS declared floors.
+cryptography>=42
+pydantic>=2.10,<3
