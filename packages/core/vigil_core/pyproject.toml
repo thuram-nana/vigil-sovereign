@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "PolyForm-Noncommercial-1.0.0 OR Commercial" }  # see repo-root LICENSE + LICENSE-COMMERCIAL.md
 dependencies = [
-    "cryptography>=42",
+    "cryptography>=50",
     "pydantic>=2.10,<3",
 ]
 

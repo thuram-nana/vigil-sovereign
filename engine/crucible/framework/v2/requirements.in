@@ -43,7 +43,7 @@ Jinja2>=3.1,<4
 # Ed25519 signatures for the governance trust-root, engagement authorities, and
 # signed evidence certificates (entitlement/, authority/, evidence/). pyca; we do
 # not roll our own crypto. Runtime verifies; signing is provisioning-side.
-cryptography>=42,<50
+cryptography>=50,<51
 
 # Version parsing/comparison (VERSION_RANGE fact family, SBOM/CVE range predicates).
 # Declared a runtime dependency by BOTH engine/crucible/pyproject.toml and
