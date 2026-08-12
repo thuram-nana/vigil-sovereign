@@ -1,14 +1,15 @@
 # vigil-gateway — the host-side deny-default egress gate (the A7-hardened filtering forward proxy).
 #
-# Runtime is STDLIB-ONLY (see pyproject: dependencies = []), so the image is tiny and dependency-free:
-# just the package + a non-root user. The proxy needs no privileges — it binds a socket and dials only
-# charter-authorized hosts. The nftables L3/L4 backstop is applied HOST-side (needs CAP_NET_ADMIN), not
-# from this container.
+# Runtime is STDLIB-ONLY (see pyproject: dependencies = []), so the image carries no third-party RUNTIME
+# packages — just the gateway + a non-root user. The proxy needs no privileges: it binds a socket and dials
+# only charter-authorized hosts. The nftables L3/L4 backstop is applied HOST-side (needs CAP_NET_ADMIN),
+# not from this container. (Build note: `pip install .` still fetches the hatchling BUILD backend via PEP
+# 517 unless you build with a warm pip cache — the runtime image itself stays dependency-free.)
 #
 # Build (from the repo root):   docker build -t vigil-gateway:latest gateway
 # Run it via:                   vigil services up   (or docker compose -f infra/docker/docker-compose.yml up -d)
 #
-# The base is a build-arg so an air-gapped/offline builder can point it at a cached tag
+# The base is a build-arg so a builder with a cached base image can avoid a registry pull for it
 # (e.g. --build-arg PYTHON_BASE=python:3.11-slim); the runtime is stdlib-only, so any >=3.11 base works.
 ARG PYTHON_BASE=python:3.13-slim
 FROM ${PYTHON_BASE}

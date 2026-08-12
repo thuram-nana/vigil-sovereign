@@ -136,6 +136,11 @@ def test_render_compose_refuses_unsafe_charter_slug():
         with pytest.raises(ValueError, match="simple slug"):   # no YAML injection via the slug
             net.render_compose(charter_slug=bad)
     assert "demo-target_1" in net.render_compose(charter_slug="demo-target_1")   # a real slug is fine
+    # the sibling template var (gateway_image) is guarded the same way
+    for bad_img in ('x:latest\n    privileged: true', 'a b', 'x"y', "x\ncap_add: [ALL]"):
+        with pytest.raises(ValueError, match="image reference"):
+            net.render_compose(gateway_image=bad_img)
+    assert "myrepo/vigil-gateway:1.2.3" in net.render_compose(gateway_image="myrepo/vigil-gateway:1.2.3")
 
 
 # --------------------------- opt-in real build + smoke --------------------------------

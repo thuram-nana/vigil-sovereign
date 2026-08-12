@@ -67,10 +67,14 @@ class SandboxNetworking:
         The Strix sandbox is NOT declared here — Strix launches it itself; it only needs
         STRIX_DOCKER_SANDBOX_NETWORK set to ``sandbox_network``.
         """
-        # charter_slug is templated into the YAML — refuse anything but a simple slug so a value with a
-        # quote / newline can never break out of the string and inject compose config.
+        # BOTH templated values are guarded — a quote / newline in either would let it break out of its
+        # YAML scalar and inject compose directives (e.g. privileged: true). charter_slug: a simple slug;
+        # gateway_image: a valid docker image reference. (Red-pen: guard the sibling too, not just one.)
         if charter_slug and not re.fullmatch(r"[A-Za-z0-9._-]+", charter_slug):
             raise ValueError("charter_slug must be a simple slug ([A-Za-z0-9._-]); refusing to template "
+                             "an unsafe value into the compose file")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", gateway_image):
+            raise ValueError("gateway_image must be a valid docker image reference; refusing to template "
                              "an unsafe value into the compose file")
         bind_ip = self.sandbox_gateway_ip()
         return f"""\
