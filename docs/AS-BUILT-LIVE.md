@@ -227,8 +227,12 @@ allowlist + WARDEN gate + owner approval decide.**
   `ExecResult` JSON and returns 0 iff it ran. **UI** — the **Terminal** screen (`renderTerminal`, DO group)
   with an *Ask in plain English* card (AI proposes → Run / Edit / Cancel), an *Or type a command* card (live
   dryrun badge), a *SIGNED* output pane, and a read-only signed *history* — the **22nd** screen.
-- **Opt-in WARDEN-gating of the Strix `exec_command` shell** (T3): the vendored Strix agent's arbitrary shell
-  is now WARDEN-**gateable** via `VIGIL_WARDEN_STRIX_GATE` — **opt-in / gateable, NOT gated by default.**
+- **WARDEN-gating of the Strix `exec_command` shell** (T3): the vendored Strix agent's arbitrary shell is
+  WARDEN-gated. T3 shipped it opt-in via `VIGIL_WARDEN_STRIX_GATE`; **#178 made it ON BY DEFAULT** and
+  **#296 made it FAIL-CLOSED** — a wiring failure now raises `WardenGateUnavailable` and stops the run
+  instead of falling back to an ungated shell. The env var is now the explicit **opt-OUT**
+  (∈ {`0`,`off`,`false`,`no`}); a bare vendored Strix checkout with no `vigil_integration` on the path is
+  unaffected and stays byte-identical.
 
 The *session-omniscient* advanced layer (**T2b** — session Q&A, cross-session knowledge fusion, ASK/DO modes,
 a minimize/maximize chat dock, a signed replayable transcript exported in the one-click dossier, teach-mode)
