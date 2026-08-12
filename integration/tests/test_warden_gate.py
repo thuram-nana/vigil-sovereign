@@ -275,7 +275,13 @@ def test_attach_from_env_fails_CLOSED_when_wiring_broken(monkeypatch, tmp_path):
 
 def test_a_healthy_wire_still_composes_the_gate(monkeypatch, tmp_path):
     """MUTATION CONTROL for the test above: the raise is caused by the BROKEN wire, not unconditional.
-    With the real composer in place the same call returns a COMPOSED (gated) hooks object."""
+    With a WORKING composer the same call returns a COMPOSED (gated) hooks object.
+
+    Uses the module's fake-SDK helper rather than the real ``agents`` package, so the control is
+    load-bearing in EVERY environment — including the sovereign / two-env-boundary leg where the SDK is
+    deliberately absent. (Relying on the real SDK would make this control silently skip exactly where the
+    fail-closed path is most interesting.)"""
+    _install_fake_agents(monkeypatch)
     monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)   # default-on
     monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path))
     base = object()
