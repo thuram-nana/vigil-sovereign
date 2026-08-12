@@ -4336,7 +4336,8 @@
           b.runs.map(function (r) { return h("option", { value: r.run_id, selected: b.run && r.run_id === b.run.run_id }, (r.mode || "url") + " · " + (r.target || r.slug || r.run_id)); })),
       ]) : null;
       var slot = h("div#brain-rs", { style: { marginTop: "12px" } }, h("div.empty", null, b.runs.length ? "Loading…" : ("No engagements yet — " + tab + " is per-engagement.")));
-      V.mount(v, [picker, slot]);
+      var actPanel = b.run ? brainRunAction(tab, (b.run.slug || b.run.run_id)) : null;
+      V.mount(v, [picker, actPanel, slot]);
       if (!b.run) return;
       var slug = b.run.slug || b.run.run_id;
       V.getJSON(OFF(ep + encodeURIComponent(slug))).then(function (data) {
@@ -4348,6 +4349,49 @@
         ]);
       }).catch(function () { var host = V.$("#brain-rs"); if (host) V.mount(host, h("div.empty", null, "Could not load " + tab + ".")); });
     }).catch(function () { V.mount(v, offlineEmpty()); });
+  }
+
+  // The per-engagement ACTION for the intel/planner tabs. Planner: compute the read-only plan projection
+  // (`plan <slug>` — no traffic, no tools). Intel: run OFFLINE recon (`intel ingest` — passive collectors,
+  // no egress; live collection is a charter-gated engagement, never a one-click button). Both are owner-plane.
+  function brainRunAction(tab, slug) {
+    var out = h("div#brain-act-out", { style: { marginTop: "10px" } });
+    if (tab === "planner") {
+      var pbtn = h("button.btn.owner", { onClick: function () {
+        pbtn.disabled = true; pbtn.textContent = "Computing…";
+        V.mount(out, h("div.hint", null, "Projecting the ranked plan over the persisted world-model…"));
+        V.postJSON(OFF("/api/planner/run"), { slug: slug }).then(function (r) {
+          if (!r || r.ok !== true) { V.mount(out, brainActErr((r && r.error) || "planner failed")); return; }
+          V.mount(out, [h("div.legend", null, [V.icon("check"), h("span", null, "Read-only projection — no traffic, no tools.")]),
+            h("pre.code.scroll-x", null, r.plan || "(empty plan)")]);
+        }).catch(function () { V.mount(out, brainActErr("could not reach the planner action")); })
+          .then(function () { pbtn.disabled = false; pbtn.textContent = "Compute plan projection"; });
+      } }, "Compute plan projection");
+      return V.card("Planner", "READ-ONLY PROJECTION", [
+        h("p.dim", { style: { marginBottom: "10px" } }, "Reason over the world-model a prior spine engagement persisted and print the ranked attack plan. It sends no traffic and drives no tools."),
+        pbtn, out], true);
+    }
+    // intel tab
+    var seed = h("input", { type: "text", placeholder: "apex domain, e.g. example.com", style: { maxWidth: "320px" } });
+    var ibtn = h("button.btn.owner", { onClick: function () {
+      var val = (seed.value || "").trim();
+      if (!val) { V.mount(out, brainActErr("enter an apex domain to seed the offline recon")); return; }
+      ibtn.disabled = true; ibtn.textContent = "Ingesting…";
+      V.mount(out, h("div.hint", null, "Running passive collectors over bundled fixtures (offline)…"));
+      V.postJSON(OFF("/api/intel/run"), { slug: slug, seed: val }).then(function (r) {
+        if (!r || r.ok !== true) { V.mount(out, brainActErr((r && r.error) || "intel ingest failed")); return; }
+        V.mount(out, [h("div.legend", null, [V.icon("check"), h("span", null, "Offline ingest for " + (r.seed || val) + " — no egress. Reload the tab to see the updated world-model.")]),
+          r.output ? h("pre.code.scroll-x", null, r.output) : null]);
+      }).catch(function () { V.mount(out, brainActErr("could not reach the intel action")); })
+        .then(function () { ibtn.disabled = false; ibtn.textContent = "Run offline recon"; });
+    } }, "Run offline recon");
+    return V.card("Intel recon", "OFFLINE", [
+      h("p.dim", { style: { marginBottom: "10px" } }, "Ingest passive recon for this engagement from bundled fixtures — no network. Live collection is a charter-gated engagement decision, never a one-click button, so this control cannot egress."),
+      h("div.row-flex", { style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } }, [seed, ibtn]),
+      out], true);
+  }
+  function brainActErr(msg) {
+    return h("div.legend", { style: { borderColor: "var(--bad-line)" } }, [V.icon("x"), h("span", null, String(msg))]);
   }
 
   // ---- Chat -----------------------------------------------------------------

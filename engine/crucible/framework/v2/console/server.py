@@ -521,6 +521,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # loopback-only + incumbent-free by construction, BOUNDED + fail-soft; no target/scope/egress.
                 self._json(actions.benchmark_run(body))
                 return
+            if path == "/api/planner/run":
+                # Brain > Planner tab: compute the READ-ONLY attack-plan projection for an engagement
+                # (`plan <slug>` — loads the persisted --spine world-model, prints the ranked plan; NO
+                # traffic, NO tools, NO persist). CSRF/rebind-gated above; only the allowlist-validated slug
+                # reaches the argv; BOUNDED + fail-soft.
+                self._json(actions.planner_compute(body))
+                return
+            if path == "/api/intel/run":
+                # Brain > Intel tab: run OFFLINE intel recon for an engagement (`intel ingest` — passive
+                # collectors over bundled fixtures; `--live` is NEVER passed, so it cannot egress). CSRF/
+                # rebind-gated above; slug + seed-domain both allowlist-validated; BOUNDED + fail-soft.
+                self._json(actions.intel_ingest_offline(body))
+                return
             if path == "/api/session/create":
                 # F2: create a named session. CSRF/rebind-gated above; the registry mints no fact and
                 # authorizes nothing — it only organises runs/chats under an operator-editable name.

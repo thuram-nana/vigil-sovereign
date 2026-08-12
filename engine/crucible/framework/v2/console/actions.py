@@ -2171,3 +2171,70 @@ def benchmark_run(body: dict) -> dict:
         return {"ok": False, "error": f"could not read benchmark result: {str(e)[-200:]}"}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---- Brain launch actions (planner projection + OFFLINE intel recon) -------------------------------------
+# Both spawn the SAME already-gated `framework.v2` subcommand a hand-run uses, anchored on THIS module so
+# `-m framework.v2` imports the running code (not a CRUCIBLE_ROOT-redirected copy). Bounded + fail-soft.
+_PLAN_TIMEOUT = 300.0
+_INTEL_TIMEOUT = 600.0
+# A seed apex-domain for offline intel ingest: a dotted hostname. NEVER a URL/CIDR/path (no scheme, no '/'),
+# so it can't smuggle a live URL or a network range in. It is argv (no shell), so this is defence in depth.
+_SEED_DOMAIN_RE = re.compile(r"^(?=.{1,253}\Z)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\Z")
+
+
+def _framework_root() -> Path:
+    """The dir that holds framework/ — anchored on THIS running module, so `-m framework.v2` runs the code
+    the console is actually running (immune to a CRUCIBLE_ROOT redirect to a vendored copy)."""
+    return Path(__file__).resolve().parents[3]
+
+
+def planner_compute(body: dict) -> dict:
+    """Compute the READ-ONLY attack-plan projection for an engagement (`framework.v2 plan <slug>`): it loads
+    the world-model a prior `engage --spine` persisted, reasons over the goal tree, and prints the ranked
+    plan. It sends NO traffic, drives NO tools, and persists nothing — a pure projection. The ONLY request
+    input is the slug, which is allowlist-validated (`_valid_slug`: no traversal, no injection); nothing
+    request-derived otherwise reaches the argv. BOUNDED + fail-soft. Same-origin/rebind-gated by do_POST."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    if not _valid_slug(slug):
+        return {"ok": False, "error": "a valid engagement slug is required"}
+    cmd = [sys.executable, "-m", "framework.v2", "plan", slug]
+    try:
+        proc = subprocess.run(cmd, cwd=str(_framework_root()), capture_output=True, text=True,  # noqa: S603
+                              timeout=_PLAN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"planner exceeded {int(_PLAN_TIMEOUT)}s and was stopped"}
+    except Exception as e:  # noqa: BLE001 — the console must never 500 on an action
+        return {"ok": False, "error": str(e)[-400:]}
+    if proc.returncode != 0:
+        # A missing --spine world-model prints a legible CrucibleError + exits non-zero → surface it, no 500.
+        return {"ok": False, "error": (proc.stderr or proc.stdout or "planner failed").strip()[-800:]}
+    return {"ok": True, "slug": slug, "plan": (proc.stdout or "").strip()[-40000:]}
+
+
+def intel_ingest_offline(body: dict) -> dict:
+    """Run OFFLINE intel recon for an engagement (`framework.v2 intel ingest --seed <domain> --slug <slug>`)
+    — passive collectors over bundled fixtures, NO network. `--live` is NEVER passed here: live collection is
+    a charter-gated engagement decision, not a one-click button, so this action structurally cannot egress.
+    Request inputs are BOTH allowlist-validated — the slug (`_valid_slug`) and the seed (a dotted domain, not
+    a URL/CIDR/path) — and nothing else reaches the argv. BOUNDED + fail-soft. Same-origin/rebind-gated."""
+    body = body if isinstance(body, dict) else {}
+    slug = str(body.get("slug", "")).strip()
+    seed = str(body.get("seed", "")).strip().lower()
+    if not _valid_slug(slug):
+        return {"ok": False, "error": "a valid engagement slug is required"}
+    if "://" in seed or "/" in seed or not _SEED_DOMAIN_RE.match(seed):
+        return {"ok": False, "error": "seed must be an apex domain (e.g. example.com) — not a URL, CIDR, or path"}
+    # OFFLINE ONLY — no --live, ever. The passive collectors read bundled fixtures; no egress.
+    cmd = [sys.executable, "-m", "framework.v2", "intel", "ingest", "--seed", seed, "--slug", slug]
+    try:
+        proc = subprocess.run(cmd, cwd=str(_framework_root()), capture_output=True, text=True,  # noqa: S603
+                              timeout=_INTEL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"intel ingest exceeded {int(_INTEL_TIMEOUT)}s and was stopped"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[-400:]}
+    if proc.returncode != 0:
+        return {"ok": False, "error": (proc.stderr or proc.stdout or "intel ingest failed").strip()[-800:]}
+    return {"ok": True, "slug": slug, "seed": seed, "output": (proc.stdout or "").strip()[-20000:]}
