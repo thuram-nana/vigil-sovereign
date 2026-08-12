@@ -4851,12 +4851,21 @@ def imds_credential_capture_oracle(observed: Any) -> OracleSignal:
     pure oracle judges what that runner captured, so a confirmed FACT re-verifies offline from its
     certificate.
 
-    STATUS (audit B3) — **EXPERIMENTAL / OFFLINE-VERIFICATION ONLY.** This is the sound offline
-    verifier for an IMDS capture; it is NOT a completed end-to-end E1 exploitation proof. The live
-    WARDEN-A2-gated IMDS runner, the ``cloud_exploit.imds.credential_capture`` evidence branch, the
-    admission/verdict route, the D2 certificate binding, the attack-path/world-model projection, the
-    veracity-firewall wiring, and a live fixture are BLOCKING WORK (not yet built). Until they land, this
-    oracle only adjudicates a capture the operator supplies — it never itself reaches a metadata endpoint.
+    STATUS (E1-Slice3) — **OFFLINE-WIRED; real-transport LIVE-FIRE deferred.** The capability is now wired
+    end-to-end OFFLINE: the WARDEN-A2- + D5-scope-gated runner
+    (``integration/vigil_integration/live/imds_runner.py``), the ``cloud_exploit.imds.credential_capture``
+    evidence branch (``docs/capability-matrix/evidence-branches.json``), the admission/verdict route + D2
+    certificate mint (``integration/vigil_integration/live/imds_verify.py`` →
+    ``verdict.admit`` → ``oracle_adapter.certify_admitted``), and the attack-path/world-model projection
+    (``scanner/orchestrator.py:_establish_imds_capture`` — a HELD credential chaining via
+    OWN_VIA_HELD_CREDENTIAL) are all built and fixture-proven; the D2 cert binding and the veracity-firewall
+    re-execution engage automatically (both are generic over any finding carrying an ``oracle_context``, so a
+    minted FACT re-verifies OFFLINE from its certificate). The oracle stays deliberately OUT of the frozen
+    ``_ALL_ORACLES`` fallback, so nothing on the scan/engage/benchmark path ever mints this finding — the
+    capability fires ONLY when the producer is called explicitly over a runner capture. **Still deferred:**
+    real-transport LIVE-FIRE (running the runner with a real httpx transport against an authorized lab
+    metadata endpoint) is credential-gated (an operator-provisioned lab credential); there is no live FACT
+    yet. This pure oracle itself never reaches a metadata endpoint — it re-derives over a retained capture.
 
     ``observed`` is the JSON-safe retained capture::
 

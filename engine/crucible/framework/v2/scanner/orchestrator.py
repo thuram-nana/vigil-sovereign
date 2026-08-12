@@ -211,6 +211,10 @@ class AutonomousCampaign:
             # the attacker has reached this confirmed-vulnerable surface
             attacker.reach(ep_id, seq=seq.next(), provenance=f"finding:{f.bug_class}", confidence=f.confidence)
             self._establish_topology(world, ep_id, f.bug_class, f.confidence, seq)
+            if f.bug_class == "imds_credential_capture":
+                # E1 achieved effect: a confirmed metadata credential capture — the attacker HOLDS a valid
+                # cloud credential, which chains (OWN_VIA_HELD_CREDENTIAL) to account takeover.
+                self._establish_imds_capture(world, attacker, ep_id, f.confidence, seq)
 
         # passive findings feed chains too: a disclosed private key IS a credential
         # the attacker can capture, which the extended operators turn into account
@@ -274,6 +278,23 @@ class AutonomousCampaign:
         world.add_node(Node(id=principal, kind=NodeKind.PRINCIPAL, attrs={},
                             provenance=prov, confidence=0.9, first_seen=seq.peek(), last_seen=seq.next()))
         _edge(world, cred, principal, EdgeKind.VALID_ON, prov, 0.9, seq)
+
+    def _establish_imds_capture(self, world: WorldModel, attacker: "AttackerState", ep_id: str,
+                                conf: float, seq: "_Seq") -> None:
+        """A confirmed IMDS/metadata credential capture (E1 achieved effect): the attacker HOLDS a cloud
+        credential proven valid by a confirming call. Mint the credential + its principal + a VALID_ON edge
+        and record the attacker's HOLD, so the graph chains via OWN_VIA_HELD_CREDENTIAL (HOLDS(cred) +
+        VALID_ON(cred->principal) => OWNS(principal)) to account takeover — the same achieved-effect topology
+        the leaked-key capture chain consumes, but seeded by a confirmed live capture rather than a leak."""
+        prov = "finding:imds_credential_capture"
+        cred, principal = f"credential:imds:{ep_id}", f"principal:imds:{ep_id}"
+        world.add_node(Node(id=cred, kind=NodeKind.CREDENTIAL,
+                            attrs={"source": "instance-metadata", "confirmed": True},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        world.add_node(Node(id=principal, kind=NodeKind.PRINCIPAL, attrs={},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        _edge(world, cred, principal, EdgeKind.VALID_ON, prov, conf, seq)
+        attacker.hold(cred, seq=seq.next(), provenance=prov, confidence=conf)
 
     def _extract_paths(self, world: WorldModel) -> list[AttackPath]:
         if world.get_node(ATTACKER_ID) is None:
