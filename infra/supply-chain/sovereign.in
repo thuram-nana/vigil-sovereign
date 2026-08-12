@@ -37,5 +37,5 @@
 # --- packages/core/vigil_core (the shared integrity substrate) ---
 # Both are already constrained tighter by apps/sigil above; they are restated because
 # vigil_core is independently installable and these are ITS declared floors.
-cryptography>=42
+cryptography>=50
 pydantic>=2.10,<3
