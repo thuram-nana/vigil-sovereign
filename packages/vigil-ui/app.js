@@ -4246,7 +4246,20 @@
             h("div.v", null, "tp " + (sc.tp != null ? sc.tp : "—") + " · fp " + (sc.fp != null ? sc.fp : "—") + " · fn " + (sc.fn != null ? sc.fn : "—"))]));
         });
       });
+      // The LIVE-run panel: an owner-plane action that re-derives this host's score right now against the
+      // in-process labelled corpus (the same soundness check the make-gate regression runs). Self-contained —
+      // no target, no scope, no egress. Result renders below the button.
+      var liveSlot = h("div#bench-live", { style: { marginTop: "10px" } });
+      var runBtn = h("button.btn.owner", { onClick: function () { runBenchmark(runBtn, liveSlot); } },
+        "Run benchmark now");
       V.mount(v, [
+        V.card("Run the soundness benchmark", "LIVE", [
+          h("p.dim", { style: { marginBottom: "10px" } },
+            "Score CRUCIBLE against the in-process corpus of 11 planted bugs + 5 safe controls, live. It runs " +
+            "loopback-only with no incumbents — no external target, no scope, no egress. A precise result is " +
+            "every planted bug found (tp) and zero safe controls flagged (fp)."),
+          runBtn, liveSlot,
+        ], true),
         V.card("Benchmark baseline", "CALIBRATION", [
           h("p.dim", { style: { marginBottom: "10px" } }, base.label || "the in-process benchmark corpus"),
           rows.length ? h("div.stack", null, rows) : h("div.empty", null, "No benchmark scores recorded yet."),
@@ -4254,6 +4267,36 @@
         h("div.legend", null, [V.icon("info"), h("span", null, "tp = planted bugs found · fp = safe controls wrongly flagged · fn = missed bugs. The corpus includes safe controls a precise engine must leave alone.")]),
       ]);
     }).catch(function () { V.mount(v, offlineEmpty()); });
+  }
+  function runBenchmark(btn, slot) {
+    if (btn) { btn.disabled = true; btn.textContent = "Running… (up to ~5 min)"; }
+    V.mount(slot, h("div.hint", { style: { marginTop: "10px" } }, "Standing up the corpus and scoring CRUCIBLE…"));
+    V.postJSON(OFF("/api/benchmark/run"), {}).then(function (r) {
+      if (!r || r.ok !== true) {
+        V.mount(slot, h("div.legend", { style: { marginTop: "10px", borderColor: "var(--bad-line)" } },
+          [V.icon("x"), h("span", null, "Benchmark did not complete: " + ((r && r.error) || "unknown error"))]));
+        return;
+      }
+      var s = r.result || {};
+      function num(x) { return (x == null) ? "—" : x; }
+      function pct(x) { return (typeof x === "number") ? Math.round(x * 100) + "%" : "—"; }
+      var clean = (s.fp === 0);
+      V.mount(slot, [
+        h("div.grid.cols-4", { style: { marginTop: "10px" } }, [
+          V.tile("True positives", String(num(s.tp)), "planted bugs found", "ok"),
+          V.tile("False positives", String(num(s.fp)), clean ? "safe controls flagged" : "FLAGGED a safe control", clean ? "ok" : "danger"),
+          V.tile("False negatives", String(num(s.fn)), "planted bugs missed", null),
+          V.tile("F1", pct(s.f1), "precision " + pct(s.precision) + " · recall " + pct(s.recall), null),
+        ]),
+        h("div.legend", { style: { marginTop: "10px" } }, [V.icon(clean ? "check" : "x"),
+          h("span", null, clean
+            ? ("Live: CRUCIBLE flagged none of the safe controls" + (s.elapsed_s != null ? " (" + Number(s.elapsed_s).toFixed(1) + "s)" : "") + " — the soundness/FP property holds on this host.")
+            : "Live: a safe control was flagged — investigate before trusting this build's precision.")]),
+      ]);
+    }).catch(function () {
+      V.mount(slot, h("div.legend", { style: { marginTop: "10px", borderColor: "var(--bad-line)" } },
+        [V.icon("x"), h("span", null, "Could not reach the benchmark action.")]));
+    }).then(function () { if (btn) { btn.disabled = false; btn.textContent = "Run benchmark now"; } });
   }
 
   function brainCatalog(v, b) {

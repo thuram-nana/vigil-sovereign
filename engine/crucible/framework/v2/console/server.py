@@ -515,6 +515,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # CLOSED service set, no request-controlled service/image/command; idempotent; fail-soft.
                 self._json(actions.services_up(body))
                 return
+            if path == "/api/benchmark/run":
+                # Brain > Benchmark screen: run the CRUCIBLE-only soundness benchmark LIVE (the same 11|0|0
+                # the make-gate regression runs). CSRF/rebind-gated above; FIXED argv (no request input),
+                # loopback-only + incumbent-free by construction, BOUNDED + fail-soft; no target/scope/egress.
+                self._json(actions.benchmark_run(body))
+                return
             if path == "/api/session/create":
                 # F2: create a named session. CSRF/rebind-gated above; the registry mints no fact and
                 # authorizes nothing — it only organises runs/chats under an operator-editable name.
