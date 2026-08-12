@@ -1,4 +1,14 @@
-FROM kalilinux/kali-rolling:latest
+# A14 (supply chain): digest-pinned. `kali-rolling:latest` is a ROLLING tag on a distro that
+# retags continuously, so this build was previously non-reproducible by construction — two builds
+# a day apart could ship different toolchains into the sandbox that executes offensive actions.
+# The digest makes the base content-addressed: it either matches or the pull fails.
+#
+# NOTE this file is a VIGIL fork of the upstream Strix container (it COPYs strix/tools/proxy/
+# caido_api.py, adds agent-browser + Caido). Only the FROM line is changed here; upstream
+# authorship of the rest is unchanged. Re-pin with:
+#   bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
+# kalilinux/kali-rolling:latest, resolved 2026-08-12.
+FROM kalilinux/kali-rolling:latest@sha256:f49124869e4eee549315879c3bd7ef92f23b8753fec7544537bcec1493277096
 
 LABEL description="AI Agent Penetration Testing Environment with Comprehensive Automated Tools"
 

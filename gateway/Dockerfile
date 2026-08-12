@@ -11,7 +11,15 @@
 #
 # The base is a build-arg so a builder with a cached base image can avoid a registry pull for it
 # (e.g. --build-arg PYTHON_BASE=python:3.11-slim); the runtime is stdlib-only, so any >=3.11 base works.
-ARG PYTHON_BASE=python:3.13-slim
+#
+# A14 (supply chain): the DEFAULT is digest-pinned. A tag is a mutable pointer — `python:3.13-slim`
+# alone means "whatever the registry serves today", so a silently-retagged or compromised base would
+# be pulled with no signal. A digest is content-addressed: it either matches or the pull fails.
+# Overriding --build-arg PYTHON_BASE=<unpinned> remains possible and is the operator's call; the
+# committed default is what CI and `vigil services up` actually build, and that is pinned.
+# Re-pin with: bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
+# python:3.13-slim, resolved 2026-08-12.
+ARG PYTHON_BASE=python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 FROM ${PYTHON_BASE}
 
 # A dedicated unprivileged user — the proxy drops all capabilities and runs read-only in compose.

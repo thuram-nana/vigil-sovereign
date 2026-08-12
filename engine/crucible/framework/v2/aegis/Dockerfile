@@ -11,8 +11,14 @@
 # CI. The image ships NO secrets and NO offensive tooling data — only the importable
 # Python package. The per-deployment secret / entitlement are supplied at run time.
 # Full walkthrough: framework/v2/aegis/QUICKSTART.md.
+#
+# A14 (supply chain): digest-pinned. This is a public-facing DATA PLANE — it sits inline in front
+# of someone's app — so "whatever :3.11-slim resolves to today" is not an acceptable provenance
+# story for it. A digest is content-addressed: it either matches or the pull fails.
+# Re-pin with: bash infra/supply-chain/resolve-image-digests.sh   (see docs/SUPPLY-CHAIN.md)
+# python:3.11-slim, resolved 2026-08-12.
 
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:90744cff8f32887f075c47d747a173ff333e9e98801667af93c357fa9f5e28ff
 
 # --- build + install the package (the repo-root pyproject delivers importable framework.v2) ---
 WORKDIR /src
