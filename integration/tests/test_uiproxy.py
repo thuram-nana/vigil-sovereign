@@ -467,7 +467,7 @@ def test_child_env_is_unbuffered():
 def test_cockpit_timeout_tolerates_bad_and_degenerate_values(monkeypatch):
     # B6/B6-4: a bad OR degenerate-but-float-valid VIGIL_UP_COCKPIT_TIMEOUT must fall back to 120 — never
     # raise (import-time), never hang forever (inf/1e999), never abort instantly (nan / <=0).
-    for bad in ("not-a-number", "inf", "1e999", "-inf", "nan", "0", "-5"):
+    for bad in ("not-a-number", "inf", "1e999", "1e300", "-inf", "nan", "0", "-5", "1e-9", "0.5", "99999"):
         monkeypatch.setenv("VIGIL_UP_COCKPIT_TIMEOUT", bad)
         assert uiproxy._cockpit_timeout() == 120.0, bad
     monkeypatch.setenv("VIGIL_UP_COCKPIT_TIMEOUT", "45")

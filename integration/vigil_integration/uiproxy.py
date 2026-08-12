@@ -690,7 +690,10 @@ def _cockpit_timeout() -> float:
         t = float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))
     except (TypeError, ValueError):
         return 120.0
-    if t != t or t == float("inf") or t <= 0:   # nan / +inf / non-positive → the sane default
+    # Reject the whole degenerate class → 120: nan, +inf/1e300 (~forever hang, worse than the bug this
+    # fixed), and <=1s / non-positive (instant spurious abort of a healthy cockpit). A real cold-start
+    # budget lives in [1s, 3600s]; anything outside is a misconfiguration, not an intent.
+    if t != t or t <= 1 or t > 3600:
         return 120.0
     return t
 
