@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -2114,3 +2115,59 @@ def services_up(body: dict) -> dict:
     except Exception as e:  # noqa: BLE001
         result["gateway_error"] = str(e)[-400:]
     return {"ok": True, "result": result}
+
+
+# The benchmark run is a self-contained, loopback-only soundness proof (the SAME 11|0|0 the `make gate`
+# regression gate runs): it stands up the in-process labelled corpus, points CRUCIBLE at it, and scores the
+# result against ground truth. No external target, no egress, no scope, no docker. Bounded so a pathological
+# run can never pin the console request thread forever.
+_BENCHMARK_TIMEOUT = 300.0
+
+
+def benchmark_run(body: dict) -> dict:
+    """Run the CRUCIBLE-only public benchmark LIVE and return this host's score (tp/fp/fn/precision/recall/f1).
+
+    This is the on-demand soundness proof the Brain > Benchmark screen surfaces: it re-derives — right now,
+    against the in-process labelled corpus — the same numbers the committed baseline records, so the operator
+    can watch the engine flag every planted bug and none of the safe controls. It takes NO free input that
+    reaches the subprocess: the argv is FIXED (`benchmark --no-incumbents`), so it can never run an arbitrary
+    tool/target. Loopback-only by construction (BenchmarkCrucibleAdapter refuses a non-loopback base URL) and
+    incumbent-free (no sqlmap/wapiti/nikto invoked). BOUNDED (`_BENCHMARK_TIMEOUT`) and fail-soft — a
+    timeout/crash is reported as an error, never a 500. Same-origin/rebind-gated by do_POST.
+    """
+    _ = body if isinstance(body, dict) else {}     # this action takes no input; tolerate any/no body (never-raises)
+    # Anchor on THIS running module (…/framework/v2/console/actions.py) so `-m framework.v2` imports the same
+    # code the console runs — NOT paths.crucible_root(), which CRUCIBLE_ROOT can redirect to a vendored copy.
+    root = Path(__file__).resolve().parents[3]     # …/framework/v2/console/actions.py → the dir holding framework/
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="vigil-bench-"))
+    except OSError as e:     # a full/unwritable temp FS must not 500 the console either (honour "never raises")
+        return {"ok": False, "error": f"could not create a temp dir for the benchmark: {e}"}
+    # --no-incumbents = CRUCIBLE only (no external tool); --json/--report write to the private tmp dir so the
+    # action never litters the repo. FIXED argv — nothing from the request reaches it.
+    cmd = [sys.executable, "-m", "framework.v2", "benchmark", "--no-incumbents",
+           "--report", str(tmp / "report.md"), "--json", str(tmp / "results.json")]
+    try:
+        proc = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,  # noqa: S603
+                              timeout=_BENCHMARK_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": f"benchmark exceeded {int(_BENCHMARK_TIMEOUT)}s and was stopped"}
+    except Exception as e:  # noqa: BLE001 — the console must never 500 on an action
+        shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": False, "error": str(e)[-400:]}
+    try:
+        if proc.returncode != 0:
+            return {"ok": False, "error": (proc.stderr or proc.stdout or "benchmark failed").strip()[-400:]}
+        doc = json.loads((tmp / "results.json").read_text(encoding="utf-8"))
+        row = next((r for r in doc.get("results", []) if r.get("tool") == "crucible"), None)
+        if not row:
+            return {"ok": False, "error": "benchmark produced no CRUCIBLE result"}
+        return {"ok": True, "result": {
+            "tp": row.get("tp"), "fp": row.get("fp"), "fn": row.get("fn"),
+            "precision": row.get("precision"), "recall": row.get("recall"), "f1": row.get("f1"),
+            "elapsed_s": row.get("elapsed_s"), "corpus": doc.get("corpus")}}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"could not read benchmark result: {str(e)[-200:]}"}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
