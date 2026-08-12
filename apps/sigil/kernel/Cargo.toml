@@ -19,3 +19,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 clap = { version = "4", features = ["derive"] }
+# flock(2) for the append critical section (A10): an exclusive advisory lock, auto-released if the
+# process dies. Already a transitive dep (via getrandom) — no new download.
+libc = "0.2"

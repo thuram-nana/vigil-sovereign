@@ -184,7 +184,17 @@ fn finish(w: &Warden, agent: &str, tool: &str, args: &str, v: &Verdict, output: 
                 v.tier, v.decision.as_str(), rec.seq, &rec.entry_hash[..16]
             );
         }
-        Err(e) => eprintln!("action-log write failed: {e}"),
+        Err(e) => {
+            // FAIL-CLOSED (A10): the action executed but its audit record could NOT be written — an
+            // integrity gap the operator must not miss. Print the output (it ran; hiding it does not
+            // un-run it), emit a LOUD failure, and exit non-zero so no wrapper reads this as success.
+            println!("\n{output}\n");
+            eprintln!(
+                "[WARDEN FAIL-CLOSED — action-log write failed: {e}. The action executed but is NOT \
+                 audited on the spine; treat as an integrity incident.]"
+            );
+            std::process::exit(4);
+        }
     }
 }
 

@@ -294,3 +294,23 @@ jobs:
           else
             echo "formal/ not present on this ref (pre-merge) — nothing to check"
           fi
+
+  warden-kernel:
+    name: WARDEN Rust kernel (A10 durability)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo test the WARDEN kernel (chain/head/anti-rollback/tiers/router/registry/crypto + A10 durability)
+        run: |
+          if [ -f apps/sigil/kernel/Cargo.toml ]; then
+            # GitHub ubuntu runners ship a stable Rust toolchain. Run the FULL kernel test suite — the
+            # #[test]s the audit (A10) flagged as never wired into CI, now including the durability
+            # regressions: the concurrent-append flock (unique/contiguous seqs, no duplicate under a
+            # race), the atomic head write (no torn temp), and the de-hardcoded interpreter path. A
+            # release build proves the binary compiles clean.
+            cd apps/sigil/kernel
+            cargo test
+            cargo build --release
+          else
+            echo "apps/sigil/kernel not present on this ref (pre-merge) — nothing to test"
+          fi

@@ -7,12 +7,30 @@
 //! hardware/remote monotonic state; this ties WARDEN's freshness to the loudly-growing spine.)
 
 use std::io;
+use std::path::Path;
 use std::process::Command;
 
-const PY: &str = "/home/kali/.sigil/venv/bin/python";
+/// Resolve the sigil Python interpreter (A10 — de-hardcode `/home/kali/.sigil/venv/bin/python`).
+/// Order: an explicit `SIGIL_KERNEL_PYTHON` override, then the venv under `SIGIL_HOME` (mirroring
+/// the kernel's `warden_dir()`), then the default `~/.sigil/venv`, then `python3` on PATH — so the
+/// kernel runs under any operator's home/venv layout, not just the build machine's.
+fn python() -> String {
+    if let Ok(p) = std::env::var("SIGIL_KERNEL_PYTHON") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    let home = std::env::var("SIGIL_HOME")
+        .unwrap_or_else(|_| format!("{}/.sigil", std::env::var("HOME").unwrap_or_else(|_| ".".into())));
+    let venv = format!("{home}/venv/bin/python");
+    if Path::new(&venv).exists() {
+        return venv;
+    }
+    "python3".to_string()
+}
 
 fn sigil(args: &[&str]) -> io::Result<String> {
-    let out = Command::new(PY).arg("-m").arg("sigil.cli").args(args).output()?;
+    let out = Command::new(python()).arg("-m").arg("sigil.cli").args(args).output()?;
     if !out.status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -53,7 +71,17 @@ fn parse_high_water(stdout: &str) -> (u64, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{anchor_msg, parse_high_water};
+    use super::{anchor_msg, parse_high_water, python};
+
+    #[test]
+    fn python_is_de_hardcoded_and_env_configurable() {
+        // A10: the interpreter is no longer a hardcoded build-machine `const`; an explicit override is
+        // honored, proving it resolves from the environment. (The venv/PATH fallbacks are box-dependent,
+        // so we assert only the deterministic override here.)
+        std::env::set_var("SIGIL_KERNEL_PYTHON", "/opt/custom/python");
+        assert_eq!(python(), "/opt/custom/python");
+        std::env::remove_var("SIGIL_KERNEL_PYTHON");
+    }
 
     #[test]
     fn parses_the_json_line_ignoring_warnings() {
