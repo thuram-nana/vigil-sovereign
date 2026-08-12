@@ -97,24 +97,38 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _a14_locks
-          regen() {  # regen <in> <committed-lock> <out>
-            local src="$1" committed="$2" out="$3"
-            # Seed from the committed lock when one exists: without --upgrade, pip-compile
-            # keeps pins that still satisfy the input, so a later diff means "the .in file
-            # changed", not "someone published to PyPI today".
-            if [ -f "$committed" ]; then cp "$committed" "$out"; fi
-            pip-compile --quiet --generate-hashes --no-header --strip-extras \
-                        --output-file="$out" "$src"
+          root="$PWD"
+          # regen <cwd> <in-relative-to-cwd> <committed-relative-to-cwd> <out-abs>
+          #
+          # The CWD is a parameter, and it MATTERS: pip-compile's `# via -r <path>`
+          # annotations are written relative to the directory it ran in, so regenerating the
+          # same lock from a different directory produces a byte-different file and a
+          # spurious "stale lock" failure. Each lock therefore has ONE canonical CWD — the
+          # one its own documented regeneration command assumes — and both the regeneration
+          # here and the verifier below use it.
+          regen() {
+            local cwd="$1" src="$2" committed="$3" out="$4"
+            ( cd "$cwd"
+              # Seed from the committed lock when one exists: without --upgrade, pip-compile
+              # keeps pins that still satisfy the input, so a later diff means "the .in file
+              # changed", not "someone published to PyPI today".
+              if [ -f "$committed" ]; then cp "$committed" "$out"; fi
+              pip-compile --quiet --generate-hashes --no-header --strip-extras \
+                          --output-file="$out" "$src" )
             echo "::group::$out ($(grep -cE '^[A-Za-z0-9._-]+==' "$out") pinned requirements)"
             cat "$out"
             echo "::endgroup::"
           }
-          regen engine/crucible/framework/v2/requirements.in \
-                engine/crucible/framework/v2/requirements.lock.txt \
-                _a14_locks/requirements.lock.txt
-          regen infra/supply-chain/sovereign.in \
+          # offense: canonical CWD is engine/crucible (see framework/v2/requirements.in).
+          regen "$root/engine/crucible" \
+                framework/v2/requirements.in \
+                framework/v2/requirements.lock.txt \
+                "$root/_a14_locks/requirements.lock.txt"
+          # sovereign: canonical CWD is the repo root (see infra/supply-chain/sovereign.in).
+          regen "$root" \
+                infra/supply-chain/sovereign.in \
                 infra/supply-chain/sovereign.lock.txt \
-                _a14_locks/sovereign.lock.txt
+                "$root/_a14_locks/sovereign.lock.txt"
 
       - name: upload regenerated locks
         if: always()
@@ -200,24 +214,62 @@ jobs:
           restore-keys: |
             trivy-db-${{ env.TRIVY_VERSION }}-
 
-      # Full picture first, always, so the log shows what is being accepted as well as what
-      # is being blocked. HIGH is reported, not enforced (see the threshold note above).
+      # Full picture first, always, so the log shows what is being ACCEPTED as well as what is
+      # being blocked. HIGH is reported, not enforced (see the threshold note above).
+      #
+      # --file-patterns is load-bearing, not tuning. Trivy's pip analyzer matches by FILENAME,
+      # so out of the box it scans apps/sigil/requirements.txt but silently skips
+      # `*.lock.txt` — which is to say, it skipped both of the locks this job exists to
+      # produce. A gate that does not scan the artifacts the change adds is hollow.
       - name: vulnerability report — HIGH + CRITICAL (ADVISORY, never blocks)
         if: always()
         continue-on-error: true
         run: |
           trivy fs --scanners vuln \
+            --file-patterns 'pip:.*\.lock\.txt$' \
             --severity HIGH,CRITICAL \
             --ignorefile .trivyignore \
             --exit-code 0 \
             --no-progress \
             .
 
-      # THE GATE. Non-zero exit here fails the job and blocks the PR.
+      # NEGATIVE CONTROL, and it runs BEFORE the gate on purpose.
+      #
+      # The gate below currently passes with an EMPTY allow-list, because this tree has no
+      # CRITICAL findings. That is the right outcome, but it is indistinguishable from a
+      # misconfigured scanner that reports nothing — a typo in a flag, a scanner that silently
+      # found no files, a severity string that matches nothing. So: run the EXACT blocking
+      # configuration against a fixture with known-CRITICAL packages and require it to FAIL.
+      # If it passes, the gate is a no-op and this job says so instead of shipping a green
+      # tick. The fixture lives outside the repo so the real scan never sees it.
+      - name: negative control — prove the blocking configuration actually fires
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/a14-negative-control
+          printf 'pyyaml==5.3.1\npillow==8.2.0\n' > /tmp/a14-negative-control/requirements.txt
+          set +e
+          trivy fs --scanners vuln \
+            --file-patterns 'pip:.*\.lock\.txt$' \
+            --severity CRITICAL \
+            --ignorefile "${GITHUB_WORKSPACE}/.trivyignore" \
+            --exit-code 1 \
+            --no-progress \
+            /tmp/a14-negative-control
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::NEGATIVE CONTROL FAILED — the blocking trivy configuration exited 0 on a fixture with known-CRITICAL packages. The gate below cannot fail, so its green tick means nothing. Fix the scanner configuration; do not merge."
+            exit 1
+          fi
+          echo "negative control OK — the blocking configuration exits ${rc} on known-CRITICAL input."
+
+      # THE GATE. A non-zero exit here fails the job and blocks the pull request.
       - name: vulnerability GATE — CRITICAL blocks
         if: always()
         run: |
           trivy fs --scanners vuln \
+            --file-patterns 'pip:.*\.lock\.txt$' \
             --severity CRITICAL \
             --ignorefile .trivyignore \
             --exit-code 1 \

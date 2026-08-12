@@ -83,17 +83,31 @@ the tree and have no registry artifact to hash.
 
 ### Regenerating a lock
 
-Under **Python 3.13** — the lock is Python-minor specific:
+Under **Python 3.13**, and **from that lock's canonical directory**. Both constraints are real:
+the lock is Python-minor specific, and pip-compile writes its `# via -r <path>` annotations
+relative to the directory it ran in — so regenerating from elsewhere produces a byte-different
+file and a staleness failure whose only diff is annotation paths.
 
 ```bash
 pip install pip-tools==7.6.1
+
+# offense — canonical CWD: engine/crucible
+cd engine/crucible
 pip-compile --generate-hashes --no-header --strip-extras \
-            --output-file=engine/crucible/framework/v2/requirements.lock.txt \
-            engine/crucible/framework/v2/requirements.in
+            --output-file=framework/v2/requirements.lock.txt \
+            framework/v2/requirements.in
+
+# sovereign — canonical CWD: the repo root
+cd <repo root>
+pip-compile --generate-hashes --no-header --strip-extras \
+            --output-file=infra/supply-chain/sovereign.lock.txt \
+            infra/supply-chain/sovereign.in
 ```
 
 `--no-header` matters: pip-compile's default header embeds the literal `--output-file` path, so
 a lock generated with it can never be byte-compared against a regeneration into a temp file.
+(That is the bug that kept `bin/verify-supply-chain.sh` from ever passing; the full story is in
+that script's header.)
 
 ### Staleness semantics — deliberately narrow
 
@@ -133,13 +147,58 @@ security scanner via `curl | sh` from an unpinned URL would be its own supply-ch
 | HIGH | Reported in full in the job log. Advisory. |
 | MEDIUM / LOW | Not surfaced by this gate. |
 
+### What is scanned
+
+`trivy fs` over the whole tree, with `--file-patterns 'pip:.*\.lock\.txt$'`. That flag is
+load-bearing, not tuning: trivy's pip analyzer matches by **filename**, so by default it scans
+`apps/sigil/requirements.txt` and **silently skips both `*.lock.txt` locks** — which is to say,
+it skipped the two artifacts this gate exists to produce. A gate that does not scan what the
+change adds is hollow.
+
+Currently detected: `apps/sigil/kernel/Cargo.lock` (cargo), `apps/sigil/requirements.txt` (pip),
+`vendor/strix/uv.lock` (uv), plus the two locks.
+
+### The gate is proved to fire
+
+The gate currently passes with an **empty** allow-list, because this tree has no CRITICAL
+findings. That is the right outcome — and it is also indistinguishable from a scanner that is
+misconfigured into reporting nothing: a typo in a flag, a severity string that matches nothing,
+an analyzer that found no files.
+
+So the job runs a **negative control immediately before the gate**: the exact blocking
+configuration, against a fixture of known-CRITICAL packages, which must *fail*. If it passes,
+the job errors out with "the gate below cannot fail, so its green tick means nothing". A gate
+that has never fired is not evidence of anything.
+
+### Current findings (run 31643595375): 0 CRITICAL, 8 HIGH
+
+All HIGH, therefore all advisory, none suppressed:
+
+| Package | Where | Advisory | Installed | Fixed in |
+|---|---|---|---|---|
+| `cryptography` | `apps/sigil/requirements.txt` + both locks | CVE-2026-69247 | 49.0.0 | 50.0.0 |
+| `cryptography` | `vendor/strix/uv.lock` | CVE-2026-69247, CVE-2026-69249, GHSA-537c-gmf6-5ccf | 46.0.7 | 50.0.0 / 49.0.0 / 48.0.1 |
+| `aiohttp` | `vendor/strix/uv.lock` | CVE-2026-69244 (DoS) | 3.14.1 | 3.14.3 |
+| `pyasn1` | `vendor/strix/uv.lock` | CVE-2026-59884/59885/59886 (DoS) | 0.6.3 | 0.6.4 |
+
+**`cryptography` is a real, actionable first-party finding, not vendored noise.** A fix exists
+(50.0.0), and the repo's own constraint `cryptography>=42,<50` in
+`engine/crucible/framework/v2/requirements.in` — plus `cryptography==49.0.0` in
+`apps/sigil/requirements.txt` — currently forbids taking it. Raising that ceiling changes a
+runtime dependency across **both** environments and belongs in its own change with its own test
+run, not in the change that installed the scanner. It is follow-up 3 below.
+
 **Why CRITICAL blocks and HIGH does not.** This tree vendors a penetration-testing toolchain
 (`vendor/strix`) and a Rust kernel, and scans their lockfiles as well as first-party ones. A
 HIGH-blocking gate over that surface needs an allow-list large enough that nobody reads it, and
 an allow-list nobody reads is worse than no gate — it launders findings. CRITICAL blocking with
-HIGH fully reported keeps the blocking set small enough that each entry is a decision. If the
-HIGH backlog is ever driven to zero, raise the threshold here and in
-`test_a14_workflow_blocking_severity_is_at_least_critical`.
+HIGH fully reported keeps the blocking set small enough that each entry is a decision.
+
+The measured HIGH backlog turned out to be **8 findings across 3 packages** (below), which is
+small enough that raising the threshold to HIGH is genuinely reachable rather than aspirational
+— once `cryptography` can move to 50.0.0. Doing so means editing the severity here **and**
+`test_a14_workflow_blocking_severity_is_at_least_critical`, which is deliberate: the threshold
+should be a decision with a diff, not a drive-by.
 
 ### Suppressions
 
@@ -203,5 +262,7 @@ Stated plainly, because a hardening document that only lists wins is a marketing
 
 1. SHA-pin the actions in `.github/workflows/ci.yml`.
 2. Install from the locks in `ci.yml` so the tested tree is the locked tree.
-3. Drive the HIGH backlog to zero, then raise the blocking threshold to HIGH.
+3. **Raise `cryptography` past the `<50` ceiling to take the CVE-2026-69247 fix** (touches both
+   `requirements.in` and `apps/sigil/requirements.txt`, i.e. both environments), then bump
+   `aiohttp` and `pyasn1` in `vendor/strix`, then raise the blocking threshold to HIGH.
 4. Add PEP 740 / sigstore attestation verification on top of the hashes.

@@ -5,8 +5,12 @@
 #
 #     pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt
 #
-# Regenerate (Python 3.13 — the lock is Python-minor specific):
+# Regenerate FROM THE REPO ROOT, under Python 3.13. Both constraints are real: the lock is
+# Python-minor specific, and pip-compile writes its `# via -r <path>` annotations relative to
+# the directory it ran in, so regenerating from elsewhere yields a byte-different file and a
+# spurious staleness failure.
 #
+#     cd <repo root>
 #     pip install pip-tools==7.6.1
 #     pip-compile --generate-hashes --no-header --strip-extras \
 #                 --output-file=infra/supply-chain/sovereign.lock.txt \

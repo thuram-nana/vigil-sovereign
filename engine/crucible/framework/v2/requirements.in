@@ -5,8 +5,13 @@
 # deployments install from the lock file; development can install
 # from this file directly.
 #
-# Regenerate the lock with (Python 3.13 — the lock is Python-minor
-# specific; --no-header keeps the output byte-comparable):
+# Regenerate the lock FROM engine/crucible/ (the CWD matters: pip-
+# compile writes its `# via -r <path>` annotations relative to the
+# directory it ran in, so regenerating from elsewhere yields a
+# byte-different file and a spurious staleness failure), under
+# Python 3.13 (the lock is Python-minor specific; --no-header keeps
+# the output byte-comparable):
+#   cd engine/crucible
 #   pip install pip-tools==7.6.1
 #   pip-compile --generate-hashes --no-header --strip-extras \
 #               --output-file=framework/v2/requirements.lock.txt \

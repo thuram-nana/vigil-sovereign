@@ -153,10 +153,14 @@ pip-compile --quiet --generate-hashes --no-header --strip-extras \
 if ! diff -u "${REQ_LOCK}" "${TMP_LOCK}"; then
     red ""
     red "FAIL: ${REQ_LOCK} is stale relative to ${REQ_IN} (diff above: committed vs regenerated)."
-    red "Regenerate under Python ${PIN_PY} with:"
+    red "Regenerate under Python ${PIN_PY}, FROM THIS DIRECTORY ($(pwd)):"
     red "  pip install pip-tools==7.6.1"
     red "  pip-compile --generate-hashes --no-header --strip-extras \\"
     red "              --output-file=${REQ_LOCK} ${REQ_IN}"
+    red ""
+    red "If the ONLY differences above are '# via -r <path>' lines, you regenerated from the"
+    red "wrong directory: pip-compile writes those annotations relative to its CWD, so each"
+    red "lock has exactly one canonical CWD. Re-run from the directory named above."
     exit 6
 fi
 green "      OK: lock matches input (${PINNED_COUNT} pinned requirements, all hashed)."

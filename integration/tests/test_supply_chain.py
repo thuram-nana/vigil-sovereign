@@ -327,6 +327,12 @@ def test_a14_workflow_declares_every_leg_of_the_gate() -> None:
         "vulnerability scanner": "trivy",
         "BLOCKING scan (non-zero exit on a finding)": "--exit-code 1",
         "suppression file is honoured": "--ignorefile",
+        # Trivy's pip analyzer matches by FILENAME, so without this it scans
+        # requirements.txt and silently skips both `*.lock.txt` locks — i.e. exactly the
+        # artifacts this whole job exists to produce.
+        "the generated locks are actually scanned": "--file-patterns",
+        # A gate that has never fired is indistinguishable from a gate that cannot fire.
+        "negative control proving the gate fires": "negative control",
     }
     missing = sorted(f"{why} ({needle!r})" for why, needle in required.items() if needle not in body)
     assert not missing, "the A14 workflow no longer declares:\n  " + "\n  ".join(missing)
