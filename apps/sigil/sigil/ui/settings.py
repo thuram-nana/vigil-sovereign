@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from typing import Optional
 
@@ -309,6 +310,204 @@ PROVIDER_ENV_VARS = tuple(dict.fromkeys(
 # legitimately needed by the offense engine (PR push, model calls, OAST relay, gated API).
 _OFFENSE_EXCLUDED_SECRETS = frozenset({"VIGIL_DESTRUCTION_OWNER_KEY", "ELEVENLABS_API_KEY"})
 _OFFENSE_DELIVERED_SECRETS = tuple(n for n in SECRET_NAMES if n not in _OFFENSE_EXCLUDED_SECRETS)
+
+# --- General system configuration (the universal env-var plane) ------------------------------------
+# Every NON-secret operational knob the UI may edit + replace, so the whole system is tunable from the
+# frontend without hand-editing an env file. A CLOSED, TYPED allowlist — exactly like SECRET_META /
+# CLOUD_CONFIG_META — so the UI can never write an ARBITRARY env var (that would be an env-poisoning
+# surface: a planted CRUCIBLE_LLM_BACKEND / endpoint could redirect the engine). Every entry is a REAL var
+# the code reads (verified against os.getenv call sites), validated per its `type`. Provider/model/secret
+# vars are deliberately NOT here — they have their own planes (set_provider / set_secret); bootstrap PATHs
+# (SIGIL_HOME, VIGIL_ROOT) and the UI bind are excluded (self-referential / lock-out risk).
+#   plane: "offense"   → also delivered to the keyless offense children by export_runtime_env
+#          "sovereign" → the sovereign process reads it from its own env (NEVER delivered to offense: FATAL-2)
+#          "gateway"/"system" → persisted to sigil.env; the gateway/`vigil up` launcher reads it at start
+#   type:  int|number|bool|enum|url|cidr|host|ports|str  (with min/max, choices as needed)
+CONFIG_META = {
+    # --- Offense engine (CRUCIBLE) performance + tuning ---
+    "CRUCIBLE_LLM_MAX_WORKERS": {"group": "offense", "type": "int", "min": 1, "max": 64, "default": "4",
+        "label": "LLM max workers", "plane": "offense",
+        "purpose": "How many reasoning calls the engine runs in parallel. Higher = faster, more API load."},
+    "CRUCIBLE_LLM_MIN_INTERVAL_S": {"group": "offense", "type": "number", "min": 0, "max": 3600, "default": "0",
+        "label": "Min seconds between LLM calls", "plane": "offense",
+        "purpose": "Throttle: minimum delay between reasoning calls (rate-limit friendliness). 0 = no throttle."},
+    "CRUCIBLE_RECON_MAX_WORKERS": {"group": "offense", "type": "int", "min": 1, "max": 64, "default": "1",
+        "label": "Recon max workers", "plane": "offense",
+        "purpose": "Parallelism for the recon phase. Keep low to stay gentle on a target."},
+    "CRUCIBLE_ANTHROPIC_ZDR": {"group": "offense", "type": "bool", "default": "",
+        "label": "Anthropic zero-data-retention", "plane": "offense",
+        "purpose": "Route Claude calls through the zero-data-retention endpoint."},
+    "CRUCIBLE_EMBEDDER": {"group": "offense", "type": "str", "default": "", "optional": True,
+        "label": "Embedding model override", "plane": "offense", "placeholder": "leave blank for the default",
+        "purpose": "Override the sentence-transformer used for the engine's semantic memory."},
+    "CRUCIBLE_BURP_URL": {"group": "offense", "type": "url", "default": "", "optional": True,
+        "label": "Burp REST API URL", "plane": "offense", "placeholder": "http://127.0.0.1:1337",
+        "purpose": "Optional: a Burp Suite REST endpoint the engine can drive."},
+    "CRUCIBLE_CLOUD_INVENTORY_URL": {"group": "offense", "type": "url", "default": "", "optional": True,
+        "label": "Cloud inventory URL", "plane": "offense", "placeholder": "https://…",
+        "purpose": "Optional: an external cloud-asset inventory feed for recon."},
+    "CRUCIBLE_BEDROCK_REGION_ALLOWLIST": {"group": "offense", "type": "str", "default": "", "optional": True,
+        "label": "Bedrock region allowlist", "plane": "offense", "placeholder": "us-east-1,eu-west-1",
+        "purpose": "Comma-separated AWS regions the Bedrock backend may use (empty = the provider default)."},
+    "CRUCIBLE_VERTEX_REGION_ALLOWLIST": {"group": "offense", "type": "str", "default": "", "optional": True,
+        "label": "Vertex region allowlist", "plane": "offense", "placeholder": "europe-west4,us-central1",
+        "purpose": "Comma-separated Vertex regions the backend may use (empty = the provider default)."},
+    # --- Sovereign runtime (SIGIL) — NEVER delivered to offense ---
+    "SIGIL_LOG_LEVEL": {"group": "sovereign", "type": "enum",
+        "choices": ["DEBUG", "INFO", "WARNING", "ERROR"], "default": "INFO",
+        "label": "Log level", "plane": "sovereign", "purpose": "Sovereign process log verbosity."},
+    "SIGIL_ALWAYS_ON": {"group": "sovereign", "type": "bool", "default": "",
+        "label": "Always-on agents", "plane": "sovereign",
+        "purpose": "Keep the sovereign agent mesh running continuously."},
+    "SIGIL_EMBED_MODEL": {"group": "sovereign", "type": "str", "default": "BAAI/bge-small-en-v1.5",
+        "label": "Memory embedding model", "plane": "sovereign",
+        "purpose": "The embedding model for the sovereign memory spine."},
+    "SIGIL_QDRANT_URL": {"group": "sovereign", "type": "url", "default": "", "optional": True,
+        "label": "Qdrant URL", "plane": "sovereign", "placeholder": "http://127.0.0.1:6333",
+        "purpose": "The vector DB the memory engine uses (blank = the embedded/default store)."},
+    "SIGIL_QDRANT_COLLECTION": {"group": "sovereign", "type": "str", "default": "sigil_memory",
+        "label": "Qdrant collection", "plane": "sovereign",
+        "purpose": "The Qdrant collection name for sovereign memory vectors."},
+    "SIGIL_INGEST_REPOS": {"group": "sovereign", "type": "str", "default": "", "optional": True,
+        "label": "Repos to ingest", "plane": "sovereign", "placeholder": "/path/a,/path/b",
+        "purpose": "Comma-separated repo paths the knowledge engine ingests."},
+    # --- Egress gateway (persisted to sigil.env; read by the gateway process when it is launched —
+    #     e.g. `vigil-gateway serve-proxy`, or the slice-2 `vigil services up` docker bring-up) ---
+    "VIGIL_GATEWAY_PROXY_HOST": {"group": "gateway", "type": "bind_host", "default": "127.0.0.1",
+        "label": "Proxy bind host", "plane": "gateway",
+        "purpose": "Where the egress proxy binds. Loopback or a tunnel IP (a public bind is refused)."},
+    "VIGIL_GATEWAY_PROXY_PORT": {"group": "gateway", "type": "int", "min": 1, "max": 65535, "default": "48081",
+        "label": "Proxy port", "plane": "gateway", "purpose": "The egress proxy's listening port."},
+    "VIGIL_GATEWAY_ALLOWED_PORTS": {"group": "gateway", "type": "ports", "default": "", "optional": True,
+        "label": "Allowed destination ports", "plane": "gateway", "placeholder": "80,443,8080,8443",
+        "purpose": "Comma-separated ports the proxy may reach (blank = the 80,443,8080,8443 default)."},
+    "VIGIL_GATEWAY_HEADER_TIMEOUT": {"group": "gateway", "type": "number", "min": 1, "max": 600, "default": "10",
+        "label": "Header-read timeout (s)", "plane": "gateway",
+        "purpose": "Slow-loris cap: seconds to read a request head before refusing."},
+    "VIGIL_GATEWAY_MAX_CONNS": {"group": "gateway", "type": "int", "min": 1, "max": 100000, "default": "256",
+        "label": "Max concurrent connections", "plane": "gateway",
+        "purpose": "Flood cap: concurrent client connections before the proxy returns 503."},
+    "VIGIL_GATEWAY_SANDBOX_SUBNET": {"group": "gateway", "type": "cidr", "default": "172.31.240.0/24",
+        "label": "Sandbox subnet", "plane": "gateway",
+        "purpose": "The docker subnet the offense sandbox lives on."},
+    "VIGIL_GATEWAY_CHARTER_SLUG": {"group": "gateway", "type": "str", "default": "", "optional": True,
+        "label": "Charter slug (scope)", "plane": "gateway", "placeholder": "the target whose signed charter scopes egress",
+        "purpose": "The signed charter that defines what hosts the proxy may reach."},
+    # --- System / bring-up ---
+    "VIGIL_UP_COCKPIT_TIMEOUT": {"group": "system", "type": "int", "min": 5, "max": 3600, "default": "120",
+        "label": "Cockpit start timeout (s)", "plane": "system",
+        "purpose": "How long `vigil up` waits for the cockpit to come up before giving up."},
+}
+CONFIG_VARS = tuple(CONFIG_META)
+_CONFIG_GROUP_ORDER = ("offense", "sovereign", "gateway", "system")
+_CONFIG_GROUP_LABEL = {"offense": "Offense engine", "sovereign": "Sovereign runtime",
+                       "gateway": "Egress gateway", "system": "System & bring-up"}
+# The config vars ALSO delivered to the keyless offense children (plane "offense"). Sovereign/gateway/system
+# vars are persisted to sigil.env but NEVER injected into an offense process (FATAL-2 / least-privilege).
+CONFIG_OFFENSE_VARS = tuple(e for e in CONFIG_VARS if CONFIG_META[e].get("plane") == "offense")
+
+
+def _validate_config_typed(env: str, value: str) -> str:
+    """Validate + normalise a general CONFIG_META value by its declared type. Returns the cleaned value
+    ("" clears the var). Raises ValueError on an unsafe or out-of-spec value (fail-closed)."""
+    meta = CONFIG_META[env]
+    value = str(value or "").strip()
+    if not value:
+        if meta.get("optional") or meta.get("default", "") == "" or meta.get("type") == "bool":
+            return ""
+        raise ValueError(f"{env} requires a value")
+    assert_env_value_safe(value, f"value for {env}", maxlen=1024)   # line-injection backstop (both axes)
+    t = meta.get("type", "str")
+    if t == "int":
+        try:
+            n = int(value)
+        except ValueError:
+            raise ValueError(f"{env} must be an integer") from None
+        lo, hi = meta.get("min"), meta.get("max")
+        if lo is not None and n < lo or hi is not None and n > hi:
+            raise ValueError(f"{env} must be between {lo} and {hi}")
+        return str(n)
+    if t == "number":
+        try:
+            f = float(value)
+        except ValueError:
+            raise ValueError(f"{env} must be a number") from None
+        if not math.isfinite(f):          # reject inf/nan — e.g. an "inf" timeout disables the slow-loris cap
+            raise ValueError(f"{env} must be a finite number")
+        if meta.get("min") is not None and f < meta["min"]:
+            raise ValueError(f"{env} must be >= {meta['min']}")
+        if meta.get("max") is not None and f > meta["max"]:   # a finite-astronomical value (1e308) also disables a cap
+            raise ValueError(f"{env} must be <= {meta['max']}")
+        return value
+    if t == "bool":
+        low = value.lower()
+        if low in ("1", "true", "yes", "on"):
+            return "1"
+        if low in ("0", "false", "no", "off"):
+            return ""
+        raise ValueError(f"{env} must be a boolean (1/0, true/false)")
+    if t == "enum":
+        if value not in meta.get("choices", ()):
+            raise ValueError(f"{env} must be one of {', '.join(meta.get('choices', ()))}")
+        return value
+    if t == "url":
+        if not (value.startswith("http://") or value.startswith("https://")):
+            raise ValueError(f"{env} must be an http(s) URL")
+        return value
+    if t == "host":
+        import ipaddress
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            raise ValueError(f"{env} must be an IP address") from None
+        return value
+    if t == "bind_host":
+        # Mirror gateway proxy.bind_ok: a listener may bind ONLY loopback / RFC1918 / CGNAT / IPv6
+        # ULA+link-local — a public or unspecified (0.0.0.0/::) bind is refused (the proxy itself
+        # refuses it at serve() time; we enforce it here too so the UI text is honest at save time).
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            raise ValueError(f"{env} must be a loopback/private/tunnel IP literal") from None
+        if ip.is_unspecified:
+            raise ValueError(f"{env} cannot be the unspecified address (0.0.0.0 / ::) — it would expose "
+                             "the proxy on every interface")
+        _allow = (ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("10.0.0.0/8"),
+                  ipaddress.ip_network("172.16.0.0/12"), ipaddress.ip_network("192.168.0.0/16"),
+                  ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("::1/128"),
+                  ipaddress.ip_network("fc00::/7"), ipaddress.ip_network("fe80::/10"))
+        if not any(ip.version == n.version and ip in n for n in _allow):
+            raise ValueError(f"{env} must be loopback or a private/tunnel IP — a public bind is refused")
+        return value
+    if t == "cidr":
+        import ipaddress
+        try:
+            ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            raise ValueError(f"{env} must be a CIDR subnet (e.g. 172.31.240.0/24)") from None
+        return value
+    if t == "ports":
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if not all(p.isdigit() and 1 <= int(p) <= 65535 for p in parts):
+            raise ValueError(f"{env} must be a comma-separated list of ports (1-65535)")
+        return ",".join(str(int(p)) for p in parts)
+    return value   # plain str: only the line-injection backstop above applies
+
+
+def set_config(env: str, value: str, *, store, owner_key, reason: str = "") -> dict:
+    """Persist ONE general (non-secret) system config var — a CLOSED, TYPED allowlist (CONFIG_VARS), so the
+    UI can never write an arbitrary env var. The value is type-validated + line-injection-safe and written to
+    the 0600 sigil.env; an empty value CLEARS it (falls back to the code default). Non-secret, so the cleaned
+    value is echoed back and recorded on the spine. Fail-closed on an unknown var or an invalid value."""
+    if env not in CONFIG_VARS:
+        raise ValueError(f"unknown config var {env!r}: only a fixed allowlist may be set here")
+    cleaned = _validate_config_typed(env, value)
+    _persist_env(env, cleaned)
+    seq = _record_signed_event(
+        store, owner_key, {"signal": "governor.config_set", "env": env, "value": cleaned}, reason)
+    return {"ok": True, "action": "set_config", "env": env, "value": cleaned, "recorded_seq": seq}
+
 
 def _validate_config_value(env: str, value: str) -> str:
     """A non-secret provider-config value (region/endpoint/project/path). Reject control/line-break chars
@@ -624,7 +823,9 @@ def export_runtime_env(include_secrets: bool = False) -> dict:
     — the signing key must NEVER reach an offense process (A2a red-pen). The GitHub token IS delivered (LAP PR
     push). The uiproxy consumer re-allowlists the same set (defense-in-depth)."""
     env: dict = {}
-    for var in (*PROVIDER_ENV_VARS, *_EXTRA_DELIVERED_ENV, *CLOUD_CONFIG_VARS):
+    # CONFIG_OFFENSE_VARS only: sovereign/gateway/system config vars are persisted but NEVER injected into an
+    # offense child (FATAL-2 / least-privilege — the offense plane reads only what it needs).
+    for var in (*PROVIDER_ENV_VARS, *_EXTRA_DELIVERED_ENV, *CLOUD_CONFIG_VARS, *CONFIG_OFFENSE_VARS):
         val = os.environ.get(var, "").strip()
         if val:
             env[var] = val
@@ -734,9 +935,28 @@ def settings_status() -> dict:
         prov_cat = SECRET_META.get(prov["probe_env"], {}).get("category", "cloud")
         cloud_providers.append({"id": prov["id"], "label": prov["label"], "purpose": prov.get("purpose", ""),
                                 "probe_env": prov["probe_env"], "category": prov_cat, "fields": fields})
+    # the universal config-var plane (non-secret → current values shown), grouped for the Settings UI.
+    config_groups = []
+    for gid in _CONFIG_GROUP_ORDER:
+        fields = []
+        for env in CONFIG_VARS:
+            meta = CONFIG_META[env]
+            if meta.get("group") != gid:
+                continue
+            fields.append({
+                "env": env, "type": meta.get("type", "str"), "label": meta.get("label", env),
+                "purpose": meta.get("purpose", ""), "default": meta.get("default", ""),
+                "placeholder": meta.get("placeholder", ""), "optional": bool(meta.get("optional")),
+                "choices": list(meta.get("choices", ())), "plane": meta.get("plane", "system"),
+                "value": os.environ.get(env, "").strip(),         # non-secret: the live value is safe to show
+                "min": meta.get("min"), "max": meta.get("max"),
+            })
+        if fields:
+            config_groups.append({"id": gid, "label": _CONFIG_GROUP_LABEL[gid], "fields": fields})
     return {
         "secrets": secrets,
         "cloud_providers": cloud_providers,
+        "config_groups": config_groups,
         "secret_backend": ss.backend,
         "keys_failing": keys_failing,          # drives the top-bar "N keys failing" badge
         "secret_categories": [{"id": c, "label": _SECRET_CATEGORY_LABEL[c]}

@@ -10,6 +10,7 @@ The load-bearing invariants (a false-green here would leak a secret or make the 
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -294,3 +295,125 @@ def test_neo4j_probe_is_fail_closed(env):
     assert status in ("ok", "unknown", "fail")          # never crashes
     if status == "unknown":
         assert "driver" in reason                       # honest "install the neo4j driver", not a false ok
+
+
+# --- set_config: the universal (non-secret) system-config plane ----------------------------------
+
+def _track(monkeypatch, *names):
+    """Let monkeypatch snapshot each var so anything set_config writes to os.environ is restored."""
+    for n in names:
+        monkeypatch.delenv(n, raising=False)
+
+
+def test_set_config_persists_records_and_mirrors(env, monkeypatch):
+    store, owner, tmp = env
+    _track(monkeypatch, "CRUCIBLE_LLM_MAX_WORKERS")
+    out = smod.set_config("CRUCIBLE_LLM_MAX_WORKERS", "8", store=store, owner_key=owner)
+    assert out["ok"] and out["env"] == "CRUCIBLE_LLM_MAX_WORKERS" and out["value"] == "8"
+    assert os.environ["CRUCIBLE_LLM_MAX_WORKERS"] == "8"                 # mirrored into the live env
+    assert "CRUCIBLE_LLM_MAX_WORKERS=8" in (tmp / "sigil.env").read_text()  # persisted to the 0600 envfile
+    rec = store.get(out["recorded_seq"])                                 # recorded on the signed spine
+    assert rec is not None and rec.payload.get("env") == "CRUCIBLE_LLM_MAX_WORKERS"
+
+
+def test_set_config_unknown_var_is_refused(env):
+    store, owner, _ = env
+    with pytest.raises(ValueError, match="unknown config var"):        # closed allowlist: no arbitrary env
+        smod.set_config("EVIL_ARBITRARY_ENV", "x", store=store, owner_key=owner)
+
+
+def test_set_config_type_validation_fail_closed(env, monkeypatch):
+    store, owner, _ = env
+    _track(monkeypatch, "CRUCIBLE_LLM_MAX_WORKERS", "CRUCIBLE_BURP_URL", "SIGIL_LOG_LEVEL",
+           "VIGIL_GATEWAY_ALLOWED_PORTS", "VIGIL_GATEWAY_SANDBOX_SUBNET", "VIGIL_GATEWAY_PROXY_HOST")
+    bad = [
+        ("CRUCIBLE_LLM_MAX_WORKERS", "999"),      # int out of range
+        ("CRUCIBLE_LLM_MAX_WORKERS", "abc"),      # not an int
+        ("CRUCIBLE_BURP_URL", "ftp://x"),         # not http(s)
+        ("SIGIL_LOG_LEVEL", "LOUD"),              # not an enum choice
+        ("VIGIL_GATEWAY_ALLOWED_PORTS", "80,nope"),  # not all ports
+        ("VIGIL_GATEWAY_SANDBOX_SUBNET", "not-a-cidr"),
+        ("VIGIL_GATEWAY_PROXY_HOST", "not-an-ip"),
+    ]
+    for env_name, val in bad:
+        with pytest.raises(ValueError):
+            smod.set_config(env_name, val, store=store, owner_key=owner)
+
+
+def test_set_config_rejects_envfile_line_injection(env, monkeypatch):
+    store, owner, _ = env
+    _track(monkeypatch, "CRUCIBLE_EMBEDDER")
+    with pytest.raises(ValueError):   # a value must never plant a second KEY=value line
+        smod.set_config("CRUCIBLE_EMBEDDER", "ok\nVIGIL_DESTRUCTION_OWNER_KEY=evil",
+                        store=store, owner_key=owner)
+
+
+def test_set_config_empty_clears_the_var(env, monkeypatch):
+    store, owner, _ = env
+    _track(monkeypatch, "CRUCIBLE_EMBEDDER")
+    smod.set_config("CRUCIBLE_EMBEDDER", "some-model", store=store, owner_key=owner)
+    assert os.environ.get("CRUCIBLE_EMBEDDER") == "some-model"
+    smod.set_config("CRUCIBLE_EMBEDDER", "", store=store, owner_key=owner)
+    assert "CRUCIBLE_EMBEDDER" not in os.environ                       # cleared → falls back to the default
+
+
+def test_export_emits_offense_config_excludes_sovereign(env, monkeypatch):
+    # This tests the EMITTER contract only (export_runtime_env): offense-plane vars are emitted,
+    # sovereign vars never are. Real end-to-end delivery ALSO needs the uiproxy CONSUMER allowlist —
+    # that half is asserted by test_config_plane_allowlists_agree in the integration suite (red-pen
+    # BLOCK-1: asserting delivery here alone green-washed a placebo, because the consumer re-allowlists).
+    store, owner, _ = env
+    _track(monkeypatch, "CRUCIBLE_LLM_MAX_WORKERS", "SIGIL_LOG_LEVEL")
+    smod.set_config("CRUCIBLE_LLM_MAX_WORKERS", "6", store=store, owner_key=owner)   # plane: offense
+    smod.set_config("SIGIL_LOG_LEVEL", "DEBUG", store=store, owner_key=owner)         # plane: sovereign
+    emitted = smod.export_runtime_env(include_secrets=False)
+    assert emitted.get("CRUCIBLE_LLM_MAX_WORKERS") == "6"            # offense-plane → emitted
+    assert "SIGIL_LOG_LEVEL" not in emitted                           # sovereign-only → NEVER emitted (FATAL-2)
+
+
+def test_set_config_bind_host_refuses_public(env, monkeypatch):
+    # The UI promises "a public bind is refused" for the proxy host — enforce it at save time.
+    store, owner, _ = env
+    _track(monkeypatch, "VIGIL_GATEWAY_PROXY_HOST")
+    for bad in ("0.0.0.0", "::", "8.8.8.8", "1.2.3.4"):
+        with pytest.raises(ValueError):
+            smod.set_config("VIGIL_GATEWAY_PROXY_HOST", bad, store=store, owner_key=owner)
+    for ok in ("127.0.0.1", "10.0.0.5", "192.168.1.2", "::1"):
+        assert smod.set_config("VIGIL_GATEWAY_PROXY_HOST", ok, store=store, owner_key=owner)["value"] == ok
+
+
+def test_set_config_number_rejects_non_finite(env, monkeypatch):
+    store, owner, _ = env
+    _track(monkeypatch, "VIGIL_GATEWAY_HEADER_TIMEOUT")
+    for bad in ("inf", "-inf", "nan", "Infinity", "1e308"):   # incl. a finite-astronomical value (would uncap the timeout)
+        with pytest.raises(ValueError):        # an 'inf'/huge timeout would disable the slow-loris cap
+            smod.set_config("VIGIL_GATEWAY_HEADER_TIMEOUT", bad, store=store, owner_key=owner)
+    assert smod.set_config("VIGIL_GATEWAY_HEADER_TIMEOUT", "15", store=store, owner_key=owner)["value"] == "15"
+
+
+def test_settings_status_exposes_config_groups(env, monkeypatch):
+    store, owner, _ = env
+    _track(monkeypatch, "CRUCIBLE_LLM_MAX_WORKERS")
+    smod.set_config("CRUCIBLE_LLM_MAX_WORKERS", "12", store=store, owner_key=owner)
+    st = smod.settings_status()
+    groups = {g["id"]: g for g in st["config_groups"]}
+    assert {"offense", "sovereign", "gateway", "system"} <= set(groups)
+    field = next(f for f in groups["offense"]["fields"] if f["env"] == "CRUCIBLE_LLM_MAX_WORKERS")
+    assert field["value"] == "12" and field["type"] == "int"
+
+
+def test_set_config_via_do_action_dispatch(env, monkeypatch):
+    store, owner, _ = env
+    _track(monkeypatch, "VIGIL_GATEWAY_MAX_CONNS")
+    out = actions.do_action("set_config", {"env": "VIGIL_GATEWAY_MAX_CONNS", "value": "512"}, store=store)
+    assert out["ok"] and out["value"] == "512"
+    assert os.environ["VIGIL_GATEWAY_MAX_CONNS"] == "512"
+
+
+def test_every_config_meta_var_is_a_real_env_read(env):
+    # honesty guard: every CONFIG_META var must be a REAL var the code reads (a field for a
+    # non-existent var would be a fake control). We assert the registry is a closed, typed set.
+    for name, meta in smod.CONFIG_META.items():
+        assert meta.get("type") in ("int", "number", "bool", "enum", "url", "cidr", "host", "bind_host", "ports", "str")
+        assert meta.get("plane") in ("offense", "sovereign", "gateway", "system")
+        assert name == name.upper() and " " not in name

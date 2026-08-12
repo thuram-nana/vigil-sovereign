@@ -461,6 +461,12 @@ _OFFENSE_ENV_ALLOWLIST = frozenset({
     "STRIX_LLM", "LLM_API_BASE",
     "CRUCIBLE_EFFORT",                          # reasoning-effort level (output_config.effort on current models)
     "STRIX_REASONING_EFFORT",                   # the same choice mapped onto the Strix codebase agent
+    # general offense-engine tuning knobs the Settings "System configuration" plane exposes — these MUST
+    # mirror settings.CONFIG_OFFENSE_VARS (plane=="offense"), or a UI knob becomes a placebo (emitted by the
+    # sovereign side then silently dropped here). test_config_plane_allowlists_agree guards the two sets.
+    "CRUCIBLE_LLM_MAX_WORKERS", "CRUCIBLE_LLM_MIN_INTERVAL_S", "CRUCIBLE_RECON_MAX_WORKERS",
+    "CRUCIBLE_ANTHROPIC_ZDR", "CRUCIBLE_EMBEDDER", "CRUCIBLE_BURP_URL", "CRUCIBLE_CLOUD_INVENTORY_URL",
+    "CRUCIBLE_BEDROCK_REGION_ALLOWLIST", "CRUCIBLE_VERTEX_REGION_ALLOWLIST",
     # cloud-provider CONFIG (non-secret) the Phase-C live collectors read via the SDK ambient chains
     "AWS_REGION", "AWS_ROLE_ARN", "CRUCIBLE_AWS_ENDPOINT_URL",
     "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_SUBSCRIPTION_ID",

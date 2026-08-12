@@ -2775,6 +2775,9 @@
         V.card("Reasoning effort", "OWNER", h("div#set-effort", null, h("div.empty", null, "Loading…")), true),
         V.card("Bring your own model", "OWNER", h("div#set-provider", null, h("div.empty", null, "Loading…")), true),
       ]),
+      h("div", { style: { marginTop: "16px" } },
+        V.card("System configuration", "OWNER",
+          h("div#set-config", null, h("div.empty", null, "Loading…")), true)),
     ]);
     loadSettings();
   }
@@ -2791,6 +2794,51 @@
     drawModelCard(st);
     drawEffortCard(st);
     drawProviderCard(st);
+    drawConfigCard(st);
+  }
+
+  // The universal system-configuration plane: every non-secret operational env var the server exposes
+  // (CONFIG_META), grouped by subsystem, each editable + saved with one owner-signed request. An empty
+  // value clears the var (the code falls back to its default). The server type-validates every value
+  // (int ranges, url/cidr/host/ports/enum) and refuses an unknown var — the UI writes no arbitrary env.
+  function drawConfigCard(st) {
+    var host = V.$("#set-config"); if (!host) return;
+    var groups = st.config_groups || [];
+    if (!groups.length) { V.mount(host, h("div.empty", null, "No configuration exposed by the server.")); return; }
+    var sections = [
+      h("div.hint", null, "Tune the whole system from here — offense engine, sovereign runtime, egress gateway, bring-up. Blank = the built-in default. Changes are signed on the server and take effect on the next `vigil up` (or service restart)."),
+    ];
+    groups.forEach(function (g) {
+      var rows = g.fields.map(function (f) {
+        var input;
+        if (f.type === "enum") {
+          input = h("select.input", null, (f.choices || []).map(function (c) {
+            var o = h("option", { value: c }, c); if (c === f.value) o.selected = true; return o;
+          }));
+        } else if (f.type === "bool") {
+          input = h("input", { type: "checkbox" }); input.checked = (f.value === "1");
+        } else {
+          input = h("input.input", { value: f.value || "", placeholder: f.placeholder || f.default || "" });
+        }
+        var save = h("button.btn.sm.owner", { onClick: function () {
+          var val = (f.type === "bool") ? (input.checked ? "1" : "") : (input.value || "").trim();
+          save.disabled = true;
+          settingsAct({ action: "set_config", env: f.env, value: val, reason: "set " + f.env + " from Settings" },
+            (f.label || f.env) + " saved.", function () { loadSettings(); })
+            .then(function () { save.disabled = false; });
+        } }, [V.icon("check"), "Save"]);
+        return h("div.field", { style: { marginBottom: "10px" } }, [
+          h("label", null, [f.label || f.env, h("code.mono", { style: { marginLeft: "8px", opacity: "0.6" } }, f.env)]),
+          h("div.hint", { style: { margin: "2px 0 6px" } }, f.purpose || ""),
+          h("div.row", { style: { display: "flex", gap: "8px", alignItems: "center" } }, [input, save]),
+        ]);
+      });
+      sections.push(h("div", { style: { marginTop: "16px" } }, [
+        h("h3", { style: { margin: "0 0 8px" } }, g.label),
+        h("div", null, rows),
+      ]));
+    });
+    V.mount(host, sections);
   }
 
   // Reasoning-effort control: how hard current-generation models think (output_config.effort). "Model
