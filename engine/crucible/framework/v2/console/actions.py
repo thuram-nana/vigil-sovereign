@@ -2085,3 +2085,31 @@ def aegis_stop(_body: dict | None = None) -> dict:
         _write_meta(cur["run_id"], **{**cur, "status": "stopped", "finished": time.time()})
     _write_aegis_current({})
     return {"stopped": True, "pid": pid}
+
+
+def services_up(body: dict) -> dict:
+    """Gated bring-up of the docker services (create-if-absent, idempotent): qdrant by default; +neo4j+otel
+    with all=True; plus the egress gateway. Takes NO free input that reaches docker — only the fixed `all`
+    flag selects from a CLOSED service set, so it can never run an arbitrary service / image / command. This
+    is the SAME create-if-absent path as `vigil services up` (already red-penned). Fail-soft per leg: it
+    reports each leg's result or error and never raises. Same-origin/rebind-gated by do_POST."""
+    want_all = bool(body.get("all"))
+    try:
+        from vigil_integration import doctor
+        root = doctor.find_repo_root()
+    except Exception as e:  # noqa: BLE001 — a bring-up must never 500 the console
+        return {"ok": False, "error": f"could not locate the repo root: {e}"}
+    result: dict = {}
+    try:
+        from vigil_integration.services import DEFAULT_SERVICES, RootServices
+        svcs = ["qdrant", "neo4j", "otel-collector"] if want_all else list(DEFAULT_SERVICES)
+        result["services"] = RootServices(root).up(svcs)     # svcs is a FIXED list — no request-controlled name
+    except Exception as e:  # noqa: BLE001
+        result["services_error"] = str(e)[-400:]
+    try:
+        from vigil_gateway.docker import SandboxNetworking
+        result["gateway"] = SandboxNetworking().compose_up(
+            root / "infra" / "docker" / "docker-compose.yml", build=True, context_dir=root / "gateway")
+    except Exception as e:  # noqa: BLE001
+        result["gateway_error"] = str(e)[-400:]
+    return {"ok": True, "result": result}

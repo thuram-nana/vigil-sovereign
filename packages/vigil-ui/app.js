@@ -4036,8 +4036,20 @@
     ], false);
     var portCard = V.card("UI ports (127.0.0.1)", "", h("div", null,
       Object.keys(ports).map(function (p) { return row(p, ports[p] === "free", ports[p], ports[p] === "free" ? "up" : "idle"); })), false);
+    var allChk = h("input", { type: "checkbox" });
+    var upBtn = h("button.btn.owner", { onClick: function () {
+      upBtn.disabled = true;
+      V.postJSON(OFF("/api/services/up"), { all: allChk.checked })
+        .then(function (r) {
+          if (r && r.error) { V.toast(r.error, true); }
+          else { V.toast("Services bring-up requested — refreshing state…"); }
+          setTimeout(function () { if (V.$("#system-body")) V.getJSON(OFF("/api/services")).then(drawSystem).catch(function () {}); }, 1800);
+        })
+        .catch(function (e) { V.toast((e && e.message) || "Bring-up failed — is the offense console up?", true); })
+        .then(function () { upBtn.disabled = false; });
+    } }, [V.icon("play"), "Bring up missing services"]);
     var svcCard = V.card("Docker services", "", [
-      h("div.hint", { style: { marginBottom: "8px" } }, "Create the absent ones with `vigil services up` (add `--all` for Neo4j + otel)."),
+      h("div.hint", { style: { marginBottom: "8px" } }, "Create the absent ones — idempotent, running ones are left alone."),
       h("div", null, Object.keys(svcs).map(function (name) {
         var s = svcs[name] || {}; var st = (typeof s === "string") ? s : (s.state || (s.error ? "error" : "?"));
         var running = st === "running", absent = st === "absent";
@@ -4046,6 +4058,10 @@
           h("div.v", null, (typeof s === "object" && s.purpose) ? s.purpose : ""),
         ]);
       })),
+      h("div.acts", { style: { marginTop: "12px", display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" } }, [
+        upBtn,
+        h("label", { style: { display: "flex", gap: "6px", alignItems: "center", fontSize: "13px", color: "var(--text-1)" } }, [allChk, "include Neo4j + otel"]),
+      ]),
     ], false);
     var issues = d.issues || [];
     var issuesCard = issues.length ? V.card("Action needed", "!", h("ul", { style: { margin: "0", paddingLeft: "18px" } }, issues.map(function (m) { return h("li", null, m); })), false) : null;

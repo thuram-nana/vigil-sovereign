@@ -11,7 +11,9 @@ The System screen surfaces the same report as `vigil doctor`. Asserts the proper
 
 from __future__ import annotations
 
-from framework.v2.console import api
+import pytest
+
+from framework.v2.console import actions, api
 
 _KEYS = {"ok", "issues", "notes", "binaries", "venvs", "dirs", "ui_ports", "docker_services"}
 
@@ -49,3 +51,60 @@ def test_services_data_fail_soft(monkeypatch) -> None:
 def test_route_is_registered() -> None:
     from framework.v2.console import server
     assert server._EXACT_ROUTES.get("/api/services") is api.services_data
+
+
+# --------------------------- the gated bring-up action (/api/services/up) ---------------------------
+# NB every test here patches BOTH bring-up legs (RootServices + SandboxNetworking) so a test NEVER runs
+# real `docker compose`/`build` (which would hang on an image pull). Needs vigil_integration → importorskip.
+
+@pytest.fixture
+def no_real_docker(monkeypatch):
+    pytest.importorskip("vigil_integration.services")
+    import vigil_integration.services as svc
+    calls: dict = {}
+
+    class _FakeRoot:
+        def __init__(self, root):
+            pass
+
+        def up(self, svcs):
+            calls["svcs"] = list(svcs)
+            return {s: "running" for s in svcs}
+    monkeypatch.setattr(svc, "RootServices", _FakeRoot)
+    try:
+        import vigil_gateway.docker as gw
+
+        class _FakeGw:
+            def compose_up(self, *a, **k):
+                calls["gateway"] = True
+                return {"gateway": "running"}
+        monkeypatch.setattr(gw, "SandboxNetworking", _FakeGw)
+    except ImportError:
+        pass
+    return calls
+
+
+def test_services_up_is_bounded_to_the_closed_service_set(no_real_docker) -> None:
+    # The request can NEVER choose the service/image/command: only the fixed `all` flag selects from a
+    # CLOSED set. A body that tries to inject a service name is ignored, and it never raises.
+    r = actions.services_up({"all": False, "services": ["evil"], "service": "x; rm -rf /"})
+    assert r["ok"] is True
+    assert no_real_docker.get("svcs") == ["qdrant"]                 # request names IGNORED — fixed default only
+
+    actions.services_up({"all": True})
+    assert no_real_docker.get("svcs") == ["qdrant", "neo4j", "otel-collector"]
+
+
+def test_services_up_fail_soft_per_leg(no_real_docker, monkeypatch) -> None:
+    # If a leg raises, the action reports it as an error and still returns ok — never a 500.
+    import vigil_integration.services as svc
+
+    class _Boom:
+        def __init__(self, root):
+            pass
+
+        def up(self, svcs):
+            raise RuntimeError("docker down")
+    monkeypatch.setattr(svc, "RootServices", _Boom)   # gateway leg stays the fast fake from the fixture
+    r = actions.services_up({"all": False})
+    assert r["ok"] is True and "services_error" in r["result"]

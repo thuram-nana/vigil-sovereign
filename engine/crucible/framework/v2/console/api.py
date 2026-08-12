@@ -221,30 +221,8 @@ def services_data() -> dict[str, Any]:
     Delegates to the SAME read-only collector as `vigil doctor` — it starts nothing, mutates nothing, and
     fails soft. Bring-up itself stays a CLI/gated act (`vigil services up`), never a side effect of a read."""
     def _collect() -> dict[str, Any]:
-        import sys
         from vigil_integration import doctor
-        # Find the REAL repo root (where .venv-offense / .vigil-live / docker-compose live). The offense
-        # console runs IN repo/.venv-offense, so sys.prefix's parent is the reliable anchor — crucible_root
-        # can point at a RELOCATED vendored copy (CRUCIBLE_ROOT), so it is only a fallback candidate.
-        starts = [Path(sys.prefix).parent, Path.cwd()]
-        try:
-            starts.append(Path(paths.crucible_root()))
-        except Exception:  # noqa: BLE001
-            pass
-        root = Path(sys.prefix).parent
-        for start in starts:
-            try:
-                start = start.resolve()
-            except OSError:
-                continue
-            for cand in [start, *start.parents]:
-                if (cand / ".venv-offense").exists():
-                    root = cand
-                    break
-            else:
-                continue
-            break
-        return doctor.collect(root)
+        return doctor.collect(doctor.find_repo_root())
     return _safe(_collect, default={"ok": False, "issues": ["system readiness probe unavailable"],
                                     "notes": [], "binaries": {}, "venvs": {}, "dirs": {},
                                     "ui_ports": {}, "docker_services": {}})

@@ -16,6 +16,23 @@ from pathlib import Path
 _UI_PORTS = (("proxy", 8770), ("cockpit", 8733), ("console", 8787), ("api", 8799))
 
 
+def find_repo_root() -> Path:
+    """Best-effort repo root — the dir holding `.venv-offense` / `.vigil-live` / `docker-compose.yml`.
+    Anchors on the offense venv (a console/CLI runs IN `repo/.venv-offense`, so `sys.prefix`'s parent is
+    the repo), then the cwd. Never raises; falls back to the venv parent. Shared by the readiness report
+    and the services bring-up so both agree on which tree to inspect/act on."""
+    import sys
+    for start in (Path(sys.prefix).parent, Path.cwd()):
+        try:
+            start = start.resolve()
+        except OSError:
+            continue
+        for cand in [start, *start.parents]:
+            if (cand / ".venv-offense").exists():
+                return cand
+    return Path(sys.prefix).parent
+
+
 def _port_free(port: int, host: str = "127.0.0.1") -> bool:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)   # mirror the real proxy bind

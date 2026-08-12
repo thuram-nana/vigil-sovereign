@@ -509,6 +509,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 # (else it returns the exact command it WOULD run and installs nothing).
                 self._json(actions.provision_tool(body))
                 return
+            if path == "/api/services/up":
+                # System screen: create the docker services IF NONE EXIST (qdrant + gateway; +neo4j+otel
+                # with all=true). CSRF/rebind-gated above; BOUNDED — only the fixed `all` flag selects from a
+                # CLOSED service set, no request-controlled service/image/command; idempotent; fail-soft.
+                self._json(actions.services_up(body))
+                return
             if path == "/api/session/create":
                 # F2: create a named session. CSRF/rebind-gated above; the registry mints no fact and
                 # authorizes nothing — it only organises runs/chats under an operator-editable name.
