@@ -249,9 +249,16 @@ def test_attach_from_env_explicit_optout_is_noop(monkeypatch):
         assert attach_from_env(base) is base
 
 
-def test_attach_from_env_fails_safe_to_base_when_wiring_broken(monkeypatch, tmp_path):
-    # A composition error must NEVER stop a scan → return the base hooks UNCHANGED. Force the SDK wire
-    # (compose_run_hooks) to raise, deterministically.
+def test_attach_from_env_fails_CLOSED_when_wiring_broken(monkeypatch, tmp_path):
+    """A wiring failure must NOT silently produce an ungated arbitrary shell.
+
+    This test previously asserted the OPPOSITE — that a broken wire "fails safe" by returning the base
+    hooks — and so enshrined a fail-OPEN defect: any exception during wiring left Strix's arbitrary
+    ``exec_command`` / ``write_stdin`` shell UNGATED, with no signal to the operator, on a run that had
+    explicitly asked to be governed. Returning ungated hooks for an arbitrary shell is not "safe"; it is
+    the most dangerous outcome this module can produce, and it is indistinguishable from a healthy run.
+    It now raises, so a governed run stops instead of proceeding ungoverned.
+    """
     import vigil_integration.warden_gate as wg
 
     monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)   # default-on
@@ -259,4 +266,38 @@ def test_attach_from_env_fails_safe_to_base_when_wiring_broken(monkeypatch, tmp_
     monkeypatch.setattr(wg, "compose_run_hooks",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("SDK unavailable")))
     base = object()
+    with pytest.raises(wg.WardenGateUnavailable) as ei:
+        attach_from_env(base)
+    # the operator must be told WHAT broke and HOW to run ungated on purpose
+    msg = str(ei.value)
+    assert "UNGATED" in msg and "SDK unavailable" in msg and "VIGIL_WARDEN_STRIX_GATE" in msg
+
+
+def test_a_healthy_wire_still_composes_the_gate(monkeypatch, tmp_path):
+    """MUTATION CONTROL for the test above: the raise is caused by the BROKEN wire, not unconditional.
+    With a WORKING composer the same call returns a COMPOSED (gated) hooks object.
+
+    Uses the module's fake-SDK helper rather than the real ``agents`` package, so the control is
+    load-bearing in EVERY environment — including the sovereign / two-env-boundary leg where the SDK is
+    deliberately absent. (Relying on the real SDK would make this control silently skip exactly where the
+    fail-closed path is most interesting.)"""
+    _install_fake_agents(monkeypatch)
+    monkeypatch.delenv("VIGIL_WARDEN_STRIX_GATE", raising=False)   # default-on
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path))
+    base = object()
+    composed = attach_from_env(base)
+    assert composed is not base, "a healthy wire must return a COMPOSED (gated) hooks object"
+
+
+def test_the_explicit_optout_remains_the_one_deliberate_way_to_run_ungated(monkeypatch, tmp_path):
+    """Failing closed on breakage must not remove the operator's deliberate, visible escape hatch.
+    Even with the wire deliberately broken, the EXPLICIT opt-out short-circuits before any wiring is
+    attempted — so an ungated run stays possible, but only ever as a stated choice."""
+    import vigil_integration.warden_gate as wg
+
+    monkeypatch.setenv("VIGIL_BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(wg, "compose_run_hooks",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("SDK unavailable")))
+    base = object()
+    monkeypatch.setenv("VIGIL_WARDEN_STRIX_GATE", "0")
     assert attach_from_env(base) is base

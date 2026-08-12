@@ -24,7 +24,9 @@ The SDK wiring: :func:`attach_from_env` composes ``WardenGateHooks`` onto the St
 gated as of the first tool call, no opt-in required. An EXPLICIT opt-*out* (``VIGIL_WARDEN_STRIX_GATE`` in
 {``0``,``off``,``false``,``no``}) turns it off, reserved for the byte-identical-vendor test / a deliberately
 ungoverned standalone run; and if the ``vigil_integration`` package is not importable (a bare vendored Strix
-checkout) the runner's soft-import guard leaves the vendor byte-identical. A non-AUTO (QUEUE) decision no
+checkout) the runner's ``ImportError`` guard leaves the vendor byte-identical. Any OTHER wiring failure is
+**FAIL-CLOSED**: :func:`attach_from_env` raises :class:`WardenGateUnavailable` rather than returning ungated
+hooks, so a governed run stops instead of silently running an UNGUARDED arbitrary shell. A non-AUTO (QUEUE) decision no
 longer hard-blocks: it is routed to the per-action, single-use, owner-signed approval BROKER
 (:mod:`live.approval_broker`) — the hook publishes a pending request, waits (bounded by
 ``VIGIL_APPROVAL_WAIT_SECONDS``, default 0 ⇒ non-blocking) for a token the owner signs for THIS exact call
@@ -65,6 +67,17 @@ Classifier = Callable[[str], str]
 class WardenDenied(RuntimeError):
     """A tool call the WARDEN gate refuses outright (a class that must never run, or — in the
     fail-safe hook — anything not auto-approved). Raised; must not be silently caught."""
+
+
+class WardenGateUnavailable(RuntimeError):
+    """The WARDEN gate could not be WIRED onto a governed run, so the run must not proceed.
+
+    Distinct from :class:`WardenDenied` (a specific call was refused *by* a working gate). This says the
+    gate itself is missing on a run that asked for it, which is strictly worse: without it, Strix's
+    arbitrary ``exec_command`` / ``write_stdin`` shell is unguarded. Raised by :func:`attach_from_env`
+    instead of silently falling back to ungated hooks. Not raised for the deliberate opt-out, and not
+    raised in a bare vendored Strix checkout (where ``vigil_integration`` is simply not importable and
+    the runner's ``ImportError`` path leaves Strix byte-identical)."""
 
 
 @dataclass(frozen=True)
@@ -408,11 +421,22 @@ def compose_run_hooks(*members: Any) -> Any:
 
 
 def attach_from_env(base_hooks: Any) -> Any:
-    """Compose this offense-side WARDEN tool-name gate onto Strix's run ``base_hooks``. **ON BY DEFAULT** —
-    returns a composite ``RunHooks`` (existing accounting + the WARDEN ``on_tool_start`` gate) unless the
-    explicit opt-OUT ``VIGIL_WARDEN_STRIX_GATE`` in {0,off,false,no} is set, or the integration/SDK cannot be
-    wired, or ANY failure — in which cases it returns ``base_hooks`` UNCHANGED so a bare vendored Strix stays
-    byte-identical and a wiring error can never stop a scan.
+    """Compose this offense-side WARDEN tool-name gate onto Strix's run ``base_hooks``. **ON BY DEFAULT,
+    FAIL-CLOSED** — returns a composite ``RunHooks`` (existing accounting + the WARDEN ``on_tool_start``
+    gate).
+
+    There is exactly ONE way to end up deliberately ungated: the explicit opt-OUT
+    ``VIGIL_WARDEN_STRIX_GATE`` in {0,off,false,no}, which returns ``base_hooks`` UNCHANGED so a bare
+    vendored Strix stays byte-identical.
+
+    **A WIRING FAILURE IS NOT AN OPT-OUT.** This function previously swallowed ANY exception and returned
+    the ungated ``base_hooks`` on the reasoning that "a wiring error can never stop a scan". That traded
+    the system's own fail-closed invariant for availability, on the single most dangerous surface it has:
+    Strix's arbitrary ``exec_command`` / ``write_stdin`` shell. The effect was that a broken wire produced
+    an UNGATED shell with NO signal to the operator — an accident, not a decision, and indistinguishable
+    from a healthy governed run. It now raises :class:`WardenGateUnavailable`, so a governed run STOPS
+    rather than silently proceeding ungoverned. An operator who genuinely wants an ungated run must say so
+    with the opt-out env var: a deliberate, visible, auditable act.
 
     The classifier is :func:`_strix_shell_classifier` (floor A0, ceiling A1): it QUEUES exactly the
     arbitrary-exec chokepoint (``exec_command`` / ``write_stdin``) and auto-runs every other (sandbox-
@@ -427,5 +451,10 @@ def attach_from_env(base_hooks: Any) -> Any:
         approver = _build_strix_approver(_strix_base_dir())
         warden = WardenGateHooks(classify=_strix_shell_classifier, floor="A0", approver=approver)
         return compose_run_hooks(base_hooks, warden)
-    except Exception:  # noqa: BLE001 — never let WARDEN wiring stop a scan; fall back to the base hooks
-        return base_hooks
+    except Exception as exc:  # noqa: BLE001 — fail CLOSED: an ungated arbitrary shell is never the fallback
+        raise WardenGateUnavailable(
+            "the VIGIL WARDEN gate on Strix's arbitrary shell (exec_command / write_stdin) could not be "
+            f"wired: {exc!r}. Refusing to run UNGATED. This is deliberate: a wiring failure is not an "
+            "opt-out, and continuing would leave the most dangerous surface in the system unguarded with "
+            f"no signal. To run without the gate on purpose, set {_STRIX_GATE_ENV}=0."
+        ) from exc
