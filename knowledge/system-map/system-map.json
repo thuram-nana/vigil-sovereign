@@ -274,6 +274,25 @@
       ]
     },
     {
+      "description": "The gated CRUCIBLE capabilities this engine EXPOSES to an external MCP (Model Context Protocol) client over an on-host stdio server — a fixed, fail-closed allowlist, each shown with its gate posture (tier / gated / observation / read-only). Read-only listing; the stdio server is started from the CLI.",
+      "group": "MANAGE",
+      "id": "mcp",
+      "label": "MCP Servers",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "mcp",
+        "model context protocol",
+        "mcp servers",
+        "exposed tools",
+        "mcp seam",
+        "stdio server",
+        "reverify_finding",
+        "declared_service",
+        "tool server"
+      ]
+    },
+    {
       "description": "The Certificate of Non-Exploitability — a signed, coverage-bounded, offline-verifiable proof that, over the surface the scanner reached, an applicable oracle had a live channel and did not fire; shows CLOSED/OPEN/UNPROVEN claims per surface, the coverage denominator, the honest residual, the out-of-band fingerprint pin, and the exact offline-verify command.",
       "group": "LEARN",
       "id": "posture",
@@ -447,5 +466,5 @@
       ]
     }
   ],
-  "source_sha": "99b534cfb63fa0f09140faebc810b56215a461080bed958ca351bb799937b406"
+  "source_sha": "4fd34d95ede63b8a747ea000d999fbd16b3f477bbfd57f16e27a31c09907f485"
 }

@@ -191,6 +191,30 @@ def sessions_list() -> dict[str, Any]:
     return _safe(sessions.list_sessions, default={"sessions": []})
 
 
+def mcp_data() -> dict[str, Any]:
+    """The MCP EXPOSE seam's read-only view for the UI: the gated capabilities this engine advertises to an
+    external MCP client (a FIXED, fail-closed allowlist — slug-independent), each with its gate posture
+    (tier / capability / gated / provenance=observation). READ-ONLY: it builds the descriptors in-process,
+    starts NO server and does no I/O; the actual stdio EXPOSE server is `crucible mcp serve --slug <slug>`
+    (on-host, no network surface). Fail-soft to an empty list + a note."""
+    def _list() -> dict[str, Any]:
+        from ..mcp.server import MCPServer
+        # `slug` is only the INVOKE-time scope binding; the exposed tool LIST is a fixed allowlist, so a
+        # placeholder slug is correct for a read-only listing (the UI never invokes a tool here).
+        server = MCPServer(slug="ui-list")
+        tools = [server._descriptor(t) for t in server.exposed()]   # noqa: SLF001 (own server)
+        return {
+            "exposed_tools": tools,
+            "transport": "stdio",
+            "note": ("These CRUCIBLE capabilities are exposed to an external MCP client over an on-host "
+                     "stdio server — start it with `crucible mcp serve --slug <engagement>`. Every call is "
+                     "re-gated (kill-switch / entitlement / charter-scope) and returns an observation, "
+                     "never a fact. The client can never choose the scope (the slug is server-fixed)."),
+        }
+    return _safe(_list, default={"exposed_tools": [], "transport": "stdio",
+                                 "note": "MCP seam unavailable in this build."})
+
+
 def session_detail(session_id: str) -> dict[str, Any]:
     """One session + the meta of its linked runs (for the Sessions screen). Fail-closed: an unsafe id
     raises ValueError (→ 404 in do_GET); an unknown id returns an error body."""

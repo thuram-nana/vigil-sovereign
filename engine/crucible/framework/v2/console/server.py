@@ -78,6 +78,7 @@ _EXACT_ROUTES = {
     "/api/posture": api.posture,                # Proof of Posture: signed Certificate(s) of Non-Exploitability (metadata only)
     "/api/brain/decision": api.brain_decision,  # Brain: the propose-only decision engine + its live proposal (if any)
     "/api/governance": api.governance_data,     # Governance & Gate audit: READ-ONLY posture + m-of-n destruction quorum
+    "/api/mcp": api.mcp_data,                    # MCP: the gated capabilities exposed over the stdio MCP server (read-only)
 }
 
 # Prefixed GET routes: "/api/<name>/<arg>" -> api provider taking one string arg.
