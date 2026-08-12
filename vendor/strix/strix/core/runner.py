@@ -226,20 +226,27 @@ async def run_strix_scan(
         )
         hooks = ReportUsageHooks(model=resolved_model, max_budget_usd=max_budget_usd)
 
-        # VIGIL WARDEN gate (A1): ON BY DEFAULT, best-effort. When the integration package is importable
+        # VIGIL WARDEN gate (A1): ON BY DEFAULT, FAIL-CLOSED. When the integration package is importable
         # (a VIGIL-governed run), the offense-side WARDEN gate is composed onto the run hooks so Strix's
         # arbitrary exec_command / write_stdin shell is classified + routed to per-action owner approval
         # (a queued call runs only on a valid single-use owner token; no authority / no token ⇒ blocked).
-        # An EXPLICIT opt-out (VIGIL_WARDEN_STRIX_GATE in {0,off,false,no}), or the integration package
-        # simply not being importable (a bare vendored Strix checkout — FATAL-2: the sovereign never loads
-        # it), leaves the base hooks unchanged and Strix byte-identical. A wiring error also falls back to
-        # the base hooks so it never stops a scan (best-effort); the gate is default-ON, not opt-in.
+        #
+        # ONLY ImportError is swallowed, and it means exactly one thing: a BARE VENDORED STRIX checkout
+        # with no vigil_integration on the path (FATAL-2: the sovereign env never loads it), so there is no
+        # governed run to protect and Strix stays byte-identical. The EXPLICIT opt-out
+        # (VIGIL_WARDEN_STRIX_GATE in {0,off,false,no}) is handled inside attach_from_env, which returns the
+        # base hooks unchanged.
+        #
+        # ANY OTHER failure now PROPAGATES as WardenGateUnavailable. Previously a bare `except Exception:
+        # pass` swallowed it and the scan continued with an UNGATED arbitrary shell and no signal to the
+        # operator — availability bought at the cost of the system's own fail-closed invariant, on its most
+        # dangerous surface. A broken gate is not an opt-out; the run stops instead.
         try:
             from vigil_integration.warden_gate import attach_from_env
-
-            hooks = attach_from_env(hooks)
-        except Exception:  # noqa: BLE001 — never let WARDEN wiring stop a scan; standalone Strix is unchanged
+        except ImportError:  # bare vendored Strix — nothing to govern; stay byte-identical
             pass
+        else:
+            hooks = attach_from_env(hooks)
 
         scope_context = build_scope_context(scan_config)
         root_context = _merge_root_prompt_context(scope_context, extra_system_prompt_context)
