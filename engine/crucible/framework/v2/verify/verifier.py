@@ -263,6 +263,10 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # the ctx carries `secret_capture` (no benchmark/scan/engage finding does), so appending it leaves the
     # unknown-class fallback and `make gate` byte-identical.
     "secret_credential_validity": (OracleKind.SECRET_CREDENTIAL_VALIDITY,),
+    # E3 GCP service-account impersonation — SAME convention: NOT in the frozen _ALL_ORACLES fallback, fires
+    # ONLY when the ctx carries `gcp_impersonation_capture` (no benchmark/scan/engage finding does), so
+    # appending it leaves the unknown-class fallback and `make gate` byte-identical.
+    "gcp_sa_impersonation": (OracleKind.GCP_SA_IMPERSONATION,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -481,6 +485,13 @@ _ALIASES: dict[str, str] = {
     "leaked_credential_validity": "secret_credential_validity",
     "secret_validity": "secret_credential_validity",
     "valid_exposed_secret": "secret_credential_validity",
+    # E3 GCP service-account impersonation spellings.
+    "gcp_service_account_impersonation": "gcp_sa_impersonation",
+    "service_account_impersonation": "gcp_sa_impersonation",
+    "sa_impersonation": "gcp_sa_impersonation",
+    "gcp_impersonation": "gcp_sa_impersonation",
+    "iam_serviceaccount_impersonation": "gcp_sa_impersonation",
+    "iam_service_account_impersonation": "gcp_sa_impersonation",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -885,6 +896,14 @@ class OracleVerifier:
         if kind is OracleKind.SECRET_CREDENTIAL_VALIDITY:
             if "secret_capture" in ctx:
                 return oracles.exposed_secret_validity_oracle(ctx["secret_capture"])
+            return None
+        # -- BUILD-PLAN §E3 GCP service-account impersonation — fire ONLY when the ctx carries
+        #    `gcp_impersonation_capture` (the WARDEN-gated impersonation runner's retained evidence); no
+        #    benchmark/scan/engage finding carries it, so it is inert on the gate path. DEFENSIVE
+        #    VERIFICATION, never an impersonation runner.
+        if kind is OracleKind.GCP_SA_IMPERSONATION:
+            if "gcp_impersonation_capture" in ctx:
+                return oracles.gcp_sa_impersonation_oracle(ctx["gcp_impersonation_capture"])
             return None
         return None
 

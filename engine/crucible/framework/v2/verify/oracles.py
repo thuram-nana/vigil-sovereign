@@ -5262,3 +5262,268 @@ def exposed_secret_validity_oracle(observed: Any) -> OracleSignal:
                   f"achieved effect over the retained evidence offline (no network)."),
         observed={"reason": "exposed_secret_validated", "secret_type": secret_type,
                   "identity": identity, "source": _imds_text(cred.get("source"))})
+
+
+# ==================================================================================================
+# E3 (BUILD-PLAN §E3) — GCP service-account IMPERSONATION. See OracleKind.GCP_SA_IMPERSONATION. Shares the
+# confirming-side trust gate (`_confirming_call_trusted`) + the GCP identity extractor (`_imds_gcp_identity`)
+# with the IMDS oracle, but is the OPPOSITE shape to E1: E1 gates on the SOURCE host (a credential retrieved
+# FROM the metadata endpoint); E3 gates on the CONFIRMING-side identity echo (a MINTED impersonation token
+# proven to authenticate AS the named target SA B at a trusted Google introspection endpoint).
+# ==================================================================================================
+
+# A well-formed GCP service-account email — the NAMED impersonation target B. The load-bearing discriminator
+# is the `.gserviceaccount.com` suffix behind at least one project/appspot/developer subdomain label (a bare
+# `x@gserviceaccount.com` is NOT a real SA and must not qualify). Covers user-managed
+# (`name@project.iam.gserviceaccount.com`), default-compute (`num-compute@developer.gserviceaccount.com`),
+# and appspot (`project@appspot.gserviceaccount.com`) forms. Applied to the LOWER-CASED target.
+_GCP_SA_EMAIL_RE = re.compile(r"^[a-z0-9][a-z0-9._%+-]{0,62}@([a-z0-9-]+\.)+gserviceaccount\.com$")
+# The iamcredentials impersonation MINT verbs. A method is a mint iff its VERB — the last `[:./]`-delimited
+# token of the lower-cased method, so `iamcredentials:generateAccessToken`, a full resource URL ending
+# `...serviceAccounts/<sa>:signJwt`, or a bare `getAccessToken` all resolve — is one of these, OR an actAs /
+# serviceAccountTokenCreator authorization token appears anywhere in the method string.
+_GCP_MINT_VERBS = frozenset({
+    "generateaccesstoken", "getaccesstoken", "generateidtoken", "signjwt", "signblob",
+})
+_GCP_ACTAS_TOKENS = ("actas", "serviceaccounttokencreator")
+# The confirming call must be a GCP token INTROSPECTION (the identity echo of the minted token).
+_GCP_IMPERSONATION_ACTIONS = frozenset({
+    "tokeninfo", "userinfo", "oauth2/v3/tokeninfo", "oauth2/v1/tokeninfo",
+    "oauth2/v3/userinfo", "oauth2/v2/userinfo", "getuserinfo",
+})
+# The per-confirming-endpoint HOST allow-list (the ANTI-LAUNDERING gate — mirrors E5's `host_ok`): a
+# tokeninfo/userinfo call proving the minted token's identity must resolve at a TRUSTED Google introspection
+# endpoint. An attacker-controlled 'tokeninfo' host can never mint a FACT.
+_GCP_IMPERSONATION_CONFIRM_HOSTS = frozenset({
+    "oauth2.googleapis.com", "www.googleapis.com", "iamcredentials.googleapis.com",
+    "openidconnect.googleapis.com",
+})
+
+
+def _gcp_mint_obj(capture: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The mint sub-object: a nested ``mint``/``impersonation``/… mapping, or the capture itself (a flat
+    record). Never raises."""
+    for k in ("mint", "impersonation", "token_mint", "mint_call"):
+        v = capture.get(k)
+        if isinstance(v, Mapping):
+            return v
+    return capture
+
+
+def _gcp_mint_method_is_impersonation(method: str) -> bool:
+    """True iff ``method`` denotes an iamcredentials impersonation mint (getAccessToken / generateAccessToken /
+    generateIdToken / signJwt / signBlob — matched on the method's VERB, the last `[:./]`-delimited token, so a
+    fully-qualified resource URL or an ``iamcredentials:``-prefixed method resolves) OR an actAs /
+    serviceAccountTokenCreator flow (matched as a DELIMITED token — ``iam.serviceAccounts.actAs`` /
+    ``roles/iam.serviceAccountTokenCreator`` — never as a mid-word substring, so a benign method that merely
+    CONTAINS the letters cannot match). Never raises."""
+    m = _coerce_text(method).strip().lower()
+    tokens = [t for t in re.split(r"[:./]", m) if t]
+    if not tokens:
+        return False
+    if tokens[-1] in _GCP_MINT_VERBS:
+        return True
+    return any(t in _GCP_ACTAS_TOKENS for t in tokens)
+
+
+def _gcp_minted_token_present(mint: Mapping[str, Any]) -> bool:
+    """A minted impersonation token was PRESENT at capture time — its presence is the structural fact (the
+    binding fingerprint is its secret-safe proxy; the oracle never sees the token). Reads the redacted
+    presence marker the reducer leaves, or any non-empty raw token field."""
+    for k in ("token", "access_token", "accessToken", "id_token", "idToken", "signed_jwt", "signedJwt",
+              "signed_blob", "signedBlob"):
+        if _imds_text(mint.get(k)).strip():
+            return True
+    return False
+
+
+def _gcp_sa_uid_ok(uid: str) -> bool:
+    """A GCP unique-id (the SA's numeric ``unique_id`` / OIDC ``sub``) — a bounded numeric id. Mirrors the
+    IMDS ``sub`` shape gate (>= 6 digits) so a degenerate 1-char id is never a valid target/echo."""
+    return uid.isdigit() and len(uid) >= 6
+
+
+def _gcp_target_identity(capture: Mapping[str, Any], mint: Mapping[str, Any]) -> tuple[str, str]:
+    """The NAMED impersonation target B as ``(email, uid)`` — an SA email OR a numeric unique-id. Read from
+    the mint's ``target``/``target_service_account``/… first, then the top-level capture. A malformed value
+    is returned in the ``email`` slot (lower-cased) so it fails the ``_GCP_SA_EMAIL_RE`` gate downstream.
+    Never raises."""
+    val = ""
+    for obj in (mint, capture):
+        if not isinstance(obj, Mapping):
+            continue
+        for k in ("target_service_account", "target", "target_sa", "target_email", "target_principal",
+                  "service_account", "sa"):
+            v = obj.get(k)
+            if v not in (None, ""):
+                val = _imds_text(v).strip()
+                break
+        if val:
+            break
+    if val.isdigit():
+        return "", val
+    return val.lower(), ""
+
+
+def gcp_sa_impersonation_oracle(observed: Any) -> OracleSignal:
+    """Fire when a RETAINED, secret-safe capture PROVES a GCP service-account IMPERSONATION achieved effect —
+    the E3 (BUILD-PLAN §E3) confirmation. The DEFENSIVE dual of an attack: it re-derives, over the retained
+    evidence ALONE (offline, ZERO network, NO exploitation code), that a principal minted a short-lived token
+    AS a named target service-account B (via iamcredentials getAccessToken / generateAccessToken / signJwt /
+    an actAs / roles/iam.serviceAccountTokenCreator flow) AND that a confirming call ECHOED B's identity at a
+    TRUSTED, allow-listed Google introspection endpoint, bound to the mint by a shared token fingerprint. It
+    NEVER performs the impersonation — the live mint/introspect action is a separate WARDEN-gated runner; this
+    pure oracle judges what that runner retained, so a confirmed FACT re-verifies OFFLINE from its certificate.
+
+    E3 is the OPPOSITE shape to E1: E1 requires the credential SOURCE host to be the metadata endpoint; E3
+    makes no claim about a source — it proves an impersonation TOKEN-MINT was confirmed by an identity echo of
+    the TARGET SA. The ANTI-LAUNDERING gate (like E5) is entirely on the CONFIRMING-CALL side: the tokeninfo/
+    userinfo call must resolve at a Google introspection host on the per-type allow-list, over a validated-TLS,
+    no-proxy, no-redirect transport, so an attacker-controlled 'tokeninfo' endpoint can never launder a FACT.
+
+    STATUS (E3) — **OFFLINE-WIRED; real-transport LIVE-FIRE deferred** on operator-provisioned GCP creds. The
+    oracle stays OUT of the frozen ``_ALL_ORACLES`` fallback and fires ONLY when the ctx carries
+    ``gcp_impersonation_capture`` (no benchmark/scan/engage finding does), so nothing on the scan path mints
+    it — the capability fires ONLY when the producer is called explicitly over a runner capture.
+
+    ``observed`` is the JSON-safe, SECRET-SAFE retained capture::
+
+        {"mint": {"method": "generateAccessToken", "target": "svc-b@proj.iam.gserviceaccount.com",
+                  "token": "[REDACTED]", "credential_fingerprint": "…"},
+         "confirming_call": {"action": "tokeninfo", "status": 200, "credential_fingerprint": "…" (== mint's),
+                             "endpoint": "https://oauth2.googleapis.com/tokeninfo", "tls_verified": true,
+                             "no_proxy": true, "no_redirect": true, "resolved_peer": "…",
+                             "response_digest": "…",
+                             "response": {"email": "svc-b@proj.iam.gserviceaccount.com", "sub": "1029…",
+                                          "expires_in": 3599}}}
+
+    Fires (0.95) ONLY when ALL hold (near-zero-FP by construction):
+      (1) the mint is an impersonation token-mint (an iamcredentials verb / an actAs/tokenCreator flow) that
+          minted a token targeting a NAMED, well-formed target SA B (a ``*.gserviceaccount.com`` email or a
+          numeric unique-id);
+      (2) a confirming tokeninfo/userinfo call SUCCEEDED (explicit 2xx, no failure marker at any depth) and
+          its identity echo (email/sub) EQUALS the named target SA B — an echo of a DIFFERENT SA does not
+          prove B was impersonated;
+      (3) the minted token is fingerprint-BOUND to that confirming call (a domain-separated fingerprint in
+          BOTH and EQUAL — the token itself is never retained), AND the confirming call used a TRUSTED,
+          allow-listed Google endpoint over a validated-TLS, no-proxy, no-redirect transport.
+
+    Does NOT fire (stays an honest LEAD): a mint that is not an impersonation call; no minted token; a
+    malformed target SA; no confirming call; a failed / 4xx / error-shaped confirming call; a confirming
+    action that is not a token introspection; an echo that resolves a DIFFERENT SA than the target; a
+    fingerprint that does not bind the mint to the call; a confirming endpoint NOT on the allow-list (a
+    laundering attempt); an unverified / proxied / redirected transport; malformed / absent evidence (never
+    raises). Pure + deterministic, so the same verdict re-verifies offline from the retained context."""
+    kind = OracleKind.GCP_SA_IMPERSONATION
+    if not isinstance(observed, Mapping):
+        return OracleSignal(kind=kind, fired=False, confidence=0.0,
+                            evidence="no GCP SA-impersonation evidence",
+                            observed={"reason": "malformed_capture"})
+    capture = observed
+    mint = _gcp_mint_obj(capture)
+    call = capture.get("confirming_call") if isinstance(capture.get("confirming_call"), Mapping) else {}
+    resp = call.get("response") if isinstance(call.get("response"), Mapping) else {}
+
+    # (1) a mint of an impersonation token targeting a NAMED, well-formed target SA B ---------------------
+    method = _imds_text(mint.get("method") or mint.get("action"))
+    if not _gcp_mint_method_is_impersonation(method):
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"the mint method {method.strip()!r} is not a GCP service-account impersonation call "
+                      f"(iamcredentials getAccessToken/generateAccessToken/generateIdToken/signJwt/signBlob, "
+                      f"or an actAs / serviceAccountTokenCreator flow) — not an impersonation (stays a LEAD)"),
+            observed={"reason": "mint_method_not_impersonation", "method": method.strip()})
+    if not _gcp_minted_token_present(mint):
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("an impersonation mint method but NO minted token is retained — a mint attempt without a "
+                      "captured token does not prove impersonation (stays a LEAD)"),
+            observed={"reason": "no_minted_token"})
+    target_email, target_uid = _gcp_target_identity(capture, mint)
+    email_target_ok = bool(target_email) and _GCP_SA_EMAIL_RE.match(target_email) is not None
+    uid_target_ok = bool(target_uid) and _gcp_sa_uid_ok(target_uid)
+    if not (email_target_ok or uid_target_ok):
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"the impersonation mint names no well-formed target service-account "
+                      f"(target={ (target_email or target_uid) or 'ABSENT'!r}) — a target that is not a "
+                      f"*.gserviceaccount.com email or a numeric unique-id is not a named SA (stays a LEAD)"),
+            observed={"reason": "target_sa_malformed", "target": target_email or target_uid})
+
+    # (2) a confirming tokeninfo/userinfo call that ECHOES the SAME target SA B --------------------------
+    if not call:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("an impersonation token minted for the target SA but NO confirming tokeninfo/userinfo "
+                      "call is retained — minted-but-unconfirmed (a mint alone does not prove the token "
+                      "authenticates as B; stays a LEAD)"),
+            observed={"reason": "no_confirming_call", "target": target_email or target_uid})
+    action = _imds_text(call.get("action")).strip().lower()
+    if action not in _GCP_IMPERSONATION_ACTIONS:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"the confirming call's action ({action or 'ABSENT'!r}) is not a GCP token introspection "
+                      f"(tokeninfo/userinfo) — an absent/mismatched action does NOT prove the minted token "
+                      f"authenticates as B (stays a LEAD)"),
+            observed={"reason": "confirming_action_mismatch", "action": action})
+    if not _imds_call_ok(resp, call.get("status")):
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("the confirming tokeninfo/userinfo call did NOT succeed (no explicit 2xx, or a failure "
+                      "marker in the body) — the minted token is not proven usable as B (stays a LEAD)"),
+            observed={"reason": "confirming_call_failed", "target": target_email or target_uid})
+    id_ok, ident = _imds_gcp_identity(resp)
+    if not id_ok:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("the confirming call returned no valid identity echo (email / numeric sub) — cannot "
+                      "prove WHICH service-account the minted token resolves to (stays a LEAD)"),
+            observed={"reason": "identity_echo_absent"})
+    echo_email = ident["email"].strip().lower()
+    echo_sub = ident["sub"].strip()
+    if email_target_ok:
+        matched = bool(echo_email) and echo_email == target_email
+    else:
+        matched = bool(echo_sub) and echo_sub == target_uid
+    if not matched:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"the confirming identity echo (email={echo_email or '∅'!r}, sub={echo_sub or '∅'!r}) "
+                      f"does NOT resolve the named target SA "
+                      f"({(target_email or target_uid)!r}) — the minted token authenticates as a DIFFERENT "
+                      f"principal, so it does not prove impersonation OF B (stays a LEAD)"),
+            observed={"reason": "identity_echo_mismatch", "target": target_email or target_uid,
+                      "echo_email": echo_email, "echo_sub": echo_sub})
+
+    # (3) the minted token is fingerprint-BOUND to the confirming call, over a TRUSTED endpoint -----------
+    mint_fp = _imds_text(mint.get("credential_fingerprint")).strip()
+    call_fp = _imds_text(call.get("credential_fingerprint")).strip()
+    if not mint_fp or not call_fp or mint_fp != call_fp:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=("the confirming call is not fingerprint-BOUND to the minted impersonation token (a "
+                      "domain-separated fingerprint present in BOTH the mint and the confirming call and "
+                      "EQUAL) — the call may have introspected a DIFFERENT token; not a bound FACT (LEAD)"),
+            observed={"reason": "token_not_bound_to_confirming_call", "target": target_email or target_uid})
+    ok, reason = _confirming_call_trusted(call, lambda h: h in _GCP_IMPERSONATION_CONFIRM_HOSTS)
+    if not ok:
+        return OracleSignal(
+            kind=kind, fired=False, confidence=0.0,
+            evidence=(f"the confirming tokeninfo/userinfo call is not over a trusted, allow-listed Google "
+                      f"endpoint ({reason}) — an un-allow-listed / proxied / redirected / TLS-unverified "
+                      f"confirmation cannot mint a FACT (anti-laundering; stays a LEAD)"),
+            observed={"reason": reason, "target": target_email or target_uid})
+
+    who = target_email or target_uid
+    return OracleSignal(
+        kind=kind, fired=True, confidence=0.95,
+        evidence=(f"GCP service-account impersonation: an impersonation token was minted via {method.strip()!r} "
+                  f"targeting service-account {who!r}, and a confirming {action} call authenticated with it "
+                  f"and echoed that exact identity (email={ident['email']!r}, sub={ident['sub']!r}), with the "
+                  f"runner binding the exact token to that call over a trusted, allow-listed Google endpoint "
+                  f"(fingerprint match + introspection-host allow-list, no proxy/redirect, validated TLS) — a "
+                  f"short-lived token valid AS {who!r} was proven minted. SUBJECT = the retained capture the "
+                  f"WARDEN-gated runner produced; VIGIL re-derives the achieved effect over the retained "
+                  f"evidence offline (no network)."),
+        observed={"reason": "gcp_sa_impersonation_confirmed", "impersonated_sa": who, "method": method.strip(),
+                  "confirming_call": action, "echo_email": ident["email"], "echo_sub": ident["sub"]})

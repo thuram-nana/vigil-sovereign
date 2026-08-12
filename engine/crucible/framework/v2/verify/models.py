@@ -273,6 +273,27 @@ class OracleKind(str, enum.Enum):
     # unverified/proxied/redirected transport, an unrecognized type, or malformed evidence do NOT fire.
     SECRET_CREDENTIAL_VALIDITY = "secret_credential_validity"
 
+    # E3 (BUILD-PLAN §E3) GCP service-account IMPERSONATION. SAME convention as E1/E5: kept OUT of the frozen
+    # _ALL_ORACLES fallback (verifier._ALL_ORACLES stays EXACTLY 15) and fired ONLY via its bug_class row
+    # keyed on the `gcp_impersonation_capture` ctx field that NO benchmark/scan/engage finding carries — so
+    # appending it leaves `make gate` byte-identical and it never auto-fires on a scan. GCP_SA_IMPERSONATION
+    # fires (0.95) ONLY when a RETAINED, secret-safe capture proves ALL of: (a) an impersonation TOKEN was
+    # minted AS a named target service-account B (an iamcredentials getAccessToken/generateAccessToken/
+    # generateIdToken/signJwt/signBlob verb, or an actAs / roles/iam.serviceAccountTokenCreator flow) targeting
+    # a well-formed *.gserviceaccount.com email or numeric unique-id; (b) a confirming tokeninfo/userinfo call
+    # SUCCEEDED (explicit 2xx, no failure marker at any depth) whose identity echo (email/sub) EQUALS the named
+    # target B (an echo of a DIFFERENT SA does NOT confirm); and (c) the minted token is fingerprint-BOUND to
+    # that call (a domain-separated fingerprint in BOTH and EQUAL — the token is never retained) AND the call
+    # used a TRUSTED, allow-listed Google introspection endpoint (oauth2/www/iamcredentials/openidconnect
+    # .googleapis.com) over a validated-TLS, no-proxy, no-redirect transport. E3 is the OPPOSITE shape to E1:
+    # E1 gates on the credential SOURCE host (retrieved FROM the metadata endpoint); E3 makes no source claim
+    # and gates entirely on the CONFIRMING-side identity echo + endpoint allow-list (the ANTI-LAUNDERING gate,
+    # so an attacker-controlled 'tokeninfo' host can never mint a FACT). A non-impersonation mint, no minted
+    # token, a malformed target, a minted-but-unconfirmed token, a failed/4xx confirming call, an echo of a
+    # DIFFERENT SA, a fingerprint mismatch, an un-allow-listed confirming host, an unverified/proxied/redirected
+    # transport, or malformed evidence do NOT fire (stay an honest LEAD).
+    GCP_SA_IMPERSONATION = "gcp_sa_impersonation"
+
 
 class OracleProbe(BaseModel):
     """A passive, abstract description of what an oracle must compare.

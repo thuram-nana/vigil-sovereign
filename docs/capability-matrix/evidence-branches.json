@@ -413,6 +413,26 @@
       ]
     },
     {
+      "id": "cloud_exploit.gcp.sa_impersonation",
+      "check": "gcp_impersonation_verify",
+      "evidence": "a VIGIL-OWNED, WARDEN-gated capture proved a GCP service-account IMPERSONATION: a principal minted a short-lived token AS a named target service-account B (via iamcredentials getAccessToken / generateAccessToken / signJwt, or an actAs / roles/iam.serviceAccountTokenCreator flow) and a confirming tokeninfo/userinfo call ECHOED B's identity (email / numeric sub) at a TRUSTED, allow-listed Google introspection endpoint, bound to the mint by a shared token fingerprint, all re-derived as an achieved-effect FACT by the deterministic gcp_sa_impersonation oracle over the RETAINED, secret-safe capture",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "capture_wellformed"
+      ],
+      "limitation": "Bounded to the CAPTURED mint and its ONE confirming call ('this principal minted a token valid as service-account B at time T'), NOT a claim about every impersonation path or the whole IAM policy. NOT CLEAN-capable: one confirming call cannot prove no impersonation path exists. The retained capture is SECRET-SAFE — the minted token is redacted to a presence marker — so the FACT re-verifies offline with no live token. E3 is the OPPOSITE shape to the IMDS branch: it makes NO claim about the token SOURCE; the ANTI-LAUNDERING gate is entirely on the CONFIRMING-CALL side — the tokeninfo/userinfo call must resolve at a per-type-allow-listed Google introspection endpoint and its identity echo must EQUAL the named target SA, so an attacker-controlled 'tokeninfo' endpoint or an echo of a DIFFERENT SA cannot mint a FACT. Real-transport LIVE-FIRE (the runner against real GCP iamcredentials/oauth2 endpoints) is deferred on operator-provisioned GCP creds; the producer and this admission / certificate / world-model wiring are complete and fixture-proven offline.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "This branch is an ACHIEVED-EFFECT exploitation confirmation over a single captured impersonation mint + confirming call; proving the ABSENCE of any service-account impersonation path is a different capability (a GCP IAM posture analysis enumerating serviceAccountTokenCreator / actAs grants across the whole policy, with a completeness proof), not this exploitation branch's target, so clean-capability is deliberately not pursued here.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:gcp_sa_impersonation_oracle",
+        "engine/crucible/framework/v2/verify/gcp_impersonation_capture.py:confirm_gcp_impersonation_capture",
+        "integration/vigil_integration/live/gcp_impersonation_verify.py:gcp_impersonation_verify"
+      ]
+    },
+    {
       "id": "k8s_exploit.rbac.anonymous_privileged_binding",
       "check": "rbac_verify",
       "evidence": "a VIGIL-OWNED, WARDEN-A2- and D5-scope-gated LIVE read of a target Kubernetes cluster's RBAC retained a ClusterRoleBinding/RoleBinding whose raw subjects + roleRef PROVE an ANONYMOUS subject (system:anonymous / system:unauthenticated) is bound to a dangerous BUILT-IN ClusterRole (cluster-admin / admin / edit) in the rbac.authorization.k8s.io apiGroup — an unauthenticated-privileged achieved effect re-derived by the deterministic k8s_workload_posture oracle over the RETAINED binding",
