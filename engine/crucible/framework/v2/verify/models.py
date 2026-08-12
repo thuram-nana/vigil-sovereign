@@ -313,6 +313,28 @@ class OracleKind(str, enum.Enum):
     # `iam_escalation_primitive`, so the two never collide in oracle_version / reverify.
     IAM_ESCALATION_PRIMITIVE = "iam_escalation_primitive"
 
+    # E4 TIER-2 (BUILD-PLAN §E4·TIER-2) K8s dangerous-VERB / default-ServiceAccount RBAC verb-GRANT. A
+    # SEPARATE, STRONGER oracle than TIER-1 (K8S_WORKLOAD_POSTURE, which only NAME-matches a dangerous built-in
+    # ClusterRole for an ANONYMOUS subject and never parses rules). SAME frozen-fallback convention as E1/E3/E5:
+    # kept OUT of the frozen _ALL_ORACLES fallback (verifier._ALL_ORACLES stays EXACTLY 15) and fired ONLY via
+    # its bug_class row keyed on the `k8s_rbac_grant_control` ctx field that NO benchmark/scan/engage finding
+    # carries — so appending it leaves `make gate` byte-identical and it never auto-fires on a scan.
+    # K8S_RBAC_VERB_GRANT fires (0.9) ONLY when a RETAINED `binding` + its SEPARATELY-retained `role_object`
+    # PROVE a dangerous (verb,resource) grant to an attacker-occupiable subject, under a MANDATORY near-zero-FP
+    # gate: (I) the roleRef->role_object identity linkage is RE-CHECKED (name/kind/apiGroup EXACT, no empty-
+    # string tolerance; a namespaced Role requires a same-namespace RoleBinding; a ClusterRole an empty
+    # namespace); (IV) the role's rules are AUTHORITATIVE (a live API GET, or a static manifest with NO
+    # aggregationRule); (III) a dangerous rule shape is present — (a) full-wildcard */*/*, (b) secret-read
+    # get/list/watch on secrets, (c) priv-esc escalate/bind/impersonate; (II) an attacker-occupiable subject is
+    # bound — an ANONYMOUS subject (system:anonymous/system:unauthenticated) MAY FACT on ANY shape, but the
+    # namespace-default ServiceAccount / system:authenticated MAY FACT ONLY on a FULL-WILDCARD grant via a
+    # ClusterRoleBinding (the built-in `admin` legitimately grants Secrets get/list/watch, and cluster-read
+    # backup/monitoring roles legitimately grant */* get/list/watch, so those most-common legitimate
+    # delegations stay LEAD). Everything else (a named subject; a resourceNames-scoped single-secret get;
+    # default-SA×secret-read; authenticated×broad-read; a linkage break; aggregated static rules; malformed
+    # evidence) stays an honest LEAD.
+    K8S_RBAC_VERB_GRANT = "k8s_rbac_verb_grant"
+
 
 class OracleProbe(BaseModel):
     """A passive, abstract description of what an oracle must compare.

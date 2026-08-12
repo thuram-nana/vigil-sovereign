@@ -235,6 +235,12 @@ class AutonomousCampaign:
                 # uses the HELD-credential chain; a role/permission gain uses HAS_GRANT + OWNS over the
                 # escalated resource (see the method — the primitive family is read from the finding).
                 self._establish_iam_escalation(world, attacker, ep_id, f, seq)
+            if f.bug_class == "k8s_rbac_privilege_grant":
+                # E4 TIER-2 achieved effect: a confirmed dangerous (verb,resource) grant to an
+                # attacker-occupiable subject (anon / default-SA / system:authenticated) — the referenced
+                # role's PARSED rules grant cluster-admin-equivalent or secret-read to a subject that holds NO
+                # credential, so REACHING the kube-apiserver as that subject IS the grant.
+                self._establish_k8s_rbac_grant(world, ep_id, f.confidence, seq)
 
         # passive findings feed chains too: a disclosed private key IS a credential
         # the attacker can capture, which the extended operators turn into account
@@ -417,6 +423,26 @@ class AutonomousCampaign:
                             provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
         _edge(world, base, resource, EdgeKind.HAS_GRANT, prov, conf, seq)   # the strict-gain edge
         attacker.own(resource, seq=seq.next(), provenance=prov, confidence=conf)
+    def _establish_k8s_rbac_grant(self, world: WorldModel, ep_id: str, conf: float, seq: "_Seq") -> None:
+        """A confirmed E4 TIER-2 dangerous-verb / default-SA RBAC verb-grant (achieved effect): an
+        attacker-occupiable subject (system:anonymous / the namespace-default ServiceAccount / the
+        system:authenticated group) is bound — via the referenced role's PARSED rules — to a
+        cluster-admin-equivalent (*/*/*) or secret-read grant. Like the TIER-1 capture, NO credential is HELD:
+        the subject is unauthenticated / a default identity that holds no token, so an attacker who merely
+        REACHES the kube-apiserver AS that subject IS the grant. Mint the cluster control-plane (a crown
+        CLOUD_RESOURCE) + the secret store (a crown DATASTORE) and TRUSTS_FOR edges ep->cluster->secrets, so
+        best_paths yields the crown-jewel route the achieved effect proves — the idor/bola datastore topology
+        (reaching the surface hands over the resource behind it), NOT the credential-HOLD chain of E1/E5."""
+        prov = "finding:k8s_rbac_privilege_grant"
+        cluster, secrets = f"cluster:{ep_id}", f"secrets:{ep_id}"
+        world.add_node(Node(id=cluster, kind=NodeKind.CLOUD_RESOURCE,
+                            attrs={"detail": "kube-apiserver control-plane", "dangerous_rbac_grant": True},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        world.add_node(Node(id=secrets, kind=NodeKind.DATASTORE, attrs={"detail": "cluster secret store"},
+                            provenance=prov, confidence=conf, first_seen=seq.peek(), last_seen=seq.next()))
+        # reaching the API server AS the granted subject IS the grant (no credential); it reads all secrets
+        _edge(world, ep_id, cluster, EdgeKind.TRUSTS_FOR, prov, conf, seq)
+        _edge(world, cluster, secrets, EdgeKind.TRUSTS_FOR, prov, conf, seq)
 
     def _extract_paths(self, world: WorldModel) -> list[AttackPath]:
         if world.get_node(ATTACKER_ID) is None:

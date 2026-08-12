@@ -95,12 +95,19 @@ _E3_CLASSES = {"gcp_sa_impersonation"}
 # `iam_privilege_escalation` (which maps to POLICY_PATH reachability), so it never re-routes the weaker oracle.
 _E2_KINDS = {OracleKind.IAM_ESCALATION_PRIMITIVE}
 _E2_CLASSES = {"iam_escalation_primitive"}
+# BUILD-PLAN §E4 TIER-2 (K8s dangerous-VERB / default-SA RBAC verb-grant — the rule-PARSING sibling of the
+# TIER-1 anonymous_privileged_binding oracle, which only NAME-matches a built-in ClusterRole) additive
+# kind/class: SAME frozen-fallback discipline — kept OUT of _ALL_ORACLES, reachable ONLY via its
+# `k8s_rbac_privilege_grant` BUG_CLASS_ORACLES row keyed on a `k8s_rbac_grant_control` ctx field that no
+# benchmark/scan/engage finding carries.
+_E4T2_KINDS = {OracleKind.K8S_RBAC_VERB_GRANT}
+_E4T2_CLASSES = {"k8s_rbac_privilege_grant"}
 # every additive kind that must stay out of the frozen unknown-class fallback.
 _EXCLUDED_KINDS = (_AEGIS_KINDS | _WS3_KINDS | _WSB_KINDS | _NW1_KINDS | _WF1_KINDS
                    | _G2_KINDS | _G3_KINDS | _CICD_KINDS | _MOBILE_KINDS | _EMAIL_KINDS | _IDENTITY_KINDS
-                   | _C3_KINDS | _T4_KINDS | _E1_KINDS | _E5_KINDS | _E3_KINDS | _E2_KINDS)
+                   | _C3_KINDS | _T4_KINDS | _E1_KINDS | _E5_KINDS | _E3_KINDS | _E2_KINDS | _E4T2_KINDS)
 _EXCLUDED_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
-                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES
+                     "credential_stuffing", "sqli_attempt", "command_injection_attempt"} | _WS3_CLASSES | _WSB_CLASSES | _NW1_CLASSES | _WF1_CLASSES | _G2_CLASSES | _G3_CLASSES | _CICD_CLASSES | _MOBILE_CLASSES | _EMAIL_CLASSES | _IDENTITY_CLASSES | _C3_CLASSES | _T4_CLASSES | _E1_CLASSES | _E5_CLASSES | _E3_CLASSES | _E2_CLASSES | _E4T2_CLASSES
 _AEGIS_CLASSES = {"prompt_injection", "system_prompt_disclosure", "automated_access",
                   "credential_stuffing", "sqli_attempt", "command_injection_attempt"}
 _AEGIS_ALIASES = {"jailbreak", "llm_prompt_injection", "indirect_prompt_injection",

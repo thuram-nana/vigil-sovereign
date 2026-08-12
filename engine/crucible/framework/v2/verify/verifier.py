@@ -273,6 +273,11 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # `iam_privilege_escalation` (which maps to POLICY_PATH reachability): this is the ACHIEVED-ESCALATION
     # (strict-gain) proof, its own evidence branch, a stronger claim than mere reachability.
     "iam_escalation_primitive": (OracleKind.IAM_ESCALATION_PRIMITIVE,),
+    # E4 TIER-2 K8s dangerous-VERB / default-SA RBAC verb-grant — SAME convention: NOT in the frozen
+    # _ALL_ORACLES fallback, fires ONLY when the ctx carries `k8s_rbac_grant_control` (no benchmark/scan/engage
+    # finding does), so appending it leaves the unknown-class fallback and `make gate` byte-identical. Distinct
+    # from the TIER-1 `k8s_workload_misconfiguration` row (K8S_WORKLOAD_POSTURE) — TIER-2 parses rules.
+    "k8s_rbac_privilege_grant": (OracleKind.K8S_RBAC_VERB_GRANT,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -429,6 +434,14 @@ _ALIASES: dict[str, str] = {
     "anonymous_rbac_binding": "k8s_workload_misconfiguration",
     "anonymous_cluster_admin": "k8s_workload_misconfiguration",
     "rbac_anonymous_privileged_binding": "k8s_workload_misconfiguration",
+    # E4 TIER-2 verb-grant spelling variants (a dangerous (verb,resource) grant PROVED over the referenced
+    # role's PARSED rules) fold onto the single canonical class. Deliberately DISTINCT from the TIER-1
+    # name-match class above — rule-parse and name-match are different proofs and stay different classes.
+    "k8s_rbac_verb_grant": "k8s_rbac_privilege_grant",
+    "k8s_rbac_dangerous_verb_grant": "k8s_rbac_privilege_grant",
+    "k8s_dangerous_rbac_grant": "k8s_rbac_privilege_grant",
+    "default_serviceaccount_privileged_binding": "k8s_rbac_privilege_grant",
+    "rbac_dangerous_verb_grant": "k8s_rbac_privilege_grant",
     # service-mesh achieved-state posture spelling variants (a mesh-config control an oracle proves via a
     # concrete insecure achieved state) fold onto the single canonical class.
     "mesh_posture": "mesh_misconfiguration",
@@ -924,6 +937,14 @@ class OracleVerifier:
         if kind is OracleKind.IAM_ESCALATION_PRIMITIVE:
             if "iam_escalation_capture" in ctx:
                 return oracles.iam_escalation_oracle(ctx["iam_escalation_capture"])
+            return None
+        # -- BUILD-PLAN §E4 TIER-2 K8s dangerous-verb / default-SA RBAC verb-grant — fire ONLY when the ctx
+        #    carries `k8s_rbac_grant_control` (the WARDEN-gated RBAC runner's retained binding + role_object);
+        #    no benchmark/scan/engage finding carries it, so it is inert on the gate path. DEFENSIVE
+        #    VERIFICATION (a rule-parsing detector), never an RBAC-exploitation runner.
+        if kind is OracleKind.K8S_RBAC_VERB_GRANT:
+            if "k8s_rbac_grant_control" in ctx:
+                return oracles.k8s_rbac_verb_grant_oracle(ctx["k8s_rbac_grant_control"])
             return None
         return None
 

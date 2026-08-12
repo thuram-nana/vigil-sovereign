@@ -77,6 +77,7 @@ from .iam_escalation_capture import (
     confirm_iam_escalation_capture,
     iam_escalation_capture_context,
 )
+from .k8s_rbac_grant import confirm_k8s_rbac_grant, k8s_rbac_grant_context
 from .oracles import (
     achieved_state_oracle,
     anonymous_reachable_oracle,
@@ -90,6 +91,7 @@ from .oracles import (
     cloud_posture_oracle,
     k8s_posture_oracle,
     k8s_workload_posture_oracle,
+    k8s_rbac_verb_grant_oracle,
     mesh_posture_oracle,
     mobile_posture_oracle,
     email_auth_posture_oracle,
@@ -159,6 +161,7 @@ __all__ = [
     "policy_path_oracle",
     "k8s_posture_oracle",
     "k8s_workload_posture_oracle",
+    "k8s_rbac_verb_grant_oracle",
     "cloud_posture_oracle",
     "mesh_posture_oracle",
     "mobile_posture_oracle",
@@ -202,6 +205,9 @@ __all__ = [
     # k8s workload posture (live-cluster RBAC achieved-state promotion; C2·K8s)
     "confirm_k8s_workload_posture",
     "k8s_workload_posture_context",
+    # k8s RBAC verb-grant (E4 TIER-2: rule-parsing dangerous-verb / default-SA grant confirmation)
+    "confirm_k8s_rbac_grant",
+    "k8s_rbac_grant_context",
     # cloud/CSPM posture (achieved-state promotion; Wave-F1)
     "confirm_cloud_posture",
     "cloud_posture_context",

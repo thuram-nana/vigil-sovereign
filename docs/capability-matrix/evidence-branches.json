@@ -471,6 +471,26 @@
         "engine/crucible/framework/v2/verify/iam_escalation_capture.py:confirm_iam_escalation_capture",
         "integration/vigil_integration/live/iam_escalation_verify.py:iam_escalation_verify"
       ]
+    },
+    {
+      "id": "k8s_exploit.rbac.dangerous_verb_grant",
+      "check": "grant_verify",
+      "evidence": "a VIGIL-OWNED, WARDEN-A2- and D5-scope-gated LIVE read of a target Kubernetes cluster's RBAC retained BOTH a ClusterRoleBinding/RoleBinding AND — SEPARATELY — the Role/ClusterRole its roleRef NAMES (a roleRef is only a name; the rules live in a distinct object), whose PARSED rules PROVE a dangerous (verb,resource) grant to an attacker-occupiable subject: an ANONYMOUS subject (system:anonymous / system:unauthenticated) on ANY dangerous shape — full-wildcard */*/*, secret-read get/list/watch on secrets, or priv-esc escalate/bind/impersonate — or the namespace-default ServiceAccount / system:authenticated ONLY on a full-wildcard */*/* grant via a ClusterRoleBinding, all re-derived by the deterministic k8s_rbac_verb_grant oracle over the RETAINED binding + role_object (the roleRef->role identity join re-checked, not trusted)",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "capture_wellformed"
+      ],
+      "limitation": "Bounded to the CAPTURED binding + the CAPTURED role_object ('this live cluster binds subject S, via this role's rules read at T, to this dangerous verb'), NOT a claim about every binding or the whole cluster's RBAC. NOT CLEAN-capable: one gated read of a subset of bindings + roles cannot prove the ABSENCE of a dangerous grant cluster-wide. The retained evidence is SECRET-SAFE — the kubeconfig bearer token / client-cert used to read is fingerprinted-and-discarded, never retained — so the FACT re-verifies offline with no live credential. This is the STRONGER rule-PARSING sibling of the TIER-1 anonymous_privileged_binding branch (which only NAME-matches a built-in ClusterRole): TIER-2 parses the role's rules, so it also confirms an anonymous subject bound to a CUSTOM role whose rules are dangerous. NEAR-ZERO-FP by a SUBJECT-GATED rule the review made mandatory: the built-in admin role legitimately grants Secrets get/list/watch and cluster-read backup/monitoring roles legitimately grant */* get/list/watch, so a default-ServiceAccount or system:authenticated subject may confirm ONLY on a genuine */*/* full-wildcard grant via a ClusterRoleBinding — default/default x admin secret-read in a namespace, a cluster-read backup role bound to system:authenticated, a named subject, a resourceNames-scoped single-secret get, a broken roleRef->role join, and aggregated static rules all stay LEAD. The retained evidence is re-derived by VIGIL's own oracle, never the collector's say-so. Real-transport LIVE-FIRE (the runner against a real cluster's kube-apiserver) is deferred on an operator-provisioned kubeconfig; the producer and this admission / certificate / world-model wiring are complete and fixture-proven offline.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "This branch is an ACHIEVED-EFFECT exploitation confirmation over a single captured binding + role_object; proving the ABSENCE of any dangerous verb-grant cluster-wide is a different capability (a k8s RBAC POSTURE analysis enumerating the full binding + role set with a completeness proof), not this exploitation branch's target, so clean-capability is deliberately not pursued here.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:k8s_rbac_verb_grant_oracle",
+        "engine/crucible/framework/v2/verify/k8s_rbac_grant.py:confirm_k8s_rbac_grant",
+        "integration/vigil_integration/live/k8s_rbac_grant_verify.py:grant_verify"
+      ]
     }
   ]
 }

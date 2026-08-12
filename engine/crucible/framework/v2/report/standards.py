@@ -248,6 +248,12 @@ _STANDARDS: dict[str, ControlMapping] = {
     # assumed-identity effect. ATT&CK T1134 (Access Token Manipulation) + T1078.004 (Valid Accounts: Cloud).
     "gcp_sa_impersonation": _m("A01:2021", ("CWE-269", "CWE-287"), pci=_AC_PCI, soc2=_AC_SOC2,
                                iso=("A.8.2", "A.5.15"), attack=("T1134", "T1078.004")),
+    # E4 TIER-2 K8s dangerous-verb / default-SA RBAC verb-grant: the referenced role's PARSED rules grant a
+    # dangerous (verb,resource) capability to an attacker-occupiable subject (anon / default-SA /
+    # system:authenticated). CWE-269 (Improper Privilege Management) + CWE-284 (Improper Access Control).
+    # ATT&CK T1078.001 (Valid Accounts: Default Accounts) + T1548 (Abuse Elevation Control Mechanism).
+    "k8s_rbac_privilege_grant": _m("A01:2021", ("CWE-269", "CWE-284"), pci=_AC_PCI, soc2=_AC_SOC2,
+                                   iso=("A.8.2", "A.5.15"), attack=("T1078.001", "T1548")),
     # ---- Authentication / identity failures (A07) ----
     "auth_bypass": _m("A07:2021", ("CWE-287", "CWE-288"), pci=_AUTH_PCI, soc2=_AUTH_SOC2, iso=_AUTH_ISO,
                       attack=("T1190", "T1078")),
