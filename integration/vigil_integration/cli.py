@@ -1216,18 +1216,25 @@ def _cmd_up(args: argparse.Namespace) -> int:
     serves the bundle itself — it imports NO framework/strix/sigil, so the two trust domains are never
     co-loaded in one interpreter. Binds loopback (or a private/tunnel IP); refuses a public bind."""
     if getattr(args, "services", False):
-        # Optional docker preflight: create the egress-gateway networks + container if none exist
-        # (idempotent). vigil_gateway.docker is pure-stdlib, so this stays on the boundary-safe path.
+        # Optional docker preflight: create the egress-gateway + root services (qdrant) if none exist
+        # (idempotent). Both helpers are pure-stdlib, so this stays on the boundary-safe path. Each leg is
+        # independently best-effort — a docker issue must NEVER block the UI bring-up.
+        import json as _json
+        import pathlib as _pl
+        _repo = _pl.Path(__file__).resolve().parents[2]
         try:
-            import json as _json
-            import pathlib as _pl
             from vigil_gateway.docker import SandboxNetworking
-            _repo = _pl.Path(__file__).resolve().parents[2]
             _res = SandboxNetworking().compose_up(
                 _repo / "infra" / "docker" / "docker-compose.yml", build=True, context_dir=_repo / "gateway")
             print(f"vigil up: gateway topology up ({_json.dumps(_res)})")
-        except Exception as _e:  # best-effort — a docker issue must never block the UI bring-up
+        except Exception as _e:  # noqa: BLE001
             print(f"vigil up: gateway services preflight skipped — {_e}", file=sys.stderr)
+        try:
+            from .services import DEFAULT_SERVICES, RootServices
+            _sres = RootServices(_repo).up(list(DEFAULT_SERVICES))
+            print(f"vigil up: services up ({_json.dumps(_sres)})")
+        except Exception as _e:  # noqa: BLE001
+            print(f"vigil up: root services preflight skipped — {_e}", file=sys.stderr)
     from .uiproxy import run_up
     return run_up(host=args.host, port=args.port, domain=args.domain, base_dir=args.base_dir,
                   no_browser=args.no_browser,
@@ -1260,6 +1267,19 @@ def _cmd_services(args: argparse.Namespace) -> int:
     compose = (pathlib.Path(args.compose).expanduser() if getattr(args, "compose", "")
                else repo / "infra" / "docker" / "docker-compose.yml")
 
+    from .services import DEFAULT_SERVICES, RootServices
+    root = RootServices(repo)
+
+    def _selected_root() -> list[str]:
+        if getattr(args, "all", False):
+            return ["qdrant", "neo4j", "otel-collector"]
+        sel = list(DEFAULT_SERVICES)                              # qdrant by default
+        if getattr(args, "with_graph", False):
+            sel.append("neo4j")
+        if getattr(args, "with_observability", False):
+            sel.append("otel-collector")
+        return sel
+
     action = args.services_action
     if action == "render":
         out = pathlib.Path(args.out).expanduser() if getattr(args, "out", "") else compose
@@ -1269,19 +1289,38 @@ def _cmd_services(args: argparse.Namespace) -> int:
         return 0
     try:
         if action == "status":
-            print(json.dumps(net.status(), indent=2))
+            print(json.dumps({"gateway": net.status(), "services": root.status()}, indent=2))
             return 0
         if action == "down":
             net.compose_down(compose)
-            print("gateway services stopped (networks left in place)")
+            root.down(["qdrant", "neo4j", "otel-collector"])
+            print("gateway + services stopped (networks left in place)")
             return 0
-        # up — build the image if absent, then `docker compose up -d` (creates only what is missing)
-        res = net.compose_up(compose, build=not getattr(args, "no_build", False), context_dir=gw_dir)
-        print(json.dumps(res, indent=2))
+        # up — create ONLY what is missing (idempotent): the gateway topology + the root services.
+        result = {"gateway": net.compose_up(compose, build=not getattr(args, "no_build", False),
+                                            context_dir=gw_dir)}
+        result["services"] = root.up(_selected_root())
+        print(json.dumps(result, indent=2))
         return 0
     except (RuntimeError, OSError) as e:
         print(f"vigil services {action}: {e}", file=sys.stderr)
         return 1
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """`vigil doctor` — a read-only preflight/health report: prerequisites (binaries, both venvs, writable
+    dirs), the UI ports (free or already in use), and which docker services are up (create the missing ones
+    with `vigil services up`). Exits non-zero only on a HARD prerequisite gap. EXEC-ONLY: pure-stdlib."""
+    import json
+    import pathlib
+    from . import doctor as _doctor
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    report = _doctor.collect(repo)
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(_doctor.render(report))
+    return 0 if report.get("ok") else 1
 
 
 def _cmd_telemetry(args: argparse.Namespace) -> int:
@@ -1873,12 +1912,15 @@ def build_parser() -> argparse.ArgumentParser:
     pu.set_defaults(func=_cmd_up)
 
     psvc = sub.add_parser("services",
-                          help="docker bring-up for the egress gateway: create the networks + gateway "
-                               "container IF NONE EXIST (idempotent, re-runnable)")
+                          help="docker bring-up: create the egress gateway + qdrant/neo4j/otel services IF "
+                               "NONE EXIST (idempotent, re-runnable)")
     psvc_sub = psvc.add_subparsers(dest="services_action", required=True)
-    psu = psvc_sub.add_parser("up", help="build the image if absent, then `docker compose up -d` (idempotent)")
-    psu.add_argument("--compose", default="", help="compose file (default infra/docker/docker-compose.yml)")
-    psu.add_argument("--no-build", action="store_true", help="do not build the image (assume it already exists)")
+    psu = psvc_sub.add_parser("up", help="create/start the gateway + root services if absent (idempotent)")
+    psu.add_argument("--compose", default="", help="gateway compose file (default infra/docker/docker-compose.yml)")
+    psu.add_argument("--no-build", action="store_true", help="do not build the gateway image (assume it exists)")
+    psu.add_argument("--with-graph", action="store_true", help="also bring up Neo4j (the knowledge graph)")
+    psu.add_argument("--with-observability", action="store_true", help="also bring up the otel-collector")
+    psu.add_argument("--all", action="store_true", help="bring up ALL services (gateway + qdrant + neo4j + otel)")
     pssg = psvc_sub.add_parser("status", help="show which networks / image / container already exist")
     pssg.add_argument("--compose", default="")
     psdn = psvc_sub.add_parser("down", help="stop + remove the gateway container (networks are left in place)")
@@ -1887,6 +1929,13 @@ def build_parser() -> argparse.ArgumentParser:
     psr.add_argument("--out", default="", help="output path (default infra/docker/docker-compose.yml)")
     psr.add_argument("--charter-slug", default="", help="charter slug to bake into the compose scope")
     psvc.set_defaults(func=_cmd_services)
+
+    pdoc = sub.add_parser("doctor",
+                          help="read-only readiness report: prerequisites (binaries, both venvs, writable "
+                               "dirs), UI ports, and which docker services are up (create the rest: `vigil "
+                               "services up`). Exits non-zero on a hard prerequisite gap.")
+    pdoc.add_argument("--json", action="store_true", help="emit the raw report as JSON")
+    pdoc.set_defaults(func=_cmd_doctor)
 
     ptel = sub.add_parser("telemetry",
                           help="live assurance/metrics collector over the signed spine (G2): write a "
