@@ -149,6 +149,36 @@ _TIER_PREFERENCE: dict[Tier, tuple[str, ...]] = {
 _TIER_ENV       = "CRUCIBLE_SOVEREIGNTY_TIER"
 _LEGACY_ENV     = "CRUCIBLE_SOVEREIGN_MODE"
 
+# The operator's zero-data-retention ATTESTATION for a direct Anthropic API key. It is an
+# attestation, not a proof: it says "this key is on a ZDR contract", which is what moves a
+# direct-API client from `cloud_only` (PERMISSIVE only) to `trusted_cloud` (TRUSTED_CLOUD+).
+_ZDR_ENV        = "CRUCIBLE_ANTHROPIC_ZDR"
+
+# The truthy set every sovereignty flag in this module accepts. Kept byte-identical to the tuple
+# `kernel.backends.anthropic.AnthropicBackend` used before `direct_anthropic_backend_name()`
+# existed — ONE vocabulary for the attestation, so every direct-SDK egress site classifies an
+# identical environment identically.
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def zdr_attested() -> bool:
+    """True when the operator has attested — via ``CRUCIBLE_ANTHROPIC_ZDR`` — that the configured
+    Anthropic API key is covered by a zero-data-retention agreement."""
+    return os.environ.get(_ZDR_ENV, "").strip() in _TRUTHY
+
+
+def direct_anthropic_backend_name() -> str:
+    """The sovereignty backend name a **direct** ``anthropic.Anthropic(...)`` client must be
+    classified under: ``anthropic-zdr`` when the operator has attested ZDR, else ``anthropic``.
+
+    Every site that constructs a direct Anthropic SDK client — the URK ``AnthropicBackend``, the
+    live think step behind ``vigil engage``, the console terminal router — resolves the name here
+    and then calls ``current().assert_permitted(name)``, so ONE rule decides whether that egress may
+    happen. Without the ZDR attestation the name classifies ``cloud_only``: permitted at PERMISSIVE
+    only, refused at AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD.
+    """
+    return "anthropic-zdr" if zdr_attested() else "anthropic"
+
 
 def _resolve_tier_from_env() -> Tier:
     raw = os.environ.get(_TIER_ENV, "").strip().upper()
@@ -160,7 +190,7 @@ def _resolve_tier_from_env() -> Tier:
             # gets a clear policy explanation when they next probe.
             return Tier.AIR_GAPPED
     # Legacy alias: Session 7's binary flag maps to AIR_GAPPED.
-    if os.environ.get(_LEGACY_ENV, "").strip() in ("1", "true", "yes", "on"):
+    if os.environ.get(_LEGACY_ENV, "").strip() in _TRUTHY:
         return Tier.AIR_GAPPED
     return Tier.PERMISSIVE
 

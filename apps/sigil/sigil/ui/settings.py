@@ -334,9 +334,21 @@ CONFIG_META = {
     "CRUCIBLE_RECON_MAX_WORKERS": {"group": "offense", "type": "int", "min": 1, "max": 64, "default": "1",
         "label": "Recon max workers", "plane": "offense",
         "purpose": "Parallelism for the recon phase. Keep low to stay gentle on a target."},
+    "CRUCIBLE_SOVEREIGNTY_TIER": {"group": "offense", "type": "enum", "optional": True, "default": "",
+        "choices": ["AIR_GAPPED", "SOVEREIGN_CLOUD", "TRUSTED_CLOUD", "PERMISSIVE"],
+        "label": "Sovereignty tier (what may leave this machine)", "plane": "offense",
+        "purpose": "Which model backends the engine may call. AIR_GAPPED = local backends only — every "
+                   "cloud model call, including the `vigil engage` think step, is refused before any bytes "
+                   "leave the host. SOVEREIGN_CLOUD adds jurisdictional cloud (Bedrock/Vertex/Mistral); "
+                   "TRUSTED_CLOUD adds Anthropic ZDR (also needs the zero-data-retention toggle below); "
+                   "PERMISSIVE allows everything. Blank = leave it to the offense process environment, "
+                   "which defaults to PERMISSIVE. A tier exported in the shell that launches `vigil up` "
+                   "takes precedence over the value stored here."},
     "CRUCIBLE_ANTHROPIC_ZDR": {"group": "offense", "type": "bool", "default": "",
         "label": "Anthropic zero-data-retention", "plane": "offense",
-        "purpose": "Route Claude calls through the zero-data-retention endpoint."},
+        "purpose": "Attest that the Anthropic API key is on a zero-data-retention contract. Routes Claude "
+                   "calls through the ZDR endpoint, and is what a direct Claude call needs to be permitted "
+                   "at the TRUSTED_CLOUD sovereignty tier."},
     "CRUCIBLE_EMBEDDER": {"group": "offense", "type": "str", "default": "", "optional": True,
         "label": "Embedding model override", "plane": "offense", "placeholder": "leave blank for the default",
         "purpose": "Override the sentence-transformer used for the engine's semantic memory."},

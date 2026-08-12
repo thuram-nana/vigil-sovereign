@@ -1707,7 +1707,11 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
     re-parsed + allowlist-checked exactly like a typed command, so a hallucinated / prompt-injected
     off-allowlist command is REFUSED here and can never run; ``answer``/``route`` touch neither the allowlist
     nor a subprocess. The session context fed to the model is assembled from existing read providers and is
-    secret-redacted before egress (see ``_session_terminal_context``). Fail-closed on SDK/model error."""
+    secret-redacted before egress (see ``_session_terminal_context``). Fail-closed on SDK/model error.
+
+    SOVEREIGNTY: this is a model egress, so it passes the SAME ``kernel.sovereignty`` ladder that governs
+    the URK backend registry — a sovereign tier refuses it (returning the policy's own message) before the
+    SDK is imported. The direct, typed terminal keeps working; only the natural-language routing stops."""
     intent = str(intent or "").strip()
     if not intent:
         return {"ok": False, "error": "describe what you want to inspect or ask (e.g. 'show the last 20 lines "
@@ -1716,6 +1720,20 @@ def terminal_propose(intent, run_id=None, session_id=None) -> dict:
     if not (isinstance(key, str) and key.strip()):
         return {"ok": False, "need_key": True,
                 "note": "add a Claude API key in Settings to use natural language, or type a command directly."}
+    # SOVEREIGNTY GATE — the same ladder the URK backend registry and `agents.egress_guard` consult,
+    # applied here BEFORE the SDK is imported or a client is built (mirroring `kernel.llm._construct`'s
+    # discipline). Under AIR_GAPPED / SOVEREIGN_CLOUD / TRUSTED_CLOUD a direct consumer-Anthropic call is
+    # refused and nothing leaves the host; the direct (non-LLM) terminal is unaffected. Fail-closed: a
+    # policy that cannot be evaluated refuses rather than egresses.
+    from ..common.errors import SovereigntyViolation
+    from ..kernel import sovereignty as _sovereignty
+    try:
+        _sovereignty.current().assert_permitted(_sovereignty.direct_anthropic_backend_name())
+    except SovereigntyViolation as e:
+        return {"ok": False, "error": f"{e} Type a command directly — the local terminal does not egress."}
+    except Exception as e:  # noqa: BLE001 — "cannot decide" is never "permitted"
+        return {"ok": False, "error": f"the sovereignty policy could not be evaluated ({type(e).__name__}); "
+                                      f"refusing the model call. Type a command directly."}
     try:
         import anthropic  # lazy: the console must not require the SDK unless a key is present
     except Exception as e:  # noqa: BLE001 — SDK missing ⇒ honest error, direct terminal still works

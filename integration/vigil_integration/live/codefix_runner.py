@@ -22,6 +22,7 @@ Import-clean: stdlib + the injected library seams only; no ``framework``/``strix
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -35,8 +36,10 @@ from ..autopatch.loop import PatchApproval, PatchResult, autopatch
 from ..remediation.codefix import is_safe_repo_path, render_untrusted_finding
 from ..warden_gate import decide_tool
 from .executor import subprocess_runner
-from .think_claude import _build_live_client, _extract_text, _resolve_key
+from .think_claude import _build_live_client, _extract_text, _resolve_key, llm_egress_refusal
 from .wiring import default_classify
+
+logger = logging.getLogger("vigil.live.codefix_runner")
 
 _MAX_CONTEXT_BYTES = 8192
 _PATCH_NAME = ".vigil-fix.patch"
@@ -316,6 +319,15 @@ class CodefixSession:
               "`--- a/<repo-relative-path>` then `+++ b/<repo-relative-path>` (repo-relative paths only; "
               "no absolute paths, no `..`). No prose, no code fences."
         )
+        # SOVEREIGNTY GATE — the coder is a model egress carrying REAL SOURCE from the operator's repo, so
+        # it passes the same `kernel.sovereignty` ladder as every other egress path (see
+        # think_claude.llm_egress_refusal). An injected client is opaque here, so it is classified as a
+        # direct cloud client — fail-closed. A refusal degrades to "no proposal", exactly like the keyless
+        # case: the auto-patch loop is total and never patches on a refusal.
+        refusal = llm_egress_refusal(None)
+        if refusal is not None:
+            logger.warning("codefix model call refused by the sovereignty policy — no proposal, no egress")
+            return ""
         client = self._client or _build_live_client(_resolve_key(None) or "")
         if client is None:
             return ""   # no API key / SDK → no proposal (honest, fail-closed)
