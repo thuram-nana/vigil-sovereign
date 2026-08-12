@@ -81,6 +81,9 @@ assert "strix" not in _m, "imds_verify must not import strix at module scope"
 import vigil_integration.live.secret_verify  # E5: the exposed-secret validity admission/cert producer
 assert "framework" not in _m, "secret_verify must not import framework at module scope"
 assert "strix" not in _m, "secret_verify must not import strix at module scope"
+import vigil_integration.live.iam_escalation_verify  # E2: the IAM privilege-escalation admission/cert producer
+assert "framework" not in _m, "iam_escalation_verify must not import framework at module scope"
+assert "strix" not in _m, "iam_escalation_verify must not import strix at module scope"
 import vigil_integration.live.k8s_rbac_verify  # E4: the anonymous-privileged K8s-RBAC admission/cert producer
 assert "framework" not in _m, "k8s_rbac_verify must not import framework at module scope"
 assert "strix" not in _m, "k8s_rbac_verify must not import strix at module scope"

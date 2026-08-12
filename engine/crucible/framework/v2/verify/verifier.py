@@ -267,6 +267,12 @@ BUG_CLASS_ORACLES: dict[str, tuple[OracleKind, ...]] = {
     # ONLY when the ctx carries `gcp_impersonation_capture` (no benchmark/scan/engage finding does), so
     # appending it leaves the unknown-class fallback and `make gate` byte-identical.
     "gcp_sa_impersonation": (OracleKind.GCP_SA_IMPERSONATION,),
+    # E2 IAM privilege-escalation PRIMITIVE — SAME convention: NOT in the frozen _ALL_ORACLES fallback, fires
+    # ONLY when the ctx carries `iam_escalation_capture` (no benchmark/scan/engage finding does), so appending
+    # it leaves the unknown-class fallback and `make gate` byte-identical. DISTINCT bug class from
+    # `iam_privilege_escalation` (which maps to POLICY_PATH reachability): this is the ACHIEVED-ESCALATION
+    # (strict-gain) proof, its own evidence branch, a stronger claim than mere reachability.
+    "iam_escalation_primitive": (OracleKind.IAM_ESCALATION_PRIMITIVE,),
 }
 
 # Spelling/format aliases folded onto canonical keys.
@@ -492,6 +498,13 @@ _ALIASES: dict[str, str] = {
     "gcp_impersonation": "gcp_sa_impersonation",
     "iam_serviceaccount_impersonation": "gcp_sa_impersonation",
     "iam_service_account_impersonation": "gcp_sa_impersonation",
+    # E2 IAM escalation-PRIMITIVE spellings — DISTINCT from the reachability aliases above (`iam_privesc` /
+    # `iam_privilege_path` fold onto the POLICY_PATH classes). These fold onto the achieved-escalation
+    # (strict-gain) class. Audited for overlap: none of these keys exists elsewhere in BUG_CLASS_ORACLES /
+    # _ALIASES, so no finding is silently re-routed to the weaker reachability oracle.
+    "iam_escalation": "iam_escalation_primitive",
+    "achieved_iam_escalation": "iam_escalation_primitive",
+    "iam_privilege_escalation_primitive": "iam_escalation_primitive",
 }
 
 # G1 (doctrine fix): the unknown-class fallback returned by `oracles_for()` is FROZEN to the
@@ -904,6 +917,13 @@ class OracleVerifier:
         if kind is OracleKind.GCP_SA_IMPERSONATION:
             if "gcp_impersonation_capture" in ctx:
                 return oracles.gcp_sa_impersonation_oracle(ctx["gcp_impersonation_capture"])
+        # -- BUILD-PLAN §E2 IAM privilege-escalation PRIMITIVE — fire ONLY when the ctx carries
+        #    `iam_escalation_capture` (a retained IAM-policy capture); no benchmark/scan/engage finding
+        #    carries it, so it is inert on the gate path. DEFENSIVE VERIFICATION over retained config, never
+        #    an attack. Distinct from POLICY_PATH (`policy` ctx / reachability) — the strict-gain dual.
+        if kind is OracleKind.IAM_ESCALATION_PRIMITIVE:
+            if "iam_escalation_capture" in ctx:
+                return oracles.iam_escalation_oracle(ctx["iam_escalation_capture"])
             return None
         return None
 

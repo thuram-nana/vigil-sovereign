@@ -49,7 +49,10 @@ _ADDITIVE = frozenset({
     "K8S_WORKLOAD_POSTURE",
     "SSO_ASSERTION_FORGERY", "SAML_STRUCTURAL_FORGERY", "CLOUD_POSTURE", "MESH_POSTURE",
     "CICD_POSTURE", "MOBILE_POSTURE", "EMAIL_AUTH_POSTURE", "IDENTITY_POSTURE", "ACTIVE_EXPOSURE",
-    "IMDS_CREDENTIAL_CAPTURE", "SECRET_CREDENTIAL_VALIDITY", "GCP_SA_IMPERSONATION",
+    "IMDS_CREDENTIAL_CAPTURE", "SECRET_CREDENTIAL_VALIDITY",
+    # BUILD-PLAN §E3 GCP service-account impersonation + §E2 IAM privilege-escalation PRIMITIVE (the
+    # strict-gain dual of POLICY_PATH reachability) — two additive kinds landed in parallel.
+    "GCP_SA_IMPERSONATION", "IAM_ESCALATION_PRIMITIVE",
 })
 
 
@@ -69,9 +72,10 @@ def test_every_additive_oraclekind_is_excluded_from_the_fallback():
         member = OracleKind[name]
         assert member not in V._ALL_ORACLES, f"{name} leaked into the frozen fallback"
         assert name not in frozen_names
-    # the enum is exactly the 15 frozen + 21 additive = 36; a new frozen member (or a new additive one
+    # the enum is exactly the 15 frozen + 22 additive = 37; a new frozen member (or a new additive one
     # not accounted for here) fails this, forcing an explicit review of the byte-identity impact.
-    assert len(OracleKind) == 36
+    # (E3 GCP_SA_IMPERSONATION and E2 IAM_ESCALATION_PRIMITIVE both landed additively, 35 -> 36 -> 37.)
+    assert len(OracleKind) == 37
     assert {k.name for k in OracleKind} == _FROZEN_15 | _ADDITIVE
     assert set(V._ALL_ORACLES) == set(OracleKind) - {OracleKind[n] for n in _ADDITIVE}
 
