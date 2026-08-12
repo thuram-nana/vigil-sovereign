@@ -42,6 +42,29 @@ class PromotionPolicy:
         payload = {**signed_payload(core, self.owner_key), "by": "owner", "tier": "A0", "decision": "auto"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
+    def state_all(self) -> list[dict]:
+        """Every currently-GRANTED (agent, scope), read-only — the SAME verified fold ``is_promoted`` uses,
+        so a listed grant is exactly one ``is_promoted`` would confirm. A later ``revoke`` supersedes; an
+        unsigned / forged grant (e.g. one a prompt-injected agent wrote via the shared ``store``) is NOT
+        listed (fail-closed verification), so this can never over-report the owner's real grants."""
+        st = SnapshotState.load(self.store)
+        # Mirror is_promoted's pubkey-dependent fold exactly (a pre-folded prefix is valid only under the
+        # pubkey it was folded with; otherwise full-scan from genesis).
+        if self.trusted_pubkey != st.trusted_pubkey:
+            state, since = {}, -1
+        else:
+            state, since = dict(st.promotion_map()), st.base_seq - 1
+        for r in self.store.iter_records(since_seq=since):
+            p = r.payload
+            if p.get("signal") != SIGNAL or p.get("state") not in ("granted", "revoked"):
+                continue
+            if not verify_signed(p, _CORE, self.trusted_pubkey):
+                continue                          # fail-closed: an unsigned/forged grant is not counted
+            state[(p.get("agent"), p.get("scope"))] = p["state"]
+        return [{"agent": a, "scope": s}
+                for (a, s), v in sorted(state.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1])))
+                if v == "granted"]
+
     def is_promoted(self, agent: str, scope: str = "*") -> bool:
         if agent in NO_PROMOTION_AGENTS:
             return False                          # never — structural, not policy
