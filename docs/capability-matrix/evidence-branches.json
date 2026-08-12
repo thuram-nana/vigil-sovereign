@@ -411,6 +411,26 @@
         "engine/crucible/framework/v2/verify/secret_capture.py:confirm_secret_capture",
         "integration/vigil_integration/live/secret_verify.py:secret_verify"
       ]
+    },
+    {
+      "id": "k8s_exploit.rbac.anonymous_privileged_binding",
+      "check": "rbac_verify",
+      "evidence": "a VIGIL-OWNED, WARDEN-A2- and D5-scope-gated LIVE read of a target Kubernetes cluster's RBAC retained a ClusterRoleBinding/RoleBinding whose raw subjects + roleRef PROVE an ANONYMOUS subject (system:anonymous / system:unauthenticated) is bound to a dangerous BUILT-IN ClusterRole (cluster-admin / admin / edit) in the rbac.authorization.k8s.io apiGroup — an unauthenticated-privileged achieved effect re-derived by the deterministic k8s_workload_posture oracle over the RETAINED binding",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "binding_wellformed"
+      ],
+      "limitation": "Bounded to the CAPTURED binding ('this live cluster binds an anonymous subject to cluster-admin as read at T'), NOT a claim about every binding or the whole cluster's RBAC. NOT CLEAN-capable: one gated read of a subset of bindings cannot prove the ABSENCE of an anonymous-privileged binding cluster-wide. The retained binding is SECRET-SAFE — the kubeconfig bearer token / client-cert used to read is fingerprinted-and-discarded, never retained — so the FACT re-verifies offline with no live credential. NEAR-ZERO-FP by the oracle's faithful typed-subject + built-in-role discrimination: a ServiceAccount or named principal merely NAMED 'system:anonymous', an anonymous binding to a custom/non-dangerous role, or a namespaced Role merely NAMED 'admin'/'edit' does NOT fire. The retained binding is re-derived by VIGIL's own oracle, never the collector's say-so. Real-transport LIVE-FIRE (the runner against a real cluster's kube-apiserver) is deferred on an operator-provisioned kubeconfig; the producer and this admission / certificate / world-model wiring are complete and fixture-proven offline.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "This branch is an ACHIEVED-EFFECT exploitation confirmation over a single captured binding; proving the ABSENCE of an anonymous-privileged binding cluster-wide is a different capability (the k8s RBAC POSTURE branch k8s_workload_posture.rbac_binding, which enumerates the full ClusterRoleBinding/RoleBinding set with a completeness proof), not this exploitation branch's target, so clean-capability is deliberately not pursued here.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:k8s_workload_posture_oracle",
+        "engine/crucible/framework/v2/verify/k8s_workload_posture.py:confirm_k8s_workload_posture",
+        "integration/vigil_integration/live/k8s_rbac_verify.py:rbac_verify"
+      ]
     }
   ]
 }
