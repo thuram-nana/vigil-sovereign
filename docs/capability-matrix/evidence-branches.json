@@ -371,6 +371,26 @@
       "implementation_refs": [
         "integration/vigil_integration/live/cloud_live_posture.py:cloud_live_verify"
       ]
+    },
+    {
+      "id": "cloud_exploit.imds.credential_capture",
+      "check": "imds_verify",
+      "evidence": "a VIGIL-OWNED, WARDEN-A2- and D5-scope-gated capture from an instance-metadata endpoint retained BOTH a structurally-valid cloud credential (an AWS AccessKeyId+SecretAccessKey+Token from 169.254.169.254/iam/security-credentials, or a GCP Bearer access_token from computeMetadata/v1 service-accounts token) AND a confirming call (sts:GetCallerIdentity / a GCP tokeninfo) that authenticated with the SAME credential, bound by a shared credential fingerprint, all re-derived as an achieved-effect FACT by the deterministic imds_credential_capture oracle over the RETAINED, secret-safe capture",
+      "fact_capable": true,
+      "clean_capable": false,
+      "preconditions": [
+        "capture_wellformed"
+      ],
+      "limitation": "Bounded to the CAPTURED credential and its ONE confirming call ('a credential retrieved from the instance-metadata endpoint authenticated as identity I at time T'), NOT a claim about every instance credential or the whole account. NOT CLEAN-capable: a non-firing over one capture cannot distinguish 'no capturable credential' from 'not captured'. The retained capture is SECRET-SAFE — the credential's secret material is redacted to a presence marker — so the FACT re-verifies offline with no live secret; the confirming call is the WARDEN-gated runner's RETAINED evidence re-derived by VIGIL's own oracle, never the runner's say-so. Real-transport LIVE-FIRE (the runner against a real metadata endpoint) is deferred on an operator-provisioned lab credential; the runner and this admission / certificate / world-model wiring are complete and fixture-proven offline.",
+      "target_fact_capable": true,
+      "target_clean_capable": false,
+      "target_downgrade_rationale": "This branch is an ACHIEVED-EFFECT exploitation confirmation over a single scoped capture; proving the ABSENCE of a capturable metadata credential is a different capability (an IMDS/metadata POSTURE check that would enumerate the instance's metadata configuration for completeness), not this exploitation branch's target, so clean-capability is deliberately not pursued here.",
+      "evidence_surface": "live_capture",
+      "implementation_refs": [
+        "engine/crucible/framework/v2/verify/oracles.py:imds_credential_capture_oracle",
+        "integration/vigil_integration/live/imds_runner.py:run_imds_capture",
+        "integration/vigil_integration/live/imds_verify.py:imds_verify"
+      ]
     }
   ]
 }
