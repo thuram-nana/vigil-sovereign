@@ -1230,7 +1230,10 @@ def _cmd_up(args: argparse.Namespace) -> int:
         except Exception as _e:  # noqa: BLE001
             print(f"vigil up: gateway services preflight skipped — {_e}", file=sys.stderr)
         try:
-            from .services import DEFAULT_SERVICES, RootServices
+            # ABSOLUTE import (not relative `.services`) to keep the `_cmd_up` boundary rule intact —
+            # it may relative-import ONLY `.uiproxy`; a pure-stdlib sibling helper comes in by absolute
+            # path, exactly like `vigil_gateway.docker` above (test_up_down_verbs_import_no_trust_domain).
+            from vigil_integration.services import DEFAULT_SERVICES, RootServices
             _sres = RootServices(_repo).up(list(DEFAULT_SERVICES))
             print(f"vigil up: services up ({_json.dumps(_sres)})")
         except Exception as _e:  # noqa: BLE001
