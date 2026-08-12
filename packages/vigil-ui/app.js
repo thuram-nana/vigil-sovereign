@@ -663,17 +663,32 @@
     return h("span.pill.sm" + (re ? ".ok" : ""), null, [re ? "re-executable" : "binding"]);
   }
 
+  var PST = { data: null };
   function renderPosture(screen) {
+    var refreshBtn = h("button.btn.sm", { onClick: function () { loadPosture(); } }, [V.icon("live"), "Refresh"]);
+    var dlBtn = h("button.btn.sm", { onClick: function () {
+      if (!PST.data || !((PST.data.posture || []).some(function (c) { return c && c.present; }))) {
+        V.toast("No posture certificate to export yet.", true); return; }
+      downloadJSON("vigil-posture-" + nowStamp() + ".json", PST.data);
+    } }, [V.icon("book"), "Download certificate (JSON)"]);
     V.mount(screen, [
       h("div.screen-head", null, [h("h1", null, "Proof of Posture"),
         h("span.sub", null, "The Certificate of Non-Exploitability — a signed, coverage-bounded, "
           + "offline-verifiable proof that, over the surface the scanner REACHED, an applicable oracle "
           + "had a live channel and did not fire. The boundary (denominator + residual) is the point.")]),
+      h("div.acts", { style: { margin: "0 0 12px", gap: "8px", display: "flex", flexWrap: "wrap" } }, [refreshBtn, dlBtn]),
       h("div#posture-doctrine", { style: { marginBottom: "14px" } }),
       h("div#posture-body", null, h("div.empty", null, "Loading posture certificates…")),
     ]);
-    V.getJSON(OFF("/api/posture")).then(renderPostureData).catch(function () {
-      V.mount(V.$("#posture-body"), h("div.empty", null, [
+    loadPosture();
+  }
+  function loadPosture() {
+    var body = V.$("#posture-body");
+    if (body) V.mount(body, h("div.empty", null, "Loading posture certificates…"));
+    V.getJSON(OFF("/api/posture")).then(function (d) { PST.data = d; renderPostureData(d); }).catch(function () {
+      PST.data = null;
+      var b = V.$("#posture-body");
+      if (b) V.mount(b, h("div.empty", null, [
         h("div.big", null, "Offense engine offline"),
         h("p", null, "Could not reach the offense console to read posture certificates. "
           + "Start it (vigil up / the console server) and reload."),
@@ -5332,6 +5347,26 @@
       .catch(function (e) { if (btn) btn.disabled = false; if (statusEl) V.mount(statusEl, h("div.legend", null, [V.icon("x"), (e && e.message) || "dossier failed"])); });
   }
 
+  // A filename-safe timestamp for client-side exports (e.g. 2026-08-12T14-05-33).
+  function nowStamp() {
+    try { return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19); }
+    catch (e) { return String(Date.now()); }
+  }
+  // Client-side JSON export: serialize an ALREADY-FETCHED read-only view to a file the operator can save
+  // or hand to an offline verifier. Pure browser (Blob) — no backend, no new endpoint, no new data exposure
+  // (it only re-packages what the screen already displays).
+  function downloadJSON(filename, obj) {
+    try {
+      var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+      V.toast("Downloaded " + filename);
+    } catch (e) { V.toast("Could not export: " + ((e && e.message) || "error"), true); }
+  }
+
   function renderReport(screen) {
     var body = V.mount(screen, [h("div.screen-head", null, [
       h("h2", null, "Client Report"),
@@ -5431,9 +5466,19 @@
             return h("option", { value: r.run_id, selected: r.run_id === ASR[which] }, (r.slug || r.run_id));
           })));
     }
+    var reverifyBtn = h("button.btn.sm", { style: { marginLeft: "14px" }, onClick: function () {
+      // Re-fire the retained certificates for this pair (pure offline re-computation — no traffic).
+      V.toast("Re-verifying — re-firing the retained certificates offline…");
+      loadAssurance(body);
+    } }, [V.icon("check"), "Re-verify now"]);
+    var dlBtn = h("button.btn.sm", { style: { marginLeft: "8px" }, onClick: function () {
+      if (!ASR.data || ASR.data.pending) { V.toast("Select two runs with re-verifiable findings first.", true); return; }
+      downloadJSON("vigil-drift-" + nowStamp() + ".json", ASR.data);
+    } }, [V.icon("book"), "Download drift (JSON)"]);
     var picker = h("div.card", null, [
       h("label", { style: { marginRight: "6px" } }, "Now"), runSel("curr"),
-      h("label", { style: { margin: "0 6px 0 14px" } }, "vs baseline"), runSel("prev")]);
+      h("label", { style: { margin: "0 6px 0 14px" } }, "vs baseline"), runSel("prev"),
+      reverifyBtn, dlBtn]);
     function list(title, ids, cls) {
       return h("div.card", null, [h("div.card-h", null, [h("h3", null, title + " (" + ids.length + ")")]),
         (ids.length
