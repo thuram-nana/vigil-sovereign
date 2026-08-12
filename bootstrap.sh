@@ -243,7 +243,9 @@ fi
 step "2/6 build the two isolated environments + the Rust kernel"
 # =============================================================================
 # envs/build_envs.sh is the SOLE source of the two-venv + kernel + boundary check. Re-runnable.
-PYTHON="$PY" bash envs/build_envs.sh
+# Guard it (B5): under `set -euo pipefail` a raw non-zero here would abort with a bare pip/rust traceback
+# and never reach the actionable messages below — turn it into one clear, fixable error.
+PYTHON="$PY" bash envs/build_envs.sh || die "the environment build (envs/build_envs.sh) failed — see the pip/rust error above, fix it, then re-run ./bootstrap.sh"
 [ -x ".venv-sovereign/bin/python" ] || die "the sovereign venv did not build."
 [ -x ".venv-offense/bin/python" ]   || die "the offense venv did not build."
 # The console scripts must be installed (offense.txt/sovereign.txt install `-e ./integration` + the

@@ -423,10 +423,15 @@ def _child_env() -> dict:
     into a child's environment (the child only ever gets the materialised file PATH, never the content), and
     HARD-EXCLUDE the owner signing key (A4) so it can never be inherited from the ambient parent env."""
     _content_vars = {cv for cv, _p, _f in _FILE_SECRET_MATERIALISE}
-    return {k: v for k, v in os.environ.items()
-            if k not in ("PYTHONPATH", "PYTHONHOME")
-            and k not in _content_vars
-            and k not in _CHILD_ENV_HARD_EXCLUDE}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME")
+           and k not in _content_vars
+           and k not in _CHILD_ENV_HARD_EXCLUDE}
+    # Unbuffer child stdout (B2): the cockpit prints its ?token= line then immediately blocks in
+    # serve_forever; with a PIPE (a fresh box), CPython block-buffers that ~200-byte line and _await_token
+    # would hang the full cockpit-timeout before aborting. PYTHONUNBUFFERED forces the flush.
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
 
 
 def _secure_log(log_path: Path):
@@ -435,6 +440,36 @@ def _secure_log(log_path: Path):
     os.chmod(log_path.parent, 0o700)
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     return fd
+
+
+def _port_free(host: str, port: int) -> bool:
+    """True if (host, port) is bindable right now (no active listener). The bring-up preflight uses this
+    so a port collision REFUSES before any backend is spawned — never orphaning children (B1)."""
+    import socket as _socket
+    fam = _socket.AF_INET6 if ":" in host else _socket.AF_INET
+    s = _socket.socket(fam, _socket.SOCK_STREAM)
+    try:
+        s.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _wait_listening(host: str, port: int, deadline: float) -> bool:
+    """True once something is LISTENING on (host, port) before the deadline — a lightweight backend
+    readiness probe (B4) so a silently-dead offense plane is surfaced, not hidden behind a later 502."""
+    import socket as _socket
+    while time.monotonic() < deadline:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            try:
+                s.connect((host, port))
+                return True
+            except OSError:
+                time.sleep(0.15)
+    return False
 
 
 def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> subprocess.Popen:
@@ -625,12 +660,21 @@ def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "
     return proc, q
 
 
-def _await_token(q: "Queue[str]", proc: subprocess.Popen,
-                 timeout: float = float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))) -> Optional[str]:
-    """Read the cockpit's stdout lines until its ``?token=`` appears (or it exits / times out).
+def _cockpit_timeout() -> float:
+    """The cockpit cold-start budget in seconds (embedding model + spine/graph rebuild can exceed 20s).
+    Parsed HERE, not as a default arg (B6): a bad VIGIL_UP_COCKPIT_TIMEOUT must not raise at import."""
+    try:
+        return float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        return 120.0
 
-    Timeout is the cockpit cold-start budget (embedding model + spine/graph rebuild on a large
-    spine can exceed the old 20s). Override with ``VIGIL_UP_COCKPIT_TIMEOUT`` (seconds)."""
+
+def _await_token(q: "Queue[str]", proc: subprocess.Popen,
+                 timeout: Optional[float] = None) -> Optional[str]:
+    """Read the cockpit's stdout lines until its ``?token=`` appears (or it exits / times out).
+    Override the budget with ``VIGIL_UP_COCKPIT_TIMEOUT`` (seconds)."""
+    if timeout is None:
+        timeout = _cockpit_timeout()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -725,6 +769,20 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                   f"built. Run envs/build_envs.sh (or `make envs`).", file=sys.stderr)
             return 127
 
+    # Preflight (B1): every listener port must be FREE before we spawn anything, so a collision (a prior
+    # `vigil up` still running, or a port otherwise in use) refuses cleanly here instead of aborting
+    # mid-spawn and orphaning backends. The proxy binds host:port; the three backends bind loopback.
+    _wanted = [(host, port, "the UI proxy"),
+               ("127.0.0.1", SOVEREIGN_PORT, "the sovereign cockpit"),
+               ("127.0.0.1", CONSOLE_PORT, "the offense console"),
+               ("127.0.0.1", API_PORT, "the offense api")]
+    _busy = [(h, p, what) for h, p, what in _wanted if not _port_free(h, p)]
+    if _busy:
+        for h, p, what in _busy:
+            print(f"vigil up: {what} port {h}:{p} is already in use — is `vigil up` already running? "
+                  "Stop it with `vigil down` (or free the port), then retry.", file=sys.stderr)
+        return 2
+
     procs: list[tuple[str, subprocess.Popen]] = []
 
     def _cleanup(*_a):
@@ -776,6 +834,16 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                                             extra_env=console_env)))
     procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log",
                                         extra_env=offense_llm_env)))
+
+    # Readiness (B4): the cockpit's startup is verified via its token, but the offense console/api are
+    # spawned fire-and-forget — if one fails to bind (an import error, a port race), the proxy would still
+    # come up and /offense/* would 502 with NO signal to the operator. Probe their ports briefly and WARN
+    # (never abort) which plane is unhealthy, so a half-up UI is visible instead of silent.
+    for _pname, _pport in (("offense console", CONSOLE_PORT), ("offense api", API_PORT)):
+        if not _wait_listening("127.0.0.1", _pport, time.monotonic() + 6.0):
+            print(f"vigil up: WARNING — {_pname} (127.0.0.1:{_pport}) is not up yet; the offense plane may "
+                  f"be starting slowly or failed to bind (see {logs}). The UI will still come up, but "
+                  "/offense/* may return 502 until it is ready.", file=sys.stderr)
 
     # 3b) OPTIONAL recurring vuln-intel feed sidecar. OFF by default — a recurring LIVE egress pull is a
     # conscious act, so it needs --with-feed AND an explicit --feed-slug (the persisted store the Knowledge
@@ -848,16 +916,31 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         _cleanup()
         return 1
 
-    # 5) start the proxy (the only human-facing listener).
+    # 5) start the proxy (the only human-facing listener). Catch OSError too (B1): allow_reuse_address
+    # does NOT prevent an EADDRINUSE collision with an ACTIVE listener, and an uncaught bind error here
+    # would escape past _cleanup() and orphan every backend already spawned above.
     try:
         httpd = make_proxy_server(host, port, ui_dir)
-    except ValueError as exc:
-        print(f"vigil up: {exc}", file=sys.stderr)
+    except (ValueError, OSError) as exc:
+        print(f"vigil up: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         _cleanup()
         return 2
 
-    _write_pids(base, [{"name": "orchestrator", "pid": os.getpid()},
-                       *[{"name": n, "pid": p.pid} for n, p in procs]])
+    # Write the pids file so `vigil down` can find these (B3): guard it — a write failure must clean up
+    # and abort, never leave orphaned backends with no pids file. (Ctrl-C still cleans up the foreground
+    # process, but `vigil down` relies on this file.)
+    try:
+        _write_pids(base, [{"name": "orchestrator", "pid": os.getpid()},
+                           *[{"name": n, "pid": p.pid} for n, p in procs]])
+    except OSError as exc:
+        print(f"vigil up: could not write the pids file ({exc}) — aborting so no backends are orphaned. "
+              "Check that .vigil-live/ is writable.", file=sys.stderr)
+        try:
+            httpd.server_close()
+        except Exception:  # noqa: BLE001
+            pass
+        _cleanup()
+        return 1
 
     url = f"{origin}/?token={token}"
     print("\n  ┌──────────────────────────────────────────────────────────────┐")

@@ -424,3 +424,57 @@ def test_console_vigil_bin_is_the_offense_sibling(tmp_path):
     vigil = binroot / "vigil"
     vigil.write_text("#!/bin/sh\n", encoding="utf-8")
     assert uiproxy._console_vigil_bin(crucible) == str(vigil)    # resolves to the sibling, absolute
+
+
+# =============== crash-hardening of `vigil up` (B1/B2/B4/B6) — helper coverage ===============
+
+def test_port_free_detects_a_busy_port():
+    # B1 preflight: a bound (listening) port reads as NOT free; an unbound one reads free.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    busy_port = s.getsockname()[1]
+    try:
+        assert uiproxy._port_free("127.0.0.1", busy_port) is False
+    finally:
+        s.close()
+    # a now-free ephemeral port (grab one, release it)
+    f = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    f.bind(("127.0.0.1", 0)); free_port = f.getsockname()[1]; f.close()
+    assert uiproxy._port_free("127.0.0.1", free_port) is True
+
+
+def test_wait_listening_true_when_up_false_when_dead():
+    # B4 readiness probe.
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert uiproxy._wait_listening("127.0.0.1", port, time.monotonic() + 2.0) is True
+    finally:
+        srv.close()
+    # nothing is listening now → the probe returns False by its (short) deadline
+    assert uiproxy._wait_listening("127.0.0.1", port, time.monotonic() + 0.4) is False
+
+
+def test_child_env_is_unbuffered():
+    # B2: every child inherits PYTHONUNBUFFERED so the cockpit's token line flushes (no 120s hang).
+    assert uiproxy._child_env().get("PYTHONUNBUFFERED") == "1"
+
+
+def test_cockpit_timeout_tolerates_a_bad_env_value(monkeypatch):
+    # B6: a bad VIGIL_UP_COCKPIT_TIMEOUT must NOT raise (it used to be parsed as a default arg at import).
+    monkeypatch.setenv("VIGIL_UP_COCKPIT_TIMEOUT", "not-a-number")
+    assert uiproxy._cockpit_timeout() == 120.0
+    monkeypatch.setenv("VIGIL_UP_COCKPIT_TIMEOUT", "45")
+    assert uiproxy._cockpit_timeout() == 45.0
+    monkeypatch.delenv("VIGIL_UP_COCKPIT_TIMEOUT", raising=False)
+    assert uiproxy._cockpit_timeout() == 120.0
+
+
+def test_await_token_signature_is_lazy():
+    # B6 root cause: the timeout default must be None (parsed in-body), never an env read at def-time.
+    import inspect
+    assert inspect.signature(uiproxy._await_token).parameters["timeout"].default is None
