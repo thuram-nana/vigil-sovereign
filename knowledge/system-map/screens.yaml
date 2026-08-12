@@ -153,6 +153,14 @@ screens:
     description: The gated CRUCIBLE capabilities this engine EXPOSES to an external MCP (Model Context Protocol) client over an on-host stdio server — a fixed, fail-closed allowlist, each shown with its gate posture (tier / gated / observation / read-only). Read-only listing; the stdio server is started from the CLI.
     synonyms: [mcp, model context protocol, mcp servers, exposed tools, mcp seam, stdio server, reverify_finding, declared_service, tool server]
 
+  - id: system
+    label: System & Services
+    group: MANAGE
+    owner: false
+    plane: unified
+    description: The whole system's readiness at a glance (the `vigil doctor` report surfaced in the UI) — prerequisites (binaries + both venvs + writable dirs), the four UI ports (free / in-use), and every docker service's live state (gateway + qdrant / neo4j / otel). Read-only; create the absent services with `vigil services up`.
+    synonyms: [system, services, doctor, readiness, health, prerequisites, docker services, qdrant, neo4j, otel, gateway status, ports, venvs, bring up]
+
   - id: compliance
     label: Compliance
     group: MANAGE
