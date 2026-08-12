@@ -424,3 +424,94 @@ def test_console_vigil_bin_is_the_offense_sibling(tmp_path):
     vigil = binroot / "vigil"
     vigil.write_text("#!/bin/sh\n", encoding="utf-8")
     assert uiproxy._console_vigil_bin(crucible) == str(vigil)    # resolves to the sibling, absolute
+
+
+# =============== crash-hardening of `vigil up` (B1/B2/B4/B6) — helper coverage ===============
+
+def test_port_free_detects_a_busy_port():
+    # B1 preflight: a bound (listening) port reads as NOT free; an unbound one reads free.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    busy_port = s.getsockname()[1]
+    try:
+        assert uiproxy._port_free("127.0.0.1", busy_port) is False
+    finally:
+        s.close()
+    # a now-free ephemeral port (grab one, release it)
+    f = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    f.bind(("127.0.0.1", 0)); free_port = f.getsockname()[1]; f.close()
+    assert uiproxy._port_free("127.0.0.1", free_port) is True
+
+
+def test_wait_listening_true_when_up_false_when_dead():
+    # B4 readiness probe.
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert uiproxy._wait_listening("127.0.0.1", port, time.monotonic() + 2.0) is True
+    finally:
+        srv.close()
+    # nothing is listening now → the probe returns False by its (short) deadline
+    assert uiproxy._wait_listening("127.0.0.1", port, time.monotonic() + 0.4) is False
+
+
+def test_child_env_is_unbuffered():
+    # B2: every child inherits PYTHONUNBUFFERED so the cockpit's token line flushes (no 120s hang).
+    assert uiproxy._child_env().get("PYTHONUNBUFFERED") == "1"
+
+
+def test_cockpit_timeout_tolerates_bad_and_degenerate_values(monkeypatch):
+    # B6/B6-4: a bad OR degenerate-but-float-valid VIGIL_UP_COCKPIT_TIMEOUT must fall back to 120 — never
+    # raise (import-time), never hang forever (inf/1e999), never abort instantly (nan / <=0).
+    for bad in ("not-a-number", "inf", "1e999", "1e300", "-inf", "nan", "0", "-5", "1e-9", "0.5", "99999"):
+        monkeypatch.setenv("VIGIL_UP_COCKPIT_TIMEOUT", bad)
+        assert uiproxy._cockpit_timeout() == 120.0, bad
+    monkeypatch.setenv("VIGIL_UP_COCKPIT_TIMEOUT", "45")
+    assert uiproxy._cockpit_timeout() == 45.0
+    monkeypatch.delenv("VIGIL_UP_COCKPIT_TIMEOUT", raising=False)
+    assert uiproxy._cockpit_timeout() == 120.0
+
+
+def test_await_token_signature_is_lazy():
+    # B6 root cause: the timeout default must be None (parsed in-body), never an env read at def-time.
+    import inspect
+    assert inspect.signature(uiproxy._await_token).parameters["timeout"].default is None
+
+
+def test_port_free_uses_reuseaddr_like_the_real_bind():
+    # B1-1: the preflight must mirror the proxy's allow_reuse_address, or a quick restart whose port is in
+    # TIME_WAIT is falsely refused. Guard the implementation + a behavioural TIME_WAIT check.
+    import inspect
+    assert "SO_REUSEADDR" in inspect.getsource(uiproxy._port_free)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    port = srv.getsockname()[1]
+    cli = socket.create_connection(("127.0.0.1", port))
+    conn, _ = srv.accept()
+    conn.close(); cli.close(); srv.close()          # server-side close first → (127.0.0.1, port) TIME_WAIT
+    assert uiproxy._port_free("127.0.0.1", port) is True   # REUSEADDR → still bindable, matching the proxy
+
+
+def test_spawn_tracked_cleans_up_on_spawn_failure(monkeypatch):
+    # B?-2: a failed spawn must clean up EVERYTHING already started and signal abort — never orphan.
+    procs = [("already-running", object())]
+    cleaned = {"called": False}
+
+    def _boom(*a, **k):
+        raise OSError(24, "EMFILE")                 # too many open files / fork pressure
+    monkeypatch.setattr(uiproxy, "_spawn", _boom)
+    aborted = uiproxy._spawn_tracked(procs, "offense-console", ["x"], object(),
+                                     lambda: cleaned.__setitem__("called", True))
+    assert aborted is True                          # caller returns 1 (a clean abort)
+    assert cleaned["called"] is True                # the running backends were cleaned up
+    assert len(procs) == 1                          # the failed spawn was not appended
+
+    # success path: appended, returns False, no (further) cleanup
+    monkeypatch.setattr(uiproxy, "_spawn", lambda *a, **k: "PROC")
+    ok = uiproxy._spawn_tracked(procs, "offense-api", ["y"], object(), lambda: None)
+    assert ok is False and procs[-1] == ("offense-api", "PROC")

@@ -423,10 +423,15 @@ def _child_env() -> dict:
     into a child's environment (the child only ever gets the materialised file PATH, never the content), and
     HARD-EXCLUDE the owner signing key (A4) so it can never be inherited from the ambient parent env."""
     _content_vars = {cv for cv, _p, _f in _FILE_SECRET_MATERIALISE}
-    return {k: v for k, v in os.environ.items()
-            if k not in ("PYTHONPATH", "PYTHONHOME")
-            and k not in _content_vars
-            and k not in _CHILD_ENV_HARD_EXCLUDE}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME")
+           and k not in _content_vars
+           and k not in _CHILD_ENV_HARD_EXCLUDE}
+    # Unbuffer child stdout (B2): the cockpit prints its ?token= line then immediately blocks in
+    # serve_forever; with a PIPE (a fresh box), CPython block-buffers that ~200-byte line and _await_token
+    # would hang the full cockpit-timeout before aborting. PYTHONUNBUFFERED forces the flush.
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
 
 
 def _secure_log(log_path: Path):
@@ -437,12 +442,63 @@ def _secure_log(log_path: Path):
     return fd
 
 
+def _port_free(host: str, port: int) -> bool:
+    """True if (host, port) is bindable right now (no ACTIVE listener). The bring-up preflight uses this so
+    a port collision REFUSES before any backend is spawned — never orphaning children (B1). We set
+    SO_REUSEADDR to MIRROR the real proxy's ``allow_reuse_address`` (B1-1): otherwise the preflight would be
+    stricter than the actual bind and falsely refuse a quick restart whose port still holds TIME_WAIT
+    sockets — a bind the proxy itself would accept. (SO_REUSEADDR relaxes TIME_WAIT, NOT an active listener,
+    so a genuinely-in-use port is still correctly detected.)"""
+    import socket as _socket
+    fam = _socket.AF_INET6 if ":" in host else _socket.AF_INET
+    s = _socket.socket(fam, _socket.SOCK_STREAM)
+    s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _wait_listening(host: str, port: int, deadline: float) -> bool:
+    """True once something is LISTENING on (host, port) before the deadline — a lightweight backend
+    readiness probe (B4) so a silently-dead offense plane is surfaced, not hidden behind a later 502."""
+    import socket as _socket
+    while time.monotonic() < deadline:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            try:
+                s.connect((host, port))
+                return True
+            except OSError:
+                time.sleep(0.15)
+    return False
+
+
 def _spawn(argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> subprocess.Popen:
     log = open(_secure_log(log_path), "ab", buffering=0)  # noqa: SIM115 — closed when the child is reaped
     env = _child_env()
     if extra_env:
         env.update(extra_env)
     return subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, env=env)
+
+
+def _spawn_tracked(procs: list, name: str, argv: list[str], log_path: Path, cleanup,
+                   *, extra_env: Optional[dict] = None) -> bool:
+    """Spawn + append a backend to ``procs``; on a spawn failure (OSError: EMFILE/ENOMEM/fork pressure, a
+    full or read-only .vigil-live, a bin TOCTOU) run ``cleanup()`` on everything already started and return
+    True (the caller then returns cleanly). A failed spawn must NEVER orphan the running backends (B?-2).
+    Module-scoped so this cleanup-on-failure path is unit-testable, not buried in a run_up closure."""
+    try:
+        procs.append((name, _spawn(argv, log_path, extra_env=extra_env)))
+        return False
+    except (OSError, ValueError) as exc:   # ValueError too, for uniformity with assemble/proxy guards
+        print(f"vigil up: backend {name!r} failed to start ({exc}) — cleaned up, nothing orphaned.",
+              file=sys.stderr)
+        cleanup()
+        return True
 
 
 # The runtime vars the offense engine may receive from the sovereign settings plane. The ONE hard exclusion
@@ -621,16 +677,47 @@ def _spawn_capture(argv: list[str], log_path: Path) -> tuple[subprocess.Popen, "
             log.close()
             q.put("")  # sentinel — the stream ended
 
-    threading.Thread(target=_pump, daemon=True).start()
+    # If the pump thread can't start (thread/RLIMIT_NPROC exhaustion) AFTER the child already forked, the
+    # child would be left running but never returned — an orphan. Tear it down + close the log fd and
+    # re-raise, so the caller's spawn-failure path applies (nothing is left running).
+    try:
+        threading.Thread(target=_pump, daemon=True).start()
+    except (RuntimeError, OSError):
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            os.close(_fd)
+        except OSError:
+            pass
+        raise
     return proc, q
 
 
-def _await_token(q: "Queue[str]", proc: subprocess.Popen,
-                 timeout: float = float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))) -> Optional[str]:
-    """Read the cockpit's stdout lines until its ``?token=`` appears (or it exits / times out).
+def _cockpit_timeout() -> float:
+    """The cockpit cold-start budget in seconds (embedding model + spine/graph rebuild can exceed 20s).
+    Parsed HERE, not as a default arg (B6): a bad VIGIL_UP_COCKPIT_TIMEOUT must not raise at import. And
+    clamp degenerate-but-float-valid values (B6-4): inf/1e999 would make _await_token hang FOREVER (worse
+    than the bug this fixed), nan aborts instantly, ≤0 aborts instantly — all fall back to 120."""
+    try:
+        t = float(os.environ.get("VIGIL_UP_COCKPIT_TIMEOUT", "120"))
+    except (TypeError, ValueError):
+        return 120.0
+    # Reject the whole degenerate class → 120: nan, +inf/1e300 (~forever hang, worse than the bug this
+    # fixed), and <=1s / non-positive (instant spurious abort of a healthy cockpit). A real cold-start
+    # budget lives in [1s, 3600s]; anything outside is a misconfiguration, not an intent.
+    if t != t or t <= 1 or t > 3600:
+        return 120.0
+    return t
 
-    Timeout is the cockpit cold-start budget (embedding model + spine/graph rebuild on a large
-    spine can exceed the old 20s). Override with ``VIGIL_UP_COCKPIT_TIMEOUT`` (seconds)."""
+
+def _await_token(q: "Queue[str]", proc: subprocess.Popen,
+                 timeout: Optional[float] = None) -> Optional[str]:
+    """Read the cockpit's stdout lines until its ``?token=`` appears (or it exits / times out).
+    Override the budget with ``VIGIL_UP_COCKPIT_TIMEOUT`` (seconds)."""
+    if timeout is None:
+        timeout = _cockpit_timeout()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -725,6 +812,20 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                   f"built. Run envs/build_envs.sh (or `make envs`).", file=sys.stderr)
             return 127
 
+    # Preflight (B1): every listener port must be FREE before we spawn anything, so a collision (a prior
+    # `vigil up` still running, or a port otherwise in use) refuses cleanly here instead of aborting
+    # mid-spawn and orphaning backends. The proxy binds host:port; the three backends bind loopback.
+    _wanted = [(host, port, "the UI proxy"),
+               ("127.0.0.1", SOVEREIGN_PORT, "the sovereign cockpit"),
+               ("127.0.0.1", CONSOLE_PORT, "the offense console"),
+               ("127.0.0.1", API_PORT, "the offense api")]
+    _busy = [(h, p, what) for h, p, what in _wanted if not _port_free(h, p)]
+    if _busy:
+        for h, p, what in _busy:
+            print(f"vigil up: {what} port {h}:{p} is already in use — is `vigil up` already running? "
+                  "Stop it with `vigil down` (or free the port), then retry.", file=sys.stderr)
+        return 2
+
     procs: list[tuple[str, subprocess.Popen]] = []
 
     def _cleanup(*_a):
@@ -742,6 +843,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                     p.kill()
                 except ProcessLookupError:
                     pass
+
+    def _track(name: str, argv: list[str], log_path: Path, *, extra_env: Optional[dict] = None) -> bool:
+        return _spawn_tracked(procs, name, argv, log_path, _cleanup, extra_env=extra_env)
 
     # 1) cockpit — capture its printed session token.
     cockpit_argv = [str(sigil_bin), "serve", "--host", "127.0.0.1", "--port", str(SOVEREIGN_PORT),
@@ -772,10 +876,20 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     vigil_bin = _console_vigil_bin(crucible_bin)
     if vigil_bin:
         console_env["VIGIL_BIN"] = vigil_bin
-    procs.append(("offense-console", _spawn(console_argv, logs / "offense-console.log",
-                                            extra_env=console_env)))
-    procs.append(("offense-api", _spawn(api_argv, logs / "offense-api.log",
-                                        extra_env=offense_llm_env)))
+    if _track("offense-console", console_argv, logs / "offense-console.log", extra_env=console_env):
+        return 1
+    if _track("offense-api", api_argv, logs / "offense-api.log", extra_env=offense_llm_env):
+        return 1
+
+    # Readiness (B4): the cockpit's startup is verified via its token, but the offense console/api are
+    # spawned fire-and-forget — if one fails to bind (an import error, a port race), the proxy would still
+    # come up and /offense/* would 502 with NO signal to the operator. Probe their ports briefly and WARN
+    # (never abort) which plane is unhealthy, so a half-up UI is visible instead of silent.
+    for _pname, _pport in (("offense console", CONSOLE_PORT), ("offense api", API_PORT)):
+        if not _wait_listening("127.0.0.1", _pport, time.monotonic() + 6.0):
+            print(f"vigil up: WARNING — {_pname} (127.0.0.1:{_pport}) is not up yet; the offense plane may "
+                  f"be starting slowly or failed to bind (see {logs}). The UI will still come up, but "
+                  "/offense/* may return 502 until it is ready.", file=sys.stderr)
 
     # 3b) OPTIONAL recurring vuln-intel feed sidecar. OFF by default — a recurring LIVE egress pull is a
     # conscious act, so it needs --with-feed AND an explicit --feed-slug (the persisted store the Knowledge
@@ -788,8 +902,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         else:
             feed_argv = [str(crucible_bin), "intel", "feed-daemon", "--live",
                          "--slug", feed_slug.strip(), "--interval", str(max(1, feed_interval))]
-            procs.append(("offense-feed", _spawn(feed_argv, logs / "offense-feed.log",
-                                                 extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+            if _track("offense-feed", feed_argv, logs / "offense-feed.log",
+                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+                return 1
 
     # 3b') OPTIONAL live assurance/metrics collector (G2). OFF by default. A READ-ONLY, one-way projection of
     # the signed spine (no egress, mints nothing) — it tails the blackboard and writes a continuous
@@ -799,8 +914,9 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
         if vigil_bin:
             tel_out = base.resolve() / "live-ui" / "telemetry.json"
             tel_argv = [vigil_bin, "telemetry", "--out", str(tel_out), "--interval", str(max(1, telemetry_interval))]
-            procs.append(("offense-telemetry", _spawn(tel_argv, logs / "offense-telemetry.log",
-                                                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+            if _track("offense-telemetry", tel_argv, logs / "offense-telemetry.log",
+                      extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+                return 1
         else:
             print("vigil up: --with-telemetry skipped (`vigil` bin unresolved) — the console still computes "
                   "assurance metrics on demand.", file=sys.stderr)
@@ -812,13 +928,15 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # identity exists, the producer still runs but the consumer is skipped (never started without its pin).
     learn_spool = base.resolve() / "learn-spool"
     grant_argv = [str(sigil_bin), "knowledge", "export-learn-grants", "--spool", str(learn_spool), "--watch"]
-    procs.append(("sovereign-learn-grants", _spawn(grant_argv, logs / "sovereign-learn-grants.log")))
+    if _track("sovereign-learn-grants", grant_argv, logs / "sovereign-learn-grants.log"):
+        return 1
     owner_pub = _resolve_owner_pubkey(sigil_bin)
     if owner_pub and vigil_bin:
         drain_argv = [vigil_bin, "learn-drain", "--spool", str(learn_spool),
                       "--owner-pubkey", owner_pub, "--watch"]
-        procs.append(("offense-learn-drain", _spawn(drain_argv, logs / "offense-learn-drain.log",
-                                                    extra_env={"VIGIL_LIVE_DIR": str(base.resolve())})))
+        if _track("offense-learn-drain", drain_argv, logs / "offense-learn-drain.log",
+                  extra_env={"VIGIL_LIVE_DIR": str(base.resolve())}):
+            return 1
     else:
         print("vigil up: learn-drain skipped (no owner pubkey resolvable or `vigil` bin unresolved) — the "
               "sovereign producer runs, but grants won't be consumed until both are available.", file=sys.stderr)
@@ -830,8 +948,8 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
     # flips the nav-mode latch ON (one-shot) so an owner-armed PHONE gesture session navigates (local camera
     # gesture is not functional — gesture input is the phone companion).
     if with_voice:
-        procs.append(("sovereign-voice", _spawn([str(sigil_bin), "voice", "--mic"],
-                                                logs / "sovereign-voice.log")))
+        if _track("sovereign-voice", [str(sigil_bin), "voice", "--mic"], logs / "sovereign-voice.log"):
+            return 1
     if with_gesture:
         try:
             subprocess.run([str(sigil_bin), "gesture-nav", "on"], env=_child_env(),
@@ -840,24 +958,41 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
             print("vigil up: could not enable gesture nav-mode (`sigil gesture-nav on` failed) — enable it "
                   "later from the sovereign CLI.", file=sys.stderr)
 
-    # 4) assemble the runtime serve dir with the token + federated mount bases.
+    # 4) assemble the runtime serve dir with the token + federated mount bases. Catch ValueError too
+    # (B?-3): read_text on a non-UTF-8 bundle asset raises UnicodeDecodeError (a ValueError, NOT an
+    # OSError), which would otherwise escape past _cleanup() and orphan every backend.
     try:
         assemble_serve_dir(src, ui_dir, token=token)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"vigil up: could not assemble the UI serve dir from {src}: {exc}", file=sys.stderr)
         _cleanup()
         return 1
 
-    # 5) start the proxy (the only human-facing listener).
+    # 5) start the proxy (the only human-facing listener). Catch OSError too (B1): allow_reuse_address
+    # does NOT prevent an EADDRINUSE collision with an ACTIVE listener, and an uncaught bind error here
+    # would escape past _cleanup() and orphan every backend already spawned above.
     try:
         httpd = make_proxy_server(host, port, ui_dir)
-    except ValueError as exc:
-        print(f"vigil up: {exc}", file=sys.stderr)
+    except (ValueError, OSError) as exc:
+        print(f"vigil up: could not bind the UI proxy on {host}:{port}: {exc}", file=sys.stderr)
         _cleanup()
         return 2
 
-    _write_pids(base, [{"name": "orchestrator", "pid": os.getpid()},
-                       *[{"name": n, "pid": p.pid} for n, p in procs]])
+    # Write the pids file so `vigil down` can find these (B3): guard it — a write failure must clean up
+    # and abort, never leave orphaned backends with no pids file. (Ctrl-C still cleans up the foreground
+    # process, but `vigil down` relies on this file.)
+    try:
+        _write_pids(base, [{"name": "orchestrator", "pid": os.getpid()},
+                           *[{"name": n, "pid": p.pid} for n, p in procs]])
+    except OSError as exc:
+        print(f"vigil up: could not write the pids file ({exc}) — aborting so no backends are orphaned. "
+              "Check that .vigil-live/ is writable.", file=sys.stderr)
+        try:
+            httpd.server_close()
+        except Exception:  # noqa: BLE001
+            pass
+        _cleanup()
+        return 1
 
     url = f"{origin}/?token={token}"
     print("\n  ┌──────────────────────────────────────────────────────────────┐")
