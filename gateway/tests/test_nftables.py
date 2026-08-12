@@ -40,9 +40,12 @@ def test_render_expresses_deny_default_and_exits():
     assert "udp dport 53 accept" in txt
     # the sandbox egress chain default-drops everything else
     assert 'log prefix "vigil-gw-drop " drop' in txt
-    # gateway's own egress hard-drops metadata (backstop against a proxy bug)
+    # gateway's own egress (output hook) hard-drops cloud metadata (backstop against a proxy
+    # bug) — but ONLY metadata (A7), so host loopback/link-local keep working.
     assert "chain output" in txt
-    assert "@hard_deny4" in txt
+    out_hook = txt.split("chain output")[1]
+    assert "@host_backstop4" in out_hook
+    assert "@hard_deny4" not in out_hook   # NOT the full set (that would kill host loopback)
 
 
 def test_hard_deny_set_covers_every_denylist_cidr():
@@ -83,12 +86,42 @@ def test_input_chain_governs_host_reachability():
     assert "drop" in ingress
 
 
-def test_forward_hard_deny_covers_all_forwarded_traffic():
-    # Nobody forwarded through this host — including the gateway container's own egress —
-    # may reach a hard-deny range. That rule sits in the forward hook, before the jump.
+def test_forward_backstop_is_metadata_only_and_sandbox_gets_full_hard_deny():
+    # A7: the GLOBAL forward hook drops ONLY the metadata backstop, so co-tenant containers
+    # forwarded through this host keep loopback / link-local / RFC1918. The sandbox's FULL
+    # hard-deny (which correctly includes those ranges) lives in sandbox_egress, not the hook.
     txt = FW.render()
     fwd_hook = txt.split("chain forward")[1].split("chain sandbox_egress")[0]
-    assert "@hard_deny4" in fwd_hook
+    assert "@host_backstop4" in fwd_hook
+    assert "@hard_deny4" not in fwd_hook   # the full set is NOT dropped for co-tenants
+    sb_egress = txt.split("chain sandbox_egress")[1].split("chain output")[0]
+    assert "@hard_deny4" in sb_egress      # the sandbox itself stays fully constrained
+
+
+def test_host_backstop_is_metadata_not_loopback():
+    # The global forward/output backstop set contains the metadata endpoint but NOT loopback
+    # (dropping 127.0.0.0/8 host-wide would break the host — the whole point of A7).
+    txt = FW.render()
+    backstop_set = txt.split("set host_backstop4")[1].split("}")[0]
+    # BLOCK-3: IMDS + the ECS/EKS container-credential endpoints are all in the global backstop.
+    for ep in ("169.254.169.254/32", "169.254.170.2/32", "169.254.170.23/32"):
+        assert ep in backstop_set, ep
+    assert "127.0.0.0/8" not in backstop_set
+    # loopback IS still denied for the sandbox: it lives in the full hard_deny4 set.
+    hard_set = txt.split("set hard_deny4")[1].split("}")[0]
+    assert "127.0.0.0/8" in hard_set
+    assert "169.254.0.0/16" in hard_set
+
+
+def test_host_backstop_cidrs_covers_all_credential_endpoints():
+    cidrs = denylist.host_backstop_cidrs()
+    # BLOCK-3: the earlier set covered only IMDS and left ECS/EKS credential endpoints reachable.
+    for ep in ("169.254.169.254/32", "169.254.170.2/32", "169.254.170.23/32"):
+        assert ep in cidrs, ep
+    # never the ranges the host/co-tenants legitimately use
+    for forbidden in ("127.0.0.0/8", "::1/128", "fe80::/10", "224.0.0.0/4", "240.0.0.0/4",
+                      "10.0.0.0/8"):
+        assert forbidden not in cidrs, forbidden
 
 
 def test_iface_matching_is_spoof_proof_when_known():

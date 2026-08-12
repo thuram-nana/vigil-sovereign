@@ -66,12 +66,18 @@ class GatewayFirewall:
     def _hard_deny(self) -> tuple[list[str], list[str]]:
         return _split_family([*denylist.hard_deny_cidrs(), *self.extra_hard_deny])
 
+    def _host_backstop(self) -> tuple[list[str], list[str]]:
+        # A7: the narrow set the GLOBAL forward/output hooks may drop without breaking the host
+        # (loopback/link-local/multicast) or co-tenant containers — just the metadata endpoints.
+        return _split_family(denylist.host_backstop_cidrs())
+
     def _sandbox_by_family(self) -> tuple[list[str], list[str]]:
         return _split_family(self.sandbox_subnets)
 
     def render(self) -> str:
         """Return the complete, loadable nft ruleset as text."""
         hd4, hd6 = self._hard_deny()
+        hb4, hb6 = self._host_backstop()
         sb4, sb6 = self._sandbox_by_family()
         gip = ipaddress.ip_address(self.gateway_ip)
         dns = ipaddress.ip_address(self._dns_ip())
@@ -94,13 +100,23 @@ class GatewayFirewall:
 
         lines: list[str] = [f"table inet {_TABLE} {{"]
 
-        # Hard-deny sets (denylist single source of truth).
+        # Hard-deny sets (denylist single source of truth) — used by the SANDBOX chains, where
+        # dropping loopback/link-local/etc. is correct because only the sandbox is governed.
         if hd4:
             lines += ["  set hard_deny4 {", "    type ipv4_addr; flags interval;",
                       f"    elements = {{ {elems(hd4)} }}", "  }"]
         if hd6:
             lines += ["  set hard_deny6 {", "    type ipv6_addr; flags interval;",
                       f"    elements = {{ {elems(hd6)} }}", "  }"]
+
+        # Host-backstop sets (A7) — the narrow metadata-only subset the GLOBAL forward/output
+        # hooks drop, so the host keeps loopback/link-local and co-tenants are untouched.
+        if hb4:
+            lines += ["  set host_backstop4 {", "    type ipv4_addr; flags interval;",
+                      f"    elements = {{ {elems(hb4)} }}", "  }"]
+        if hb6:
+            lines += ["  set host_backstop6 {", "    type ipv6_addr; flags interval;",
+                      f"    elements = {{ {elems(hb6)} }}", "  }"]
 
         # INPUT hook: govern what the sandbox may reach ON the gateway host itself (the
         # host-bridge topology). Only the proxy + DNS ports; every other host service is
@@ -117,15 +133,16 @@ class GatewayFirewall:
         lines.append(f"    {log}drop")
         lines.append("  }")
 
-        # FORWARD hook: nothing forwarded through this host may reach a hard-deny range
-        # (covers the gateway container's OWN egress too, not just the sandbox), then govern
-        # sandbox-sourced egress; co-tenants are untouched by policy accept.
+        # FORWARD hook: nothing forwarded through this host may reach cloud metadata (covers
+        # the gateway container's OWN egress too), then govern sandbox-sourced egress. The
+        # backstop is metadata-only so co-tenant containers keep loopback/link-local/RFC1918;
+        # the sandbox's FULL hard-deny is enforced in sandbox_egress, not here.
         lines.append("  chain forward {")
         lines.append("    type filter hook forward priority 0; policy accept;")
-        if hd4:
-            lines.append(f"    ip daddr @hard_deny4 {logh}drop")
-        if hd6:
-            lines.append(f"    ip6 daddr @hard_deny6 {logh}drop")
+        if hb4:
+            lines.append(f"    ip daddr @host_backstop4 {logh}drop")
+        if hb6:
+            lines.append(f"    ip6 daddr @host_backstop6 {logh}drop")
         lines += govern("sandbox_egress")
         lines.append("  }")
 
@@ -147,14 +164,17 @@ class GatewayFirewall:
         lines.append(f"    {log}drop")
         lines.append("  }")
 
-        # OUTPUT backstop: the gateway HOST's own egress may never reach the hard-deny
-        # ranges either, so even a proxy bug on the host cannot touch instance metadata.
+        # OUTPUT backstop: the gateway HOST's own egress may never reach the known cloud
+        # metadata + container-credential endpoints (169.254.169.254 / .170.2 / .170.23 /
+        # fd00:ec2::/32), so even a proxy bug on the host cannot touch them. Endpoint-scoped so
+        # the host keeps loopback (127/8, ::1), IPv6 NDP (fe80::/10), and multicast/broadcast —
+        # dropping the full hard-deny set here would break the host.
         lines.append("  chain output {")
         lines.append("    type filter hook output priority 0; policy accept;")
-        if hd4:
-            lines.append(f"    ip daddr @hard_deny4 {logh}drop")
-        if hd6:
-            lines.append(f"    ip6 daddr @hard_deny6 {logh}drop")
+        if hb4:
+            lines.append(f"    ip daddr @host_backstop4 {logh}drop")
+        if hb6:
+            lines.append(f"    ip6 daddr @host_backstop6 {logh}drop")
         lines.append("  }")
 
         lines.append("}")
