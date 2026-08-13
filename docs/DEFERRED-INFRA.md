@@ -268,6 +268,69 @@ a tool image being present.
 4. Run `run_external_tool(spec, target, scope_gate=..., backend=DockerTopologyBackend(image=...), ...)`.
    The scope gate + oracle authority + signing are inherited verbatim.
 
+## E — cloud / Kubernetes exploitation oracles: real-transport live-fire
+
+**Modules:** `engine/crucible/framework/v2/verify/oracles.py` (`imds_credential_capture_oracle`,
+`exposed_secret_validity_oracle`, `gcp_sa_impersonation_oracle`, `iam_escalation_oracle`,
+`k8s_workload_posture_oracle`, `k8s_rbac_verb_grant_oracle`) + their `verify/*_capture.py` producers +
+the `integration/vigil_integration/live/*_verify.py` admission wiring.
+**Registry:** `docs/capability-matrix/evidence-branches.json` — the per-branch `limitation` is authoritative.
+**Live-fire harness (E4 only):** `tools/livefire/k8s_rbac_livefire.{sh,py}`
+
+This section exists because "have you ever run the cloud exploitation suite against a real cloud?" is
+question one, and the answer belonged in this runbook rather than only in JSON `limitation` strings and
+module docstrings. The honest answer has two halves.
+
+### [BUILT] and LIVE-FIRE PROVEN — E4, the two Kubernetes RBAC branches
+`k8s_exploit.rbac.anonymous_privileged_binding` and `k8s_exploit.rbac.dangerous_verb_grant` have been
+adjudicated over bytes a **real API server** produced (PR #297). The harness stands up a single-node k3s
+cluster **VIGIL itself creates and owns** — throwaway, loopback-only, destroyed afterwards, nobody else's
+infrastructure — plants known-dangerous *and* known-benign RBAC, captures the real responses, and drives
+them through the production path (oracle → admission → certificate → offline re-verification). It asserts
+every expectation and **exits non-zero on any deviation**.
+
+Not covered by that run, and stated so nobody infers it: a WARDEN- and scope-gated **enumeration** runner
+that discovers bindings across a cluster under authorization (the harness reads named objects it planted),
+and a **managed control plane** (EKS/GKE/AKS) — the same RBAC API, a different access path.
+
+### [credential-gated] — E1, E2, E3, E5 are FIXTURE-PROVEN, not live-fired
+
+| Branch | Oracle | What is proven offline | What real transport would add |
+|---|---|---|---|
+| `cloud_exploit.imds.credential_capture` (E1) | `imds_credential_capture_oracle` | Runner, admission, certificate + world-model wiring; secret-safe retention; the capture/confirming-call fingerprint binding | The runner against a **real** `169.254.169.254` / `computeMetadata/v1` endpoint |
+| `cloud_exploit.secret.credential_validity` (E5) | `exposed_secret_validity_oracle` | The per-TYPE confirming-endpoint allow-list (the anti-laundering gate), inverted source-semantics, secret-safe retention | A confirming call to the **real** `sts:GetCallerIdentity` / GitHub `/user` |
+| `cloud_exploit.gcp.sa_impersonation` (E3) | `gcp_sa_impersonation_oracle` | The identity-echo equality gate at an allow-listed Google introspection endpoint | A **real** `iamcredentials` mint + `tokeninfo` echo |
+| `cloud_exploit.iam.privilege_escalation` (E2) | `iam_escalation_oracle` | The two-closure strict-gain differential over a retained policy; deny/Condition/boundary/SCP fail-closed behaviour | A **real** exported IAM policy graph. Note E2 makes **no** cloud call by design even when live |
+
+**No live cloud FACT has been claimed, and none exists in the evidence store.** Each branch's
+`limitation` string says so in the registry that governs admission, so the deferral is enforced where it
+matters rather than only described here.
+
+**Activate when an operator provisions a lab credential** (per provider; do all of it in a throwaway
+account, never a production one):
+
+1. **Provision.** A dedicated lab account/project with the minimum scope the branch needs — E1: one
+   instance with an instance profile / attached service account; E5: one deliberately-exposed test
+   credential of an allow-listed type; E3: two service accounts, one holding
+   `roles/iam.serviceAccountTokenCreator` on the other; E2: an exported IAM policy set (no live call).
+2. **Charter it.** Add the `(provider, account[, region][, resource])` tuple to the engagement charter's
+   cloud scope. The D5 `CloudScopeGate` authorises **cloud-native identity**, not a URL host, and refuses
+   fail-closed — an unchartered tuple mints nothing, and each captured subject is re-authorised with its
+   raw, case-exact id before it is certified.
+3. **Run the producer** for that branch (`live/<branch>_verify.py`) against the lab target with the WARDEN
+   gate on and per-action approval as usual. Do **not** add a bypass to make live-fire convenient.
+4. **Assert both directions, and fail the harness on deviation.** A known-vulnerable fixture must CONFIRM
+   *and* its certificate must re-verify **offline**; a known-benign one must **not** confirm. Model the
+   harness on `tools/livefire/k8s_rbac_livefire.py` — a script that only prints is a demo, not a proof.
+5. **Record the result honestly.** Update the branch's `limitation` in
+   `docs/capability-matrix/evidence-branches.json` (the enforcement test reads it) and this section. If
+   live-fire *fails*, the branch's capability comes down — the registry is a ladder, and a rung that does
+   not hold is removed, not narrated around.
+
+**Not on this list, deliberately:** executing an IAM escalation. E2 proves a configuration *permits* a
+strict-gain escalation primitive; a defensive verification oracle never uses it. That is a design
+commitment, not a deferral, so it has no activation step.
+
 ## Phase 0.2 evidence-verification — tracked LOW follow-ups (red-pen, non-blocking)
 - **single_engagement discards `""`** (`evidence/certify.py`): a cert with an empty `engagement_slug` can ride a named-engagement bundle without tripping the cross-engagement guard. Defense-in-depth only — it still requires a governance-signed head over the mixed chain. Fix (a producer-consistency + verifier tightening) deferred so uniform legacy `""` bundles under a named head keep verifying.
 - **refs_unique vs mint side** (`evidence/certify.py` vs `integration/vigil_integration/proof/bundle.py`): the verifier refuses a bundle with duplicate `finding_ref`s (closes the context-lookup collision), but the PRODUCER does not yet guarantee unique refs (it can fall back to `bug_class`). A legitimately-minted bundle with two same-class findings would be refused (fail-closed). Follow-up: make the producer key/emit unique refs (or key contexts by `cert_digest`) — Phase 0.6 conformance work.

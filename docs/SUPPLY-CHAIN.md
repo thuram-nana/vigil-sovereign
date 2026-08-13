@@ -242,11 +242,29 @@ first follow-up below.
 
 Stated plainly, because a hardening document that only lists wins is a marketing document.
 
-- **`ci.yml` still installs unpinned.** The eight jobs in `ci.yml` install loose ranges
+- **`ci.yml` still installs unpinned.** The jobs in `ci.yml` install loose ranges
   (`pip install "pydantic>=2.10,<3" …`) rather than the locks. So the locks are *verified* on
   every PR but are not yet what CI *tests against*. Switching those jobs onto the locks is the
   second follow-up; doing it in this change would have coupled an A14 failure to every unrelated
   test job.
+- **So does the operator's install path — and this is the bigger case of the two.**
+  `bootstrap.sh` is the *only documented* way to install VIGIL, and it delegates to
+  `envs/build_envs.sh:14-23`, which runs `uv pip install -r` / `pip install -r` over
+  `envs/offense.txt` and `envs/sovereign.txt`. Those two files are five `-e ./…` editable lines
+  each, with no hashes and no `--require-hashes`; every transitive dependency therefore resolves
+  live from PyPI at install time. **The hash-locked `infra/supply-chain/sovereign.lock.txt` and
+  `engine/crucible/framework/v2/requirements.lock.txt` are consumed only by
+  `.github/workflows/supply-chain.yml`.** Stated without euphemism: the locks are proven
+  *installable* in CI, and they are not what an operator installs. Closing it means making
+  `build_envs.sh` install the third-party layer from the lock under `--require-hashes` first and
+  the first-party `-e` members second (they have no registry artifact to hash), which changes
+  every install on every host and so is its own reviewed slice rather than a rider on this one.
+  Until that lands, an operator who needs a hash-verified third-party layer can install it
+  themselves first — `pip install --require-hashes -r infra/supply-chain/sovereign.lock.txt` into
+  `.venv-sovereign`, and the offense lock into `.venv-offense` — and then run `./bootstrap.sh`,
+  which does not re-resolve an already-satisfied requirement. Verify rather than assume: read the
+  install output, because a range in `envs/*.txt` that conflicts with a pin will still pull a
+  different wheel over it. This is a workaround, not the control; the control is the follow-up.
 - **Non-Python ecosystems are scanned but not locked by us.** `vendor/strix/uv.lock`,
   `apps/sigil/kernel/Cargo.lock` and the corpus app's `package-lock.json` are their own upstream
   artifacts; trivy reads them, but this gate does not regenerate or hash-verify them.
@@ -262,7 +280,16 @@ Stated plainly, because a hardening document that only lists wins is a marketing
 
 1. SHA-pin the actions in `.github/workflows/ci.yml`.
 2. Install from the locks in `ci.yml` so the tested tree is the locked tree.
-3. **Raise `cryptography` past the `<50` ceiling to take the CVE-2026-69247 fix** (touches both
-   `requirements.in` and `apps/sigil/requirements.txt`, i.e. both environments), then bump
-   `aiohttp` and `pyasn1` in `vendor/strix`, then raise the blocking threshold to HIGH.
-4. Add PEP 740 / sigstore attestation verification on top of the hashes.
+3. **Install from the locks in `envs/build_envs.sh`** so the operator's install is the locked
+   install, not only CI's (§6, second bullet). This is the follow-up with the widest reach: today
+   the locks bind CI and nobody else.
+4. ~~**Raise `cryptography` past the `<50` ceiling to take the CVE-2026-69247 fix**~~ — **DONE
+   (PR #295).** Both environments now require `cryptography>=50`
+   (`engine/crucible/framework/v2/requirements.in:46` pins `>=50,<51`,
+   `infra/supply-chain/sovereign.in:40` pins `>=50`, `apps/sigil/requirements.txt:1` pins
+   `==50.0.0`) and both locks were regenerated. **Still open from that item:** bump `aiohttp` and
+   `pyasn1` in `vendor/strix`, then raise the blocking threshold from CRITICAL to HIGH — the
+   threshold cannot move while a known HIGH sits in the vendored tree, so the bump gates the
+   raise. The gate currently blocks on CRITICAL (`supply-chain.yml:254`, `:273`) and reports
+   HIGH advisory-only (`:230`).
+5. Add PEP 740 / sigstore attestation verification on top of the hashes.

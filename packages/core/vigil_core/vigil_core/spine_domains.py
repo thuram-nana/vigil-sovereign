@@ -15,12 +15,18 @@ It is deliberately honest about the limits the S5 understand-phase found:
     domain-separation prefix (see :data:`DOMAIN_TAGS`) so a signature under one can never replay as another.
   * ``owner_rooted`` states whether a verify path EXISTS TODAY that chains a segment's trust back to the
     owner — the owner key DIRECTLY, or a CONSUMER of an owner-signed delegation (a live ``verify_delegation``
-    call). Delegate-ABILITY alone is NOT enough: the offense-spine key is delegatable (``OFFENSE_SPINE_ROLE``)
-    but nothing consumes such a delegation yet, so it is ``owner_rooted=False`` today — the identical honest
-    treatment the usage ledger gets (its stable operator key is not owner-delegated either). Only
-    ``offense-finding-anchor1`` is ``owner_rooted=True`` among the offense segments, because a real consumer
-    (``finding_receiver.from_delegation`` → ``verify_delegation``) exists. Closing the spine/ledger ties is
-    S6/S7's job; this module does not pretend the tie is enforced before it is.
+    call). Delegate-ABILITY alone is NOT enough; a NAMED consumer must exist, and
+    :func:`verify_registration` refuses the registry unless ``owner_rooted`` holds IFF
+    ``owner_tie_consumer`` names one — so this bullet cannot drift from the data below it in either
+    direction. THREE of the five offense segments are owner-rooted today, each by a different consumer:
+    ``offense-finding-anchor1`` (``finding_receiver.from_delegation`` → ``verify_delegation`` under
+    ``OFFENSE_GOVERNANCE_ROLE``), ``offense-spine`` (``live/spine_verify.verify_offense_spine`` →
+    ``verify_delegation`` under ``OFFENSE_SPINE_ROLE`` — the tie S5 recorded as unconsumed was closed by the
+    spine-verify consumer), and ``crucible-blackboard-chain`` (``live/spine_verify.verify_blackboard_chain``
+    under ``OFFENSE_GOVERNANCE_ROLE``). What is still NOT owner-rooted, and is stated rather than glossed:
+    ``offense-usage-ledger`` and ``continuous-attestation-log``, whose stable operator keys are not
+    owner-delegated and which no delegation-consuming verifier reads. Closing those two ties remains open
+    work; this module does not pretend a tie is enforced before it is, and does not under-state one that is.
   * ``file_backed`` states whether the segment is persisted as inert bytes a public-key-only reader can
     verify offline. As of T3b the CRUCIBLE blackboard chain has a real persist + offline-verify path on every
     live engage run **that enters the OODA loop**: the loop mirrors its own hook points onto the blackboard, so

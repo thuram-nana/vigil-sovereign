@@ -1,5 +1,5 @@
 """
-veracity.firewall — admit(): the one choke point every claim must cross.
+veracity.firewall — admit(): the shared re-execution gate a claim crosses to be called a FACT.
 
 `admit()` turns a `Claim` into an `AdmittedClaim` by RE-EXECUTING each cited ground —
 never trusting a string — and labelling the result. It is the reusable generalization of
@@ -24,10 +24,30 @@ and a world-model node must be one the claim names AND whose provenance traces t
 oracle/cert (an allowlist — collected intelligence and derivations do not reach fact
 strength). A fact claim must declare its subject; an unbound proof grounds nothing.
 
-NOTE ON PHASING: this is the caller-less PRIMITIVE (veracity P0). Runtime enforcement is
-wired in the subsequent phases — the world-model admission gate (P2) routes every
-add_node/add_edge through admit(), and the reporting gate (P4) binds report prose. Until
-then admit() is exercised only by its tests; that is by design, not a gap.
+WHERE THIS IS WIRED (kept current deliberately: a "not yet wired" note that outlives its
+phase is an underclaim, and docs/CLAIM-DISCIPLINE.md treats that as the same defect as an
+overclaim). admit() is a PRODUCTION path, not a test-only primitive. Today's callers:
+
+  * ``report.grounding.admit_for_report`` — the single shared entry point for a finding, used
+    by ``scanner.campaign.populate_worldmodel`` (a FINDING node keeps its ``oracle:``
+    provenance only if its retained proof re-fires; otherwise it is written ``demoted:``) and
+    by report rendering;
+  * ``evidence.certify._claims_grounded`` — the 5th certificate-verification layer: every
+    report sentence bound as ``render_as == "fact"`` must re-admit for its DECLARED bug_class,
+    so a relabelled claim fails the certificate closed;
+  * ``aegis.pipeline`` — a defensive confirmation is emitted only if admit() calls it a fact;
+  * ``agents.critics.GroundingCritic`` and ``agents.cognitive_refusal`` — the false-positive
+    lens and the epistemic refusal gate both re-execute through admit();
+  * ``scanner.report`` / ``veracity.adapters.admit_finding`` — the per-finding live grounding
+    verdict carried into exports.
+
+HONEST BOUND — this is a gate on the paths listed above, NOT a universal choke point on the
+graph. ``worldmodel.graph.add_node`` / ``add_edge`` have NO admission gate: admission happens
+at the WRITERS (``populate_worldmodel`` grades provenance before the node is built, and
+``scanner.orchestrator`` re-fires a finding's proof before minting attacker-capability
+derivatives when ``verify=True``). A caller that constructs a node directly bypasses this
+module, so "every claim crosses admit()" is a property of the wired paths, not of the type
+system. Closing that would need the gate inside ``graph``; it is not there today.
 """
 
 from __future__ import annotations

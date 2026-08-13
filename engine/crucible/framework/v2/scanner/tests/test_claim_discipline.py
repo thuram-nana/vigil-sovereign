@@ -41,6 +41,43 @@ _QUALIFIERS = (
     "does not", "cannot see", "scoped to", "only when", "except", "caveat", "bounded",
 )
 
+# The documents rule 3 ("Any document that claims a capability must state the boundary") is ENFORCED over.
+# It used to be the three machine-readable capability files, while the rule said "any document" — so the
+# enforcement claim outran the enforcement, and the documents an evaluator actually opens first (the README
+# and the status map) were outside it. Widened to the reader-facing set rather than narrowing the rule,
+# per docs/CLAIM-DISCIPLINE.md itself: when a claim outruns the code you build the code up.
+# It is still not literally "any document" — design notes, ADRs and the plain-English chapters are not in
+# it — so rule 3's prose names this list as the enforced scope and marks the rest [REVIEW].
+_LINTED_DOCS = (
+    "docs/CLAIM-DISCIPLINE.md",
+    "docs/capability-matrix/hexstrike.json",
+    "docs/capability-matrix/evidence-branches.json",
+    "README.md",
+    "docs/AS-BUILT.md",
+    "docs/FEATURES.md",
+    "docs/SUPPLY-CHAIN.md",
+)
+
+# Phrases in the shipped capability matrix that DENY a branch's ability to mint a FACT. Each is legal only
+# while the registry agrees, so the pair is what makes the assertion load-bearing: flip the registry and the
+# assertion flips with it (see ``test_the_capability_matrix_does_not_lag_the_branch_registry``).
+#
+# A PINNED TABLE rather than a natural-language rule, deliberately: deciding "does this sentence deny that
+# capability?" from arbitrary prose is exactly the hand-approximation rule 4 forbids. A pin is small, exact,
+# and fails loudly when the branch it names disappears.
+_MATRIX_CAPABILITY_DENIALS = {
+    "open_redirect.js_sink": (
+        "js-redirect branch is lead-only",
+        "js sink is lead-only",
+        "needs a real js tokenizer",
+    ),
+    "open_redirect.body_markup": (
+        "does not process content-encoding",
+        "body-derived branches are lead-only",
+        "body-derived branches are not fact-capable",
+    ),
+}
+
 
 def _load(path: Path) -> dict:
     assert path.is_file(), f"{path} is missing — the discipline is not enforceable without it"
@@ -462,20 +499,37 @@ def test_body_branches_are_attributable_to_one_evidence_source() -> None:
     assert canary in js_sink_hosts(js) and meta_refresh_hosts(js) == []
 
 
-@pytest.mark.parametrize("doc", ["docs/CLAIM-DISCIPLINE.md", "docs/capability-matrix/hexstrike.json",
-                                 "docs/capability-matrix/evidence-branches.json"])
-def test_capability_documents_make_no_unqualified_absolute_claims(doc: str) -> None:
-    """An absolute claim is allowed only next to its boundary. Scope inflation — naming a family when only
-    part of it qualifies — is how honest sentences become a dishonest document."""
-    path = _ROOT / doc
-    text = path.read_text(encoding="utf-8")
+def _unqualified_absolutes(doc: str, text: str) -> "list[str]":
+    """Paragraphs asserting an absolute with no limitation beside it. Factored out so the widened doc set
+    and the mutation control exercise the SAME checker rather than two that could drift."""
     offenders: list[str] = []
     for para in re.split(r"\n\s*\n", text):
         low = para.lower()
         for absolute in _ABSOLUTES:
             if absolute in low and not any(q in low for q in _QUALIFIERS):
                 offenders.append(f"{doc}: {absolute!r} unqualified in: {para.strip()[:120]}")
-    assert not offenders, "unqualified absolute claim(s):\n" + "\n".join(offenders)
+    return offenders
+
+
+@pytest.mark.parametrize("doc", _LINTED_DOCS)
+def test_capability_documents_make_no_unqualified_absolute_claims(doc: str) -> None:
+    """An absolute claim is allowed only next to its boundary. Scope inflation — naming a family when only
+    part of it qualifies — is how honest sentences become a dishonest document."""
+    path = _ROOT / doc
+    assert path.is_file(), f"{doc} is listed as a capability-describing document but does not exist"
+    assert not (offenders := _unqualified_absolutes(doc, path.read_text(encoding="utf-8"))), (
+        "unqualified absolute claim(s):\n" + "\n".join(offenders))
+
+
+def test_the_absolute_claim_lint_is_load_bearing() -> None:
+    """MUTATION CONTROL for the lint above. A checker nobody has ever seen fail is indistinguishable from
+    one that cannot fail — and this one now guards the documents an evaluator actually reads, so proving it
+    fires matters more than before. A paragraph carrying its boundary must pass; the same claim stripped of
+    that boundary must be caught."""
+    bounded = "VIGIL's oracles have zero false positives within the bounded surface each branch declares."
+    assert _unqualified_absolutes("synthetic", bounded) == [], "a bounded absolute must be allowed"
+    assert _unqualified_absolutes("synthetic", "VIGIL's oracles have zero false positives."), (
+        "the lint did not catch an unqualified absolute — it is not load-bearing")
 
 
 def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
@@ -493,4 +547,156 @@ def test_the_capability_matrix_does_not_outrun_the_branch_registry() -> None:
     notes = httpx[0]["notes"].lower()
     assert "header" in notes and ("not clean-capable" in notes or "lead-only" in notes), (
         "the web capability note must state its boundary: header-derived evidence is FACT-capable, "
-        "body-derived branches are not CLEAN-capable until decoding is complete, JS is LEAD-only")
+        "body-derived branches are not CLEAN-capable, JS is FACT-capable only from executable code")
+
+
+def _matrix_capability_prose(matrix: dict) -> str:
+    """The matrix's capability-describing prose: its own note plus every tool note. Lower-cased, because a
+    denial is a claim regardless of its casing."""
+    return " ".join([matrix.get("note", "")] + [t.get("notes", "") for t in matrix["tools"]]).lower()
+
+
+def _lag_offenders(prose: str, branches: "dict[str, dict]") -> "list[str]":
+    """Where the shipped matrix and the registry disagree about what a branch can do.
+
+    Factored out so the mutation control below drives the SAME function the assertion does."""
+    offenders: list[str] = []
+    for bid, denials in _MATRIX_CAPABILITY_DENIALS.items():
+        if bid not in branches:
+            offenders.append(f"{bid}: pinned in the lag table but absent from the registry — re-point the pin")
+            continue
+        present = [d for d in denials if d in prose]
+        if branches[bid]["fact_capable"] and present:
+            offenders.append(
+                f"{bid}: the registry declares it FACT-capable, but the shipped matrix still denies it: "
+                f"{present!r} — the document LAGS the code (an underclaim)")
+        if not branches[bid]["fact_capable"] and not present:
+            offenders.append(
+                f"{bid}: the registry declares it NOT FACT-capable, but the shipped matrix states no such "
+                f"boundary — the document OUTRUNS the code (an overclaim)")
+    return offenders
+
+
+def test_the_capability_matrix_does_not_lag_the_branch_registry() -> None:
+    """The mirror of ``…_does_not_outrun_…``. That test catches the matrix claiming MORE than the registry
+    declares; this one catches it still DENYING a capability the registry declares — which is how a
+    capability that was actually built quietly goes unsold, and how a reader concludes the JS sink is a
+    regex when ``js_lex.sink_is_executable`` is a tokenizer. ``docs/CLAIM-DISCIPLINE.md`` treats an
+    underclaim as the same defect as an overclaim: the ratchet only moves toward accuracy."""
+    branches = {b["id"]: b for b in _load(_BRANCHES)["branches"]}
+    assert not (offenders := _lag_offenders(_matrix_capability_prose(_load(_MATRIX)), branches)), (
+        "the shipped capability matrix disagrees with the branch registry:\n" + "\n".join(offenders))
+
+
+def test_the_lag_check_is_load_bearing() -> None:
+    """MUTATION CONTROL. Re-insert the exact stale sentence the readiness audit found ("the JS-redirect
+    branch is LEAD-only … needs a real JS tokenizer") into the prose and assert the check fires; then flip
+    the registry's own claim and assert the check demands that boundary back. Both directions, because a
+    one-directional pin would let the table rot into a no-op."""
+    branches = {b["id"]: b for b in _load(_BRANCHES)["branches"]}
+    assert branches["open_redirect.js_sink"]["fact_capable"], (
+        "this control assumes js_sink is FACT-capable today; if that changed, re-derive the control")
+
+    stale = "the js-redirect branch is lead-only (its regex still matches sinks inside js comments)."
+    assert _lag_offenders(stale, branches), "the lag check missed a re-inserted stale denial"
+
+    demoted = {**branches, "open_redirect.js_sink": {**branches["open_redirect.js_sink"],
+                                                     "fact_capable": False}}
+    assert _lag_offenders(_matrix_capability_prose(_load(_MATRIX)), demoted), (
+        "a demoted branch with no boundary in the matrix went unreported — the pin is one-directional")
+    assert not _lag_offenders(stale, demoted), (
+        "the denial that matches a demoted branch must be ACCEPTED, not flagged")
+
+
+# --- rule 1, applied to the code's own prose: a docstring may not lag its callers ----------------------
+#
+# The readiness audit found the flagship anti-hallucination module describing itself as "the caller-less
+# PRIMITIVE … exercised only by its tests; that is by design, not a gap" — two programs after production
+# wired it. A phasing note that outlives its phase is an UNDERCLAIM, and the reader who opens the module
+# named for the product's core guarantee is the worst possible person to mislead.
+_FIREWALL = Path("engine/crucible/framework/v2/veracity/firewall.py")
+_FIREWALL_CALLERS = (
+    "report/grounding.py",
+    "evidence/certify.py",
+    "aegis/pipeline.py",
+    "agents/critics.py",
+    "agents/cognitive_refusal.py",
+)
+# Phrases that assert the module has no production callers. Legal only while that is true.
+_FIREWALL_NO_CALLER_PHRASES = (
+    "caller-less",
+    "exercised only by its tests",
+    "runtime enforcement is\nwired in the subsequent phases",
+)
+_V2 = Path("engine/crucible/framework/v2")
+
+
+def _module_calls_admit(rel: str) -> bool:
+    """Whether this module really routes a claim through the veracity firewall. Both halves are required —
+    a bare ``admit(`` could be an unrelated helper (``verdict.admit`` in the sovereign live path is a
+    different function entirely), and a bare mention of veracity could be a comment."""
+    src = (_ROOT / _V2 / rel).read_text(encoding="utf-8")
+    return "admit(" in src and ("veracity" in src or "firewall" in src)
+
+
+def _firewall_doc_offenders(doc: str, callers: "tuple[str, ...]") -> "list[str]":
+    """Where the firewall docstring and its real call graph disagree. Factored out so the mutation control
+    drives the SAME function the assertion does."""
+    offenders: list[str] = []
+    low = doc.lower()
+    for phrase in _FIREWALL_NO_CALLER_PHRASES:
+        if phrase in low and callers:
+            offenders.append(
+                f"the firewall docstring still claims it has no production callers ({phrase!r}), but "
+                f"{len(callers)} module(s) route through admit(): {callers!r} — an UNDERCLAIM")
+    for rel in callers:
+        # The FULL dotted path, not the bare stem: "pipeline" alone would be satisfied by any sentence
+        # mentioning a pipeline, so dropping ``aegis.pipeline`` would go unnoticed.
+        dotted = rel.removesuffix(".py").replace("/", ".")
+        if dotted not in low and rel not in low:
+            offenders.append(
+                f"{rel} calls admit() but the firewall docstring does not name it ({dotted!r}) — the "
+                f"WHERE THIS IS WIRED list has rotted")
+    return offenders
+
+
+def test_the_veracity_firewall_docstring_does_not_lag_its_callers() -> None:
+    """Rule 1 turned on the codebase's own prose. Both directions are pinned: every module that really
+    routes through ``admit()`` must be named in the docstring, and the retired "not yet wired" phrasing may
+    not come back while those callers exist."""
+    for rel in _FIREWALL_CALLERS:
+        assert _module_calls_admit(rel), (
+            f"{rel} no longer calls admit() — this pin is stale; re-derive the caller list AND the "
+            f"firewall docstring rather than deleting the assertion")
+    doc = (_ROOT / _FIREWALL).read_text(encoding="utf-8").split('"""')[1]
+    assert not (offenders := _firewall_doc_offenders(doc, _FIREWALL_CALLERS)), "\n".join(offenders)
+
+
+def test_the_firewall_docstring_check_is_load_bearing() -> None:
+    """MUTATION CONTROL. The exact stale sentence the audit found must be caught, and so must a docstring
+    that silently drops a caller."""
+    stale = ("this is the caller-less PRIMITIVE (veracity P0) … Until then admit() is exercised only by "
+             "its tests; that is by design, not a gap.")
+    assert _firewall_doc_offenders(stale, _FIREWALL_CALLERS), (
+        "the check missed the exact underclaim the readiness audit found")
+    assert _firewall_doc_offenders("admit() re-executes each cited ground.", ("aegis/pipeline.py",)), (
+        "a docstring naming none of its callers went unreported")
+    assert _firewall_doc_offenders("wired by the defensive pipeline", ("aegis/pipeline.py",)), (
+        "a bare stem satisfied the pin — dropping a named caller for a vague noun must still be caught")
+    assert not _firewall_doc_offenders("wired by aegis.pipeline", ("aegis/pipeline.py",)), (
+        "a docstring that DOES name its caller must pass")
+
+
+def test_the_firewall_is_not_a_universal_graph_gate() -> None:
+    """The docstring's HONEST BOUND, machine-checked in the other direction: it states that
+    ``worldmodel.graph`` has no admission gate and that admission happens at the WRITERS. If someone wires
+    the gate into ``graph`` itself, that bound becomes a stale underclaim — so this test fails and forces
+    the docstring to be upgraded rather than left describing a weaker system than the one that ships."""
+    graph = (_ROOT / _V2 / "worldmodel" / "graph.py").read_text(encoding="utf-8")
+    assert "veracity" not in graph and "admit(" not in graph, (
+        "worldmodel/graph.py now references the veracity firewall — the firewall docstring's 'graph has NO "
+        "admission gate' bound is no longer true and must be rewritten UP, not left stale")
+    doc = (_ROOT / _FIREWALL).read_text(encoding="utf-8").split('"""')[1].lower()
+    assert "no admission gate" in doc, (
+        "the firewall docstring must keep stating the bound it actually has — that admission is on the "
+        "wired paths, not on graph.add_node")

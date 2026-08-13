@@ -103,9 +103,23 @@ paragraph. **The banned list is not reproduced here.** It lives in `_ABSOLUTES` 
 is the single source of truth — duplicating it into prose is how a checker and its documentation drift apart,
 and a stale list in a governance document is itself a false claim about what is enforced. Read the test.
 
+**Exactly which documents the LINT runs over** — stated, because "any document" was itself an unearned
+absolute while the parametrisation covered three files. The enforced set is `_LINTED_DOCS` in the
+enforcement test (again the single source of truth), and it now covers the reader-facing documents as well
+as the machine-readable ones: `README.md`, `docs/AS-BUILT.md`, `docs/FEATURES.md`, `docs/SUPPLY-CHAIN.md`,
+`docs/CLAIM-DISCIPLINE.md`, and both `docs/capability-matrix/*.json`. Rule 3 still *binds* any document that
+claims a capability; outside `_LINTED_DOCS` it binds under **[REVIEW]** only, and widening the list is the
+right way to close that gap — never narrowing the rule.
+
 The lint half is mechanical; the REVIEW half is not, and matters more: **adjacency does not prove the
 qualifier actually bounds the claim.** A reviewer must judge whether the stated limitation genuinely covers
 what the sentence asserts.
+
+A capability document must also not **lag** the code. The same enforcement test pins the phrases in the
+shipped capability matrix that DENY a branch's ability to mint a FACT against that branch's declaration in
+`evidence-branches.json`, so a sentence saying "the JS-redirect branch is LEAD-only" is legal only while the
+registry agrees. Denying a capability that exists is the same defect as claiming one that does not (rule 1);
+the ratchet only moves toward accuracy.
 
 ## 4. Do not hand-approximate a specified algorithm **[REVIEW]**
 
@@ -194,7 +208,16 @@ Runs in the `CRUCIBLE core` CI leg. What it actually verifies, precisely:
   target carries a rationale;
 - `admit()` behaves as declared — unregistered branches are refused, a non-`fact_capable` branch cannot mint,
   a non-`clean_capable` branch or an unmet precondition yields INCONCLUSIVE rather than CLEAN;
-- capability-describing documents contain no unqualified absolute claims.
+- the documents listed in `_LINTED_DOCS` (the two capability-matrix JSONs, this file, `README.md`,
+  `docs/AS-BUILT.md`, `docs/FEATURES.md`, `docs/SUPPLY-CHAIN.md`) contain no unqualified absolute claims —
+  and a mutation control proves that lint can still fail;
+- a module under `integration/vigil_integration/live/` that mints by calling `confirm_and_certify` directly
+  instead of routing through `admit()` is caught by a static routing guard
+  (`test_no_sovereign_live_module_mints_by_calling_confirm_and_certify_directly`). That guard carries a
+  named `_PENDING_MIGRATION` allowlist of not-yet-migrated modules, and an anti-rot assert fails once a
+  listed module no longer needs the exemption — read the test for the current frontier;
+- the shipped capability matrix neither outruns nor lags the branch registry (both directions are asserted,
+  each with a mutation control).
 
 What it does **not** verify: that every verdict-producing code path calls `admit()`, that the registry's
 limitations are *complete*, or that any branch's underlying oracle is correct. Those rest on the differential
