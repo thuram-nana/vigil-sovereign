@@ -23,6 +23,8 @@ from contextlib import contextmanager
 
 from framework.v2.console import actions, api, server
 
+from .conftest import AUTH_HEADERS
+
 
 @contextmanager
 def _running():
@@ -39,8 +41,9 @@ def _running():
 
 
 def _get_status(url):
+    req = urllib.request.Request(url, headers=AUTH_HEADERS)
     try:
-        with urllib.request.urlopen(url, timeout=5) as r:  # noqa: S310 (loopback test)
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
             return r.status
     except urllib.error.HTTPError as e:
         return e.code
@@ -51,6 +54,8 @@ def _post(url, *, csrf=True, data=b"{}"):
     if csrf:
         req.add_header("X-Requested-With", "vigil-ui")
     req.add_header("Sec-Fetch-Site", "same-origin")
+    for k, v in AUTH_HEADERS.items():           # the session credential the operator's page holds
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
             return r.status, r.read()

@@ -874,7 +874,14 @@ def run_up(*, host: str, port: int, domain: str, base_dir: str, no_browser: bool
                 "--allow-host", authority, "--allow-origin", origin]
     # point the console's chat transcripts at the SAME .vigil-live base the rest of the live plane uses
     # (the console otherwise defaults to a different root); resolved absolute so cwd can't move it.
-    console_env = {**offense_llm_env, "VIGIL_LIVE_DIR": str(base.resolve())}
+    #
+    # VIGIL_CONSOLE_TOKEN hands the offense console the SAME session token that is embedded in the
+    # unified UI's index.html, so ONE credential covers both federated planes: the browser sends
+    # `X-SIGIL-Token` (and `?token=` for SSE / downloads) to /sovereign/* and /offense/* alike. Without
+    # it the console would mint its own token and every /offense/* call from the UI would 401. The
+    # token rides the child's ENV — never argv (argv is world-readable in /proc) and never a log line.
+    console_env = {**offense_llm_env, "VIGIL_LIVE_DIR": str(base.resolve()),
+                   "VIGIL_CONSOLE_TOKEN": token}
     # Hand the console child the absolute `vigil` path so its graph-backed engage never SILENTLY falls back
     # to the non-graph engine when `vigil` isn't on the child's inherited PATH (venv not activated).
     vigil_bin = _console_vigil_bin(crucible_bin)

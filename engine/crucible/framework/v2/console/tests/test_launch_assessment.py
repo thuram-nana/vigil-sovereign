@@ -28,6 +28,8 @@ import pytest
 from framework.v2.console import actions, api, server
 from framework.v2.console.blackboard_sse import BlackboardTailer
 
+from .conftest import AUTH_HEADERS
+
 
 # ---------------------------------------------------------------------------
 # launch_assessment — each mode routes to the right gated CLI (spawn stubbed)
@@ -371,6 +373,8 @@ def _post(url, *, headers=None, data=b"{}", csrf=True):
     req = urllib.request.Request(url, method="POST", data=data)
     if csrf:
         req.add_header("X-Requested-With", "vigil-ui")
+    for k, v in AUTH_HEADERS.items():           # the session credential the operator's page holds
+        req.add_header(k, v)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
@@ -396,6 +400,7 @@ def test_launch_assessment_route_is_csrf_gated_and_routes(monkeypatch, tmp_path)
 
 def test_capabilities_route_serves_catalog(monkeypatch, tmp_path):
     with _running_server(monkeypatch, tmp_path) as base:
-        with urllib.request.urlopen(base + "/api/capabilities", timeout=5) as r:  # noqa: S310
+        req = urllib.request.Request(base + "/api/capabilities", headers=AUTH_HEADERS)
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310
             d = json.loads(r.read())
         assert any(c["id"] == "recon" for c in d["capabilities"])

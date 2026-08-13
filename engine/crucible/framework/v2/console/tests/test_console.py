@@ -18,6 +18,8 @@ from contextlib import contextmanager
 import pytest
 
 from framework.v2.console import api, server
+
+from .conftest import AUTH_HEADERS, auth_url
 from framework.v2.console.sse import EventTailer
 
 
@@ -111,8 +113,11 @@ def _running_server():
         th.join(timeout=5)
 
 
-def _get(url: str):
-    with urllib.request.urlopen(url, timeout=5) as r:  # noqa: S310 (loopback test)
+def _get(url: str, *, headers=AUTH_HEADERS):
+    req = urllib.request.Request(url, method="GET")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
         return r.status, r.headers.get_content_type(), r.read()
 
 
@@ -143,6 +148,8 @@ def _post(url: str, *, headers=None, data=b"{}", csrf=True):
     req = urllib.request.Request(url, method="POST", data=data)
     if csrf:                                    # the custom header the SPA's fetch sets
         req.add_header("X-Requested-With", "fetch")
+    for k, v in AUTH_HEADERS.items():           # the session credential the operator's page holds
+        req.add_header(k, v)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:

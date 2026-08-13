@@ -242,6 +242,28 @@
       ]
     },
     {
+      "description": "Every past job you can come back to months later — newest worked first, with real dates and times, the kind of operation, the subject, and its run and finding counts; rename a job or a run (presentation only, nothing signed changes) and click through to its runs, findings, evidence and dossier.",
+      "group": "MANAGE",
+      "id": "library",
+      "label": "Engagement Library",
+      "owner": false,
+      "plane": "unified",
+      "synonyms": [
+        "library",
+        "engagement library",
+        "past jobs",
+        "previous jobs",
+        "old jobs",
+        "past engagements",
+        "job history",
+        "previous assessments",
+        "past scans",
+        "what did i run",
+        "go back to a job",
+        "rename a job"
+      ]
+    },
+    {
       "description": "Watch an active or recent run stream live — its findings, tools, and events as they happen.",
       "group": "DO",
       "id": "live",
@@ -490,5 +512,5 @@
       ]
     }
   ],
-  "source_sha": "8686da7aeb9ecf80433621ee21042437f684f1d193ce2817e832ffcf16951936"
+  "source_sha": "88ea4c10619899516116651b5fdfcdc38c7efd9dc77117e93e332330501965df"
 }

@@ -26,6 +26,8 @@ from contextlib import contextmanager
 from framework.v2.common import paths
 from framework.v2.console import actions, api, server
 
+from .conftest import AUTH_HEADERS
+
 
 class _FakePopen:
     def __init__(self, argv, **kw):
@@ -191,6 +193,8 @@ def _post(url, *, csrf=True, headers=None, data=b"{}"):
     if csrf:
         req.add_header("X-Requested-With", "vigil-ui")
     req.add_header("Sec-Fetch-Site", "same-origin")
+    for k, v in AUTH_HEADERS.items():           # the session credential the operator's page holds
+        req.add_header(k, v)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:

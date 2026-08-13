@@ -20,6 +20,8 @@ from contextlib import contextmanager
 
 from framework.v2.console import server
 
+from .conftest import AUTH_HEADERS, auth_url
+
 
 @contextmanager
 def _running(**serve_kw):
@@ -38,6 +40,8 @@ def _running(**serve_kw):
 def _post(url, *, headers=None):
     req = urllib.request.Request(url, method="POST", data=b"{}")
     req.add_header("X-Requested-With", "vigil-ui")
+    for k, v in AUTH_HEADERS.items():           # the session credential the operator's page holds
+        req.add_header(k, v)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
@@ -48,12 +52,13 @@ def _post(url, *, headers=None):
 
 
 def _get(url):
-    with urllib.request.urlopen(url, timeout=5) as r:  # noqa: S310 (loopback test)
-        return r.status, dict(r.headers)
+    return _get_hdr(url)
 
 
 def _get_hdr(url, *, headers=None):
     req = urllib.request.Request(url, method="GET")
+    for k, v in AUTH_HEADERS.items():           # the session credential the operator's page holds
+        req.add_header(k, v)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:

@@ -29,6 +29,8 @@ from framework.v2.tools.registry import (
     probe_tools,
 )
 
+from .conftest import AUTH_HEADERS
+
 # A binary that exists on effectively every POSIX box we run on (the test host included).
 _REAL_BINARY = "sh" if shutil.which("sh") else ("ls" if shutil.which("ls") else "python3")
 _BOGUS = "vigil-nonexistent-tool-zzz-000"
@@ -195,7 +197,8 @@ def _running_server():
 
 def test_api_tools_route_serves_json_with_csp() -> None:
     with _running_server() as base:
-        with urllib.request.urlopen(base + "/api/tools", timeout=5) as r:  # noqa: S310 (loopback test)
+        req = urllib.request.Request(base + "/api/tools", headers=AUTH_HEADERS)
+        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 (loopback test)
             assert r.status == 200
             assert r.headers.get_content_type() == "application/json"
             # strict CSP parity with the other data routes (defense-in-depth on JSON).

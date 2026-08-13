@@ -21,7 +21,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from ..common import logging as v2log
 from ..common import paths
@@ -424,6 +424,99 @@ class Blackboard:
             "SELECT MAX(id) AS m FROM events WHERE engagement_id = ?", (eid,),
         ).fetchone()
         return int(row["m"] or 0)
+
+    # ---- library listing (the engagement roster, newest activity first) ----
+
+    _LIST_ENGAGEMENTS_SQL = """
+        SELECT e.id          AS id,
+               e.slug        AS slug,
+               e.started_at  AS started_at,
+               e.closed_at   AS closed_at,
+               COUNT(v.id)   AS events,
+               MIN(v.posted_at) AS first_event_at,
+               MAX(v.posted_at) AS last_event_at,
+               MAX(v.id)     AS last_event_id,
+               SUM(CASE WHEN v.kind = 'finding' THEN 1 ELSE 0 END) AS findings
+          FROM bb_engagements e
+          LEFT JOIN events v
+                 ON v.engagement_id = e.id
+                AND NOT EXISTS (SELECT 1 FROM events s WHERE s.supersedes_id = v.id)
+         GROUP BY e.id, e.slug, e.started_at, e.closed_at
+    """
+
+    def list_engagements(
+        self,
+        *,
+        labels: Mapping[str, str] | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Every engagement the spine knows about — a stable identity plus TIMESTAMPS — newest
+        activity FIRST. This is the engagement-library roster: the operator comes back months
+        later and needs to see WHICH jobs exist and WHEN each was worked on, not an alphabetical
+        list of directories.
+
+        Per engagement: the registry ``id`` + ``slug`` (the stable identity), ``started_at`` (when
+        the engagement was registered), ``first_seen`` / ``last_activity`` (the first and last event
+        actually posted — falling back to ``started_at`` for an engagement registered but never
+        posted to), ``closed_at``, and the current-view counts (``events``, ``findings``, ``facts``).
+        Superseded rows are excluded, so the counts match the current view the rest of the console
+        renders (``read``'s default), not the full audit history.
+
+        A FACT is a finding whose payload carries ``verified_by_oracle`` — the same provenance flag
+        the telemetry collector folds on. This method DERIVES; it never mints, promotes, or writes.
+
+        ``labels`` is an OPTIONAL, caller-supplied ``slug -> human label`` mapping stamped onto the
+        rows as ``label``. It is PRESENTATION metadata and it is deliberately INJECTED rather than
+        stored: there is no label column, no label write path, and nothing here ever puts a label
+        into an event payload — so renaming an engagement cannot touch a signed byte or invalidate
+        a certificate. An unlabelled engagement gets ``""`` (the UI falls back to the slug).
+
+        Read-only over the append-only log. Total: it never raises for a fresh/empty spine.
+        """
+        rows = self._conn.execute(self._LIST_ENGAGEMENTS_SQL).fetchall()
+
+        # FACT counts need the payload flag, so they cannot come from the aggregate above. Findings
+        # are the rarest kind on a spine, so this is a small, indexed read (idx_events_eng_kind).
+        facts: dict[int, int] = {}
+        for r in self._conn.execute(
+            "SELECT v.engagement_id AS eid, v.payload_json AS payload_json FROM events v "
+            "WHERE v.kind = 'finding' "
+            "  AND NOT EXISTS (SELECT 1 FROM events s WHERE s.supersedes_id = v.id)"
+        ):
+            try:
+                payload = json.loads(r["payload_json"])
+            except (TypeError, ValueError):     # a payload we cannot parse is never counted a fact
+                continue
+            if isinstance(payload, dict) and payload.get("verified_by_oracle"):
+                eid = int(r["eid"])
+                facts[eid] = facts.get(eid, 0) + 1
+
+        label_map = dict(labels or {})
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            slug = str(r["slug"])
+            started = str(r["started_at"])
+            out.append({
+                "id": int(r["id"]),
+                "slug": slug,
+                # presentation only — injected by the caller, never read from or written to the spine
+                "label": str(label_map.get(slug, "") or ""),
+                "started_at": started,
+                "first_seen": str(r["first_event_at"] or started),
+                "last_activity": str(r["last_event_at"] or started),
+                "closed_at": r["closed_at"],
+                "events": int(r["events"] or 0),
+                "findings": int(r["findings"] or 0),
+                "facts": int(facts.get(int(r["id"]), 0)),
+                "last_event_id": int(r["last_event_id"] or 0),
+            })
+        # Newest activity first. posted_at/started_at are `now_iso()` (UTC, SECOND precision) and sort
+        # lexicographically == chronologically. Second precision means two engagements touched in the
+        # same second tie, so the tie-break is the spine's own LOGICAL CLOCK — the highest event id is
+        # genuinely the more recent one — and finally the registry id. Sorting on the slug there would
+        # be arbitrary (it would reintroduce the alphabetical listing this method exists to replace).
+        out.sort(key=lambda e: (e["last_activity"], e["last_event_id"], e["id"]), reverse=True)
+        return out[: max(0, int(limit))]
 
 
 def open_blackboard(*, db_path: Path | None = None) -> Blackboard:

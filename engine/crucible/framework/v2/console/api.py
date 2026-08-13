@@ -115,20 +115,131 @@ def _engagement_row(slug: str) -> dict[str, Any]:
     }
 
 
-def list_engagements() -> dict[str, Any]:
-    """Every engagement (a slug = a directory under ``targets/``), with its
-    safety/charter state. Skips the `_template` scaffold and hidden dirs."""
-    def _list() -> list[str]:
-        root = Path(paths.targets_root())
-        if not root.is_dir():
-            return []
-        return sorted(
-            p.name for p in root.iterdir()
-            if p.is_dir() and not p.name.startswith((".", "_"))
-        )
+# ---------------------------------------------------------------------------
+# The ENGAGEMENT LIBRARY — past jobs you can come back to months later.
+#
+# The old listing was `sorted(targets/*)`: alphabetical, no timestamps, and EMPTY for an engagement
+# that only ever existed on the spine (an `engage --spine` run registers a slug on the blackboard and
+# may never create a targets/ directory). A library needs three things the old shape could not give:
+# a WHEN (so "months later" is navigable), a HUMAN NAME (so the job is recognisable), and a way IN
+# (its runs → their findings → the evidence/dossier that already exist).
+#
+# So the roster is the UNION of two real sources — never invented:
+#   * the signed spine  (Blackboard.list_engagements: identity + first/last event timestamps + counts)
+#   * the charter tree  (targets/<slug>: charter, authority, kill-switch, evidence)
+# plus the console's own runs (grouped by the slug recorded in each run's meta.json). Every timestamp
+# is derived from something on disk; an engagement with no activity is honestly `last_activity: null`
+# rather than back-dated to "now".
+# ---------------------------------------------------------------------------
 
-    slugs = _safe(_list, default=[])
-    return {"engagements": [_engagement_row(s) for s in slugs]}
+
+def _target_slugs() -> list[str]:
+    """Engagement slugs that have a charter/target directory. Skips the `_template` scaffold and
+    hidden dirs. Total: [] when the targets root is absent."""
+    root = Path(paths.targets_root())
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir()
+                  if p.is_dir() and not p.name.startswith((".", "_")))
+
+
+def _spine_engagements(labels: dict[str, str]) -> list[dict[str, Any]]:
+    """The spine's own roster (identity + timestamps + counts), newest activity first. Total: [] when
+    no spine exists yet / it cannot be opened — the library then falls back to the charter tree."""
+    from ..agents.blackboard import open_blackboard
+    bb = open_blackboard()
+    try:
+        return bb.list_engagements(labels=labels)
+    finally:
+        try:
+            bb.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _iso_from_epoch(ts: float | None) -> str | None:
+    """A UTC ISO-8601 stamp (second precision) from a POSIX timestamp — the SAME shape the spine's
+    ``posted_at`` uses, so the library can compare/sort spine and filesystem times as plain strings."""
+    if not ts:
+        return None
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def _runs_by_slug() -> dict[str, list[dict[str, Any]]]:
+    """The console's own runs grouped by the engagement slug RECORDED IN THEIR OWN meta.json (never a
+    caller-supplied one), newest first within each engagement. A run with no slug is grouped under
+    ``""`` so it is still reachable, never dropped."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in list_runs().get("runs", []):
+        out.setdefault(str(r.get("slug") or ""), []).append(r)
+    return out
+
+
+def list_engagements() -> dict[str, Any]:
+    """The engagement library: every past job, NEWEST ACTIVITY FIRST, each with its human label, its
+    timestamps, its run/finding counts and the charter/safety state the console already showed.
+
+    The roster unions the signed spine with the charter tree (see the section note above), so an
+    engagement is listed whether it was created by a charter, by a ``--spine`` run, or by both. Sort
+    key is the last real activity (spine event / run start / charter mtime); an engagement with no
+    activity at all sorts last with an honest ``last_activity: null``.
+
+    Read-only and total — a fresh tree, an absent spine or an unreadable target dir yields a partial
+    but never-fabricated list, and never a traceback."""
+    from . import labels as labels_mod
+
+    label_map = _safe(labels_mod.engagement_labels, default={}) or {}
+    spine = _safe(lambda: _spine_engagements(label_map), default=[]) or []
+    by_slug: dict[str, dict[str, Any]] = {str(e["slug"]): e for e in spine if e.get("slug")}
+    runs_by_slug = _safe(_runs_by_slug, default={}) or {}
+
+    slugs = list(by_slug)
+    for s in _safe(_target_slugs, default=[]) or []:
+        if s not in by_slug:
+            slugs.append(s)
+
+    rows: list[dict[str, Any]] = []
+    for slug in slugs:
+        sp = by_slug.get(slug, {})
+        row = _engagement_row(slug)
+        runs = runs_by_slug.get(slug, [])
+        # `started` on a run meta is a POSIX timestamp; normalise to the spine's ISO shape so the two
+        # sources are comparable (and so the UI formats ONE kind of stamp).
+        run_times = [t for t in (_iso_from_epoch(r.get("started")) for r in runs) if t]
+        charter_mtime = _safe(
+            lambda s=slug: _iso_from_epoch(Path(paths.charter_path(s)).stat().st_mtime), default=None)
+        first_candidates = [t for t in (sp.get("first_seen"), *run_times, charter_mtime) if t]
+        last_candidates = [t for t in (sp.get("last_activity"), *run_times, charter_mtime) if t]
+        # Findings: the spine's own count when the engagement ran with --spine; else the console runs'
+        # saved report counts. Both are REAL counts of stored findings — never an estimate.
+        run_findings = sum(int(r.get("findings") or 0) for r in runs)
+        rows.append({
+            **row,
+            "id": sp.get("id"),                       # spine registry id (None for a charter-only job)
+            "label": str(label_map.get(slug, "") or ""),
+            "on_spine": bool(sp),
+            "first_seen": min(first_candidates) if first_candidates else None,
+            "last_activity": max(last_candidates) if last_candidates else None,
+            "closed_at": sp.get("closed_at"),
+            "run_count": len(runs),
+            "finding_count": int(sp.get("findings") or 0) or run_findings,
+            "fact_count": int(sp.get("facts") or 0),
+            "event_count": int(sp.get("events") or 0),
+            # what KIND of operation this was — read from the runs' own metas (never guessed).
+            "kinds": sorted({str(r.get("mode") or "") for r in runs if r.get("mode")}),
+            "subjects": sorted({str(r.get("target") or "") for r in runs if r.get("target")})[:5],
+        })
+    # Newest activity first; an engagement with no activity at all sorts last (never back-dated).
+    #
+    # The tie-break matters more than it looks. Every stamp here is second-precision, and a charter
+    # written by the same `engage` invocation gives several jobs the SAME `last_activity` — driving the
+    # real console showed exactly that, and the roster then fell back to the slug, i.e. to the
+    # alphabetical listing this function exists to replace (reversed, which is no better). So the
+    # tie-break is a second REAL signal — the more recently STARTED job leads — and the slug is only
+    # the final, purely-deterministic resort so the order never flickers between two identical rows.
+    rows.sort(key=lambda e: (e["last_activity"] or "", e["first_seen"] or "", e["slug"]), reverse=True)
+    return {"engagements": rows}
 
 
 def engagement_detail(slug: str) -> dict[str, Any]:
@@ -137,6 +248,30 @@ def engagement_detail(slug: str) -> dict[str, Any]:
     row["charter_present"] = row["has_charter"]
     row["memory"] = _safe(_memory_summary, default={})
     return row
+
+
+def library_engagement(slug: str) -> dict[str, Any]:
+    """One engagement in the library: its identity + label + timestamps + charter/safety state, and
+    the RUNS that belong to it (newest first), each with its own label, timestamps, status, subject
+    and finding count — the click-through from a past job to the work inside it.
+
+    Membership is resolved SERVER-SIDE: a run belongs to this engagement iff its OWN ``meta.json``
+    records this slug. A caller cannot claim a run into an engagement it does not belong to.
+    Read-only + total (an unknown slug yields an honest empty run list)."""
+    from . import labels as labels_mod
+
+    s = str(slug or "").strip()
+    if not s:
+        return {"slug": "", "runs": [], "note": "select an engagement"}
+    row = engagement_detail(s)
+    runs = (_safe(_runs_by_slug, default={}) or {}).get(s, [])
+    return {
+        **row,
+        "label": _safe(lambda: labels_mod.engagement_label(s), default="") or "",
+        "runs": runs,
+        "run_count": len(runs),
+        "charter": _safe(lambda: charter_status(s), default=None),
+    }
 
 
 def _memory_summary() -> dict[str, int]:
@@ -151,8 +286,17 @@ def _memory_summary() -> dict[str, int]:
 
 
 def list_runs() -> dict[str, Any]:
-    """Console-launched scan runs, newest first, with their meta + finding count."""
+    """Console-launched scan runs, newest first, with their meta + finding count.
+
+    Each row also carries the run's HUMAN label (from the presentation-only label side-car — never
+    from the run's own artifacts, which stay untouched by a rename) and ISO-8601 forms of its start/
+    finish stamps so the library can render a real date and time without re-deriving them per screen.
+    The ``slug`` is the one the run itself recorded in ``meta.json`` — the library groups on it, so
+    engagement membership can never be asserted by a caller."""
     from . import actions
+    from . import labels as labels_mod
+
+    label_map = _safe(labels_mod.run_labels, default={}) or {}
 
     def _list() -> list[dict[str, Any]]:
         runs_root = actions.console_dir() / "runs"
@@ -166,9 +310,13 @@ def list_runs() -> dict[str, Any]:
             report = _safe(lambda p=d: json.loads((p / "report.json").read_text(encoding="utf-8")), default=None)
             out.append({
                 "run_id": d.name,
+                "label": str(label_map.get(d.name, "") or ""),
                 "target": meta.get("target"),
                 "status": meta.get("status", "unknown"),
                 "started": meta.get("started"),
+                "started_iso": _iso_from_epoch(meta.get("started")),
+                "finished": meta.get("finished"),
+                "finished_iso": _iso_from_epoch(meta.get("finished")),
                 # P2 assessment-run fields (absent for legacy loopback scans → sensible defaults):
                 "mode": meta.get("mode", "url"),
                 "slug": meta.get("slug"),
