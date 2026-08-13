@@ -22,6 +22,7 @@ Sub-state ↔ bearer (all identity-empty in Slice C):
   capability_map         {host_id: cap}                          right-biased LWW               mesh host capability
   mesh_dev_state         {device_pubkey: authorized|revoked}     LWW (keep revoked!)            mesh device authz
   promotion              {(agent,scope): granted|revoked}        LWW (keep revoked!)            auto-approval grants
+  promotion_issued       {(agent,scope): max issued_at}          join-semilattice (max)         grant anti-replay
   consumed_arm_nonces    {(device_pubkey, nonce)}                set-union                      HID-arm replay ledger
   device_approval_dedup  {(pubkey,sig): min_seq}                 min-seq semilattice            device-approval idempotency
   warden_best            {pubkey: (max_count, head_hash, seq)}   max-count LWW-tie              warden anchor high-water
@@ -81,6 +82,10 @@ class SnapshotState(BaseModel):
     capability_map: list = []         # [[host_id, cap_dict], ...]  -> dict() reconstructs (keys verbatim)
     mesh_dev_state: list = []         # [[device_pubkey, "authorized"|"revoked"], ...] -> dict() reconstructs
     promotion: list = []              # [[agent, scope, "granted"|"revoked"], ...]
+    promotion_issued: list = []       # [[agent, scope, issued_at], ...] — PER-(agent,scope) grant high-water.
+    #                                   Missing row ⇒ the -inf bottom. Per key and never global: a global one
+    #                                   would let a grant for agent A refuse a legitimate later grant for
+    #                                   agent B carrying a smaller issued_at.
     consumed_arm_nonces: list = []    # [[device_pubkey, nonce], ...]  (nonce int OR str, verbatim)
     device_approval_dedup: list = []  # [[pubkey|None, sig|None, min_seq], ...]
     warden_best: dict[str, list] = {} # {pubkey: [max_count, head_hash, tiebreak_seq]}
@@ -95,6 +100,9 @@ class SnapshotState(BaseModel):
 
     def promotion_map(self) -> dict[tuple[Optional[str], Optional[str]], str]:
         return {(row[0], row[1]): row[2] for row in self.promotion}
+
+    def promotion_issued_map(self) -> dict[tuple[Optional[str], Optional[str]], float]:
+        return {(row[0], row[1]): row[2] for row in self.promotion_issued}
 
     def capability_latch_map(self) -> dict[Optional[str], bool]:
         return {row[0]: row[1] for row in self.capability_latch}
@@ -206,6 +214,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.capability import _CORE as _CAPLATCH_CORE
     from ..governor.killswitch import SIGNAL as _KS_SIGNAL
     from ..governor.killswitch import _CORE as _KS_CORE
+    from ..governor.promotion import SIGNAL as _PROMO_SIGNAL
+    from ..governor.promotion import _CORE as _PROMO_CORE
     from ..mesh.registry import CAP_SIGNAL, DEV_SIGNAL, _CAP_CORE, _DEV_CORE
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
@@ -224,6 +234,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     capability: dict[Any, dict] = dict(s.capability_map) if s else {}   # list-of-rows -> dict (keys verbatim)
     mesh_dev: dict[Any, str] = dict(s.mesh_dev_state) if s else {}
     promo: dict[tuple[Optional[str], Optional[str]], str] = dict(s.promotion_map()) if s else {}
+    promo_issued: dict[tuple[Optional[str], Optional[str]], float] = (dict(s.promotion_issued_map())
+                                                                      if s else {})
     arm: set = set(s.arm_set()) if s else set()
     dedup: dict[tuple[Optional[str], Optional[str]], int] = dict(s.approval_dedup_map()) if s else {}
     warden: dict[str, tuple[int, str, int]] = ({k: (v[0], v[1], v[2]) for k, v in s.warden_best.items()}
@@ -283,10 +295,19 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         # --- mesh device authz (LWW verified; keep revoked) — no isinstance guard (mirror the scan) ---
         if sig == DEV_SIGNAL and p.get("state") in ("authorized", "revoked") and verify_signed(p, _DEV_CORE, tp):
             mesh_dev[p.get("device_pubkey")] = p["state"]
-        # --- promotion grants (LWW verified; keep revoked) — no isinstance guard (mirror the scan) ---
-        if sig == "governor.promotion" and p.get("state") in ("granted", "revoked") \
-                and verify_signed(p, ("signal", "state", "agent", "scope"), tp):
-            promo[(p.get("agent"), p.get("scope"))] = p["state"]
+        # --- promotion grants (LWW verified + grant ANTI-REPLAY FRESH; keep revoked) — no isinstance
+        #     guard (mirror the scan) ---
+        if sig == _PROMO_SIGNAL and p.get("state") in ("granted", "revoked") \
+                and verify_signed(p, _PROMO_CORE, tp):
+            akey = (p.get("agent"), p.get("scope"))
+            fresh = True
+            if p["state"] == "granted":           # mirror PromotionPolicy._fold EXACTLY
+                at = as_issued_at(p.get("issued_at"))
+                fresh = at > promo_issued.get(akey, NO_HIGHWATER)
+                if fresh:
+                    promo_issued[akey] = at
+            if fresh:
+                promo[akey] = p["state"]
         # --- gesture device-arm replay ledger (set-union) ---
         if sig == "gesture.session_armed" and p.get("armed_by") == "device":
             arm.add((p.get("device_pubkey"), p.get("nonce")))
@@ -324,6 +345,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         capability_map=[[h, c] for h, c in capability.items()],
         mesh_dev_state=[[d, s] for d, s in mesh_dev.items()],
         promotion=[[a, s, v] for (a, s), v in promo.items()],
+        promotion_issued=[[a, s, i] for (a, s), i in promo_issued.items()],
         consumed_arm_nonces=[[d, n] for (d, n) in arm],
         device_approval_dedup=[[pk, sg, seq] for (pk, sg), seq in dedup.items()],
         warden_best={k: [c, h, s] for k, (c, h, s) in warden.items()},

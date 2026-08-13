@@ -339,7 +339,7 @@ def cmd_warden(a) -> None:
         seq = KillSwitch(store, owner_key=ok).release(issued_at=_time.time(), reason=a.reason or "")
         print(f"  kill switch released (seq {seq}, owner-signed) — agent mesh live again")
     elif a.action == "promote":
-        seq = PromotionPolicy(store, owner_key=ok).grant(a.agent, a.scope or "*")
+        seq = PromotionPolicy(store, owner_key=ok).grant(a.agent, a.scope or "*", issued_at=_time.time())
         print(f"  refused: {a.agent} has no promotion path (SIGIL §4.6)" if seq is None
               else f"  promoted {a.agent}/{a.scope or '*'} → A2 auto-approve, owner-signed (seq {seq})")
     elif a.action == "revoke":

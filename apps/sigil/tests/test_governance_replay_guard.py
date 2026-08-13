@@ -48,6 +48,8 @@ from sigil.governor.capability import _CORE as CAP_CORE
 from sigil.governor.capability import CapabilityGate
 from sigil.governor.killswitch import _CORE as KS_CORE
 from sigil.governor.killswitch import KillSwitch
+from sigil.governor.promotion import _CORE as PROMO_CORE
+from sigil.governor.promotion import PromotionPolicy
 from sigil.reuse import generate_keypair
 from sigil.spine.snapshot import SnapshotState, build
 from sigil.spine.store import SpineStore
@@ -342,3 +344,137 @@ def test_capability_state_all_inherits_the_guard():
     g.disable("gesture", reason="panic")
     _replay(s, captured)
     assert g.state_all()["gesture"] == "disabled"
+
+
+# =====================================================================================================
+# governor.promotion — replaying a captured `granted` must not restore a revoked A2 auto-approval.
+# =====================================================================================================
+def _pp(store):
+    return PromotionPolicy(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
+
+
+def test_promotion_replay_of_grant_after_revoke_does_not_repromote():
+    s = _store()
+    p = _pp(s)
+    seq = p.grant("SCHOLAR", "draft", issued_at=100.0)
+    assert p.is_promoted("SCHOLAR", "draft") is True
+    captured = dict(s.get(seq).payload)
+    p.revoke("SCHOLAR", "draft")
+    assert p.is_promoted("SCHOLAR", "draft") is False
+    _replay(s, captured)
+    assert p.is_promoted("SCHOLAR", "draft") is False, "a replayed grant must NOT restore a revoked promotion"
+
+
+def test_promotion_replayed_grant_is_not_LISTED_either():
+    """BOTH read surfaces. `state_all` was a hand-copied second fold, and that duplication already cost a
+    real defect once (the NO_PROMOTION denylist landed in is_promoted and had to be mirrored afterwards).
+    Both now call the one `_fold`, so a listed grant is exactly one is_promoted would confirm."""
+    s = _store()
+    p = _pp(s)
+    captured = dict(s.get(p.grant("SCHOLAR", "draft", issued_at=100.0)).payload)
+    p.revoke("SCHOLAR", "draft")
+    _replay(s, captured)
+    assert p.state_all() == [], "state_all must not list a promotion is_promoted refuses to enforce"
+
+
+def test_promotion_stale_lower_issued_grant_cannot_override_a_newer_one():
+    s = _store()
+    p = _pp(s)
+    old = dict(s.get(p.grant("SCHOLAR", "draft", issued_at=10.0)).payload)
+    p.grant("SCHOLAR", "draft", issued_at=20.0)
+    p.revoke("SCHOLAR", "draft")
+    _replay(s, old)
+    assert p.is_promoted("SCHOLAR", "draft") is False
+
+
+def test_promotion_legitimate_retoggle_still_works():
+    """THE REGRESSION GUARD. grant→revoke→grant re-signs BYTE-IDENTICALLY, so a signature-dedup fix would
+    swallow the owner's second REAL grant and silently leave the agent unpromoted."""
+    s = _store()
+    p = _pp(s)
+    for _ in range(3):
+        p.grant("SCHOLAR", "draft", issued_at=_iss())
+        assert p.is_promoted("SCHOLAR", "draft") is True
+        assert p.state_all() == [{"agent": "SCHOLAR", "scope": "draft"}]
+        p.revoke("SCHOLAR", "draft")
+        assert p.is_promoted("SCHOLAR", "draft") is False
+
+
+def test_promotion_high_water_is_PER_AGENT_SCOPE_not_global():
+    """HAZARD: a GLOBAL high-water would let a fresh grant for one agent refuse a legitimate later grant
+    for another that carried a smaller issued_at. (agent, scope) keys must be independent."""
+    s = _store()
+    p = _pp(s)
+    p.grant("SCHOLAR", "draft", issued_at=900.0)      # a HIGH high-water, but only for this key
+    p.grant("ARTIFICER", "wire", issued_at=5.0)       # a genuine, much older grant for a DIFFERENT key
+    p.grant("SCHOLAR", "report", issued_at=6.0)       # ...and a different SCOPE of the same agent
+    assert p.is_promoted("ARTIFICER", "wire") is True, "a per-key high-water must not leak across agents"
+    assert p.is_promoted("SCHOLAR", "report") is True, "...nor across scopes of one agent"
+
+
+def test_promotion_revoke_needs_no_freshness_and_its_replay_is_harmless():
+    s = _store()
+    p = _pp(s)
+    p.grant("SCHOLAR", "draft", issued_at=1.0)
+    rev = dict(s.get(p.revoke("SCHOLAR", "draft")).payload)
+    p.grant("SCHOLAR", "draft", issued_at=2.0)
+    assert p.is_promoted("SCHOLAR", "draft") is True
+    _replay(s, rev)                                    # replaying a REVOKE is fail-safe
+    assert p.is_promoted("SCHOLAR", "draft") is False
+
+
+def test_promotion_issued_at_is_in_the_signed_core():
+    assert "issued_at" in PROMO_CORE
+
+
+def test_promotion_tampered_issued_at_breaks_the_signature():
+    s = _store()
+    p = _pp(s)
+    captured = dict(s.get(p.grant("SCHOLAR", "draft", issued_at=10.0)).payload)
+    p.revoke("SCHOLAR", "draft")
+    captured["issued_at"] = 10_000.0                   # re-stamp freshness WITHOUT re-signing
+    _replay(s, captured)
+    assert p.is_promoted("SCHOLAR", "draft") is False
+    assert p.state_all() == []
+
+
+def test_promotion_high_water_survives_a_prune(monkeypatch):
+    s = _store()
+    p = _pp(s)
+    captured = dict(s.get(p.grant("SCHOLAR", "draft", issued_at=500.0)).payload)
+    K = len(list(s.iter_records()))
+    prefix = [r for r in s.iter_records() if r.seq < K]
+    synthetic = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=K, snapshot_seq=K - 1)
+    assert synthetic.promotion_issued_map() == {("SCHOLAR", "draft"): 500.0}
+
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: synthetic))
+    p.revoke("SCHOLAR", "draft")
+    _replay(s, captured)
+    assert p.is_promoted("SCHOLAR", "draft") is False, "a pruned-prefix grant must stay un-replayable"
+    assert p.state_all() == []
+
+
+def test_promotion_build_matches_the_live_scan_under_a_replay():
+    s = _store()
+    p = _pp(s)
+    captured = dict(s.get(p.grant("SCHOLAR", "draft", issued_at=42.0)).payload)
+    p.revoke("SCHOLAR", "draft")
+    _replay(s, captured)
+    folded = build(list(s.iter_records()), trusted_pubkey=OWNER_PUB, base_seq=0, snapshot_seq=-1)
+    assert folded.promotion_map()[("SCHOLAR", "draft")] == "revoked"
+    assert p.is_promoted("SCHOLAR", "draft") is False
+
+
+def test_promotion_foreign_pubkey_snapshot_bypass_restarts_the_high_water(monkeypatch):
+    """HAZARD 7: the seeded high-water must follow the SAME pubkey-dependent bypass as the state it
+    guards. A snapshot folded under a foreign anchor is invalid — including its high-water — so the fold
+    must restart from the bottom, or a rotated key would resurrect grants (or refuse genuine ones)."""
+    s = _store()
+    p = _pp(s)
+    p.grant("SCHOLAR", "draft", issued_at=5.0)
+    poisoned = SnapshotState(base_seq=99, trusted_pubkey=generate_keypair().public_key_b64,
+                             promotion=[["SCHOLAR", "draft", "revoked"]],
+                             promotion_issued=[["SCHOLAR", "draft", 1e12]])
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
+    assert p.is_promoted("SCHOLAR", "draft") is True, \
+        "a foreign-anchor snapshot must be bypassed entirely — its high-water cannot refuse a real grant"

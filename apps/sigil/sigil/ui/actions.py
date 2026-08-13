@@ -53,7 +53,8 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
     if action in ("promote", "revoke"):
         pp = PromotionPolicy(store, owner_key=owner)
         agent, scope = str(params["agent"]), str(params.get("scope", "*"))
-        out = pp.grant(agent, scope) if action == "promote" else pp.revoke(agent, scope)
+        out = (pp.grant(agent, scope, issued_at=_time.time()) if action == "promote"
+               else pp.revoke(agent, scope))
         result = {"ok": out is not None, "action": action, "agent": agent, "scope": scope, "recorded_seq": out}
         if out is None:
             # A refused grant (a NO_PROMOTION agent like ENVOY/DELEGATE) must NOT read as success: surface an

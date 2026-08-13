@@ -85,7 +85,7 @@ def test_a2_queues_unless_promoted_for_kind():
     s = _store()
     t = _Emitter(s)
     assert t.run(Tier.A2, kind="draft").queued, "unpromoted A2 queues"
-    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft")     # owner-signed grant
+    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft", issued_at=_iss())  # owner-signed grant
     assert t.run(Tier.A2, kind="draft").applied, "a signed promotion auto-approves that kind's A2"
     assert t.run(Tier.A2, kind="event").queued, "a different kind still queues (scope bound to kind)"
 
@@ -93,7 +93,7 @@ def test_a2_queues_unless_promoted_for_kind():
 def test_a3_never_auto_even_when_promoted():
     s = _store()
     t = _Emitter(s)
-    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "wire")
+    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "wire", issued_at=_iss())
     assert t.run(Tier.A3, kind="wire").queued, "A3 has no promotion path — always queues"
 
 
@@ -108,17 +108,20 @@ def test_forged_promotion_grants_nothing():
     attacker = generate_keypair()
     s.append(kind="event", source="governor", actor="WARDEN",
              payload=signed_payload({"signal": "governor.promotion", "state": "granted",
-                                     "agent": "TESTER", "scope": "draft"}, attacker))
+                                     "agent": "TESTER", "scope": "draft",
+                                     "issued_at": _iss()}, attacker))
     assert t.run(Tier.A2, kind="draft").queued, "a non-owner-signed grant auto-approves nothing"
 
 
 def test_envoy_has_no_promotion_path():
     s = _store()
-    assert PromotionPolicy(s, owner_key=OWNER).grant("ENVOY", "*") is None, "promoting ENVOY is refused"
+    assert PromotionPolicy(s, owner_key=OWNER).grant("ENVOY", "*", issued_at=_iss()) is None, \
+        "promoting ENVOY is refused"
     # even a genuinely OWNER-SIGNED grant cannot promote ENVOY — the exclusion is structural
     s.append(kind="event", source="governor", actor="WARDEN",
              payload=signed_payload({"signal": "governor.promotion", "state": "granted",
-                                     "agent": "ENVOY", "scope": "*"}, OWNER))
+                                     "agent": "ENVOY", "scope": "*",
+                                     "issued_at": _iss()}, OWNER))
     assert PromotionPolicy(s, trusted_pubkey=OWNER_PUB).is_promoted("ENVOY", "*") is False
 
 
@@ -255,7 +258,7 @@ def test_spine_integrity_after_governance_writes():
     t = _Emitter(s)
     KillSwitch(s, owner_key=OWNER).engage(); t.run(Tier.A1)
     KillSwitch(s, owner_key=OWNER).release(issued_at=_iss()); t.run(Tier.A1)
-    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft")
+    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft", issued_at=_iss())
     t.run(Tier.A2, kind="event")
     ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OWNER_PUB).approve(pending(s, OWNER_PUB)[0].seq)
     ok, msg = s.verify()
