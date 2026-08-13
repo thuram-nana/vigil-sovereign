@@ -1,7 +1,8 @@
 """secret_verify — VIGIL-owned admission / certification route for an exposed-secret VALIDITY FACT
 (BUILD-PLAN §E5 — the PRODUCER for the E5 oracle, mirroring ``imds_verify`` for E1).
 
-A WARDEN-gated secret-validation runner (a follow-on slice) produces a RETAINED, secret-safe capture; this
+The WARDEN-gated secret-validation runner (``secret_runner.run_secret_validation``) produces a RETAINED,
+secret-safe capture; this
 module routes that capture through the deterministic ``secret_credential_validity`` oracle, ADMITS it against
 the registered ``cloud_exploit.secret.credential_validity`` evidence branch (``verdict.admit`` — a fired
 oracle over a fact-capable, precondition-holding branch is a FACT, anything else a LEAD), and — on a FACT —
@@ -19,8 +20,14 @@ this producer is called EXPLICITLY over a runner capture — preserving the no-a
 FATAL-2: every framework import is FUNCTION-LOCAL; at module scope this is pure stdlib only, so importing it
 co-loads no offense engine (mirrors ``imds_verify`` / ``cloud_live_posture``). The capture is SECRET-SAFE
 (the secret value is redacted to a presence marker by ``FindingContext.from_secret_capture``), so the
-certificate carries NO live secret yet re-verifies offline. Real-transport LIVE-FIRE (running the validation
-runner against real provider endpoints) is deferred on an operator-provisioned credential.
+certificate carries NO live secret yet re-verifies offline.
+
+LIVE-FIRE STATUS — proven for the ``github_pat`` row ONLY. ``tools/livefire/secret_github_livefire.sh``
+drives the real runner over the real transport against the real ``api.github.com`` with the operator's own
+credential: the valid credential is CONFIRMED here and its certificate re-verifies OFFLINE, while a bogus
+token (a real 401 from GitHub), an attacker-controlled confirming endpoint, and a broken fingerprint binding
+are all correctly left LEADs. The ``aws_access_key`` row is BUILT and unit-proven but NOT live-fire proven —
+it still needs a real, operator-provisioned AWS access key, and nothing about the GitHub run transfers to it.
 """
 from __future__ import annotations
 
