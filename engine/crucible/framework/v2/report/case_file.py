@@ -45,6 +45,8 @@ from typing import Any, Iterable, Optional
 from .adapt import AdaptResult, FindingExtras
 from .grounding import GRADE_DEMOTED, GradedFinding
 from .howto import finding_specific_remediation
+from .plainspeak import oracle_plain as _oracle_plain
+from .plainspeak import oracle_plain_map, plain_for as _plain_for
 from .priority import effort_size, prioritize
 from .runinfo import RunInfo, safe_command_token
 
@@ -81,228 +83,6 @@ _SEVERITY_WORDS = {
 }
 
 
-# --------------------------------------------------------------------------------------------------
-# plain-language descriptions of weakness categories
-#
-# These are generic, well-established descriptions of well-known categories — the same standing as
-# the class-level remediation table in report.generate. They describe the CATEGORY, never this
-# system's specifics, so rendering them deterministically states nothing that was not established
-# long before this engagement. Matched by substring against the bug class, then the title; an
-# unmatched finding falls through to an honest "no plain-language description is on file".
-# --------------------------------------------------------------------------------------------------
-
-_PLAIN_BY_CLASS: tuple[tuple[tuple[str, ...], str, str], ...] = (
-    (("boolean_sqli", "time_based_sqli", "error_based_sqli", "sqli", "sql_injection", "nosqli"),
-     "The system builds the questions it asks its database by pasting in text that a visitor "
-     "supplied. A visitor who supplies the right text can therefore change the question itself, "
-     "rather than merely answering it.",
-     "Database questions decide who is allowed in and what information comes back. Somebody who "
-     "can rewrite them can normally read records they were never meant to see — including other "
-     "people's personal data — and on many systems can also change or delete them. This is one "
-     "of the most damaging categories of weakness in existence."),
-    (("reflected_xss", "stored_xss", "dom_xss", "xss", "reflection_context", "dom_execution"),
-     "Text that a visitor supplies is placed back into the web page as working code instead of "
-     "as ordinary text, so the visitor's browser runs it.",
-     "A browser does whatever the page tells it to do. Someone who can put their own code into "
-     "the page can act as any person who opens the affected link — seeing what that person sees "
-     "and doing what that person is allowed to do, including on their account."),
-    (("ssti", "template_injection", "evaluation"),
-     "Text a visitor supplies is treated as part of the page's own template — that is, as "
-     "instructions to the system rather than as content.",
-     "Instructions supplied by a visitor can be made to run on the organisation's own server. "
-     "That is usually the most serious outcome possible, because it puts the visitor in control "
-     "of the machine rather than merely of the page."),
-    (("command_injection", "os_command", "rce"),
-     "Text a visitor supplies reaches a place where the system runs operating-system commands.",
-     "This lets an outsider run their own programs on the organisation's server. Everything that "
-     "server can reach is then within their reach as well."),
-    (("ssrf",),
-     "The system can be persuaded to fetch an address chosen by a visitor, and it does so from "
-     "inside the organisation's own network.",
-     "Internal systems are usually protected by being unreachable from outside. Turning the "
-     "organisation's own server into the messenger removes that protection, and is a common route "
-     "to internal administration interfaces and cloud credentials."),
-    (("path_traversal", "lfi", "rfi"),
-     "The system builds file names out of text a visitor supplied, and does not stop a visitor "
-     "from stepping outside the folder it intended to use.",
-     "It allows files to be read (and sometimes written) that were never meant to be available — "
-     "commonly configuration files containing passwords and keys."),
-    (("xxe", "blind_xxe"),
-     "The system's document reader will follow references to outside resources that a submitted "
-     "document names.",
-     "A submitted document can make the server fetch files from its own disk or from inside the "
-     "network, and return them to the sender."),
-    (("idor", "bola", "insecure_direct", "broken_object"),
-     "The system decides what to show based on an identifier in the request, without checking "
-     "that the person asking is entitled to that particular record.",
-     "Changing a number in a web address becomes enough to read or alter somebody else's record. "
-     "It is a frequent cause of large personal-data breaches because it scales: one request per "
-     "record, repeated."),
-    (("bfla", "broken_function", "auth_bypass", "authentication_bypass", "authorization", "authz",
-      "privilege_escalation", "priv_esc"),
-     "A check that was supposed to decide who may perform an action either does not run or can be "
-     "sidestepped.",
-     "People end up able to perform actions reserved for someone more senior — often including "
-     "administrative actions. Every other control that assumes 'only an administrator can do this' "
-     "is weakened at the same time."),
-    (("deserial",),
-     "The system rebuilds live program objects directly from data it received, rather than reading "
-     "the data as plain values.",
-     "Carefully shaped data can make the system run the sender's instructions while it is "
-     "rebuilding the object."),
-    (("open_redirect",),
-     "The system will forward a visitor on to any web address supplied in the request.",
-     "A link that genuinely begins with the organisation's own address can land the visitor on an "
-     "attacker's page. It makes fraudulent messages far more convincing, because the visible "
-     "address really is the organisation's."),
-    (("cors",),
-     "The system tells browsers that other websites may read its responses.",
-     "Another website, opened in the same browser, can read data belonging to the signed-in "
-     "person — data the browser would otherwise keep to this site alone."),
-    (("host_header",),
-     "The system trusts the address name supplied by the requester when it builds links and "
-     "redirects.",
-     "It allows links in emails such as password resets to be pointed at an attacker's site while "
-     "still being generated by the real system."),
-    (("jwt", "signature", "missing_signature"),
-     "The system does not properly check the digital signature that is supposed to prove a token "
-     "or message is genuine.",
-     "Tokens and messages can be forged. Anything the system decides on the basis of them — who "
-     "somebody is, what they paid, what they are allowed to do — can be dictated by the forger."),
-    (("weak_tls", "tls_weakness", "weak_cipher"),
-     "The encrypted connection between visitors and the system permits outdated protection that is "
-     "no longer considered sound.",
-     "Someone positioned on the network — on shared wi-fi, or at an internet provider — has a "
-     "better chance of reading or altering traffic that should be private."),
-    (("request_smuggling",),
-     "Two systems in the chain that handles requests disagree about where one request ends and the "
-     "next begins.",
-     "An attacker can attach a hidden request to their own, which the second system then treats as "
-     "if it came from the next visitor."),
-    (("rate_limit",),
-     "The system does not limit how many times an action can be attempted.",
-     "Passwords, codes and vouchers can be guessed by sheer repetition, and the service can be "
-     "exhausted by a single sender."),
-    (("mass_assignment",),
-     "The system copies every field it receives onto its own records, including fields the sender "
-     "was never meant to set.",
-     "A sender can set fields such as 'administrator' or 'balance' simply by adding them to an "
-     "ordinary request."),
-    (("exposure", "info_disclosure", "info-disclosure"),
-     "Information the system was not meant to publish is reachable by anyone who asks for it.",
-     "What is exposed determines the harm: at best it helps an attacker plan, at worst it is "
-     "credentials or personal data with no further step required."),
-    (("supply_chain", "dependency", "framework_version", "outdated"),
-     "The system runs a third-party component with publicly known weaknesses.",
-     "Weaknesses in widely used components are documented in public and are among the first "
-     "things attackers try, because the same attack works against every organisation that has "
-     "not updated."),
-)
-
-_PLAIN_BY_TITLE: tuple[tuple[tuple[str, ...], str, str], ...] = (
-    (("content-security-policy",),
-     "The system does not tell visitors' browsers which sources of code they are permitted to run "
-     "on its pages.",
-     "This instruction is the safety net that limits the damage when a code-injection weakness "
-     "exists somewhere else on the site. Without it, such a weakness reaches further than it "
-     "otherwise would. On its own it causes no direct harm."),
-    (("x-frame-options", "clickjack"),
-     "The system does not tell browsers to refuse to display its pages inside another website's "
-     "page.",
-     "An attacker can lay the real site invisibly over their own page, so that a person believes "
-     "they are clicking something harmless while they are in fact clicking a real button on the "
-     "real site — approving a payment or a permission change."),
-    (("x-content-type-options", "mime sniffing"),
-     "The system does not tell browsers to stop guessing what kind of file they have been sent.",
-     "A browser that guesses wrongly may treat a file supplied by a visitor as program code and "
-     "run it."),
-    (("referrer-policy",),
-     "The system does not limit the address information browsers pass on when a visitor follows a "
-     "link away from it.",
-     "Web addresses often contain identifiers such as account or document references. Passing them "
-     "to other websites discloses where the person had been and what they were looking at."),
-    (("permissions-policy",),
-     "The system does not state which browser capabilities — camera, microphone, location — its "
-     "pages are allowed to use.",
-     "Stating this is what stops injected code on the site from reaching a visitor's hardware. On "
-     "its own the omission causes no direct harm."),
-    (("cross-origin-opener", "coop"),
-     "The system does not ask browsers to keep its pages isolated from pages opened by other sites.",
-     "Isolation limits what a page opened from elsewhere can learn about, or do to, a page of this "
-     "site that is open at the same time."),
-    (("cross-origin-embedder", "coep"),
-     "The system does not ask browsers to require that everything it loads has explicitly agreed "
-     "to be loaded by it.",
-     "It weakens the browser-level isolation that protects data held in memory by the page."),
-    (("cross-origin-resource", "corp"),
-     "The system does not state which other sites may load its resources.",
-     "Other sites can embed its resources, which in some browser conditions helps them infer "
-     "information about them."),
-    (("x-permitted-cross-domain-policies",),
-     "The system does not tell certain browser plug-ins where they may load its data from.",
-     "It applies to legacy plug-in technology. The risk is small on a modern estate but the "
-     "instruction costs nothing to add."),
-    (("hsts", "strict-transport-security"),
-     "The system does not instruct browsers to insist on an encrypted connection in future.",
-     "A visitor's first request, or a request made from an old link, can be downgraded to an "
-     "unencrypted one that somebody on the network can read or alter."),
-    (("version banner", "version disclosed", "server version"),
-     "The system announces to every visitor exactly which software and version it is running.",
-     "It removes guesswork for an attacker: rather than probing to find out what the system is, "
-     "they can look up the published list of known weaknesses for that precise version."),
-    (("directory listing",),
-     "The system shows the contents of a folder to anyone who asks for it.",
-     "Files never meant to be found — backups, notes, old versions — become discoverable simply by "
-     "browsing."),
-    (("cookie",),
-     "A cookie the system sets is missing one of the protective attributes browsers understand.",
-     "Cookies usually carry the visitor's session. Missing protections make a session easier to "
-     "steal or to misuse from another site."),
-)
-
-# How each deterministic check establishes its result, in plain language. The checks are named in
-# the machine record as "oracles"; these sentences describe the METHOD, and are generic to the
-# method rather than specific to any finding. An unknown check falls through to a generic sentence
-# that names it rather than describing something it may not do.
-_ORACLE_PLAIN: dict[str, str] = {
-    "differential_response": (
-        "We sent the system one harmless request and one modified request, and compared the two "
-        "replies. They differed in a way that only occurs when the modification genuinely changed "
-        "what the system did, rather than merely what it displayed."
-    ),
-    "reflection_context": (
-        "We sent the system a unique marker and then examined the page that came back. The marker "
-        "had become a live part of the page rather than ordinary text, which is what makes "
-        "supplied text executable."
-    ),
-    "error_signature": (
-        "We sent a modified request and the system replied with an internal error message "
-        "characteristic of the underlying component processing the modification rather than "
-        "rejecting it."
-    ),
-    "sql_injection_breakout": (
-        "We sent a request modified so that, if the text were being pasted into a database "
-        "question, it would break out of the surrounding quotation. The system's reply showed "
-        "that it had."
-    ),
-    "oob_callback": (
-        "We supplied an address belonging to a listener under our control. The system connected "
-        "to that listener, which only happens if it genuinely acted on the supplied address."
-    ),
-    "statistical_timing": (
-        "We repeatedly timed the system's replies to modified and unmodified requests. The "
-        "difference was consistent and large enough to rule out ordinary variation."
-    ),
-    "achieved_state": (
-        "We checked the state of the system after the request and found it had reached a state "
-        "that only the attempted action produces."
-    ),
-    "sanitizer_signal": (
-        "We ran the target under an instrumentation tool that reports memory-safety violations, "
-        "and it reported one during the request."
-    ),
-}
-
 
 @dataclass
 class _Item:
@@ -314,44 +94,6 @@ class _Item:
     what: str
     why: str
     generic: bool          # True when no plain-language description was on file for the category
-
-
-def _plain_for(bug_class: str, title: str) -> tuple[str, str, bool]:
-    """``(what it is, why it matters, description_was_missing)`` for a weakness category."""
-    b = (bug_class or "").strip().lower()
-    if b and b != "passive":
-        for keys, what, why in _PLAIN_BY_CLASS:
-            if any(k in b for k in keys):
-                return (what, why, False)
-    t = (title or "").strip().lower()
-    if t:
-        for keys, what, why in _PLAIN_BY_TITLE:
-            if any(k in t for k in keys):
-                return (what, why, False)
-        for keys, what, why in _PLAIN_BY_CLASS:
-            if any(k in t for k in keys):
-                return (what, why, False)
-    return (
-        "No plain-language description of this category of weakness is held on file, so none is "
-        "offered here rather than one being improvised. The engine's own description of what it "
-        "observed is reproduced below.",
-        "The consequence for this organisation has not been assessed in plain terms. Ask the "
-        "engineering team to interpret the technical description before deciding how urgent it is.",
-        True,
-    )
-
-
-def _oracle_plain(kind: Optional[str]) -> str:
-    k = (kind or "").strip()
-    if not k:
-        return ("An automated check confirmed it, but the record does not name which one. Treat "
-                "the confirmation as unexplained until the engineering team identifies the check.")
-    plain = _ORACLE_PLAIN.get(k)
-    if plain:
-        return plain
-    return (f"An automated check named `{k}` confirmed it by re-examining the saved request and "
-            f"reply. The record does not carry a plain-language description of how that particular "
-            f"check works; the engineering team can look it up by that name.")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -1299,16 +1041,16 @@ def render_glossary(*, label: str, info: RunInfo, built: Optional[str],
 def _extra_glossary_terms(items: Iterable[_Item]) -> list[tuple[str, str]]:
     """Glossary entries for the specific weakness categories and checks this run produced, so the
     promise that every term is explained holds for THIS pack, not merely in general."""
+    known = oracle_plain_map()
     out: dict[str, str] = {}
     for it in items:
         kind = (it.graded.oracle_kind or "").strip()
-        if kind and kind in _ORACLE_PLAIN:
-            out[f"{kind} (an automatic check)"] = _ORACLE_PLAIN[kind]
-        elif kind:
-            out[f"{kind} (an automatic check)"] = (
-                "One of the automatic checks used in this examination. The record does not carry "
-                "a plain-language description of how it works; it is named here so it can be "
-                "looked up by that name.")
+        if not kind:
+            continue
+        out[f"{kind} (an automatic check)"] = known.get(kind) or (
+            "One of the automatic checks used in this examination. The record does not carry "
+            "a plain-language description of how it works; it is named here so it can be "
+            "looked up by that name.")
     return sorted(out.items())
 
 
