@@ -27,7 +27,9 @@ THE ONE RULE HERE: every provenance field is DERIVED FROM THE CONNECTION, never 
     different address than the one the bytes came from, which would be evidence about the wrong thing.
   * body — read BOUNDED (``_MAX_BODY``, the same cap ``imds_runner.response_digest`` hashes under). A body
     that exceeds the cap is reported truncated and is NOT parsed as JSON, so a truncated (therefore
-    unsound) identity echo can never reach an oracle.
+    unsound) identity echo can never reach an oracle. These are the DECODED bytes (any content-encoding
+    already undone), i.e. exactly the bytes that were parsed — so the retained digest and the retained
+    identity echo describe the same thing.
 
 FAIL CLOSED: no field ever defaults to the permissive value. A missing network stream, an exception while
 introspecting the socket, an http:// URL, an over-long body — each degrades to the value that makes the

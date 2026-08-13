@@ -220,6 +220,14 @@ def run_secret_validation(
     secret = ""                                # SECRET LIFECYCLE: only the fingerprint survives the call
 
     confirm = transport(spec["method"], confirm_endpoint)
+    # Finish the secret lifecycle: after the call the TRANSPORT is the last thing holding the plaintext
+    # (in its header map or its signer closure). Close and drop it immediately so a credential-bearing
+    # connection is not left sitting in a pool. A ``Transport`` is only required to be callable, so this
+    # is best-effort — a mock has nothing to close.
+    closer = getattr(transport, "close", None)
+    if callable(closer):
+        closer()
+    transport = None
 
     credential_record = {
         "identifier": non_secret_id,

@@ -101,15 +101,13 @@ def main() -> int:
     scope = ("github", "self", "", "user")
 
     def validate(secret: str, **kwargs):
-        """One gated run of the production runner against the real provider."""
-        factory = bearer_transport_factory()
-        try:
-            return run_secret_validation(
-                "github_pat", secret=secret, source="livefire:gh auth token (operator's own credential)",
-                authorize=lambda: (True, "authorized owner-test, WARDEN A2 approved"),
-                scope_gate=_AllowGate(), scope=scope, credential_transport=factory, **kwargs)
-        finally:
-            del factory
+        """One gated run of the production runner against the real provider. The runner closes the
+        credential-bearing transport itself once the confirming call returns."""
+        return run_secret_validation(
+            "github_pat", secret=secret, source="livefire:gh auth token (operator's own credential)",
+            authorize=lambda: (True, "authorized owner-test, WARDEN A2 approved"),
+            scope_gate=_AllowGate(), scope=scope,
+            credential_transport=bearer_transport_factory(), **kwargs)
 
     # =============================================================================================
     print("\n   -- The FACT: a real credential, the real provider, the production path --")

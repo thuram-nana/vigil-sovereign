@@ -116,6 +116,23 @@ def test_the_confirming_call_is_bound_to_the_exact_secret_that_was_fingerprinted
     assert seen["secrets"] == [_GH_TOKEN]
 
 
+def test_the_credential_bearing_transport_is_closed_once_the_call_returns() -> None:
+    """After the confirming call the transport is the last thing holding the plaintext. It must not be
+    left with a live, authenticated connection pooled."""
+    closed: list[bool] = []
+
+    class _ClosableTransport:
+        def __call__(self, method: str, url: str) -> TransportResult:
+            return TransportResult(status=200, body=b"{}", resolved_peer="140.82.121.6",
+                                   tls_verified=True, via_proxy=False, redirected=False, json=_GH_USER)
+
+        def close(self) -> None:
+            closed.append(True)
+
+    res = _run(lambda _secret: _ClosableTransport())
+    assert res.status == "captured" and closed == [True]
+
+
 def test_the_e5_fingerprint_domain_is_separated_from_e1() -> None:
     from vigil_integration.live.imds_runner import credential_fingerprint
     assert secret_fingerprint("same-bytes") != credential_fingerprint("same-bytes")
