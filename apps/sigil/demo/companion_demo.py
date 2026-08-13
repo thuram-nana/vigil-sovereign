@@ -12,6 +12,7 @@ the PWA — but the crypto, the canonical signing bytes, the transport, and ever
 Run:  ~/.sigil/venv/bin/python demo/companion_demo.py
 It uses a throwaway temp SIGIL_HOME, so it never touches your real ~/.sigil.
 """
+import itertools
 import base64
 import json
 import os
@@ -37,6 +38,16 @@ from sigil.reuse import canonical_json, generate_keypair, sign          # noqa: 
 from sigil.spine.store import SpineStore                                # noqa: E402
 
 C = {"h": "\033[1;36m", "ok": "\033[1;32m", "d": "\033[2m", "w": "\033[1;33m", "x": "\033[0m"}
+
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
 
 
 def hdr(t):
@@ -118,7 +129,7 @@ def main():
         phone(f"generated a device key; shows pubkey …{dev.public_key_b64[-12:]}  fingerprint {C['w']}{fp}{C['x']}")
         print(f"  {C['d']}owner runs:{C['x']} sigil mesh authorize phone-1 <pubkey>   (and confirms the fingerprint matches)")
         assert _device_fingerprint(dev.public_key_b64) == fp, "PC recomputes the SAME fingerprint"
-        authorize_device(store, "phone-1", dev.public_key_b64, owner)     # owner-signed, on the spine
+        authorize_device(store, "phone-1", dev.public_key_b64, owner, issued_at=_dev_iss())     # owner-signed, on the spine
         pc(f"fingerprint matches → device AUTHORIZED (owner-signed ledger). The owner key never left the desktop.")
 
         # 2. APPROVE a queued action — the phone signs the approval; the desktop only verifies.

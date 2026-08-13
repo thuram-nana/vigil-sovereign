@@ -28,6 +28,7 @@ This test proves the rewrite is behaviour-preserving, two ways:
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snapshot_fold_capability_map.py -q
 """
+import itertools
 import tempfile
 
 from sigil.governor.authn import signed_payload
@@ -44,6 +45,15 @@ AP = ATTACKER.public_key_b64
 K = 4   # split point: prefix = seq [0,1,2,3], live = seq [4,5,6]
 
 
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed capability ADVERTISEMENT (the
+# anti-replay high-water). NEVER time.time(): two advertisements inside one clock tick would collide.
+_adv_issue = itertools.count(1)
+
+
+def _adv_iss() -> float:
+    return float(next(_adv_issue))
+
+
 def _store():
     return SpineStore(tempfile.mktemp(suffix=".jsonl"))
 
@@ -53,14 +63,15 @@ def _advertise(store, host_id, *, os_, camera):
     `advertise_capability` does not coerce it, so a non-str host_id (None/int) is signed and kept as-is."""
     return advertise_capability(store, {"host_id": host_id, "os": os_, "has_screen": True,
                                         "has_camera": camera, "has_gpu_vlm": True, "always_on": True,
-                                        "has_hid_inject": False, "has_camera_stream": False}, OWNER)
+                                        "has_hid_inject": False, "has_camera_stream": False}, OWNER, issued_at=_adv_iss())
 
 
 def _forged(store, host_id):
     """A capability advertisement signed by the ATTACKER (never verifies under OP; verifies under AP).
     Core carries the full _CAP_CORE key set so it re-verifies under the attacker's own key too."""
     core = {"signal": CAP_SIGNAL, "host_id": host_id, "os": "?", "has_screen": True, "has_camera": True,
-            "has_gpu_vlm": True, "always_on": True, "has_hid_inject": False, "has_camera_stream": False}
+            "has_gpu_vlm": True, "always_on": True, "has_hid_inject": False, "has_camera_stream": False,
+            "issued_at": _adv_iss()}
     payload = {**signed_payload(core, ATTACKER), "tier": "A0", "decision": "auto"}
     return store.append(kind="event", source="mesh", actor="OWNER", payload=payload)
 

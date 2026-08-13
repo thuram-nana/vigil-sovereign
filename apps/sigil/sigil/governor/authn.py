@@ -6,9 +6,31 @@ core → NOT authentic. This is the primitive that makes "zero unauthorized A2/A
 log rather than promised (a forged governance event never verifies, so it is ignored)."""
 from __future__ import annotations
 
+import math
 from typing import Optional, Sequence
 
 from ..reuse import IntegrityError, canonical_json, sign, verify_one
+
+# The "no high-water yet" bottom of an anti-replay fold. Defined here, next to `as_issued_at`, so every
+# last-writer-wins governance fold compares against ONE definition of the ordering.
+NO_HIGHWATER = float("-inf")
+
+
+def as_issued_at(value) -> float:
+    """Parse an anti-replay ``issued_at`` FAIL-CLOSED, never raising out of a fold.
+
+    A signature makes a value authentic, not sane: the owner can sign any JSON number, and every
+    caller of this is inside a fold that must not crash on a hostile/corrupt spine. Unparseable →
+    0.0 (the lowest legitimate high-water, so such a record is honoured at most once and then blocks
+    its own replay). NON-FINITE → 0.0 as well, which is the security-critical half: a NaN high-water
+    would POISON the guard outright (every `issued <= nan` is False, so every later replay would be
+    accepted), and an +inf high-water would permanently brick the dangerous direction. Both are
+    mapped to the bottom instead."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
 
 
 def _canon(core: dict) -> bytes:

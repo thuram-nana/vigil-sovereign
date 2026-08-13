@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from .authn import signed_payload, verify_signed
+from .authn import as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
 SIGNAL = "governor.offense_gate"
@@ -122,9 +122,9 @@ class OffenseGate:
                     continue  # forged/unsigned open — no effect
                 if payload.get("charter_id") != charter_id or payload.get("charter_hash") != charter_hash:
                     continue  # open for a DIFFERENT charter — no effect on this one
-                issued = _as_float(payload.get("issued_at"))
-                if issued <= max_issued:
-                    continue  # REPLAY (or stale re-append) of an already-seen open — reject, no effect
+                issued = as_issued_at(payload.get("issued_at"))   # NaN/inf-safe: a NaN high-water would
+                if issued <= max_issued:      # make every later `issued <= max_issued` False and let EVERY
+                    continue                  # replay through, so authn maps non-finite values to the bottom
                 max_issued = issued  # consume this issued_at so its replay is refused hereafter
                 signed_na = _as_float(payload.get("not_after"))
                 if now < signed_na:

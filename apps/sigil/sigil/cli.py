@@ -317,7 +317,14 @@ def cmd_warden_anchor_get(a) -> None:
 
 def cmd_warden(a) -> None:
     """Phase 6 governor controls (SIGIL §5): kill switch + per-kind promotion policy. Governance
-    mutations are signed by the persisted OWNER key (auto-created once if absent)."""
+    mutations are signed by the persisted OWNER key (auto-created once if absent).
+
+    The CLI supplies `issued_at` for every dangerous-direction mutation. The governance modules read no
+    clock by design (a module-supplied timestamp is one an attacker replaying the module's own output
+    could rely on); the authority over "when" sits with the caller holding the owner key, which here is
+    the operator at this terminal."""
+    import time as _time
+
     from .governor import KillSwitch, PromotionPolicy
     from .governor.identity import ensure_owner_keypair
     store = SpineStore()
@@ -329,10 +336,10 @@ def cmd_warden(a) -> None:
         seq = KillSwitch(store, owner_key=ok).engage(reason=a.reason or "")
         print(f"  KILL SWITCH ENGAGED (seq {seq}) — agent mesh halted; perception + memory read stay alive")
     elif a.action == "release":
-        seq = KillSwitch(store, owner_key=ok).release(reason=a.reason or "")
+        seq = KillSwitch(store, owner_key=ok).release(issued_at=_time.time(), reason=a.reason or "")
         print(f"  kill switch released (seq {seq}, owner-signed) — agent mesh live again")
     elif a.action == "promote":
-        seq = PromotionPolicy(store, owner_key=ok).grant(a.agent, a.scope or "*")
+        seq = PromotionPolicy(store, owner_key=ok).grant(a.agent, a.scope or "*", issued_at=_time.time())
         print(f"  refused: {a.agent} has no promotion path (SIGIL §4.6)" if seq is None
               else f"  promoted {a.agent}/{a.scope or '*'} → A2 auto-approve, owner-signed (seq {seq})")
     elif a.action == "revoke":
@@ -344,7 +351,11 @@ def cmd_capability(a) -> None:
     """Enable/disable gesture control, voice control, or autolearn (the Knowledge-Engine propose loop)
     via the owner-signed, tamper-evident capability latch (audit W0 / K2). `status` needs no key; toggling
     is owner-signed. Any disable is fail-safe (takes effect regardless of signature); only an owner-signed
-    enable re-enables. `both` is the physical-input pair (gesture+voice); `autolearn` is toggled explicitly."""
+    enable re-enables. `both` is the physical-input pair (gesture+voice); `autolearn` is toggled explicitly.
+
+    The CLI stamps `issued_at` on each enable (the anti-replay high-water); the gate reads no clock."""
+    import time as _time
+
     from .governor import CAPABILITIES, CapabilityGate
     from .governor.identity import ensure_owner_keypair
     store = SpineStore()
@@ -360,8 +371,12 @@ def cmd_capability(a) -> None:
     # "both" is the historical gesture+voice pair — autolearn is NOT swept in (matches the UI action plane).
     caps = ["gesture", "voice"] if a.target == "both" else [a.target]
     cg = CapabilityGate(store, owner_key=ensure_owner_keypair())
+    # ONE `issued_at` for the whole invocation is correct: the high-water is PER CAPABILITY, so the same
+    # value applied to `gesture` and `voice` lands on two independent keys and neither refuses the other.
+    now = _time.time()
     for c in caps:
-        seq = cg.disable(c, reason=a.reason) if a.state == "off" else cg.enable(c, reason=a.reason)
+        seq = cg.disable(c, reason=a.reason) if a.state == "off" else cg.enable(c, issued_at=now,
+                                                                                reason=a.reason)
         print(f"  {c} {'DISABLED' if a.state == 'off' else 'ENABLED (owner-signed)'} (seq {seq})")
 
 
@@ -502,7 +517,14 @@ def _device_fingerprint(pubkey: str) -> str:
 def _mesh_authorize(store, device_id, pubkey, owner_key, *, assume_yes=False, confirm=input):
     """Authorize a phone device key (owner-signed). Prints the fingerprint and, unless `assume_yes`,
     makes the operator confirm it matches what the phone displays before writing the ledger record.
-    Returns the record seq, or None if the operator did not confirm."""
+    Returns the record seq, or None if the operator did not confirm.
+
+    Stamps `issued_at` from THIS process's clock (the anti-replay high-water). The mesh module reads no
+    clock — the authority over "when" belongs to the caller holding the owner key, which here is the
+    operator at this terminal. Stamped AFTER the fingerprint confirmation, so an abandoned pairing
+    consumes no high-water."""
+    import time as _time
+
     fp = _device_fingerprint(pubkey)
     print(f"  device {device_id!r} fingerprint: {fp}")
     if not assume_yes:
@@ -510,7 +532,7 @@ def _mesh_authorize(store, device_id, pubkey, owner_key, *, assume_yes=False, co
         if (ans or "").strip().lower() != "yes":
             print("  aborted — fingerprint not confirmed; device NOT authorized")
             return None
-    seq = authorize_device(store, device_id, pubkey, owner_key)
+    seq = authorize_device(store, device_id, pubkey, owner_key, issued_at=_time.time())
     print(f"  authorized device {device_id!r} (owner-signed, seq {seq}); fingerprint {fp}")
     return seq
 

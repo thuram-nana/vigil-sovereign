@@ -16,6 +16,7 @@ from the folded snapshot prefix `[0..base_seq)` (`SnapshotState.load`) and folds
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snapshot_fold_killswitch.py -q
 """
+import itertools
 import tempfile
 
 from sigil.governor.killswitch import SIGNAL, KillSwitch
@@ -25,6 +26,14 @@ from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
 OWNER_PUB = OWNER.public_key_b64
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each release (the anti-replay high-water). A wall
+# clock would collide across two releases inside one tick and the second would be dropped as a replay.
+_issue = itertools.count(1)
+
+
+def _iss() -> float:
+    return float(next(_issue))
 
 
 def _store():
@@ -43,7 +52,7 @@ def _noise(store, text):
 def _forged_release(store):
     """An UNSIGNED release — must NEVER un-halt (fail-closed)."""
     return store.append(kind="event", source="governor", actor="WARDEN",
-                        payload={"signal": SIGNAL, "state": "released"})
+                        payload={"signal": SIGNAL, "state": "released", "issued_at": _iss()})
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -54,7 +63,7 @@ def test_identity_known_correct_verdict():
     writer = _ks(s)
     _noise(s, "seed")                    # seq0 non-killswitch noise
     writer.engage(reason="drill")        # seq1 engaged -> True
-    writer.release(reason="all clear")   # seq2 owner-signed release -> False
+    writer.release(issued_at=_iss(), reason="all clear")   # seq2 owner-signed release -> False
     _forged_release(s)                   # seq3 forged release -> IGNORED (stays False)
     writer.engage(reason="drill2")       # seq4 engaged -> True
     _forged_release(s)                   # seq5 forged release -> IGNORED (stays True, fail-closed)
@@ -63,7 +72,7 @@ def test_identity_known_correct_verdict():
     assert _ks(s)._scan_engaged() is True, "engage stands; a forged release can never revive the mesh"
 
     # a subsequent OWNER-SIGNED release does un-halt.
-    writer.release(reason="stand down")  # seq7 signed release -> False
+    writer.release(issued_at=_iss(), reason="stand down")  # seq7 signed release -> False
     assert _ks(s)._scan_engaged() is False, "an owner-signed release un-halts (fail-closed honored)"
 
     # is_engaged() (the change-token cache wrapper) agrees with the underlying scan.
@@ -80,7 +89,7 @@ def _seed_store():
     writer = _ks(s)
     _noise(s, "seed")                    # seq0 noise
     writer.engage(reason="a")            # seq1 engaged -> True
-    writer.release(reason="b")           # seq2 signed release -> False
+    writer.release(issued_at=_iss(), reason="b")           # seq2 signed release -> False
     writer.engage(reason="c")            # seq3 engaged -> True   <-- LAST real state-change
     _noise(s, "d")                       # seq4 noise
     _forged_release(s)                   # seq5 forged release -> IGNORED

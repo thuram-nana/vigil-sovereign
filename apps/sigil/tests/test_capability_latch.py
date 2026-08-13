@@ -7,6 +7,7 @@ byte-identical to a genesis scan (identity / split / pubkey-dependence), like th
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_capability_latch.py -q
 """
+import itertools
 import tempfile
 
 import pytest
@@ -21,6 +22,16 @@ OWNER = generate_keypair()
 OWNER_PUB = OWNER.public_key_b64
 ATTACKER = generate_keypair()
 
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed ENABLE (the anti-replay
+# high-water). NEVER time.time(): two enables inside one clock tick would collide and the second
+# would be refused as its own replay — a flake that would hide the guard failing.
+_issue = itertools.count(1)
+
+
+def _iss() -> float:
+    return float(next(_issue))
+
+
 
 def _store():
     return SpineStore(tempfile.mktemp(suffix=".jsonl"))
@@ -30,10 +41,11 @@ def _cg(store, *, owner_key=OWNER):
     return CapabilityGate(store, owner_key=owner_key, trusted_pubkey=OWNER_PUB)
 
 
-def _raw(store, capability, state, *, key=None):
+def _raw(store, capability, state, *, key=None, issued_at=None):
     """Append a governor.capability record signed by `key` (None = unsigned) — bypasses CapabilityGate so we
     can forge attacker/unsigned records."""
-    core = {"signal": SIGNAL, "capability": capability, "state": state}
+    core = {"signal": SIGNAL, "capability": capability, "state": state,
+            "issued_at": _iss() if issued_at is None else issued_at}
     payload = {**signed_payload(core, key), "tier": "A0", "decision": "auto"}
     return store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
@@ -62,7 +74,7 @@ def test_enable_requires_an_owner_signature():
     assert not _cg(s).is_enabled("gesture")
     _raw(s, "gesture", "enabled", key=ATTACKER)       # attacker enable — must NOT re-enable
     assert not _cg(s).is_enabled("gesture"), "a forged enable can never revive a disabled capability"
-    _cg(s).enable("gesture")                          # owner-signed enable DOES re-enable
+    _cg(s).enable("gesture", issued_at=_iss())        # owner-signed enable DOES re-enable
     assert _cg(s).is_enabled("gesture")
 
 
@@ -71,12 +83,12 @@ def test_domain_separation_capability_and_signal():
     cg = _cg(s)
     cg.disable("gesture")
     cg.disable("voice")
-    cg.enable("voice")                                # owner enable of VOICE
+    cg.enable("voice", issued_at=_iss())              # owner enable of VOICE
     assert cg.is_enabled("voice") and not cg.is_enabled("gesture"), \
         "an owner-signed enable(voice) must not re-enable gesture (capability is in the signed core)"
     # a kill-switch release (different signal + core) must not re-enable any capability
     from sigil.governor.killswitch import KillSwitch
-    KillSwitch(s, owner_key=OWNER, trusted_pubkey=OWNER_PUB).release(reason="unrelated")
+    KillSwitch(s, owner_key=OWNER, trusted_pubkey=OWNER_PUB).release(issued_at=1.0, reason="unrelated")
     assert not cg.is_enabled("gesture"), "a kill-switch release cannot re-enable a capability (domain-separated)"
 
 
@@ -98,7 +110,7 @@ def test_toggle_round_trip_is_immediate():
     cg = _cg(s)
     cg.disable("voice")
     assert not cg.is_enabled("voice")
-    cg.enable("voice")
+    cg.enable("voice", issued_at=_iss())
     assert cg.is_enabled("voice"), "the change-token cache invalidates on append — a re-enable is immediate"
 
 
@@ -119,7 +131,7 @@ def _seed_store():
     s = _store()
     cg = _cg(s)
     s.append(kind="message", source="t", actor="u", payload={"text": "seed"})   # seq0 noise
-    cg.enable("gesture")                              # seq1 owner enable -> enabled
+    cg.enable("gesture", issued_at=_iss())            # seq1 owner enable -> enabled
     cg.disable("gesture")                             # seq2 disable -> disabled  <-- LAST real change
     s.append(kind="message", source="t", actor="u", payload={"text": "d"})      # seq3 noise
     _raw(s, "gesture", "enabled", key=ATTACKER)       # seq4 forged enable -> IGNORED
@@ -134,7 +146,7 @@ def _synthetic(store, K, *, trusted_pubkey=OWNER_PUB):
 def test_fold_identity_known_correct():
     s = _seed_store()
     assert _cg(s)._scan_enabled("gesture") is False, "the seq2 disable stands; a forged enable can't revive it"
-    _cg(s).enable("gesture")                          # owner enable un-disables
+    _cg(s).enable("gesture", issued_at=_iss())        # owner enable un-disables
     assert _cg(s)._scan_enabled("gesture") is True
     assert _cg(s).is_enabled("gesture") is True       # cache wrapper agrees
 

@@ -25,6 +25,7 @@ dict — so a non-str key an owner signed round-trips through JSON verbatim. Rec
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snapshot_fold_mesh_authorized.py -q
 """
+import itertools
 import tempfile
 
 from sigil.governor.authn import signed_payload
@@ -43,6 +44,16 @@ OP = OWNER.public_key_b64
 # int -> JSON number -> int; both re-verify under the owner anchor). See _build_store seq 4 / seq 5.
 NONE_KEY = None
 INT_KEY = 1337
+
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
 
 
 def _store():
@@ -77,14 +88,14 @@ def _build_store():
     A, B, C, D = generate_keypair(), generate_keypair(), generate_keypair(), generate_keypair()
     attacker = generate_keypair()
     E, F = generate_keypair(), generate_keypair()
-    authorize_device(s, "phoneA", A.public_key_b64, OWNER)          # seq 0
-    authorize_device(s, "phoneB", B.public_key_b64, OWNER)          # seq 1
-    authorize_device(s, "phoneD", D.public_key_b64, OWNER)          # seq 2
+    authorize_device(s, "phoneA", A.public_key_b64, OWNER, issued_at=_dev_iss())          # seq 0
+    authorize_device(s, "phoneB", B.public_key_b64, OWNER, issued_at=_dev_iss())          # seq 1
+    authorize_device(s, "phoneD", D.public_key_b64, OWNER, issued_at=_dev_iss())          # seq 2
     revoke_device(s, "phoneD", D.public_key_b64, OWNER)             # seq 3  (pruned revoke)
-    authorize_device(s, "phoneNone", NONE_KEY, OWNER)              # seq 4  (non-str key = None)
-    authorize_device(s, "phoneInt", INT_KEY, OWNER)                # seq 5  (non-str key = int)
+    authorize_device(s, "phoneNone", NONE_KEY, OWNER, issued_at=_dev_iss())              # seq 4  (non-str key = None)
+    authorize_device(s, "phoneInt", INT_KEY, OWNER, issued_at=_dev_iss())                # seq 5  (non-str key = int)
     _forged_authorize(s, E.public_key_b64, attacker, "evilE")       # seq 6
-    authorize_device(s, "phoneC", C.public_key_b64, OWNER)          # seq 7
+    authorize_device(s, "phoneC", C.public_key_b64, OWNER, issued_at=_dev_iss())          # seq 7
     revoke_device(s, "phoneB", B.public_key_b64, OWNER)             # seq 8
     _forged_authorize(s, F.public_key_b64, attacker, "evilF")       # seq 9
     return s, A, B, C, D

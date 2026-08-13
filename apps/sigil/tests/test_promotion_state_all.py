@@ -9,6 +9,7 @@ It MUST be the same verified fold `is_promoted` uses, so what the owner sees is 
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_promotion_state_all.py -q
 """
+import itertools
 import tempfile
 
 from sigil.governor.promotion import PromotionPolicy
@@ -19,6 +20,16 @@ OWNER = generate_keypair()
 OWNER_PUB = OWNER.public_key_b64
 
 
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed GRANT (the anti-replay high-water).
+# NEVER time.time(): two grants inside one clock tick would collide and the second would be refused as
+# its own replay — a flake that would hide the guard failing.
+_issue = itertools.count(1)
+
+
+def _iss() -> float:
+    return float(next(_issue))
+
+
 def _store():
     return SpineStore(tempfile.mktemp(suffix=".jsonl"))
 
@@ -27,12 +38,12 @@ def _populate(store):
     """The same crafted set as the fold-equivalence test: a live-untouched grant, a grant-then-revoke, a
     revoke-then-regrant, a wildcard grant, and a FORGED unsigned grant that must be ignored."""
     pol = PromotionPolicy(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
-    pol.grant("SCHOLAR", "draft")      # granted, never touched -> listed
-    pol.grant("ARTIFICER", "wire")     # granted then revoked below -> NOT listed
+    pol.grant("SCHOLAR", "draft", issued_at=_iss())      # granted, never touched -> listed
+    pol.grant("ARTIFICER", "wire", issued_at=_iss())     # granted then revoked below -> NOT listed
     pol.revoke("TESTER", "code")       # revoked then re-granted below -> listed
     pol.revoke("ARTIFICER", "wire")
-    pol.grant("TESTER", "code")
-    pol.grant("BASTION", "*")          # wildcard -> listed as "*"
+    pol.grant("TESTER", "code", issued_at=_iss())
+    pol.grant("BASTION", "*", issued_at=_iss())          # wildcard -> listed as "*"
     store.append(kind="event", source="governor", actor="WARDEN",   # forged, unsigned -> must be ignored
                  payload={"signal": "governor.promotion", "state": "granted",
                           "agent": "EVIL", "scope": "draft"})
@@ -70,7 +81,7 @@ def test_forged_grant_signed_by_a_foreign_key_is_not_listed():
     # trusted pubkey it must not verify -> not listed (this is the core anti-forgery property).
     store = _store()
     attacker = generate_keypair()
-    PromotionPolicy(store, owner_key=attacker, trusted_pubkey=attacker.public_key_b64).grant("MALICE", "*")
+    PromotionPolicy(store, owner_key=attacker, trusted_pubkey=attacker.public_key_b64).grant("MALICE", "*", issued_at=_iss())
     honest = PromotionPolicy(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
     assert honest.state_all() == []
     assert honest.is_promoted("MALICE", "*") is False
@@ -85,8 +96,8 @@ def test_snapshot_exposes_promotions_under_the_process_key():
     ensure_owner_keypair()                     # anchor the owner key so owner_keypair()==owner_pubkey()
     store = _store()
     pol = PromotionPolicy(store)               # default = the process owner key snapshot() also uses
-    pol.grant("ARCHIVIST", "draft")
-    pol.grant("ENVOY", "*")                     # structurally refused -> must not appear
+    pol.grant("ARCHIVIST", "draft", issued_at=_iss())
+    pol.grant("ENVOY", "*", issued_at=_iss())                     # structurally refused -> must not appear
     snap = snapshot(store)
     assert isinstance(snap.get("promotions"), list)
     assert {"agent": "ARCHIVIST", "scope": "draft"} in snap["promotions"]
@@ -111,7 +122,7 @@ def test_a_signed_denylisted_grant_is_not_listed_and_not_enforced():
     from sigil.governor.promotion import NO_PROMOTION_AGENTS, SIGNAL
     store = _store()
     for agent in sorted(NO_PROMOTION_AGENTS):
-        core = {"signal": SIGNAL, "state": "granted", "agent": agent, "scope": "*"}
+        core = {"signal": SIGNAL, "state": "granted", "agent": agent, "scope": "*", "issued_at": _iss()}
         payload = {**signed_payload(core, OWNER), "by": "owner", "tier": "A0", "decision": "auto"}
         store.append(kind="event", source="governor", actor="WARDEN", payload=payload)   # a REAL signed grant
     pol = PromotionPolicy(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)

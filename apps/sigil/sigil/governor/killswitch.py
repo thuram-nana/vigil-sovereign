@@ -5,7 +5,19 @@ ASYMMETRIC AUTHENTICATION (Phase 6 red-pen RP-2): halting is always the safe dir
 engage event halts (a nuisance forged-engage is at worst a fail-safe DoS). UN-halting is the
 dangerous direction, so a RELEASE is honored ONLY if it is signed by the owner key and verifies
 against the trusted pubkey — a forged release can never revive a halted mesh. Read fresh per decision
-so a release (or engage) takes effect immediately."""
+so a release (or engage) takes effect immediately.
+
+ANTI-REPLAY (this slice): a signature proves WHO wrote a release, never WHEN or HOW OFTEN it counts.
+Anyone able to append to the spine could re-append a captured owner-signed release VERBATIM after a
+later engage — the signature is genuine and the hash chain extends cleanly over the new record, so
+the mesh un-halted. Signature dedup CANNOT fix this (Ed25519 is deterministic over a canonical core,
+so a legitimate engage→release→engage→release re-signs BYTE-IDENTICALLY and a dedup would swallow the
+second real release), and `record.seq` cannot either (assigned inside `store.append` AFTER signing, so
+a replay just gets a fresh one). So a release carries an owner-set, strictly-increasing `issued_at`
+INSIDE the signed core and the fold keeps a high-water: a release un-halts only while its `issued_at`
+strictly exceeds every release already honored, and honoring one consumes that value so its own
+replay is refused thereafter. Identical shape to `offense_gate.state()`. The SAFE direction (engage)
+keeps NO freshness requirement at all — gating it would convert a fail-safe into a fail-open."""
 from __future__ import annotations
 
 import threading
@@ -13,11 +25,13 @@ from pathlib import Path
 from typing import Optional
 
 from ..spine.snapshot import SnapshotState
-from .authn import signed_payload, verify_signed
+from .authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from .identity import owner_keypair, owner_pubkey
 
 SIGNAL = "governor.killswitch"
-_CORE = ("signal", "state")
+# `issued_at` MUST be inside the core: outside it, an attacker could rewrite a captured release's
+# freshness without breaking the signature, which is exactly the replay this guard refuses.
+_CORE = ("signal", "state", "issued_at")
 
 # FIX 4 (audit CRITICAL): `is_engaged()` full-scans the spine on EVERY governor decision, so a batch of
 # proposals is O(proposals × spine). Cache the authoritative verdict keyed by (resolved spine path,
@@ -39,13 +53,23 @@ class KillSwitch:
         self.trusted_pubkey = trusted_pubkey if trusted_pubkey is not None else owner_pubkey()
 
     def engage(self, *, by: str = "owner", reason: str = "") -> int:
-        core = {"signal": SIGNAL, "state": "engaged"}
+        """HALT the mesh — the SAFE direction. Takes effect whoever signs it and carries a FIXED
+        `issued_at` of 0.0: engaging needs no freshness (its replay just re-halts an already-halted
+        mesh), and demanding one would let a stale-clock caller fail to halt. The constant keeps the
+        record signature-valid under the new core so `sigil governor status` still shows a verified
+        provenance chain for the halt."""
+        core = {"signal": SIGNAL, "state": "engaged", "issued_at": 0.0}
         payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason,
                    "tier": "A0", "decision": "auto"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
 
-    def release(self, *, by: str = "owner", reason: str = "") -> int:
-        core = {"signal": SIGNAL, "state": "released"}
+    def release(self, *, issued_at: float, by: str = "owner", reason: str = "") -> int:
+        """UN-HALT the mesh — the DANGEROUS direction. `issued_at` is a REQUIRED, owner-set,
+        strictly-increasing value (unix seconds): it must exceed every release already honored on this
+        spine or the fold ignores it as a replay. Required rather than defaulted because this module
+        reads NO clock — the authority over "when" belongs to the caller that holds the owner key
+        (same contract as `offense_gate.open_gate`), and a silent default would be a forgeable one."""
+        core = {"signal": SIGNAL, "state": "released", "issued_at": float(issued_at)}
         payload = {**signed_payload(core, self.owner_key), "by": by, "reason": reason,
                    "tier": "A0", "decision": "auto"}
         return self.store.append(kind="event", source="governor", actor="WARDEN", payload=payload)
@@ -77,14 +101,21 @@ class KillSwitch:
         under the trusted pubkey it verifies against), so a caller whose trust anchor differs from the one
         the snapshot was folded under BYPASSES the snapshot and re-scans from genesis. Under the Slice-C
         empty snapshot (base_seq==0, killswitch_engaged=False, trusted_pubkey=""), BOTH branches seed False
-        and window since_seq=-1 (the current full genesis scan), so this is BYTE-IDENTICAL to the old scan."""
+        and window since_seq=-1 (the current full genesis scan), so this is BYTE-IDENTICAL to the old scan.
+
+        The anti-replay high-water is seeded from the SAME snapshot under the SAME pubkey condition. It has
+        to be: were it re-seeded to the bottom on every call, the first hard prune would make every release
+        in the pruned prefix replayable again — the guard would be silently undone by the pruning work."""
         st = SnapshotState.load(self.store)
         if self.trusted_pubkey != st.trusted_pubkey:
             engaged = False                         # pubkey mismatch: folded latch invalid → genesis rescan
             since_seq = -1
+            max_issued = NO_HIGHWATER               # ...and so is the folded high-water — restart it too
         else:
             engaged = st.killswitch_engaged         # seed from the folded prefix (scalar bool; no mutation)
             since_seq = st.base_seq - 1
+            max_issued = (NO_HIGHWATER if st.killswitch_issued_hw is None
+                          else st.killswitch_issued_hw)   # None ⇒ no release honored in the pruned prefix
         for r in self.store.iter_records(since_seq=since_seq):
             p = r.payload
             if p.get("signal") != SIGNAL:
@@ -93,5 +124,9 @@ class KillSwitch:
             if state == "engaged":
                 engaged = True                      # honor ANY engage — halting is fail-safe
             elif state == "released" and verify_signed(p, _CORE, self.trusted_pubkey):
-                engaged = False                     # only an OWNER-SIGNED release un-halts (fail-closed)
+                issued = as_issued_at(p.get("issued_at"))
+                if issued <= max_issued:
+                    continue                        # REPLAY / stale re-append of an already-honored release
+                max_issued = issued                 # consume it so its own replay is refused hereafter
+                engaged = False                     # only an OWNER-SIGNED, FRESH release un-halts
         return engaged

@@ -9,6 +9,8 @@ governance events are owner-signed, so an A2-auto log line PROVES a real owner p
 import tempfile
 from pathlib import Path
 
+import itertools
+
 from sigil.agents.base import Agent, Proposal, Tier
 from sigil.governor import BudgetCaps, Governor, KillSwitch, PromotionPolicy
 from sigil.governor.authn import signed_payload
@@ -17,6 +19,15 @@ from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()                 # the established owner identity for these tests
 OWNER_PUB = OWNER.public_key_b64
+
+# A deterministic, strictly-increasing source for the anti-replay `issued_at` on every dangerous-direction
+# governance mint. NEVER time.time(): two mints inside one clock tick would collide and the second would be
+# refused as a replay, making these tests flaky in exactly the direction that hides the guard failing.
+_issue = itertools.count(1)
+
+
+def _iss() -> float:
+    return float(next(_issue))
 
 
 def _store():
@@ -49,7 +60,7 @@ def test_killswitch_halts_and_only_signed_release_restores():
     s.append(kind="event", source="governor", actor="WARDEN",
              payload={"signal": "governor.killswitch", "state": "released"})
     assert not t.run(Tier.A1).applied, "an unsigned release cannot un-halt the mesh (fail-closed)"
-    KillSwitch(s, owner_key=OWNER).release()
+    KillSwitch(s, owner_key=OWNER).release(issued_at=_iss())
     assert t.run(Tier.A1).applied, "an OWNER-SIGNED release restores the mesh"
 
 
@@ -74,7 +85,7 @@ def test_a2_queues_unless_promoted_for_kind():
     s = _store()
     t = _Emitter(s)
     assert t.run(Tier.A2, kind="draft").queued, "unpromoted A2 queues"
-    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft")     # owner-signed grant
+    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft", issued_at=_iss())  # owner-signed grant
     assert t.run(Tier.A2, kind="draft").applied, "a signed promotion auto-approves that kind's A2"
     assert t.run(Tier.A2, kind="event").queued, "a different kind still queues (scope bound to kind)"
 
@@ -82,7 +93,7 @@ def test_a2_queues_unless_promoted_for_kind():
 def test_a3_never_auto_even_when_promoted():
     s = _store()
     t = _Emitter(s)
-    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "wire")
+    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "wire", issued_at=_iss())
     assert t.run(Tier.A3, kind="wire").queued, "A3 has no promotion path — always queues"
 
 
@@ -97,17 +108,20 @@ def test_forged_promotion_grants_nothing():
     attacker = generate_keypair()
     s.append(kind="event", source="governor", actor="WARDEN",
              payload=signed_payload({"signal": "governor.promotion", "state": "granted",
-                                     "agent": "TESTER", "scope": "draft"}, attacker))
+                                     "agent": "TESTER", "scope": "draft",
+                                     "issued_at": _iss()}, attacker))
     assert t.run(Tier.A2, kind="draft").queued, "a non-owner-signed grant auto-approves nothing"
 
 
 def test_envoy_has_no_promotion_path():
     s = _store()
-    assert PromotionPolicy(s, owner_key=OWNER).grant("ENVOY", "*") is None, "promoting ENVOY is refused"
+    assert PromotionPolicy(s, owner_key=OWNER).grant("ENVOY", "*", issued_at=_iss()) is None, \
+        "promoting ENVOY is refused"
     # even a genuinely OWNER-SIGNED grant cannot promote ENVOY — the exclusion is structural
     s.append(kind="event", source="governor", actor="WARDEN",
              payload=signed_payload({"signal": "governor.promotion", "state": "granted",
-                                     "agent": "ENVOY", "scope": "*"}, OWNER))
+                                     "agent": "ENVOY", "scope": "*",
+                                     "issued_at": _iss()}, OWNER))
     assert PromotionPolicy(s, trusted_pubkey=OWNER_PUB).is_promoted("ENVOY", "*") is False
 
 
@@ -118,7 +132,7 @@ def test_self_audit_reconstructs_including_denials():
     t = _Emitter(s)
     KillSwitch(s, owner_key=OWNER).engage()
     t.run(Tier.A3, kind="wire")                       # DENIED under the kill switch
-    KillSwitch(s, owner_key=OWNER).release()
+    KillSwitch(s, owner_key=OWNER).release(issued_at=_iss())
     t.run(Tier.A1, kind="event")                      # auto
     rows = self_audit(s, agent="TESTER")
     decs = {r["decision"] for r in rows}
@@ -243,8 +257,8 @@ def test_spine_integrity_after_governance_writes():
     s = _store()
     t = _Emitter(s)
     KillSwitch(s, owner_key=OWNER).engage(); t.run(Tier.A1)
-    KillSwitch(s, owner_key=OWNER).release(); t.run(Tier.A1)
-    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft")
+    KillSwitch(s, owner_key=OWNER).release(issued_at=_iss()); t.run(Tier.A1)
+    PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft", issued_at=_iss())
     t.run(Tier.A2, kind="event")
     ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OWNER_PUB).approve(pending(s, OWNER_PUB)[0].seq)
     ok, msg = s.verify()

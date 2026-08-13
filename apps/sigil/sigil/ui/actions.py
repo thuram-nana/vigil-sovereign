@@ -27,6 +27,13 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
     if action not in ACTIONS:
         raise ValueError(f"unknown action: {action!r}")
     store = store or SpineStore()
+    # The SERVER's clock stamps `issued_at` on every dangerous-direction governance mutation (the
+    # anti-replay high-water). It is deliberately NOT taken from `params`: the browser is untrusted, and a
+    # caller-chosen `issued_at` would let a request pin the high-water arbitrarily high and lock the owner
+    # out of the safe direction, or arbitrarily low and neuter the guard. The governance modules read no
+    # clock themselves — the caller holding the owner key owns "when", and here that caller is this server.
+    import time as _time
+
     from ..agents.approvals import ApprovalQueue
     from ..governor import KillSwitch, PromotionPolicy
     from ..governor.identity import ensure_owner_keypair
@@ -40,12 +47,14 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         return {"ok": True, "action": action, "target_seq": seq, "recorded_seq": out}
     if action in ("kill", "release"):
         ks = KillSwitch(store, owner_key=owner)
-        out = ks.engage(reason=reason) if action == "kill" else ks.release(reason=reason)
+        out = ks.engage(reason=reason) if action == "kill" else ks.release(issued_at=_time.time(),
+                                                                          reason=reason)
         return {"ok": True, "action": action, "recorded_seq": out}
     if action in ("promote", "revoke"):
         pp = PromotionPolicy(store, owner_key=owner)
         agent, scope = str(params["agent"]), str(params.get("scope", "*"))
-        out = pp.grant(agent, scope) if action == "promote" else pp.revoke(agent, scope)
+        out = (pp.grant(agent, scope, issued_at=_time.time()) if action == "promote"
+               else pp.revoke(agent, scope))
         result = {"ok": out is not None, "action": action, "agent": agent, "scope": scope, "recorded_seq": out}
         if out is None:
             # A refused grant (a NO_PROMOTION agent like ENVOY/DELEGATE) must NOT read as success: surface an
@@ -100,7 +109,12 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         # `autolearn` (K2) is deliberately NOT swept into "both": it is an independent, explicit toggle,
         # so the existing panic control's behaviour is unchanged when a new capability is registered.
         caps = ["gesture", "voice"] if which == "both" else [which]
-        seqs = {c: (cg.disable(c, reason=reason) if verb == "disable" else cg.enable(c, reason=reason))
+        # ONE server-clock `issued_at` for the whole request: the anti-replay high-water is PER CAPABILITY,
+        # so the same value on `gesture` and `voice` lands on two independent keys and neither refuses the
+        # other. Never from `params` — a browser-chosen value could pin the high-water out of reach.
+        now = _time.time()
+        seqs = {c: (cg.disable(c, reason=reason) if verb == "disable"
+                    else cg.enable(c, issued_at=now, reason=reason))
                 for c in caps}
         return {"ok": True, "action": action, "capabilities": caps, "recorded_seqs": seqs}
     if action in _SETTINGS_ACTIONS:

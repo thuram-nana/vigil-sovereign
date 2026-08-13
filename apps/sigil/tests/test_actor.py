@@ -107,7 +107,7 @@ def test_no_impersonation_field_exists():
 def test_delegate_never_promotes():
     assert "DELEGATE" in NO_PROMOTION_AGENTS, "DELEGATE must be structurally no-promotion (like ENVOY)"
     s = _store()
-    assert PromotionPolicy(s, owner_key=OWNER, trusted_pubkey=OP).grant("DELEGATE", "*") is None, \
+    assert PromotionPolicy(s, owner_key=OWNER, trusted_pubkey=OP).grant("DELEGATE", "*", issued_at=1.0) is None, \
         "granting DELEGATE promotion is refused"
     assert PromotionPolicy(s, trusted_pubkey=OP).is_promoted("DELEGATE", "*") is False, "DELEGATE is never promoted"
 

@@ -2,6 +2,7 @@
 keystone; NO wire bearer secret). Authentication IS an Ed25519 signature over the canonical envelope
 core by an owner-AUTHORIZED device key; replay is a spine-anchored per-device monotonic-nonce highwater.
 Run: ~/.sigil/venv/bin/python tests/test_bridge_envelope.py"""
+import itertools
 import tempfile
 
 from sigil.bridge import (ACTIONS, RECEIPT_SIGNAL, build_core, consume,
@@ -15,6 +16,16 @@ OWNER = generate_keypair()
 OP = OWNER.public_key_b64
 
 
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
+
+
 def _store():
     return SpineStore(tempfile.mktemp(suffix=".jsonl"))
 
@@ -22,7 +33,7 @@ def _store():
 def _authorized_device(s):
     """Authorize a fresh device against OWNER; return (device_key, authorized_set)."""
     device = generate_keypair()
-    authorize_device(s, "phone-1", device.public_key_b64, OWNER)
+    authorize_device(s, "phone-1", device.public_key_b64, OWNER, issued_at=_dev_iss())
     return device, authorized_devices(s, OP)
 
 
@@ -129,7 +140,7 @@ def test_unknown_action_refused():
 def test_revoked_device_refused():
     s = _store()
     device = generate_keypair()
-    authorize_device(s, "phone-2", device.public_key_b64, OWNER)
+    authorize_device(s, "phone-2", device.public_key_b64, OWNER, issued_at=_dev_iss())
     assert device.public_key_b64 in authorized_devices(s, OP)
     revoke_device(s, "phone-2", device.public_key_b64, OWNER)
     authorized = authorized_devices(s, OP)
@@ -168,7 +179,7 @@ def test_module_is_pure_no_clock_no_random():
 def _authed():
     s = _store()
     dev = generate_keypair()
-    authorize_device(s, "dev", dev.public_key_b64, OWNER)
+    authorize_device(s, "dev", dev.public_key_b64, OWNER, issued_at=_dev_iss())
     return s, dev, authorized_devices(s, OP)
 
 

@@ -9,6 +9,7 @@ Proves fold == scan for the promotion bearer (LWW keep-revoked, pubkey-dependent
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snapshot_fold_promotion.py -q
 """
+import itertools
 import tempfile
 
 from sigil.governor.promotion import PromotionPolicy
@@ -32,6 +33,16 @@ EXPECTED = {
 }
 
 
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed GRANT (the anti-replay high-water).
+# NEVER time.time(): two grants inside one clock tick would collide and the second would be refused as
+# its own replay — a flake that would hide the guard failing.
+_issue = itertools.count(1)
+
+
+def _iss() -> float:
+    return float(next(_issue))
+
+
 def _store():
     return SpineStore(tempfile.mktemp(suffix=".jsonl"))
 
@@ -42,18 +53,18 @@ def _populate(store):
     a soon-regranted revoke). Live window (seq >= K) then overrides/extends it."""
     pol = PromotionPolicy(store, owner_key=OWNER, trusted_pubkey=OWNER_PUB)
     # ---- prefix [0..K): three signed governance events that all matter downstream ----
-    pol.grant("SCHOLAR", "draft")     # never touched again -> discriminator: only a seeded prefix yields True
-    pol.grant("ARTIFICER", "wire")    # revoked below the split
+    pol.grant("SCHOLAR", "draft", issued_at=_iss())     # never touched again -> discriminator: only a seeded prefix yields True
+    pol.grant("ARTIFICER", "wire", issued_at=_iss())    # revoked below the split
     pol.revoke("TESTER", "code")      # re-granted below the split
     k = store.append(kind="event", source="governor", actor="WARDEN",   # marks the split boundary K
                      payload={"signal": "marker"})                        # inert (no promotion signal)
     # ---- live [K..T): overrides + extensions + a forged grant that must be ignored ----
     pol.revoke("ARTIFICER", "wire")   # LWW: overrides the prefix grant
-    pol.grant("TESTER", "code")       # LWW: overrides the prefix revoke
-    pol.grant("BASTION", "*")         # wildcard grant
+    pol.grant("TESTER", "code", issued_at=_iss())       # LWW: overrides the prefix revoke
+    pol.grant("BASTION", "*", issued_at=_iss())         # wildcard grant
     store.append(kind="event", source="governor", actor="WARDEN",        # forged, unsigned -> ignored
                  payload={"signal": "governor.promotion", "state": "granted",
-                          "agent": "EVIL", "scope": "draft"})
+                          "agent": "EVIL", "scope": "draft", "issued_at": _iss()})
     return k
 
 

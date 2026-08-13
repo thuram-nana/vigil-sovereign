@@ -8,6 +8,7 @@ gesture+voice control.
 Run: SIGIL_HOME=$(mktemp -d) python -m pytest tests/test_capability_autolearn.py -q
 """
 
+import itertools
 import tempfile
 
 from sigil.governor import CAPABILITIES
@@ -19,6 +20,16 @@ from sigil.ui import actions
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
 ATTACKER = generate_keypair()
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed ENABLE (the anti-replay
+# high-water). NEVER time.time(): two enables inside one clock tick would collide and the second
+# would be refused as its own replay — a flake that would hide the guard failing.
+_issue = itertools.count(1)
+
+
+def _iss() -> float:
+    return float(next(_issue))
+
 
 
 def _store():
@@ -39,7 +50,7 @@ def test_autolearn_default_enabled_disable_then_owner_signed_enable():
     assert g.is_enabled("autolearn") is True            # default enabled (no record)
     g.disable("autolearn", reason="deactivate")
     assert g.is_enabled("autolearn") is False           # any disable takes effect (fail-safe)
-    g.enable("autolearn", reason="activate")
+    g.enable("autolearn", issued_at=_iss(), reason="activate")
     assert g.is_enabled("autolearn") is True            # owner-signed enable re-activates
 
 
@@ -47,7 +58,8 @@ def test_forged_enable_cannot_reactivate_autolearn():
     s = _store()
     _gate(s).disable("autolearn", reason="off")
     # an ENABLE signed by a non-owner key must NOT revive it (verify against the owner pubkey, fail-closed).
-    CapabilityGate(s, owner_key=ATTACKER, trusted_pubkey=OP).enable("autolearn", reason="forged")
+    CapabilityGate(s, owner_key=ATTACKER, trusted_pubkey=OP).enable("autolearn", issued_at=_iss(),
+                                                                     reason="forged")
     assert _gate(s).is_enabled("autolearn") is False     # still disabled — the forged enable was ignored
 
 
