@@ -24,6 +24,15 @@ OP = OWNER.public_key_b64
 _dev_issue = itertools.count(1)
 
 
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed capability ADVERTISEMENT (the
+# anti-replay high-water). NEVER time.time(): two advertisements inside one clock tick would collide.
+_adv_issue = itertools.count(1)
+
+
+def _adv_iss() -> float:
+    return float(next(_adv_issue))
+
+
 def _dev_iss() -> float:
     return float(next(_dev_issue))
 
@@ -130,7 +139,7 @@ def test_device_approval_target_seq_binding_no_replay():
 def test_capability_map_ignores_forged_advertisements():
     s = _store()
     advertise_capability(s, {"host_id": "desk", "os": "linux", "has_screen": True, "has_camera": True,
-                             "has_gpu_vlm": True, "always_on": True}, OWNER)
+                             "has_gpu_vlm": True, "always_on": True}, OWNER, issued_at=_adv_iss())
     attacker = generate_keypair()
     from sigil.governor.authn import signed_payload
     s.append(kind="event", source="mesh", actor="OWNER",

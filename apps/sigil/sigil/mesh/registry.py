@@ -21,7 +21,13 @@ never WHEN that authorization counts — so anyone able to append could capture 
 bytes verbatim and re-arm a full approval identity across every one of those consumers at once. So
 `issued_at` joins the signed device core and `authorized_devices` keeps a PER-DEVICE-PUBKEY high-water.
 `revoked` — the safe direction — keeps NO freshness requirement, so a revoke always lands and its own
-replay merely re-revokes. (The host_capability ledger gets the same treatment in the next slice.)"""
+replay merely re-revokes.
+
+The host_capability ledger carries the same guard, per host_id. It has NO safe direction — an
+advertisement is the only transition — so freshness gates every one: a captured advertisement replayed
+after the host truthfully re-advertises FEWER capabilities would otherwise resurrect the withdrawn ones
+(`has_hid_inject` / `has_camera_stream` are the ones that route real HID injection and camera streaming
+to a host), and one replayed at a host that had downgraded would silently re-route work to it."""
 from __future__ import annotations
 
 from typing import Optional, Set
@@ -36,20 +42,36 @@ from ..spine.store import SpineStore
 
 CAP_SIGNAL = "mesh.host_capability"
 DEV_SIGNAL = "mesh.device"
-_CAP_CORE = ("signal", "host_id", "os", "has_screen", "has_camera", "has_gpu_vlm", "always_on",
-             "has_hid_inject", "has_camera_stream")
-# `issued_at` MUST be inside the core: outside it, an attacker could re-stamp a captured authorization's
+# `issued_at` MUST be inside each core: outside it, an attacker could re-stamp a captured record's
 # freshness past the high-water without breaking the signature — exactly the replay this guard refuses.
+_CAP_CORE = ("signal", "host_id", "os", "has_screen", "has_camera", "has_gpu_vlm", "always_on",
+             "has_hid_inject", "has_camera_stream", "issued_at")
 _DEV_CORE = ("signal", "state", "device_id", "device_pubkey", "issued_at")
+# The advertised descriptor a consumer sees: the signed core MINUS the two bookkeeping fields. Defined
+# once and used by BOTH `capability_map` and `snapshot.build()`, so the projected shape cannot drift
+# between the live scan and the pruned-prefix fold (and so adding `issued_at` to the core did not
+# silently change what `capability_map` returns).
+_CAP_DESCRIPTOR_FIELDS = tuple(k for k in _CAP_CORE if k not in ("signal", "issued_at"))
+
+
+def cap_descriptor(payload: dict) -> dict:
+    return {k: payload.get(k) for k in _CAP_DESCRIPTOR_FIELDS}
 
 
 # --- host capability advertisement -----------------------------------------------------------------
-def advertise_capability(store: SpineStore, descriptor: dict, owner_key) -> int:
+def advertise_capability(store: SpineStore, descriptor: dict, owner_key, *, issued_at: float) -> int:
+    """Advertise a host's capabilities. `issued_at` is a REQUIRED, owner-set, strictly-increasing value:
+    `capability_map` honors this advertisement only while it exceeds every one already honored for THIS
+    host_id. Unlike the other four ledgers this one has NO safe direction — an advertisement is the only
+    transition — so freshness gates every record, or a captured richer advertisement could be replayed to
+    resurrect capabilities the host has since truthfully withdrawn. Required rather than defaulted: this
+    module reads no clock, so "when" is the caller-with-the-owner-key's authority."""
     core = {"signal": CAP_SIGNAL, "host_id": descriptor["host_id"], "os": descriptor["os"],
             "has_screen": bool(descriptor["has_screen"]), "has_camera": bool(descriptor["has_camera"]),
             "has_gpu_vlm": bool(descriptor["has_gpu_vlm"]), "always_on": bool(descriptor["always_on"]),
             "has_hid_inject": bool(descriptor.get("has_hid_inject", False)),
-            "has_camera_stream": bool(descriptor.get("has_camera_stream", False))}
+            "has_camera_stream": bool(descriptor.get("has_camera_stream", False)),
+            "issued_at": float(issued_at)}
     payload = {**signed_payload(core, owner_key), "tier": "A0", "decision": "auto"}
     return store.append(kind="event", source="mesh", actor="OWNER", payload=payload)
 
@@ -65,12 +87,22 @@ def capability_map(store: SpineStore, trusted_pubkey: Optional[str] = None) -> d
     # pre-fold is invalid, so BYPASS it and re-scan from genesis (seed empty, since=-1).
     if tp == st.trusted_pubkey:
         latest, since = dict(st.capability_map), st.base_seq - 1
+        # PER-HOST_ID advertisement high-water, seeded from the SAME snapshot under the SAME pubkey
+        # condition — otherwise the first hard prune would reset it and make every pruned advertisement
+        # replayable. Per host and never global: one host's fresh advertisement must not refuse another
+        # host's legitimate later one that carried a smaller issued_at.
+        issued = dict(st.capability_map_issued_map())
     else:
-        latest, since = {}, -1
+        latest, since, issued = {}, -1, {}
     for r in store.iter_records(since_seq=since):
         p = r.payload
         if p.get("signal") == CAP_SIGNAL and verify_signed(p, _CAP_CORE, tp):
-            latest[p.get("host_id")] = {k: p.get(k) for k in _CAP_CORE if k != "signal"}
+            hkey = p.get("host_id")
+            at = as_issued_at(p.get("issued_at"))
+            if at <= issued.get(hkey, NO_HIGHWATER):
+                continue                            # REPLAY / stale re-append of an already-honored advert
+            issued[hkey] = at                       # consume it so its own replay is refused hereafter
+            latest[hkey] = cap_descriptor(p)
     return latest
 
 

@@ -20,6 +20,7 @@ Sub-state ↔ bearer (all identity-empty in Slice C):
   capability_issued      {capability: max issued_at}             join-semilattice (max)         enable anti-replay
   creation_created       {(service,origin): count}               count-add (PAIR key!)          DELEGATE account cap
   capability_map         {host_id: cap}                          right-biased LWW               mesh host capability
+  capability_map_issued  {host_id: max issued_at}                join-semilattice (max)         advert anti-replay
   mesh_dev_state         {device_pubkey: authorized|revoked}     LWW (keep revoked!)            mesh device authz
   mesh_dev_issued        {device_pubkey: max issued_at}          join-semilattice (max)         authorize anti-replay
   promotion              {(agent,scope): granted|revoked}        LWW (keep revoked!)            auto-approval grants
@@ -81,6 +82,8 @@ class SnapshotState(BaseModel):
     # make build() != scan. `dict(rows)` / the accessors reconstruct the map (incl. any non-str key).
     creation_created: list = []       # [[service|None, origin|None, count], ...]
     capability_map: list = []         # [[host_id, cap_dict], ...]  -> dict() reconstructs (keys verbatim)
+    capability_map_issued: list = []  # [[host_id, issued_at], ...] — PER-HOST advertisement high-water.
+    #                                   Missing row ⇒ the -inf bottom. Per host and never global.
     mesh_dev_state: list = []         # [[device_pubkey, "authorized"|"revoked"], ...] -> dict() reconstructs
     mesh_dev_issued: list = []        # [[device_pubkey, issued_at], ...] — PER-DEVICE authorize high-water.
     #                                   Missing row ⇒ the -inf bottom. Per device and never global: one
@@ -117,6 +120,9 @@ class SnapshotState(BaseModel):
 
     def mesh_dev_issued_map(self) -> dict[Any, float]:
         return {row[0]: row[1] for row in self.mesh_dev_issued}
+
+    def capability_map_issued_map(self) -> dict[Any, float]:
+        return {row[0]: row[1] for row in self.capability_map_issued}
 
     def arm_set(self) -> set:
         return {(row[0], row[1]) for row in self.consumed_arm_nonces}
@@ -224,7 +230,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..governor.killswitch import _CORE as _KS_CORE
     from ..governor.promotion import SIGNAL as _PROMO_SIGNAL
     from ..governor.promotion import _CORE as _PROMO_CORE
-    from ..mesh.registry import CAP_SIGNAL, DEV_SIGNAL, _CAP_CORE, _DEV_CORE
+    from ..mesh.registry import CAP_SIGNAL, DEV_SIGNAL, _CAP_CORE, _DEV_CORE, cap_descriptor
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
     # iter_records already yields ascending seq, but sort defensively so build() is correct for ANY caller /
@@ -240,6 +246,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     cap_issued: dict[Any, float] = dict(s.capability_issued_map()) if s else {}
     creation: dict[tuple[Optional[str], Optional[str]], int] = dict(s.creation_counter()) if s else {}
     capability: dict[Any, dict] = dict(s.capability_map) if s else {}   # list-of-rows -> dict (keys verbatim)
+    cap_map_issued: dict[Any, float] = dict(s.capability_map_issued_map()) if s else {}
     mesh_dev: dict[Any, str] = dict(s.mesh_dev_state) if s else {}
     mesh_dev_issued: dict[Any, float] = dict(s.mesh_dev_issued_map()) if s else {}
     promo: dict[tuple[Optional[str], Optional[str]], str] = dict(s.promotion_map()) if s else {}
@@ -297,10 +304,15 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                 and p.get("status") == "applied":
             key = (p.get("service"), _origin(p.get("url", "")))
             creation[key] = creation.get(key, 0) + 1
-        # --- mesh host capability (LWW verified). NO isinstance guard — mirror the scan, which keys on
-        #     p.get("host_id") unconditionally (a non-str key is preserved via the list-of-rows form). ---
+        # --- mesh host capability (LWW verified + ANTI-REPLAY FRESH). NO isinstance guard — mirror the
+        #     scan, which keys on p.get("host_id") unconditionally (a non-str key is preserved via the
+        #     list-of-rows form). This ledger has NO safe direction, so freshness gates EVERY record. ---
         if sig == CAP_SIGNAL and verify_signed(p, _CAP_CORE, tp):
-            capability[p.get("host_id")] = {k: p.get(k) for k in _CAP_CORE if k != "signal"}
+            hkey = p.get("host_id")
+            at = as_issued_at(p.get("issued_at"))
+            if at > cap_map_issued.get(hkey, NO_HIGHWATER):   # mirror capability_map EXACTLY
+                cap_map_issued[hkey] = at
+                capability[hkey] = cap_descriptor(p)
         # --- mesh device authz (LWW verified + authorize ANTI-REPLAY FRESH; keep revoked) — no
         #     isinstance guard (mirror the scan) ---
         if sig == DEV_SIGNAL and p.get("state") in ("authorized", "revoked") and verify_signed(p, _DEV_CORE, tp):
@@ -361,6 +373,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         capability_issued=[[c, i] for c, i in cap_issued.items()],
         creation_created=[[s, o, c] for (s, o), c in creation.items()],
         capability_map=[[h, c] for h, c in capability.items()],
+        capability_map_issued=[[h, i] for h, i in cap_map_issued.items()],
         mesh_dev_state=[[d, s] for d, s in mesh_dev.items()],
         mesh_dev_issued=[[d, i] for d, i in mesh_dev_issued.items()],
         promotion=[[a, s, v] for (a, s), v in promo.items()],

@@ -50,7 +50,8 @@ from sigil.governor.killswitch import _CORE as KS_CORE
 from sigil.governor.killswitch import KillSwitch
 from sigil.governor.promotion import _CORE as PROMO_CORE
 from sigil.governor.promotion import PromotionPolicy
-from sigil.mesh.registry import _DEV_CORE, authorize_device, authorized_devices, revoke_device
+from sigil.mesh.registry import (_CAP_CORE, _DEV_CORE, advertise_capability, authorize_device,
+                                 authorized_devices, capability_map, revoke_device)
 from sigil.reuse import generate_keypair
 from sigil.spine.snapshot import SnapshotState, build
 from sigil.spine.store import SpineStore
@@ -620,3 +621,108 @@ def test_device_foreign_pubkey_snapshot_bypass_restarts_the_high_water(monkeypat
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
     assert authorized_devices(s, OWNER_PUB) == {dev}, \
         "a foreign-anchor snapshot must be bypassed entirely — its high-water cannot refuse a real authz"
+
+
+# =====================================================================================================
+# mesh.host_capability — the one ledger with NO safe direction (an advertisement is the only
+# transition), so freshness gates EVERY record. A replayed richer advertisement would otherwise
+# resurrect capabilities a host has since truthfully withdrawn — `has_hid_inject` and
+# `has_camera_stream` are what route real HID injection and camera streaming to a host.
+# =====================================================================================================
+def _advertise(store, host_id, *, issued_at, hid=False, camera_stream=False):
+    return advertise_capability(store, {"host_id": host_id, "os": "linux", "has_screen": True,
+                                        "has_camera": True, "has_gpu_vlm": True, "always_on": True,
+                                        "has_hid_inject": hid, "has_camera_stream": camera_stream},
+                                OWNER, issued_at=issued_at)
+
+
+def _cap_replay(store, payload: dict) -> int:
+    return store.append(kind="event", source="mesh", actor="OWNER", payload=dict(payload))
+
+
+def test_host_capability_replay_cannot_resurrect_a_withdrawn_capability():
+    s = _store()
+    rich = dict(s.get(_advertise(s, "desk", issued_at=100.0, hid=True, camera_stream=True)).payload)
+    assert capability_map(s, OWNER_PUB)["desk"]["has_hid_inject"] is True
+    _advertise(s, "desk", issued_at=200.0, hid=False, camera_stream=False)   # host truthfully downgrades
+    assert capability_map(s, OWNER_PUB)["desk"]["has_hid_inject"] is False
+    _cap_replay(s, rich)                              # attacker replays the RICHER advertisement
+    m = capability_map(s, OWNER_PUB)
+    assert m["desk"]["has_hid_inject"] is False, "a replayed advertisement must not resurrect HID injection"
+    assert m["desk"]["has_camera_stream"] is False
+
+
+def test_host_capability_stale_lower_issued_advert_cannot_override_a_newer_one():
+    s = _store()
+    old = dict(s.get(_advertise(s, "desk", issued_at=10.0, hid=True)).payload)
+    _advertise(s, "desk", issued_at=20.0, hid=False)
+    _cap_replay(s, old)
+    assert capability_map(s, OWNER_PUB)["desk"]["has_hid_inject"] is False
+
+
+def test_host_capability_legitimate_re_advertisement_still_works():
+    """THE REGRESSION GUARD. A host that re-advertises the SAME descriptor re-signs BYTE-IDENTICALLY, so
+    a signature-dedup fix would drop every refresh after the first."""
+    s = _store()
+    for _ in range(3):
+        _advertise(s, "desk", issued_at=_iss(), hid=True)
+        assert capability_map(s, OWNER_PUB)["desk"]["has_hid_inject"] is True
+        _advertise(s, "desk", issued_at=_iss(), hid=False)
+        assert capability_map(s, OWNER_PUB)["desk"]["has_hid_inject"] is False
+
+
+def test_host_capability_high_water_is_PER_HOST_not_global():
+    s = _store()
+    _advertise(s, "desk", issued_at=900.0)            # a HIGH high-water, but only for `desk`
+    _advertise(s, "laptop", issued_at=5.0, hid=True)  # a genuine, much older advert for a DIFFERENT host
+    m = capability_map(s, OWNER_PUB)
+    assert set(m) == {"desk", "laptop"}, "a per-host high-water must not leak across hosts"
+    assert m["laptop"]["has_hid_inject"] is True
+
+
+def test_host_capability_issued_at_is_in_the_signed_core():
+    assert "issued_at" in _CAP_CORE
+
+
+def test_host_capability_descriptor_shape_is_unchanged_by_the_guard():
+    """`issued_at` is bookkeeping, not something the host advertises about itself, so the projected
+    descriptor deliberately excludes it — `capability_map`'s return shape is what it always was."""
+    s = _store()
+    _advertise(s, "desk", issued_at=1.0)
+    assert set(capability_map(s, OWNER_PUB)["desk"]) == {
+        "host_id", "os", "has_screen", "has_camera", "has_gpu_vlm", "always_on",
+        "has_hid_inject", "has_camera_stream"}
+
+
+def test_host_capability_tampered_issued_at_breaks_the_signature():
+    s = _store()
+    rich = dict(s.get(_advertise(s, "desk", issued_at=10.0, hid=True)).payload)
+    _advertise(s, "desk", issued_at=20.0, hid=False)
+    rich["issued_at"] = 10_000.0                      # re-stamp freshness WITHOUT re-signing
+    _cap_replay(s, rich)
+    assert capability_map(s, OWNER_PUB)["desk"]["has_hid_inject"] is False
+
+
+def test_host_capability_high_water_survives_a_prune(monkeypatch):
+    s = _store()
+    rich = dict(s.get(_advertise(s, "desk", issued_at=500.0, hid=True)).payload)
+    K = len(list(s.iter_records()))
+    prefix = [r for r in s.iter_records() if r.seq < K]
+    synthetic = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=K, snapshot_seq=K - 1)
+    assert synthetic.capability_map_issued_map() == {"desk": 500.0}
+
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: synthetic))
+    _advertise(s, "desk", issued_at=600.0, hid=False)
+    _cap_replay(s, rich)
+    assert capability_map(s, OWNER_PUB)["desk"]["has_hid_inject"] is False, \
+        "a pruned-prefix advertisement must stay un-replayable after the prune"
+
+
+def test_host_capability_build_matches_the_live_scan_under_a_replay():
+    s = _store()
+    rich = dict(s.get(_advertise(s, "desk", issued_at=42.0, hid=True)).payload)
+    _advertise(s, "desk", issued_at=43.0, hid=False)
+    _cap_replay(s, rich)
+    folded = build(list(s.iter_records()), trusted_pubkey=OWNER_PUB, base_seq=0, snapshot_seq=-1)
+    assert dict(folded.capability_map)["desk"] == capability_map(s, OWNER_PUB)["desk"]
+    assert dict(folded.capability_map)["desk"]["has_hid_inject"] is False

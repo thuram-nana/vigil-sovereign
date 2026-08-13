@@ -1,6 +1,7 @@
 """SIGIL Phase 8 WS-F — SIGIL-HAND gesture control: debounced fail-safe FSM, invariant landmark
 features, and THE KEYSTONE — injection only inside an owner-armed session, A2 actions queued (a
 gesture can never type a password or launch an app). Run: ~/.sigil/venv/bin/python tests/test_gesture.py"""
+import itertools
 import logging
 import math
 import tempfile
@@ -18,6 +19,15 @@ from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
+
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed capability ADVERTISEMENT (the
+# anti-replay high-water). NEVER time.time(): two advertisements inside one clock tick would collide.
+_adv_issue = itertools.count(1)
+
+
+def _adv_iss() -> float:
+    return float(next(_adv_issue))
 
 
 def _store():
@@ -179,7 +189,7 @@ def test_capability_advertises_hid_flags():
     s = _store()
     advertise_capability(s, {"host_id": "h", "os": "linux", "has_screen": True, "has_camera": True,
                              "has_gpu_vlm": False, "always_on": True,
-                             "has_hid_inject": True, "has_camera_stream": True}, OWNER)
+                             "has_hid_inject": True, "has_camera_stream": True}, OWNER, issued_at=_adv_iss())
     m = capability_map(s, OP)
     assert m["h"]["has_hid_inject"] is True and m["h"]["has_camera_stream"] is True
 
