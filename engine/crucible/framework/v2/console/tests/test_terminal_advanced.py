@@ -21,6 +21,7 @@ import sys
 import types
 
 from framework.v2.console import actions, api, sessions
+from framework.v2.kernel import sovereignty
 
 
 # --- fakes (same shape as test_terminal_ui) ----------------------------------------------------------
@@ -302,3 +303,72 @@ def test_cross_session_fusion_redacts_connected_secrets(monkeypatch):
     assert vendor_secret not in blob                            # connected-session secret masked before egress
     assert actions.MASK in blob
     assert "auth" in blob                                       # non-secret grounding from the connected run survives
+
+
+# --- the sovereignty ladder governs this model egress too ---------------------------------------------
+#
+# The console terminal router is the console-side twin of the `vigil engage` think step: an
+# ANTHROPIC_API_KEY read followed by a direct `anthropic.Anthropic(...)` call. It must pass the SAME
+# `kernel.sovereignty` ladder the URK backend registry and `agents.egress_guard` consult, or an
+# AIR_GAPPED deployment still egresses from here.
+
+
+def _no_sovereignty_env(monkeypatch):
+    for var in ("CRUCIBLE_SOVEREIGNTY_TIER", "CRUCIBLE_SOVEREIGN_MODE",
+                "CRUCIBLE_SOVEREIGNTY_SEALED", "CRUCIBLE_ANTHROPIC_ZDR"):
+        monkeypatch.delenv(var, raising=False)
+    sovereignty.set_policy(None)
+
+
+def _forbid_sdk(monkeypatch):
+    """Fail the test if the anthropic SDK is even IMPORTED — the refusal must precede it."""
+    class _Boom(types.ModuleType):
+        def __getattr__(self, name):
+            raise AssertionError(f"the anthropic SDK was touched under a sovereign tier: {name}")
+    monkeypatch.setitem(sys.modules, "anthropic", _Boom("anthropic"))
+
+
+def test_terminal_router_refuses_the_model_call_under_a_sovereign_tier(monkeypatch):
+    _no_sovereignty_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "AIR_GAPPED")
+    _stub_empty_context(monkeypatch)
+    _forbid_subprocess(monkeypatch)
+    _forbid_sdk(monkeypatch)
+
+    r = actions.terminal_propose("what did we prove this session?")
+
+    assert r["ok"] is False
+    assert "AIR_GAPPED" in r["error"]                            # names the tier that refused
+    assert "CRUCIBLE_SOVEREIGNTY_TIER" in r["error"]             # names how to change it
+    assert "sk-test" not in r["error"]                           # still secret-free
+    sovereignty.set_policy(None)
+
+
+def test_terminal_router_still_works_at_the_permissive_tier(monkeypatch):
+    """MUTATION CONTROL: identical call, tier flipped to PERMISSIVE → the model call happens. Proves the
+    refusal above is caused by the TIER, not by the fakes or the missing context."""
+    _no_sovereignty_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", "PERMISSIVE")
+    _stub_empty_context(monkeypatch)
+    _forbid_subprocess(monkeypatch)
+    _install_fake_anthropic(monkeypatch, json.dumps(
+        {"mode": "answer", "answer": "nothing yet.", "cites": []}))
+
+    r = actions.terminal_propose("what did we prove this session?")
+
+    assert r["ok"] is True and r["mode"] == "answer"
+    sovereignty.set_policy(None)
+
+
+def test_terminal_router_refusal_precedes_the_key_check_never_leaks_state(monkeypatch):
+    """With NO key the answer is unchanged (`need_key`), at every tier — the gate must not turn a
+    keyless console into a sovereignty error, nor vice versa."""
+    _no_sovereignty_env(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    for tier in ("AIR_GAPPED", "PERMISSIVE"):
+        monkeypatch.setenv("CRUCIBLE_SOVEREIGNTY_TIER", tier)
+        r = actions.terminal_propose("anything")
+        assert r["ok"] is False and r.get("need_key") is True, tier
+    sovereignty.set_policy(None)

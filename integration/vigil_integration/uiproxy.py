@@ -521,6 +521,10 @@ _OFFENSE_ENV_ALLOWLIST = frozenset({
     # mirror settings.CONFIG_OFFENSE_VARS (plane=="offense"), or a UI knob becomes a placebo (emitted by the
     # sovereign side then silently dropped here). test_config_plane_allowlists_agree guards the two sets.
     "CRUCIBLE_LLM_MAX_WORKERS", "CRUCIBLE_LLM_MIN_INTERVAL_S", "CRUCIBLE_RECON_MAX_WORKERS",
+    # The sovereignty ladder itself. Without these on the allowlist an operator's tier choice would be
+    # silently DROPPED on the way to the offense children — i.e. an AIR_GAPPED deployment would run
+    # PERMISSIVE. Passing them can only ever narrow what the child may call, never widen it.
+    "CRUCIBLE_SOVEREIGNTY_TIER", "CRUCIBLE_SOVEREIGN_MODE", "CRUCIBLE_SOVEREIGNTY_SEALED",
     "CRUCIBLE_ANTHROPIC_ZDR", "CRUCIBLE_EMBEDDER", "CRUCIBLE_BURP_URL", "CRUCIBLE_CLOUD_INVENTORY_URL",
     "CRUCIBLE_BEDROCK_REGION_ALLOWLIST", "CRUCIBLE_VERTEX_REGION_ALLOWLIST",
     # cloud-provider CONFIG (non-secret) the Phase-C live collectors read via the SDK ambient chains

@@ -29,11 +29,21 @@ deterministic pipeline still runs live: the injected ``replay`` (a scripted ``LL
 typically a :class:`ReplayThinker`) supplies each decision. No key, no client, no replay → fail-closed
 to the safest action; the module never crashes and never fabricates authority.
 
+**Sovereignty-governed.** Before ANY model client is constructed or called, this module asks the SAME
+ladder that governs every other egress path in the engine — ``framework.v2.kernel.sovereignty``, the one
+``agents.egress_guard`` and the URK backend registry consult — whether the operator's configured tier
+permits this backend. Under ``AIR_GAPPED`` / ``SOVEREIGN_CLOUD`` / ``TRUSTED_CLOUD`` a direct consumer
+Anthropic call is REFUSED: no SDK import, no client construction, no bytes off the host — and the think
+step degrades to the inert ``ASK_USER`` pause carrying the policy's OWN message, which names the tier and
+the env var to change it deliberately. The offline paths (``replay``, the no-backend case) are untouched;
+they never egress. See :func:`llm_egress_refusal`.
+
 **Secret-free.** The API key is only ever forwarded to the SDK client constructor; it is never logged,
 never placed in a span/spine record, and never included in the request the caller can inspect.
 
 Import-clean: pydantic + stdlib + the ``anthropic`` SDK (imported lazily, so a fake-client/replay run
-needs no SDK) + the existing F1/F2/F3 seams.
+needs no SDK) + the existing F1/F2/F3 seams + a lazily-imported ``framework.v2.kernel.sovereignty``
+(fail-closed when it is not importable).
 """
 
 from __future__ import annotations
@@ -117,6 +127,136 @@ def _safest(reason: str, question: str) -> LLMDecision:
     in ``agent.react``). Returned whenever there is no usable think backend or a backend fails — a think
     step must degrade to a human pause, never to an action-bearing edge."""
     return LLMDecision(action=ActionType.ASK_USER, reasoning=reason, question=question)
+
+
+# ---------------------------------------------------------------------------------------------------
+# sovereignty gate — the SAME ladder that governs every other egress path, applied to the model egress
+# ---------------------------------------------------------------------------------------------------
+
+# Read ONLY by the fail-closed fallback below, for the case where the canonical policy module cannot be
+# imported at all. These are the same names `kernel.sovereignty` reads; the fallback never *permits*
+# anything the canonical policy would refuse — it only ever refuses.
+_TIER_ENV = "CRUCIBLE_SOVEREIGNTY_TIER"
+_LEGACY_TIER_ENV = "CRUCIBLE_SOVEREIGN_MODE"
+_TRUTHY = ("1", "true", "yes", "on")
+
+_HOWTO = (
+    f"To allow it deliberately, set {_TIER_ENV} to a tier that permits this backend "
+    f"(PERMISSIVE permits everything; TRUSTED_CLOUD additionally needs CRUCIBLE_ANTHROPIC_ZDR=1 to "
+    f"attest the key is zero-data-retention), or point the think step at a local backend."
+)
+
+
+def _direct_backend_name(sov: Any) -> str:
+    """The ``kernel.sovereignty`` backend name for a DIRECT ``anthropic.Anthropic(...)`` client.
+
+    The engine owns this rule (``sovereignty.direct_anthropic_backend_name``) and that is what we use.
+    The local mirror below is a VERSION-SKEW degradation only — an engine copy on the path that predates
+    that helper, or none at all. It is not a second policy: it computes the same name from the same env
+    var, and if the attestation cannot be read it yields the STRICTER ``anthropic`` (cloud_only), so the
+    degradation can only ever narrow what is permitted, never widen it. The policy DECISION itself is
+    always the engine's ``assert_permitted``."""
+    fn = getattr(sov, "direct_anthropic_backend_name", None)
+    if callable(fn):
+        try:
+            name = fn()
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+        except Exception:  # noqa: BLE001 — fall through to the stricter local mirror
+            pass
+    try:
+        if os.environ.get("CRUCIBLE_ANTHROPIC_ZDR", "").strip() in _TRUTHY:
+            return "anthropic-zdr"
+    except Exception:  # noqa: BLE001 — an unreadable environment yields the STRICTER classification
+        pass
+    return "anthropic"
+
+
+def _fallback_refusal(backend: str) -> Optional[str]:
+    """The fail-closed answer for when ``framework.v2.kernel.sovereignty`` cannot be imported, so the
+    tier cannot be evaluated properly.
+
+    Mirrors ``sovereignty._resolve_tier_from_env`` in the DENY direction only: if the operator has
+    opted into any non-PERMISSIVE tier (or the legacy binary flag) we refuse, because we cannot prove
+    the egress is permitted. If no sovereignty env is set at all the canonical policy would have
+    resolved PERMISSIVE anyway, so we permit — behaviour is then byte-identical to before this gate
+    existed. This can over-refuse; it can never under-refuse."""
+    tier = os.environ.get(_TIER_ENV, "").strip().upper()
+    if tier:
+        # An explicit tier wins over the legacy flag, exactly as `_resolve_tier_from_env` orders them.
+        # Anything other than PERMISSIVE (including an unrecognised value, which the canonical policy
+        # resolves to AIR_GAPPED) is a configured sovereign tier.
+        configured = "" if tier == "PERMISSIVE" else f"{_TIER_ENV}={tier}"
+    elif os.environ.get(_LEGACY_TIER_ENV, "").strip() in _TRUTHY:
+        configured = f"{_LEGACY_TIER_ENV} is set (legacy alias for AIR_GAPPED)"
+    else:
+        configured = ""
+    if not configured:
+        return None      # no sovereign tier configured ⇒ the canonical policy would be PERMISSIVE
+    return (
+        f"LLM egress to backend {backend!r} refused: a sovereignty tier is configured ({configured}) "
+        f"but the policy module framework.v2.kernel.sovereignty is not importable from this process, "
+        f"so the tier cannot be evaluated. Refusing rather than egressing (fail-closed). Put the engine "
+        f"on PYTHONPATH so the policy can be enforced properly. " + _HOWTO
+    )
+
+
+def llm_egress_refusal(backend: Optional[str] = None) -> Optional[str]:
+    """``None`` when the active sovereignty tier permits ``backend`` to be called from this process;
+    otherwise the operator-facing refusal text (which names the tier, what it permits, and how to change
+    it) — the message is produced by ``kernel.sovereignty`` itself, not re-worded here.
+
+    ``backend`` names what the model client actually is, in ``kernel.sovereignty`` vocabulary
+    (``anthropic``, ``anthropic-zdr``, ``ollama``, ``bedrock``, …). ``None`` ⇒ the direct-Anthropic name
+    the SDK path resolves to. Unknown names classify ``cloud_only`` in the policy — fail-closed.
+
+    Deny-by-default at every step: an unimportable policy module refuses whenever a tier is configured
+    (:func:`_fallback_refusal`), and a policy module that raises while being evaluated refuses
+    unconditionally — we never treat "could not decide" as "permitted".
+
+    TOTAL: this never raises. ``think()`` promises never to raise, so a gate that could throw would push
+    the failure into the ReAct loop; every escape here resolves to a REFUSAL, never to a permission."""
+    try:
+        return _llm_egress_refusal(backend)
+    except BaseException as exc:  # noqa: BLE001 — an escaped error is a refusal, never a permission
+        return (
+            f"LLM egress refused: the sovereignty gate itself failed ({type(exc).__name__}). "
+            f"Refusing rather than egressing (fail-closed). " + _HOWTO
+        )
+
+
+def _llm_egress_refusal(backend: Optional[str]) -> Optional[str]:
+    """The gate body. Wrapped by :func:`llm_egress_refusal`, which converts any escape into a refusal."""
+    try:
+        from framework.v2.common.errors import SovereigntyViolation
+        from framework.v2.kernel import sovereignty as _sovereignty
+    except Exception:  # noqa: BLE001 — engine not importable ⇒ fall back to the deny-only env check
+        return _fallback_refusal(_direct_backend_name(None))
+    try:
+        name = (backend or "").strip() or _direct_backend_name(_sovereignty)
+        _sovereignty.current().assert_permitted(name)
+    except SovereigntyViolation as exc:
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 — a policy that cannot be evaluated is NOT a permission
+        return (
+            f"LLM egress refused: the sovereignty policy could not be evaluated "
+            f"({type(exc).__name__}). Refusing rather than egressing (fail-closed). " + _HOWTO
+        )
+    return None
+
+
+def _refused(refusal: str) -> LLMDecision:
+    """Turn a sovereignty refusal into the inert human pause, carrying the policy's own explanation.
+
+    Refusing by RETURNING the safest action (rather than raising) is what keeps ``think()`` total — the
+    ReAct loop depends on that — while still being fail-closed in the only sense that matters here: the
+    client is never constructed, the SDK is never imported, and nothing leaves the host."""
+    logger.warning("live think call refused by the sovereignty policy — no model egress performed")
+    return _safest(
+        "the sovereignty policy refused this model egress: " + refusal,
+        "the configured sovereignty tier forbids calling this model backend — "
+        "how should I proceed? (" + refusal + ")",
+    )
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -409,6 +549,7 @@ def think(
     replay: Optional[Any] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    backend: Optional[str] = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> LLMDecision:
     """Run one live Claude think step and return a **non-authoritative** ``LLMDecision`` proposal.
@@ -419,12 +560,22 @@ def think(
     ``ASK_USER`` action, never an action-bearing edge from garbage, never authority).
 
     Backend selection (fail-closed / deny-by-default at every step):
-      * ``client`` injected (a fake in tests, a caller-built real client) → call it. Takes precedence,
-        and its own auth is used — the ``api_key`` arg is ignored and never touched.
-      * else a key is resolvable (``api_key`` arg or ``ANTHROPIC_API_KEY``) → build a real client and
-        call it. The key is only forwarded to the SDK — never logged or spined.
-      * else ``replay`` is provided → draw the next scripted decision (keyless-live).
-      * else → the safest action (no backend wired).
+      * ``client`` injected (a fake in tests, a caller-built real client) → SOVEREIGNTY-GATED, then
+        called. Takes precedence, and its own auth is used — the ``api_key`` arg is ignored and never
+        touched. An injected client is opaque to this module, so it is classified by ``backend``:
+        declare a local backend (e.g. ``backend="ollama"``) to inject a client that egresses nowhere
+        under a sovereign tier. Undeclared ⇒ classified as a direct cloud client — fail-closed.
+      * else a key is resolvable (``api_key`` arg or ``ANTHROPIC_API_KEY``) → SOVEREIGNTY-GATED, then a
+        real client is built and called. Here the backend is NOT caller-declarable: this path always
+        constructs a direct ``anthropic.Anthropic`` client, so it is always classified as such and the
+        ``backend`` argument is ignored (it must not be usable to relabel a cloud call as local).
+        The key is only forwarded to the SDK — never logged or spined.
+      * else ``replay`` is provided → draw the next scripted decision (keyless-live). No egress, so no
+        sovereignty gate: an AIR_GAPPED deployment runs the replay path unchanged.
+      * else → the safest action (no backend wired). No egress.
+
+    On a sovereignty refusal nothing is imported, constructed, or sent: the safest ``ASK_USER`` action
+    is returned carrying the policy's own explanation (naming the tier and how to change it).
 
     Never raises; always returns an ``LLMDecision``. The decision is a proposal only — it must clear
     ``agent.react.authorize_edge`` before anything runs.
@@ -442,12 +593,24 @@ def think(
         )
 
     # 1. explicit client wins (its own auth is used; the api_key arg is not consulted or logged).
+    #    Gated FIRST: an injected client is opaque, so the caller's `backend` declaration classifies it
+    #    and an undeclared one is treated as a direct cloud client (fail-closed).
     if client is not None:
+        refusal = llm_egress_refusal(backend)
+        if refusal is not None:
+            return _refused(refusal)
         return _think_via_client(client, system, user, model=model, max_tokens=max_tokens)
 
-    # 2. resolvable key → build a real client and go live (secret-free).
+    # 2. resolvable key → build a real client and go live (secret-free). Gated BEFORE the SDK import and
+    #    before client construction, so under a sovereign tier this path never touches `anthropic`.
+    #    `backend` is deliberately NOT consulted here — this path is a direct Anthropic client by
+    #    construction, so it is classified as one and cannot be relabelled by a caller. The gate sits
+    #    INSIDE the key branch so the keyless paths (3 and 4) are reached exactly as before.
     key = _resolve_key(api_key)
     if key is not None:
+        refusal = llm_egress_refusal(None)
+        if refusal is not None:
+            return _refused(refusal)
         live = _build_live_client(key)
         if live is not None:
             return _think_via_client(live, system, user, model=model, max_tokens=max_tokens)
@@ -497,4 +660,5 @@ class ReplayThinker:
         return max(0, len(self._items) - self._i)
 
 
-__all__ = ["think", "ReplayThinker", "resolve_model", "DEFAULT_MODEL", "DEFAULT_MAX_TOKENS"]
+__all__ = ["think", "ReplayThinker", "resolve_model", "llm_egress_refusal",
+           "DEFAULT_MODEL", "DEFAULT_MAX_TOKENS"]

@@ -177,6 +177,41 @@ misconfigured deployment fails closed at startup.
 | `TRUSTED_CLOUD` | `CRUCIBLE_SOVEREIGNTY_TIER=TRUSTED_CLOUD` | + Anthropic Zero-Data-Retention (`CRUCIBLE_ANTHROPIC_ZDR=1`) | Contractual data-handling (ZDR contract with Anthropic) | Frontier | Trusted-vendor organisational use |
 | `PERMISSIVE` (default) | Default; or `CRUCIBLE_SOVEREIGNTY_TIER=PERMISSIVE` | + plain consumer Anthropic / Claude Code OAuth | None | Best-available | Development, personal use |
 
+### What the tier actually governs (and what it does not)
+
+The tier is checked before any model client is constructed and before any
+provider SDK is imported, at **every** model-egress site in the offense
+plane:
+
+| Egress site | Reached by | Gate |
+|---|---|---|
+| URK backend registry (`kernel/llm.py::_construct`) | every `kernel.binding` reasoning call | `sovereignty.current().assert_permitted(name)` |
+| Live think step (`live/think_claude.py`) | `vigil engage` | `think_claude.llm_egress_refusal()` → the same `assert_permitted` |
+| Auto-patch coder (`live/codefix_runner.py`) | `vigil patch`, gated fix-apply | same |
+| Console terminal router (`console/actions.py::terminal_propose`) | the cockpit's natural-language terminal | same |
+
+Non-LLM egress is governed separately and is unchanged: HTTP to the
+target by `agents/scope_gate` + `agents/egress_guard`, intel collectors
+by the collector-hosts allowlist.
+
+Honest limits — the tier does **not** cover:
+
+- The **sovereign (SIGIL) plane's own** model calls (voice, vision,
+  memory consolidation). Those run in a separate process behind SIGIL's
+  own WARDEN policy and read `SIGIL_ANTHROPIC_API_KEY` /
+  `ANTHROPIC_API_KEY` independently of `CRUCIBLE_SOVEREIGNTY_TIER`.
+- A **caller-injected** model client that in-process code declares as a
+  local backend. `backend="ollama"` on a client that actually reaches a
+  cloud endpoint defeats the gate — the declaration is trusted
+  in-process code, not a verified property. An *undeclared* injected
+  client is classified as cloud, so the default is fail-closed.
+- Egress performed by **third-party tools** the engine shells out to.
+  Those are bounded by the gateway / sandbox, not by this ladder.
+
+A tier is not a network control. For an enforced boundary combine it with
+the egress gateway (`gateway/`) or host firewalling; the tier guarantees
+the engine will not *attempt* a disallowed model call.
+
 ### Per-tier configuration
 
 **AIR_GAPPED** requires a local LLM substrate (Ollama is the

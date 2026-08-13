@@ -130,11 +130,11 @@ class AnthropicBackend(LLMBackend):
         # construct lazily on first use to avoid network on import
         self._client: object | None = None
         self.model = os.environ.get("CRUCIBLE_ANTHROPIC_MODEL", _DEFAULT_MODEL)
-        # ZDR flag: explicit constructor arg wins; otherwise read env.
-        env_zdr = os.environ.get("CRUCIBLE_ANTHROPIC_ZDR", "").strip() in (
-            "1", "true", "yes", "on",
-        )
-        self.zdr = bool(zdr) if zdr is not None else env_zdr
+        # ZDR flag: explicit constructor arg wins; otherwise read env. The env read lives in
+        # `kernel.sovereignty` so this backend and every other direct-Anthropic-SDK egress site
+        # (the live think step, the console terminal router) share ONE attestation vocabulary.
+        from .. import sovereignty as _sovereignty
+        self.zdr = bool(zdr) if zdr is not None else _sovereignty.zdr_attested()
         if self.zdr:
             # The sovereignty policy classifies by name; rebrand this
             # instance so the policy gate places it under trusted_cloud.
