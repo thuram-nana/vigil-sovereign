@@ -9,6 +9,8 @@ governance events are owner-signed, so an A2-auto log line PROVES a real owner p
 import tempfile
 from pathlib import Path
 
+import itertools
+
 from sigil.agents.base import Agent, Proposal, Tier
 from sigil.governor import BudgetCaps, Governor, KillSwitch, PromotionPolicy
 from sigil.governor.authn import signed_payload
@@ -17,6 +19,15 @@ from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()                 # the established owner identity for these tests
 OWNER_PUB = OWNER.public_key_b64
+
+# A deterministic, strictly-increasing source for the anti-replay `issued_at` on every dangerous-direction
+# governance mint. NEVER time.time(): two mints inside one clock tick would collide and the second would be
+# refused as a replay, making these tests flaky in exactly the direction that hides the guard failing.
+_issue = itertools.count(1)
+
+
+def _iss() -> float:
+    return float(next(_issue))
 
 
 def _store():
@@ -49,7 +60,7 @@ def test_killswitch_halts_and_only_signed_release_restores():
     s.append(kind="event", source="governor", actor="WARDEN",
              payload={"signal": "governor.killswitch", "state": "released"})
     assert not t.run(Tier.A1).applied, "an unsigned release cannot un-halt the mesh (fail-closed)"
-    KillSwitch(s, owner_key=OWNER).release()
+    KillSwitch(s, owner_key=OWNER).release(issued_at=_iss())
     assert t.run(Tier.A1).applied, "an OWNER-SIGNED release restores the mesh"
 
 
@@ -118,7 +129,7 @@ def test_self_audit_reconstructs_including_denials():
     t = _Emitter(s)
     KillSwitch(s, owner_key=OWNER).engage()
     t.run(Tier.A3, kind="wire")                       # DENIED under the kill switch
-    KillSwitch(s, owner_key=OWNER).release()
+    KillSwitch(s, owner_key=OWNER).release(issued_at=_iss())
     t.run(Tier.A1, kind="event")                      # auto
     rows = self_audit(s, agent="TESTER")
     decs = {r["decision"] for r in rows}
@@ -243,7 +254,7 @@ def test_spine_integrity_after_governance_writes():
     s = _store()
     t = _Emitter(s)
     KillSwitch(s, owner_key=OWNER).engage(); t.run(Tier.A1)
-    KillSwitch(s, owner_key=OWNER).release(); t.run(Tier.A1)
+    KillSwitch(s, owner_key=OWNER).release(issued_at=_iss()); t.run(Tier.A1)
     PromotionPolicy(s, owner_key=OWNER).grant("TESTER", "draft")
     t.run(Tier.A2, kind="event")
     ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OWNER_PUB).approve(pending(s, OWNER_PUB)[0].seq)

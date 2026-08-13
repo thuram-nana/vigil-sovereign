@@ -16,6 +16,7 @@ the identity/split equivalence tests prove the fold machinery for when Slice D/E
 Sub-state ↔ bearer (all identity-empty in Slice C):
   nonce_highwater        {device: max int-nonce}                 join-semilattice (max)         envelope replay floor
   killswitch_engaged     bool                                    last-write latch (ID/T/F)      governor halt
+  killswitch_issued_hw   float|None                              join-semilattice (max)         release anti-replay
   creation_created       {(service,origin): count}               count-add (PAIR key!)          DELEGATE account cap
   capability_map         {host_id: cap}                          right-biased LWW               mesh host capability
   mesh_dev_state         {device_pubkey: authorized|revoked}     LWW (keep revoked!)            mesh device authz
@@ -56,6 +57,15 @@ class SnapshotState(BaseModel):
 
     nonce_highwater: dict[str, int] = {}
     killswitch_engaged: bool = False
+    # ANTI-REPLAY high-waters of the governance latches: the largest `issued_at` whose DANGEROUS-direction
+    # record was actually HONORED in the pruned prefix. `None` (or an absent row) means "none honored yet" —
+    # the -inf bottom. A sentinel and not a number because -inf is not portable JSON and 0.0 is itself a
+    # legitimate high-water (an unparseable `issued_at` folds to 0.0). These MUST be carried across a prune:
+    # without them the first hard prune would reset every high-water to the bottom and make every release /
+    # enable / grant / device authorization in the pruned prefix replayable again — i.e. the pruning work
+    # would silently undo the anti-replay guard. The fold is `max` over honored records, a join-semilattice,
+    # so it is associative exactly like `nonce_highwater`.
+    killswitch_issued_hw: Optional[float] = None
     capability_latch: list = []       # [[capability, enabled_bool], ...] — governor.capability latch (LWW:
     #                                   disable=any, enable=owner-verified). Missing capability ⇒ enabled.
     # tuple-keyed / None-tolerant sub-states as list-of-rows (JSON-safe + type-verbatim): a non-str key an
@@ -180,7 +190,12 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     from ..agents.actor_scope import _origin
     from ..bridge.envelope import RECEIPT_SIGNAL
     from ..consolidate.grounding import CONSOLIDATE_SOURCE
-    from ..governor.authn import verify_signed
+    from ..governor.authn import NO_HIGHWATER, as_issued_at, verify_signed
+    # Import each consumer's REAL signed-core tuple rather than restating it here. A restated tuple is a
+    # silent drift hazard: adding a field to a consumer's core (as the anti-replay `issued_at` did) while
+    # this copy lagged would make build() honor records the live scan rejects, and vice versa.
+    from ..governor.killswitch import SIGNAL as _KS_SIGNAL
+    from ..governor.killswitch import _CORE as _KS_CORE
     from ..mesh.registry import CAP_SIGNAL, DEV_SIGNAL, _CAP_CORE, _DEV_CORE
 
     # The order-DEPENDENT folds (the kill-switch latch, every last-write-wins map) require ascending seq.
@@ -191,6 +206,8 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
     s = seed
     nonce: dict[str, int] = dict(s.nonce_highwater) if s else {}
     ks_engaged = s.killswitch_engaged if s else False
+    ks_issued = (s.killswitch_issued_hw if s.killswitch_issued_hw is not None else NO_HIGHWATER) \
+        if s else NO_HIGHWATER
     cap_latch: dict[Any, bool] = dict(s.capability_latch) if s else {}   # list-of-rows -> {capability: bool}
     creation: dict[tuple[Optional[str], Optional[str]], int] = dict(s.creation_counter()) if s else {}
     capability: dict[Any, dict] = dict(s.capability_map) if s else {}   # list-of-rows -> dict (keys verbatim)
@@ -220,13 +237,16 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
                         n = None
                     if n is not None and n > nonce.get(dev, -1):
                         nonce[dev] = n
-        # --- killswitch latch (engage=any, release=owner-verified, IN ORDER) ---
-        if sig == "governor.killswitch":
+        # --- killswitch latch (engage=any, release=owner-verified + ANTI-REPLAY FRESH, IN ORDER) ---
+        if sig == _KS_SIGNAL:
             state = p.get("state")
             if state == "engaged":
                 ks_engaged = True
-            elif state == "released" and verify_signed(p, ("signal", "state"), tp):
-                ks_engaged = False
+            elif state == "released" and verify_signed(p, _KS_CORE, tp):
+                issued = as_issued_at(p.get("issued_at"))
+                if issued > ks_issued:              # mirror _scan_engaged EXACTLY: stale/replayed ⇒ no effect
+                    ks_issued = issued
+                    ks_engaged = False
         # --- capability latch (disable=any, enable=owner-verified, IN ORDER, per capability). No isinstance
         #     guard on the key — mirror the scan, which keys on p.get("capability") unconditionally. ---
         if sig == "governor.capability":
@@ -282,6 +302,7 @@ def build(records: Iterable[SpineRecord], *, trusted_pubkey: Optional[str],
         base_seq=base_seq, snapshot_seq=snapshot_seq, trusted_pubkey=tp,
         nonce_highwater=nonce,
         killswitch_engaged=ks_engaged,
+        killswitch_issued_hw=(None if ks_issued == NO_HIGHWATER else ks_issued),   # -inf ⇒ the None sentinel
         capability_latch=[[c, e] for c, e in cap_latch.items()],
         creation_created=[[s, o, c] for (s, o), c in creation.items()],
         capability_map=[[h, c] for h, c in capability.items()],

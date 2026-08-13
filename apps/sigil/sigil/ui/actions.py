@@ -27,6 +27,13 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
     if action not in ACTIONS:
         raise ValueError(f"unknown action: {action!r}")
     store = store or SpineStore()
+    # The SERVER's clock stamps `issued_at` on every dangerous-direction governance mutation (the
+    # anti-replay high-water). It is deliberately NOT taken from `params`: the browser is untrusted, and a
+    # caller-chosen `issued_at` would let a request pin the high-water arbitrarily high and lock the owner
+    # out of the safe direction, or arbitrarily low and neuter the guard. The governance modules read no
+    # clock themselves — the caller holding the owner key owns "when", and here that caller is this server.
+    import time as _time
+
     from ..agents.approvals import ApprovalQueue
     from ..governor import KillSwitch, PromotionPolicy
     from ..governor.identity import ensure_owner_keypair
@@ -40,7 +47,8 @@ def do_action(action: str, params: dict, *, store: Optional[SpineStore] = None) 
         return {"ok": True, "action": action, "target_seq": seq, "recorded_seq": out}
     if action in ("kill", "release"):
         ks = KillSwitch(store, owner_key=owner)
-        out = ks.engage(reason=reason) if action == "kill" else ks.release(reason=reason)
+        out = ks.engage(reason=reason) if action == "kill" else ks.release(issued_at=_time.time(),
+                                                                          reason=reason)
         return {"ok": True, "action": action, "recorded_seq": out}
     if action in ("promote", "revoke"):
         pp = PromotionPolicy(store, owner_key=owner)

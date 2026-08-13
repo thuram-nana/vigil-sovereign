@@ -76,7 +76,7 @@ def test_domain_separation_capability_and_signal():
         "an owner-signed enable(voice) must not re-enable gesture (capability is in the signed core)"
     # a kill-switch release (different signal + core) must not re-enable any capability
     from sigil.governor.killswitch import KillSwitch
-    KillSwitch(s, owner_key=OWNER, trusted_pubkey=OWNER_PUB).release(reason="unrelated")
+    KillSwitch(s, owner_key=OWNER, trusted_pubkey=OWNER_PUB).release(issued_at=1.0, reason="unrelated")
     assert not cg.is_enabled("gesture"), "a kill-switch release cannot re-enable a capability (domain-separated)"
 
 

@@ -261,7 +261,7 @@ def test_killswitch_cache_correct_and_invalidates_on_growth():
     s.append(kind="event", source="governor", actor="WARDEN",                     # forged UNSIGNED release
              payload={"signal": "governor.killswitch", "state": "released"})
     assert ks.is_engaged() is True, "an unsigned release cannot revive the mesh — even through the cache"
-    KillSwitch(s, owner_key=owner, trusted_pubkey=pub).release()                   # owner-signed → grows
+    KillSwitch(s, owner_key=owner, trusted_pubkey=pub).release(issued_at=1.0)      # owner-signed → grows
     assert ks.is_engaged() is False, "an owner-signed release un-halts on the next call"
     # prove the cache is actually consulted: with no new appends the authoritative scan is NOT re-run
     calls = {"n": 0}

@@ -317,7 +317,14 @@ def cmd_warden_anchor_get(a) -> None:
 
 def cmd_warden(a) -> None:
     """Phase 6 governor controls (SIGIL §5): kill switch + per-kind promotion policy. Governance
-    mutations are signed by the persisted OWNER key (auto-created once if absent)."""
+    mutations are signed by the persisted OWNER key (auto-created once if absent).
+
+    The CLI supplies `issued_at` for every dangerous-direction mutation. The governance modules read no
+    clock by design (a module-supplied timestamp is one an attacker replaying the module's own output
+    could rely on); the authority over "when" sits with the caller holding the owner key, which here is
+    the operator at this terminal."""
+    import time as _time
+
     from .governor import KillSwitch, PromotionPolicy
     from .governor.identity import ensure_owner_keypair
     store = SpineStore()
@@ -329,7 +336,7 @@ def cmd_warden(a) -> None:
         seq = KillSwitch(store, owner_key=ok).engage(reason=a.reason or "")
         print(f"  KILL SWITCH ENGAGED (seq {seq}) — agent mesh halted; perception + memory read stay alive")
     elif a.action == "release":
-        seq = KillSwitch(store, owner_key=ok).release(reason=a.reason or "")
+        seq = KillSwitch(store, owner_key=ok).release(issued_at=_time.time(), reason=a.reason or "")
         print(f"  kill switch released (seq {seq}, owner-signed) — agent mesh live again")
     elif a.action == "promote":
         seq = PromotionPolicy(store, owner_key=ok).grant(a.agent, a.scope or "*")
