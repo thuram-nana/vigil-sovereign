@@ -412,7 +412,7 @@
         "integration/vigil_integration/live/secret_runner.py:run_secret_validation",
         "integration/vigil_integration/live/live_transport.py:LiveTransport",
         "integration/vigil_integration/live/secret_verify.py:secret_verify",
-        "tools/livefire/secret_github_livefire.sh"
+        "tools/livefire/secret_github_livefire.py:main"
       ]
     },
     {
