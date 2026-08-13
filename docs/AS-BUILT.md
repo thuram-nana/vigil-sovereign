@@ -14,11 +14,26 @@ its tests win — update this doc.
 
 ## What's assured now (2026-07 hardening program — merged & CI-green on `main`)
 
-Every item below merged only after adversarial red-pen + all 6 required CI jobs green (required status
-checks are now enforced on protected `main` — nothing merges without them):
+Every item below merged only after adversarial red-pen + all required CI jobs green. Branch protection on
+`main` is live, and its exact shape matters more than the slogan:
+
+| Protection | State today |
+|---|---|
+| Required status checks | **9**, all of them: `vigil_core — shared integrity substrate` · `CRUCIBLE core on vigil_core` · `gateway egress gate (P6)` · `integration two-env boundary (P5)` · `strix Claude-runtime (P8)` · `SIGIL governor gates (P7 — offense gate + authn)` · `formal (TLA+ core-invariant model check, F1)` · `WARDEN Rust kernel (A10 durability)` · `A14 supply-chain gate` |
+| Force-push to `main` | blocked |
+| Branch deletion | blocked |
+| Administrator enforcement | **off** (`enforce_admins: false`) — the repository owner keeps an explicit admin override |
+
+So the honest form of the claim is: **a pull request cannot merge without those 9 checks green — unless the
+repository owner uses their admin override.** For every ordinary contributor, and for every automated agent
+in this repo, the gate is unconditional. For the owner it is a deliberate, attributable act rather than an
+impossibility. Anyone can re-derive this in one command:
+`gh api repos/thuram-nana/vigil-sovereign/branches/main/protection`.
 
 - **Per-action owner approval is the default offense authority** (#178). A queued offense action, and the
-  vendored agent's arbitrary shell (`exec_command`/`write_stdin`, gated by default), runs only on a
+  vendored agent's arbitrary shell (`exec_command`/`write_stdin`, gated by default — and **fail-closed since
+  #296**: a wiring failure raises `WardenGateUnavailable` and stops the run rather than continuing ungated),
+  runs only on a
   single-use, action-bound, owner-signed token (`vigil approve`); no authority / no token ⇒ blocked.
 - **Every finding tells you how to re-verify it** (#179), on all five surfaces (report · SARIF/JSON ·
   signed certificate · proof bundle `HOW-TO-VERIFY.md` · UI drawer); per-session graph as a real
@@ -92,7 +107,7 @@ Merged and green on `main` in the current program (see `git log` and `docs/DEFER
 | Live L1 error-based SQLi | `framework/v2/verify/oracles.py` (`error_signature_oracle`, `ERROR_SIGNATURE`) | `error_based_sqli` routes to the `error_signature` oracle first; over the loopback app it minted a real FACT **re-verified 3/3 offline with no Caido/Docker** (the first-party executor captured the datastore-error bytes). |
 | Live L2 **external** FACT (2026-07-29, re-corroborated 2026-07-30) | `targets/testasp/charter.md` §7 | The byte-identical external run is **DONE and re-corroborated**: a fresh chartered run against the vendor-published `testasp.vulnweb.com` on 2026-07-30 ran live through the full gate chain (every destructive probe **default-denied**, no TTY) and minted **2 oracle-confirmed, certificate-backed findings** onto the signed spine (`.blackboard/store.sqlite`, `--spine`): `boolean_sqli` (`differential_response`, 0.99) + `open_redirect` (`achieved_state`, 0.90). The **signed spine carries these FACTs** (resolving an earlier per-run `telemetry.json` that showed only a refusal — a destructive-edges-denied view, not the confirmed edge plane). Two `request_smuggling` timing detections (CL.TE / TE.TE) were also observed but are **UNCONFIRMED LEADs**, capped at LEAD per audit **A12 (#269)** — timing alone is a hypothesis, not proof, so they are **not** FACTs and are **not** carried as confirmations on the spine. The self-contained **3/3 offline re-verify** is demonstrated on-box by the loopback L1 FACT (`AS-BUILT-LIVE.md` §L1); this external run is corroborated by minting through the full gate + a tampered-baseline byte rejected (`[BAD] CLAIM-MISMATCH`). Demonstrated live **and** external. |
 | Governed local Terminal + AI chatbot (T2) | `integration/vigil_integration/live/executor.py` (`execute_terminal`, `_TERMINAL_ALLOWLIST`/`_FIND_SAFE_PREDICATES`/`_TERMINAL_BARE_ONLY`/`_TERMINAL_METACHARS`), `live/wiring.py` (`build_terminal_runtime`), `cli.py` (`_cmd_terminal` → `vigil terminal`), `framework/v2/console/actions.py` (`terminal_propose`/`terminal_dryrun`/`terminal_run`/`terminal_history`), `console/server.py` (`/api/terminal/*`), `packages/vigil-ui/app.js` (`renderTerminal`) | A **local-only** inspection shell where **the AI proposes; the allowlist + WARDEN gate + owner approval decide**. Every command is parsed with **no shell** (argv list, `shell=False`; any shell metacharacter refuses the whole command), **allowlist-validated** to local read/print binaries only (`ls cat head tail wc stat pwd whoami id uname echo df du ps uptime grep cut tr`; `find` via a read-only *predicate* allowlist — exec/write predicates refused by omission; `date`/`hostname` **bare-only**), classified **WARDEN A2 → QUEUES** under the A1 ceiling (never auto), and — on the operator's Run/`--approve` — run and written as a **signed, redacted `ExecRecord`** on the spine (no signer ⇒ refuse before running). It can **neither egress, write files, nor spawn an interpreter — by construction** (no such binary is on the allowlist; the test suite's hostile red-pen battery — network binaries, interpreters, writers, metacharacters, unsafe `find` predicates, and coreutils option-abbreviation bypasses such as `sort --compress=curl` / `--out=` — is refused across the board). The chatbot (`terminal_propose`) has Claude return **one** candidate string that is re-parsed + allowlist-checked exactly like a typed command (a hallucinated/injected off-allowlist command is refused, never run); no `ANTHROPIC_API_KEY` ⇒ an honest "add a key or type a command directly" — the direct terminal needs no LLM. The console's `_TERM_*` allowlist is an **advisory mirror** for the dryrun badge only; the authoritative check is inside `vigil terminal` at run time (the offense console must not import the executor — FATAL-2). |
-| Opt-in Strix shell gate (T3) | `integration/vigil_integration/warden_gate.py`, `vendor/strix/strix/core/runner.py` (`VIGIL_WARDEN_STRIX_GATE`) | The vendored Strix agent's arbitrary `exec_command` shell is now WARDEN-**gateable** as an opt-in via `VIGIL_WARDEN_STRIX_GATE` — *gateable*, **not** gated by default. |
+| Strix shell gate (T3) — **on by default, fail-closed** | `integration/vigil_integration/warden_gate.py` (`attach_from_env`, `WardenGateUnavailable`), `vendor/strix/strix/core/runner.py` (`VIGIL_WARDEN_STRIX_GATE`) | The vendored Strix agent's arbitrary `exec_command`/`write_stdin` shell is WARDEN-gated. **This row previously said "gateable, not gated by default"; that was stale from #157 and is corrected here.** T3 landed it as opt-in; **#178 made it ON BY DEFAULT** (no opt-in required) and **#296 made it FAIL-CLOSED**: `attach_from_env` raises `WardenGateUnavailable` on any wiring failure instead of returning ungated hooks, and the runner narrowed its `except` to `ImportError`, so a governed run **stops** rather than silently proceeding with an unguarded shell. Exactly two paths run ungated, and both are deliberate: the **explicit opt-out** `VIGIL_WARDEN_STRIX_GATE` ∈ {`0`,`off`,`false`,`no`}, and a **bare vendored Strix checkout** with no `vigil_integration` importable (the `ImportError` path — nothing to govern, vendor stays byte-identical). |
 
 ---
 
