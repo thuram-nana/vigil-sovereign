@@ -1895,6 +1895,20 @@ def build_dossier(run_id: str) -> dict:
     # dossier records every governed terminal command too. Already redacted at source + re-scrubbed by the
     # compiler; covered by the dossier manifest+signature.
     argv = [vigil, "dossier", "--run-dir", str(rd), "--out", str(out), "--slug", slug]
+    # Carry the operator's HUMAN name for this run into the pack, so a downloaded case file is titled the
+    # way the library shows it ("Ministry of Health — Q3 external review") rather than by a machine id that
+    # means nothing to the person who opens it months later. The label is PRESENTATION metadata only: the
+    # dossier builder keeps it out of every signed surface, which is why renaming a run cannot invalidate
+    # its certificates (pinned by test_renaming_never_breaks_the_PROOF_BUNDLE_verification). A run with no
+    # label simply omits the flag and the pack falls back to the slug, exactly as before.
+    try:
+        from . import labels as _labels  # noqa: PLC0415 — console-local, avoids an import cycle at module scope
+
+        _label = (_labels.run_label(run_id) or "").strip()
+    except Exception:  # noqa: BLE001 — a missing/corrupt label store must never block a download
+        _label = ""
+    if _label:
+        argv += ["--label", _label]
     term_hist = Path(_terminal_base_dir()) / "terminal-history.jsonl"
     if term_hist.is_file():
         argv += ["--terminal-history", str(term_hist)]
