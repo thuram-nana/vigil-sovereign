@@ -328,6 +328,15 @@ def launch_scan(target: str, *, max_pages: int = 60, use_library: bool = True,
         # a receiver + poll for callbacks, adding latency) and prioritise per point.
         "--no-oob", "--targeted",
     ]
+    # Honour `use_library`. It was previously accepted and then DROPPED — the parameter
+    # appeared exactly ONCE in this file, in the signature — so every console-launched scan
+    # silently ran the built-in checks only and never the declarative check library, despite
+    # the caller asking for it and the default being True. The library is stack-SCOPED (an
+    # entry runs only when its applicability predicate matches the fingerprinted stack, so a
+    # stack-specific payload never fires off-stack) and oracle-anchored exactly like the
+    # built-ins, so honouring the flag widens COVERAGE without touching soundness.
+    if use_library:
+        cmd.append("--library")
     _write_meta(run_id, ephemeral=ephemeral, target=target, cmd=cmd,
                 status="running", started=time.time())
 
