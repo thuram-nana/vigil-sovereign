@@ -24,6 +24,11 @@ from pathlib import Path
 
 import pytest
 
+# Assembling a case file needs the offense engine (the report renderers and the dossier compiler both live
+# there), so skip in the deliberately framework-free sovereign leg — the same convention the sibling
+# producer tests use. This file is wired into the framework-on-path CI invocation, where it really runs.
+pytest.importorskip("framework.v2.report.case_file")
+
 from vigil_core import generate_keypair
 from vigil_integration.proof.run import build_report_mint
 from vigil_integration.proof.sink import CAPTURE_KEY
