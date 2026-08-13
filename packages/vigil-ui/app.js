@@ -31,6 +31,7 @@
       { id: "replay", label: "Replay Proof", icon: "bolt", ready: true },
     ]},
     { group: "MANAGE", items: [
+      { id: "library", label: "Engagement Library", icon: "book", ready: true },
       { id: "sessions", label: "Sessions", icon: "book", ready: true },
       { id: "activity", label: "Activity", icon: "live", ready: true },
       { id: "safety", label: "Approvals & Safety", icon: "key", owner: true, ready: true },
@@ -4721,6 +4722,220 @@
     loadSessions();
   }
 
+  // ---- Engagement Library — the past jobs you can come back to, months later ------------------
+  //
+  // The old listing was an alphabetical `ls targets/` with no timestamps (and it returned NOTHING for
+  // a job that only ever existed on the signed spine). A library needs three things that shape could
+  // not give: a WHEN, a human NAME, and a way IN. So each row carries its label, a real date and time
+  // rendered in the VIEWER'S OWN TIMEZONE, what kind of operation it was, what it was pointed at, and
+  // how much it produced — and clicking it opens the runs inside that job, each run's findings, the
+  // evidence view and the dossier download that already exist.
+  //
+  // RENAMING IS PRESENTATION ONLY. It writes one key in the console's label side-car; no run artifact,
+  // no certificate and no signed event is touched, so a relabelled job still re-verifies byte for byte.
+  var LIB = { rows: [], detail: null };
+
+  function libTimeZone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; }
+  }
+  // A human date+time WITH ITS TIMEZONE. The API hands out UTC ISO-8601 stamps; the operator reads
+  // them months later in their own zone, so the zone is shown rather than assumed.
+  function fmtWhen(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    try {
+      return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+    } catch (e) { return d.toISOString(); }
+  }
+  function libName(row) { return (row && row.label) || (row && row.slug) || "(unnamed)"; }
+  function libRunName(run) { return (run && run.label) || (run && run.run_id) || "(run)"; }
+  // "—" for a stamp we genuinely do not have. A dormant job is honestly blank, never back-dated.
+  function libWhenCell(iso) {
+    return iso ? h("span", null, fmtWhen(iso)) : h("span.dim", { title: "no recorded activity" }, "—");
+  }
+
+  function renderLibrary(screen) {
+    var slug = hashQuery().slug || "";
+    if (slug) { renderLibraryDetail(screen, slug); return; }
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Engagement Library"),
+        h("span.sub", null, "Every past job, most recently worked first — open one to get back to its runs, findings and proof.")]),
+      h("div.hint", { style: { marginBottom: "10px" } },
+        "Times are shown in your timezone" + (libTimeZone() ? " (" + libTimeZone() + ")" : "")
+        + ". Renaming a job or a run is presentation only — it stores a human name beside the "
+        + "machine identity and touches no signed byte, so every certificate still verifies."),
+      h("div#library-body", null, h("div.empty", null, "Loading past jobs…")),
+    ]);
+    loadLibrary();
+  }
+
+  function loadLibrary() {
+    V.getJSON(OFF("/api/engagements")).then(function (d) {
+      LIB.rows = (d && d.engagements) || [];
+      drawLibrary();
+    }).catch(function (e) {
+      var host = V.$("#library-body"); if (!host) return;
+      V.mount(host, h("div.empty", null, [h("div.big", null, "Offense console offline"),
+        h("p", null, "Could not load the library: " + ((e && e.message) || e))]));
+    });
+  }
+
+  function drawLibrary() {
+    var host = V.$("#library-body"); if (!host) return;
+    if (!LIB.rows.length) {
+      V.mount(host, h("div.empty", null, [h("div.big", null, "No past jobs yet"),
+        h("p", null, "Every assessment you run is filed here with its date and time; you can rename it and come back to it later."),
+        h("button.btn.primary", { style: { marginTop: "16px" }, onClick: function () { location.hash = "#/assess"; } },
+          [V.icon("bolt"), "New Assessment"])]));
+      return;
+    }
+    var cols = ["Job", "Last worked on", "First seen", "Kind", "Subject", "Runs", "Findings", ""];
+    var table = h("div.scroll-x", null, h("table.tbl", null, [
+      h("thead", null, h("tr", null, cols.map(function (c) { return h("th", null, c); }))),
+      h("tbody", null, LIB.rows.map(function (r) {
+        function open() { location.hash = "#/library?slug=" + encodeURIComponent(r.slug); }
+        return h("tr.click", { onClick: open }, [
+          h("td", null, [h("b", null, libName(r)),
+            (r.label ? h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, r.slug) : null),
+            (r.on_spine ? null : h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, "not on the spine"))]),
+          h("td", null, libWhenCell(r.last_activity)),
+          h("td", null, libWhenCell(r.first_seen)),
+          h("td", null, (r.kinds && r.kinds.length) ? h("span.mono", { style: { fontSize: "var(--fs-xs)" } }, r.kinds.join(", "))
+            : h("span.dim", null, "—")),
+          h("td", null, (r.subjects && r.subjects.length)
+            ? h("span.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } }, r.subjects.join(", "))
+            : h("span.dim", null, "—")),
+          h("td", null, String(r.run_count != null ? r.run_count : 0)),
+          h("td", null, [String(r.finding_count != null ? r.finding_count : 0),
+            (r.fact_count ? h("span.dim", { style: { fontSize: "var(--fs-xs)" } }, " · " + r.fact_count + " proven") : null)]),
+          h("td", null, h("div", { style: { display: "flex", gap: "6px" } }, [
+            h("button.btn.sm", { onClick: function (e) { e.stopPropagation(); open(); } }, "Open"),
+            h("button.btn.sm", { onClick: function (e) { e.stopPropagation(); renameEngagement(r); } }, "Rename"),
+          ])),
+        ]);
+      })),
+    ]));
+    V.mount(host, h("div.card", null, [
+      h("div.card-h", null, [h("span.label", null, "PAST JOBS"),
+        h("h3", null, LIB.rows.length + (LIB.rows.length === 1 ? " engagement" : " engagements"))]),
+      h("div", { style: { marginTop: "12px" } }, table),
+    ]));
+  }
+
+  function renameEngagement(row) {
+    var name = window.prompt("Name this job so it is easy to find later:\n\n" + row.slug
+      + "\n\n(The name is for you — it changes nothing that is signed.)", row.label || "");
+    if (name === null) return;
+    V.postJSON(OFF("/api/label/engagement"), { slug: row.slug, label: name }).then(function (d) {
+      if (d && d.error) { V.toast(d.error, true); return; }
+      V.toast(name ? "Renamed" : "Name cleared");
+      if (LIB.detail && LIB.detail.slug === row.slug) { loadLibraryDetail(row.slug); } else { loadLibrary(); }
+    }).catch(function (e) { V.toast(String(e), true); });
+  }
+
+  function renameRun(run, slug) {
+    var name = window.prompt("Name this run:\n\n" + run.run_id
+      + "\n\n(The name is for you — it changes nothing that is signed.)", run.label || "");
+    if (name === null) return;
+    V.postJSON(OFF("/api/label/run"), { run_id: run.run_id, label: name }).then(function (d) {
+      if (d && d.error) { V.toast(d.error, true); return; }
+      V.toast(name ? "Renamed" : "Name cleared");
+      loadLibraryDetail(slug);
+    }).catch(function (e) { V.toast(String(e), true); });
+  }
+
+  function renderLibraryDetail(screen, slug) {
+    V.mount(screen, [
+      h("div.screen-head", null, [h("h1", null, "Engagement Library"),
+        h("span.sub", null, "One past job — its runs, and the way back into each one's findings and proof.")]),
+      h("div", { style: { marginBottom: "10px" } },
+        h("button.btn.sm", { onClick: function () { location.hash = "#/library"; } }, "← All past jobs")),
+      h("div#library-detail", null, h("div.empty", null, "Loading…")),
+    ]);
+    loadLibraryDetail(slug);
+  }
+
+  function loadLibraryDetail(slug) {
+    V.getJSON(OFF("/api/library/" + encodeURIComponent(slug))).then(function (d) {
+      LIB.detail = d || null;
+      drawLibraryDetail(slug);
+    }).catch(function (e) {
+      var host = V.$("#library-detail"); if (!host) return;
+      V.mount(host, h("div.empty", null, "Could not load this job: " + ((e && e.message) || e)));
+    });
+  }
+
+  function drawLibraryDetail(slug) {
+    var host = V.$("#library-detail"); if (!host) return;
+    var d = LIB.detail;
+    if (!d) { V.mount(host, h("div.empty", null, "Not found.")); return; }
+    // the roster row carries the timestamps + counts; the detail carries the runs + charter/safety.
+    var roster = null;
+    LIB.rows.forEach(function (r) { if (r.slug === slug) roster = r; });
+    var runs = d.runs || [];
+    var ks = d.killswitch || {};
+
+    var header = h("div.card", null, [
+      h("div.card-h", null, [h("span.label", null, "PAST JOB"), h("h3", null, libName(d.label ? d : { slug: slug })),
+        h("span", { style: { flex: 1 } }),
+        h("button.btn.sm", { onClick: function () { renameEngagement({ slug: slug, label: d.label || "" }); } }, "Rename")]),
+      h("div.grid.cols-4", { style: { marginTop: "12px" } }, [
+        V.tile("Machine identity", slug, "never changes"),
+        V.tile("Last worked on", roster && roster.last_activity ? fmtWhen(roster.last_activity) : "—",
+          libTimeZone() || "your timezone"),
+        V.tile("Runs", String(runs.length), "in this job"),
+        V.tile("Findings", String(roster && roster.finding_count != null ? roster.finding_count : "—"),
+          roster && roster.fact_count ? roster.fact_count + " oracle-proven" : "as recorded"),
+      ]),
+      h("div", { style: { marginTop: "10px", display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" } }, [
+        d.has_charter ? V.pill("Charter on file", "ok", null) : V.pill("No charter", "idle", null),
+        ks.tripped ? V.pill("Kill-switch TRIPPED", "danger", null) : null,
+        roster && roster.on_spine ? V.pill("On the signed spine", "live", null) : null,
+      ]),
+    ]);
+
+    var runsCard;
+    if (!runs.length) {
+      runsCard = h("div.card", null, [h("div.card-h", null, [h("span.label", null, "RUNS"), h("h3", null, "No runs recorded")]),
+        h("div.hint", null, "This job has a charter or a spine entry but no console-launched run yet.")]);
+    } else {
+      var cols = ["Run", "Started", "Status", "Subject", "Findings", ""];
+      runsCard = h("div.card", null, [
+        h("div.card-h", null, [h("span.label", null, "RUNS"),
+          h("h3", null, runs.length + (runs.length === 1 ? " run" : " runs"))]),
+        h("div.hint", { style: { marginTop: "6px" } },
+          "Each run inside this job stays distinct — its own time, its own findings, its own proof."),
+        h("div.scroll-x", { style: { marginTop: "12px" } }, h("table.tbl", null, [
+          h("thead", null, h("tr", null, cols.map(function (c) { return h("th", null, c); }))),
+          h("tbody", null, runs.map(function (run) {
+            return h("tr", null, [
+              h("td", null, [h("b", null, libRunName(run)),
+                (run.label ? h("div.dim", { style: { fontSize: "var(--fs-xs)" } }, run.run_id) : null)]),
+              h("td", null, libWhenCell(run.started_iso)),
+              h("td", null, V.statusBadge(run.status || "unknown")),
+              h("td", null, h("span.mono", { style: { fontSize: "var(--fs-xs)", wordBreak: "break-all" } },
+                run.target || "—")),
+              h("td", null, run.findings != null ? String(run.findings) : h("span.dim", null, "—")),
+              h("td", null, h("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, [
+                h("button.btn.sm", { onClick: function () {
+                  location.hash = "#/findings?run=" + encodeURIComponent(run.run_id) + "&tab=findings"; } }, "Findings"),
+                h("button.btn.sm", { onClick: function () {
+                  location.hash = "#/findings?run=" + encodeURIComponent(run.run_id) + "&tab=evidence"; } }, "Evidence"),
+                h("button.btn.sm", { onClick: function (e) {
+                  downloadDossier(run.run_id, e.target, V.$("#library-dossier-status")); } }, "Dossier"),
+                h("button.btn.sm", { onClick: function () { renameRun(run, slug); } }, "Rename"),
+              ])),
+            ]);
+          })),
+        ])),
+        h("div#library-dossier-status", { style: { marginTop: "10px" } }),
+      ]);
+    }
+    V.mount(host, [header, h("div", { style: { marginTop: "16px" } }, runsCard)]);
+  }
+
   // ---- Knowledge Engine (K1) — vuln-intel feed + defensive CATALOG (read-only) ----
   var K = { slug: "", data: null, engagements: [], feedInterval: 3600, feedBusy: false };
   function renderKnowledge(screen) {
@@ -5665,6 +5880,7 @@
     if (id === "assess") { renderAssess(screen); return; }
     if (id === "chat") { renderChat(screen); return; }
     if (id === "terminal") { renderTerminal(screen); return; }
+    if (id === "library") { renderLibrary(screen); return; }
     if (id === "sessions") { renderSessions(screen); return; }
     if (id === "live") { renderLive(screen); return; }
     if (id === "activity") { renderBackground(screen); return; }

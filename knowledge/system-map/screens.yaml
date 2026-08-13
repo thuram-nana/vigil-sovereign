@@ -89,6 +89,14 @@ screens:
     description: The defensive AEGIS side — detections, posture, and the managed gateway.
     synonyms: [defense, aegis, defend, protection, shield, blue team]
 
+  - id: library
+    label: Engagement Library
+    group: MANAGE
+    owner: false
+    plane: unified
+    description: Every past job you can come back to months later — newest worked first, with real dates and times, the kind of operation, the subject, and its run and finding counts; rename a job or a run (presentation only, nothing signed changes) and click through to its runs, findings, evidence and dossier.
+    synonyms: [library, engagement library, past jobs, previous jobs, old jobs, past engagements, job history, previous assessments, past scans, what did i run, go back to a job, rename a job]
+
   - id: sessions
     label: Sessions
     group: MANAGE
