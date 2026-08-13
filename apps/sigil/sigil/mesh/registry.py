@@ -9,14 +9,26 @@
     trust-root key, and can approve offline.
 
 All reads are fail-closed: a descriptor/authorization that does not verify against the owner key is
-ignored. Reuses `governor.authn` (the same signed-event primitive kill/promotion/approval use)."""
+ignored. Reuses `governor.authn` (the same signed-event primitive kill/promotion/approval use).
+
+ANTI-REPLAY (this slice): the device ledger is the most dangerous of the last-writer-wins governance
+records, because `authorized_devices()` IS the `extra_pubkeys` allowlist for A2/A3 approval
+(`agents/approvals.py`), gesture remote-arm (`gesture/session.py`), the bridge daemon
+(`bridge/server.py`), the actor gate (`agents/actor_gate.py`), the operator gate (`agents/operator.py`)
+and the egress gate (`perception/egress.py`). Verifying the signature proved WHO authorized a device,
+never WHEN that authorization counts — so anyone able to append could capture an owner-signed
+`authorized`, wait for the owner to REVOKE that phone (lost, stolen, sold), then re-append the captured
+bytes verbatim and re-arm a full approval identity across every one of those consumers at once. So
+`issued_at` joins the signed device core and `authorized_devices` keeps a PER-DEVICE-PUBKEY high-water.
+`revoked` — the safe direction — keeps NO freshness requirement, so a revoke always lands and its own
+replay merely re-revokes. (The host_capability ledger gets the same treatment in the next slice.)"""
 from __future__ import annotations
 
 from typing import Optional, Set
 
 from ..agents.approvals import SIGNAL as _APPROVAL_SIGNAL
 from ..agents.approvals import _approval_message
-from ..governor.authn import signed_payload, verify_signed
+from ..governor.authn import NO_HIGHWATER, as_issued_at, signed_payload, verify_signed
 from ..governor.identity import owner_pubkey
 from ..reuse import sha256_hex, sign
 from ..spine.snapshot import SnapshotState
@@ -26,7 +38,9 @@ CAP_SIGNAL = "mesh.host_capability"
 DEV_SIGNAL = "mesh.device"
 _CAP_CORE = ("signal", "host_id", "os", "has_screen", "has_camera", "has_gpu_vlm", "always_on",
              "has_hid_inject", "has_camera_stream")
-_DEV_CORE = ("signal", "state", "device_id", "device_pubkey")
+# `issued_at` MUST be inside the core: outside it, an attacker could re-stamp a captured authorization's
+# freshness past the high-water without breaking the signature — exactly the replay this guard refuses.
+_DEV_CORE = ("signal", "state", "device_id", "device_pubkey", "issued_at")
 
 
 # --- host capability advertisement -----------------------------------------------------------------
@@ -61,14 +75,25 @@ def capability_map(store: SpineStore, trusted_pubkey: Optional[str] = None) -> d
 
 
 # --- device authorization ledger -------------------------------------------------------------------
-def authorize_device(store: SpineStore, device_id: str, device_pubkey: str, owner_key) -> int:
-    core = {"signal": DEV_SIGNAL, "state": "authorized", "device_id": device_id, "device_pubkey": device_pubkey}
+def authorize_device(store: SpineStore, device_id: str, device_pubkey: str, owner_key,
+                     *, issued_at: float) -> int:
+    """Authorize a device key — the DANGEROUS direction, and the one that hands out an approval identity.
+    `issued_at` is a REQUIRED, owner-set, strictly-increasing value: `authorized_devices` honors this
+    record only while it exceeds every authorization already honored for THIS device pubkey, so a replay
+    of it after a revoke never re-arms the device. Required rather than defaulted because this module
+    reads no clock — "when" is the caller-with-the-owner-key's authority, not the module's."""
+    core = {"signal": DEV_SIGNAL, "state": "authorized", "device_id": device_id,
+            "device_pubkey": device_pubkey, "issued_at": float(issued_at)}
     payload = {**signed_payload(core, owner_key), "tier": "A0", "decision": "auto"}
     return store.append(kind="event", source="mesh", actor="OWNER", payload=payload)
 
 
 def revoke_device(store: SpineStore, device_id: str, device_pubkey: str, owner_key) -> int:
-    core = {"signal": DEV_SIGNAL, "state": "revoked", "device_id": device_id, "device_pubkey": device_pubkey}
+    """Revoke a device key — the SAFE direction. Carries a FIXED `issued_at` of 0.0 and is subject to NO
+    freshness check: a revoke must ALWAYS land (it is how a lost phone is disarmed) and its own replay
+    merely re-revokes. The constant keeps the record signature-valid under the new core."""
+    core = {"signal": DEV_SIGNAL, "state": "revoked", "device_id": device_id,
+            "device_pubkey": device_pubkey, "issued_at": 0.0}
     payload = {**signed_payload(core, owner_key), "tier": "A0", "decision": "auto"}
     return store.append(kind="event", source="mesh", actor="OWNER", payload=payload)
 
@@ -85,13 +110,24 @@ def authorized_devices(store: SpineStore, trusted_pubkey: Optional[str] = None) 
     # pre-fold is invalid, so BYPASS it and re-scan from genesis (seed empty, since=-1).
     if tp == st.trusted_pubkey:
         state, since = dict(st.mesh_dev_state), st.base_seq - 1   # COPY the cached sub-state; never mutate it
+        # PER-DEVICE-PUBKEY authorization high-water, seeded from the SAME snapshot under the SAME pubkey
+        # condition — otherwise the first hard prune would reset it and make every pruned authorization
+        # replayable. Per device and never global: one phone's fresh authorization must not refuse another
+        # phone's legitimate later one that carried a smaller issued_at.
+        issued = dict(st.mesh_dev_issued_map())
     else:
-        state, since = {}, -1
+        state, since, issued = {}, -1, {}
     for r in store.iter_records(since_seq=since):
         p = r.payload
         if p.get("signal") == DEV_SIGNAL and p.get("state") in ("authorized", "revoked") \
                 and verify_signed(p, _DEV_CORE, tp):
-            state[p.get("device_pubkey")] = p["state"]      # latest verified state per device key
+            dkey = p.get("device_pubkey")
+            if p["state"] == "authorized":
+                at = as_issued_at(p.get("issued_at"))
+                if at <= issued.get(dkey, NO_HIGHWATER):
+                    continue                            # REPLAY / stale re-append — the device stays revoked
+                issued[dkey] = at                       # consume it so its own replay is refused hereafter
+            state[dkey] = p["state"]                    # latest verified (and, if authorized, FRESH) wins
     return {pub for pub, st in state.items() if st == "authorized"}
 
 

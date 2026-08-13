@@ -517,7 +517,14 @@ def _device_fingerprint(pubkey: str) -> str:
 def _mesh_authorize(store, device_id, pubkey, owner_key, *, assume_yes=False, confirm=input):
     """Authorize a phone device key (owner-signed). Prints the fingerprint and, unless `assume_yes`,
     makes the operator confirm it matches what the phone displays before writing the ledger record.
-    Returns the record seq, or None if the operator did not confirm."""
+    Returns the record seq, or None if the operator did not confirm.
+
+    Stamps `issued_at` from THIS process's clock (the anti-replay high-water). The mesh module reads no
+    clock — the authority over "when" belongs to the caller holding the owner key, which here is the
+    operator at this terminal. Stamped AFTER the fingerprint confirmation, so an abandoned pairing
+    consumes no high-water."""
+    import time as _time
+
     fp = _device_fingerprint(pubkey)
     print(f"  device {device_id!r} fingerprint: {fp}")
     if not assume_yes:
@@ -525,7 +532,7 @@ def _mesh_authorize(store, device_id, pubkey, owner_key, *, assume_yes=False, co
         if (ans or "").strip().lower() != "yes":
             print("  aborted — fingerprint not confirmed; device NOT authorized")
             return None
-    seq = authorize_device(store, device_id, pubkey, owner_key)
+    seq = authorize_device(store, device_id, pubkey, owner_key, issued_at=_time.time())
     print(f"  authorized device {device_id!r} (owner-signed, seq {seq}); fingerprint {fp}")
     return seq
 

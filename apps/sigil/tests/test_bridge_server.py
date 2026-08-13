@@ -6,6 +6,7 @@ Host/Origin gate, and the minimal-frame (no-subject/no-secret) invariant on the 
 Deterministic by construction: temp spines, port=0 (ephemeral), a FIXED clock, fixed nonces. The
 phone path uses ONLY owner-authorized DEVICE keys — the owner trust-root is never needed to drive it.
 Run: ~/.sigil/venv/bin/python tests/test_bridge_server.py"""
+import itertools
 import base64
 import json
 import socket
@@ -33,6 +34,16 @@ CLOCK = lambda: NOW                                # noqa: E731 — injected so 
 
 
 # ---- an agent that queues an A2/A3 with a SECRET subject (mirrors test_mobile._Emitter) -----------
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
+
+
 class _Emitter(Agent):
     name = "TESTER"
     ceiling = Tier.A2
@@ -61,7 +72,7 @@ def _authorize(spine_path):
     """Owner-side (desktop) setup: mint an authorized device key. Uses the OWNER key ONCE, here —
     never on the phone request path below."""
     dev = generate_keypair()
-    authorize_device(SpineStore(spine_path), "phone-1", dev.public_key_b64, OWNER)
+    authorize_device(SpineStore(spine_path), "phone-1", dev.public_key_b64, OWNER, issued_at=_dev_iss())
     return dev
 
 

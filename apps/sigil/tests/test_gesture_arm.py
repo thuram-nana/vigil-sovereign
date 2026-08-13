@@ -4,6 +4,7 @@ replayed / stale / after-revoke arms are refused; the TTL is clamped shorter tha
 arm never displaces a live session; the owner's kill-switch/disarm always wins; and every downstream
 bound (A1-inject / A2-queue) is UNCHANGED for a device-armed session.
 Run: ~/.sigil/venv/bin/python tests/test_gesture_arm.py"""
+import itertools
 import tempfile
 import time
 
@@ -23,6 +24,16 @@ DEV = generate_keypair()          # a phone the owner will authorize
 ATTACKER = generate_keypair()     # a device the owner NEVER authorized
 
 
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
+
+
 def _store():
     return SpineStore(tempfile.mktemp(suffix=".jsonl"))
 
@@ -38,7 +49,7 @@ def _gate(store, backend=None):
 
 
 def _authorize(store, kp=DEV, device_id="phone1"):
-    authorize_device(store, device_id, kp.public_key_b64, OWNER)
+    authorize_device(store, device_id, kp.public_key_b64, OWNER, issued_at=_dev_iss())
 
 
 def _req(kp=DEV, *, device_id="phone1", nonce=1, ts=None, ttl=120.0):

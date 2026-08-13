@@ -50,6 +50,7 @@ from sigil.governor.killswitch import _CORE as KS_CORE
 from sigil.governor.killswitch import KillSwitch
 from sigil.governor.promotion import _CORE as PROMO_CORE
 from sigil.governor.promotion import PromotionPolicy
+from sigil.mesh.registry import _DEV_CORE, authorize_device, authorized_devices, revoke_device
 from sigil.reuse import generate_keypair
 from sigil.spine.snapshot import SnapshotState, build
 from sigil.spine.store import SpineStore
@@ -478,3 +479,144 @@ def test_promotion_foreign_pubkey_snapshot_bypass_restarts_the_high_water(monkey
     monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
     assert p.is_promoted("SCHOLAR", "draft") is True, \
         "a foreign-anchor snapshot must be bypassed entirely — its high-water cannot refuse a real grant"
+
+
+# =====================================================================================================
+# mesh.device — THE MOST DANGEROUS of the five. `authorized_devices()` is the `extra_pubkeys` allowlist
+# for A2/A3 approval, gesture remote-arm, the bridge daemon, the actor gate, the operator gate and the
+# egress gate, so ONE replayed `authorized` re-arms a revoked approval identity across all of them.
+# =====================================================================================================
+def _mesh_replay(store, payload: dict) -> int:
+    return store.append(kind="event", source="mesh", actor="OWNER", payload=dict(payload))
+
+
+def test_device_replay_of_authorization_after_revoke_does_not_rearm():
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    seq = authorize_device(s, "phone-1", dev, OWNER, issued_at=100.0)
+    assert authorized_devices(s, OWNER_PUB) == {dev}
+    captured = dict(s.get(seq).payload)             # the exact owner-signed authorization bytes
+    revoke_device(s, "phone-1", dev, OWNER)          # the phone is lost/stolen/sold
+    assert authorized_devices(s, OWNER_PUB) == set()
+    _mesh_replay(s, captured)
+    assert authorized_devices(s, OWNER_PUB) == set(), \
+        "a replayed authorization must NOT re-arm a revoked device"
+
+
+def test_device_replay_does_not_restore_approval_authority():
+    """The impact test, not just the set test: the replayed device must not regain the ability to approve
+    an A2/A3 item — that is what `authorized_devices` is consumed FOR."""
+    from sigil.agents.approvals import ApprovalQueue, verify_approval
+    from sigil.mesh.registry import DeviceApprover
+    s = _store()
+    device = generate_keypair()
+    captured = dict(s.get(authorize_device(s, "phone-1", device.public_key_b64, OWNER,
+                                           issued_at=100.0)).payload)
+    revoke_device(s, "phone-1", device.public_key_b64, OWNER)
+    _mesh_replay(s, captured)                        # attacker re-arms the revoked phone
+
+    q = ApprovalQueue(s, owner_key=OWNER, trusted_pubkey_b64=OWNER_PUB)
+    target = s.append(kind="wire", source="agent", actor="ENVOY",
+                      payload={"tier": "A3", "decision": "queued"})
+    rec = s.get(DeviceApprover(s, device_key=device).approve(target))
+    assert verify_approval(rec, OWNER_PUB, extra_pubkeys=authorized_devices(s, OWNER_PUB)) is False, \
+        "a replay-re-armed device must not be able to approve anything"
+    assert q is not None
+
+
+def test_device_stale_lower_issued_authorization_cannot_override_a_newer_one():
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    old = dict(s.get(authorize_device(s, "phone-1", dev, OWNER, issued_at=10.0)).payload)
+    authorize_device(s, "phone-1", dev, OWNER, issued_at=20.0)
+    revoke_device(s, "phone-1", dev, OWNER)
+    _mesh_replay(s, old)
+    assert authorized_devices(s, OWNER_PUB) == set()
+
+
+def test_device_legitimate_reauthorization_still_works():
+    """THE REGRESSION GUARD. authorize→revoke→authorize re-signs BYTE-IDENTICALLY, so a signature-dedup
+    fix would leave a re-paired phone permanently unable to approve."""
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    for _ in range(3):
+        authorize_device(s, "phone-1", dev, OWNER, issued_at=_iss())
+        assert authorized_devices(s, OWNER_PUB) == {dev}, "a genuine re-authorization must re-arm"
+        revoke_device(s, "phone-1", dev, OWNER)
+        assert authorized_devices(s, OWNER_PUB) == set()
+
+
+def test_device_high_water_is_PER_DEVICE_not_global():
+    """HAZARD: a GLOBAL high-water would let one phone's fresh authorization refuse another phone's
+    legitimate later one carrying a smaller issued_at — silently un-pairing a device."""
+    s = _store()
+    a, b = generate_keypair().public_key_b64, generate_keypair().public_key_b64
+    authorize_device(s, "phoneA", a, OWNER, issued_at=900.0)   # a HIGH high-water, only for phoneA
+    authorize_device(s, "phoneB", b, OWNER, issued_at=5.0)     # a genuine, much older one for phoneB
+    assert authorized_devices(s, OWNER_PUB) == {a, b}, "a per-device high-water must not leak across keys"
+
+
+def test_device_revoke_needs_no_freshness_and_its_replay_is_harmless():
+    """A revoke must ALWAYS land — it is how a lost phone is disarmed. Gating it on freshness would be a
+    fail-OPEN: an attacker who could pin the high-water would block every future revoke."""
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    authorize_device(s, "phone-1", dev, OWNER, issued_at=1.0)
+    rev = dict(s.get(revoke_device(s, "phone-1", dev, OWNER)).payload)
+    authorize_device(s, "phone-1", dev, OWNER, issued_at=2.0)
+    assert authorized_devices(s, OWNER_PUB) == {dev}
+    _mesh_replay(s, rev)                             # replaying a REVOKE is fail-safe
+    assert authorized_devices(s, OWNER_PUB) == set()
+
+
+def test_device_issued_at_is_in_the_signed_core():
+    assert "issued_at" in _DEV_CORE
+
+
+def test_device_tampered_issued_at_breaks_the_signature():
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    captured = dict(s.get(authorize_device(s, "phone-1", dev, OWNER, issued_at=10.0)).payload)
+    revoke_device(s, "phone-1", dev, OWNER)
+    captured["issued_at"] = 10_000.0                 # re-stamp freshness WITHOUT re-signing
+    _mesh_replay(s, captured)
+    assert authorized_devices(s, OWNER_PUB) == set()
+
+
+def test_device_high_water_survives_a_prune(monkeypatch):
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    captured = dict(s.get(authorize_device(s, "phone-1", dev, OWNER, issued_at=500.0)).payload)
+    K = len(list(s.iter_records()))
+    prefix = [r for r in s.iter_records() if r.seq < K]
+    synthetic = build(prefix, trusted_pubkey=OWNER_PUB, base_seq=K, snapshot_seq=K - 1)
+    assert synthetic.mesh_dev_issued_map() == {dev: 500.0}
+
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: synthetic))
+    revoke_device(s, "phone-1", dev, OWNER)
+    _mesh_replay(s, captured)
+    assert authorized_devices(s, OWNER_PUB) == set(), \
+        "a pruned-prefix authorization must stay un-replayable after the prune"
+
+
+def test_device_build_matches_the_live_scan_under_a_replay():
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    captured = dict(s.get(authorize_device(s, "phone-1", dev, OWNER, issued_at=42.0)).payload)
+    revoke_device(s, "phone-1", dev, OWNER)
+    _mesh_replay(s, captured)
+    folded = build(list(s.iter_records()), trusted_pubkey=OWNER_PUB, base_seq=0, snapshot_seq=-1)
+    assert dict(folded.mesh_dev_state)[dev] == "revoked"
+    assert authorized_devices(s, OWNER_PUB) == set()
+
+
+def test_device_foreign_pubkey_snapshot_bypass_restarts_the_high_water(monkeypatch):
+    """HAZARD 7: the seeded high-water follows the SAME pubkey-dependent bypass as the state it guards."""
+    s = _store()
+    dev = generate_keypair().public_key_b64
+    authorize_device(s, "phone-1", dev, OWNER, issued_at=5.0)
+    poisoned = SnapshotState(base_seq=99, trusted_pubkey=generate_keypair().public_key_b64,
+                             mesh_dev_state=[[dev, "revoked"]], mesh_dev_issued=[[dev, 1e12]])
+    monkeypatch.setattr(SnapshotState, "load", classmethod(lambda cls, store: poisoned))
+    assert authorized_devices(s, OWNER_PUB) == {dev}, \
+        "a foreign-anchor snapshot must be bypassed entirely — its high-water cannot refuse a real authz"

@@ -18,6 +18,7 @@ Each test proves fold==scan two ways:
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snapshot_fold_gesture_arm.py -q
 """
+import itertools
 import tempfile
 import time
 
@@ -30,6 +31,16 @@ from sigil.spine.store import SpineStore
 
 # --- Site A fixtures: pubkeys are opaque strings (pending_device_arms does NO crypto) --------------
 P1, P2, P3 = "pk_dev_one", "pk_dev_two", "pk_dev_three"
+
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
 
 
 def _store():
@@ -140,7 +151,7 @@ def _gate(store):
 
 def test_site_b_replay_split_equals_full(monkeypatch):
     s = _store()
-    authorize_device(s, "phone1", DEV.public_key_b64, OWNER)     # seq 0: owner-signed DEV authz
+    authorize_device(s, "phone1", DEV.public_key_b64, OWNER, issued_at=_dev_iss())     # seq 0: owner-signed DEV authz
     now = time.time()
     req = sign_arm_request(DEV, device_id="phone1", nonce=77, ts=now, ttl_seconds=120.0)
 
@@ -181,7 +192,7 @@ def test_site_b_replay_split_equals_full(monkeypatch):
 def test_site_b_nonce_type_is_not_stringified(monkeypatch):
     """A prefix that consumed INT nonce 77 must NOT refuse a distinct STR nonce "77" (no stringify)."""
     s = _store()
-    authorize_device(s, "phone1", DEV.public_key_b64, OWNER)
+    authorize_device(s, "phone1", DEV.public_key_b64, OWNER, issued_at=_dev_iss())
     now = time.time()
     assert _gate(s).arm_by_device(
         sign_arm_request(DEV, device_id="phone1", nonce=77, ts=now, ttl_seconds=120.0), now=now) is not None

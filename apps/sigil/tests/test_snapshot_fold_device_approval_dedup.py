@@ -13,6 +13,7 @@ incoming `(pubkey, sig)`. This test proves fold == scan two ways:
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_snapshot_fold_device_approval_dedup.py -q
 """
+import itertools
 import tempfile
 
 from sigil.agents.approvals import _approval_message
@@ -21,6 +22,16 @@ from sigil.mesh import authorize_device
 from sigil.reuse import generate_keypair, sha256_hex, sign
 from sigil.spine.snapshot import SnapshotState, build
 from sigil.spine.store import SpineStore
+
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
 
 
 def _store():
@@ -47,7 +58,7 @@ def _build_store():
     approval key. Returns (store, daemon, owner, dev, appr, earliest_seq, later_seq)."""
     s = _store()
     owner, dev, dev2 = generate_keypair(), generate_keypair(), generate_keypair()
-    authorize_device(s, "d", dev.public_key_b64, owner)       # dev is authorized (owner-signed)
+    authorize_device(s, "d", dev.public_key_b64, owner, issued_at=_dev_iss())       # dev is authorized (owner-signed)
     d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
 
     appr = _approval(dev, target_seq=100)                     # the body we will re-submit (a replay)

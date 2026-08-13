@@ -1,6 +1,7 @@
 """SIGIL Phase 7 WS-D — cross-platform + mobile bridge: per-OS backend selection, keyring-first
 secrets, the owner-signed device-authorization ledger (a device approves ONLY while authorized),
 minimal-payload push, and the WG bind guard. Run: ~/.sigil/venv/bin/python tests/test_mobile.py"""
+import itertools
 import sys
 import tempfile
 
@@ -15,6 +16,16 @@ from sigil.spine.store import SpineStore
 
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
+
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
 
 
 def _store():
@@ -74,7 +85,7 @@ def test_device_approves_only_while_authorized():
     DeviceApprover(s, device_key=device).approve(tgt)
     assert len(pending(s, OP, extra_pubkeys=authorized_devices(s, OP))) == 1, "an unauthorized device can't approve"
     # (b) owner AUTHORIZES the device → a device approval now resolves it
-    authorize_device(s, "phone-1", device.public_key_b64, OWNER)
+    authorize_device(s, "phone-1", device.public_key_b64, OWNER, issued_at=_dev_iss())
     assert device.public_key_b64 in authorized_devices(s, OP)
     DeviceApprover(s, device_key=device).approve(tgt)
     assert not pending(s, OP, extra_pubkeys=authorized_devices(s, OP)), "an authorized device approval verifies + clears"
@@ -95,7 +106,7 @@ def test_forged_and_revoked_device_cannot_approve():
     assert len(pending(s, OP, extra_pubkeys=authorized_devices(s, OP))) == 1, "the forged device can't approve"
     # a genuinely authorized device that is later REVOKED loses approval power
     dev = generate_keypair()
-    authorize_device(s, "phone-2", dev.public_key_b64, OWNER)
+    authorize_device(s, "phone-2", dev.public_key_b64, OWNER, issued_at=_dev_iss())
     revoke_device(s, "phone-2", dev.public_key_b64, OWNER)
     assert dev.public_key_b64 not in authorized_devices(s, OP), "a revoked device is no longer authorized"
 
@@ -107,7 +118,7 @@ def test_device_approval_target_seq_binding_no_replay():
     pend = pending(s, OP)
     harmless, dangerous = pend[0].seq, pend[1].seq
     device = generate_keypair()
-    authorize_device(s, "phone", device.public_key_b64, OWNER)
+    authorize_device(s, "phone", device.public_key_b64, OWNER, issued_at=_dev_iss())
     approved = DeviceApprover(s, device_key=device).approve(harmless)   # approve the HARMLESS one
     genuine = s.get(approved).payload
     s.append(kind="event", source="mesh", actor="DEVICE", supersedes_id=dangerous, payload=dict(genuine))  # replay
@@ -146,7 +157,7 @@ def test_bridge_daemon_gates_device_approval():
         d.submit_device_approval(forged); assert False, "an unauthorized device approval must be refused"
     except ValueError:
         pass
-    authorize_device(s, "phone", device.public_key_b64, OWNER)
+    authorize_device(s, "phone", device.public_key_b64, OWNER, issued_at=_dev_iss())
     d.submit_device_approval(forged)                          # now authorized → accepted
     assert not d.pending(), "an authorized device approval clears the queue via the daemon"
 
@@ -179,7 +190,7 @@ def test_submit_arm_request_dedups_replayed_bodies():   # Phase 9 sweep MED-5 (s
     from sigil.gesture.session import sign_arm_request
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, dev = generate_keypair(), generate_keypair()
-    authorize_device(s, "d", dev.public_key_b64, owner)
+    authorize_device(s, "d", dev.public_key_b64, owner, issued_at=_dev_iss())
     d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
     req = sign_arm_request(dev, device_id="d", nonce=1, ts=_t.time(), ttl_seconds=120.0)
     seqs = {d.submit_arm_request(req) for _ in range(5)}   # one captured body, replayed 5x
@@ -193,7 +204,7 @@ def test_approval_dedup_holds_for_out_of_range_target_seq():   # re-check FINDIN
     from sigil.reuse import sha256_hex, sign
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, dev = generate_keypair(), generate_keypair()
-    authorize_device(s, "d", dev.public_key_b64, owner)
+    authorize_device(s, "d", dev.public_key_b64, owner, issued_at=_dev_iss())
     d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
     tgt = 10 ** 18                                         # a target_seq far PAST the tip
     msg = _approval_message(tgt, "approved", "device")
@@ -210,7 +221,7 @@ def test_stale_arm_body_is_refused_not_recorded():   # tightening BLOCK-1 fix: f
     from sigil.gesture.session import sign_arm_request
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, dev = generate_keypair(), generate_keypair()
-    authorize_device(s, "d", dev.public_key_b64, owner)
+    authorize_device(s, "d", dev.public_key_b64, owner, issued_at=_dev_iss())
     d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
     stale = sign_arm_request(dev, device_id="d", nonce=1, ts=_t.time() - 100, ttl_seconds=120.0)  # >30s old
     try:
@@ -227,7 +238,7 @@ def test_approval_dedup_bounds_a_rotated_pool():   # tightening BLOCK-1 fix: ful
     from sigil.reuse import sha256_hex, sign
     s = SpineStore(tempfile.mktemp(suffix=".jsonl"))
     owner, dev = generate_keypair(), generate_keypair()
-    authorize_device(s, "d", dev.public_key_b64, owner)
+    authorize_device(s, "d", dev.public_key_b64, owner, issued_at=_dev_iss())
     d = BridgeDaemon(s, trusted_pubkey=owner.public_key_b64)
 
     def _appr(tgt):
@@ -263,7 +274,7 @@ def test_authorized_device_authorizes_operator_execution():
     DeviceApprover(s, device_key=device).approve(rep.plan_seq)        # UNauthorized device approval
     assert not op.execute(rep.plan_seq).applied and (root / "a.txt").exists(), \
         "an unauthorized device cannot authorize operator execution"
-    authorize_device(s, "phone", device.public_key_b64, OWNER)       # owner authorizes the device
+    authorize_device(s, "phone", device.public_key_b64, OWNER, issued_at=_dev_iss())       # owner authorizes the device
     DeviceApprover(s, device_key=device).approve(rep.plan_seq)
     ex = op.execute(rep.plan_seq)
     assert ex.applied and not (root / "a.txt").exists(), \

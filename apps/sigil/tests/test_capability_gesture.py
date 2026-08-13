@@ -7,6 +7,7 @@ kill-switch), so the enabled path is unchanged (regression).
 
 Run: SIGIL_HOME=$(mktemp -d) ~/.sigil/venv/bin/python -m pytest tests/test_capability_gesture.py -q
 """
+import itertools
 import tempfile
 import time
 
@@ -25,6 +26,16 @@ from sigil.spine.store import SpineStore
 OWNER = generate_keypair()
 OP = OWNER.public_key_b64
 DEV = generate_keypair()
+
+
+# Strictly-increasing, DETERMINISTIC `issued_at` for each owner-signed device AUTHORIZATION (the
+# anti-replay high-water). NEVER time.time(): two authorizations inside one clock tick would collide
+# and the second would be refused as its own replay.
+_dev_issue = itertools.count(1)
+
+
+def _dev_iss() -> float:
+    return float(next(_dev_issue))
 
 
 def _store():
@@ -76,7 +87,7 @@ def test_disabled_gesture_refuses_local_arm():
 
 def test_disabled_gesture_refuses_device_arm():
     s = _store(); g = _gate(s, RecordingInputBackend())
-    authorize_device(s, "phone1", DEV.public_key_b64, OWNER)
+    authorize_device(s, "phone1", DEV.public_key_b64, OWNER, issued_at=_dev_iss())
     _disable(s)
     req = sign_arm_request(DEV, device_id="phone1", nonce=1, ts=time.time(), ttl_seconds=120.0)
     assert g.arm_by_device(req) is None, "a device arm is refused while gesture is disabled"
